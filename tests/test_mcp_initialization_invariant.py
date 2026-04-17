@@ -502,6 +502,37 @@ class TestNonBlockingInitialization:
         assert startup["phases"]["startup_barrier"]["completed_at"] is not None
 
     @pytest.mark.asyncio
+    async def test_install_default_watchman_startup_barrier_raises_recorded_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset realtime backend should still fail fast when install default is watchman."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = None
+
+        monkeypatch.setattr(
+            base_module,
+            "default_realtime_backend_for_current_install",
+            lambda: "watchman",
+        )
+
+        server = ConcreteMCPServer(config=config)
+        server._deferred_start_task = asyncio.create_task(asyncio.sleep(0))
+        server._startup_failure_message = "Watchman sidecar startup failed: boom"
+
+        with pytest.raises(RuntimeError, match="Watchman sidecar startup failed: boom"):
+            await server.await_startup_barrier()
+
+        startup = server._scan_progress["realtime"]["startup"]
+        assert startup["state"] == "failed"
+        assert startup["last_error"] == "Watchman sidecar startup failed: boom"
+        assert startup["phases"]["startup_barrier"]["state"] == "failed"
+        assert startup["phases"]["startup_barrier"]["completed_at"] is not None
+
+    @pytest.mark.asyncio
     async def test_daemon_run_records_publish_exposure_ready_timestamp(
         self, tmp_path: Path
     ) -> None:

@@ -526,8 +526,36 @@ async def test_private_watchman_sidecar_start_failure_leaves_no_metadata(
     if listener_path_is_filesystem(resolve_packaged_watchman_runtime()):
         assert not sidecar.paths.socket_path.exists()
         assert not sidecar.paths.pidfile_path.exists()
-        assert sidecar.paths.logfile_path.exists()
+        assert not sidecar.paths.logfile_path.exists()
+        assert sidecar.paths.logfile_path.with_name("watchman.failed.log").exists()
     assert not sidecar.paths.statefile_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_private_watchman_sidecar_retry_succeeds_after_failed_start_log_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    sidecar = PrivateWatchmanSidecar(repo_root)
+    monkeypatch.setenv("CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY", "1")
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        await sidecar.start()
+
+    failed_log_path = sidecar.paths.logfile_path.with_name("watchman.failed.log")
+    assert failed_log_path.exists()
+    assert not sidecar.paths.logfile_path.exists()
+    assert not sidecar.paths.metadata_path.exists()
+
+    monkeypatch.delenv("CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY", raising=False)
+    metadata = await sidecar.start()
+    try:
+        assert metadata.pid > 0
+        assert failed_log_path.exists()
+        assert sidecar.paths.metadata_path.exists()
+    finally:
+        await sidecar.stop()
 
 
 @pytest.mark.asyncio

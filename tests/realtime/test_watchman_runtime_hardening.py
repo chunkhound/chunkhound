@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from chunkhound.services.realtime.adapters.watchman import WatchmanRealtimeAdapter
+from chunkhound.watchman import PrivateWatchmanSidecar, WatchmanSubscriptionScope
 from chunkhound.watchman.session import WatchmanCliSession
 from chunkhound.watchman_runtime import bridge as bridge_module
 
@@ -75,3 +77,93 @@ def test_runtime_subscription_stop_warns_when_observer_thread_survives(
     assert warning_messages == [
         "chunkhound watchman runtime: observer thread did not stop within 5.0s"
     ]
+
+
+def test_watchman_subscribe_command_requests_directory_entries(tmp_path: Path) -> None:
+    session = WatchmanCliSession(
+        binary_path=tmp_path / "watchman",
+        socket_path=tmp_path / "watchman.sock",
+        statefile_path=tmp_path / "watchman.state",
+        logfile_path=tmp_path / "watchman.log",
+        pidfile_path=tmp_path / "watchman.pid",
+        project_root=tmp_path,
+    )
+    scope = WatchmanSubscriptionScope(
+        requested_path=tmp_path,
+        watch_root=tmp_path,
+        relative_root=None,
+        scope_kind="primary",
+    )
+
+    command = session._build_subscribe_command(
+        scope=scope,
+        subscription_name="chunkhound-live-indexing",
+    )
+
+    assert command[:3] == ["subscribe", str(tmp_path), "chunkhound-live-indexing"]
+    payload = command[3]
+    assert isinstance(payload, dict)
+    assert "expression" not in payload
+    assert payload["fields"] == ["name", "exists", "new", "type"]
+    assert payload["empty_on_fresh_instance"] is True
+
+
+def test_watchman_adapter_translates_deleted_directory_entries(tmp_path: Path) -> None:
+    adapter = object.__new__(WatchmanRealtimeAdapter)
+    scope = WatchmanSubscriptionScope(
+        requested_path=tmp_path,
+        watch_root=tmp_path,
+        relative_root=None,
+        scope_kind="primary",
+    )
+
+    translated = adapter._translate_watchman_file_entry(
+        {
+            "name": "src/deleted_dir",
+            "exists": False,
+            "new": False,
+            "type": "d",
+        },
+        scope,
+    )
+
+    assert translated == ("dir_deleted", tmp_path / "src" / "deleted_dir")
+
+
+def test_watchman_adapter_skips_existing_directory_change_entries(
+    tmp_path: Path,
+) -> None:
+    adapter = object.__new__(WatchmanRealtimeAdapter)
+    scope = WatchmanSubscriptionScope(
+        requested_path=tmp_path,
+        watch_root=tmp_path,
+        relative_root=None,
+        scope_kind="primary",
+    )
+
+    translated = adapter._translate_watchman_file_entry(
+        {
+            "name": "src/existing_dir",
+            "exists": True,
+            "new": False,
+            "type": "d",
+        },
+        scope,
+    )
+
+    assert translated is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_stale_state_ignores_failed_log_without_metadata(
+    tmp_path: Path,
+) -> None:
+    sidecar = PrivateWatchmanSidecar(tmp_path / "repo")
+    sidecar.paths.root.mkdir(parents=True, exist_ok=True)
+    failed_log_path = sidecar.paths.logfile_path.with_name("watchman.failed.log")
+    failed_log_path.write_text("watchman startup failed\n", encoding="utf-8")
+
+    result = await sidecar.cleanup_stale_state()
+
+    assert result is None
+    assert failed_log_path.exists()

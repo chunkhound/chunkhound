@@ -230,6 +230,7 @@ class IndexingCoordinator(BaseService):
         # Base directory for path normalization (immutable after initialization)
         # Store raw path - will resolve at usage time for consistent symlink handling
         self._base_directory: Path = base_directory
+        self._root_identity_validated = False
 
     def _get_relative_path(self, file_path: Path) -> Path:
         """Get relative path, preserving symlink logical paths.
@@ -498,6 +499,19 @@ class IndexingCoordinator(BaseService):
         # PREVENTS: Race conditions in read-modify-write operations
         file_lock = await self._get_file_lock(file_path)
         async with file_lock:
+            if not self._root_identity_validated:
+                ensure_root = getattr(self._db, "ensure_indexed_root_identity", None)
+                if callable(ensure_root):
+                    get_base = getattr(self._db, "get_base_directory", None)
+                    requested_root = (
+                        get_base() if callable(get_base) else self._base_directory
+                    )
+                    ensure_root(
+                        requested_root=requested_root,
+                        allow_claim_if_missing=True,
+                    )
+                self._root_identity_validated = True
+
             # Use batch processor with single file for consistency
             parsed_results = await self._process_files_in_batches([(file_path, None)])
 
@@ -1150,6 +1164,7 @@ class IndexingCoordinator(BaseService):
                 requested_root=requested_root,
                 allow_claim_if_missing=True,
             )
+            self._root_identity_validated = True
         try:
             import time as _t
 

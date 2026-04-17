@@ -298,6 +298,27 @@ class DaemonStartupHandle:
     log_path: Path
 
 
+def _terminate_startup_handle_sync(startup: DaemonStartupHandle) -> None:
+    """Best-effort terminate for a detached daemon startup child."""
+    process = startup.process
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+
+
+async def _terminate_startup_handle(startup: DaemonStartupHandle) -> None:
+    """Best-effort async wrapper for detached daemon child termination."""
+    await asyncio.to_thread(_terminate_startup_handle_sync, startup)
+
+
 class DaemonDiscovery:
     """Locate or start the daemon for a given project directory."""
 
@@ -1202,6 +1223,7 @@ class DaemonDiscovery:
                         while time.monotonic() < poll_deadline:
                             returncode = startup.process.poll()
                             if returncode is not None:
+                                await _terminate_startup_handle(startup)
                                 raise RuntimeError(
                                     self._format_startup_failure(
                                         prefix=(
@@ -1245,6 +1267,7 @@ class DaemonDiscovery:
                                 min(_STARTUP_POLL_INTERVAL, max(sleep_for, 0.0))
                             )
 
+                        await _terminate_startup_handle(startup)
                         raise RuntimeError(
                             self._format_startup_failure(
                                 prefix=(

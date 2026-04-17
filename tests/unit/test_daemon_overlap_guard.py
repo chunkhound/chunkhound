@@ -4,10 +4,12 @@ import json
 import multiprocessing
 import os
 import socket
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from unittest.mock import AsyncMock
 
 import chunkhound.daemon.discovery as discovery_module
 from chunkhound.daemon.discovery import (
@@ -792,6 +794,93 @@ async def test_ensure_daemon_running_publishes_registry_entry_authoritatively(
     assert conflict is not None
     assert conflict["pid"] == os.getpid()
     assert conflict["socket_path"] == fake_address
+
+
+@pytest.mark.asyncio
+async def test_find_or_start_daemon_terminates_detached_child_on_startup_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+            self.kill_calls = 0
+            self.wait_calls = 0
+            self.returncode = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise subprocess.TimeoutExpired("chunkhound", timeout)
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+    fake_process = _FakeProcess()
+    log_path = discovery.get_daemon_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(discovery_module, "_STARTUP_TIMEOUT", 0.05)
+    monkeypatch.setattr(discovery, "_reuse_live_daemon", AsyncMock(return_value=None))
+    monkeypatch.setattr(discovery, "_acquire_cross_runtime_startup_lock", lambda: True)
+    monkeypatch.setattr(discovery, "_release_cross_runtime_startup_lock", lambda: None)
+    monkeypatch.setattr(discovery, "_acquire_global_startup_lock", lambda: True)
+    monkeypatch.setattr(discovery, "_release_global_startup_lock", lambda: None)
+    monkeypatch.setattr(discovery, "_acquire_starter_lock", lambda: True)
+    monkeypatch.setattr(discovery, "_release_starter_lock", lambda: None)
+    monkeypatch.setattr(discovery, "find_conflicting_daemon", lambda: None)
+    monkeypatch.setattr(discovery, "read_lock", lambda: None)
+    monkeypatch.setattr(
+        discovery,
+        "_socket_connectable",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        discovery,
+        "_start_daemon_subprocess",
+        lambda args, socket_path=None: DaemonStartupHandle(
+            process=fake_process,  # type: ignore[arg-type]
+            log_path=log_path,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="did not start within"):
+        await discovery.find_or_start_daemon(object())
+
+    assert fake_process.terminate_calls == 1
+    assert fake_process.kill_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_terminate_startup_handle_swallows_process_errors() -> None:
+    class _ExplodingProcess:
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            raise OSError("terminate exploded")
+
+    startup = DaemonStartupHandle(
+        process=_ExplodingProcess(),  # type: ignore[arg-type]
+        log_path=Path("/tmp/daemon.log"),
+    )
+
+    await discovery_module._terminate_startup_handle(startup)
 
 
 def test_validated_registry_entry_normalizes_corrupt_started_at(

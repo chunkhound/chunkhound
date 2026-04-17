@@ -349,7 +349,7 @@ class WatchmanRealtimeAdapter:
         scope: WatchmanSubscriptionScope,
     ) -> tuple[str, Path] | None:
         file_type = entry.get("type")
-        if file_type not in {None, "f"}:
+        if file_type not in {None, "f", "d"}:
             self._warn_translation_issue(
                 f"Skipping unexpected Watchman file type {file_type!r}"
             )
@@ -386,7 +386,14 @@ class WatchmanRealtimeAdapter:
 
         exists = entry.get("exists")
         is_new = entry.get("new")
-        if exists is False:
+        if file_type == "d":
+            if exists is False:
+                event_type = "dir_deleted"
+            elif exists is True and is_new is True:
+                event_type = "dir_created"
+            else:
+                return None
+        elif exists is False:
             event_type = "deleted"
         elif exists is True and is_new is True:
             event_type = "created"

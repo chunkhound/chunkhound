@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -22,7 +23,13 @@ from tests.utils.windows_compat import wait_for_indexed
 pytestmark = pytest.mark.requires_native_watchman
 
 
-def _subscription_pdu(*, name: str, exists: bool, is_new: bool) -> dict[str, object]:
+def _subscription_pdu(
+    *,
+    name: str,
+    exists: bool,
+    is_new: bool,
+    file_type: str = "f",
+) -> dict[str, object]:
     return {
         "subscription": "chunkhound-live-indexing",
         "clock": "c:0:1",
@@ -31,7 +38,7 @@ def _subscription_pdu(*, name: str, exists: bool, is_new: bool) -> dict[str, obj
                 "name": name,
                 "exists": exists,
                 "new": is_new,
-                "type": "f",
+                "type": file_type,
             }
         ],
     }
@@ -950,6 +957,48 @@ async def test_watchman_subscription_pdu_deletes_indexed_file(tmp_path: Path) ->
         )
 
         assert await _wait_for_removed(services.provider, file_path)
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_subscription_pdu_deletes_indexed_directory(
+    tmp_path: Path,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+
+    try:
+        await service.start(watch_dir)
+        queue = service.watchman_subscription_queue
+        assert queue is not None
+
+        deleted_dir = watch_dir / "src" / "deleted_dir"
+        first_file = deleted_dir / "first.py"
+        second_file = deleted_dir / "second.py"
+        deleted_dir.mkdir(parents=True, exist_ok=True)
+        first_file.write_text("def first():\n    return 1\n", encoding="utf-8")
+        second_file.write_text("def second():\n    return 2\n", encoding="utf-8")
+
+        await service.add_file(first_file, priority="priority")
+        await service.add_file(second_file, priority="priority")
+        assert await _wait_for_logical_indexed(services.provider, first_file)
+        assert await _wait_for_logical_indexed(services.provider, second_file)
+
+        shutil.rmtree(deleted_dir)
+        queue.put_nowait(
+            _subscription_pdu(
+                name="src/deleted_dir",
+                exists=False,
+                is_new=False,
+                file_type="d",
+            )
+        )
+
+        assert await _wait_for_removed(services.provider, first_file)
+        assert await _wait_for_removed(services.provider, second_file)
     finally:
         await service.stop()
         services.provider.disconnect()

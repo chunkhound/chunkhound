@@ -453,7 +453,19 @@ class PrivateWatchmanSidecar:
         try:
             await self._wait_for_ready()
         except BaseException:
+            failed_log_path = self.paths.logfile_path.with_name("watchman.failed.log")
+            renamed_failed_log = False
+            try:
+                self.paths.logfile_path.replace(failed_log_path)
+                renamed_failed_log = True
+            except OSError:
+                pass
             await self.stop()
+            if not renamed_failed_log:
+                try:
+                    self.paths.logfile_path.replace(failed_log_path)
+                except OSError:
+                    pass
             raise
 
         process_start_time_epoch = self._read_process_start_time_epoch(

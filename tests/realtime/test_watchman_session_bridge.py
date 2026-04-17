@@ -267,7 +267,6 @@ def test_scope_plan_subscription_names_preserve_logical_root_when_target_resolve
         "chunkhound-live-indexing--linked-workspace",
     )
 
-
 def test_watchman_cli_session_queue_overflow_reports_drop_and_calls_handler(
     tmp_path: Path,
 ) -> None:

@@ -184,3 +184,98 @@ async def test_process_directory_same_root_reuse_happy_path(tmp_path: Path) -> N
         )
     finally:
         db2.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_process_file_rejects_wrong_root_before_batch_processing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 108: `IndexingCoordinator.process_file(...)` must fail-closed before batching."""
+    db_path = tmp_path / "chunks.db"
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    root_a.mkdir()
+    root_b.mkdir()
+    file_path = root_a / "alpha.py"
+    file_path.write_text("print('a')\n", encoding="utf-8")
+
+    parser = create_parser_for_language(Language.PYTHON)
+    db = DuckDBProvider(db_path, base_directory=root_a)
+    db.connect()
+    try:
+        coordinator = IndexingCoordinator(
+            db, root_a, None, {Language.PYTHON: parser}, None, None
+        )
+        db.ensure_indexed_root_identity(
+            requested_root=root_a,
+            allow_claim_if_missing=True,
+        )
+
+        sidecar = _indexed_root_sidecar_path(db_path)
+        assert sidecar is not None and sidecar.exists()
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "indexed_root_path": _normalize_indexed_root(root_b),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        batch_invoked: list[str] = []
+
+        async def _fail_batches(*args, **kwargs):  # pragma: no cover
+            batch_invoked.append("called")
+            raise AssertionError(
+                "_process_files_in_batches must not run when Step 108 guard refuses reuse"
+            )
+
+        monkeypatch.setattr(coordinator, "_process_files_in_batches", _fail_batches)
+
+        with pytest.raises(DuckDBIndexedRootMismatchError):
+            await coordinator.process_file(file_path, skip_embeddings=True)
+
+        assert batch_invoked == []
+    finally:
+        db.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_process_file_validates_indexed_root_only_once_per_coordinator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 108: single-file realtime mutations should cache root validation per coordinator."""
+    db_path = tmp_path / "chunks.db"
+    root = tmp_path / "root"
+    root.mkdir()
+    first_file = root / "first.py"
+    second_file = root / "second.py"
+    first_file.write_text("def first():\n    return 1\n", encoding="utf-8")
+    second_file.write_text("def second():\n    return 2\n", encoding="utf-8")
+
+    parser = create_parser_for_language(Language.PYTHON)
+    db = DuckDBProvider(db_path, base_directory=root)
+    db.connect()
+    try:
+        coordinator = IndexingCoordinator(
+            db, root, None, {Language.PYTHON: parser}, None, None
+        )
+        call_count = 0
+        original_ensure = db.ensure_indexed_root_identity
+
+        def wrapped_ensure(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return original_ensure(*args, **kwargs)
+
+        monkeypatch.setattr(db, "ensure_indexed_root_identity", wrapped_ensure)
+
+        await coordinator.process_file(first_file, skip_embeddings=True)
+        await coordinator.process_file(second_file, skip_embeddings=True)
+
+        assert call_count == 1
+    finally:
+        db.disconnect()

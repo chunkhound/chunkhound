@@ -625,7 +625,6 @@ class WatchmanCliSession:
         subscription_name: str,
     ) -> list[object]:
         payload: dict[str, object] = {
-            "expression": ["allof", ["type", "f"]],
             "fields": ["name", "exists", "new", "type"],
             "empty_on_fresh_instance": True,
         }

@@ -33,6 +33,9 @@ from chunkhound.services.realtime_indexing_service import (
     RealtimeIndexingService,
     RealtimeStartupStatusTracker,
 )
+from chunkhound.watchman_runtime.loader import (
+    default_realtime_backend_for_current_install,
+)
 
 
 class MCPServerBase(ABC):
@@ -450,7 +453,10 @@ class MCPServerBase(ABC):
 
     def requires_strict_startup_barrier(self) -> bool:
         """Return whether daemon startup must block on realtime readiness."""
-        return self._configured_realtime_backend() == "watchman"
+        backend = self._configured_realtime_backend()
+        if backend is None:
+            backend = default_realtime_backend_for_current_install()
+        return backend == "watchman"
 
     def _set_startup_failure(
         self,
