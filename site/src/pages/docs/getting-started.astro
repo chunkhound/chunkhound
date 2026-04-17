@@ -5,7 +5,7 @@ import DocsCallout from "../../components/DocsCallout.astro";
 import DocsLayout from "../../layouts/DocsLayout.astro";
 import PlatformCodeBlock from "../../components/PlatformCodeBlock.astro";
 import { Code } from 'astro:components';
-import { SHIKI_THEME } from '../../lib/shiki-config.js';
+import { SHIKI_THEMES } from '../../lib/shiki-config.js';
 import { getChunkhoundVersion } from "../../lib/version";
 
 const chunkhoundVersion = getChunkhoundVersion();
@@ -27,10 +27,10 @@ const psCode = `# Skip if you already have uv\npowershell -ExecutionPolicy ByPas
     <h2>Install</h2>
     <PlatformCodeBlock dataCopy={posixCode}>
         <div data-platform-code="posix" data-platform-copy={posixCode}>
-            <Code lang="bash" theme={SHIKI_THEME} code={posixCode} />
+            <Code lang="bash" themes={SHIKI_THEMES} defaultColor={false} code={posixCode} />
         </div>
         <div data-platform-code="powershell" hidden data-platform-copy={psCode}>
-            <Code lang="powershell" theme={SHIKI_THEME} code={psCode} />
+            <Code lang="powershell" themes={SHIKI_THEMES} defaultColor={false} code={psCode} />
         </div>
     </PlatformCodeBlock>
     <p>Verify the install resolved on your shell:</p>

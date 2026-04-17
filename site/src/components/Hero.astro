@@ -1,6 +1,6 @@
 ---
 import Wordmark from "./Wordmark.astro";
-import { THEME_CMD, THEME_STRING } from '../lib/shiki-config.js';
+import { DEMO_CODE_PALETTE } from '../lib/shiki-config.js';
 ---
 
 <section class="hero">
@@ -123,7 +123,7 @@ import { THEME_CMD, THEME_STRING } from '../lib/shiki-config.js';
     </div>
 </section>
 
-<style define:vars={{ themeCmd: THEME_CMD, themeString: THEME_STRING }}>
+<style define:vars={{ themeCmd: DEMO_CODE_PALETTE.cmd, themeString: DEMO_CODE_PALETTE.string }}>
     .hero {
         padding: var(--space-10) 0;
         text-align: center;

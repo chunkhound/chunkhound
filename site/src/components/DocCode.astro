@@ -1,7 +1,7 @@
 ---
 import { Code } from 'astro:components';
 import CodeBlock from './CodeBlock.astro';
-import { SHIKI_THEME } from '../lib/shiki-config.js';
+import { SHIKI_THEMES } from '../lib/shiki-config.js';
 
 interface Props {
     lang?: string;
@@ -12,5 +12,5 @@ const { lang = 'bash', code } = Astro.props;
 ---
 
 <CodeBlock dataCopy={code}>
-    <Code lang={lang} theme={SHIKI_THEME} code={code} />
+    <Code lang={lang} themes={SHIKI_THEMES} defaultColor={false} code={code} />
 </CodeBlock>

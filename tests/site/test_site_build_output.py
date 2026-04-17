@@ -34,6 +34,19 @@ def _expected_docs_version() -> str:
     return git_describe.stdout.strip().removeprefix("v")
 
 
+def _extract_astro_code_block_after_marker(html: str, marker: str) -> str:
+    marker_index = html.find(marker)
+    assert marker_index != -1, f"Missing marker {marker!r}"
+
+    pre_index = html.find('<pre class="astro-code', marker_index)
+    assert pre_index != -1, f"Missing astro-code block after {marker!r}"
+
+    end_index = html.find("</pre>", pre_index)
+    assert end_index != -1, f"Missing closing </pre> after {marker!r}"
+
+    return html[pre_index : end_index + len("</pre>")]
+
+
 def test_site_build_outputs_platform_aware_onboarding() -> None:
     subprocess.run(
         ["npm", "run", "build", "--prefix", "site"],
@@ -56,6 +69,18 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert "data-platform-code" in getting_started
     assert "platform-code-block" in getting_started
     assert "code-header" in getting_started
+    # Astro still emits Shiki's light/dark CSS variables even though the site
+    # stylesheet intentionally renders code blocks with the dark token set.
+    platform_code_block = _extract_astro_code_block_after_marker(
+        getting_started, 'data-platform-code="posix"'
+    )
+    doc_code_block = _extract_astro_code_block_after_marker(
+        getting_started, 'data-copy="chunkhound --version"'
+    )
+    for code_block in (platform_code_block, doc_code_block):
+        assert "astro-code-themes" in code_block
+        assert "--shiki-light:" in code_block
+        assert "--shiki-dark:" in code_block
     assert "install.ps1" in getting_started
     assert "Expected output" in getting_started
     assert f"chunkhound {_expected_docs_version()}" in getting_started

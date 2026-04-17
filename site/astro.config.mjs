@@ -1,13 +1,18 @@
 import { defineConfig } from 'astro/config';
 import remarkGfm from 'remark-gfm';
-import { SHIKI_THEME, COPY_SVG } from './src/lib/shiki-config.js';
+import { SHIKI_THEMES, COPY_SVG } from './src/lib/shiki-config.js';
 
 export default defineConfig({
   site: 'https://chunkhound.ai',
   markdown: {
     remarkPlugins: [remarkGfm],
     shikiConfig: {
-      theme: SHIKI_THEME,
+      // Code blocks intentionally keep a dark code surface and the dark Shiki
+      // token palette in both site themes. We still emit Shiki's dual-theme
+      // variables because Astro's renderer expects them, but the site
+      // stylesheet always resolves rendered code to the dark token set.
+      themes: SHIKI_THEMES,
+      defaultColor: false,
       transformers: [{
         pre(node) {
           const rawCode = this.source;

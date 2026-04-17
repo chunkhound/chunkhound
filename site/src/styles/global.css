@@ -173,6 +173,18 @@ pre {
   font-family: 'JetBrains Mono', monospace;
 }
 
+/* Code blocks intentionally keep a dark surface in both site themes. The
+   surface itself can vary slightly per theme, but rendered tokens always use
+   the dark Shiki palette for consistent readability. */
+pre.astro-code {
+  background-color: var(--code-bg) !important;
+  color: var(--shiki-dark) !important;
+}
+
+pre.astro-code span {
+  color: var(--shiki-dark) !important;
+}
+
 a {
   color: var(--link);
   text-decoration: none;

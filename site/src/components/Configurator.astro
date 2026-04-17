@@ -14,7 +14,7 @@ import {
 } from "./configurator-data";
 import CodeBlock from "./CodeBlock.astro";
 import PlatformCodeBlock from "./PlatformCodeBlock.astro";
-import { THEME_CMD, THEME_STRING, THEME_OP, THEME_JSON_KEY, THEME_COMMENT, THEME_TEXT } from '../lib/shiki-config.js';
+import { DEMO_CODE_PALETTE } from '../lib/shiki-config.js';
 
 interface Props {
     heading?: string;
@@ -213,7 +213,7 @@ if (compact) {
     import "../scripts/configurator.ts";
 </script>
 
-<style define:vars={{ themeCmd: THEME_CMD, themeString: THEME_STRING, themeOp: THEME_OP, themeJsonKey: THEME_JSON_KEY, themeComment: THEME_COMMENT, themeText: THEME_TEXT }}>
+<style define:vars={{ themeCmd: DEMO_CODE_PALETTE.cmd, themeString: DEMO_CODE_PALETTE.string, themeOp: DEMO_CODE_PALETTE.op, themeJsonKey: DEMO_CODE_PALETTE.jsonKey, themeComment: DEMO_CODE_PALETTE.comment, themeText: DEMO_CODE_PALETTE.text }}>
     .configurator {
         padding: var(--space-8) 0;
     }
@@ -405,7 +405,7 @@ if (compact) {
         margin: var(--space-5) auto 0;
     }
 
-    /* Bash syntax highlighting — github-dark-dimmed token colors */
+    /* Bash syntax highlighting — GitHub dark-dimmed token colors */
     :global(.code-panel .sh-cmd), :global(.rerank-cmd .sh-cmd) { color: var(--themeCmd); }
     :global(.code-panel .sh-str), :global(.rerank-cmd .sh-str) { color: var(--themeString); }
     :global(.code-panel .sh-op),  :global(.rerank-cmd .sh-op)  { color: var(--themeOp); }
