@@ -304,3 +304,5 @@ site/node_modules/
 site/dist/
 site/.astro/
 
+# Gemini-CLI
+.gemini/settings.json
