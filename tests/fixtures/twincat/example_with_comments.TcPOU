@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_CommentExample" Id="{44444444-4444-4444-4444-444444444444}" SpecialFunc="None">
+    <Declaration><![CDATA[(* This is a block comment in the declaration *)
+FUNCTION_BLOCK FB_CommentExample
+VAR_INPUT
+    nInput : DINT;  // Input parameter comment
+END_VAR
+VAR
+    (* Multi-line
+       block comment
+       in VAR section *)
+    nCounter : DINT;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* Implementation block comment *)
+// Line comment before assignment
+nCounter := nCounter + nInput;
+
+(* Another block comment
+   spanning multiple lines *)
+// Final line comment
+]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>

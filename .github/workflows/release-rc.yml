@@ -1,0 +1,43 @@
+name: RC Release
+
+on:
+  push:
+    tags:
+      - 'v*rc*'  # e.g. v1.2.0rc1 (PEP 440 release candidate)
+      - 'v*b*'   # e.g. v1.2.0b1  (PEP 440 beta)
+      - 'v*a*'   # e.g. v1.2.0a1  (PEP 440 alpha)
+      # tag push by maintainer is the human gate (protected via tag ruleset)
+
+permissions:
+  id-token: write  # OIDC Trusted Publishing
+
+jobs:
+  build-and-publish-rc:
+    runs-on: ubuntu-latest
+    environment: pypi
+    timeout-minutes: 15
+
+    steps:
+      - name: Validate pre-release tag format (PEP 440)
+        shell: python
+        run: |
+          import re, sys
+          tag = "${{ github.ref_name }}"
+          if not re.match(r'^v\d+\.\d+\.\d+(a|b|rc)\d+$', tag):
+              print(f"::error::Tag {tag!r} is not a valid PEP 440 pre-release (expected vX.Y.Z(a|b|rc)N)")
+              sys.exit(1)
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs requires full history for version derivation
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No token needed — OIDC Trusted Publishing configured on PyPI project

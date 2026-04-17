@@ -1,4 +1,5 @@
 """ChunkHound - Local-first semantic code search with vector and regex capabilities."""
+# ci: merge queue test
 
 from .version import __version__
 

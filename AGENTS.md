@@ -53,25 +53,48 @@ uv run scripts/update_version.py --bump minor b1   # v4.0.1 → v4.1.0b1
 NEVER manually edit version strings - ALWAYS create git tags instead.
 
 ## PUBLISHING_PROCESS
+Releases are now fully automated via GitHub Actions (OIDC Trusted Publishing).
+See **RELEASING.md** for the authoritative step-by-step guide.
+
+Quick summary:
+1. Tag the version: `uv run scripts/update_version.py X.Y.Z`
+2. Run smoke tests: `uv run pytest tests/test_smoke.py -v -n auto` (MANDATORY)
+3. Create and publish a GitHub Release — `release.yml` handles the PyPI upload automatically.
+
+Pre-releases (alpha/beta/RC) publish to **PyPI** (not TestPyPI) via `release-rc.yml` on tag push.
+Do NOT use `uv publish` or `prepare_release.sh` manually — CI owns the publish step.
+
+## TEST RELEASE (alpha to PyPI)
+
+**If version not specified:** fetch latest version from PyPI, increment minor, append `a1`:
 ```bash
-# 1. Create version tag
-uv run scripts/update_version.py X.Y.Z
-
-# 2. Run smoke tests (MANDATORY)
-uv run pytest tests/test_smoke.py -v -n auto
-
-# 3. Prepare release
-./scripts/prepare_release.sh
-
-# 4. Test local install
-pip install dist/chunkhound-X.Y.Z-py3-none-any.whl
-
-# 5. Push tag
-git push origin vX.Y.Z
-
-# 6. Publish
-uv publish
+LATEST=$(pip index versions chunkhound 2>/dev/null | grep -oP '[\d.]+' | head -1)
+# e.g. 4.0.3 → next minor = 4.1.0 → alpha = 4.1.0a1
 ```
+
+**If version specified by user** (e.g. `4.2.0`): append `a1` → `4.2.0a1`
+
+**Steps:**
+```bash
+# 1. Save current remote and switch to chunkhound org remote
+ORIGINAL_REMOTE=$(git remote get-url origin)
+git remote set-url origin https://github.com/chunkhound/chunkhound.git
+
+# 2. Create the alpha tag
+uv run scripts/update_version.py X.Y.Za1
+
+# 3. Push the tag — triggers release-rc.yml → publishes to PyPI as pre-release
+git push origin vX.Y.Za1
+
+# 4. Revert remote back to original
+git remote set-url origin "$ORIGINAL_REMOTE"
+```
+
+PyPI trusted publisher required for `release-rc.yml`:
+- Owner: `chunkhound`
+- Repository: `chunkhound`
+- Workflow: `release-rc.yml`
+- Environment: `pypi`
 
 ## DB_PATH_GOTCHAS
 - **Preferred: pass project directory as positional arg** — `chunkhound search "query" /path/to/project` — this reads `.chunkhound.json` and resolves the DB correctly

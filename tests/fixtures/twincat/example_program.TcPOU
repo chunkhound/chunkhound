@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="PRG_Example" Id="{11111111-1111-1111-1111-111111111111}" SpecialFunc="None">
+    <Declaration><![CDATA[PROGRAM PRG_Example
+VAR_INPUT
+    bStart : BOOL;
+END_VAR
+VAR_OUTPUT
+    bRunning : BOOL;
+END_VAR
+VAR
+    nCycleCount : DINT;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[IF bStart THEN
+    bRunning := TRUE;
+    nCycleCount := nCycleCount + 1;
+END_IF;
+]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>
