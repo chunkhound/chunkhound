@@ -71,7 +71,7 @@ class CodexCLIProvider(BaseCLIProvider):
         default = Path.home() / ".codex"
         return default if default.exists() else None
 
-    def _resolve_model_name(self, requested: str | None) -> str:
+    def _resolve_model_name(self, requested: str | None) -> str | None:
         """Resolve requested model name to Codex CLI model identifier."""
         resolved, _source = self.describe_model_resolution(requested)
         return resolved
@@ -83,7 +83,7 @@ class CodexCLIProvider(BaseCLIProvider):
         return self._resolved_model
 
     @classmethod
-    def describe_model_resolution(cls, requested: str | None) -> tuple[str, str]:
+    def describe_model_resolution(cls, requested: str | None) -> tuple[str | None, str]:
         """Return (resolved_model, source) for Codex CLI model selection.
 
         Notes:
@@ -265,13 +265,17 @@ class CodexCLIProvider(BaseCLIProvider):
 
             config_path = overlay / "config.toml"
             # Many Codex builds expect top-level `model` keys (not a [model] table).
-            cfg_lines = [
-                f'model = "{model_name}"',
-                f'model_reasoning_effort = "{self._reasoning_effort}"',
-                "",
-                "[history]",
-                'persistence = "none"',
-            ]
+            cfg_lines: list[str] = []
+            if model_name:
+                cfg_lines.append(f'model = "{model_name}"')
+            cfg_lines.extend(
+                [
+                    f'model_reasoning_effort = "{self._reasoning_effort}"',
+                    "",
+                    "[history]",
+                    'persistence = "none"',
+                ]
+            )
             config_path.write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
         except Exception as e:
             logger.warning(f"Failed to build Codex overlay home: {e}")
