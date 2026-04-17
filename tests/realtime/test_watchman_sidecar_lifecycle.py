@@ -538,9 +538,17 @@ async def test_private_watchman_sidecar_retry_succeeds_after_failed_start_log_re
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     sidecar = PrivateWatchmanSidecar(repo_root)
-    monkeypatch.setenv("CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY", "1")
+    original_builder = build_watchman_sidecar_command
 
-    with pytest.raises(RuntimeError, match="simulated"):
+    def broken_builder(**kwargs) -> list[str]:
+        return [*original_builder(**kwargs), "--definitely-invalid-watchman-flag"]
+
+    monkeypatch.setattr(
+        "chunkhound.watchman.sidecar.build_watchman_sidecar_command",
+        broken_builder,
+    )
+
+    with pytest.raises(RuntimeError, match="exited before it became ready"):
         await sidecar.start()
 
     failed_log_path = sidecar.paths.logfile_path.with_name("watchman.failed.log")
@@ -548,7 +556,10 @@ async def test_private_watchman_sidecar_retry_succeeds_after_failed_start_log_re
     assert not sidecar.paths.logfile_path.exists()
     assert not sidecar.paths.metadata_path.exists()
 
-    monkeypatch.delenv("CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY", raising=False)
+    monkeypatch.setattr(
+        "chunkhound.watchman.sidecar.build_watchman_sidecar_command",
+        original_builder,
+    )
     metadata = await sidecar.start()
     try:
         assert metadata.pid > 0
