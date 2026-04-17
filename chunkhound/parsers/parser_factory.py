@@ -81,6 +81,7 @@ from chunkhound.parsers.mappings import (
     ZigMapping,
 )
 from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.twincat.twincat_mapping import TwinCATMapping
 from chunkhound.parsers.universal_engine import SetupError, TreeSitterEngine
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
 
@@ -239,6 +240,12 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.PDF: LanguageConfig(
         None, PDFMapping, True, "pdf"
     ),  # PDF doesn't need tree-sitter
+    Language.TWINCAT: LanguageConfig(
+        None,  # No tree-sitter module (uses Lark)
+        TwinCATMapping,
+        True,  # Always available - lark is a hard dependency
+        "twincat",
+    ),
 }
 
 # File extension to language mapping
@@ -338,6 +345,9 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".text": Language.TEXT,
     # PDF files
     ".pdf": Language.PDF,
+    # TwinCAT / IEC 61131-3 Structured Text
+    ".TcPOU": Language.TWINCAT,
+    ".tcpou": Language.TWINCAT,
 }
 
 
@@ -424,9 +434,9 @@ class ParserFactory:
 
         parser: UniversalParser
 
-        # Special handling for text and PDF files (no tree-sitter required)
-        if language in (Language.TEXT, Language.PDF):
-            # Text and PDF mappings don't need tree-sitter engine
+        # Special handling for non-tree-sitter languages (text, PDF, TwinCAT)
+        if config.tree_sitter_module is None:
+            # These mappings don't need a tree-sitter engine
             mapping = config.mapping_class()
             parser = UniversalParser(None, mapping, cast_config, detect_embedded_sql)  # type: ignore[arg-type]
             wrapped = self._maybe_wrap_yaml_parser(language, parser, cast_config)
@@ -584,7 +594,7 @@ class ParserFactory:
         """
         missing = {}
         for language, config in LANGUAGE_CONFIGS.items():
-            if not config.available and language not in (Language.TEXT, Language.PDF):
+            if not config.available and config.tree_sitter_module is not None:
                 missing[language] = (
                     f"pip install tree-sitter-{config.language_name.lower()}"
                 )

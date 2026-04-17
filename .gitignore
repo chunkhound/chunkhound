@@ -16,6 +16,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+!site/src/lib/
+!site/src/lib/*.js
+!site/src/lib/*.ts
 lib64/
 parts/
 sdist/
@@ -300,3 +303,4 @@ cluster_eval.json
 site/node_modules/
 site/dist/
 site/.astro/
+
