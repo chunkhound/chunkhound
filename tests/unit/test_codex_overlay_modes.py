@@ -141,6 +141,44 @@ async def test_codex_config_only_mode_accepts_custom_reasoning_effort(monkeypatc
     assert cfg.get("model_reasoning_effort") == "high"
 
 
+@pytest.mark.asyncio
+async def test_codex_config_only_mode_omits_model_for_provider_default(monkeypatch, tmp_path: Path):
+    from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+
+    monkeypatch.setenv("CHUNKHOUND_CODEX_STDIN_FIRST", "0")
+    monkeypatch.setenv("CHUNKHOUND_CODEX_CONFIG_OVERRIDE", "env")
+    monkeypatch.delenv("CHUNKHOUND_CODEX_DEFAULT_MODEL", raising=False)
+
+    monkeypatch.setattr(CodexCLIProvider, "_get_base_codex_home", lambda self: None, raising=True)
+    monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+
+    captured = {"env": None, "config_text": None}
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):  # noqa: ANN001
+        env = kwargs.get("env", {})
+        captured["env"] = env
+        cfg_key = os.getenv("CHUNKHOUND_CODEX_CONFIG_ENV", "CODEX_CONFIG")
+        cfg_path = env.get(cfg_key)
+        if cfg_path:
+            cfg = Path(cfg_path)
+            if cfg.exists():
+                captured["config_text"] = cfg.read_text()
+        return _DummyProc(rc=0, out=b"OK", err=b"")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
+
+    prov = CodexCLIProvider(model="codex", reasoning_effort="medium")
+    out = await prov._run_exec("ping", cwd=None, max_tokens=16, timeout=10, model="codex")  # type: ignore[attr-defined]
+
+    assert out.strip() == "OK"
+    assert captured["config_text"] is not None
+    assert 'model = "' not in captured["config_text"]
+    assert 'model_reasoning_effort = "medium"' in captured["config_text"]
+    cfg = tomllib.loads(captured["config_text"])
+    assert "model" not in cfg
+    assert cfg.get("model_reasoning_effort") == "medium"
+
+
 def test_codex_model_resolution_defaults(monkeypatch):
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
@@ -148,8 +186,8 @@ def test_codex_model_resolution_defaults(monkeypatch):
     monkeypatch.delenv("CHUNKHOUND_CODEX_DEFAULT_MODEL", raising=False)
 
     prov = CodexCLIProvider(model="codex")
-    # "codex" alias should resolve to the default Codex reasoning model
-    assert prov._resolve_model_name("codex") == "gpt-5.1-codex"
+    # "codex" alias should let Codex choose its provider default model
+    assert prov._resolve_model_name("codex") is None
     # Non-alias model names should pass through unchanged
     assert prov._resolve_model_name("gpt-5.1-codex-mini") == "gpt-5.1-codex-mini"
 

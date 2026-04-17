@@ -80,5 +80,5 @@ async def test_codex_overlay_cleanup(monkeypatch, tmp_path: Path):
 
     # Overlay should be cleaned up by provider
     assert not overlay_dir.exists(), "overlay CODEX_HOME was not cleaned up"
-    # "codex" alias should resolve to the default Codex model
-    assert requested_model.get("value") == "gpt-5.1-codex"
+    # "codex" alias should defer model selection to the provider default
+    assert requested_model.get("value") is None

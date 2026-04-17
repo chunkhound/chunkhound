@@ -136,7 +136,7 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeyp
         cfg_key = os.getenv("CHUNKHOUND_CODEX_CONFIG_ENV", "CODEX_CONFIG")
         cfg_path_str = env.get(cfg_key)
 
-        model_name = "<missing>"
+        model_name = "<provider-default>"
         effort_value = "<missing>"
 
         if isinstance(cfg_path_str, str):

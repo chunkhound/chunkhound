@@ -14,8 +14,8 @@ def test_codex_cli_model_resolution_defaults(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.delenv("CHUNKHOUND_CODEX_DEFAULT_MODEL", raising=False)
     resolved, source = CodexCLIProvider.describe_model_resolution("codex")
-    assert resolved == "gpt-5.1-codex"
-    assert source in {"default", "env:CHUNKHOUND_CODEX_DEFAULT_MODEL"}
+    assert resolved is None
+    assert source == "provider-default"
 
 
 def test_codex_cli_model_resolution_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
