@@ -18,7 +18,7 @@ def _expected_docs_version() -> str:
     if VERSION_FILE.exists():
         match = re.search(
             r"__version__\s*=\s*version\s*=\s*['\"]([^'\"]+)['\"]",
-            VERSION_FILE.read_text(),
+            VERSION_FILE.read_text(encoding="utf-8"),
         )
         if match is None:
             raise AssertionError("Could not parse chunkhound/_version.py version")
@@ -56,10 +56,10 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
         text=True,
     )
 
-    homepage = (DIST / "index.html").read_text()
-    getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text()
-    cli_reference = (DIST / "docs" / "cli-reference" / "index.html").read_text()
-    configuration = (DIST / "docs" / "configuration" / "index.html").read_text()
+    homepage = (DIST / "index.html").read_text(encoding="utf-8")
+    getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(encoding="utf-8")
+    cli_reference = (DIST / "docs" / "cli-reference" / "index.html").read_text(encoding="utf-8")
+    configuration = (DIST / "docs" / "configuration" / "index.html").read_text(encoding="utf-8")
     umami_script = (
         '<script defer src="https://cloud.umami.is/script.js" '
         'data-website-id="ab95aad1-dc04-4bc7-be56-b162a68d6aa3"></script>'

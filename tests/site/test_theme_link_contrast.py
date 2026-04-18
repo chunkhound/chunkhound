@@ -65,7 +65,7 @@ def _contrast_ratio(foreground: str, background: str) -> float:
 
 
 def test_link_tokens_meet_aa_contrast_in_light_and_dark_themes() -> None:
-    css = GLOBAL_CSS.read_text()
+    css = GLOBAL_CSS.read_text(encoding="utf-8")
     dark_tokens = _extract_tokens(_extract_block(css, ":root"))
     light_tokens = _extract_tokens(_extract_block(css, '[data-theme="light"]'))
 
@@ -89,7 +89,7 @@ def test_link_tokens_meet_aa_contrast_in_light_and_dark_themes() -> None:
 
 
 def test_astro_code_background_uses_shared_code_surface_token() -> None:
-    css = GLOBAL_CSS.read_text()
+    css = GLOBAL_CSS.read_text(encoding="utf-8")
 
     default_block = _extract_block(css, "pre.astro-code")
 
@@ -98,7 +98,7 @@ def test_astro_code_background_uses_shared_code_surface_token() -> None:
 
 
 def test_astro_code_tokens_are_intentionally_pinned_to_dark_shiki_values() -> None:
-    css = GLOBAL_CSS.read_text()
+    css = GLOBAL_CSS.read_text(encoding="utf-8")
 
     span_block = _extract_block(css, "pre.astro-code span")
 
@@ -108,8 +108,8 @@ def test_astro_code_tokens_are_intentionally_pinned_to_dark_shiki_values() -> No
 def test_rendered_comment_token_meets_aa_contrast_on_shared_code_surfaces() -> None:
     _build_site()
 
-    css = GLOBAL_CSS.read_text()
-    getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text()
+    css = GLOBAL_CSS.read_text(encoding="utf-8")
+    getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(encoding="utf-8")
     dark_tokens = _extract_tokens(_extract_block(css, ":root"))
     light_tokens = _extract_tokens(_extract_block(css, '[data-theme="light"]'))
     comment_token = _extract_shiki_dark_token(
@@ -126,7 +126,7 @@ def test_rendered_comment_token_meets_aa_contrast_on_shared_code_surfaces() -> N
 
 
 def test_code_surface_text_meets_aa_contrast_in_both_site_themes() -> None:
-    css = GLOBAL_CSS.read_text()
+    css = GLOBAL_CSS.read_text(encoding="utf-8")
     dark_tokens = _extract_tokens(_extract_block(css, ":root"))
     light_tokens = _extract_tokens(_extract_block(css, '[data-theme="light"]'))
 
