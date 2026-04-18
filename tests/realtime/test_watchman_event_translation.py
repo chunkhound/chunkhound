@@ -14,8 +14,14 @@ from chunkhound.services.realtime_indexing_service import RealtimeIndexingServic
 from chunkhound.watchman import WatchmanScopePlan, WatchmanSubscriptionScope
 from tests.helpers.watchman_realtime import (
     build_watchman_service as _build_watchman_service,
+)
+from tests.helpers.watchman_realtime import (
     start_isolated_watchman_translation as _start_isolated_watchman_translation,
+)
+from tests.helpers.watchman_realtime import (
     wait_for_logical_indexed as _wait_for_logical_indexed,
+)
+from tests.helpers.watchman_realtime import (
     wait_for_removed as _wait_for_removed,
 )
 from tests.utils.windows_compat import wait_for_indexed
@@ -54,6 +60,22 @@ async def _wait_for_pipeline_count(
             return stats
         await asyncio.sleep(0.1)
     raise AssertionError(f"Timed out waiting for pipeline.{field} >= {minimum}")
+
+
+async def _wait_for_realtime_idle(
+    service: RealtimeIndexingService,
+) -> dict[str, object]:
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while asyncio.get_running_loop().time() < deadline:
+        if (
+            service._active_processing_count == 0
+            and service.event_queue.qsize() == 0
+            and service.file_queue.qsize() == 0
+            and not service.pending_files
+        ):
+            return await service.get_health()
+        await asyncio.sleep(0.05)
+    raise AssertionError("Timed out waiting for realtime service to become idle")
 
 
 @pytest.mark.asyncio
@@ -1097,6 +1119,14 @@ async def test_watchman_multi_scope_translation_deduplicates_across_subscription
         file_path = nested_mount / "src" / "mounted.py"
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text("def mounted():\n    return 1\n", encoding="utf-8")
+        assert await _wait_for_logical_indexed(services.provider, file_path)
+
+        baseline_stats = await _wait_for_realtime_idle(service)
+        baseline_suppressed_duplicates = int(
+            baseline_stats["pipeline"]["suppressed_duplicate_count"]
+        )
+        add_file_calls.clear()
+        service.reset_file_tracking(file_path)
 
         queue.put_nowait(
             {
@@ -1127,9 +1157,9 @@ async def test_watchman_multi_scope_translation_deduplicates_across_subscription
             }
         )
 
-        assert await _wait_for_logical_indexed(services.provider, file_path)
+        assert await service.wait_for_file_indexed(file_path)
+        stats = await _wait_for_realtime_idle(service)
 
-        stats = await service.get_health()
         assert stats["watchman_subscription_count"] == 2
         assert stats["watchman_subscription_names"] == [
             "chunkhound-live-indexing",
@@ -1156,7 +1186,10 @@ async def test_watchman_multi_scope_translation_deduplicates_across_subscription
             for queued_path, priority in add_file_calls
             if priority == "change"
         ] == [(file_path.resolve(), "change")]
-        assert stats["pipeline"]["suppressed_duplicate_count"] >= 1
+        assert (
+            int(stats["pipeline"]["suppressed_duplicate_count"])
+            >= baseline_suppressed_duplicates + 1
+        )
     finally:
         await service.stop()
         services.provider.disconnect()
