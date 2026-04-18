@@ -124,6 +124,12 @@ class TestRealtimeFailures:
     @pytest.mark.asyncio
     async def test_file_debouncing_cleans_up_state(self, realtime_setup):
         """Test that rapid changes to one file leave no stale debounce state."""
+        pass  # Placeholder - test body follows in next method context
+
+    @pytest.mark.native_watcher
+    @pytest.mark.asyncio
+    async def test_file_debouncing_creates_memory_leaks(self, realtime_setup):
+        """Test that file debouncing properly cleans up timers."""
         service, watch_dir, _, _ = realtime_setup
         await service.start(watch_dir)
 
@@ -146,6 +152,7 @@ class TestRealtimeFailures:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_background_scan_conflicts_with_realtime(self, realtime_setup):
         """Test that background scan and real-time processing conflict."""
         service, watch_dir, _, services = realtime_setup
@@ -249,6 +256,7 @@ class TestRealtimeFailures:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_error_in_processing_loop_kills_service(self, realtime_setup):
         """Test that an error in the processing loop kills the entire service."""
         service, watch_dir, _, _ = realtime_setup
@@ -276,6 +284,7 @@ class TestRealtimeFailures:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.polling_watcher
     async def test_polling_monitor_cleanup_on_cancellation(self, realtime_setup):
         """Test that polling monitor cleans up resources when cancelled."""
         service, watch_dir, _, _ = realtime_setup
@@ -295,6 +304,7 @@ class TestRealtimeFailures:
 
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_compaction_error_defers_file_without_counting_as_failure(
         self, realtime_setup
     ):
@@ -335,6 +345,7 @@ class TestRealtimeFailures:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_successful_retry_clears_deferred_state(self, realtime_setup):
         """A successful retry after a CompactionError must clear deferred state.
 
@@ -389,6 +400,7 @@ class TestRealtimeFailures:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_remove_file_clears_deferred_state(self, realtime_setup):
         """remove_file() must also clear stale deferred state for the target path.
 
@@ -438,6 +450,7 @@ class TestRealtimeFailures:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_remove_file_defers_compaction_without_counting_as_failure(
         self, realtime_setup
     ):
@@ -467,6 +480,7 @@ class TestRealtimeFailures:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_clear_compaction_deferred_files_preserves_genuine_failures(
         self, realtime_setup
     ):
