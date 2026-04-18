@@ -1,15 +1,13 @@
-import os
 import re
 import subprocess
 import tempfile
 from pathlib import Path
 
-from tests.site.tsx_runner import NPM
+from tests.site.tsx_runner import NPM, run_tsx_raw
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
 VERSION_FILE = ROOT / "chunkhound" / "_version.py"
-SITE_PREFIX = ROOT / "site"
 
 
 def _clean_dev_suffix(version: str) -> str:
@@ -129,14 +127,7 @@ import process from "node:process";
   }}
 }})();
 """
-        result = subprocess.run(
-            [NPM, "exec", "--prefix", str(SITE_PREFIX), "--", "tsx", "--eval", script],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "PATH": os.environ.get("PATH", "")},
-        )
+        result = run_tsx_raw(script, check=False)
 
     assert result.returncode == 1
     assert (

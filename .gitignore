@@ -1,4 +1,6 @@
 .DS_Store
+# temp TypeScript files created by tsx_runner.py
+/tmp*.mts
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
