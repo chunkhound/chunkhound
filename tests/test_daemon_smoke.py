@@ -36,7 +36,6 @@ from tests.utils import (
     get_safe_subprocess_env,
 )
 
-
 def _chunkhound_exe() -> str:
     """Return the absolute path to the chunkhound executable in the active venv."""
     exe = shutil.which("chunkhound")
