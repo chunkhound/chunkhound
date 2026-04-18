@@ -332,7 +332,11 @@ class WatchmanRealtimeAdapter:
             self._context.ingest_realtime_event(
                 event_type,
                 file_path,
-                should_index=path_filter.should_index(file_path),
+                should_index=self._should_admit_event(
+                    event_type,
+                    file_path,
+                    path_filter,
+                ),
             )
 
     def _path_filter_for_scope(
@@ -342,6 +346,16 @@ class WatchmanRealtimeAdapter:
             str(scope.requested_path),
             self._path_filter,
         )
+
+    def _should_admit_event(
+        self,
+        event_type: str,
+        file_path: Path,
+        path_filter: RealtimePathFilter,
+    ) -> bool:
+        if event_type in {"dir_created", "dir_deleted"}:
+            return True
+        return path_filter.should_index(file_path)
 
     def _translate_watchman_file_entry(
         self,

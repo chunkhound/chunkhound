@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from chunkhound.core.config.config import Config
 from chunkhound.services.realtime.adapters.watchman import WatchmanRealtimeAdapter
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.watchman import PrivateWatchmanSidecar, WatchmanSubscriptionScope
 from chunkhound.watchman.session import WatchmanCliSession
 from chunkhound.watchman_runtime import bridge as bridge_module
@@ -39,9 +42,7 @@ async def test_watchman_session_stderr_loop_records_reader_failures() -> None:
 
     await session._stderr_loop()
 
-    assert session._last_error == (
-        "Watchman stderr reader failed: stderr exploded"
-    )
+    assert session._last_error == ("Watchman stderr reader failed: stderr exploded")
     assert pending_reply.done()
     with pytest.raises(RuntimeError, match="stderr exploded"):
         pending_reply.result()
@@ -152,6 +153,115 @@ def test_watchman_adapter_skips_existing_directory_change_entries(
     )
 
     assert translated is None
+
+
+def _recording_watchman_adapter(
+    tmp_path: Path,
+) -> tuple[
+    WatchmanRealtimeAdapter,
+    WatchmanSubscriptionScope,
+    list[tuple[str, Path, bool]],
+    RealtimePathFilter,
+]:
+    recorded: list[tuple[str, Path, bool]] = []
+
+    class _RecordingContext:
+        def ingest_realtime_event(
+            self,
+            event_type: str,
+            file_path: Path,
+            *,
+            should_index: bool,
+        ) -> None:
+            recorded.append((event_type, file_path, should_index))
+
+    config = Config(
+        args=SimpleNamespace(path=tmp_path),
+        database={
+            "path": str(tmp_path / ".chunkhound" / "test.db"),
+            "provider": "duckdb",
+        },
+        indexing={
+            "realtime_backend": "watchman",
+            "include": ["**/*.py"],
+            "exclude": [],
+        },
+    )
+    path_filter = RealtimePathFilter(config=config, root_path=tmp_path)
+    adapter = object.__new__(WatchmanRealtimeAdapter)
+    adapter._context = _RecordingContext()
+    adapter._path_filter = path_filter
+    adapter._scope_path_filters = {str(tmp_path): path_filter}
+    scope = WatchmanSubscriptionScope(
+        requested_path=tmp_path,
+        watch_root=tmp_path,
+        relative_root=None,
+        scope_kind="primary",
+    )
+    return adapter, scope, recorded, path_filter
+
+
+def test_watchman_adapter_admits_directory_lifecycle_events_despite_file_globs(
+    tmp_path: Path,
+) -> None:
+    adapter, scope, recorded, path_filter = _recording_watchman_adapter(tmp_path)
+    directory_path = tmp_path / "src" / "pkg"
+
+    assert path_filter.should_index(directory_path) is False
+
+    adapter._translate_subscription_pdu(
+        {
+            "subscription": "chunkhound-live-indexing",
+            "clock": "c:0:2",
+            "files": [
+                {
+                    "name": "src/pkg",
+                    "exists": True,
+                    "new": True,
+                    "type": "d",
+                },
+                {
+                    "name": "src/pkg",
+                    "exists": False,
+                    "new": False,
+                    "type": "d",
+                },
+            ],
+        },
+        scope,
+    )
+
+    assert recorded == [
+        ("dir_created", directory_path, True),
+        ("dir_deleted", directory_path, True),
+    ]
+
+
+def test_watchman_adapter_keeps_file_events_filter_gated(
+    tmp_path: Path,
+) -> None:
+    adapter, scope, recorded, path_filter = _recording_watchman_adapter(tmp_path)
+    blocked_file = tmp_path / "src" / "ignored.txt"
+
+    assert path_filter.should_index(blocked_file) is False
+
+    adapter._translate_subscription_pdu(
+        {
+            "subscription": "chunkhound-live-indexing",
+            "clock": "c:0:3",
+            "files": [
+                {
+                    "name": "src/ignored.txt",
+                    "exists": True,
+                    "new": True,
+                    "type": "f",
+                }
+            ],
+        },
+        scope,
+    )
+
+    assert recorded == [("created", blocked_file, False)]
 
 
 @pytest.mark.asyncio
