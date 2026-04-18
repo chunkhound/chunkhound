@@ -20,6 +20,11 @@ from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
+# Default synthesis-grade reasoning model for Codex CLI.
+# Update here when OpenAI releases a newer synthesis model — this is the single source of truth.
+# Use CHUNKHOUND_CODEX_DEFAULT_MODEL env var to override at runtime.
+CODEX_DEFAULT_SYNTHESIS_MODEL = "gpt-5.1-codex"
+
 
 class CodexCLIProvider(BaseCLIProvider):
     """Provider that shells out to `codex exec`.
@@ -75,7 +80,7 @@ class CodexCLIProvider(BaseCLIProvider):
         """
         env_override = os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL")
         # Default to a Codex-optimized reasoning model unless explicitly overridden.
-        default_model = env_override.strip() if env_override else "gpt-5.1-codex"
+        default_model = env_override.strip() if env_override else CODEX_DEFAULT_SYNTHESIS_MODEL
         default_source = (
             "env:CHUNKHOUND_CODEX_DEFAULT_MODEL" if env_override else "default"
         )
