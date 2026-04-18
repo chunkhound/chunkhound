@@ -13,13 +13,19 @@ jobs:
   tests:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.11"]
         include:
-          # Windows CI polling monitor occasionally misses second file write within
-          # 45s window — retry individual flaky tests before failing the run.
-          - os: windows-latest
-            pytest_extra_args: "--reruns 2 --reruns-delay 5 --only-rerun AssertionError"
+          - name: ubuntu
+            os: ubuntu-latest
+            python: "3.11"
+            pytest_selector: "not polling_watcher"
+          - name: macos
+            os: macos-latest
+            python: "3.11"
+            pytest_selector: "not polling_watcher"
+          - name: windows-main
+            os: windows-latest
+            python: "3.11"
+            pytest_selector: "not native_watcher and not polling_watcher"
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -47,33 +53,111 @@ jobs:
           uv run pytest tests/ --collect-only -q -m native_watcher --tb=no
           uv run pytest tests/ --collect-only -q -m polling_watcher --tb=no
 
-      - name: Configure watcher mode
-        if: runner.os == 'Windows'
-        shell: bash
-        run: echo "CHUNKHOUND_TEST_WATCHER_MODE=polling" >> "$GITHUB_ENV"
-
       - name: Run tests
         id: tests
-        # Two retry layers serving different failure modes:
-        # - nick-fields/retry: restarts the whole pytest process on CI-level failures
-        #   (e.g. OOM, runner hiccup).
-        # - --reruns (pytest-rerunfailures): retries individual flaky tests within a
-        #   process, used on Windows where the file-monitor can miss writes transiently.
-        # timeout_minutes * max_attempts must stay below the job-level timeout (30m).
-        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08  # v3
-        with:
-          timeout_minutes: 13
-          max_attempts: 2
-          command: uv run pytest tests/ -v --junit-xml=test-results.xml ${{ matrix.pytest_extra_args || '' }}
+        run: uv run pytest tests/ -v -m "${{ matrix.pytest_selector }}" --junit-xml=test-results.xml
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
+          name: test-results-${{ matrix.name }}-py${{ matrix.python }}
           path: test-results.xml
           if-no-files-found: ignore
 
       - name: Check flaky annotations
-        if: failure() && steps.tests.outcome == 'failure'
+        if: failure() && steps.tests.outcome == 'failure' && hashFiles('test-results.xml') != ''
+        run: uv run python scripts/check_flaky_annotations.py test-results.xml
+
+  windows-native-watcher:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Test collection check
+        run: uv run pytest tests/ --collect-only -q --tb=no
+
+      - name: Watcher marker collection
+        run: uv run pytest tests/ --collect-only -q -m native_watcher --tb=no
+
+      - name: Run tests
+        id: tests
+        run: uv run pytest tests/ -v -m native_watcher --junit-xml=test-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-windows-native-watcher-py3.11
+          path: test-results.xml
+          if-no-files-found: ignore
+
+      - name: Check flaky annotations
+        if: failure() && steps.tests.outcome == 'failure' && hashFiles('test-results.xml') != ''
+        run: uv run python scripts/check_flaky_annotations.py test-results.xml
+
+  windows-polling-watcher:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Test collection check
+        run: uv run pytest tests/ --collect-only -q --tb=no
+
+      - name: Watcher marker collection
+        run: uv run pytest tests/ --collect-only -q -m polling_watcher --tb=no
+
+      - name: Configure watcher mode
+        shell: bash
+        run: echo "CHUNKHOUND_TEST_WATCHER_MODE=polling" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        id: tests
+        # Keep retries scoped to the small polling slice where NTFS mtime misses are known.
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08  # v3
+        with:
+          timeout_minutes: 13
+          max_attempts: 2
+          command: >-
+            uv run pytest tests/ -v -m polling_watcher --junit-xml=test-results.xml
+            --reruns 2 --reruns-delay 5 --only-rerun AssertionError
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-windows-polling-watcher-py3.11
+          path: test-results.xml
+          if-no-files-found: ignore
+
+      - name: Check flaky annotations
+        if: failure() && steps.tests.outcome == 'failure' && hashFiles('test-results.xml') != ''
         run: uv run python scripts/check_flaky_annotations.py test-results.xml
