@@ -62,13 +62,19 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text()
     cli_reference = (DIST / "docs" / "cli-reference" / "index.html").read_text()
     configuration = (DIST / "docs" / "configuration" / "index.html").read_text()
+    umami_script = (
+        '<script defer src="https://cloud.umami.is/script.js" '
+        'data-website-id="ab95aad1-dc04-4bc7-be56-b162a68d6aa3"></script>'
+    )
 
     assert "macOS/Linux" in homepage
     assert "PowerShell" in homepage
+    assert umami_script in homepage
     assert "data-platform-option" in homepage
     assert "/docs/getting-started/" in homepage
     assert 'aria-label="Setup configurator"' in homepage
     assert "data-platform-code" in getting_started
+    assert umami_script in getting_started
     assert "platform-code-block" in getting_started
     assert "code-header" in getting_started
     # Astro still emits Shiki's light/dark CSS variables even though the site
