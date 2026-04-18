@@ -797,6 +797,67 @@ async def test_ensure_daemon_running_publishes_registry_entry_authoritatively(
 
 
 @pytest.mark.asyncio
+async def test_find_or_start_daemon_terminates_child_when_registry_publish_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+
+    fake_address = "tcp:127.0.0.1:54998"
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+            self.wait_calls = 0
+            self.returncode = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.returncode = -15
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.wait_calls += 1
+            return -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    fake_process = _FakeProcess()
+    log_path = discovery.get_daemon_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.touch()
+
+    def fake_start(args: object, *, socket_path: str | None = None) -> DaemonStartupHandle:
+        del args, socket_path
+        discovery.write_lock(os.getpid(), fake_address, auth_token="token")
+        return DaemonStartupHandle(process=fake_process, log_path=log_path)  # type: ignore[arg-type]
+
+    async def fake_connectable(address: str) -> bool:
+        return address == fake_address
+
+    def fake_write_registry_entry(pid: int, socket_path: str) -> None:
+        del pid, socket_path
+        raise OSError("registry write failed")
+
+    monkeypatch.setattr(discovery, "_start_daemon_subprocess", fake_start)
+    monkeypatch.setattr(discovery, "_socket_connectable", fake_connectable)
+    monkeypatch.setattr(discovery, "write_registry_entry", fake_write_registry_entry)
+
+    with pytest.raises(OSError, match="registry write failed"):
+        await discovery.find_or_start_daemon(object())
+
+    assert fake_process.terminate_calls == 1
+    assert fake_process.wait_calls >= 1
+    assert not discovery.get_registry_entry_path().exists()
+
+
+@pytest.mark.asyncio
 async def test_find_or_start_daemon_terminates_detached_child_on_startup_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

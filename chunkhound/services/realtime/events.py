@@ -19,6 +19,7 @@ def normalize_file_path(path: Path | str) -> str:
 
 
 QueueResultCallback = Callable[[str, Path, bool, str | None], None]
+AdmissionCallback = Callable[[str, Path, bool], bool]
 
 
 class _WatchmanTranslationError(RuntimeError):
@@ -126,6 +127,7 @@ class SimpleEventHandler(FileSystemEventHandler):
         queue_result_callback: QueueResultCallback | None = None,
         source_event_callback: Callable[[str, Path], None] | None = None,
         filtered_event_callback: Callable[[str, Path], None] | None = None,
+        admission_callback: AdmissionCallback | None = None,
     ):
         self.event_queue = event_queue
         self.config = config
@@ -133,6 +135,7 @@ class SimpleEventHandler(FileSystemEventHandler):
         self._queue_result_callback = queue_result_callback
         self._source_event_callback = source_event_callback
         self._filtered_event_callback = filtered_event_callback
+        self._admission_callback = admission_callback
         if root_path is not None:
             self._root = root_path.resolve()
         else:
@@ -175,8 +178,9 @@ class SimpleEventHandler(FileSystemEventHandler):
         file_path = Path(normalize_file_path(event.src_path))
         self._record_source_event(event.event_type, file_path)
 
-        # Simple filtering for supported file types
-        if not self._should_index(file_path):
+        # Simple filtering for supported file types, with a shared
+        # previously-indexed delete exception for cleanup correctness.
+        if not self._should_admit_event(event.event_type, file_path):
             self._record_filtered_event(event.event_type, file_path)
             return
 
@@ -196,15 +200,22 @@ class SimpleEventHandler(FileSystemEventHandler):
         """Handle atomic file moves (temp -> final file)."""
         src_file = Path(normalize_file_path(src_path))
         dest_file = Path(normalize_file_path(dest_path))
+        src_should_index = self._should_index(src_file)
+        dest_should_index = self._should_index(dest_file)
+        src_should_admit_delete = self._should_admit_event(
+            "deleted",
+            src_file,
+            should_index=src_should_index,
+        )
 
         # If moving FROM temp file TO supported file -> index destination
-        if not self._should_index(src_file) and self._should_index(dest_file):
+        if not src_should_index and dest_should_index:
             logger.debug(f"Atomic write detected: {src_path} -> {dest_path}")
             self._record_source_event("created", dest_file)
             self._queue_event("created", dest_file)
 
         # If moving FROM supported file -> handle as deletion + creation
-        elif self._should_index(src_file) and self._should_index(dest_file):
+        elif src_should_admit_delete and dest_should_index:
             logger.debug(f"File rename: {src_path} -> {dest_path}")
             self._record_source_event("deleted", src_file)
             self._queue_event("deleted", src_file)
@@ -212,10 +223,24 @@ class SimpleEventHandler(FileSystemEventHandler):
             self._queue_event("created", dest_file)
 
         # If moving FROM supported file TO temp/unsupported -> deletion
-        elif self._should_index(src_file) and not self._should_index(dest_file):
+        elif src_should_admit_delete and not dest_should_index:
             logger.debug(f"File moved to temp/unsupported: {src_path}")
             self._record_source_event("deleted", src_file)
             self._queue_event("deleted", src_file)
+
+    def _should_admit_event(
+        self,
+        event_type: str,
+        file_path: Path,
+        *,
+        should_index: bool | None = None,
+    ) -> bool:
+        path_allowed = (
+            should_index if should_index is not None else self._should_index(file_path)
+        )
+        if self._admission_callback is None:
+            return path_allowed
+        return self._admission_callback(event_type, file_path, path_allowed)
 
     def _queue_event(self, event_type: str, file_path: Path) -> None:
         """Queue an event for async processing."""

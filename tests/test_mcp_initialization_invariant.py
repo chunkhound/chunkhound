@@ -461,6 +461,8 @@ class TestNonBlockingInitialization:
                     "fresh_instance_count": 0,
                     "recrawl_count": 0,
                     "disconnect_count": 0,
+                    "translation_failure_count": 0,
+                    "subscription_pdu_dropped_count": 0,
                     "last_reason": None,
                     "last_at": None,
                     "last_details": None,

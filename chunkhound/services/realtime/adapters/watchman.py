@@ -25,6 +25,8 @@ def _default_watchman_loss_of_sync_snapshot() -> dict[str, Any]:
         "fresh_instance_count": 0,
         "recrawl_count": 0,
         "disconnect_count": 0,
+        "translation_failure_count": 0,
+        "subscription_pdu_dropped_count": 0,
         "last_reason": None,
         "last_at": None,
         "last_details": None,
@@ -117,6 +119,8 @@ class WatchmanRealtimeAdapter:
         self._fresh_instance_count = 0
         self._recrawl_count = 0
         self._disconnect_count = 0
+        self._translation_failure_count = 0
+        self._subscription_pdu_dropped_count = 0
         self._last_loss_of_sync_reason: str | None = None
         self._last_loss_of_sync_at: str | None = None
         self._last_loss_of_sync_details: dict[str, object] | None = None
@@ -467,6 +471,8 @@ class WatchmanRealtimeAdapter:
         self._fresh_instance_count = 0
         self._recrawl_count = 0
         self._disconnect_count = 0
+        self._translation_failure_count = 0
+        self._subscription_pdu_dropped_count = 0
         self._last_loss_of_sync_reason = None
         self._last_loss_of_sync_at = None
         self._last_loss_of_sync_details = None
@@ -918,6 +924,10 @@ class WatchmanRealtimeAdapter:
             self._recrawl_count += 1
         elif reason == "disconnect":
             self._disconnect_count += 1
+        elif reason in {"translation_failure", "scope_mapping_failure"}:
+            self._translation_failure_count += 1
+        elif reason == "subscription_pdu_dropped":
+            self._subscription_pdu_dropped_count += 1
 
         self._last_loss_of_sync_reason = reason
         self._last_loss_of_sync_at = self._context.utc_now()
@@ -1093,6 +1103,8 @@ class WatchmanRealtimeAdapter:
             "fresh_instance_count": self._fresh_instance_count,
             "recrawl_count": self._recrawl_count,
             "disconnect_count": self._disconnect_count,
+            "translation_failure_count": self._translation_failure_count,
+            "subscription_pdu_dropped_count": self._subscription_pdu_dropped_count,
             "last_reason": self._last_loss_of_sync_reason,
             "last_at": self._last_loss_of_sync_at,
             "last_details": self._last_loss_of_sync_details,

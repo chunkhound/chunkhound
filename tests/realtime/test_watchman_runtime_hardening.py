@@ -11,6 +11,7 @@ from chunkhound.services.realtime.adapters.watchman import WatchmanRealtimeAdapt
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.watchman import PrivateWatchmanSidecar, WatchmanSubscriptionScope
 from chunkhound.watchman.session import WatchmanCliSession
+from chunkhound.watchman_runtime import resolve_packaged_watchman_runtime
 from chunkhound.watchman_runtime import bridge as bridge_module
 
 
@@ -262,6 +263,25 @@ def test_watchman_adapter_keeps_file_events_filter_gated(
     )
 
     assert recorded == [("created", blocked_file, False)]
+
+
+def test_private_watchman_sidecar_probe_ready_requires_version_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = PrivateWatchmanSidecar(tmp_path / "repo")
+    sidecar._runtime = resolve_packaged_watchman_runtime()
+    sidecar._binary_path = tmp_path / "watchman"
+
+    def fake_run(*args, **kwargs) -> SimpleNamespace:
+        del args, kwargs
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"log":"warming up"}\n{"warning":"still starting"}\n',
+        )
+
+    monkeypatch.setattr("chunkhound.watchman.sidecar.subprocess.run", fake_run)
+
+    assert sidecar._probe_ready_sync() is False
 
 
 @pytest.mark.asyncio

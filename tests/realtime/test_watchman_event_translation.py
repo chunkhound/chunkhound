@@ -1406,6 +1406,7 @@ async def test_watchman_scope_mapping_failure_requests_resync(
             "clock": "c:0:6",
         }
         assert stats["pipeline"]["translation_error_count"] == 1
+        assert stats["watchman_loss_of_sync"]["translation_failure_count"] == 1
         assert stats["watchman_loss_of_sync"]["last_reason"] == "scope_mapping_failure"
         assert stats["watchman_loss_of_sync"]["last_details"] == callback_calls[0][1]
         assert (
@@ -1486,6 +1487,7 @@ async def test_watchman_translation_failure_requests_resync(
             "clock": "c:0:7",
         }
         assert stats["pipeline"]["translation_error_count"] == 1
+        assert stats["watchman_loss_of_sync"]["translation_failure_count"] == 1
         assert stats["watchman_loss_of_sync"]["last_reason"] == "translation_failure"
         assert stats["watchman_loss_of_sync"]["last_details"] == callback_calls[0][1]
         assert (

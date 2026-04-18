@@ -60,6 +60,23 @@ class RealtimePipelineMixin:
             scope="excluded",
         )
         self._emit_status_update()
+    def _should_admit_realtime_event(
+        self,
+        event_type: str,
+        file_path: Path,
+        should_index: bool,
+    ) -> bool:
+        if should_index:
+            return True
+        if event_type != "deleted":
+            return False
+        try:
+            return self.services.provider.get_file_by_path(str(file_path)) is not None
+        except Exception as error:
+            logger.warning(
+                f"Realtime delete admission lookup failed for {file_path}: {error}"
+            )
+            return False
     def _record_translation_error(self) -> None:
         self._translation_error_count += 1
     def _record_duplicate_suppression(

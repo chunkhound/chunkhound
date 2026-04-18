@@ -109,6 +109,18 @@ def test_prepare_release_enforces_supported_matrix_for_runtime_verifier() -> Non
     ) in script_text
 
 
+def test_prepare_release_keeps_ci_owned_publish_contract() -> None:
+    prepare_release = (
+        Path(__file__).resolve().parents[1] / "scripts" / "prepare_release.sh"
+    )
+    script_text = prepare_release.read_text(encoding="utf-8")
+
+    assert "gh release create <tag>" in script_text
+    assert "--generate-notes" in script_text
+    assert "gh release edit <tag> --draft=false" in script_text
+    assert "Do not run uv publish manually" in script_text
+
+
 @pytest.mark.asyncio
 async def test_wait_for_ready_requires_nested_watchman_health(monkeypatch) -> None:
     responses = [
@@ -142,6 +154,8 @@ async def test_wait_for_ready_requires_nested_watchman_health(monkeypatch) -> No
                         "fresh_instance_count": 0,
                         "recrawl_count": 0,
                         "disconnect_count": 0,
+                        "translation_failure_count": 0,
+                        "subscription_pdu_dropped_count": 0,
                         "last_reason": None,
                         "last_at": None,
                         "last_details": None,

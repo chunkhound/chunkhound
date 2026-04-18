@@ -94,6 +94,14 @@ async def test_watchman_fresh_instance_requests_resync_without_incremental_trans
             stats["watchman_loss_of_sync"]["disconnect_count"]
             == baseline_loss_of_sync["disconnect_count"]
         )
+        assert (
+            stats["watchman_loss_of_sync"]["translation_failure_count"]
+            == baseline_loss_of_sync["translation_failure_count"]
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["subscription_pdu_dropped_count"]
+            == baseline_loss_of_sync["subscription_pdu_dropped_count"]
+        )
         assert stats["watchman_loss_of_sync"]["last_reason"] == "fresh_instance"
         assert stats["watchman_loss_of_sync"]["last_details"] == {
             "backend": "watchman",
@@ -178,6 +186,14 @@ async def test_watchman_recrawl_warning_requests_resync_without_incremental_tran
         assert (
             stats["watchman_loss_of_sync"]["disconnect_count"]
             == baseline_loss_of_sync["disconnect_count"]
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["translation_failure_count"]
+            == baseline_loss_of_sync["translation_failure_count"]
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["subscription_pdu_dropped_count"]
+            == baseline_loss_of_sync["subscription_pdu_dropped_count"]
         )
         assert stats["watchman_loss_of_sync"]["last_reason"] == "recrawl"
         assert stats["watchman_loss_of_sync"]["last_details"] == {
@@ -276,6 +292,16 @@ async def test_watchman_subscription_queue_overflow_requests_resync_and_degrades
         assert (
             stats["watchman_loss_of_sync"]["count"]
             == baseline_loss_of_sync["count"] + 1
+        )
+        assert stats["watchman_loss_of_sync"]["subscription_pdu_dropped_count"] == (
+            baseline_loss_of_sync["subscription_pdu_dropped_count"] + 1
+        )
+        assert stats["watchman_loss_of_sync"]["count"] == (
+            stats["watchman_loss_of_sync"]["fresh_instance_count"]
+            + stats["watchman_loss_of_sync"]["recrawl_count"]
+            + stats["watchman_loss_of_sync"]["disconnect_count"]
+            + stats["watchman_loss_of_sync"]["translation_failure_count"]
+            + stats["watchman_loss_of_sync"]["subscription_pdu_dropped_count"]
         )
         assert stats["watchman_loss_of_sync"]["last_reason"] == (
             "subscription_pdu_dropped"

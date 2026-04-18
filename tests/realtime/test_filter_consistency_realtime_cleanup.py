@@ -77,6 +77,17 @@ def _build_config(
     )
 
 
+def _seed_indexed_file(provider: object, root: Path, file_path: Path) -> None:
+    provider.insert_file(
+        File(
+            path=file_path.relative_to(root).as_posix(),
+            mtime=1.0,
+            language=Language.PYTHON,
+            size_bytes=1,
+        )
+    )
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 @pytest.mark.asyncio
 async def test_watchdog_event_filter_blocks_gitignored_worktree_file(
@@ -117,6 +128,62 @@ async def test_watchdog_event_filter_blocks_gitignored_worktree_file(
     assert filtered_events == [("created", ignored_file.resolve())]
     assert await event_queue.get() == ("created", included_file.resolve())
     assert event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_delete_admits_previously_indexed_excluded_file(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    deleted_file = root / "src" / "stale.py"
+    db_path = tmp_path / "watchdog-delete.duckdb"
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={
+            "include": ["**/*.keep"],
+            "exclude": [],
+            "realtime_backend": "watchdog",
+        },
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+
+    try:
+        _seed_indexed_file(services.provider, root, deleted_file)
+        service = RealtimeIndexingService(services, config)
+        event_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
+        filtered_events: list[tuple[str, Path]] = []
+
+        handler = SimpleEventHandler(
+            event_queue,
+            config=config,
+            loop=asyncio.get_running_loop(),
+            root_path=root,
+            filtered_event_callback=lambda event_type, file_path: filtered_events.append(
+                (event_type, file_path)
+            ),
+            admission_callback=service._should_admit_realtime_event,
+        )
+
+        assert handler._should_index(deleted_file) is False
+
+        handler.on_any_event(
+            SimpleNamespace(
+                event_type="deleted",
+                is_directory=False,
+                src_path=str(deleted_file),
+            )
+        )
+
+        await asyncio.sleep(0)
+
+        assert filtered_events == []
+        assert await event_queue.get() == ("deleted", deleted_file.resolve())
+        assert event_queue.empty()
+    finally:
+        services.provider.disconnect()
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
@@ -161,6 +228,62 @@ async def test_watchman_translation_filters_gitignored_worktree_file(
         assert stats["pipeline"]["filtered_event_count"] == 1
         assert stats["pipeline"]["last_source_event_path"] == str(ignored_file)
         assert stats["pipeline"]["last_accepted_event_path"] is None
+    finally:
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_delete_admits_previously_indexed_excluded_file(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    deleted_file = root / "src" / "stale.py"
+    db_path = tmp_path / "watchman-delete.duckdb"
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={
+            "include": ["**/*.keep"],
+            "exclude": [],
+            "realtime_backend": "watchman",
+        },
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+
+    try:
+        _seed_indexed_file(services.provider, root, deleted_file)
+        service = RealtimeIndexingService(services, config)
+        adapter = WatchmanRealtimeAdapter(service)
+        adapter._path_filter = RealtimePathFilter(config=config, root_path=root)
+        adapter._scope_path_filters = {str(root): adapter._path_filter}
+
+        adapter._translate_subscription_pdu(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:11",
+                "files": [
+                    {
+                        "name": "src/stale.py",
+                        "exists": False,
+                        "new": False,
+                        "type": "f",
+                    }
+                ],
+            },
+            WatchmanSubscriptionScope(
+                requested_path=root,
+                watch_root=root.resolve(),
+                relative_root=None,
+                scope_kind="primary",
+            ),
+        )
+
+        assert services.provider.get_file_by_path(str(deleted_file)) is not None
+        assert service._filtered_event_count == 0
+        assert service.event_queue.get_nowait() == ("deleted", deleted_file.resolve())
+        assert service.event_queue.empty()
     finally:
         services.provider.disconnect()
 

@@ -1258,9 +1258,13 @@ class DaemonDiscovery:
                                     # of this write must fail the startup so
                                     # the cross-runtime barrier is never
                                     # released over an unpublished daemon.
-                                    self.write_registry_entry(
-                                        actual_pid, actual_address
-                                    )
+                                    try:
+                                        self.write_registry_entry(
+                                            actual_pid, actual_address
+                                        )
+                                    except Exception:
+                                        await _terminate_startup_handle(startup)
+                                        raise
                                     return actual_address
                             sleep_for = poll_deadline - time.monotonic()
                             await asyncio.sleep(

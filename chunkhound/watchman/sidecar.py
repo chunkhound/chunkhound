@@ -606,7 +606,15 @@ class PrivateWatchmanSidecar:
                 payload = json.loads(raw_line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(payload, dict) and not isinstance(payload.get("error"), str):
+            if not isinstance(payload, dict):
+                continue
+            if isinstance(payload.get("log"), str):
+                continue
+            error = payload.get("error")
+            if isinstance(error, str) and error:
+                return False
+            version = payload.get("version")
+            if isinstance(version, str) and version:
                 return True
         return False
 

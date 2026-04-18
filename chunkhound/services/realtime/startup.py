@@ -733,6 +733,7 @@ class RealtimeStartupMixin:
             queue_result_callback=self._handle_queue_result,
             source_event_callback=self._record_source_event,
             filtered_event_callback=self._record_filtered_event,
+            admission_callback=self._should_admit_realtime_event,
         )
         observer = Observer()
 

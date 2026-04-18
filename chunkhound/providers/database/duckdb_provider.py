@@ -118,8 +118,13 @@ def _read_indexed_root_sidecar(sidecar: Path) -> str:
     return stored
 
 
-def _write_indexed_root_sidecar(sidecar: Path, logical_root: str) -> None:
-    """Atomically write the sidecar via temp sibling + os.replace()."""
+def _write_indexed_root_sidecar(sidecar: Path, logical_root: str) -> bool:
+    """Exclusively claim the sidecar path, returning True only for the winner.
+
+    The final sidecar path is only published after the payload is fully written
+    and fsynced to a unique sibling temp file. That avoids exposing empty or
+    partial JSON to concurrent readers while still preserving first-writer wins.
+    """
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
         {
@@ -127,9 +132,21 @@ def _write_indexed_root_sidecar(sidecar: Path, logical_root: str) -> None:
             "indexed_root_path": logical_root,
         }
     )
-    tmp = sidecar.with_name(sidecar.name + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, sidecar)
+    tmp = sidecar.with_name(f"{sidecar.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with open(tmp, "x", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(tmp, sidecar)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 class DuckDBProvider(SerialDatabaseProvider):
@@ -252,20 +269,18 @@ class DuckDBProvider(SerialDatabaseProvider):
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         try:
+            # Validate stored indexed-root identity before any file-backed DB
+            # open, WAL replay, extension load, or schema touch happens.
+            self.ensure_indexed_root_identity(
+                requested_root=self._base_directory,
+                allow_claim_if_missing=False,
+            )
+
             # Initialize connection manager FIRST - this handles WAL validation
             self._connection_manager.connect()
 
             # Call parent connect which handles executor initialization
             super().connect()
-
-            # Validate stored indexed-root identity against the requested base
-            # directory. A missing sidecar at connect-time is treated as the
-            # legacy migration case and left for the first mutation-capable
-            # call site to claim (see ensure_indexed_root_identity below).
-            self.ensure_indexed_root_identity(
-                requested_root=self._base_directory,
-                allow_claim_if_missing=False,
-            )
 
         except Exception as e:
             logger.error(f"DuckDB connection failed: {e}")
@@ -315,13 +330,24 @@ class DuckDBProvider(SerialDatabaseProvider):
         if not allow_claim_if_missing:
             return
 
-        _write_indexed_root_sidecar(sidecar, current_root)
-        logger.warning(
-            "DuckDB indexed-root sidecar was missing for %s; treated as legacy "
-            "DB migration and claimed current root %s. Future opens under a "
-            "different root will fail.",
-            self._connection_manager.db_path,
-            current_root,
+        if _write_indexed_root_sidecar(sidecar, current_root):
+            logger.warning(
+                "DuckDB indexed-root sidecar was missing for %s; treated as legacy "
+                "DB migration and claimed current root %s. Future opens under a "
+                "different root will fail.",
+                self._connection_manager.db_path,
+                current_root,
+            )
+            return
+
+        stored_root = _read_indexed_root_sidecar(sidecar)
+        if stored_root == current_root:
+            return
+        raise DuckDBIndexedRootMismatchError(
+            f"Refusing to open DuckDB database {self._connection_manager.db_path} "
+            f"under indexed root {current_root!r}: sidecar {sidecar} records "
+            f"previously claimed root {stored_root!r}. This database must only "
+            f"be reopened under its original indexed root."
         )
 
     def _executor_connect(self, conn: Any, state: dict[str, Any]) -> None:

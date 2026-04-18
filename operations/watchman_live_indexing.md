@@ -138,7 +138,7 @@ Fields that are useful during diagnosis:
   filesystem socket path
 - `last_warning` and `last_error`: operator-visible runtime warnings/errors
 - `watchman_loss_of_sync`: counters and last observed fresh-instance/recrawl/
-  disconnect signal
+  disconnect/translation-failure/subscription-overflow signal
 - `resync.needs_resync`, `resync.in_progress`, `resync.last_reason`,
   `resync.last_error`: ChunkHound-side reconciliation state
 - These fields summarize observed mutations and pipeline progress only.
@@ -191,12 +191,18 @@ as a hidden backend swap.
   `watchman_loss_of_sync.recrawl_count`.
 - Unexpected Watchman session exits increment
   `watchman_loss_of_sync.disconnect_count`.
+- Translation and scope-mapping failures increment
+  `watchman_loss_of_sync.translation_failure_count`.
+- Subscription queue-overflow incidents increment
+  `watchman_loss_of_sync.subscription_pdu_dropped_count`.
 - These events schedule a ChunkHound resync request and surface through
   `watchman_loss_of_sync.*`, `last_warning` or `last_error`, and `resync.*`.
 
 During an incident, confirm that:
 
-- `watchman_loss_of_sync.count` increased for the expected reason
+- `watchman_loss_of_sync.count` equals the sum of
+  `fresh_instance_count`, `recrawl_count`, `disconnect_count`,
+  `translation_failure_count`, and `subscription_pdu_dropped_count`
 - `resync.last_reason == "realtime_loss_of_sync"` once the request is recorded
 - `resync.needs_resync` eventually clears after reconciliation completes
 - `watchman_reconnect.state` moves through `running` and, between attempts,

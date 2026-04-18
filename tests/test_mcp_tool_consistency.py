@@ -228,6 +228,8 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
                 "fresh_instance_count": 1,
                 "recrawl_count": 1,
                 "disconnect_count": 0,
+                "translation_failure_count": 0,
+                "subscription_pdu_dropped_count": 0,
                 "last_reason": "recrawl",
                 "last_at": "2026-03-08T00:00:04Z",
                 "last_details": {"warning": "Recrawled this watch"},
@@ -299,6 +301,8 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
     ]
     assert realtime["watchman_loss_of_sync"]["fresh_instance_count"] == 1
     assert realtime["watchman_loss_of_sync"]["recrawl_count"] == 1
+    assert realtime["watchman_loss_of_sync"]["translation_failure_count"] == 0
+    assert realtime["watchman_loss_of_sync"]["subscription_pdu_dropped_count"] == 0
     assert realtime["watchman_reconnect"]["state"] == "restored"
     assert realtime["watchman_reconnect"]["last_result"] == "restored"
     assert realtime["resync"]["needs_resync"] is True
