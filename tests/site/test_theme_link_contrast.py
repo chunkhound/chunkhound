@@ -4,6 +4,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from tests.site.tsx_runner import NPM
+
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
@@ -26,7 +28,7 @@ def _extract_tokens(block: str) -> dict[str, str]:
 
 def _build_site() -> None:
     subprocess.run(
-        ["npm", "run", "build", "--prefix", "site"],
+        [NPM, "run", "build", "--prefix", "site"],
         cwd=ROOT,
         check=True,
         capture_output=True,

@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from tests.site.tsx_runner import NPM
+
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
 VERSION_FILE = ROOT / "chunkhound" / "_version.py"
@@ -49,7 +51,7 @@ def _extract_astro_code_block_after_marker(html: str, marker: str) -> str:
 
 def test_site_build_outputs_platform_aware_onboarding() -> None:
     subprocess.run(
-        ["npm", "run", "build", "--prefix", "site"],
+        [NPM, "run", "build", "--prefix", "site"],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -122,7 +124,7 @@ import process from "node:process";
 }})();
 """
         result = subprocess.run(
-            ["npm", "exec", "--prefix", str(SITE_PREFIX), "--", "tsx", "--eval", script],
+            [NPM, "exec", "--prefix", str(SITE_PREFIX), "--", "tsx", "--eval", script],
             cwd=ROOT,
             check=False,
             capture_output=True,
