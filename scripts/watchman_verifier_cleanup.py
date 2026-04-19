@@ -10,6 +10,28 @@ from typing import Any
 import psutil
 
 
+def _canonical_path(path: str, *, os_module: Any = os) -> str:
+    normalized = path
+    try:
+        normalized = os_module.path.realpath(normalized)
+    except Exception:
+        pass
+    try:
+        normalized = os_module.path.abspath(normalized)
+    except Exception:
+        pass
+    return os_module.path.normcase(os_module.path.normpath(normalized))
+
+
+def _path_is_within_root(candidate: str, root: str, *, os_module: Any = os) -> bool:
+    try:
+        candidate_path = _canonical_path(candidate, os_module=os_module)
+        root_path = _canonical_path(root, os_module=os_module)
+        return os_module.path.commonpath([candidate_path, root_path]) == root_path
+    except Exception:
+        return False
+
+
 def terminate_process_tree(pid: int, *, psutil_module: Any = psutil) -> None:
     try:
         root = psutil_module.Process(pid)
@@ -59,10 +81,31 @@ def terminate_processes_using_root(
         except (psutil_module.NoSuchProcess, psutil_module.AccessDenied):
             continue
 
-        if isinstance(cwd, str) and cwd.startswith(root_str):
+        if isinstance(cwd, str) and _path_is_within_root(
+            cwd, root_str, os_module=os_module
+        ):
             candidates.append(pid)
             continue
-        if any(isinstance(arg, str) and root_str in arg for arg in cmdline):
+        if any(
+            isinstance(arg, str)
+            and _path_is_within_root(arg, root_str, os_module=os_module)
+            for arg in cmdline
+        ):
+            candidates.append(pid)
+            continue
+        try:
+            open_files = process.open_files()
+        except (AttributeError, psutil_module.NoSuchProcess, psutil_module.AccessDenied):
+            open_files = []
+        if any(
+            isinstance(getattr(open_file, "path", None), str)
+            and _path_is_within_root(
+                open_file.path,
+                root_str,
+                os_module=os_module,
+            )
+            for open_file in open_files
+        ):
             candidates.append(pid)
 
     for pid in candidates:

@@ -869,3 +869,64 @@ def test_remove_tree_with_retries_terminates_windows_processes_using_root(
 
     assert attempts["count"] == 2
     assert terminated == [101, 202]
+
+
+def test_remove_tree_with_retries_terminates_windows_processes_with_open_file_handles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    locked_root = tmp_path / "locked-root"
+    locked_root.mkdir()
+    terminated: list[int] = []
+    original_rmtree = live_verifier.shutil.rmtree
+    attempts = {"count": 0}
+
+    class FakeOpenFile:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+    class FakeProcess:
+        def __init__(
+            self,
+            pid: int,
+            cwd: str | None,
+            cmdline: list[str],
+            open_files: list[FakeOpenFile],
+        ) -> None:
+            self.info = {"pid": pid, "cwd": cwd, "cmdline": cmdline}
+            self._open_files = open_files
+
+        def open_files(self) -> list[FakeOpenFile]:
+            return list(self._open_files)
+
+    def flaky_rmtree(path: Path) -> None:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError("simulated Windows handle delay")
+        original_rmtree(path)
+
+    monkeypatch.setattr(live_verifier.os, "name", "nt", raising=False)
+    monkeypatch.setattr(live_verifier.shutil, "rmtree", flaky_rmtree)
+    monkeypatch.setattr(live_verifier.time, "sleep", lambda *_args: None)
+    monkeypatch.setattr(
+        live_verifier.psutil,
+        "process_iter",
+        lambda *_args, **_kwargs: iter(
+            [
+                FakeProcess(
+                    101,
+                    str(tmp_path / "elsewhere"),
+                    ["python", "--flag"],
+                    [FakeOpenFile(str(locked_root / "project" / ".chunkhound" / "daemon.log"))],
+                ),
+                FakeProcess(202, str(tmp_path / "other"), [], []),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        live_verifier, "_terminate_process_tree", lambda pid: terminated.append(pid)
+    )
+
+    live_verifier._remove_tree_with_retries(locked_root, attempts=2)
+
+    assert attempts["count"] == 2
+    assert terminated == [101]
