@@ -546,6 +546,7 @@ class PrivateWatchmanSidecar:
 
             ready_paths: list[Path] = []
             if listener_path_is_filesystem(self._runtime):
+                ready_paths.append(self.paths.socket_path)
                 ready_paths.append(self.paths.logfile_path)
                 if self._runtime.launch_mode == "native_binary":
                     ready_paths.append(self.paths.pidfile_path)

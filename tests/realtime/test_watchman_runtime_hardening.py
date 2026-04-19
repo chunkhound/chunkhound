@@ -269,7 +269,11 @@ def test_private_watchman_sidecar_probe_ready_requires_version_response(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sidecar = PrivateWatchmanSidecar(tmp_path / "repo")
-    sidecar._runtime = resolve_packaged_watchman_runtime()
+    sidecar._runtime = resolve_packaged_watchman_runtime(
+        system_name="linux",
+        machine_name="x86_64",
+        _hydrate_if_missing=False,
+    )
     sidecar._binary_path = tmp_path / "watchman"
 
     def fake_run(*args, **kwargs) -> SimpleNamespace:

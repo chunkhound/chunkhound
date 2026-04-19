@@ -149,6 +149,25 @@ def _write_indexed_root_sidecar(sidecar: Path, logical_root: str) -> bool:
             pass
 
 
+def _read_indexed_root_sidecar_after_claim_collision(sidecar: Path) -> str:
+    """Read the winner sidecar after a first-writer collision.
+
+    Some filesystems can surface the no-clobber publish collision to the loser
+    just before the published path is synchronously readable from that loser
+    thread/process. Retry only the transient not-found case; any other malformed
+    or unreadable sidecar remains fail-closed.
+    """
+    for _ in range(20):
+        try:
+            return _read_indexed_root_sidecar(sidecar)
+        except RuntimeError as error:
+            if isinstance(error.__cause__, FileNotFoundError):
+                time.sleep(0.01)
+                continue
+            raise
+    return _read_indexed_root_sidecar(sidecar)
+
+
 class DuckDBProvider(SerialDatabaseProvider):
     """DuckDB implementation of DatabaseProvider protocol.
 
@@ -340,7 +359,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             )
             return
 
-        stored_root = _read_indexed_root_sidecar(sidecar)
+        stored_root = _read_indexed_root_sidecar_after_claim_collision(sidecar)
         if stored_root == current_root:
             return
         raise DuckDBIndexedRootMismatchError(
