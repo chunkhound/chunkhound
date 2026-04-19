@@ -101,6 +101,64 @@ VOYAGE_MODEL_CONFIG = {
 }
 
 
+# Base backoff (seconds) for each retry category. Network errors fall through
+# to the per-provider ``self._retry_delay`` so the existing instance setting
+# still drives generic connection retries.
+_CATEGORY_BACKOFFS: dict[str, float] = {
+    # TPM / RPM windows on VoyageAI are 60s; 30s lets the window partially
+    # drain before the first retry.
+    "rate_limit": 30.0,
+    # Azure ML / proxy 408s mean the upstream endpoint is overloaded; give it
+    # room to recover before we hit it again.
+    "upstream_timeout": 10.0,
+}
+
+
+def _classify_voyageai_error(e: Exception) -> str | None:
+    """Classify a VoyageAI SDK exception for retry decisions.
+
+    Returns one of ``"rate_limit"``, ``"upstream_timeout"``, ``"network"``,
+    or ``None`` for a non-retryable error. Shared by the embedding and
+    reranking code paths so their retry behavior cannot silently drift
+    apart (a prior bug where the rerank path was missing ``str(e)`` went
+    unnoticed for exactly this reason).
+    """
+    error_type = type(e).__name__
+    error_str = str(e)
+    error_lower = error_str.lower()
+
+    # Rate limit / server errors from the VoyageAI SDK (HTTP 429, 5xx).
+    # The ``"rate limit"`` substring match is a fallback for custom
+    # endpoints (Azure ML, self-hosted proxies) that surface 429s as
+    # generic ``RuntimeError`` / ``Exception`` rather than a dedicated
+    # SDK exception class.
+    if (
+        "RateLimitError" in error_type
+        or "TryAgain" in error_type
+        or "ServerError" in error_type
+        or "ServiceUnavailableError" in error_type
+        or "rate limit" in error_lower
+    ):
+        return "rate_limit"
+
+    # HTTP 408 (upstream request timeout) from Azure ML / proxies: treat
+    # as transient and retry with a longer initial backoff.
+    if "408" in error_str or "upstream request timeout" in error_lower:
+        return "upstream_timeout"
+
+    # Network / transient connection errors.
+    if (
+        "APIConnectionError" in error_type
+        or "ConnectionError" in error_type
+        or "RemoteDisconnected" in error_type
+        or "Timeout" in error_type
+        or "TimeoutError" in error_type
+    ):
+        return "network"
+
+    return None
+
+
 class VoyageAIEmbeddingProvider:
     """VoyageAI embedding provider using voyage-3.5 by default."""
 
@@ -323,49 +381,12 @@ class VoyageAIEmbeddingProvider:
                 return [embedding for embedding in result.embeddings]
 
             except Exception as e:
-                # Classify error type for retry decision
                 error_type = type(e).__name__
                 error_module = type(e).__module__
-                error_str = str(e)
+                category = _classify_voyageai_error(e)
 
-                # Network / transient errors that should be retried
-                is_network_error = any(
-                    [
-                        "APIConnectionError" in error_type,
-                        "ConnectionError" in error_type,
-                        "RemoteDisconnected" in error_type,
-                        "Timeout" in error_type,
-                        "TimeoutError" in error_type,
-                    ]
-                )
-
-                # Rate limit / server errors from VoyageAI SDK (HTTP 429, 5xx)
-                is_rate_limit_error = any(
-                    [
-                        "RateLimitError" in error_type,
-                        "TryAgain" in error_type,
-                        "ServerError" in error_type,
-                        "ServiceUnavailableError" in error_type,
-                        "rate limit" in error_str.lower(),
-                    ]
-                )
-
-                # HTTP 408 (upstream request timeout) from Azure ML / proxies:
-                # treat as transient and retry with a longer initial backoff
-                is_upstream_timeout = "408" in error_str or (
-                    "upstream request timeout" in error_str.lower()
-                )
-
-                is_retryable = is_network_error or is_rate_limit_error or is_upstream_timeout
-
-                if is_retryable and attempt < self._retry_attempts - 1:
-                    # Rate limits need longer backoff (TPM window is 60s)
-                    if is_rate_limit_error:
-                        base_delay = 30.0
-                    elif is_upstream_timeout:
-                        base_delay = 10.0
-                    else:
-                        base_delay = self._retry_delay
+                if category is not None and attempt < self._retry_attempts - 1:
+                    base_delay = _CATEGORY_BACKOFFS.get(category, self._retry_delay)
                     delay = base_delay * (2**attempt)
                     logger.warning(
                         f"VoyageAI embedding failed with {error_module}.{error_type} "
@@ -375,8 +396,7 @@ class VoyageAIEmbeddingProvider:
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    # Non-retryable error or last attempt
-                    if is_retryable:
+                    if category is not None:
                         logger.error(
                             f"VoyageAI embedding failed after {self._retry_attempts} attempts: {e}"
                         )
@@ -655,31 +675,10 @@ class VoyageAIEmbeddingProvider:
             except Exception as e:
                 error_type = type(e).__name__
                 error_module = type(e).__module__
-                error_str = str(e)
-                is_network_error = any(
-                    [
-                        "APIConnectionError" in error_type,
-                        "ConnectionError" in error_type,
-                        "RemoteDisconnected" in error_type,
-                        "Timeout" in error_type,
-                        "TimeoutError" in error_type,
-                    ]
-                )
-                is_rate_limit_error = any(
-                    [
-                        "RateLimitError" in error_type,
-                        "TryAgain" in error_type,
-                        "ServerError" in error_type,
-                        "ServiceUnavailableError" in error_type,
-                        "rate limit" in error_str.lower(),
-                    ]
-                )
-                is_retryable = is_network_error or is_rate_limit_error
-                if is_retryable and attempt < self._retry_attempts - 1:
-                    if is_rate_limit_error:
-                        base_delay = 30.0
-                    else:
-                        base_delay = self._retry_delay
+                category = _classify_voyageai_error(e)
+
+                if category is not None and attempt < self._retry_attempts - 1:
+                    base_delay = _CATEGORY_BACKOFFS.get(category, self._retry_delay)
                     delay = base_delay * (2**attempt)
                     logger.warning(
                         f"VoyageAI reranking failed with {error_module}.{error_type} "
@@ -689,7 +688,7 @@ class VoyageAIEmbeddingProvider:
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    if is_retryable:
+                    if category is not None:
                         logger.error(
                             f"VoyageAI reranking failed after {self._retry_attempts} attempts: {e}"
                         )
