@@ -505,7 +505,7 @@ class OpenAIEmbeddingProvider:
             dims=self.dims,
             distance=self.distance,
             batch_size=self.batch_size,
-            max_tokens=self.max_tokens,
+            max_tokens=self._max_tokens,
             api_key=self._api_key,
             base_url=self._base_url,
             timeout=self._timeout,
@@ -613,10 +613,6 @@ class OpenAIEmbeddingProvider:
             return await self.embed_batch(validated_texts)
 
         except Exception as e:
-            # CRITICAL: Log EVERY exception that passes through here to trace execution path
-            logger.error(
-                f"[DEBUG-TRACE] Exception caught in OpenAI embed() method: {type(e).__name__}: {str(e)[:200]}"
-            )
             self._usage_stats["errors"] += 1
             # Log details of oversized chunks for root cause analysis
             text_sizes = [len(text) for text in validated_texts]
