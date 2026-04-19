@@ -218,26 +218,88 @@ class LLMConfig(BaseSettings):
         description="Enable Anthropic extended thinking (shows Claude's reasoning process)",
     )
 
+    anthropic_thinking_mode: Literal["auto", "off", "manual", "adaptive"] | None = (
+        Field(
+            default=None,
+            description=(
+                "Explicit thinking mode. 'adaptive' lets Claude decide depth "
+                "(Opus 4.6/4.7, Sonnet 4.6). 'manual' uses a fixed budget "
+                "(all older models). 'off' disables thinking. Default 'auto' "
+                "picks adaptive for 4.6+ models and manual for older ones "
+                "when anthropic_thinking_enabled is true."
+            ),
+        )
+    )
+
+    anthropic_thinking_display: Literal["summarized", "omitted"] | None = Field(
+        default=None,
+        description=(
+            "Claude's thinking block display mode. 'summarized' (default on "
+            "Opus 4.6 and Sonnet 4.6) returns summarized thinking text. "
+            "'omitted' (default on Opus 4.7) keeps signatures for multi-turn "
+            "continuity but returns empty thinking text. Applies to adaptive mode."
+        ),
+    )
+
     anthropic_thinking_budget_tokens: int = Field(
         default=10000,
         ge=1024,
-        description="Token budget for Anthropic thinking (min 1024, recommend 10000)",
+        description=(
+            "Token budget for Anthropic manual-mode thinking (min 1024, "
+            "recommend 10000). Ignored in adaptive mode."
+        ),
     )
 
     anthropic_interleaved_thinking: bool = Field(
         default=False,
         description=(
-            "Enable interleaved thinking for tool use (Claude 4 models only). "
-            "Allows Claude to think between tool calls for more sophisticated reasoning."
+            "Enable interleaved thinking for tool use. Auto-enabled in "
+            "adaptive mode on Opus 4.6/4.7 and Sonnet 4.6. For manual mode "
+            "on Sonnet 4.6, requires the interleaved-thinking-2025-05-14 beta."
         ),
     )
 
-    # Anthropic Effort Parameter (Opus 4.5 only)
-    anthropic_effort: Literal["low", "medium", "high"] | None = Field(
+    # Anthropic Effort Parameter (Opus 4.5/4.6/4.7, Sonnet 4.6, Mythos)
+    anthropic_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = Field(
         default=None,
         description=(
-            "Control token usage vs thoroughness tradeoff (Opus 4.5 only). "
-            "high=maximum capability (default), medium=balanced, low=most efficient"
+            "Control token usage vs thoroughness tradeoff. Supported on "
+            "Opus 4.5, Opus 4.6, Opus 4.7, Sonnet 4.6, and Mythos. "
+            "low/medium/high/max available on 4.6+; xhigh is Opus 4.7 only. "
+            "high is the API default; Sonnet 4.6 recommends medium."
+        ),
+    )
+
+    # Anthropic Prompt Caching (automatic, ephemeral)
+    anthropic_prompt_caching: bool = Field(
+        default=True,
+        description=(
+            "Enable automatic prompt caching on Anthropic requests. Sends a "
+            "top-level cache_control={type:'ephemeral'} which caches the "
+            "system prompt plus conversation prefix up to the last cacheable "
+            "block. Cache hits cost 10% of base input; writes cost 25% more "
+            "for 5m TTL, 100% more for 1h TTL. Works on all active models."
+        ),
+    )
+
+    anthropic_cache_ttl: Literal["5m", "1h"] | None = Field(
+        default=None,
+        description=(
+            "Cache TTL for prompt caching. Default 5m is free to refresh on "
+            "each hit. Use '1h' (2x write cost) for workloads that reuse the "
+            "same prefix less often than every 5 minutes."
+        ),
+    )
+
+    # Anthropic Task Budgets (beta, Opus 4.7 only)
+    anthropic_task_budget_tokens: int | None = Field(
+        default=None,
+        ge=20000,
+        description=(
+            "Advisory total token budget for a full agentic loop on Opus 4.7 "
+            "(beta, requires task-budgets-2026-03-13). Unlike max_tokens this "
+            "is visible to the model so it can pace itself. Min 20000. Leave "
+            "unset for open-ended work where quality matters over throughput."
         ),
     )
 
@@ -321,12 +383,7 @@ class LLMConfig(BaseSettings):
         """Normalize Codex effort strings."""
         if v is None:
             return v
-        if isinstance(v, str):
-            return v.strip().lower()
-        # This branch is technically reachable if v is not None and not a str
-        # but pydantic should prevent that based on the type hint.
-        # However, for type safety we return v as is.
-        return v
+        return v.strip().lower()
 
     def get_provider_configs(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """
@@ -382,54 +439,39 @@ class LLMConfig(BaseSettings):
         if resolved_synthesis_provider in ("codex-cli", "openai") and synthesis_effort:
             synthesis_config["reasoning_effort"] = synthesis_effort
 
-        # Add Anthropic configuration
-        if resolved_utility_provider == "anthropic":
-            utility_config["thinking_enabled"] = self.anthropic_thinking_enabled
-            utility_config["thinking_budget_tokens"] = (
-                self.anthropic_thinking_budget_tokens
-            )
-            utility_config["interleaved_thinking"] = self.anthropic_interleaved_thinking
+        def _apply_anthropic(target: dict[str, Any]) -> None:
+            target["thinking_enabled"] = self.anthropic_thinking_enabled
+            target["thinking_budget_tokens"] = self.anthropic_thinking_budget_tokens
+            target["interleaved_thinking"] = self.anthropic_interleaved_thinking
+            if self.anthropic_thinking_mode:
+                target["thinking_mode"] = self.anthropic_thinking_mode
+            if self.anthropic_thinking_display:
+                target["thinking_display"] = self.anthropic_thinking_display
             if self.anthropic_effort:
-                utility_config["effort"] = self.anthropic_effort
+                target["effort"] = self.anthropic_effort
+            target["prompt_caching"] = self.anthropic_prompt_caching
+            if self.anthropic_cache_ttl:
+                target["cache_ttl"] = self.anthropic_cache_ttl
+            if self.anthropic_task_budget_tokens is not None:
+                target["task_budget_tokens"] = self.anthropic_task_budget_tokens
             if self.anthropic_context_management_enabled:
-                utility_config["context_management_enabled"] = True
+                target["context_management_enabled"] = True
                 if self.anthropic_clear_thinking_keep_turns is not None:
-                    utility_config["clear_thinking_keep_turns"] = (
+                    target["clear_thinking_keep_turns"] = (
                         self.anthropic_clear_thinking_keep_turns
                     )
                 if self.anthropic_clear_tool_uses_trigger_tokens is not None:
-                    utility_config["clear_tool_uses_trigger_tokens"] = (
+                    target["clear_tool_uses_trigger_tokens"] = (
                         self.anthropic_clear_tool_uses_trigger_tokens
                     )
                 if self.anthropic_clear_tool_uses_keep is not None:
-                    utility_config["clear_tool_uses_keep"] = (
-                        self.anthropic_clear_tool_uses_keep
-                    )
+                    target["clear_tool_uses_keep"] = self.anthropic_clear_tool_uses_keep
+
+        if resolved_utility_provider == "anthropic":
+            _apply_anthropic(utility_config)
 
         if resolved_synthesis_provider == "anthropic":
-            synthesis_config["thinking_enabled"] = self.anthropic_thinking_enabled
-            synthesis_config["thinking_budget_tokens"] = (
-                self.anthropic_thinking_budget_tokens
-            )
-            synthesis_config["interleaved_thinking"] = (
-                self.anthropic_interleaved_thinking
-            )
-            if self.anthropic_effort:
-                synthesis_config["effort"] = self.anthropic_effort
-            if self.anthropic_context_management_enabled:
-                synthesis_config["context_management_enabled"] = True
-                if self.anthropic_clear_thinking_keep_turns is not None:
-                    synthesis_config["clear_thinking_keep_turns"] = (
-                        self.anthropic_clear_thinking_keep_turns
-                    )
-                if self.anthropic_clear_tool_uses_trigger_tokens is not None:
-                    synthesis_config["clear_tool_uses_trigger_tokens"] = (
-                        self.anthropic_clear_tool_uses_trigger_tokens
-                    )
-                if self.anthropic_clear_tool_uses_keep is not None:
-                    synthesis_config["clear_tool_uses_keep"] = (
-                        self.anthropic_clear_tool_uses_keep
-                    )
+            _apply_anthropic(synthesis_config)
 
         return utility_config, synthesis_config
 
@@ -458,13 +500,13 @@ class LLMConfig(BaseSettings):
             # Alternative models: gemini-2.5-pro (balanced), gemini-2.5-flash (fast)
             return ("gemini-3-pro-preview", "gemini-3-pro-preview")
         elif self.provider == "anthropic":
-            # Anthropic: Haiku 4.5 for utility (fast/cheap), Sonnet 4.5 for synthesis (powerful)
-            # Claude 4.5 generation models:
-            # - claude-haiku-4-5-20251001: Fastest model with near-frontier intelligence
-            # - claude-sonnet-4-5-20250929: Smartest model for complex agents and coding
-            # - claude-opus-4-5-20251101: Most capable model with effort control (supports effort parameter)
-            # - claude-opus-4-1-20250805: Exceptional model for specialized reasoning (legacy)
-            return ("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929")
+            # Anthropic defaults:
+            # - Utility: Haiku 4.5 (fast, cheap, no effort/adaptive support)
+            # - Synthesis: Sonnet 4.6 (frontier reasoning at Sonnet price, supports
+            #   adaptive thinking + effort; close to Opus 4.6 on many benchmarks)
+            # Opt-in upgrades for heavier workloads: claude-opus-4-7 (state of
+            # the art, xhigh effort), claude-opus-4-6 (previous flagship).
+            return ("claude-haiku-4-5-20251001", "claude-sonnet-4-6")
         elif self.provider == "grok":
             # Grok: Use the same flagship model for both utility and synthesis
             # Intentional: Grok reasoning models (especially grok-4-1-fast-reasoning)

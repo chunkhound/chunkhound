@@ -1,15 +1,19 @@
-"""Tests for Anthropic LLM provider with extended thinking and Opus 4.5 support."""
+"""Tests for Anthropic LLM provider with adaptive/manual thinking and effort."""
 
 import pytest
 
 from chunkhound.providers.llm.anthropic_llm_provider import (
     ANTHROPIC_AVAILABLE,
     BETA_CONTEXT_MANAGEMENT,
-    BETA_EFFORT,
     BETA_INTERLEAVED_THINKING,
     BETA_STRUCTURED_OUTPUTS,
-    EFFORT_SUPPORTED_MODELS,
+    BETA_TASK_BUDGETS,
     AnthropicLLMProvider,
+    requires_adaptive_thinking,
+    supports_adaptive_thinking,
+    supports_effort,
+    supports_effort_level,
+    supports_task_budget,
 )
 
 
@@ -21,11 +25,11 @@ class TestAnthropicProviderBasics:
         """Test provider can be initialized."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
-            model="claude-sonnet-4-5-20250929",
+            model="claude-sonnet-4-6",
         )
 
         assert provider.name == "anthropic"
-        assert provider.model == "claude-sonnet-4-5-20250929"
+        assert provider.model == "claude-sonnet-4-6"
         assert provider.supports_thinking() is True
         assert provider.supports_tools() is True
 
@@ -181,6 +185,7 @@ class TestProviderCapabilities:
         # Anthropic has higher rate limits than OpenAI
         assert provider.get_synthesis_concurrency() == 5
 
+
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
 class TestConfiguration:
     """Test various configuration scenarios."""
@@ -189,10 +194,11 @@ class TestConfiguration:
         """Test default configuration values."""
         provider = AnthropicLLMProvider(api_key="test-key")
 
-        assert provider._model == "claude-sonnet-4-5-20250929"
+        assert provider._model == "claude-sonnet-4-6"
         assert provider._timeout == 60
         assert provider._max_retries == 3
         assert provider._thinking_enabled is False
+        assert provider._thinking_mode == "off"
         assert provider._thinking_budget_tokens == 10000
 
     def test_custom_configuration(self):
@@ -300,20 +306,18 @@ class TestOpus45EffortParameter:
         )
 
         assert provider._effort == "medium"
-        assert provider._model in EFFORT_SUPPORTED_MODELS
+        assert supports_effort(provider._model) is True
 
     def test_effort_parameter_warning_non_opus(self):
-        """Test that non-Opus 4.5 models get a warning for effort parameter."""
-        # This should log a warning but still initialize
+        """Sonnet 4.5 stores the effort value but does not accept the parameter."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-sonnet-4-5-20250929",
             effort="low",
         )
 
-        # Effort is stored but model doesn't support it
         assert provider._effort == "low"
-        assert provider._model not in EFFORT_SUPPORTED_MODELS
+        assert supports_effort(provider._model) is False
 
     def test_effort_levels(self):
         """Test all valid effort levels."""
@@ -500,28 +504,6 @@ class TestBetaHeaders:
         headers = provider._get_beta_headers()
         assert headers == []
 
-    def test_effort_beta_header(self):
-        """Test effort beta header is included for Opus 4.5."""
-        provider = AnthropicLLMProvider(
-            api_key="test-key",
-            model="claude-opus-4-5-20251101",
-            effort="medium",
-        )
-
-        headers = provider._get_beta_headers()
-        assert BETA_EFFORT in headers
-
-    def test_effort_beta_header_not_for_sonnet(self):
-        """Test effort beta header is not included for non-Opus models."""
-        provider = AnthropicLLMProvider(
-            api_key="test-key",
-            model="claude-sonnet-4-5-20250929",
-            effort="medium",
-        )
-
-        headers = provider._get_beta_headers()
-        assert BETA_EFFORT not in headers
-
     def test_context_management_beta_header(self):
         """Test context management beta header."""
         provider = AnthropicLLMProvider(
@@ -533,9 +515,10 @@ class TestBetaHeaders:
         assert BETA_CONTEXT_MANAGEMENT in headers
 
     def test_interleaved_thinking_beta_header(self):
-        """Test interleaved thinking beta header."""
+        """Interleaved beta header is emitted for manual-mode models."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
+            model="claude-opus-4-5-20251101",
             thinking_enabled=True,
             interleaved_thinking=True,
         )
@@ -554,8 +537,8 @@ class TestBetaHeaders:
         headers = provider._get_beta_headers()
         assert BETA_INTERLEAVED_THINKING not in headers
 
-    def test_all_beta_headers(self):
-        """Test all beta headers combined."""
+    def test_all_beta_headers_manual_thinking(self):
+        """Opus 4.5 uses manual thinking so interleaved header is emitted."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-opus-4-5-20251101",
@@ -566,10 +549,25 @@ class TestBetaHeaders:
         )
 
         headers = provider._get_beta_headers()
-        assert BETA_EFFORT in headers
         assert BETA_CONTEXT_MANAGEMENT in headers
         assert BETA_INTERLEAVED_THINKING in headers
-        assert len(headers) == 3
+        assert len(headers) == 2
+
+    def test_adaptive_mode_suppresses_interleaved_header(self):
+        """Adaptive thinking auto-enables interleaved; no beta header needed."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            thinking_enabled=True,
+            interleaved_thinking=True,
+            context_management_enabled=True,
+        )
+
+        assert provider._thinking_mode == "adaptive"
+        headers = provider._get_beta_headers()
+        assert BETA_INTERLEAVED_THINKING not in headers
+        assert BETA_CONTEXT_MANAGEMENT in headers
+        assert len(headers) == 1
 
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
@@ -584,10 +582,6 @@ class TestOpus45ModelConfiguration:
         )
 
         assert provider.model == "claude-opus-4-5-20251101"
-
-    def test_opus_45_in_supported_models(self):
-        """Test Opus 4.5 is in effort supported models."""
-        assert "claude-opus-4-5-20251101" in EFFORT_SUPPORTED_MODELS
 
     def test_opus_45_full_configuration(self):
         """Test Opus 4.5 with all features enabled."""
@@ -687,7 +681,12 @@ class TestStrictToolUse:
         """Test detecting strict tools."""
         tools = [
             {"name": "tool1", "description": "desc", "input_schema": {}},
-            {"name": "tool2", "description": "desc", "strict": True, "input_schema": {}},
+            {
+                "name": "tool2",
+                "description": "desc",
+                "strict": True,
+                "input_schema": {},
+            },
         ]
 
         has_strict = any(tool.get("strict") for tool in tools)
@@ -728,7 +727,7 @@ class TestStructuredOutputsBetaHeaders:
         assert BETA_STRUCTURED_OUTPUTS not in headers
 
     def test_all_beta_headers_with_opus(self):
-        """Test all beta headers for Opus 4.5 configuration."""
+        """Test beta headers for Opus 4.5 configuration (manual thinking)."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-opus-4-5-20251101",
@@ -739,9 +738,288 @@ class TestStructuredOutputsBetaHeaders:
         )
 
         headers = provider._get_beta_headers()
-        # Should have effort, context management, interleaved thinking
-        assert BETA_EFFORT in headers
         assert BETA_CONTEXT_MANAGEMENT in headers
         assert BETA_INTERLEAVED_THINKING in headers
         # Structured outputs is added dynamically, not in _get_beta_headers
-        assert len(headers) == 3
+        assert len(headers) == 2
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestCapabilityPredicates:
+    """Test model capability predicate helpers."""
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-opus-4-5-20251101",
+            "claude-opus-4-6",
+            "claude-opus-4-6-20260205",
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-mythos-preview",
+        ],
+    )
+    def test_supports_effort(self, model):
+        assert supports_effort(model) is True
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-sonnet-4-5-20250929",
+            "claude-haiku-4-5-20251001",
+            "claude-opus-4-1-20250805",
+        ],
+    )
+    def test_no_effort_on_older_models(self, model):
+        assert supports_effort(model) is False
+
+    def test_max_effort_on_46_and_later(self):
+        assert supports_effort_level("claude-opus-4-6", "max") is True
+        assert supports_effort_level("claude-opus-4-7", "max") is True
+        assert supports_effort_level("claude-sonnet-4-6", "max") is True
+        assert supports_effort_level("claude-opus-4-5-20251101", "max") is False
+
+    def test_xhigh_only_on_opus_47(self):
+        assert supports_effort_level("claude-opus-4-7", "xhigh") is True
+        assert supports_effort_level("claude-opus-4-6", "xhigh") is False
+        assert supports_effort_level("claude-sonnet-4-6", "xhigh") is False
+
+    def test_adaptive_thinking_models(self):
+        assert supports_adaptive_thinking("claude-opus-4-7") is True
+        assert supports_adaptive_thinking("claude-opus-4-6") is True
+        assert supports_adaptive_thinking("claude-sonnet-4-6") is True
+        assert supports_adaptive_thinking("claude-opus-4-5-20251101") is False
+        assert supports_adaptive_thinking("claude-sonnet-4-5-20250929") is False
+
+    def test_adaptive_only_on_opus_47(self):
+        assert requires_adaptive_thinking("claude-opus-4-7") is True
+        assert requires_adaptive_thinking("claude-mythos-preview") is True
+        assert requires_adaptive_thinking("claude-opus-4-6") is False
+        assert requires_adaptive_thinking("claude-sonnet-4-6") is False
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestAdaptiveThinking:
+    """Test adaptive thinking mode selection and configuration."""
+
+    def test_auto_mode_picks_adaptive_on_opus_47(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            thinking_enabled=True,
+        )
+        assert provider._thinking_mode == "adaptive"
+        assert provider._thinking_enabled is True
+
+    def test_auto_mode_picks_adaptive_on_sonnet_46(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            thinking_enabled=True,
+        )
+        assert provider._thinking_mode == "adaptive"
+
+    def test_auto_mode_picks_manual_on_opus_45(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-5-20251101",
+            thinking_enabled=True,
+        )
+        assert provider._thinking_mode == "manual"
+
+    def test_thinking_disabled_resolves_to_off(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            thinking_enabled=False,
+        )
+        assert provider._thinking_mode == "off"
+        assert provider._thinking_enabled is False
+
+    def test_manual_forced_on_adaptive_only_model_is_upgraded(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            thinking_enabled=True,
+            thinking_mode="manual",
+        )
+        assert provider._thinking_mode == "adaptive"
+
+    def test_explicit_off_mode(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            thinking_enabled=True,
+            thinking_mode="off",
+        )
+        assert provider._thinking_mode == "off"
+        assert provider._thinking_enabled is False
+
+    def test_adaptive_build_thinking_config(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            thinking_enabled=True,
+        )
+        assert provider._build_thinking_config() == {"type": "adaptive"}
+
+    def test_adaptive_build_thinking_config_with_display(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            thinking_enabled=True,
+            thinking_display="summarized",
+        )
+        assert provider._build_thinking_config() == {
+            "type": "adaptive",
+            "display": "summarized",
+        }
+
+    def test_manual_build_thinking_config(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-5-20251101",
+            thinking_enabled=True,
+            thinking_budget_tokens=8000,
+        )
+        assert provider._build_thinking_config() == {
+            "type": "enabled",
+            "budget_tokens": 8000,
+        }
+
+    def test_off_build_thinking_config(self):
+        provider = AnthropicLLMProvider(api_key="test-key")
+        assert provider._build_thinking_config() is None
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestEffortLevels:
+    """Test expanded effort levels (max, xhigh)."""
+
+    @pytest.mark.parametrize("level", ["low", "medium", "high", "max"])
+    def test_opus_46_accepts_standard_and_max(self, level):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-6",
+            effort=level,
+        )
+        assert provider._build_output_config() == {"effort": level}
+
+    @pytest.mark.parametrize("level", ["low", "medium", "high", "xhigh", "max"])
+    def test_opus_47_accepts_all_levels(self, level):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            effort=level,
+        )
+        assert provider._build_output_config() == {"effort": level}
+
+    def test_xhigh_warning_on_non_opus_47(self, caplog):
+        # Should log a warning for xhigh on Opus 4.6 but still store it
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-6",
+            effort="xhigh",
+        )
+        assert provider._effort == "xhigh"
+
+    def test_effort_emits_on_sonnet_46(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            effort="medium",
+        )
+        assert provider._build_output_config() == {"effort": "medium"}
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestPromptCaching:
+    """Automatic prompt caching via top-level cache_control."""
+
+    def test_default_cache_control_ephemeral(self):
+        provider = AnthropicLLMProvider(api_key="test-key")
+        assert provider._build_cache_control() == {"type": "ephemeral"}
+
+    def test_cache_control_with_ttl(self):
+        provider = AnthropicLLMProvider(api_key="test-key", cache_ttl="1h")
+        assert provider._build_cache_control() == {
+            "type": "ephemeral",
+            "ttl": "1h",
+        }
+
+    def test_cache_disabled(self):
+        provider = AnthropicLLMProvider(api_key="test-key", prompt_caching=False)
+        assert provider._build_cache_control() is None
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestStructuredOutputsConfig:
+    """Structured outputs are emitted under output_config.format."""
+
+    def test_schema_merged_into_output_config(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            effort="high",
+        )
+        schema = {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
+            "additionalProperties": False,
+        }
+        cfg = provider._build_output_config(json_schema=schema)
+        assert cfg["effort"] == "high"
+        assert cfg["format"] == {"type": "json_schema", "schema": schema}
+
+    def test_empty_output_config_returns_none(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-5-20250929",
+        )
+        assert provider._build_output_config() is None
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestTaskBudget:
+    """Advisory task_budget beta for Opus 4.7."""
+
+    def test_task_budget_supported_on_opus_47(self):
+        assert supports_task_budget("claude-opus-4-7") is True
+        assert supports_task_budget("claude-mythos-preview") is True
+        assert supports_task_budget("claude-opus-4-6") is False
+        assert supports_task_budget("claude-sonnet-4-6") is False
+
+    def test_task_budget_emitted_in_output_config(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            task_budget_tokens=50000,
+        )
+        cfg = provider._build_output_config()
+        assert cfg["task_budget"] == {"type": "tokens", "total": 50000}
+
+    def test_task_budget_beta_header_added(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            task_budget_tokens=30000,
+        )
+        assert BETA_TASK_BUDGETS in provider._get_beta_headers()
+
+    def test_task_budget_ignored_on_unsupported_model(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-6",
+            task_budget_tokens=50000,
+        )
+        assert provider._task_budget_tokens is None
+        assert BETA_TASK_BUDGETS not in provider._get_beta_headers()
+
+    def test_task_budget_clamped_to_minimum(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            task_budget_tokens=10000,
+        )
+        assert provider._task_budget_tokens == 20000
