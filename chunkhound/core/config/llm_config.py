@@ -13,6 +13,8 @@ from typing import Any, Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from ._utils import _parse_env_bool
+
 from chunkhound.core.config.openai_utils import is_official_openai_endpoint
 
 DEFAULT_LLM_TIMEOUT = 120
@@ -49,16 +51,6 @@ def _parse_llm_provider_arg(value: str) -> str:
             f"invalid choice: {value!r} (choose from {allowed})"
         )
     return normalized
-
-
-def _parse_env_bool(value: str) -> bool | None:
-    """Parse a boolean environment variable value."""
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return None
 
 
 class LLMConfig(BaseSettings):

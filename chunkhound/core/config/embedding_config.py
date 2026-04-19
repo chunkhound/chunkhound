@@ -17,6 +17,7 @@ from typing_extensions import Self
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
 
+from ._utils import _parse_env_bool
 from .openai_utils import is_azure_openai_endpoint, is_official_openai_endpoint
 from .voyageai_utils import is_official_voyageai_endpoint
 
@@ -28,16 +29,6 @@ RERANK_MODEL_REQUIRED_COHERE = (
 RERANK_BASE_URL_REQUIRED = (
     "rerank_model or rerank_format requires base_url or explicit rerank_url"
 )
-
-
-def _parse_env_bool(value: str) -> bool | None:
-    """Parse a boolean environment variable value."""
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return None
 
 
 def validate_rerank_configuration(
