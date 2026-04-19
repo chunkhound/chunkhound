@@ -117,14 +117,11 @@ class Config(BaseModel):
                         local_config = json.load(f)
                         self._deep_merge(config_data, local_config)
                         # Mark exclude list as user-supplied when present in local file
-                        try:
-                            idx = config_data.get("indexing") or {}
-                            exc = idx.get("exclude") if isinstance(idx, dict) else None
-                            if isinstance(exc, list):
-                                idx["exclude_user_supplied"] = True
-                                config_data["indexing"] = idx
-                        except Exception:
-                            pass
+                        idx = config_data.get("indexing") or {}
+                        exc = idx.get("exclude") if isinstance(idx, dict) else None
+                        if isinstance(exc, list):
+                            idx["exclude_user_supplied"] = True
+                            config_data["indexing"] = idx
                 except json.JSONDecodeError as e:
                     raise ValueError(
                         f"Invalid JSON in config file {local_config_path}: {e}. "
@@ -145,14 +142,11 @@ class Config(BaseModel):
                     file_config = json.load(f)
                     self._deep_merge(config_data, file_config)
                     # Mark exclude list as user-supplied when present in file
-                    try:
-                        idx = config_data.get("indexing") or {}
-                        exc = idx.get("exclude") if isinstance(idx, dict) else None
-                        if isinstance(exc, list):
-                            idx["exclude_user_supplied"] = True
-                            config_data["indexing"] = idx
-                    except Exception:
-                        pass
+                    idx = config_data.get("indexing") or {}
+                    exc = idx.get("exclude") if isinstance(idx, dict) else None
+                    if isinstance(exc, list):
+                        idx["exclude_user_supplied"] = True
+                        config_data["indexing"] = idx
             except json.JSONDecodeError as e:
                 raise ValueError(
                     f"Invalid JSON in config file {config_file}: {e}. "
@@ -163,25 +157,19 @@ class Config(BaseModel):
         if args:
             cli_overrides = self._extract_cli_overrides(args)
             # If CLI provided an explicit exclude list, mark it as user-supplied
-            try:
-                idx = cli_overrides.get("indexing") or {}
-                if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
-                    idx["exclude_user_supplied"] = True
-                    cli_overrides["indexing"] = idx
-            except Exception:
-                pass
+            idx = cli_overrides.get("indexing") or {}
+            if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
+                idx["exclude_user_supplied"] = True
+                cli_overrides["indexing"] = idx
             self._deep_merge(config_data, cli_overrides)
 
         # 6. Apply any direct kwargs (for testing)
         if kwargs:
             # If direct kwargs include an explicit exclude list, mark it as user-supplied
-            try:
-                idx = kwargs.get("indexing") or {}
-                if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
-                    idx["exclude_user_supplied"] = True
-                    kwargs["indexing"] = idx
-            except Exception:
-                pass
+            idx = kwargs.get("indexing") or {}
+            if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
+                idx["exclude_user_supplied"] = True
+                kwargs["indexing"] = idx
             self._deep_merge(config_data, kwargs)
 
         # Special handling for EmbeddingConfig
