@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-import httpx
+import openai
 import pytest
 
 from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
@@ -255,7 +255,7 @@ async def test_self_signed_https_requires_explicit_ssl_disable():
             model="bge-en-icl",
         )
 
-        with pytest.raises((httpx.ConnectError, httpx.RemoteProtocolError)):
+        with pytest.raises(openai.APIConnectionError):
             await provider.embed(["test text for embedding"])
     finally:
         server.stop()
