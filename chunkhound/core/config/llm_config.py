@@ -430,7 +430,7 @@ class LLMConfig(BaseSettings):
 
         if base_url := self._base_url_for_provider(provider):
             config["base_url"] = base_url
-            config["ssl_verify"] = self.ssl_verify
+            config["ssl_verify"] = self.ssl_verify  # only relevant for custom endpoints
 
         if provider in ("codex-cli", "openai") and reasoning_effort:
             config["reasoning_effort"] = reasoning_effort

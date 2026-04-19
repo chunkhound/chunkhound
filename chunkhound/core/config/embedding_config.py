@@ -306,10 +306,11 @@ class EmbeddingConfig(BaseSettings):
         if self.api_key:
             base_config["api_key"] = self.api_key.get_secret_value()
 
-        # Add base URL if available
+        # Add base URL if available; ssl_verify is intentionally scoped here —
+        # it only applies to custom endpoints, not the official API default.
         if self.base_url:
             base_config["base_url"] = self.base_url
-        base_config["ssl_verify"] = self.ssl_verify
+            base_config["ssl_verify"] = self.ssl_verify  # irrelevant without base_url
 
         # Add Azure OpenAI configuration if available
         if self.api_version:
