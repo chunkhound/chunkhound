@@ -243,7 +243,7 @@ def test_grok_config_validation_missing_api_key_per_role():
     assert "api_key" in missing[0]
 
 
-def test_map_hyde_provider_requires_api_key():
+def test_map_hyde_provider_with_custom_base_url_does_not_require_api_key():
     """Custom Grok-compatible HyDE endpoints should not require an API key."""
     cfg = LLMConfig(
         provider="openai",
@@ -403,7 +403,7 @@ def test_openai_official_endpoint_without_api_key_is_invalid():
     assert "api_key" in missing[0]
 
 
-def test_per_role_grok_still_requires_api_key_on_custom_openai_base_url():
+def test_per_role_grok_on_custom_openai_base_url_does_not_require_api_key():
     """A shared custom endpoint should be treated as keyless for Grok-compatible roles."""
     cfg = LLMConfig(
         provider="openai",

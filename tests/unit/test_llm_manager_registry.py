@@ -50,8 +50,8 @@ def test_create_provider_keeps_provider_default_model_when_omitted():
     assert provider.model == "opencode/grok-code"
 
 
-def test_create_provider_does_not_pass_base_url_to_non_openai_compatible_provider():
-    """Anthropic custom endpoints must continue to receive base_url."""
+def test_create_provider_passes_base_url_to_anthropic_provider():
+    """Anthropic provider receives base_url even though it is not in OPENAI_COMPATIBLE_LLM_PROVIDERS."""
     manager = object.__new__(LLMManager)
 
     captured: dict[str, object] = {}
