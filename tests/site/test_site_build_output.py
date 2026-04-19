@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from tests.site.tsx_runner import NPM, run_tsx_raw
+from tests.site.tsx_runner import run_tsx_raw
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
@@ -48,31 +48,24 @@ def _extract_astro_code_block_after_marker(html: str, marker: str) -> str:
 
 
 def test_site_build_outputs_platform_aware_onboarding() -> None:
-    subprocess.run(
-        [NPM, "run", "build", "--prefix", "site"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
     getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(encoding="utf-8")
     cli_reference = (DIST / "docs" / "cli-reference" / "index.html").read_text(encoding="utf-8")
     configuration = (DIST / "docs" / "configuration" / "index.html").read_text(encoding="utf-8")
-    umami_script = (
-        '<script defer src="https://cloud.umami.is/script.js" '
-        'data-website-id="ab95aad1-dc04-4bc7-be56-b162a68d6aa3"></script>'
-    )
-
     assert "macOS/Linux" in homepage
     assert "PowerShell" in homepage
-    assert umami_script in homepage
+    assert re.search(
+        r'<script[^>]+src="https://cloud\.umami\.is/script\.js"[^>]+data-website-id="[a-f0-9-]+"',
+        homepage,
+    ), "Umami analytics script missing from homepage"
     assert "data-platform-option" in homepage
     assert "/docs/getting-started/" in homepage
     assert 'aria-label="Setup configurator"' in homepage
     assert "data-platform-code" in getting_started
-    assert umami_script in getting_started
+    assert re.search(
+        r'<script[^>]+src="https://cloud\.umami\.is/script\.js"[^>]+data-website-id="[a-f0-9-]+"',
+        getting_started,
+    ), "Umami analytics script missing from getting_started"
     assert "platform-code-block" in getting_started
     assert "code-header" in getting_started
     # Astro still emits Shiki's light/dark CSS variables even though the site

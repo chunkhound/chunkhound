@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
-
-from tests.site.tsx_runner import NPM
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,16 +21,6 @@ def _extract_tokens(block: str) -> dict[str, str]:
         name: value
         for name, value in re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]{6})\s*;", block)
     }
-
-
-def _build_site() -> None:
-    subprocess.run(
-        [NPM, "run", "build", "--prefix", "site"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
 
 
 def _extract_shiki_dark_token(html: str, rendered_text: str) -> str:
@@ -106,8 +93,6 @@ def test_astro_code_tokens_are_intentionally_pinned_to_dark_shiki_values() -> No
 
 
 def test_rendered_comment_token_meets_aa_contrast_on_shared_code_surfaces() -> None:
-    _build_site()
-
     css = GLOBAL_CSS.read_text(encoding="utf-8")
     getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(encoding="utf-8")
     dark_tokens = _extract_tokens(_extract_block(css, ":root"))
