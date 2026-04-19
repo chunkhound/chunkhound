@@ -147,7 +147,6 @@ class VueTemplateMapping(BaseMapping):
             (directive_attribute
               (directive_name) @event_prefix
               (#match? @event_prefix "^@|^v-on$")
-              (directive_argument)? @event_name
               (quoted_attribute_value
                 (attribute_value) @handler_expr
               )?
@@ -157,7 +156,6 @@ class VueTemplateMapping(BaseMapping):
             (directive_attribute
               (directive_name) @bind_prefix
               (#match? @bind_prefix "^:|^v-bind$")
-              (directive_argument)? @prop_name
               (quoted_attribute_value
                 (attribute_value) @bind_expr
               )?
@@ -167,7 +165,6 @@ class VueTemplateMapping(BaseMapping):
             (directive_attribute
               (directive_name) @directive_name
               (#eq? @directive_name "v-model")
-              (directive_argument)? @model_arg
               (quoted_attribute_value
                 (attribute_value) @model_expr
               )?
@@ -182,7 +179,7 @@ class VueTemplateMapping(BaseMapping):
             (directive_attribute
               (directive_name) @directive_name
               (#match? @directive_name "^v-slot$|^#")
-              (directive_argument)? @slot_name
+              (directive_value)? @slot_name
             ) @definition
         """
 
