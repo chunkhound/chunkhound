@@ -132,7 +132,12 @@ class Config(BaseModel):
                     )
 
         # 4. Load explicit config file last so it wins over auto-discovered local config
-        if config_file and config_file.exists():
+        if config_file and not config_file.exists():
+            raise ValueError(
+                f"Config file not found: {config_file}. "
+                "Check the path or visit https://chunkhound.ai to generate a config."
+            )
+        if config_file:
             import json
 
             try:
