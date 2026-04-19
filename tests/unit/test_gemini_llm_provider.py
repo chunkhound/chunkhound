@@ -1,5 +1,7 @@
 """Tests for Gemini LLM provider."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
@@ -201,3 +203,90 @@ class TestGeminiLLMProvider:
         provider = GeminiLLMProvider(api_key="test-key", timeout=DEFAULT_LLM_TIMEOUT)
         http_options = provider._client._api_client._http_options
         assert http_options.timeout == DEFAULT_LLM_TIMEOUT * 1000
+
+
+class TestGeminiLLMProviderAsync:
+    """Async unit tests covering runtime code paths in complete() and complete_structured()."""
+
+    @pytest.fixture
+    def mock_aclient(self):
+        aclient = MagicMock()
+        aclient.models.generate_content = AsyncMock()
+        return aclient
+
+    @pytest.fixture
+    def provider_with_mock(self, provider, mock_aclient):
+        aio_ctx = MagicMock()
+        aio_ctx.__aenter__ = AsyncMock(return_value=mock_aclient)
+        aio_ctx.__aexit__ = AsyncMock(return_value=None)
+        provider._client = MagicMock()
+        provider._client.aio = aio_ctx
+        return provider, mock_aclient
+
+    def _make_response(self, text, finish_reason="STOP", prompt_tokens=10, completion_tokens=20):
+        response = MagicMock()
+        response.text = text
+        usage = MagicMock()
+        usage.prompt_token_count = prompt_tokens
+        usage.candidates_token_count = completion_tokens
+        usage.total_token_count = prompt_tokens + completion_tokens
+        response.usage_metadata = usage
+        candidate = MagicMock()
+        candidate.finish_reason = finish_reason
+        response.candidates = [candidate]
+        return response
+
+    async def test_complete_empty_response_raises(self, provider_with_mock):
+        provider, mock_aclient = provider_with_mock
+        mock_aclient.models.generate_content.return_value = self._make_response("")
+        with pytest.raises(RuntimeError, match="empty response"):
+            await provider.complete("hello")
+
+    async def test_complete_safety_finish_reason_raises(self, provider_with_mock):
+        provider, mock_aclient = provider_with_mock
+        mock_aclient.models.generate_content.return_value = self._make_response(
+            "blocked", finish_reason="SAFETY"
+        )
+        with pytest.raises(RuntimeError, match="blocked"):
+            await provider.complete("hello")
+
+    async def test_complete_returns_llm_response(self, provider_with_mock):
+        provider, mock_aclient = provider_with_mock
+        mock_aclient.models.generate_content.return_value = self._make_response(
+            "Hello world", prompt_tokens=10, completion_tokens=20
+        )
+        result = await provider.complete("hello")
+        assert result.content == "Hello world"
+        assert result.tokens_used == 30
+        assert result.model == provider.model
+
+    async def test_complete_structured_valid_json_returns_dict(self, provider_with_mock):
+        provider, mock_aclient = provider_with_mock
+        mock_aclient.models.generate_content.return_value = self._make_response(
+            '{"answer": "42"}'
+        )
+        result = await provider.complete_structured("hello", json_schema={"type": "object"})
+        assert result == {"answer": "42"}
+
+    async def test_complete_structured_empty_response_raises(self, provider_with_mock):
+        provider, mock_aclient = provider_with_mock
+        mock_aclient.models.generate_content.return_value = self._make_response("")
+        with pytest.raises(RuntimeError, match="empty response"):
+            await provider.complete_structured("hello", json_schema={"type": "object"})
+
+    async def test_health_check_healthy_dict_structure(self, provider_with_mock):
+        provider, mock_aclient = provider_with_mock
+        mock_aclient.models.generate_content.return_value = self._make_response("OK")
+        result = await provider.health_check()
+        assert result["status"] == "healthy"
+        assert result["provider"] == "gemini"
+        assert "model" in result
+        assert "thinking_level" in result
+        assert "test_response" in result
+
+    async def test_health_check_unhealthy_on_failure(self, provider_with_mock):
+        provider, mock_aclient = provider_with_mock
+        mock_aclient.models.generate_content.side_effect = Exception("connection failed")
+        result = await provider.health_check()
+        assert result["status"] == "unhealthy"
+        assert "error" in result
