@@ -23,6 +23,7 @@ class GrokLLMProvider(OpenAICompatibleProvider):
         api_key: str | None = None,
         model: str = "grok-4-1-fast-reasoning",
         base_url: str | None = None,
+        ssl_verify: bool = True,
         timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
@@ -32,6 +33,7 @@ class GrokLLMProvider(OpenAICompatibleProvider):
             api_key: xAI API key (passed from config)
             model: Model name (default: "grok-4-1-fast-reasoning")
             base_url: Base URL (defaults to https://api.x.ai/v1)
+            ssl_verify: Whether to verify SSL certificates
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts
         """
@@ -40,6 +42,7 @@ class GrokLLMProvider(OpenAICompatibleProvider):
             api_key=api_key,
             model=model,
             base_url=base_url,
+            ssl_verify=ssl_verify,
             timeout=timeout,
             max_retries=max_retries,
         )
