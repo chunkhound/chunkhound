@@ -112,11 +112,7 @@ async def async_main() -> None:
 
     if validation_errors:
         should_show_web_banner = sys.stdout.isatty() or sys.stderr.isatty()
-        logger.error(
-            "Configuration required. "
-            "Generate a config at https://chunkhound.ai "
-            "or create .chunkhound.json manually."
-        )
+        logger.error("Configuration error — see details below.")
         if should_show_web_banner:
             print(
                 "\nConfiguration required. "
@@ -135,6 +131,8 @@ async def async_main() -> None:
         for error in validation_errors:
             logger.error(f"Error: {error}")
 
+        logger.warning("Hint: Create a .chunkhound.json config file — docs: https://chunkhound.ai/docs/configuration/")
+
         # Show helpful fix suggestions for interactive terminals.
         if should_show_web_banner:
             # Use print() for stdout output to match test expectations
@@ -142,7 +140,7 @@ async def async_main() -> None:
             print("  1. Generate a config at https://chunkhound.ai")
             print("  2. Create a .chunkhound.json file manually")
             print("  3. Read the config docs at https://chunkhound.ai/docs/configuration/")
-            if embedding_error and args.command in [None, "index"]:
+            if embedding_error and args.command == "index":
                 print("  4. Use --no-embeddings to skip embeddings")
 
         sys.exit(1)

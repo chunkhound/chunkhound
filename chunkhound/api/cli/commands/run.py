@@ -298,8 +298,6 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         formatter.error(f"Run command failed: {e}")
         logger.exception("Run command error details")
         sys.exit(1)
-    finally:
-        pass
 
 
 def _print_completion_summary(stats, formatter: RichOutputFormatter) -> None:

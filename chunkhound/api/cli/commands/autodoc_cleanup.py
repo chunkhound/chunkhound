@@ -180,8 +180,8 @@ def resolve_cleanup_config_and_llm_manager(
             exit_code=2,
             errors=(
                 "AutoDoc cleanup requires an LLM provider, but none is configured. "
-                "Configure `llm` in your config/environment, or run with --assets-only "
-                "to update UI assets without regenerating topic pages.",
+                "Configure `llm` in your config/environment, or visit "
+                "https://chunkhound.ai to generate a config.",
             ),
         )
 
