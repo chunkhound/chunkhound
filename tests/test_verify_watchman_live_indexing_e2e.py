@@ -694,6 +694,167 @@ def test_clean_room_env_injects_runtime_dir(tmp_path: Path, monkeypatch) -> None
     assert env["TEST_FLAG"] == "1"
 
 
+@pytest.mark.asyncio
+async def test_verify_wheel_uses_clean_room_runtime_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wheel_path = tmp_path / "chunkhound.whl"
+    wheel_path.write_text("wheel", encoding="utf-8")
+    work_root = tmp_path / "work-root"
+    captured_env: dict[str, str] = {}
+    cleanup_roots: list[Path] = []
+
+    monkeypatch.setattr(
+        live_verifier.tempfile,
+        "mkdtemp",
+        lambda prefix: str(work_root),
+    )
+
+    def fake_run(
+        args: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> SimpleNamespace:
+        del check, capture_output, text, env, cwd
+        if args[:2] == ["uv", "venv"]:
+            venv_dir = Path(args[2])
+            bin_dir = venv_dir / ("Scripts" if os.name == "nt" else "bin")
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            exe_name = "chunkhound.exe" if os.name == "nt" else "chunkhound"
+            python_name = "python.exe" if os.name == "nt" else "python"
+            (bin_dir / exe_name).write_text("", encoding="utf-8")
+            (bin_dir / python_name).write_text("", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[:3] == ["uv", "pip", "install"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    class FakePipe:
+        async def read(self) -> bytes:
+            return b""
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stderr = FakePipe()
+
+    class FakeClient:
+        def __init__(self, process: object) -> None:
+            del process
+
+        async def start(self) -> None:
+            return None
+
+        async def send_request(
+            self, method: str, params: dict[str, object] | None = None, timeout: float = 5.0
+        ) -> dict[str, object]:
+            del method, params, timeout
+            return {}
+
+        async def send_notification(
+            self, method: str, params: dict[str, object] | None = None
+        ) -> None:
+            del method, params
+
+        async def close(self) -> None:
+            return None
+
+    async def fake_create_subprocess_exec_safe(
+        *args: str,
+        stdin: object = None,
+        stdout: object = None,
+        stderr: object = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> FakeProcess:
+        del args, stdin, stdout, stderr, cwd
+        assert env is not None
+        captured_env.update(env)
+        return FakeProcess()
+
+    ready_status = {
+        "scan_progress": {
+            "realtime": {
+                "watchman_sidecar_state": "running",
+                "watchman_pid": 1,
+                "watchman_binary_path": "/tmp/watchman",
+                "watchman_subscription_names": ["chunkhound-live-indexing"],
+                "watchman_subscription_pdu_count": 1,
+                "watchman_scopes": [
+                    {
+                        "subscription_name": "chunkhound-live-indexing",
+                        "scope_kind": "primary",
+                        "requested_path": "/repo",
+                        "watch_root": "/repo",
+                        "relative_root": None,
+                    }
+                ],
+                "watchman_loss_of_sync": {
+                    "count": 0,
+                    "fresh_instance_count": 0,
+                    "recrawl_count": 0,
+                    "disconnect_count": 0,
+                    "translation_failure_count": 0,
+                    "subscription_pdu_dropped_count": 0,
+                    "last_reason": None,
+                    "last_at": None,
+                    "last_details": None,
+                },
+            }
+        }
+    }
+
+    async def fake_wait_for_ready(client: object) -> dict[str, object]:
+        del client
+        return ready_status
+
+    async def fake_wait_for_search_hit(client: object, query: str) -> None:
+        del client, query
+        return None
+
+    monkeypatch.setattr(live_verifier.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        live_verifier,
+        "_create_subprocess_exec_safe",
+        fake_create_subprocess_exec_safe,
+    )
+    monkeypatch.setattr(live_verifier, "SubprocessJsonRpcClient", FakeClient)
+    monkeypatch.setattr(live_verifier, "_wait_for_ready", fake_wait_for_ready)
+    monkeypatch.setattr(live_verifier, "_wait_for_search_hit", fake_wait_for_search_hit)
+    monkeypatch.setattr(
+        live_verifier,
+        "_assert_sidecar_uses_installed_runtime",
+        lambda realtime, *, venv_dir: None,
+    )
+    monkeypatch.setattr(
+        live_verifier,
+        "_parse_tool_json",
+        lambda result: ready_status,
+    )
+    monkeypatch.setattr(
+        live_verifier,
+        "_terminate_processes_using_root",
+        lambda root: cleanup_roots.append(root),
+    )
+    monkeypatch.setattr(
+        live_verifier,
+        "_remove_tree_with_retries",
+        lambda root: cleanup_roots.append(root),
+    )
+
+    await live_verifier._verify_wheel(wheel_path)
+
+    runtime_dir = work_root / "runtime"
+    assert captured_env["CHUNKHOUND_DAEMON_RUNTIME_DIR"] == str(runtime_dir)
+    assert captured_env["CHUNKHOUND_DAEMON_REGISTRY_DIR"] == str(
+        runtime_dir / "daemon-user-registry"
+    )
+    assert cleanup_roots == [work_root, work_root]
+
+
 def test_mcp_env_prefers_installed_venv_and_clears_repo_python_state(
     monkeypatch,
     tmp_path: Path,

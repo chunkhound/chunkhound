@@ -908,6 +908,7 @@ async def _verify_wheel(wheel_path: Path) -> None:
     root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-live-wheel-verify-"))
     try:
         venv_dir = root / "venv"
+        runtime_dir = root / "runtime"
         project_dir = root / "project"
         project_dir.mkdir(parents=True, exist_ok=True)
         live_file, live_symbol = _write_project(project_dir)
@@ -937,7 +938,7 @@ async def _verify_wheel(wheel_path: Path) -> None:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=_mcp_env(venv_dir),
+            env=_clean_room_env(venv_dir, runtime_dir=runtime_dir),
             cwd=str(project_dir),
         )
         client = SubprocessJsonRpcClient(proc)
