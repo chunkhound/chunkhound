@@ -21,8 +21,8 @@ import sys
 import pytest
 
 from chunkhound.providers.llm.anthropic_llm_provider import (
-    EFFORT_SUPPORTED_MODELS,
     AnthropicLLMProvider,
+    supports_effort,
 )
 
 # Skip all tests in this file if no API key is available
@@ -199,7 +199,7 @@ async def test_opus_45_effort():
 
     print(f"\nModel: {provider.model}")
     print(f"Effort: {provider._effort}")
-    print(f"Model in supported list: {provider.model in EFFORT_SUPPORTED_MODELS}")
+    print(f"Model supports effort: {supports_effort(provider.model)}")
 
     prompt = "What are three key benefits of functional programming? Be concise."
     print(f"\nPrompt: {prompt}")
