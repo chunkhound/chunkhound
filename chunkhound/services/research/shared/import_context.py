@@ -83,9 +83,19 @@ class ImportContextService:
             return []
 
         try:
+            # Preprocess content before AST parsing so language-specific
+            # transformations are applied (e.g. SCSS #{...} interpolations
+            # are replaced with same-length placeholders to avoid grammar
+            # errors).  Mirrors universal_parser.py:parse_content().
+            # content_bytes always stays on the *original* source so that
+            # extracted chunk text is faithful to what the user wrote.
+            ast_source = content
+            if hasattr(parser, "base_mapping"):
+                ast_source = parser.base_mapping.preprocess_for_ast(content)
+
             # Parse content to get AST
             content_bytes = content.encode("utf-8")
-            tree = parser.engine.parse_to_ast(content)
+            tree = parser.engine.parse_to_ast(ast_source)
             if tree is None:
                 logger.debug(f"Failed to parse file: {file_path}")
                 return []
