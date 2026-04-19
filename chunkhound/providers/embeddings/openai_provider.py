@@ -4,7 +4,6 @@ import asyncio
 import heapq
 import math
 from collections.abc import AsyncIterator
-from datetime import datetime
 from typing import Any, cast
 
 import httpx
@@ -644,17 +643,6 @@ class OpenAIEmbeddingProvider:
             logger.error(
                 f"[OpenAI-Provider] Failed to generate embeddings (texts: {len(validated_texts)}, total_chars: {total_chars}, max_chars: {max_chars}): {e}"
             )
-
-            # Add debug logging to trace the error
-            debug_file = "/tmp/chunkhound_openai_debug.log"
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{datetime.now().isoformat()}] OPENAI-PROVIDER ERROR: texts={len(validated_texts)}, max_chars={max_chars}, error={e}\n"
-                    )
-                    f.flush()
-            except OSError:
-                pass  # Debug logging is best-effort, OK to fail silently
 
             raise
 
