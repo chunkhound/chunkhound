@@ -49,6 +49,9 @@ jobs:
       - name: Install site dependencies
         run: npm ci --prefix site
 
+      - name: Build site
+        run: npm run build --prefix site
+
       - name: Test collection check
         run: uv run pytest tests/ --collect-only -q --tb=no
 
