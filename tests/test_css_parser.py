@@ -353,5 +353,53 @@ def test_resolve_import_paths_source_file_relative(tmp_path):
     assert resolved[0] == tokens_dir / "colors.css"
 
 
+def test_resolve_import_paths_query_string(tmp_path):
+    """resolve_import_paths strips ?query from import URL before resolving."""
+    from chunkhound.parsers.mappings.css import CssMapping
+    css = CssMapping()
+    (tmp_path / "theme.css").write_text(":root{--color:red}")
+    resolved = css.resolve_import_paths(
+        '@import url("theme.css?v=1");', tmp_path, tmp_path / "style.css"
+    )
+    assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
+    assert resolved[0] == tmp_path / "theme.css"
+
+
+def test_resolve_import_paths_fragment(tmp_path):
+    """resolve_import_paths strips #fragment from import URL before resolving."""
+    from chunkhound.parsers.mappings.css import CssMapping
+    css = CssMapping()
+    (tmp_path / "theme.css").write_text(":root{--color:red}")
+    resolved = css.resolve_import_paths(
+        '@import "theme.css#v2";', tmp_path, tmp_path / "style.css"
+    )
+    assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
+    assert resolved[0] == tmp_path / "theme.css"
+
+
+def test_root_vars_tail_position_in_selector_list(css_parser):
+    """:root appearing after the 60-char truncation point is still classified as NAMESPACE.
+
+    Before the fix, _is_root_vars() called selector_text() which truncates at 60 chars.
+    A selector list where :root appears after position 60 would have been misclassified
+    as a plain DEFINITION block, losing the design-token NAMESPACE chunk.
+    """
+    from chunkhound.core.types.common import ChunkType
+    # `:root` appears well past the 60-char cutoff
+    long_prefix = ".very-long-vendor-specific-selector-name-exceeding-sixty-chars"
+    assert len(long_prefix) > 60
+    code = f"""{long_prefix}, :root {{
+  --color: red;
+  --size: 1rem;
+}}
+"""
+    chunks = css_parser.parse_content(code, "test.css", file_id=1)
+    ns_chunks = [c for c in chunks if c.chunk_type == ChunkType.NAMESPACE]
+    assert len(ns_chunks) >= 1, (
+        f":root after 60-char cutoff was misclassified — no NAMESPACE chunk. "
+        f"Chunks: {[(c.chunk_type, c.symbol) for c in chunks]}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

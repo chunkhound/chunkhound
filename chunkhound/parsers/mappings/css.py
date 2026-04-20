@@ -73,8 +73,18 @@ class CssMapping(BaseMapping):
 
         Handles comma-separated selector lists such as ``:root, [data-bs-theme=light]``
         (Bootstrap theme tokens) by checking whether any selector part is ``:root`` or ``*``.
+
+        Note: reads the raw selectors node text directly instead of calling
+        ``selector_text()`` because that helper truncates at 60 characters — a selector
+        list with ``:root`` after the cutoff would otherwise be misclassified.
         """
-        sel = selector_text(node, content)
+        sel = ""
+        for child in node.children:
+            if child.type == "selectors":
+                sel = node_text(child, content).strip()
+                break
+        if not sel:
+            return False
         parts = [s.strip() for s in sel.split(",")]
         if not any(p in (":root", "*") for p in parts):
             return False
@@ -224,6 +234,9 @@ class CssMapping(BaseMapping):
             text = text.split()[0] if text else text
         # Strip surrounding quotes
         path = text.strip("\"'")
+        # Strip query strings (?...) and fragments (#...) — they are not part of the
+        # file path and would cause resolution to fail silently.
+        path = re.split(r"[?#]", path)[0]
         candidate = resolve_dir / path
         if candidate.exists():
             return [candidate.resolve()]
