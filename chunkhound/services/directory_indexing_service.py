@@ -130,6 +130,7 @@ class DirectoryIndexingService:
             patterns=processed_patterns,
             exclude_patterns=exclude_patterns,
             config_file_size_threshold_kb=self.config.indexing.config_file_size_threshold_kb,
+            force_reindex=self.config.indexing.force_reindex,
         )
 
         if result["status"] not in ["complete", "success", "no_files"]:

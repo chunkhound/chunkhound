@@ -12,40 +12,22 @@ from pathlib import Path
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 
-
-class _CaptureCoordinator:
-    def __init__(self) -> None:
-        self.last_patterns: list[str] | None = None
-
-    async def process_directory(
-        self,
-        directory: Path,
-        patterns: list[str] | None = None,
-        exclude_patterns: list[str] | None = None,
-        config_file_size_threshold_kb: int = 20,
-    ) -> dict:
-        self.last_patterns = list(patterns or [])
-        # Return a benign payload so the service doesn't raise
-        return {"status": "no_files", "patterns": self.last_patterns}
+from tests.unit.conftest import CaptureCoordinator
 
 
 class _DummyConfig:
-    def __init__(self) -> None:
-        self.indexing = IndexingConfig()
+    def __init__(self, force_reindex: bool = False) -> None:
+        self.indexing = IndexingConfig(force_reindex=force_reindex)
 
 
 @pytest.mark.asyncio
 async def test_patterns_not_double_prefixed(tmp_path: Path):
-    coord = _CaptureCoordinator()
+    coord = CaptureCoordinator()
     svc = DirectoryIndexingService(indexing_coordinator=coord, config=_DummyConfig())
 
-    res = await svc._process_directory_files(
-        tmp_path,
-        include_patterns=svc.config.indexing.include,
-        exclude_patterns=svc.config.indexing.exclude,
-    )
+    await svc.process_directory(tmp_path)
 
-    patts = res.get("patterns", [])
+    patts = coord.last_patterns or []
     # Key assertion: none of the patterns should contain "**/**/"
     assert all("**/**/" not in p for p in patts), (
         f"Found over-prefixed pattern(s): {[p for p in patts if '**/**/' in p]}"
@@ -54,3 +36,30 @@ async def test_patterns_not_double_prefixed(tmp_path: Path):
     # And a sanity check: python pattern should remain exactly "**/*.py"
     assert "**/*.py" in patts, "Expected default python pattern '**/*.py'"
 
+
+@pytest.mark.asyncio
+async def test_force_reindex_forwarded_to_coordinator(tmp_path: Path):
+    """force_reindex=True in config is forwarded to the coordinator."""
+    coord = CaptureCoordinator()
+    svc = DirectoryIndexingService(
+        indexing_coordinator=coord, config=_DummyConfig(force_reindex=True)
+    )
+
+    await svc.process_directory(tmp_path)
+
+    assert coord.last_force_reindex is True
+
+
+@pytest.mark.asyncio
+async def test_default_config_forwards_force_reindex_false(tmp_path: Path) -> None:
+    """Default config must forward force_reindex=False to the coordinator."""
+    coord = CaptureCoordinator()
+    svc = DirectoryIndexingService(
+        indexing_coordinator=coord,
+        config=_DummyConfig(force_reindex=False),
+    )
+
+    await svc.process_directory(tmp_path)
+
+    assert coord.call_count > 0, "coordinator was never called"
+    assert coord.last_force_reindex is False

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.mcp_server.base import MCPServerBase
+
+from tests.unit.conftest import CaptureCoordinator
 
 
 class ConcreteMCPServer(MCPServerBase):
@@ -50,49 +54,53 @@ async def test_clears_compaction_deferrals_before_reindex(
     realtime = RealtimeStub()
     server.realtime_indexing = realtime
 
-    mock_stats = MagicMock(files_processed=5, chunks_created=42)
+    class _OrderingCoordinator(CaptureCoordinator):
+        async def process_directory(self, directory, **kwargs):
+            assert realtime.deferred_files == set(), (
+                "Post-compaction reindex must run only after stale deferred state is cleared"
+            )
+            return await super().process_directory(directory, **kwargs)
 
-    async def _record_reindex(*args, **kwargs):
-        assert realtime.deferred_files == set(), (
-            "Post-compaction reindex must run only after stale deferred state is cleared"
-        )
-        return mock_stats
+    coordinator = _OrderingCoordinator()
+    server.services.indexing_coordinator = coordinator
 
-    with patch("chunkhound.mcp_server.base.DirectoryIndexingService") as MockDIS:
-        MockDIS.return_value.process_directory = AsyncMock(side_effect=_record_reindex)
-        await server._post_compaction_reindex()
+    await server._post_compaction_reindex()
+
+    assert coordinator.call_count == 1, "reindex coordinator was never called"
 
 
 async def test_uses_force_reindex(server: ConcreteMCPServer) -> None:
-    """DirectoryIndexingService receives a config with force_reindex=True."""
-    server.realtime_indexing = None
-    server.config.model_copy.return_value.indexing.force_reindex = True
+    """Post-compaction reindex always forces a full reindex regardless of the current config value."""
+    # Start with force_reindex=False to prove the implementation overrides it unconditionally.
+    # Wire model_copy so the Pydantic update chain produces a real IndexingConfig(force_reindex=True).
+    server.config.indexing = IndexingConfig(force_reindex=False)
+    server.config.model_copy.side_effect = lambda update=None, **kw: types.SimpleNamespace(
+        indexing=(update or {}).get("indexing", server.config.indexing)
+    )
+    coordinator = CaptureCoordinator()
+    server.services.indexing_coordinator = coordinator
 
-    mock_stats = MagicMock(files_processed=3, chunks_created=10)
-    with patch("chunkhound.mcp_server.base.DirectoryIndexingService") as MockDIS:
-        MockDIS.return_value.process_directory = AsyncMock(return_value=mock_stats)
-        await server._post_compaction_reindex()
+    await server._post_compaction_reindex()
 
-    called_config = MockDIS.call_args.kwargs["config"]
-    assert called_config.indexing.force_reindex is True
+    assert coordinator.last_force_reindex is True
 
 
 async def test_skips_when_no_services(server: ConcreteMCPServer) -> None:
     """_post_compaction_reindex exits early when services is None."""
     server.services = None
-
-    with patch("chunkhound.mcp_server.base.DirectoryIndexingService") as MockDIS:
-        await server._post_compaction_reindex()
-        MockDIS.assert_not_called()
+    # If the guard fails, accessing None.indexing_coordinator raises AttributeError → test fails.
+    await server._post_compaction_reindex()
 
 
 async def test_skips_when_no_target_path(server: ConcreteMCPServer) -> None:
     """_post_compaction_reindex exits early when _target_path is None."""
+    coordinator = CaptureCoordinator()
+    server.services.indexing_coordinator = coordinator
     server._target_path = None
 
-    with patch("chunkhound.mcp_server.base.DirectoryIndexingService") as MockDIS:
-        await server._post_compaction_reindex()
-        MockDIS.assert_not_called()
+    await server._post_compaction_reindex()
+
+    assert coordinator.call_count == 0
 
 
 async def test_reindex_error_is_swallowed(server: ConcreteMCPServer) -> None:
@@ -103,3 +111,19 @@ async def test_reindex_error_is_swallowed(server: ConcreteMCPServer) -> None:
     )
     # Should not raise
     await server._post_compaction_reindex()
+
+
+async def test_reindex_skipped_when_clear_raises(server: ConcreteMCPServer) -> None:
+    """If clear_compaction_deferred_files raises, reindex is not attempted."""
+    coordinator = CaptureCoordinator()
+    server.services.indexing_coordinator = coordinator
+    server.realtime_indexing = MagicMock()
+    server.realtime_indexing.clear_compaction_deferred_files = AsyncMock(
+        side_effect=RuntimeError("fail")
+    )
+
+    await server._post_compaction_reindex()  # must not raise
+
+    # A partial-clear state means deferred file records are stale; proceeding
+    # with reindex on inconsistent state could silently leave entries un-marked.
+    assert coordinator.call_count == 0, "reindex must not be attempted when clear raises"

@@ -1101,6 +1101,7 @@ class IndexingCoordinator(BaseService):
         patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
         config_file_size_threshold_kb: int = 20,
+        force_reindex: bool = False,
     ) -> dict[str, Any]:
         """Process all supported files in a directory with batch optimization and consistency checks.
 
@@ -1109,6 +1110,9 @@ class IndexingCoordinator(BaseService):
             patterns: Optional file patterns to include
             exclude_patterns: Optional file patterns to exclude
             config_file_size_threshold_kb: Skip structured config files (JSON/YAML/TOML) larger than this (KB)
+            force_reindex: If True, skip mtime-based change detection and reindex all files.
+                Caller-supplied True is preserved; config.indexing.force_reindex is only
+                consulted when this parameter is False (its default).
 
         Returns:
             Dictionary with processing statistics
@@ -1147,14 +1151,10 @@ class IndexingCoordinator(BaseService):
             )
 
             # Phase 2.5: Change detection (skip unchanged files unless force_reindex)
-            force_reindex = False
-            try:
-                if self.config and getattr(self.config, "indexing", None):
-                    force_reindex = bool(
-                        getattr(self.config.indexing, "force_reindex", False)
-                    )
-            except Exception:
-                force_reindex = False
+            # Config escalates to force_reindex but cannot suppress an explicit True from
+            # the caller; also serves as fallback for direct callers that omit the flag.
+            if not force_reindex and self.config and getattr(self.config, "indexing", None):
+                force_reindex = bool(self.config.indexing.force_reindex)
 
             files_to_process: list[Path] = files
             skipped_unchanged = 0
