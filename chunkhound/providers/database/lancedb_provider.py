@@ -1154,9 +1154,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                             "provider": "",
                             "model": "",
                             "created_time": row.get("created_time", time.time()),
-                            "metadata": row.get(
-                                "metadata"
-                            ),  # Preserve existing metadata
+                            "metadata": _serialize_metadata(
+                                row.get("metadata")
+                            ),  # Serialize existing metadata
                         }
                         chunks_to_restore.append(chunk_data)
 
