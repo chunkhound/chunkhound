@@ -37,6 +37,8 @@ from chunkhound.providers.database.duckdb.connection_manager import (
     PHASE_2,
     PHASE_PRE_SWAP,
     DuckDBConnectionManager,
+    _COMPACTING_PATHS,
+    _COMPACTING_PATHS_LOCK,
     get_compaction_lock_path,
 )
 from chunkhound.providers.database.duckdb.embedding_repository import (
@@ -3151,15 +3153,26 @@ class DuckDBProvider(SerialDatabaseProvider):
         intent_path = Path(str(db_path) + ".swap_intent")
 
         lock_acquired = False
+        flag_set = False
+        path_registered = False
         try:
             # Atomic lock acquisition (matches daemon PID lock pattern)
             try:
+                # Pre-register in process-wide set BEFORE creating the lock file so any
+                # concurrent same-process connect() that sees the file also sees the path
+                # as live. lock_acquired tracks the on-disk file; path_registered tracks
+                # the in-memory registry — they are cleaned up independently in finally.
+                with _COMPACTING_PATHS_LOCK:
+                    _COMPACTING_PATHS.add(str(db_path))
+                path_registered = True
+                # Instance flag for the reconnect fast-path in connect().
+                # Set before the on-disk lock so a concurrent same-process connect()
+                # that sees the file also sees flag=True — both guards are consistent.
+                self._connection_manager._compaction_in_progress = True
+                flag_set = True
                 with open(lock_file, "x") as f:
                     f.write(f"{os.getpid()}:{time.time():.0f}")
                 lock_acquired = True
-                # Signal to connect() that the lock it may encounter on
-                # reconnect is ours. Authoritative over on-disk PID.
-                self._connection_manager._compaction_in_progress = True
             except FileExistsError:
                 raise CompactionError(
                     "Compaction already in progress (lock file exists)",
@@ -3301,9 +3314,19 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Always clean up export directory and lock file
             if export_dir.exists():
                 shutil.rmtree(export_dir, ignore_errors=True)
+            # Cleanup order: unlink the on-disk lock first, then discard from _COMPACTING_PATHS.
+            # Discard is gated on lock_acquired (not path_registered alone) so Provider B
+            # (which failed at lock acquisition with lock_acquired=False) cannot remove Provider A's
+            # valid registry entry. Since _COMPACTING_PATHS is a set and both A and B register the
+            # same path string, A's discard implicitly covers B's registration — no stale entry
+            # persists past A's completion.
             if lock_acquired:
                 lock_file.unlink(missing_ok=True)
+            if flag_set:
                 self._connection_manager._compaction_in_progress = False
+            if path_registered and lock_acquired:
+                with _COMPACTING_PATHS_LOCK:
+                    _COMPACTING_PATHS.discard(str(db_path))
             intent_path.unlink(missing_ok=True)
             # Only restore connection gate if provider is actually connected.
             # Success/cancel paths already set() explicitly above.
