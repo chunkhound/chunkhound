@@ -14,7 +14,8 @@ permissions:
 jobs:
   validate-tag:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    environment: pypi
+    timeout-minutes: 15
 
     steps:
       - name: Validate pre-release tag format (PEP 440)
@@ -94,7 +95,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Publish to TestPyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
