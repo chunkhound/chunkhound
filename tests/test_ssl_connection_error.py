@@ -195,7 +195,7 @@ async def test_ssl_connection_error_reproduces_user_issue():
         # If we get here, the SSL issue is fixed!
         assert len(embeddings) == 1
         assert len(embeddings[0]) == 1536  # Mock embedding dimension
-        print("✓ SSL connection issue is FIXED - embeddings generated successfully!")
+        print("[SUCCESS] SSL connection issue is FIXED - embeddings generated successfully!")
         
     finally:
         server.stop()
