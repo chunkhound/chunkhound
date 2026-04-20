@@ -309,14 +309,14 @@ class TestOpus45EffortParameter:
         assert supports_effort(provider._model) is True
 
     def test_effort_parameter_warning_non_opus(self):
-        """Sonnet 4.5 stores the effort value but does not accept the parameter."""
+        """Sonnet 4.5 drops an effort value it cannot use; only warns."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-sonnet-4-5-20250929",
             effort="low",
         )
 
-        assert provider._effort == "low"
+        assert provider._effort is None
         assert supports_effort(provider._model) is False
 
     def test_effort_levels(self):
@@ -914,14 +914,18 @@ class TestEffortLevels:
         )
         assert provider._build_output_config() == {"effort": level}
 
-    def test_xhigh_warning_on_non_opus_47(self, caplog):
-        # Should log a warning for xhigh on Opus 4.6 but still store it
-        provider = AnthropicLLMProvider(
-            api_key="test-key",
-            model="claude-opus-4-6",
-            effort="xhigh",
-        )
-        assert provider._effort == "xhigh"
+    def test_xhigh_dropped_on_non_opus_47(self, caplog):
+        """xhigh is rejected on Opus 4.6 and dropped with a warning."""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            provider = AnthropicLLMProvider(
+                api_key="test-key",
+                model="claude-opus-4-6",
+                effort="xhigh",
+            )
+        assert provider._effort is None
+        assert provider._build_output_config() is None
 
     def test_effort_emits_on_sonnet_46(self):
         provider = AnthropicLLMProvider(
@@ -1016,10 +1020,220 @@ class TestTaskBudget:
         assert provider._task_budget_tokens is None
         assert BETA_TASK_BUDGETS not in provider._get_beta_headers()
 
-    def test_task_budget_clamped_to_minimum(self):
+    def test_task_budget_below_minimum_raises(self):
+        with pytest.raises(ValueError, match="below the API minimum"):
+            AnthropicLLMProvider(
+                api_key="test-key",
+                model="claude-opus-4-7",
+                task_budget_tokens=10000,
+            )
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestStateMachineValidation:
+    """Reject contradictory thinking_enabled/thinking_mode combinations."""
+
+    def test_unknown_thinking_mode_raises(self):
+        with pytest.raises(ValueError, match="Unknown thinking_mode"):
+            AnthropicLLMProvider(
+                api_key="test-key",
+                model="claude-opus-4-7",
+                thinking_mode="adpative",
+            )
+
+    def test_thinking_enabled_false_with_adaptive_raises(self):
+        with pytest.raises(ValueError, match="conflicts with thinking_mode"):
+            AnthropicLLMProvider(
+                api_key="test-key",
+                model="claude-opus-4-7",
+                thinking_enabled=False,
+                thinking_mode="adaptive",
+            )
+
+    def test_thinking_enabled_false_with_manual_raises(self):
+        with pytest.raises(ValueError, match="conflicts with thinking_mode"):
+            AnthropicLLMProvider(
+                api_key="test-key",
+                model="claude-opus-4-5-20251101",
+                thinking_enabled=False,
+                thinking_mode="manual",
+            )
+
+    def test_explicit_off_wins_over_thinking_enabled(self):
+        """thinking_mode='off' + thinking_enabled=True resolves to off."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-opus-4-7",
-            task_budget_tokens=10000,
+            thinking_enabled=True,
+            thinking_mode="off",
         )
-        assert provider._task_budget_tokens == 20000
+        assert provider._thinking_mode == "off"
+        assert provider._thinking_enabled is False
+
+    def test_adaptive_on_older_model_falls_back_to_manual(self):
+        """thinking_mode='adaptive' on Opus 4.5 downgrades to manual with warning."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-5-20251101",
+            thinking_enabled=True,
+            thinking_mode="adaptive",
+        )
+        assert provider._thinking_mode == "manual"
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestPrefixCollisionGuard:
+    """_matches_family requires exact match or '-' delimiter."""
+
+    def test_no_collision_with_extended_digits(self):
+        assert supports_effort("claude-opus-4-50") is False
+        assert supports_effort("claude-opus-4-77") is False
+        assert supports_effort("claude-sonnet-4-60-custom") is False
+
+    def test_exact_alias_still_matches(self):
+        assert supports_effort("claude-opus-4-7") is True
+        assert supports_effort("claude-sonnet-4-6") is True
+
+    def test_dated_variant_still_matches(self):
+        assert supports_effort("claude-opus-4-7-20260416") is True
+        assert supports_effort("claude-sonnet-4-6-20260217") is True
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestToolChoiceContextManagement:
+    """tool_choice forcing thinking off must suppress clear_thinking edit."""
+
+    def test_apply_common_with_thinking_active_false(self):
+        """Passing thinking_active=False omits clear_thinking edit."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-5-20251101",
+            thinking_enabled=True,
+            context_management_enabled=True,
+        )
+        kwargs: dict = {}
+        provider._apply_common_request_fields(kwargs, thinking_active=False)
+        cm = kwargs.get("context_management")
+        assert cm is not None
+        edits = cm["edits"]
+        assert all(e["type"] != "clear_thinking_20251015" for e in edits)
+        assert any(e["type"] == "clear_tool_uses_20250919" for e in edits)
+
+    def test_apply_common_with_thinking_active_true(self):
+        """Default path emits clear_thinking when provider has it enabled."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-5-20251101",
+            thinking_enabled=True,
+            context_management_enabled=True,
+        )
+        kwargs: dict = {}
+        provider._apply_common_request_fields(kwargs, thinking_active=True)
+        edits = kwargs["context_management"]["edits"]
+        assert any(e["type"] == "clear_thinking_20251015" for e in edits)
+
+    def test_interleaved_beta_omitted_when_thinking_disabled(self):
+        """_get_beta_headers with thinking_active=False drops interleaved beta."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-5-20251101",
+            thinking_enabled=True,
+            interleaved_thinking=True,
+        )
+        assert (
+            BETA_INTERLEAVED_THINKING
+            in provider._get_beta_headers(thinking_active=True)
+        )
+        assert (
+            BETA_INTERLEAVED_THINKING
+            not in provider._get_beta_headers(thinking_active=False)
+        )
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestThinkingDisplayWarning:
+    """thinking_display on non-adaptive modes is dropped with a warning."""
+
+    def test_thinking_display_ignored_on_manual(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-5-20251101",
+            thinking_enabled=True,
+            thinking_display="summarized",
+        )
+        assert provider._thinking_mode == "manual"
+        assert provider._thinking_display is None
+
+    def test_thinking_display_preserved_on_adaptive(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            thinking_enabled=True,
+            thinking_display="summarized",
+        )
+        assert provider._thinking_mode == "adaptive"
+        assert provider._thinking_display == "summarized"
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestEffortNormalization:
+    """Effort values are lowercased/stripped before validation."""
+
+    def test_uppercase_effort_normalized(self):
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-7",
+            effort=" HIGH ",
+        )
+        assert provider._effort == "high"
+
+
+class TestLLMConfigEnvLoading:
+    """New Anthropic fields load from env vars."""
+
+    def test_env_loads_anthropic_fields(self, monkeypatch):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        monkeypatch.setenv("CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING", "false")
+        monkeypatch.setenv("CHUNKHOUND_LLM_ANTHROPIC_THINKING_MODE", "adaptive")
+        monkeypatch.setenv("CHUNKHOUND_LLM_ANTHROPIC_CACHE_TTL", "1h")
+        monkeypatch.setenv("CHUNKHOUND_LLM_ANTHROPIC_TASK_BUDGET_TOKENS", "50000")
+        monkeypatch.setenv("CHUNKHOUND_LLM_ANTHROPIC_EFFORT", "MAX")
+        monkeypatch.setenv("CHUNKHOUND_LLM_ANTHROPIC_THINKING_DISPLAY", "omitted")
+
+        loaded = LLMConfig.load_from_env()
+        assert loaded["anthropic_prompt_caching"] is False
+        assert loaded["anthropic_thinking_mode"] == "adaptive"
+        assert loaded["anthropic_cache_ttl"] == "1h"
+        assert loaded["anthropic_task_budget_tokens"] == 50000
+        assert loaded["anthropic_effort"] == "max"
+        assert loaded["anthropic_thinking_display"] == "omitted"
+
+    def test_env_unset_leaves_keys_absent(self, monkeypatch):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        for name in (
+            "CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING",
+            "CHUNKHOUND_LLM_ANTHROPIC_THINKING_MODE",
+            "CHUNKHOUND_LLM_ANTHROPIC_CACHE_TTL",
+            "CHUNKHOUND_LLM_ANTHROPIC_TASK_BUDGET_TOKENS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        loaded = LLMConfig.load_from_env()
+        assert "anthropic_prompt_caching" not in loaded
+        assert "anthropic_thinking_mode" not in loaded
+        assert "anthropic_cache_ttl" not in loaded
+        assert "anthropic_task_budget_tokens" not in loaded
+
+
+class TestLLMConfigDefaults:
+    """Pin default model selection."""
+
+    def test_anthropic_default_models(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(provider="anthropic")
+        assert cfg.get_default_models() == (
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-6",
+        )

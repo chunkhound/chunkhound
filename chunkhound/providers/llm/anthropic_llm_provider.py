@@ -1,7 +1,7 @@
 """Anthropic LLM provider implementation for ChunkHound deep research.
 
-Supports Claude 4.5, 4.6, and 4.7 generation models:
-- Adaptive thinking (Opus 4.7, Opus 4.6, Sonnet 4.6)
+Supports Claude 4.5, 4.6, 4.7, and Mythos generation models:
+- Adaptive thinking (Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos)
 - Manual extended thinking with configurable budget_tokens (Opus 4.5 and older)
 - Interleaved thinking for tool use (auto-enabled in adaptive mode)
 - Effort parameter for token usage vs thoroughness tradeoff
@@ -69,7 +69,10 @@ _TASK_BUDGET_PREFIXES: tuple[str, ...] = (
 
 
 def _matches_family(model: str, prefixes: tuple[str, ...]) -> bool:
-    return any(model.startswith(p) for p in prefixes)
+    # Require an exact match or a '-' delimiter so that 'claude-opus-4-5' does
+    # not accidentally match a hypothetical 'claude-opus-4-50' or
+    # 'claude-opus-4-5b' in a future naming scheme.
+    return any(model == p or model.startswith(f"{p}-") for p in prefixes)
 
 
 def supports_effort(model: str) -> bool:
@@ -206,7 +209,6 @@ class AnthropicLLMProvider(LLMProvider):
         self._max_retries = max_retries
         self._thinking_budget_tokens = max(1024, thinking_budget_tokens)
         self._interleaved_thinking = interleaved_thinking
-        self._thinking_display = thinking_display
         self._prompt_caching = prompt_caching
         self._cache_ttl = cache_ttl
         if task_budget_tokens is not None and not supports_task_budget(model):
@@ -216,53 +218,76 @@ class AnthropicLLMProvider(LLMProvider):
             )
             task_budget_tokens = None
         if task_budget_tokens is not None and task_budget_tokens < 20000:
-            logger.warning(
-                f"task_budget_tokens ({task_budget_tokens}) below the 20000 "
-                "minimum; raising to 20000"
+            raise ValueError(
+                f"task_budget_tokens ({task_budget_tokens}) is below the API "
+                "minimum of 20000; set it to at least 20000 or pass None to "
+                "disable."
             )
-            task_budget_tokens = 20000
         self._task_budget_tokens = task_budget_tokens
 
         # Resolve the effective thinking mode. The historical API uses
         # thinking_enabled (bool); new callers can pass thinking_mode directly.
         requested_mode = (thinking_mode or "auto").lower()
         if requested_mode not in ("auto", "off", "manual", "adaptive"):
-            logger.warning(
-                f"Unknown thinking_mode={requested_mode!r}, falling back to 'auto'"
+            raise ValueError(
+                f"Unknown thinking_mode={thinking_mode!r}; "
+                "expected one of auto, off, manual, adaptive"
             )
-            requested_mode = "auto"
 
-        if requested_mode == "auto":
-            if not thinking_enabled:
-                resolved_mode = "off"
-            elif supports_adaptive_thinking(model):
-                resolved_mode = "adaptive"
-            else:
-                resolved_mode = "manual"
+        if requested_mode in ("manual", "adaptive") and not thinking_enabled:
+            raise ValueError(
+                f"thinking_enabled=False conflicts with thinking_mode={requested_mode!r}. "
+                "Pass thinking_enabled=True, or use thinking_mode='off' to disable."
+            )
+
+        if requested_mode == "off" or not thinking_enabled:
+            resolved_mode = "off"
+        elif requested_mode == "auto":
+            resolved_mode = (
+                "adaptive" if supports_adaptive_thinking(model) else "manual"
+            )
         elif requested_mode == "manual" and requires_adaptive_thinking(model):
             logger.warning(
-                f"Model {model} requires adaptive thinking; "
-                "falling back to adaptive mode"
+                f"Model {model} requires adaptive thinking; falling back to "
+                "adaptive (thinking_budget_tokens is ignored in adaptive mode; "
+                "thinking can consume up to max_tokens)"
             )
             resolved_mode = "adaptive"
+        elif requested_mode == "adaptive" and not supports_adaptive_thinking(model):
+            logger.warning(
+                f"Model {model} does not support adaptive thinking; "
+                "falling back to manual"
+            )
+            resolved_mode = "manual"
         else:
             resolved_mode = requested_mode
 
         self._thinking_mode = resolved_mode
         self._thinking_enabled = resolved_mode in ("manual", "adaptive")
 
-        self._effort = effort
-        if effort:
+        if thinking_display is not None and resolved_mode != "adaptive":
+            logger.warning(
+                f"thinking_display={thinking_display!r} only applies in adaptive "
+                f"mode; resolved mode is {resolved_mode!r}, ignoring."
+            )
+            thinking_display = None
+        self._thinking_display = thinking_display
+
+        if effort is not None:
+            effort = effort.strip().lower()
             if not supports_effort(model):
                 logger.warning(
                     f"Model {model} does not accept the effort parameter; "
-                    f"ignoring effort={effort}"
+                    f"ignoring effort={effort!r}"
                 )
+                effort = None
             elif not supports_effort_level(model, effort):
                 logger.warning(
                     f"Effort level {effort!r} is not supported on {model}; "
-                    "request may be rejected by the API"
+                    "dropping it (request would otherwise be rejected by the API)"
                 )
+                effort = None
+        self._effort = effort
 
         # Context management settings
         self._context_management_enabled = context_management_enabled
@@ -377,8 +402,13 @@ class AnthropicLLMProvider(LLMProvider):
 
         return thinking_blocks
 
-    def _get_beta_headers(self) -> list[str]:
+    def _get_beta_headers(self, thinking_active: bool | None = None) -> list[str]:
         """Build list of beta headers for the enabled features.
+
+        Args:
+            thinking_active: Override whether thinking is active for this call.
+                The interleaved-thinking beta header is only emitted when
+                manual-mode thinking is active for the request.
 
         Returns:
             Headers for context management, manual-mode interleaved thinking,
@@ -390,7 +420,14 @@ class AnthropicLLMProvider(LLMProvider):
         if self._context_management_enabled:
             headers.append(BETA_CONTEXT_MANAGEMENT)
 
-        if self._interleaved_thinking and self._thinking_mode == "manual":
+        is_thinking_active = (
+            thinking_active if thinking_active is not None else self._thinking_enabled
+        )
+        if (
+            self._interleaved_thinking
+            and self._thinking_mode == "manual"
+            and is_thinking_active
+        ):
             headers.append(BETA_INTERLEAVED_THINKING)
 
         if self._task_budget_tokens is not None:
@@ -516,7 +553,7 @@ class AnthropicLLMProvider(LLMProvider):
             output_config dict or None when empty.
         """
         cfg: dict[str, Any] = {}
-        if self._effort and supports_effort(self._model):
+        if self._effort and supports_effort_level(self._model, self._effort):
             cfg["effort"] = self._effort
         if json_schema is not None:
             cfg["format"] = {"type": "json_schema", "schema": json_schema}
@@ -540,15 +577,23 @@ class AnthropicLLMProvider(LLMProvider):
         self,
         request_kwargs: dict[str, Any],
         json_schema: dict[str, Any] | None = None,
+        thinking_active: bool | None = None,
     ) -> None:
-        """Attach output_config, cache_control, and context_management."""
+        """Attach output_config, cache_control, and context_management.
+
+        Pass thinking_active=False when the caller disabled thinking for this
+        specific request (e.g. tool_choice forced it off) so
+        context_management does not emit a clear_thinking edit.
+        """
         output_config = self._build_output_config(json_schema=json_schema)
         if output_config:
             request_kwargs["output_config"] = output_config
         cache_control = self._build_cache_control()
         if cache_control:
             request_kwargs["cache_control"] = cache_control
-        context_management = self._build_context_management()
+        context_management = self._build_context_management(
+            thinking_active=thinking_active,
+        )
         if context_management:
             request_kwargs["context_management"] = context_management
 
@@ -608,16 +653,18 @@ class AnthropicLLMProvider(LLMProvider):
 
             # Thinking configuration (adaptive / manual / off)
             thinking_cfg = self._build_thinking_config()
+            thinking_active = thinking_cfg is not None
             if thinking_cfg is not None:
                 self._ensure_thinking_max_tokens(request_kwargs, max_completion_tokens)
                 request_kwargs["thinking"] = thinking_cfg
 
-            # Add beta headers for advanced features
-            beta_headers = self._get_beta_headers()
+            beta_headers = self._get_beta_headers(thinking_active=thinking_active)
             if beta_headers:
                 request_kwargs["betas"] = beta_headers
 
-            self._apply_common_request_fields(request_kwargs)
+            self._apply_common_request_fields(
+                request_kwargs, thinking_active=thinking_active
+            )
 
             response = await self._create_message(request_kwargs)
 
@@ -708,7 +755,7 @@ class AnthropicLLMProvider(LLMProvider):
         Features:
         - Guaranteed valid JSON via constrained decoding (no parsing errors)
         - Compatible with extended thinking (grammar resets between sections)
-        - Compatible with effort parameter (Opus 4.5)
+        - Compatible with the effort parameter on models that support it
         - Compatible with context management
 
         Note: Incompatible with citations and message prefilling.
@@ -745,10 +792,6 @@ class AnthropicLLMProvider(LLMProvider):
             if system:
                 request_kwargs["system"] = system
 
-            beta_headers = self._get_beta_headers()
-            if beta_headers:
-                request_kwargs["betas"] = beta_headers
-
             # Thinking configuration (adaptive / manual / off)
             thinking_cfg = self._build_thinking_config()
             thinking_active = thinking_cfg is not None
@@ -756,19 +799,15 @@ class AnthropicLLMProvider(LLMProvider):
                 self._ensure_thinking_max_tokens(request_kwargs, max_completion_tokens)
                 request_kwargs["thinking"] = thinking_cfg
 
-            # Apply output_config (effort + json_schema + task_budget),
-            # cache_control, and thinking-aware context_management.
-            output_config = self._build_output_config(json_schema=json_schema)
-            if output_config:
-                request_kwargs["output_config"] = output_config
-            cache_control = self._build_cache_control()
-            if cache_control:
-                request_kwargs["cache_control"] = cache_control
-            context_management = self._build_context_management(
-                thinking_active=thinking_active
+            beta_headers = self._get_beta_headers(thinking_active=thinking_active)
+            if beta_headers:
+                request_kwargs["betas"] = beta_headers
+
+            self._apply_common_request_fields(
+                request_kwargs,
+                json_schema=json_schema,
+                thinking_active=thinking_active,
             )
-            if context_management:
-                request_kwargs["context_management"] = context_management
 
             response = await self._create_message(request_kwargs)
 
@@ -908,24 +947,16 @@ class AnthropicLLMProvider(LLMProvider):
 
             # Structured outputs is a beta for strict tool use only; JSON
             # outputs via output_config.format don't need the header.
-            beta_headers: list[str] = []
-            has_strict_tools = any(tool.get("strict") for tool in tools)
-            if has_strict_tools:
-                beta_headers.append(BETA_STRUCTURED_OUTPUTS)
-            if self._context_management_enabled:
-                beta_headers.append(BETA_CONTEXT_MANAGEMENT)
-            if (
-                self._interleaved_thinking
-                and self._thinking_mode == "manual"
-                and thinking_compatible
-            ):
-                beta_headers.append(BETA_INTERLEAVED_THINKING)
-            if self._task_budget_tokens is not None:
-                beta_headers.append(BETA_TASK_BUDGETS)
+            thinking_active = thinking_cfg is not None
+            beta_headers = self._get_beta_headers(thinking_active=thinking_active)
+            if any(tool.get("strict") for tool in tools):
+                beta_headers.insert(0, BETA_STRUCTURED_OUTPUTS)
             if beta_headers:
                 request_kwargs["betas"] = beta_headers
 
-            self._apply_common_request_fields(request_kwargs)
+            self._apply_common_request_fields(
+                request_kwargs, thinking_active=thinking_active
+            )
 
             response = await self._create_message(request_kwargs)
 
@@ -1089,16 +1120,18 @@ class AnthropicLLMProvider(LLMProvider):
 
             # Thinking configuration (adaptive / manual / off)
             thinking_cfg = self._build_thinking_config()
+            thinking_active = thinking_cfg is not None
             if thinking_cfg is not None:
                 self._ensure_thinking_max_tokens(request_kwargs, max_completion_tokens)
                 request_kwargs["thinking"] = thinking_cfg
 
-            # Add beta headers for advanced features
-            beta_headers = self._get_beta_headers()
+            beta_headers = self._get_beta_headers(thinking_active=thinking_active)
             if beta_headers:
                 request_kwargs["betas"] = beta_headers
 
-            self._apply_common_request_fields(request_kwargs)
+            self._apply_common_request_fields(
+                request_kwargs, thinking_active=thinking_active
+            )
 
             # Create streaming response - use beta endpoint when beta features are enabled
             beta_headers = request_kwargs.pop("betas", None)

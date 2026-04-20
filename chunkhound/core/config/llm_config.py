@@ -223,10 +223,11 @@ class LLMConfig(BaseSettings):
             default=None,
             description=(
                 "Explicit thinking mode. 'adaptive' lets Claude decide depth "
-                "(Opus 4.6/4.7, Sonnet 4.6). 'manual' uses a fixed budget "
-                "(all older models). 'off' disables thinking. Default 'auto' "
-                "picks adaptive for 4.6+ models and manual for older ones "
-                "when anthropic_thinking_enabled is true."
+                "(Opus 4.6/4.7, Sonnet 4.6, Mythos). 'manual' uses a fixed "
+                "budget (accepted on Opus 4.5/4.6, Sonnet 4.5/4.6, Haiku 4.5; "
+                "rejected on Opus 4.7/Mythos). 'off' disables thinking. "
+                "Default 'auto' picks adaptive for 4.6+ models and manual "
+                "for older ones when anthropic_thinking_enabled is true."
             ),
         )
     )
@@ -254,8 +255,9 @@ class LLMConfig(BaseSettings):
         default=False,
         description=(
             "Enable interleaved thinking for tool use. Auto-enabled in "
-            "adaptive mode on Opus 4.6/4.7 and Sonnet 4.6. For manual mode "
-            "on Sonnet 4.6, requires the interleaved-thinking-2025-05-14 beta."
+            "adaptive mode (Opus 4.6/4.7, Sonnet 4.6, Mythos). For manual "
+            "mode on any model that supports it (Opus 4.5, Sonnet 4.5/4.6, "
+            "Haiku 4.5), sends the interleaved-thinking-2025-05-14 beta."
         ),
     )
 
@@ -265,8 +267,9 @@ class LLMConfig(BaseSettings):
         description=(
             "Control token usage vs thoroughness tradeoff. Supported on "
             "Opus 4.5, Opus 4.6, Opus 4.7, Sonnet 4.6, and Mythos. "
-            "low/medium/high/max available on 4.6+; xhigh is Opus 4.7 only. "
-            "high is the API default; Sonnet 4.6 recommends medium."
+            "low/medium/high on all supported models; max on 4.6+; "
+            "xhigh is Opus 4.7 only. high is the API default; Sonnet 4.6 "
+            "recommends medium."
         ),
     )
 
@@ -688,10 +691,85 @@ class LLMConfig(BaseSettings):
             help="Override Codex/OpenAI reasoning effort for AutoDoc LLM cleanup",
         )
 
+        anthropic_bool = argparse.BooleanOptionalAction
+        parser.add_argument(
+            "--llm-anthropic-thinking",
+            dest="llm_anthropic_thinking_enabled",
+            action=anthropic_bool,
+            default=None,
+            help="Enable Anthropic extended thinking",
+        )
+        parser.add_argument(
+            "--llm-anthropic-thinking-mode",
+            choices=["auto", "off", "manual", "adaptive"],
+            help="Anthropic thinking mode selector",
+        )
+        parser.add_argument(
+            "--llm-anthropic-thinking-display",
+            choices=["summarized", "omitted"],
+            help="Thinking display mode (adaptive models only)",
+        )
+        parser.add_argument(
+            "--llm-anthropic-thinking-budget-tokens",
+            type=int,
+            help="Token budget for Anthropic manual thinking (min 1024)",
+        )
+        parser.add_argument(
+            "--llm-anthropic-interleaved-thinking",
+            dest="llm_anthropic_interleaved_thinking",
+            action=anthropic_bool,
+            default=None,
+            help="Enable interleaved thinking between tool calls (manual mode)",
+        )
+        parser.add_argument(
+            "--llm-anthropic-effort",
+            choices=["low", "medium", "high", "xhigh", "max"],
+            help="Anthropic effort level",
+        )
+        parser.add_argument(
+            "--llm-anthropic-prompt-caching",
+            dest="llm_anthropic_prompt_caching",
+            action=anthropic_bool,
+            default=None,
+            help="Enable automatic Anthropic prompt caching",
+        )
+        parser.add_argument(
+            "--llm-anthropic-cache-ttl",
+            choices=["5m", "1h"],
+            help="Anthropic prompt cache TTL",
+        )
+        parser.add_argument(
+            "--llm-anthropic-task-budget-tokens",
+            type=int,
+            help="Advisory task budget for agentic loops (Opus 4.7; min 20000)",
+        )
+        parser.add_argument(
+            "--llm-anthropic-context-management",
+            dest="llm_anthropic_context_management_enabled",
+            action=anthropic_bool,
+            default=None,
+            help="Enable automatic Anthropic context management",
+        )
+        parser.add_argument(
+            "--llm-anthropic-clear-thinking-keep-turns",
+            type=int,
+            help="Number of thinking turns to preserve when clearing",
+        )
+        parser.add_argument(
+            "--llm-anthropic-clear-tool-uses-trigger-tokens",
+            type=int,
+            help="Input token threshold that triggers tool-result clearing",
+        )
+        parser.add_argument(
+            "--llm-anthropic-clear-tool-uses-keep",
+            type=int,
+            help="Number of recent tool use/result pairs to keep after clearing",
+        )
+
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load LLM config from environment variables."""
-        config = {}
+        config: dict[str, Any] = {}
 
         if api_key := os.getenv("CHUNKHOUND_LLM_API_KEY"):
             config["api_key"] = api_key
@@ -735,6 +813,67 @@ class LLMConfig(BaseSettings):
             "CHUNKHOUND_LLM_AUTODOC_CLEANUP_REASONING_EFFORT"
         ):
             config["autodoc_cleanup_reasoning_effort"] = cleanup_effort.strip().lower()
+
+        def _bool_env(name: str) -> bool | None:
+            raw = os.getenv(name)
+            if raw is None:
+                return None
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+
+        bool_fields = (
+            ("CHUNKHOUND_LLM_ANTHROPIC_THINKING_ENABLED", "anthropic_thinking_enabled"),
+            (
+                "CHUNKHOUND_LLM_ANTHROPIC_INTERLEAVED_THINKING",
+                "anthropic_interleaved_thinking",
+            ),
+            ("CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING", "anthropic_prompt_caching"),
+            (
+                "CHUNKHOUND_LLM_ANTHROPIC_CONTEXT_MANAGEMENT_ENABLED",
+                "anthropic_context_management_enabled",
+            ),
+        )
+        for env_name, key in bool_fields:
+            bool_val = _bool_env(env_name)
+            if bool_val is not None:
+                config[key] = bool_val
+
+        str_fields = (
+            ("CHUNKHOUND_LLM_ANTHROPIC_THINKING_MODE", "anthropic_thinking_mode"),
+            ("CHUNKHOUND_LLM_ANTHROPIC_THINKING_DISPLAY", "anthropic_thinking_display"),
+            ("CHUNKHOUND_LLM_ANTHROPIC_EFFORT", "anthropic_effort"),
+            ("CHUNKHOUND_LLM_ANTHROPIC_CACHE_TTL", "anthropic_cache_ttl"),
+        )
+        for env_name, key in str_fields:
+            raw = os.getenv(env_name)
+            if raw:
+                config[key] = raw.strip().lower()
+
+        int_fields = (
+            (
+                "CHUNKHOUND_LLM_ANTHROPIC_THINKING_BUDGET_TOKENS",
+                "anthropic_thinking_budget_tokens",
+            ),
+            (
+                "CHUNKHOUND_LLM_ANTHROPIC_TASK_BUDGET_TOKENS",
+                "anthropic_task_budget_tokens",
+            ),
+            (
+                "CHUNKHOUND_LLM_ANTHROPIC_CLEAR_THINKING_KEEP_TURNS",
+                "anthropic_clear_thinking_keep_turns",
+            ),
+            (
+                "CHUNKHOUND_LLM_ANTHROPIC_CLEAR_TOOL_USES_TRIGGER_TOKENS",
+                "anthropic_clear_tool_uses_trigger_tokens",
+            ),
+            (
+                "CHUNKHOUND_LLM_ANTHROPIC_CLEAR_TOOL_USES_KEEP",
+                "anthropic_clear_tool_uses_keep",
+            ),
+        )
+        for env_name, key in int_fields:
+            raw = os.getenv(env_name)
+            if raw:
+                config[key] = int(raw)
 
         return config
 
@@ -804,6 +943,32 @@ class LLMConfig(BaseSettings):
             overrides["autodoc_cleanup_reasoning_effort"] = (
                 args.llm_autodoc_cleanup_reasoning_effort
             )
+
+        anthropic_flag_map = {
+            "llm_anthropic_thinking_enabled": "anthropic_thinking_enabled",
+            "llm_anthropic_thinking_mode": "anthropic_thinking_mode",
+            "llm_anthropic_thinking_display": "anthropic_thinking_display",
+            "llm_anthropic_thinking_budget_tokens": "anthropic_thinking_budget_tokens",
+            "llm_anthropic_interleaved_thinking": "anthropic_interleaved_thinking",
+            "llm_anthropic_effort": "anthropic_effort",
+            "llm_anthropic_prompt_caching": "anthropic_prompt_caching",
+            "llm_anthropic_cache_ttl": "anthropic_cache_ttl",
+            "llm_anthropic_task_budget_tokens": "anthropic_task_budget_tokens",
+            "llm_anthropic_context_management_enabled": (
+                "anthropic_context_management_enabled"
+            ),
+            "llm_anthropic_clear_thinking_keep_turns": (
+                "anthropic_clear_thinking_keep_turns"
+            ),
+            "llm_anthropic_clear_tool_uses_trigger_tokens": (
+                "anthropic_clear_tool_uses_trigger_tokens"
+            ),
+            "llm_anthropic_clear_tool_uses_keep": "anthropic_clear_tool_uses_keep",
+        }
+        for arg_name, config_key in anthropic_flag_map.items():
+            value = getattr(args, arg_name, None)
+            if value is not None:
+                overrides[config_key] = value
 
         return overrides
 
