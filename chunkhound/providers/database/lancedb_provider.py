@@ -1307,7 +1307,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                                 "provider": emb_data["provider"],
                                 "model": emb_data["model"],
                                 "created_time": row["created_time"],
-                                "metadata": row.get("metadata"),  # Preserve metadata
+                                "metadata": _serialize_metadata(
+                                    row.get("metadata")
+                                ),  # Serialize metadata
                             }
                         )
 
