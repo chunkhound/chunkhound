@@ -834,6 +834,7 @@ class WatchmanRealtimeAdapter:
                         "Watchman reconnect failed:",
                     )
                 )
+                self._schedule_post_restore_resync()
                 self._context.refresh_runtime_service_state()
                 self._context.emit_status_update()
                 return
@@ -953,6 +954,15 @@ class WatchmanRealtimeAdapter:
                 self._context.set_error(f"Watchman resync request failed: {error}")
 
         self._context.start_transient_task(_dispatch())
+
+    def _schedule_post_restore_resync(self) -> None:
+        details = {
+            "backend": "watchman",
+            "loss_of_sync_reason": "disconnect",
+            "post_restore_reconciliation": True,
+            "reconnect_state": "restored",
+        }
+        self._schedule_resync_request("disconnect", details)
 
     @staticmethod
     def _latest_session_value(

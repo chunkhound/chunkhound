@@ -524,7 +524,12 @@ class MCPServerBase(ABC):
                 "Watchman startup barrier requested before deferred startup began"
             )
 
-        await asyncio.shield(self._deferred_start_task)
+        try:
+            await asyncio.shield(self._deferred_start_task)
+        except asyncio.CancelledError as error:
+            message = "Watchman deferred startup was cancelled before readiness"
+            self._set_startup_failure(message, phase_name="startup_barrier")
+            raise RuntimeError(message) from error
         if self._startup_failure_message is not None:
             self._set_startup_failure(
                 self._startup_failure_message,

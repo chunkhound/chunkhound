@@ -145,6 +145,54 @@ def test_delete_files_batch_restores_rows_when_hnsw_index_recreation_fails(
     assert provider.delete_files_batch(["orphan_one.py", "orphan_two.py"]) == 2
 
 
+def test_delete_files_batch_restore_uses_bulk_row_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    _, first_chunk_id = _insert_file_with_embedding(provider, "orphan_one.py", 0.1)
+    _, second_chunk_id = _insert_file_with_embedding(provider, "orphan_two.py", 0.4)
+
+    initial_indexes = _get_hnsw_index_names(provider)
+    if not initial_indexes:
+        pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+
+    recreate_attempts = {"count": 0}
+    original_recreate = provider._executor_recreate_vector_index_from_info
+
+    def _fail_once(conn, state, index_info):
+        recreate_attempts["count"] += 1
+        if recreate_attempts["count"] == 1:
+            raise RuntimeError("forced hnsw recreate failure")
+        return original_recreate(conn, state, index_info)
+
+    monkeypatch.setattr(
+        provider, "_executor_recreate_vector_index_from_info", _fail_once
+    )
+    monkeypatch.setattr(
+        provider,
+        "_executor_insert_row_dict",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("rollback should not use single-row restore inserts")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="forced hnsw recreate failure"):
+        provider.delete_files_batch(["orphan_one.py", "orphan_two.py"])
+
+    assert provider.get_file_by_path("orphan_one.py", as_model=False) is not None
+    assert provider.get_file_by_path("orphan_two.py", as_model=False) is not None
+    restored_embeddings = provider.execute_query(
+        "SELECT COUNT(*) AS count FROM embeddings_3 WHERE chunk_id IN (?, ?)",
+        [first_chunk_id, second_chunk_id],
+    )
+    assert restored_embeddings[0]["count"] == 2
+    assert _get_hnsw_index_names(provider) == initial_indexes
+
+
 def test_delete_files_batch_skips_unsafe_hnsw_restore_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

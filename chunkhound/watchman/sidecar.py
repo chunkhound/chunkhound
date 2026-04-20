@@ -491,7 +491,7 @@ class PrivateWatchmanSidecar:
         self._metadata = metadata
         return metadata
 
-    async def stop(self, *, remove_log: bool = False) -> None:
+    async def stop(self, *, remove_log: bool = True) -> None:
         metadata = self._metadata or self.read_metadata()
         pid = None
 

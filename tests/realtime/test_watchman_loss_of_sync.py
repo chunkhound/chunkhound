@@ -452,6 +452,55 @@ async def test_watchman_reconnect_status_reports_retrying_then_restored(
 
 
 @pytest.mark.asyncio
+async def test_watchman_reconnect_restore_requests_post_restore_reconciliation(
+    tmp_path: Path,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    post_restore_event = asyncio.Event()
+    callback_calls: list[tuple[str, dict[str, object] | None]] = []
+
+    async def resync_callback(
+        reason: str, details: dict[str, object] | None
+    ) -> None:
+        callback_calls.append((reason, details))
+        if isinstance(details, dict) and details.get("post_restore_reconciliation"):
+            post_restore_event.set()
+
+    service._resync_callback = resync_callback
+
+    try:
+        await service.start(watch_dir)
+        adapter = service._monitor_adapter
+        assert adapter is not None
+
+        disconnect_process = _active_watchman_disconnect_process(adapter)
+        disconnect_process.terminate()
+
+        restored_stats = await _wait_for_watchman_reconnect_state(
+            service,
+            "restored",
+            timeout=30.0,
+        )
+        await asyncio.wait_for(post_restore_event.wait(), timeout=10.0)
+
+        assert restored_stats["watchman_reconnect"]["last_result"] == "restored"
+        assert any(
+            reason == "realtime_loss_of_sync"
+            and isinstance(details, dict)
+            and details.get("backend") == "watchman"
+            and details.get("loss_of_sync_reason") == "disconnect"
+            and details.get("post_restore_reconciliation") is True
+            and details.get("reconnect_state") == "restored"
+            for reason, details in callback_calls
+        )
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_service_stop_during_reconnect_teardown_does_not_orphan_cli_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

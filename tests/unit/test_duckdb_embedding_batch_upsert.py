@@ -269,6 +269,84 @@ def test_single_row_insert_embedding_uses_true_upsert_contract(
         provider.disconnect(skip_checkpoint=True)
 
 
+def test_legacy_embeddings_migration_coalesces_duplicate_rows(
+    tmp_path: Path,
+) -> None:
+    duckdb = pytest.importorskip("duckdb")
+
+    db_path = tmp_path / "legacy.duckdb"
+    conn = duckdb.connect(str(db_path))
+    try:
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
+        conn.execute("""
+            CREATE TABLE embeddings (
+                id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
+                chunk_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                embedding FLOAT[3],
+                dims INTEGER NOT NULL,
+                created_at TIMESTAMP
+            )
+        """)
+        conn.executemany(
+            """
+            INSERT INTO embeddings
+            (chunk_id, provider, model, embedding, dims, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    7,
+                    "test",
+                    "mini",
+                    [1.0, 1.1, 1.2],
+                    3,
+                    "2026-04-01 00:00:00",
+                ),
+                (
+                    7,
+                    "test",
+                    "mini",
+                    [9.0, 9.1, 9.2],
+                    3,
+                    "2026-04-02 00:00:00",
+                ),
+            ],
+        )
+    finally:
+        conn.close()
+
+    provider = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
+    provider.connect()
+    try:
+        assert provider.execute_query(
+            """
+            SELECT COUNT(*) AS count
+            FROM information_schema.tables
+            WHERE table_name = 'embeddings'
+            """,
+            [],
+        )[0]["count"] == 0
+
+        migrated_rows = provider.execute_query(
+            """
+            SELECT chunk_id, provider, model, embedding, dims
+            FROM embeddings_3
+            ORDER BY chunk_id
+            """,
+            [],
+        )
+        assert len(migrated_rows) == 1
+        assert migrated_rows[0]["chunk_id"] == 7
+        assert migrated_rows[0]["provider"] == "test"
+        assert migrated_rows[0]["model"] == "mini"
+        assert list(migrated_rows[0]["embedding"]) == pytest.approx([9.0, 9.1, 9.2])
+        assert migrated_rows[0]["dims"] == 3
+    finally:
+        provider.disconnect(skip_checkpoint=True)
+
+
 def test_repository_large_batch_uses_true_upsert_contract(tmp_path: Path) -> None:
     pytest.importorskip("duckdb")
 

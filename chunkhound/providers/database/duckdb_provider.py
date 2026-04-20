@@ -1102,10 +1102,18 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
 
         try:
-            # Get all embeddings with their dimensions
+            # Read rows newest-first within each logical upsert key so duplicate
+            # legacy rows collapse onto the latest version during migration.
             embeddings = conn.execute("""
-                SELECT id, chunk_id, provider, model, embedding, dims, created_at
+                SELECT chunk_id, provider, model, embedding, dims, created_at
                 FROM embeddings
+                ORDER BY
+                    dims,
+                    chunk_id,
+                    provider,
+                    model,
+                    created_at DESC NULLS LAST,
+                    id DESC
             """).fetchall()
 
             if not embeddings:
@@ -1113,13 +1121,29 @@ class DuckDBProvider(SerialDatabaseProvider):
                 conn.execute("DROP TABLE embeddings")
                 return
 
-            # Group by dimensions
-            by_dims = {}
+            by_dims: dict[int, list[tuple[Any, Any, Any, Any, int, Any]]] = {}
+            seen_keys_by_dims: dict[int, set[tuple[int, str, str]]] = {}
+            duplicate_count = 0
             for emb in embeddings:
-                dims = emb[5]  # dims column
-                if dims not in by_dims:
-                    by_dims[dims] = []
-                by_dims[dims].append(emb)
+                chunk_id, provider, model, embedding, dims, created_at = emb
+                dims_value = int(dims)
+                dim_rows = by_dims.setdefault(dims_value, [])
+                seen_keys = seen_keys_by_dims.setdefault(dims_value, set())
+                logical_key = (int(chunk_id), str(provider), str(model))
+                if logical_key in seen_keys:
+                    duplicate_count += 1
+                    continue
+                seen_keys.add(logical_key)
+                dim_rows.append(
+                    (
+                        int(chunk_id),
+                        provider,
+                        model,
+                        embedding,
+                        dims_value,
+                        created_at,
+                    )
+                )
 
             # Migrate each dimension group
             for dims, emb_list in by_dims.items():
@@ -1127,18 +1151,19 @@ class DuckDBProvider(SerialDatabaseProvider):
                     conn, state, dims
                 )
                 logger.info(f"Migrating {len(emb_list)} embeddings to {table_name}")
-
-                # Insert data into dimension-specific table
-                for emb in emb_list:
-                    vector_str = str(emb[4])  # embedding column
-                    conn.execute(
-                        f"""
-                        INSERT INTO {table_name} 
-                        (chunk_id, provider, model, embedding, dims, created_at)
-                        VALUES (?, ?, ?, {vector_str}, ?, ?)
+                conn.executemany(
+                    f"""
+                    INSERT INTO {table_name}
+                    (chunk_id, provider, model, embedding, dims, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (chunk_id, provider, model) DO UPDATE
+                    SET
+                        embedding = EXCLUDED.embedding,
+                        dims = EXCLUDED.dims,
+                        created_at = EXCLUDED.created_at
                     """,
-                        [emb[1], emb[2], emb[3], emb[5], emb[6]],
-                    )
+                    emb_list,
+                )
 
             # Drop legacy table
             conn.execute("DROP TABLE embeddings")
@@ -1146,6 +1171,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                 f"Successfully migrated embeddings to {len(by_dims)} "
                 "dimension-specific tables"
             )
+            if duplicate_count:
+                logger.info(
+                    "Coalesced "
+                    f"{duplicate_count} duplicate legacy embedding rows during migration"
+                )
 
         except Exception as e:
             logger.error(f"Failed to migrate legacy embeddings table: {e}")
@@ -1456,6 +1486,23 @@ class DuckDBProvider(SerialDatabaseProvider):
             [row[column] for column in columns],
         )
 
+    def _executor_insert_row_dicts(
+        self, conn: Any, table_name: str, rows: list[dict[str, Any]]
+    ) -> None:
+        """Insert a snapshot batch back into a table with one executemany call."""
+        if not rows:
+            return
+
+        columns = list(rows[0].keys())
+        placeholders = ", ".join(["?"] * len(columns))
+        conn.executemany(
+            f"""
+            INSERT INTO {table_name} ({", ".join(columns)})
+            VALUES ({placeholders})
+            """,
+            [[row[column] for column in columns] for row in rows],
+        )
+
     def _executor_delete_embeddings_for_chunk_ids(
         self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
     ) -> None:
@@ -1656,15 +1703,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             placeholders = ", ".join(["?"] * len(file_ids))
             conn.execute(f"DELETE FROM files WHERE id IN ({placeholders})", file_ids)
 
-        for file_row in snapshot["file_rows"]:
-            self._executor_insert_row_dict(conn, "files", file_row)
-
-        for chunk_row in snapshot["chunk_rows"]:
-            self._executor_insert_row_dict(conn, "chunks", chunk_row)
+        self._executor_insert_row_dicts(conn, "files", snapshot["file_rows"])
+        self._executor_insert_row_dicts(conn, "chunks", snapshot["chunk_rows"])
 
         for table_name, rows in snapshot["embedding_rows_by_table"].items():
-            for row in rows:
-                self._executor_insert_row_dict(conn, table_name, row)
+            self._executor_insert_row_dicts(conn, table_name, rows)
 
         for index_info in original_indexes:
             self._executor_recreate_vector_index_from_info(conn, state, index_info)

@@ -535,6 +535,37 @@ class TestNonBlockingInitialization:
         assert startup["phases"]["startup_barrier"]["completed_at"] is not None
 
     @pytest.mark.asyncio
+    async def test_watchman_startup_barrier_records_deferred_task_cancellation(
+        self, tmp_path: Path
+    ) -> None:
+        """Deferred-start cancellation should surface as a recorded startup failure."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchman"
+
+        server = ConcreteMCPServer(config=config)
+        server._deferred_start_task = asyncio.create_task(asyncio.sleep(60))
+        server._deferred_start_task.cancel()
+
+        with pytest.raises(
+            RuntimeError,
+            match="Watchman deferred startup was cancelled before readiness",
+        ):
+            await server.await_startup_barrier()
+
+        startup = server._scan_progress["realtime"]["startup"]
+        assert startup["state"] == "failed"
+        assert (
+            startup["last_error"]
+            == "Watchman deferred startup was cancelled before readiness"
+        )
+        assert startup["phases"]["startup_barrier"]["state"] == "failed"
+        assert startup["phases"]["startup_barrier"]["completed_at"] is not None
+
+    @pytest.mark.asyncio
     async def test_daemon_run_records_publish_exposure_ready_timestamp(
         self, tmp_path: Path
     ) -> None:

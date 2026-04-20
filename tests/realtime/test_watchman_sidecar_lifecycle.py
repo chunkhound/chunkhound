@@ -165,7 +165,7 @@ async def test_private_watchman_sidecar_start_ignores_poisoned_python_path(
 
 
 @pytest.mark.asyncio
-async def test_private_watchman_sidecar_stop_cleans_state_and_keeps_runtime_cache(
+async def test_private_watchman_sidecar_stop_cleans_state_keeps_runtime_cache_and_allows_restart(
     tmp_path: Path,
 ) -> None:
     repo_root = tmp_path / "repo"
@@ -173,8 +173,8 @@ async def test_private_watchman_sidecar_stop_cleans_state_and_keeps_runtime_cach
     sidecar = PrivateWatchmanSidecar(repo_root)
     runtime = resolve_packaged_watchman_runtime()
 
-    metadata = await sidecar.start()
-    binary_path = Path(metadata.binary_path)
+    first_metadata = await sidecar.start()
+    binary_path = Path(first_metadata.binary_path)
 
     await sidecar.stop()
 
@@ -182,9 +182,14 @@ async def test_private_watchman_sidecar_stop_cleans_state_and_keeps_runtime_cach
     if listener_path_is_filesystem(runtime):
         assert not sidecar.paths.socket_path.exists()
         assert not sidecar.paths.pidfile_path.exists()
-        assert sidecar.paths.logfile_path.exists()
+        assert not sidecar.paths.logfile_path.exists()
     assert not sidecar.paths.statefile_path.exists()
     assert binary_path.is_file()
+
+    restarted_metadata = await sidecar.start()
+    assert restarted_metadata.pid != first_metadata.pid
+
+    await sidecar.stop()
 
 
 @pytest.mark.asyncio
