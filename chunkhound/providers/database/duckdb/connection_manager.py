@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,12 @@ from chunkhound.core.exceptions.core import CompactionError
 # Created in DuckDBProvider._executor_create_schema.
 _REQUIRED_TABLES = frozenset({"files", "chunks"})
 
+# Shared with duckdb_provider.py (the writer) — lives here in the base module
+# to avoid circular imports. duckdb_provider imports these by name and is the
+# sole writer; connection_manager is the sole reader.
+_COMPACTING_PATHS: set[str] = set()
+_COMPACTING_PATHS_LOCK: threading.Lock = threading.Lock()
+
 _LONG_COMPACTION_WARNING_SECONDS = 600  # 10 minutes
 
 # Intent-file phase constants used by both the provider (writer) and
@@ -69,7 +76,7 @@ class DuckDBConnectionManager:
         # Coerce to Path so recovery/compaction code paths work regardless of
         # whether the caller passed a str (e.g. from the registry) or a Path.
         self._db_path: Path | str = (
-            db_path if str(db_path) == ":memory:" else Path(db_path)
+            db_path if str(db_path) == ":memory:" else Path(db_path).resolve()
         )
         self.connection: Any | None = None
         self.config = config
@@ -257,28 +264,35 @@ class DuckDBConnectionManager:
                                     f"Removing stale compaction lock "
                                     f"(PID {pid} reused after reboot)"
                                 )
-                            elif self._compaction_in_progress and pid == os.getpid():
-                                # Our own lock — the provider is mid-compaction
-                                # and reconnecting after the swap. Leave the
-                                # lock for the caller's finally block to clean
-                                # up, and skip the foreign-lock raise. The
-                                # in-process flag is authoritative; the PID
-                                # check is defense-in-depth against legacy
-                                # PID-only locks after PID reuse.
-                                lock_is_stale = False
-                                is_own_lock = True
                             elif pid == os.getpid():
-                                # Same PID as us but no compaction in progress
-                                # — the lock cannot belong to us. Either a
-                                # prior process with the same PID crashed and
-                                # the kernel reused its PID, or a stale legacy
-                                # PID-only lock survived. Remove as stale
-                                # (lock_is_stale stays True).
-                                logger.warning(
-                                    f"Removing stale compaction lock "
-                                    f"(PID {pid} matches ours but no "
-                                    "compaction in progress)"
-                                )
+                                # Same PID — check both the instance flag and
+                                # the process-wide registry to determine intent.
+                                with _COMPACTING_PATHS_LOCK:
+                                    path_is_compacting = str(self._db_path) in _COMPACTING_PATHS
+                                if self._compaction_in_progress:
+                                    # This specific connection manager started
+                                    # the compaction — it's reconnecting after
+                                    # the swap. Leave the lock for the finally
+                                    # block to clean up.
+                                    lock_is_stale = False
+                                    is_own_lock = True
+                                elif path_is_compacting:
+                                    # A different DuckDBProvider instance in
+                                    # the same process is compacting this path.
+                                    # Treat as a live foreign lock.
+                                    lock_is_stale = False
+                                    logger.debug(
+                                        f"Compaction lock held by same process (PID {pid}) via another provider instance; "
+                                        "treating as live foreign lock."
+                                    )
+                                else:
+                                    # Same PID but no active compaction registered
+                                    # — stale lock from PID reuse or prior crash.
+                                    logger.warning(
+                                        f"Removing stale compaction lock "
+                                        f"(PID {pid} matches ours but no "
+                                        "compaction in progress)"
+                                    )
                             else:
                                 # Process alive and lock from current boot
                                 lock_is_stale = False
@@ -313,15 +327,15 @@ class DuckDBConnectionManager:
                     foreign_lock_alive = True
 
             if foreign_lock_alive:
-                # Another process is actively compacting this database. Opening
-                # a second handle here would race EXPORT/IMPORT swap: the
+                # Another process or provider instance is actively compacting this database.
+                # Opening a second handle here would race EXPORT/IMPORT swap: the
                 # exporter uses duckdb.connect(read_only=True) which does NOT
                 # take DuckDB's exclusive write lock, so a concurrent reader
                 # could see a dangling inode after os.replace() (POSIX) or
                 # crash the swap outright (Windows). Fail fast — callers
                 # (CLI repack, CompactionService) surface this as a retry hint.
                 raise CompactionError(
-                    f"Another process is compacting this database "
+                    f"Another compaction is in progress for this database "
                     f"(lock held by live PID). Retry in a few seconds. "
                     f"Lock file: {lock_file}",
                     operation="connection",

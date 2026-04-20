@@ -8,6 +8,7 @@ and mid-swap states.
 import os
 import shutil
 import time
+from collections.abc import Generator
 from pathlib import Path
 
 import duckdb
@@ -17,9 +18,14 @@ from loguru import logger
 from chunkhound.core.exceptions import CompactionError
 from chunkhound.providers.database.duckdb.connection_manager import (
     DuckDBConnectionManager,
+    _COMPACTING_PATHS,
+    _COMPACTING_PATHS_LOCK,
     _REQUIRED_TABLES,
     get_compaction_lock_path,
 )
+from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+
+_COMPACTION_MATCH = "Another compaction is in progress for this database"
 
 
 def _create_valid_duckdb(path: Path) -> None:
@@ -175,6 +181,14 @@ class TestStaleArtifacts:
 class TestLockFileRecovery:
     """Test PID-aware lock file handling on startup."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_compacting_paths(self) -> Generator[None, None, None]:
+        with _COMPACTING_PATHS_LOCK:
+            _COMPACTING_PATHS.clear()
+        yield
+        with _COMPACTING_PATHS_LOCK:
+            _COMPACTING_PATHS.clear()
+
     def test_str_db_path_triggers_recovery(self, tmp_path: Path):
         """A string db_path must still exercise the lock recovery path.
 
@@ -232,7 +246,7 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="Another process is compacting") as exc_info:
+            with pytest.raises(CompactionError, match=_COMPACTION_MATCH) as exc_info:
                 mgr.connect()
             assert exc_info.value.operation == "connection"
             assert lock_path.exists(), "Lock held by live process should be preserved"
@@ -268,7 +282,7 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="Another process is compacting") as exc_info:
+            with pytest.raises(CompactionError, match=_COMPACTION_MATCH) as exc_info:
                 mgr.connect()
             assert exc_info.value.operation == "connection"
             assert lock_path.exists(), (
@@ -311,7 +325,7 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="Another process is compacting") as exc_info:
+            with pytest.raises(CompactionError, match=_COMPACTION_MATCH) as exc_info:
                 mgr.connect()
             assert exc_info.value.operation == "connection"
             assert lock_path.exists(), (
@@ -355,6 +369,24 @@ class TestLockFileRecovery:
             mgr.disconnect()
             lock_path.unlink(missing_ok=True)
             intent_path.unlink(missing_ok=True)
+
+    def test_own_lock_fast_path_without_registry_entry(self, tmp_path: Path):
+        """Instance flag alone is sufficient to bypass CompactionError — registry is not required."""
+        db_path = tmp_path / "test.duckdb"
+        _create_valid_duckdb(db_path)
+        lock_file = get_compaction_lock_path(db_path)
+        lock_file.write_text(f"{os.getpid()}:{int(time.time())}")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr._compaction_in_progress = True
+
+        mgr.connect()  # must NOT raise
+        try:
+            assert mgr.is_connected
+            assert lock_file.exists()  # lock was not deleted
+        finally:
+            mgr.disconnect()
+            lock_file.unlink(missing_ok=True)
 
     def test_allows_connect_legacy_own_lock_via_flag(self, tmp_path: Path):
         """Legacy-format own lock is honored when the in-process flag is set.
@@ -434,7 +466,7 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="Another process is compacting") as exc_info:
+            with pytest.raises(CompactionError, match=_COMPACTION_MATCH) as exc_info:
                 mgr.connect()
             assert exc_info.value.operation == "connection"
 
@@ -470,7 +502,7 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="Another process is compacting") as exc_info:
+            with pytest.raises(CompactionError, match=_COMPACTION_MATCH) as exc_info:
                 mgr.connect()
             assert exc_info.value.operation == "connection"
 
@@ -714,3 +746,103 @@ class TestIntentBasedRecovery:
             assert not intent_path.exists(), "intent should be cleaned up"
         finally:
             mgr.disconnect()
+
+
+class TestSameProcessCompaction:
+    @pytest.fixture(autouse=True)
+    def _reset_compacting_paths(self) -> Generator[None, None, None]:
+        with _COMPACTING_PATHS_LOCK:
+            _COMPACTING_PATHS.clear()
+        yield
+        with _COMPACTING_PATHS_LOCK:
+            _COMPACTING_PATHS.clear()
+
+    def test_second_manager_raises_when_same_process_compacting(self, tmp_path: Path) -> None:
+        """A second DuckDBConnectionManager must not delete a live same-process compaction lock.
+
+        Regression test for the bug where Provider B (same PID, same path) treated
+        Provider A's live lock as stale and unlinked it, allowing mid-EXPORT/IMPORT
+        connection.
+        """
+        db_path = tmp_path / "chunks.duckdb"
+        _create_valid_duckdb(db_path)
+        lock_path = get_compaction_lock_path(db_path)
+
+        try:
+            # Simulate Provider A actively compacting: registered in process-wide set
+            with _COMPACTING_PATHS_LOCK:
+                _COMPACTING_PATHS.add(str(db_path))
+            lock_path.write_text(f"{os.getpid()}:{int(time.time())}")
+            mgr2 = DuckDBConnectionManager(db_path)
+            with pytest.raises(CompactionError, match=_COMPACTION_MATCH) as exc_info:
+                mgr2.connect()
+            assert exc_info.value.operation == "connection"
+            assert lock_path.exists(), "Lock must not be deleted by the second manager"
+        finally:
+            with _COMPACTING_PATHS_LOCK:
+                _COMPACTING_PATHS.discard(str(db_path))
+            lock_path.unlink(missing_ok=True)
+
+    def test_failed_lock_acquisition_does_not_remove_holder_entry(self, tmp_path: Path) -> None:
+        """A compact() that fails at lock acquisition must not remove the holder's registry entry.
+
+        Regression guard for the discard-on-failed-acquisition bug: Provider B registers in
+        _COMPACTING_PATHS then hits FileExistsError — its finally must not discard Provider A's
+        valid entry, or a third connect() would treat A's live lock as stale.
+        """
+        db_path = tmp_path / "chunks.duckdb"
+        _create_valid_duckdb(db_path)
+        lock_path = get_compaction_lock_path(db_path)
+
+        # Provider A: registered in registry AND holds the on-disk lock.
+        with _COMPACTING_PATHS_LOCK:
+            _COMPACTING_PATHS.add(str(db_path))
+        lock_path.write_text(f"{os.getpid()}:{int(time.time())}")
+
+        try:
+            # Provider B calls real production code — it pre-registers in _COMPACTING_PATHS
+            # then hits FileExistsError on lock creation and raises CompactionError.
+            # Provider B never needs a live connection — FileExistsError fires before any DB operation.
+            provider_b = DuckDBProvider(db_path, base_directory=tmp_path)
+            with pytest.raises(CompactionError):
+                # optimize() calls optimize_tables() first (requires connected provider), so we
+                # call the lock-acquisition layer directly to exercise the FileExistsError path
+                # without needing a live connection.
+                provider_b._run_blocking_compaction()
+
+            # A's entry must still be in the registry despite B's failed attempt.
+            with _COMPACTING_PATHS_LOCK:
+                assert str(db_path) in _COMPACTING_PATHS, (
+                    "A's registry entry must survive B's failed lock acquisition"
+                )
+            assert lock_path.exists(), "A's lock file must not be deleted by B's finally"
+
+            # A third manager must still see A's compaction as live.
+            mgr3 = DuckDBConnectionManager(db_path)
+            with pytest.raises(CompactionError, match=_COMPACTION_MATCH):
+                mgr3.connect()
+        finally:
+            with _COMPACTING_PATHS_LOCK:
+                _COMPACTING_PATHS.discard(str(db_path))
+            lock_path.unlink(missing_ok=True)
+
+    def test_second_manager_succeeds_when_lock_file_gone(self, tmp_path: Path) -> None:
+        """Registry entry without a lock file must not block connection.
+
+        Verifies the ordering invariant: the lock file is unlinked before the
+        path is removed from _COMPACTING_PATHS, so a stale registry entry that
+        outlives the file is harmless — connect() gates on file existence first.
+        """
+        db_path = tmp_path / "chunks.duckdb"
+        _create_valid_duckdb(db_path)
+        # Simulate a stale registry entry with no corresponding lock file.
+        with _COMPACTING_PATHS_LOCK:
+            _COMPACTING_PATHS.add(str(db_path))
+        try:
+            mgr = DuckDBConnectionManager(db_path)
+            mgr.connect()  # must succeed — no lock file present
+            assert mgr.is_connected
+            mgr.disconnect()
+        finally:
+            with _COMPACTING_PATHS_LOCK:
+                _COMPACTING_PATHS.discard(str(db_path))
