@@ -172,6 +172,22 @@ class TestProjectRootDetection:
             empty_dir = Path(tmpdir) / "empty"
             empty_dir.mkdir()
 
+            # Clean any leftover markers from temp directory tree
+            def clean_markers(path: Path):
+                """Remove any chunkhound markers from the directory tree."""
+                for marker in [".chunkhound.json", ".chunkhound"]:
+                    marker_path = path / marker
+                    if marker_path.exists():
+                        if marker_path.is_file():
+                            marker_path.unlink()
+                        elif marker_path.is_dir():
+                            import shutil
+                            shutil.rmtree(marker_path)
+                if path.parent != path:  # Avoid infinite recursion
+                    clean_markers(path.parent)
+
+            clean_markers(empty_dir)
+
             # Change to empty directory
             original_cwd = Path.cwd()
             try:

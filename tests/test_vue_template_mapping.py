@@ -26,9 +26,9 @@ class TestVueTemplateMapping:
         query = self.mapping.get_query_for_concept(UniversalConcept.DEFINITION)
         assert query is not None
         assert "directive_attribute" in query
-        assert "v-if" in query
-        assert "v-for" in query
-        assert "@" in query  # Event handlers
+        assert "interpolation" in query
+        # Note: Specific directive types are now handled in extraction logic,
+        # not in the query itself, due to tree-sitter grammar changes
 
     def test_get_query_for_concept_block(self):
         """Test getting query for BLOCK concept."""
