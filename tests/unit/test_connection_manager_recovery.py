@@ -40,6 +40,81 @@ def _create_valid_duckdb(path: Path) -> None:
     conn.close()
 
 
+def _create_searchable_duckdb(path: Path, marker: str) -> None:
+    """Create a minimal valid DB containing searchable chunk content."""
+    conn = duckdb.connect(str(path))
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS files_id_seq")
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS chunks_id_seq")
+    conn.execute("""
+        CREATE TABLE files (
+            id INTEGER PRIMARY KEY DEFAULT nextval('files_id_seq'),
+            path TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            extension TEXT,
+            size INTEGER,
+            modified_time TIMESTAMP,
+            content_hash TEXT,
+            language TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE chunks (
+            id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
+            file_id INTEGER REFERENCES files(id),
+            chunk_type TEXT NOT NULL,
+            symbol TEXT,
+            code TEXT NOT NULL,
+            start_line INTEGER,
+            end_line INTEGER,
+            start_byte INTEGER,
+            end_byte INTEGER,
+            language TEXT,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    file_id = conn.execute(
+        """
+        INSERT INTO files (path, name, extension, size, modified_time, content_hash, language)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+        RETURNING id
+        """,
+        [
+            f"/tmp/{marker}.py",
+            f"{marker}.py",
+            ".py",
+            len(marker),
+            marker,
+            "python",
+        ],
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO chunks (
+            file_id, chunk_type, symbol, code, start_line, end_line,
+            start_byte, end_byte, language, metadata
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            file_id,
+            "function",
+            marker,
+            f"def {marker}():\n    return '{marker}'\n",
+            1,
+            2,
+            0,
+            0,
+            "python",
+            "{}",
+        ],
+    )
+    conn.close()
+
+
 @pytest.fixture
 def foreign_live_pid():
     """Spawn a short-lived subprocess and yield its PID.
@@ -596,9 +671,10 @@ class TestIntentBasedRecovery:
         old_path = db_path.with_suffix(".duckdb.old")
         compact_path = db_path.with_suffix(".compact.duckdb")
         intent_path = Path(str(db_path) + ".swap_intent")
+        marker = "phase2_recovered_marker"
 
         _create_valid_duckdb(old_path)
-        _create_valid_duckdb(compact_path)
+        _create_searchable_duckdb(compact_path, marker)
         intent_path.write_text("phase2")
 
         mgr = DuckDBConnectionManager(db_path)
@@ -608,6 +684,11 @@ class TestIntentBasedRecovery:
             assert not compact_path.exists(), "compact should be consumed/cleaned"
             assert not old_path.exists(), "old should be cleaned after successful swap"
             assert not intent_path.exists(), "intent should be cleaned up"
+            result = mgr.connection.execute(
+                "SELECT code FROM chunks WHERE code LIKE ?",
+                [f"%{marker}%"],
+            ).fetchone()
+            assert result is not None, "Recovered DB should preserve searchable chunk data"
         finally:
             mgr.disconnect()
 
@@ -676,8 +757,9 @@ class TestIntentBasedRecovery:
         db_path = tmp_path / "chunks.duckdb"
         compact_path = db_path.with_suffix(".compact.duckdb")
         intent_path = Path(str(db_path) + ".swap_intent")
+        marker = "phase2_compact_only_marker"
 
-        _create_valid_duckdb(compact_path)
+        _create_searchable_duckdb(compact_path, marker)
         intent_path.write_text("phase2")
 
         mgr = DuckDBConnectionManager(db_path)
@@ -687,9 +769,10 @@ class TestIntentBasedRecovery:
             assert not compact_path.exists(), "compact should be consumed"
             assert not intent_path.exists(), "intent should be cleaned up"
             result = mgr.connection.execute(
-                "SELECT count(*) FROM files"
+                "SELECT code FROM chunks WHERE code LIKE ?",
+                [f"%{marker}%"],
             ).fetchone()
-            assert result == (0,), "Installed DB should have files table"
+            assert result is not None, "Installed DB should preserve searchable chunk data"
         finally:
             mgr.disconnect()
 
