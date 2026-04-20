@@ -964,11 +964,25 @@ class RealtimeIndexingService:
             "watched_directories_count": len(self.watched_directories),  # Added
         }
 
-    async def clear_compaction_deferred_files(self) -> None:
-        """Clear stale compaction-deferral records under the file condition lock."""
+    async def drain_compaction_deferred_files(self) -> set[str]:
+        """Atomically remove and return stale compaction-deferral records."""
         async with self._file_condition:
+            drained = set(self._compaction_deferred_files)
             self._compaction_deferred_files.clear()
             self._file_condition.notify_all()
+            return drained
+
+    async def restore_compaction_deferred_files(self, paths: set[str]) -> None:
+        """Restore deferred compaction paths after a failed catch-up reindex."""
+        if not paths:
+            return
+        async with self._file_condition:
+            self._compaction_deferred_files.update(paths)
+            self._file_condition.notify_all()
+
+    async def clear_compaction_deferred_files(self) -> None:
+        """Clear stale compaction-deferral records under the file condition lock."""
+        await self.drain_compaction_deferred_files()
 
     async def wait_for_monitoring_ready(self, timeout: float = 10.0) -> bool:
         """Wait for filesystem monitoring to be ready."""

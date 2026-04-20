@@ -9,13 +9,21 @@ import asyncio
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
+from chunkhound.mcp_server.base import MCPServerBase
 from chunkhound.mcp_server.tools import execute_tool
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from tests.test_utils import (
+    build_embedding_config_from_dict,
+    create_embedding_manager_for_tests,
+    get_api_key_for_tests,
+    get_embedding_config_for_tests,
+)
 from tests.utils.realtime_test_helpers import (
     remove_file_from_index,
     write_and_index_file,
@@ -25,8 +33,6 @@ from tests.utils.windows_compat import (
     is_ci,
     is_windows,
 )
-
-from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict, create_embedding_manager_for_tests
 
 
 class TestMCPIntegration:
@@ -48,7 +54,6 @@ class TestMCPIntegration:
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Use fake args to prevent find_project_root call that fails in CI
-        from types import SimpleNamespace
         fake_args = SimpleNamespace(path=temp_dir)
         config = Config(
             args=fake_args,
@@ -87,6 +92,7 @@ class TestMCPIntegration:
     async def test_mcp_rejects_during_compaction(self, mcp_setup):
         """MCP tool calls return CompactionError JSON when compaction gate is closed."""
         import json
+
         from chunkhound.mcp_server.common import handle_tool_call
 
         services, _, _, _, _ = mcp_setup
@@ -455,11 +461,7 @@ class NewlyAddedClass:
         from unittest.mock import patch
 
         from chunkhound.services.compaction_service import CompactionService
-        from chunkhound.services.directory_indexing_service import (
-            DirectoryIndexingService,
-        )
-
-        services, _, watch_dir, temp_dir, _ = mcp_setup
+        services, realtime_service, watch_dir, temp_dir, _ = mcp_setup
 
         test_file = watch_dir / "modify_during_compact.py"
         test_file.write_text("def original_marker():\n    return 'OLD'\n")
@@ -492,16 +494,19 @@ class NewlyAddedClass:
             assert export_proceed.wait(timeout=10.0), "export_proceed never set"
             return real_export(db_p, export_dir)
 
+        def debug_log(_message: str, always: bool = False) -> None:
+            del always
+
+        server_stub = SimpleNamespace(
+            config=compaction_config,
+            services=services,
+            realtime_indexing=realtime_service,
+            _target_path=watch_dir,
+            debug_log=debug_log,
+        )
+
         async def reindex_modified() -> None:
-            # Mirror chunkhound/mcp_server/base.py:361-370 — drive the
-            # production reindex path so change detection (mtime/size/
-            # content_hash) discovers the mutated file, rather than
-            # hand-feeding process_file() a known path.
-            indexing_service = DirectoryIndexingService(
-                indexing_coordinator=services.indexing_coordinator,
-                config=compaction_config,
-            )
-            await indexing_service.process_directory(watch_dir, no_embeddings=True)
+            await MCPServerBase._post_compaction_reindex(server_stub)
 
         with patch.object(
             services.provider,

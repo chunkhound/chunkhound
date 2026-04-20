@@ -5,11 +5,19 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
 
-
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["uv", "run", *cmd], cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+def _run(
+    cmd: list[str],
+    cwd: Path | None = None,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["uv", "run", *cmd],
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
 
 
 def test_repack_help() -> None:
@@ -76,11 +84,55 @@ def test_repack_backup_creates_bak_file(tmp_path: Path) -> None:
     )
 
 
+def test_repack_preserves_searchable_data_and_reports_results(tmp_path: Path) -> None:
+    """Non-dry-run repack must preserve searchability and report before/after stats."""
+    marker = "repack_survivor_marker"
+    src = tmp_path / "survivor.py"
+    src.write_text(
+        f"def {marker}():\n"
+        f"    return '{marker}'\n"
+    )
+
+    proc = _run(
+        ["chunkhound", "index", "--no-embeddings", str(tmp_path)],
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    before = _run(
+        ["chunkhound", "search", marker, str(tmp_path), "--regex"],
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert before.returncode == 0, before.stderr
+    assert marker in before.stdout
+
+    repack = _run(
+        ["chunkhound", "repack", str(tmp_path)],
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert repack.returncode == 0, repack.stderr
+    output = repack.stdout
+    assert "Before:" in output
+    assert "After:" in output
+    assert "Saved:" in output or "No size change" in output
+
+    after = _run(
+        ["chunkhound", "search", marker, str(tmp_path), "--regex"],
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert after.returncode == 0, after.stderr
+    assert marker in after.stdout
+
+
 def test_repack_non_duckdb_error() -> None:
     proc = _run(["chunkhound", "repack", "--database-provider", "lancedb"])
     assert proc.returncode != 0
     combined = (proc.stdout + proc.stderr).lower()
-    # Provider-type check must run before database-existence check.
+    # Provider-type check must remain the user-facing failure contract here.
     assert "only supported for duckdb" in combined
 
 

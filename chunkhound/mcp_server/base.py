@@ -356,11 +356,14 @@ class MCPServerBase(ABC):
 
         try:
             self.debug_log("Starting post-compaction reindex...")
+            drained_deferred_files: set[str] = set()
 
             # Clear only stale compaction deferrals before reindex.
             # Genuine realtime failures remain visible until they are resolved.
             if self.realtime_indexing:
-                await self.realtime_indexing.clear_compaction_deferred_files()
+                drained_deferred_files = (
+                    await self.realtime_indexing.drain_compaction_deferred_files()
+                )
 
             # Force reindex: the DB was rebuilt from export, mtime-based
             # skip logic is unreliable after compaction.
@@ -386,7 +389,12 @@ class MCPServerBase(ABC):
             )
 
         except Exception as e:
-            self.debug_log(f"Post-compaction reindex failed: {e}")
+            if self.realtime_indexing and drained_deferred_files:
+                await self.realtime_indexing.restore_compaction_deferred_files(
+                    drained_deferred_files
+                )
+            self.debug_log(f"Post-compaction reindex failed: {e}", always=True)
+            raise
 
     async def cleanup(self) -> None:
         """Clean up resources and close database connection.

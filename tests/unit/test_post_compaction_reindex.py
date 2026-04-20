@@ -10,7 +10,6 @@ import pytest
 
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.mcp_server.base import MCPServerBase
-
 from tests.unit.conftest import CaptureCoordinator
 
 
@@ -48,8 +47,13 @@ async def test_clears_compaction_deferrals_before_reindex(
         def __init__(self) -> None:
             self.deferred_files = {"stale.py"}
 
-        async def clear_compaction_deferred_files(self) -> None:
+        async def drain_compaction_deferred_files(self) -> set[str]:
+            drained = set(self.deferred_files)
             self.deferred_files.clear()
+            return drained
+
+        async def restore_compaction_deferred_files(self, paths: set[str]) -> None:
+            self.deferred_files.update(paths)
 
     realtime = RealtimeStub()
     server.realtime_indexing = realtime
@@ -104,26 +108,74 @@ async def test_skips_when_no_target_path(server: ConcreteMCPServer) -> None:
 
 
 async def test_reindex_error_is_swallowed(server: ConcreteMCPServer) -> None:
-    """_post_compaction_reindex must not propagate exceptions — MCP server must stay alive."""
+    """_post_compaction_reindex must re-raise so CompactionService records it."""
     server.realtime_indexing = MagicMock()
-    server.realtime_indexing.clear_compaction_deferred_files = AsyncMock(
+    server.realtime_indexing.drain_compaction_deferred_files = AsyncMock(
+        return_value=set()
+    )
+    server.services.indexing_coordinator = MagicMock()
+    server.services.indexing_coordinator.process_directory = AsyncMock(
         side_effect=RuntimeError("boom")
     )
-    # Should not raise
-    await server._post_compaction_reindex()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await server._post_compaction_reindex()
 
 
 async def test_reindex_skipped_when_clear_raises(server: ConcreteMCPServer) -> None:
-    """If clear_compaction_deferred_files raises, reindex is not attempted."""
+    """If deferred-state drain raises, reindex is not attempted."""
     coordinator = CaptureCoordinator()
     server.services.indexing_coordinator = coordinator
     server.realtime_indexing = MagicMock()
-    server.realtime_indexing.clear_compaction_deferred_files = AsyncMock(
+    server.realtime_indexing.drain_compaction_deferred_files = AsyncMock(
         side_effect=RuntimeError("fail")
     )
 
-    await server._post_compaction_reindex()  # must not raise
+    with pytest.raises(RuntimeError, match="fail"):
+        await server._post_compaction_reindex()
 
     # A partial-clear state means deferred file records are stale; proceeding
     # with reindex on inconsistent state could silently leave entries un-marked.
     assert coordinator.call_count == 0, "reindex must not be attempted when clear raises"
+
+
+async def test_reindex_failure_restores_deferred_state(
+    server: ConcreteMCPServer,
+) -> None:
+    """Failed catch-up must restore deferred paths for later recovery."""
+    drained = {"stale.py"}
+    server.realtime_indexing = MagicMock()
+    server.realtime_indexing.drain_compaction_deferred_files = AsyncMock(
+        return_value=drained
+    )
+    server.realtime_indexing.restore_compaction_deferred_files = AsyncMock()
+    server.services.indexing_coordinator = MagicMock()
+    server.services.indexing_coordinator.process_directory = AsyncMock(
+        side_effect=RuntimeError("reindex failed")
+    )
+
+    with pytest.raises(RuntimeError, match="reindex failed"):
+        await server._post_compaction_reindex()
+
+    server.realtime_indexing.restore_compaction_deferred_files.assert_awaited_once_with(
+        drained
+    )
+
+
+async def test_successful_reindex_does_not_restore_deferred_state(
+    server: ConcreteMCPServer,
+) -> None:
+    """Successful catch-up keeps drained deferred paths cleared."""
+    drained = {"stale.py"}
+    server.realtime_indexing = MagicMock()
+    server.realtime_indexing.drain_compaction_deferred_files = AsyncMock(
+        return_value=drained
+    )
+    server.realtime_indexing.restore_compaction_deferred_files = AsyncMock()
+    coordinator = CaptureCoordinator()
+    server.services.indexing_coordinator = coordinator
+
+    await server._post_compaction_reindex()
+
+    assert coordinator.call_count == 1
+    server.realtime_indexing.restore_compaction_deferred_files.assert_not_awaited()
