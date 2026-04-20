@@ -240,7 +240,7 @@ async def test_httpx_ssl_verify_env_var_doesnt_work():
         
         # If we get here, either the env var started working OR SSL config was fixed
         assert len(embeddings) == 1
-        print("✓ HTTPX_SSL_VERIFY=0 environment variable now works, OR SSL config was fixed")
+        print("[SUCCESS] HTTPX_SSL_VERIFY=0 environment variable now works, OR SSL config was fixed")
         
     finally:
         # Restore original environment
