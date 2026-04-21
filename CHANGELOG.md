@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Config precedence reordered** — Local `.chunkhound.json` now takes precedence over
   environment variables. If you relied on env vars overriding project-level settings,
   use CLI arguments instead.
+- **`--config` now overrides local `.chunkhound.json`** — Previously, a project-local
+  `.chunkhound.json` took precedence over an explicit `--config` path. Now `--config`
+  wins. If you relied on local `.chunkhound.json` shadowing a shared config file, move
+  that override into CLI arguments.
+- **Missing `--config` / `CHUNKHOUND_CONFIG_FILE` path now raises** — A non-existent
+  config file path used to be silently ignored; it now raises `ValueError` with an
+  actionable message.
+- **`DEFAULT_LLM_TIMEOUT` doubled** — Default LLM request timeout increased from 60 s
+  to 120 s for all providers (was already 120 s for Gemini; now uniform).
 - **HTTP MCP server removed** - ChunkHound now supports stdio transport only for MCP connections
   - `chunkhound mcp http` command removed
   - `--http`, `--port`, `--host` CLI flags removed

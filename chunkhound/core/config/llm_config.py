@@ -57,11 +57,9 @@ class LLMConfig(BaseSettings):
     """
     LLM configuration for ChunkHound deep research.
 
-    Configuration Sources (in order of precedence):
-    1. CLI arguments
-    2. Environment variables (CHUNKHOUND_LLM_*)
-    3. Config files
-    4. Default values
+    Note: At the application level, Config() applies this final precedence order:
+      CLI args > explicit --config file > local .chunkhound.json > env vars > defaults.
+    Within this class, pydantic-settings applies: init kwargs > env vars > defaults.
 
     Environment Variables:
         CHUNKHOUND_LLM_API_KEY=sk-...

@@ -8,6 +8,7 @@ This module provides a unified configuration system with clear precedence:
 5. Default values (lowest priority)
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -110,8 +111,6 @@ class Config(BaseModel):
         if target_dir and target_dir.exists():
             local_config_path = target_dir / ".chunkhound.json"
             if local_config_path.exists() and local_config_path != config_file:
-                import json
-
                 try:
                     with open(local_config_path) as f:
                         local_config = json.load(f)
@@ -135,8 +134,6 @@ class Config(BaseModel):
                 "Check the path or visit https://chunkhound.ai to generate a config."
             )
         if config_file:
-            import json
-
             try:
                 with open(config_file) as f:
                     file_config = json.load(f)
