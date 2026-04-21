@@ -27,6 +27,7 @@ _MCP_INIT_PARAMS = {
     "capabilities": {},
 }
 _READY_TIMEOUT_SECONDS = 60.0
+_MCP_INITIALIZE_TIMEOUT_SECONDS = 60.0
 _SEARCH_TIMEOUT_SECONDS = 30.0
 _SOURCE_FALLBACK_FAILURE_TIMEOUT_SECONDS = 20.0
 _DETERMINISTIC_FAILURE_URL_BASE = "https://127.0.0.1:9/chunkhound-watchman-fail"
@@ -706,7 +707,11 @@ async def _start_proxy_client(
     )
     client = SubprocessJsonRpcClient(proc)
     await client.start()
-    await client.send_request("initialize", _MCP_INIT_PARAMS, timeout=30.0)
+    await client.send_request(
+        "initialize",
+        _MCP_INIT_PARAMS,
+        timeout=_MCP_INITIALIZE_TIMEOUT_SECONDS,
+    )
     await client.send_notification("notifications/initialized", {})
     return proc, client
 
@@ -945,7 +950,11 @@ async def _verify_wheel(wheel_path: Path) -> None:
         stderr_text = ""
         await client.start()
         try:
-            await client.send_request("initialize", _MCP_INIT_PARAMS, timeout=30.0)
+            await client.send_request(
+                "initialize",
+                _MCP_INIT_PARAMS,
+                timeout=_MCP_INITIALIZE_TIMEOUT_SECONDS,
+            )
             await client.send_notification("notifications/initialized", {})
 
             ready_status = await _wait_for_ready(client)
