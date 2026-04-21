@@ -409,16 +409,16 @@ async def test_watchman_unexpected_session_exit_requests_resync_and_restores_mon
                 and call[1].get("watchman_session_alive") is False
             ),
         )
+        stats = await _wait_for_watchman_reconnect_state(
+            service,
+            "restored",
+            timeout=30.0,
+        )
         file_path = watch_dir / "src" / "watchman_reconnect_catchup.py"
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(
             "def watchman_reconnect_catchup():\n    return 7\n",
             encoding="utf-8",
-        )
-        stats = await _wait_for_watchman_reconnect_state(
-            service,
-            "restored",
-            timeout=30.0,
         )
 
         assert any(
