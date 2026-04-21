@@ -25,10 +25,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0  # docs/site version resolution requires tags
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Resolve docs version
+        run: echo "CHUNKHOUND_DOCS_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')" >> "$GITHUB_ENV"
       - run: npm ci --prefix site
       - run: npm run build --prefix site
       - uses: actions/upload-pages-artifact@v4

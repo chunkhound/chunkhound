@@ -25,14 +25,17 @@ function findRepoRoot(): string {
 }
 
 const repoRoot = findRepoRoot();
+const DOCS_VERSION_ENV = "CHUNKHOUND_DOCS_VERSION";
 
 export function getChunkhoundVersion(): string {
+    const envVersion = process.env[DOCS_VERSION_ENV]?.trim();
+    if (envVersion) return normalizeVersion(envVersion);
     // 1. Build-generated _version.py (most precise; matches pip install)
     const versionFile = path.join(repoRoot, "chunkhound/_version.py");
     if (existsSync(versionFile)) {
         const m = readFileSync(versionFile, "utf8")
             .match(/__version__\s*=\s*version\s*=\s*['"]([^'"]+)['"]/);
-        if (m) return cleanDevSuffix(m[1]);
+        if (m) return normalizeVersion(m[1]);
     }
     // 2. Latest git tag (works in any checkout with history)
     try {
@@ -42,7 +45,7 @@ export function getChunkhoundVersion(): string {
         })
             .toString()
             .trim();
-        if (tag) return tag.replace(/^v/, "");
+        if (tag) return normalizeVersion(tag);
     } catch {
         // ignore — fall through to explicit failure
     }
@@ -54,4 +57,8 @@ export function getChunkhoundVersion(): string {
 function cleanDevSuffix(v: string): string {
     // Strip ".devN+gHASH.dYYYYMMDD" so docs show "4.1.0b1" not the dev tag
     return v.replace(/\.dev\d+.*$/, "");
+}
+
+function normalizeVersion(v: string): string {
+    return cleanDevSuffix(v).replace(/^v/, "");
 }

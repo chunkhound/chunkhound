@@ -1,3 +1,4 @@
+import os
 import re
 import subprocess
 import tempfile
@@ -15,6 +16,10 @@ def _clean_dev_suffix(version: str) -> str:
 
 
 def _expected_docs_version() -> str:
+    env_version = os.environ.get("CHUNKHOUND_DOCS_VERSION", "").strip()
+    if env_version:
+        return _normalize_version(env_version)
+
     if VERSION_FILE.exists():
         match = re.search(
             r"__version__\s*=\s*version\s*=\s*['\"]([^'\"]+)['\"]",
@@ -22,7 +27,7 @@ def _expected_docs_version() -> str:
         )
         if match is None:
             raise AssertionError("Could not parse chunkhound/_version.py version")
-        return _clean_dev_suffix(match.group(1))
+        return _normalize_version(match.group(1))
 
     git_describe = subprocess.run(
         ["git", "describe", "--tags", "--abbrev=0"],
@@ -31,7 +36,11 @@ def _expected_docs_version() -> str:
         capture_output=True,
         text=True,
     )
-    return git_describe.stdout.strip().removeprefix("v")
+    return _normalize_version(git_describe.stdout.strip())
+
+
+def _normalize_version(version: str) -> str:
+    return _clean_dev_suffix(version).removeprefix("v")
 
 
 def _extract_astro_code_block_after_marker(html: str, marker: str) -> str:
@@ -127,3 +136,23 @@ import process from "node:process";
         "Unable to resolve ChunkHound version for docs build" in result.stderr
         or "Unable to resolve ChunkHound version for docs build" in result.stdout
     )
+
+
+def test_version_helper_uses_env_version_without_file_or_git_tags() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        script = f"""
+import process from "node:process";
+(async () => {{
+  process.chdir({temp_dir!r});
+
+  const {{ getChunkhoundVersion }} = await import({(ROOT / "site" / "src" / "lib" / "version.ts").as_uri()!r});
+  console.log(getChunkhoundVersion());
+}})();
+"""
+        result = run_tsx_raw(
+            script,
+            check=True,
+            env={**os.environ, "CHUNKHOUND_DOCS_VERSION": "v4.1.0b1"},
+        )
+
+    assert result.stdout.strip() == "4.1.0b1"
