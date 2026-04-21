@@ -5,38 +5,65 @@
 <section class="proven">
     <div class="container">
         <p class="eyebrow">PROVEN AT SCALE</p>
-        <h2 class="heading">50M+ lines of code. Production. Today.</h2>
+        <h2 class="heading">Your laptop outperforms their cluster.</h2>
         <p class="body">
-            ChunkHound indexes a 50M+ line monorepo at Applied Materials.
-            Sharded USearch HNSW vector indexes with 13 formal invariants.
-            Search latency stays flat as your codebase grows.
+            Sourcegraph needs Kubernetes. Augment Code needs their servers. GitHub Copilot's
+            @workspace tops out before your monorepo does. ChunkHound indexes your entire
+            codebase on your own machine — no cloud account, no vendor, no code leaving your
+            network. MIT licensed. Community built. Applied Materials runs 50M+ lines on a
+            developer laptop today.
         </p>
 
-        <div class="card">
-            <div class="bar-row">
-                <span class="bar-label">1K files</span>
-                <div class="bar" style="width: 20%"></div>
-                <span class="bar-result">instant</span>
-            </div>
-            <div class="bar-row">
-                <span class="bar-label">50K files</span>
-                <div class="bar" style="width: 50%"></div>
-                <span class="bar-result">&lt;1s</span>
-            </div>
-            <div class="bar-row">
-                <span class="bar-label">50M+ LOC</span>
-                <div class="bar" style="width: 85%"></div>
-                <span class="bar-result">still fast</span>
-            </div>
+        <div class="compare-card">
+            <table class="compare-table">
+                <thead>
+                    <tr>
+                        <th class="col-feature"></th>
+                        <th class="col-them">The alternatives</th>
+                        <th class="col-us">ChunkHound</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="feature-label">Kubernetes cluster</td>
+                        <td class="val-bad">required</td>
+                        <td class="val-good">not needed</td>
+                    </tr>
+                    <tr>
+                        <td class="feature-label">H100 / GPU server</td>
+                        <td class="val-bad">required</td>
+                        <td class="val-good">not needed</td>
+                    </tr>
+                    <tr>
+                        <td class="feature-label">Vendor subscription</td>
+                        <td class="val-bad">required</td>
+                        <td class="val-good">MIT licensed</td>
+                    </tr>
+                    <tr>
+                        <td class="feature-label">Code leaves network</td>
+                        <td class="val-bad">yes</td>
+                        <td class="val-good">never</td>
+                    </tr>
+                    <tr>
+                        <td class="feature-label">Closed, proprietary</td>
+                        <td class="val-bad">yes</td>
+                        <td class="val-good">open source</td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
 
-        <blockquote class="testimonial">
-            &ldquo;We've compressed what used to take 2–3 months down to 2–3
-            days across our 50M+ line monorepo.&rdquo;
-            <cite>— Ofir Rozenfeld, Applied Materials</cite>
-        </blockquote>
+        <div class="proof-receipt">
+            <a class="receipt-org" href="https://www.appliedmaterials.com" target="_blank" rel="noopener">Applied Materials</a>
+            <p class="receipt-facts">50M+ lines · 1 developer laptop · 0 bytes sent · MIT licensed · production today</p>
+        </div>
     </div>
 </section>
+
+<script>
+  import { setupScrollAnimation } from "../scripts/scroll-observer.ts";
+  setupScrollAnimation(".proven");
+</script>
 
 <style>
     .proven {
@@ -72,68 +99,188 @@
         line-height: var(--lh-base);
         color: var(--text-secondary);
         margin-bottom: var(--space-6);
-        max-width: 640px;
+        max-width: 720px;
         margin-left: auto;
         margin-right: auto;
     }
 
-    .card {
+    /* ---- Comparison card ---- */
+    .compare-card {
         background: var(--code-bg);
         border-radius: var(--radius-xl);
-        padding: var(--space-5) var(--space-6);
-        max-width: 600px;
-        margin: 0 auto;
-        display: flex;
-        flex-direction: column;
-        gap: var(--space-3);
+        padding: var(--space-6);
+        max-width: 720px;
+        margin: 0 auto var(--space-7);
+        text-align: left;
+        overflow-x: auto;
     }
 
-    .bar-row {
-        display: flex;
-        align-items: center;
-        gap: 0;
-    }
-
-    .bar-label {
+    .compare-table {
+        width: 100%;
+        border-collapse: collapse;
         font-family: "JetBrains Mono", monospace;
         font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+    }
+
+    .compare-table thead th {
+        font-size: var(--text-xs);
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
         color: var(--code-text);
-        width: 90px;
-        text-align: left;
+        opacity: 0.55;
+        padding-bottom: var(--space-3);
+        border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .col-feature {
+        width: 40%;
+    }
+
+    .col-them,
+    .col-us {
+        width: 30%;
+        text-align: center;
+    }
+
+    .compare-table tbody tr {
+        border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .compare-table tbody tr:last-child {
+        border-bottom: none;
+    }
+
+    .compare-table tbody td {
+        padding: var(--space-3) 0;
+    }
+
+    .feature-label {
+        color: var(--code-text);
+    }
+
+    .val-bad {
+        color: var(--code-text);
+        opacity: 0.4;
+        text-align: center;
+    }
+
+    .val-good {
+        color: var(--primary);
+        font-weight: 600;
+        text-align: center;
+    }
+
+    @media (max-width: 640px) {
+        .compare-card {
+            padding: var(--space-4);
+        }
+
+        .compare-table {
+            font-size: var(--text-xs);
+        }
+    }
+
+    /* ---- Proof receipt ---- */
+    .proof-receipt {
+        display: flex;
+        align-items: baseline;
+        justify-content: center;
+        gap: var(--space-3);
+        flex-wrap: wrap;
+        font-family: "JetBrains Mono", monospace;
+        padding: var(--space-4) 0;
+    }
+
+    .receipt-org {
+        color: var(--link);
+        font-size: var(--text-sm);
+        font-weight: 600;
+        text-decoration: none;
+        white-space: nowrap;
         flex-shrink: 0;
     }
 
-    .bar {
-        height: 28px;
-        background: var(--primary);
-        border-radius: var(--radius-sm);
+    .receipt-org:hover {
+        color: var(--link-hover);
+        text-decoration: underline;
     }
 
-    .bar-result {
-        font-size: var(--text-sm);
-        color: var(--code-text);
-        margin-left: var(--space-3);
-        white-space: nowrap;
-    }
-
-    .testimonial {
-        margin: var(--space-7) auto 0;
-        max-width: 600px;
-        padding: var(--space-4) var(--space-5);
-        border-left: var(--border-w-accent) solid var(--primary);
-        text-align: left;
-        font-size: var(--text-base);
-        line-height: var(--lh-base);
+    .receipt-org::after {
+        content: " ·";
         color: var(--text-secondary);
-        font-style: italic;
+        font-weight: 400;
+        text-decoration: none;
     }
 
-    .testimonial cite {
-        display: block;
-        margin-top: var(--space-2);
-        font-style: normal;
-        font-weight: 600;
+    .receipt-facts {
         font-size: var(--text-sm);
-        color: var(--text-primary);
+        line-height: var(--lh-sm);
+        color: var(--text-secondary);
+    }
+
+    /* ============================================================
+       SCROLL ANIMATIONS — progressive enhancement via .js-animate
+    ============================================================ */
+
+    .js-animate .compare-card {
+        opacity: 0;
+        transform: translateY(14px);
+        transition:
+            opacity 0.5s ease 0.3s,
+            transform 0.5s ease 0.3s;
+    }
+
+    .js-animate .proof-receipt {
+        opacity: 0;
+        transition: opacity 0.45s ease 0.55s;
+    }
+
+    .is-visible .compare-card {
+        opacity: 1;
+        transform: none;
+    }
+
+    .is-visible .proof-receipt {
+        opacity: 1;
+    }
+
+    /* Text element entrance animations */
+    .js-animate .eyebrow,
+    .js-animate .heading,
+    .js-animate .body {
+        opacity: 0;
+        transform: translateY(18px);
+        transition: opacity 0.55s ease, transform 0.55s ease;
+    }
+    .is-visible .eyebrow { opacity: 1; transform: none; transition-delay: 0s; }
+    .is-visible .heading { opacity: 1; transform: none; transition-delay: 0.1s; }
+    .is-visible .body    { opacity: 1; transform: none; transition-delay: 0.2s; }
+
+    /* Sequential table row reveals */
+    @keyframes stepReveal {
+        from { opacity: 0; transform: translateY(7px); }
+        to   { opacity: 1; transform: translateY(0);   }
+    }
+
+    .js-animate .compare-table tbody tr { opacity: 0; }
+
+    .is-visible .compare-table tbody tr:nth-child(1) { animation: stepReveal 0.3s ease 0.7s both; }
+    .is-visible .compare-table tbody tr:nth-child(2) { animation: stepReveal 0.3s ease 0.85s both; }
+    .is-visible .compare-table tbody tr:nth-child(3) { animation: stepReveal 0.3s ease 1.0s both; }
+    .is-visible .compare-table tbody tr:nth-child(4) { animation: stepReveal 0.3s ease 1.15s both; }
+    .is-visible .compare-table tbody tr:nth-child(5) { animation: stepReveal 0.3s ease 1.3s both; }
+
+    /* Reduced-motion overrides in CSS */
+    @media (prefers-reduced-motion: reduce) {
+        .js-animate .eyebrow,
+        .js-animate .heading,
+        .js-animate .body,
+        .js-animate .compare-card,
+        .js-animate .proof-receipt {
+            opacity: 1; transform: none; transition: none;
+        }
+        .js-animate .compare-table tbody tr { opacity: 1; animation: none !important; }
     }
 </style>

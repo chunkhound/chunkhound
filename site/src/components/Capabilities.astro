@@ -44,13 +44,7 @@ const capabilities = [
 <section id="capabilities" class="capabilities">
   <div class="container">
     <p class="eyebrow">CAPABILITIES</p>
-    <h2 class="heading">What no other tool can do</h2>
-
-    <blockquote class="social-proof">
-      &ldquo;An absolute beast at reading multiple large repos — what would take
-      a human days or plain Claude Code multiple attempts.&rdquo;
-      <cite>— @flrk, Discord</cite>
-    </blockquote>
+    <h2 class="heading">Seven capabilities, one semantic index</h2>
 
     <div class="grid">
       {capabilities.map((cap) => (
@@ -61,6 +55,11 @@ const capabilities = [
         </div>
       ))}
     </div>
+
+    <blockquote class="cap-quote">
+      &ldquo;Chunkhound has been an absolute beast in reading multiple large repos in such extents that would take a human days or the plain claude code setup multiple attempts to get it (at least somewhat) right.&rdquo;
+      <cite>— @flrk, co-founder of <a href="https://kimara.ai/" target="_blank" rel="noopener">Kimara AI</a></cite>
+    </blockquote>
   </div>
 </section>
 
@@ -92,22 +91,6 @@ const capabilities = [
     color: var(--text-primary);
     text-align: center;
     margin-bottom: var(--space-5);
-  }
-
-  .social-proof {
-    font-size: var(--text-sm);
-    line-height: var(--lh-sm);
-    color: var(--text-secondary);
-    font-style: italic;
-    text-align: center;
-    max-width: 600px;
-    margin: 0 auto var(--space-7);
-  }
-
-  .social-proof cite {
-    font-style: normal;
-    font-weight: 600;
-    color: var(--text-secondary);
   }
 
   .grid {
@@ -144,6 +127,49 @@ const capabilities = [
     line-height: var(--lh-sm);
     color: var(--text-secondary);
     flex: 1;
+  }
+
+  .cap-quote {
+    margin: var(--space-6) auto 0;
+    max-width: 720px;
+    padding: 0 var(--space-5);
+    text-align: center;
+    font-size: var(--text-base);
+    line-height: var(--lh-base);
+    font-weight: 400;
+    color: var(--text-secondary);
+    font-style: italic;
+  }
+
+  .cap-quote::before {
+    content: '\201C';
+    display: block;
+    font-size: 3rem;
+    line-height: 1;
+    font-weight: 700;
+    font-style: normal;
+    color: var(--primary);
+    margin-bottom: var(--space-2);
+  }
+
+  .cap-quote cite {
+    display: block;
+    margin-top: var(--space-2);
+    font-style: normal;
+    font-weight: 600;
+    font-size: var(--text-xs);
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+  }
+
+  .cap-quote a {
+    color: var(--link);
+    text-decoration: none;
+  }
+
+  .cap-quote a:hover {
+    color: var(--link-hover);
+    text-decoration: underline;
   }
 
   @media (max-width: 768px) {
