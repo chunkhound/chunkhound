@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -41,17 +42,17 @@ async def test_async_main_shows_web_configurator_banner_for_tty(
             ["Missing required configuration: embedding provider"],
         ),
     )
-    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
-    monkeypatch.setattr("sys.stderr.isatty", lambda: False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
 
     with pytest.raises(SystemExit) as excinfo:
         await cli_main.async_main()
 
     assert excinfo.value.code == 1
-    out = capsys.readouterr().out
-    assert "Generate a config with the web configurator" in out
-    assert "https://chunkhound.ai" in out
-    assert ".chunkhound.json" in out
+    captured = capsys.readouterr()
+    assert "Generate a config with the web configurator" in captured.err
+    assert "https://chunkhound.ai" in captured.err
+    assert ".chunkhound.json" in captured.err
+    assert captured.out == ""
 
 
 @pytest.mark.asyncio
@@ -75,18 +76,18 @@ async def test_async_main_shows_web_configurator_banner_for_llm_command_tty(
             ["Missing required configuration: llm.api_key"],
         ),
     )
-    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
-    monkeypatch.setattr("sys.stderr.isatty", lambda: False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
 
     with pytest.raises(SystemExit) as excinfo:
         await cli_main.async_main()
 
     assert excinfo.value.code == 1
-    out = capsys.readouterr().out
-    assert "Generate a config with the web configurator" in out
-    assert "https://chunkhound.ai" in out
-    assert ".chunkhound.json" in out
-    assert "--no-embeddings" not in out
+    captured = capsys.readouterr()
+    assert "Generate a config with the web configurator" in captured.err
+    assert "https://chunkhound.ai" in captured.err
+    assert ".chunkhound.json" in captured.err
+    assert "--no-embeddings" not in captured.err
+    assert captured.out == ""
 
 
 @pytest.mark.asyncio
@@ -110,50 +111,18 @@ async def test_async_main_skips_web_configurator_banner_for_non_tty(
             ["Missing required configuration: embedding provider"],
         ),
     )
-    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
-    monkeypatch.setattr("sys.stderr.isatty", lambda: False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: False)
 
     with pytest.raises(SystemExit) as excinfo:
         await cli_main.async_main()
 
     assert excinfo.value.code == 1
-    out = capsys.readouterr().out
-    assert "Generate a config with the web configurator" not in out
-    assert "To fix this, you can:" not in out
-    assert "https://chunkhound.ai" not in out
-
-
-@pytest.mark.asyncio
-async def test_async_main_shows_web_configurator_banner_when_stdout_is_redirected_but_stderr_is_tty(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    args = SimpleNamespace(
-        command="index",
-        verbose=False,
-        simulate=False,
-        check_ignores=False,
-    )
-    monkeypatch.setattr(cli_main, "create_parser", lambda: _Parser(args))
-    monkeypatch.setattr(cli_main, "setup_logging", lambda _verbose: None)
-    monkeypatch.setattr(
-        cli_main,
-        "create_validated_config",
-        lambda _args, _command: (
-            object(),
-            ["Missing required configuration: embedding provider"],
-        ),
-    )
-    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
-    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
-
-    with pytest.raises(SystemExit) as excinfo:
-        await cli_main.async_main()
-
-    assert excinfo.value.code == 1
-    out = capsys.readouterr().out
-    assert "Generate a config with the web configurator" in out
-    assert "https://chunkhound.ai" in out
+    captured = capsys.readouterr()
+    assert "Generate a config with the web configurator" not in captured.err
+    assert "To fix this, you can:" not in captured.err
+    # Brief one-line hint is always emitted even for non-TTY (useful in CI/scripts).
+    assert "Hint: Create a .chunkhound.json config file" in captured.err
+    assert captured.out == ""
 
 
 def test_create_validated_config_reports_custom_llm_endpoint_missing_model(

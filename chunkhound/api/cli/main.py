@@ -5,7 +5,6 @@ import asyncio
 import logging as _pylogging
 import multiprocessing
 import sys
-from pathlib import Path
 
 from loguru import logger
 
@@ -95,7 +94,7 @@ async def async_main() -> None:
     setup_logging(getattr(args, "verbose", False))
 
     # Validate args and create config
-    # Special-case: index subtools (--simulate, --check-ignores) never require embeddings
+    # Special-case: index subtools (--simulate, --check-ignores) skip embeddings
     if args.command == "index" and (
         getattr(args, "simulate", False) or getattr(args, "check_ignores", False)
     ):
@@ -111,7 +110,7 @@ async def async_main() -> None:
     config, validation_errors = create_validated_config(args, args.command)
 
     if validation_errors:
-        should_show_web_banner = sys.stdout.isatty() or sys.stderr.isatty()
+        should_show_web_banner = sys.stderr.isatty()
         logger.error("Configuration error — see details below.")
         if should_show_web_banner:
             print(
@@ -119,7 +118,8 @@ async def async_main() -> None:
                 "Generate a config with the web configurator:\n"
                 "  https://chunkhound.ai\n"
                 "Or create .chunkhound.json manually.\n"
-                "Offline docs: https://chunkhound.ai/docs/configuration/\n"
+                "Offline docs: https://chunkhound.ai/docs/configuration/\n",
+                file=sys.stderr,
             )
 
         # Check if this is an embedding-related error
@@ -131,17 +131,24 @@ async def async_main() -> None:
         for error in validation_errors:
             logger.error(f"Error: {error}")
 
-        logger.warning("Hint: Create a .chunkhound.json config file — docs: https://chunkhound.ai/docs/configuration/")
+        # Always emit the core hint so non-interactive environments see it.
+        print(
+            "Hint: Create a .chunkhound.json config file"
+            " — docs: https://chunkhound.ai/docs/configuration/",
+            file=sys.stderr,
+        )
 
-        # Show helpful fix suggestions for interactive terminals.
+        # Show detailed steps only for interactive terminals.
         if should_show_web_banner:
-            # Use print() for stdout output to match test expectations
-            print("To fix this, you can:")
-            print("  1. Generate a config at https://chunkhound.ai")
-            print("  2. Create a .chunkhound.json file manually")
-            print("  3. Read the config docs at https://chunkhound.ai/docs/configuration/")
+            print("To fix this, you can:", file=sys.stderr)
+            print("  1. Generate a config at https://chunkhound.ai", file=sys.stderr)
+            print("  2. Create a .chunkhound.json file manually", file=sys.stderr)
+            print(
+                "  3. Read the config docs at https://chunkhound.ai/docs/configuration/",
+                file=sys.stderr,
+            )
             if embedding_error and args.command == "index":
-                print("  4. Use --no-embeddings to skip embeddings")
+                print("  4. Use --no-embeddings to skip embeddings", file=sys.stderr)
 
         sys.exit(1)
 
