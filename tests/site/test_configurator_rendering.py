@@ -32,13 +32,16 @@ def test_full_mode_heredoc_opener_keeps_initial_tokenization_across_selections(
     alternate_output = _render_full_output("vllm-embed", "grok", "cursor")
 
     assert "echo .chunkhound.json >> .gitignore" in default_output["copy"]
-    assert "cat > .chunkhound.json <<'EOF'" in default_output["copy"]
+    assert "cat > .chunkhound.json <<'CHUNKHOUND_EOF'" in default_output["copy"]
     assert "echo .chunkhound.json >> .gitignore" in alternate_output["copy"]
-    assert "cat > .chunkhound.json <<'EOF'" in alternate_output["copy"]
+    assert "cat > .chunkhound.json <<'CHUNKHOUND_EOF'" in alternate_output["copy"]
     assert ".chunkhound.json" in default_output["html"]
     assert ".chunkhound.json" in alternate_output["html"]
-    assert "<<'EOF'" in default_output["copy"]
-    assert "<<'EOF'" in alternate_output["copy"]
+    assert "<<'CHUNKHOUND_EOF'" in default_output["copy"]
+    assert "<<'CHUNKHOUND_EOF'" in alternate_output["copy"]
+    assert "\nCHUNKHOUND_EOF" in default_output["copy"]
+    assert "CHUNKHOUND_EOF" in default_output["html"]
+    assert "CHUNKHOUND_EOF" in alternate_output["html"]
 
 
 def test_full_mode_renderer_outputs_stable_html_and_copy_for_non_default_selection(
@@ -46,9 +49,10 @@ def test_full_mode_renderer_outputs_stable_html_and_copy_for_non_default_selecti
     rendered = _render_full_output("ollama-embed", "codex-cli", "vscode")
 
     assert "echo .chunkhound.json >> .gitignore" in rendered["copy"]
-    assert "cat > .chunkhound.json <<'EOF'" in rendered["copy"]
+    assert "cat > .chunkhound.json <<'CHUNKHOUND_EOF'" in rendered["copy"]
     assert "mkdir -p .vscode" in rendered["copy"]
-    assert "cat > .vscode/mcp.json <<'EOF'" in rendered["copy"]
+    assert "cat > .vscode/mcp.json <<'CHUNKHOUND_EOF'" in rendered["copy"]
+    assert "\nCHUNKHOUND_EOF" in rendered["copy"]
     assert "qwen3-embedding" in rendered["html"]
     assert "codex-cli" in rendered["html"]
     assert '<span class="json-comment">' in rendered["html"]
@@ -72,7 +76,7 @@ if (!embedding || !llm) {
 console.log(JSON.stringify(buildCompactConfiguratorOutput(embedding, llm, 'cursor')));
 """
     rendered = run_tsx_json(script)
-    assert "\nmkdir -p .cursor\necho " in rendered["copy"]
+    assert "\nmkdir -p .cursor\ncat > " in rendered["copy"]
 
 
 def test_compact_mode_skips_parent_directory_creation_for_root_editor_files() -> None:
@@ -93,7 +97,8 @@ console.log(JSON.stringify(buildCompactConfiguratorOutput(embedding, llm, 'openc
 """
     rendered = run_tsx_json(script)
     assert "\nmkdir -p " not in rendered["copy"]
-    assert "\necho '{\"mcp\"" in rendered["copy"]
+    assert "\ncat > opencode.json <<'CHUNKHOUND_EOF'\n" in rendered["copy"]
+    assert "\nCHUNKHOUND_EOF" in rendered["copy"]
 
 
 def test_full_mode_renders_powershell_commands_for_windows_selection() -> None:

@@ -311,7 +311,8 @@ function getEditorFilePath(
     if (platform === "powershell" && editor.mcpFilePowerShell) {
         return editor.mcpFilePowerShell;
     }
-    return editor.mcpFile!;
+    if (!editor.mcpFile) throw new Error(`Editor '${editor.id}' is missing mcpFile`);
+    return editor.mcpFile;
 }
 
 function buildGitignoreCommand(platform: ConfiguratorPlatform): string {
@@ -338,7 +339,7 @@ function buildJsonWriteCommand(
         return withParentDirSetup(filename, writeCommand, platform);
     }
 
-    const writeCommand = `cat > ${filename} <<'EOF'\n${content}\nEOF`;
+    const writeCommand = `cat > ${filename} <<'CHUNKHOUND_EOF'\n${content}\nCHUNKHOUND_EOF`;
     return withParentDirSetup(filename, writeCommand, platform);
 }
 
@@ -347,16 +348,7 @@ export function echoCommand(
     content: ConfigRecord,
     platform: ConfiguratorPlatform = DEFAULT_PLATFORM,
 ): string {
-    if (platform === "powershell") {
-        return buildJsonWriteCommand(
-            filename,
-            JSON.stringify(content, null, 2),
-            platform,
-        );
-    }
-
-    const writeCommand = `echo '${JSON.stringify(content)}' > ${filename}`;
-    return withParentDirSetup(filename, writeCommand, platform);
+    return buildJsonWriteCommand(filename, JSON.stringify(content, null, 2), platform);
 }
 
 export function buildChunkhoundConfig(
@@ -388,7 +380,7 @@ export function buildEditorCommands(
         editors.map((editor) => [
             editor.id,
             editor.rawCmd ??
-                echoCommand(getEditorFilePath(editor, platform), editor.mcp!, platform),
+                echoCommand(getEditorFilePath(editor, platform), editor.mcp ?? {}, platform),
         ]),
     );
 }
@@ -405,7 +397,7 @@ export function buildPrettyEditorCommand(
             plainCopy: editor.rawCmd,
         };
     }
-    const { plain, html } = prettifyJsonBlock(editor.mcp!);
+    const { plain, html } = prettifyJsonBlock(editor.mcp ?? {});
     const editorFilePath = getEditorFilePath(editor, platform);
     const shell = buildJsonWriteCommand(editorFilePath, plain, platform);
     const htmlOut = renderMixedJsonWriteBlock(
@@ -706,9 +698,9 @@ function renderMixedJsonWriteBlock(
     }
 
     htmlLines.push(
-        highlightShellLine(`cat > ${filename} <<'EOF'`),
+        highlightShellLine(`cat > ${filename} <<'CHUNKHOUND_EOF'`),
         ...jsonHtmlLines,
-        highlightShellLine("EOF"),
+        highlightShellLine("CHUNKHOUND_EOF"),
     );
     return htmlLines.join("\n");
 }
@@ -743,10 +735,7 @@ export function buildPrettyConfigJson(
     lines.push({ text: "}" });
 
     const cleanJson = lines.map((l) => l.text).join("\n");
-    const plainCopy =
-        platform === "powershell"
-            ? buildJsonWriteCommand(".chunkhound.json", cleanJson, platform)
-            : `cat > .chunkhound.json <<'EOF'\n${cleanJson}\nEOF`;
+    const plainCopy = buildJsonWriteCommand(".chunkhound.json", cleanJson, platform);
     const htmlAnnotated = renderMixedJsonWriteBlock(
         ".chunkhound.json",
         renderAnnotatedJsonLines(lines),
