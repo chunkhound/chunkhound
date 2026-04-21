@@ -8,15 +8,20 @@ import psutil
 import pytest
 
 from chunkhound.mcp_server.status import derive_daemon_status
-from chunkhound.services.realtime_indexing_service import (
-    RealtimeIndexingService,
-    WatchmanRealtimeAdapter,
-)
+from chunkhound.services.realtime_indexing_service import WatchmanRealtimeAdapter
 from tests.helpers.watchman_realtime import (
     active_session_close_handle as _active_session_close_handle,
+)
+from tests.helpers.watchman_realtime import (
     active_watchman_disconnect_process as _active_watchman_disconnect_process,
+)
+from tests.helpers.watchman_realtime import (
     build_watchman_service as _build_watchman_service,
+)
+from tests.helpers.watchman_realtime import (
     wait_for_logical_indexed as _wait_for_logical_indexed,
+)
+from tests.helpers.watchman_realtime import (
     wait_for_watchman_reconnect_state as _wait_for_watchman_reconnect_state,
 )
 
@@ -458,15 +463,11 @@ async def test_watchman_reconnect_restore_requests_post_restore_reconciliation(
     watch_dir = tmp_path / "watchman_project"
     watch_dir.mkdir(parents=True)
     service, services = _build_watchman_service(watch_dir)
-    post_restore_event = asyncio.Event()
-    callback_calls: list[tuple[str, dict[str, object] | None]] = []
 
     async def resync_callback(
         reason: str, details: dict[str, object] | None
     ) -> None:
-        callback_calls.append((reason, details))
-        if isinstance(details, dict) and details.get("post_restore_reconciliation"):
-            post_restore_event.set()
+        del reason, details
 
     service._resync_callback = resync_callback
 
@@ -483,18 +484,16 @@ async def test_watchman_reconnect_restore_requests_post_restore_reconciliation(
             "restored",
             timeout=30.0,
         )
-        await asyncio.wait_for(post_restore_event.wait(), timeout=10.0)
 
+        post_restore_details = restored_stats["resync"]["last_details"]
         assert restored_stats["watchman_reconnect"]["last_result"] == "restored"
-        assert any(
-            reason == "realtime_loss_of_sync"
-            and isinstance(details, dict)
-            and details.get("backend") == "watchman"
-            and details.get("loss_of_sync_reason") == "disconnect"
-            and details.get("post_restore_reconciliation") is True
-            and details.get("reconnect_state") == "restored"
-            for reason, details in callback_calls
-        )
+        assert restored_stats["resync"]["last_reason"] == "realtime_loss_of_sync"
+        assert post_restore_details == {
+            "backend": "watchman",
+            "loss_of_sync_reason": "disconnect",
+            "post_restore_reconciliation": True,
+            "reconnect_state": "restored",
+        }
     finally:
         await service.stop()
         services.provider.disconnect()

@@ -823,18 +823,18 @@ class WatchmanRealtimeAdapter:
                     )
                     continue
 
-                self._reconnect_state = "restored"
-                self._reconnect_retry_delay_seconds = None
-                self._last_reconnect_completed_at = self._context.utc_now()
-                self._last_reconnect_result = "restored"
-                self._last_reconnect_error = None
                 self._context.clear_error_state(
                     prefixes=(
                         "Watchman session disconnected:",
                         "Watchman reconnect failed:",
                     )
                 )
-                self._schedule_post_restore_resync()
+                await self._request_post_restore_resync()
+                self._reconnect_state = "restored"
+                self._reconnect_retry_delay_seconds = None
+                self._last_reconnect_completed_at = self._context.utc_now()
+                self._last_reconnect_result = "restored"
+                self._last_reconnect_error = None
                 self._context.refresh_runtime_service_state()
                 self._context.emit_status_update()
                 return
@@ -955,14 +955,17 @@ class WatchmanRealtimeAdapter:
 
         self._context.start_transient_task(_dispatch())
 
-    def _schedule_post_restore_resync(self) -> None:
+    async def _request_post_restore_resync(self) -> None:
         details = {
             "backend": "watchman",
             "loss_of_sync_reason": "disconnect",
             "post_restore_reconciliation": True,
             "reconnect_state": "restored",
         }
-        self._schedule_resync_request("disconnect", details)
+        try:
+            await self._context.request_resync("realtime_loss_of_sync", details)
+        except Exception as error:
+            self._context.set_error(f"Watchman resync request failed: {error}")
 
     @staticmethod
     def _latest_session_value(
