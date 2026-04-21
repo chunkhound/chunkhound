@@ -128,6 +128,9 @@ class LLMProvider(ABC):
 
         Returns:
             LLMResponse with content and metadata
+
+        Raises:
+            RuntimeError: If the API call fails for any reason.
         """
         ...
 
@@ -155,6 +158,7 @@ class LLMProvider(ABC):
 
         Raises:
             NotImplementedError: If provider doesn't support structured outputs
+            RuntimeError: If the API call fails for any reason.
         """
         raise NotImplementedError(
             f"{self.name} provider does not support structured outputs"

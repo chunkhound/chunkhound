@@ -495,6 +495,8 @@ class AnthropicLLMProvider(LLMProvider):
                 finish_reason=response.stop_reason,
             )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Anthropic completion failed: {e}")
             raise RuntimeError(f"LLM completion failed: {e}") from e
@@ -816,6 +818,8 @@ class AnthropicLLMProvider(LLMProvider):
 
             return llm_response, tool_uses
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Anthropic tool use completion failed: {e}")
             raise RuntimeError(f"LLM tool use completion failed: {e}") from e
@@ -1010,6 +1014,8 @@ class AnthropicLLMProvider(LLMProvider):
                             message.usage.input_tokens + message.usage.output_tokens
                         )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Anthropic streaming completion failed: {e}")
             raise RuntimeError(f"LLM streaming completion failed: {e}") from e

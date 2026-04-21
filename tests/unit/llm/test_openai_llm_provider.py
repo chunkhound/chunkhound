@@ -1,6 +1,6 @@
 """High-value functional tests for OpenAILLMProvider (Responses API path)."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -150,3 +150,73 @@ class TestOpenAILLMProvider:
 
         assert "LLM completion failed" in str(exc.value)
         assert "rate limit" in str(exc.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_internal_runtime_error_not_double_wrapped_chat_completions(self, mock_openai_client):
+        """RuntimeError from internal checks must pass through unwrapped (Chat Completions path)."""
+        mock_resp = MagicMock()
+        mock_resp.choices[0].message.content = None
+        mock_resp.choices[0].finish_reason = "stop"
+        mock_resp.usage = MagicMock(total_tokens=5, prompt_tokens=3, completion_tokens=2)
+        mock_openai_client.chat.completions.create.return_value = mock_resp
+
+        provider = OpenAILLMProvider(api_key="sk-test", model="gpt-3.5-turbo")
+        with pytest.raises(RuntimeError) as exc:
+            await provider.complete("test")
+
+        msg = str(exc.value)
+        assert "LLM returned empty response" in msg
+        assert "LLM completion failed" not in msg
+
+    @pytest.mark.asyncio
+    async def test_internal_runtime_error_not_double_wrapped_responses_api(self, mock_openai_client):
+        """RuntimeError from internal checks must pass through unwrapped (Responses API path)."""
+        mock_resp = MagicMock()
+        mock_resp.output = []  # content_parts stays empty → content = None
+        mock_resp.usage = MagicMock(total_tokens=5, input_tokens=3, output_tokens=2)
+        mock_resp.status = "completed"
+        mock_openai_client.responses.create.return_value = mock_resp
+
+        provider = OpenAILLMProvider(api_key="sk-test", model="gpt-4o")
+        with pytest.raises(RuntimeError) as exc:
+            await provider.complete("test")
+
+        msg = str(exc.value)
+        assert "LLM returned empty response" in msg
+        assert "LLM completion failed" not in msg
+
+    @pytest.mark.asyncio
+    async def test_internal_runtime_error_not_double_wrapped_complete_structured(self, mock_openai_client):
+        """RuntimeError from internal checks must pass through unwrapped (complete_structured path)."""
+        mock_resp = MagicMock()
+        mock_resp.choices[0].message.content = None
+        mock_resp.choices[0].finish_reason = "stop"
+        mock_resp.usage = MagicMock(total_tokens=5, prompt_tokens=3, completion_tokens=2)
+        mock_openai_client.chat.completions.create.return_value = mock_resp
+
+        provider = OpenAILLMProvider(api_key="sk-test", model="gpt-3.5-turbo")
+        with pytest.raises(RuntimeError) as exc:
+            await provider.complete_structured("test", json_schema={"type": "object"})
+
+        msg = str(exc.value)
+        assert "LLM structured completion returned empty response" in msg
+        assert "LLM structured completion failed" not in msg
+
+    @pytest.mark.asyncio
+    async def test_internal_runtime_error_not_double_wrapped_complete_structured_responses_api(
+        self, mock_openai_client
+    ):
+        """RuntimeError from _complete_structured_with_responses_api must pass through unwrapped."""
+        mock_resp = MagicMock()
+        mock_resp.output = []   # empty output list → content_parts=[], raises RuntimeError
+        mock_resp.status = "completed"
+        mock_resp.usage = MagicMock(total_tokens=5, input_tokens=3, output_tokens=2)
+        mock_openai_client.responses.create.return_value = mock_resp
+
+        provider = OpenAILLMProvider(api_key="sk-test", model="gpt-4o")
+        with pytest.raises(RuntimeError) as exc:
+            await provider.complete_structured("test", json_schema={"type": "object"})
+
+        msg = str(exc.value)
+        assert "LLM structured completion returned empty response" in msg
+        assert "LLM structured completion failed" not in msg

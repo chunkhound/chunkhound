@@ -158,6 +158,8 @@ class BaseCLIProvider(LLMProvider):
                 finish_reason="stop",  # CLI doesn't provide this
             )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"{self.name} completion failed: {e}")
             raise RuntimeError(f"LLM completion failed: {e}") from e
@@ -248,6 +250,8 @@ Respond with JSON only, no additional text."""
             logger.error(f"Failed to parse structured output as JSON: {e}")
             logger.debug(f"Raw output: {content if 'content' in locals() else 'N/A'}")
             raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"{self.name} structured completion failed: {e}")
             raise RuntimeError(f"LLM structured completion failed: {e}") from e

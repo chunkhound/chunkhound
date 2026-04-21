@@ -52,8 +52,10 @@ class OpenAICompatibleProvider(LLMProvider):
             api_key: API key (defaults to environment variable)
             model: Model name
             base_url: Base URL (defaults to subclass implementation)
-            ssl_verify: Verify TLS certificates for requests sent via base_url.
-                Ignored when base_url is not set.
+            ssl_verify: Verify TLS certificates for HTTP requests. When False, disables
+                TLS verification for the resolved base URL. Ignored when no base URL is
+                set (explicit or provider-resolved). Only disable for self-signed / local
+                endpoints.
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
         """
@@ -214,7 +216,8 @@ class OpenAICompatibleProvider(LLMProvider):
                 model=self._model,
                 finish_reason=finish_reason,
             )
-
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"{self.name} completion failed: {e}")
             raise RuntimeError(f"LLM completion failed: {e}") from e
@@ -311,6 +314,8 @@ class OpenAICompatibleProvider(LLMProvider):
                 logger.error(f"Failed to parse structured output as JSON: {e}")
                 raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"{self.name} structured completion failed: {e}")
             raise RuntimeError(f"LLM structured completion failed: {e}") from e

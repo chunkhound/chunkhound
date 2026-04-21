@@ -247,6 +247,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                 finish_reason=finish_reason,
             )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"OpenAI Responses API completion failed: {e}")
             raise RuntimeError(f"LLM completion failed: {e}") from e
@@ -352,11 +354,11 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             # Validate content
             if content is None or not content.strip():
                 logger.error(
-                    f"Responses API structured output returned empty content "
+                    f"Responses API structured completion returned empty content "
                     f"(status={finish_reason})"
                 )
                 raise RuntimeError(
-                    f"LLM structured output returned empty response "
+                    f"LLM structured completion returned empty response "
                     f"(status={finish_reason})"
                 )
 
@@ -369,7 +371,7 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                         f"output={response.usage.output_tokens:,})"
                     )
                 raise RuntimeError(
-                    f"LLM structured output incomplete - token limit "
+                    f"LLM structured completion incomplete - token limit "
                     f"exceeded{usage_info}"
                 )
 
@@ -382,6 +384,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                 f"Failed to parse Responses API structured output as JSON: {e}"
             )
             raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Responses API structured completion failed: {e}")
             raise RuntimeError(f"LLM structured completion failed: {e}") from e

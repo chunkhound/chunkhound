@@ -279,6 +279,8 @@ class GeminiLLMProvider(LLMProvider):
                 finish_reason=finish_reason,
             )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             # Handle API errors with detailed messages
             if GENAI_AVAILABLE and isinstance(e, errors.APIError):
@@ -372,6 +374,8 @@ class GeminiLLMProvider(LLMProvider):
                 logger.debug(f"Content: {content}")
                 raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
 
+        except RuntimeError:
+            raise
         except Exception as e:
             # Handle API errors with detailed messages
             if GENAI_AVAILABLE and isinstance(e, errors.APIError):

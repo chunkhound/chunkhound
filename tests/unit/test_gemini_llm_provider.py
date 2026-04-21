@@ -290,3 +290,29 @@ class TestGeminiLLMProviderAsync:
         result = await provider.health_check()
         assert result["status"] == "unhealthy"
         assert "error" in result
+
+    async def test_internal_runtime_error_not_double_wrapped_complete(self, provider_with_mock):
+        """RuntimeError raised inside complete() must pass through unwrapped."""
+        provider, mock_aclient = provider_with_mock
+        mock_aclient.models.generate_content.return_value = self._make_response("")
+
+        with pytest.raises(RuntimeError) as exc:
+            await provider.complete("test")
+
+        msg = str(exc.value)
+        assert "empty response" in msg
+        assert "LLM completion failed" not in msg
+
+    async def test_internal_runtime_error_not_double_wrapped_complete_structured(
+        self, provider_with_mock
+    ):
+        """RuntimeError raised inside complete_structured() must pass through unwrapped."""
+        provider, mock_aclient = provider_with_mock
+        mock_aclient.models.generate_content.return_value = self._make_response("")
+
+        with pytest.raises(RuntimeError) as exc:
+            await provider.complete_structured("test", json_schema={"type": "object"})
+
+        msg = str(exc.value)
+        assert "empty response" in msg
+        assert "LLM structured completion failed" not in msg
