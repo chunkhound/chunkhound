@@ -15,6 +15,33 @@ from .utils.config_factory import create_validated_config
 multiprocessing.freeze_support()
 
 
+def _infer_repack_target_dir_from_db(db_arg: Path) -> Path:
+    """Infer the project root for `repack --db` config discovery.
+
+    Walk upward from the resolved database location using the same project
+    marker precedence as normal discovery: `.chunkhound.json`, `.chunkhound/db`,
+    then `.git`. For the default storage layout this resolves the project root
+    above `.chunkhound`. If no markers are found, fall back to the resolved
+    database location's containing directory.
+    """
+    resolved_db = Path(db_arg).resolve()
+    fallback = resolved_db if resolved_db.is_dir() else resolved_db.parent
+    current = fallback
+
+    while True:
+        if (current / ".chunkhound.json").exists():
+            return current
+        if (current / ".chunkhound" / "db").exists():
+            return current
+        if (current / ".git").exists():
+            return current
+        if current.name == ".chunkhound":
+            return current.parent
+        if current == current.parent:
+            return fallback
+        current = current.parent
+
+
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging for the CLI.
 
@@ -111,15 +138,15 @@ async def async_main() -> None:
         args.path = _Path(args.project_dir).resolve()
 
     # When `chunkhound repack --db <abs>` is invoked without an explicit project
-    # directory, anchor target_dir to the --db file's parent. Otherwise Config
-    # falls back to CWD and merges any CWD-local .chunkhound.json (e.g.
-    # provider=lancedb), causing repack to abort with "only supported for duckdb".
+    # directory, infer the target project root from the DB location. This must
+    # prefer the target repo's own `.chunkhound.json` over an unrelated CWD-local
+    # config, and for default layouts must step back above `.chunkhound/`.
     if (
         args.command == "repack"
         and getattr(args, "db", None)
         and args.path == Path(".")
     ):
-        args.path = Path(args.db).resolve().parent
+        args.path = _infer_repack_target_dir_from_db(args.db)
 
     config, validation_errors = create_validated_config(args, args.command)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -34,7 +35,11 @@ def test_repack_dry_run(tmp_path: Path) -> None:
     src.write_text("print('hello')\n")
 
     # Index into a DuckDB (no embeddings needed for repack test)
-    proc = _run(["chunkhound", "index", "--no-embeddings", str(tmp_path)], cwd=tmp_path, timeout=60)
+    proc = _run(
+        ["chunkhound", "index", "--no-embeddings", str(tmp_path)],
+        cwd=tmp_path,
+        timeout=60,
+    )
     assert proc.returncode == 0, proc.stderr
 
     db_dir = tmp_path / ".chunkhound" / "db"
@@ -139,11 +144,9 @@ def test_repack_non_duckdb_error() -> None:
 def test_repack_db_flag_anchors_config_without_positional(tmp_path: Path) -> None:
     """`chunkhound repack --db <abs>` from an unrelated CWD must succeed.
 
-    main.py remaps args.path to the --db file's parent when no positional
-    path is given, so Config does not pick up a conflicting CWD-local
-    .chunkhound.json (e.g. provider=lancedb).
+    The inferred target root must come from the target DB path rather than the
+    invoking CWD, so an unrelated local config cannot hijack provider selection.
     """
-    import json
 
     # 1. Index a real DuckDB project at tmp_path/dbproj
     dbproj = tmp_path / "dbproj"
@@ -177,6 +180,93 @@ def test_repack_db_flag_anchors_config_without_positional(tmp_path: Path) -> Non
     assert "only supported for duckdb" not in combined
 
 
+def test_repack_db_flag_loads_target_project_config(tmp_path: Path) -> None:
+    """`repack --db` must prefer the target project's config over the invoking CWD."""
+    dbproj = tmp_path / "dbproj"
+    dbproj.mkdir()
+    (dbproj / "hello.py").write_text("print('hello')\n")
+    proc = _run(
+        ["chunkhound", "index", "--no-embeddings", str(dbproj)],
+        cwd=dbproj,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    (dbproj / ".chunkhound.json").write_text(
+        json.dumps(
+            {
+                "database": {
+                    "provider": "lancedb",
+                }
+            }
+        )
+    )
+
+    conflict_cwd = tmp_path / "conflict_cwd"
+    conflict_cwd.mkdir()
+    (conflict_cwd / ".chunkhound.json").write_text(
+        json.dumps(
+            {
+                "database": {
+                    "provider": "duckdb",
+                }
+            }
+        )
+    )
+
+    db_path = dbproj / ".chunkhound" / "db"
+    proc = _run(
+        ["chunkhound", "repack", "--db", str(db_path), "--dry-run"],
+        cwd=conflict_cwd,
+        timeout=60,
+    )
+    assert proc.returncode != 0
+    combined = (proc.stdout + proc.stderr).lower()
+    assert "only supported for duckdb" in combined
+
+
+def test_repack_db_flag_custom_db_uses_git_root_config(tmp_path: Path) -> None:
+    """Custom DB locations must still anchor config discovery at the repo root."""
+    dbproj = tmp_path / "dbproj"
+    dbproj.mkdir()
+    (dbproj / ".git").mkdir()
+    (dbproj / "hello.py").write_text("print('hello')\n")
+    proc = _run(
+        ["chunkhound", "index", "--no-embeddings", str(dbproj)],
+        cwd=dbproj,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    custom_db = dbproj / "var" / "chunkhound-db"
+    custom_db.parent.mkdir(parents=True)
+    (dbproj / ".chunkhound" / "db").rename(custom_db)
+    (dbproj / ".chunkhound.json").write_text(
+        json.dumps(
+            {
+                "database": {
+                    "provider": "lancedb",
+                }
+            }
+        )
+    )
+
+    conflict_cwd = tmp_path / "conflict_cwd"
+    conflict_cwd.mkdir()
+    (conflict_cwd / ".chunkhound.json").write_text(
+        json.dumps({"database": {"provider": "duckdb"}})
+    )
+
+    proc = _run(
+        ["chunkhound", "repack", "--db", str(custom_db), "--dry-run"],
+        cwd=conflict_cwd,
+        timeout=60,
+    )
+    assert proc.returncode != 0
+    combined = (proc.stdout + proc.stderr).lower()
+    assert "only supported for duckdb" in combined
+
+
 def test_repack_positional_path_anchors_config(tmp_path: Path) -> None:
     """Positional project path must anchor config discovery on the target project.
 
@@ -184,8 +274,6 @@ def test_repack_positional_path_anchors_config(tmp_path: Path) -> None:
     CWD-local .chunkhound.json — so running repack from a directory with a
     conflicting lancedb config would falsely reject a valid DuckDB target.
     """
-    import json
-
     # 1. Create a DuckDB project at tmp_path/dbproj
     dbproj = tmp_path / "dbproj"
     dbproj.mkdir()
