@@ -752,6 +752,31 @@ class TestIntentBasedRecovery:
         finally:
             mgr.disconnect()
 
+    def test_phase2_restores_old_when_db_path_exists_but_is_corrupt(
+        self, tmp_path: Path
+    ):
+        """phase2 crash: corrupt db_path + old_db valid -> restore old_db."""
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        _create_valid_duckdb(old_path)
+        db_path.write_bytes(b"corrupt current db")
+        intent_path.write_text("phase2")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists(), "Should be restored from old_db"
+            assert not old_path.exists(), "old should be consumed"
+            assert not intent_path.exists(), "intent should be cleaned up"
+            result = mgr.connection.execute(
+                "SELECT count(*) FROM files"
+            ).fetchone()
+            assert result == (0,), "Restored DB should have files table"
+        finally:
+            mgr.disconnect()
+
     def test_phase2_completes_swap_without_backup(self, tmp_path: Path):
         """phase2 crash: db missing, compact valid, no old_db -> install compact."""
         db_path = tmp_path / "chunks.duckdb"
