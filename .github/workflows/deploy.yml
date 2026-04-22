@@ -31,7 +31,7 @@ jobs:
         with:
           node-version: "22"
       - name: Resolve docs version
-        run: echo "CHUNKHOUND_DOCS_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')" >> "$GITHUB_ENV"
+        run: bash scripts/resolve_docs_version.sh
       - run: npm ci --prefix site
       - run: npm run build --prefix site
       - uses: actions/upload-pages-artifact@v4

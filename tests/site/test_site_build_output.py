@@ -15,15 +15,32 @@ def _clean_dev_suffix(version: str) -> str:
     return version.split(".dev", 1)[0]
 
 
-def _expected_docs_version() -> str:
+def _run(command: list[str], cwd: Path) -> None:
+    subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _create_tagged_repo(repo_dir: Path, version_tag: str) -> None:
+    _run(["git", "init"], repo_dir)
+    _run(["git", "config", "user.name", "ChunkHound Tests"], repo_dir)
+    _run(["git", "config", "user.email", "tests@chunkhound.invalid"], repo_dir)
+    (repo_dir / "README.md").write_text("test\n", encoding="utf-8")
+    _run(["git", "add", "README.md"], repo_dir)
+    _run(["git", "commit", "-m", "initial"], repo_dir)
+    _run(["git", "tag", version_tag], repo_dir)
+
+
+def _expected_docs_version(
+    root: Path = ROOT,
+    version_file: Path = VERSION_FILE,
+) -> str:
     env_version = os.environ.get("CHUNKHOUND_DOCS_VERSION", "").strip()
     if env_version:
         return _normalize_version(env_version)
 
-    if VERSION_FILE.exists():
+    if version_file.exists():
         match = re.search(
             r"__version__\s*=\s*version\s*=\s*['\"]([^'\"]+)['\"]",
-            VERSION_FILE.read_text(encoding="utf-8"),
+            version_file.read_text(encoding="utf-8"),
         )
         if match is None:
             raise AssertionError("Could not parse chunkhound/_version.py version")
@@ -31,7 +48,7 @@ def _expected_docs_version() -> str:
 
     git_describe = subprocess.run(
         ["git", "describe", "--tags", "--abbrev=0"],
-        cwd=ROOT,
+        cwd=root,
         check=True,
         capture_output=True,
         text=True,
@@ -156,3 +173,50 @@ import process from "node:process";
         )
 
     assert result.stdout.strip() == "4.1.0b1"
+
+
+def test_expected_docs_version_prefers_env_over_version_file_and_git(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        repo_dir = Path(temp_dir)
+        _create_tagged_repo(repo_dir, "v4.1.0")
+        version_file = repo_dir / "chunkhound" / "_version.py"
+        version_file.parent.mkdir()
+        version_file.write_text(
+            "__version__ = version = '4.2.0b1.dev3'\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("CHUNKHOUND_DOCS_VERSION", "v4.1.0")
+
+        assert _expected_docs_version(repo_dir, version_file) == "4.1.0"
+
+
+def test_version_helper_prefers_env_over_version_file_and_git() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        repo_dir = Path(temp_dir)
+        _create_tagged_repo(repo_dir, "v4.1.0")
+        version_file = repo_dir / "chunkhound" / "_version.py"
+        version_file.parent.mkdir()
+        version_file.write_text(
+            "__version__ = version = '4.2.0b1.dev3'\n",
+            encoding="utf-8",
+        )
+
+        script = f"""
+import process from "node:process";
+
+(async () => {{
+  process.chdir({temp_dir!r});
+  const {{ getChunkhoundVersion }} = await import({(ROOT / "site" / "src" / "lib" / "version.ts").as_uri()!r});
+  console.log(getChunkhoundVersion());
+}})();
+"""
+        result = run_tsx_raw(
+            script,
+            check=True,
+            env={**os.environ, "CHUNKHOUND_DOCS_VERSION": "v4.1.0"},
+        )
+
+    assert result.stdout.strip() == "4.1.0"
