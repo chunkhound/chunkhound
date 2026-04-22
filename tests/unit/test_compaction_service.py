@@ -1522,6 +1522,96 @@ class TestConnectionGateDuringCompaction:
 class TestConcurrentAccessDuringCompaction:
     """Test that concurrent reads are blocked while compaction is in progress."""
 
+    def test_queued_read_finishes_before_disconnect_and_later_reads_are_blocked(
+        self, provider_with_fragmentation: tuple
+    ):
+        """A queued read drains, new reads are blocked during compaction, then resume."""
+        provider, _db_path = provider_with_fragmentation
+
+        queued_read_started = threading.Event()
+        allow_queued_read = threading.Event()
+        export_paused = threading.Event()
+        allow_export = threading.Event()
+        queued_read_result: dict[str, object] = {}
+        compaction_result: dict[str, object] = {}
+
+        original_read = provider._executor_get_file_by_path
+        original_export = provider._export_database_for_compaction
+
+        def blocking_read(conn, state, path, as_model):
+            queued_read_started.set()
+            assert allow_queued_read.wait(timeout=10), "Queued read never released"
+            return original_read(conn, state, path, as_model)
+
+        def pausing_export(db_p: Path, export_dir: Path) -> None:
+            export_paused.set()
+            assert allow_export.wait(timeout=10), "Export phase never released"
+            original_export(db_p, export_dir)
+
+        def run_queued_read() -> None:
+            try:
+                queued_read_result["value"] = provider.get_file_by_path("test_8.py")
+            except Exception as exc:  # pragma: no cover - failure path asserted below
+                queued_read_result["error"] = exc
+
+        def run_compaction() -> None:
+            try:
+                compaction_result["value"] = provider.optimize()
+            except Exception as exc:  # pragma: no cover - failure path asserted below
+                compaction_result["error"] = exc
+
+        with patch.object(
+            provider, "_executor_get_file_by_path", side_effect=blocking_read
+        ), patch.object(
+            provider, "_export_database_for_compaction", side_effect=pausing_export
+        ):
+            read_thread: threading.Thread | None = None
+            compact_thread: threading.Thread | None = None
+            try:
+                read_thread = threading.Thread(target=run_queued_read)
+                read_thread.start()
+                assert queued_read_started.wait(timeout=10), "Queued read never started"
+
+                compact_thread = threading.Thread(target=run_compaction)
+                compact_thread.start()
+
+                assert not export_paused.is_set(), (
+                    "Compaction reached the blocked phase before the queued read drained"
+                )
+
+                allow_queued_read.set()
+                read_thread.join(timeout=10)
+                assert not read_thread.is_alive(), "Queued read thread did not finish"
+                assert "error" not in queued_read_result, queued_read_result.get("error")
+                assert queued_read_result["value"] is not None
+
+                assert export_paused.wait(timeout=10), "Export phase never started"
+
+                with pytest.raises(
+                    CompactionError, match="compaction in progress"
+                ) as exc_info:
+                    provider.get_file_by_path("test_8.py")
+                assert exc_info.value.operation == "connection"
+            finally:
+                allow_queued_read.set()
+                allow_export.set()
+                if read_thread is not None:
+                    read_thread.join(timeout=10)
+                    assert not read_thread.is_alive(), (
+                        "Queued read thread did not finish during cleanup"
+                    )
+                if compact_thread is not None:
+                    compact_thread.join(timeout=10)
+                    assert not compact_thread.is_alive(), (
+                        "Compaction thread did not finish during cleanup"
+                    )
+
+            assert "error" not in compaction_result, compaction_result.get("error")
+            assert compaction_result["value"] is True
+
+        result = provider.get_file_by_path("test_8.py")
+        assert result is not None
+
     def test_reads_blocked_during_export_then_resume(
         self, provider_with_fragmentation: tuple
     ):
