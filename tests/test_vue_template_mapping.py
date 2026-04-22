@@ -45,8 +45,10 @@ class TestVueTemplateMapping:
     def test_get_query_for_concept_structure(self):
         """Test getting query for STRUCTURE concept."""
         query = self.mapping.get_query_for_concept(UniversalConcept.STRUCTURE)
+        # Components are now handled in DEFINITION query, so STRUCTURE query may be empty
         assert query is not None
-        assert "component_name" in query
+        # STRUCTURE query is now empty since components moved to DEFINITION
+        assert query == ""
 
 
 class TestVueParserTemplateDirectives:
@@ -99,12 +101,11 @@ class TestVueParserTemplateDirectives:
         ]
 
         # Should find at least one v-if directive
-        if vif_chunks:  # Only check if template parsing succeeded
-            assert len(vif_chunks) > 0
-            # Check that condition is extracted
-            for chunk in vif_chunks:
-                if "condition" in chunk.metadata:
-                    assert chunk.metadata["condition"]
+        assert len(vif_chunks) > 0
+        # Check that condition is extracted
+        for chunk in vif_chunks:
+            if "condition" in chunk.metadata:
+                assert chunk.metadata["condition"]
 
     def test_parse_v_for_directive(self):
         """Test extraction of v-for directives."""
@@ -119,12 +120,11 @@ class TestVueParserTemplateDirectives:
         ]
 
         # Should find at least one v-for directive
-        if vfor_chunks:  # Only check if template parsing succeeded
-            assert len(vfor_chunks) > 0
-            # Check that loop expression is extracted
-            for chunk in vfor_chunks:
-                if "loop_expression" in chunk.metadata:
-                    assert chunk.metadata["loop_expression"]
+        assert len(vfor_chunks) > 0
+        # Check that loop expression is extracted
+        for chunk in vfor_chunks:
+            if "loop_expression" in chunk.metadata:
+                assert chunk.metadata["loop_expression"]
 
     def test_parse_event_handlers(self):
         """Test extraction of event handlers (@click, @submit, etc.)."""
@@ -139,14 +139,13 @@ class TestVueParserTemplateDirectives:
         ]
 
         # Should find event handlers
-        if event_chunks:  # Only check if template parsing succeeded
-            assert len(event_chunks) > 0
-            # Check that event names are extracted
-            event_names = [
-                c.metadata.get("event_name") for c in event_chunks if "event_name" in c.metadata
-            ]
-            if event_names:
-                assert "click" in event_names or "submit" in event_names
+        assert len(event_chunks) > 0
+        # Check that event names are extracted
+        event_names = [
+            c.metadata.get("event_name") for c in event_chunks if "event_name" in c.metadata
+        ]
+        if event_names:
+            assert "click" in event_names or "submit" in event_names
 
     def test_parse_property_bindings(self):
         """Test extraction of property bindings (:prop, v-bind)."""
@@ -161,12 +160,11 @@ class TestVueParserTemplateDirectives:
         ]
 
         # Should find property bindings
-        if bind_chunks:  # Only check if template parsing succeeded
-            assert len(bind_chunks) > 0
-            # Check that property names are extracted
-            for chunk in bind_chunks:
-                if "property_name" in chunk.metadata:
-                    assert chunk.metadata["property_name"]
+        assert len(bind_chunks) > 0
+        # Check that property names are extracted
+        for chunk in bind_chunks:
+            if "property_name" in chunk.metadata:
+                assert chunk.metadata["property_name"]
 
     def test_parse_v_model(self):
         """Test extraction of v-model (two-way binding)."""
@@ -181,12 +179,11 @@ class TestVueParserTemplateDirectives:
         ]
 
         # Should find v-model directives
-        if vmodel_chunks:  # Only check if template parsing succeeded
-            assert len(vmodel_chunks) > 0
-            # Check that model binding is extracted
-            for chunk in vmodel_chunks:
-                if "model_binding" in chunk.metadata:
-                    assert chunk.metadata["model_binding"]
+        assert len(vmodel_chunks) > 0
+        # Check that model binding is extracted
+        for chunk in vmodel_chunks:
+            if "model_binding" in chunk.metadata:
+                assert chunk.metadata["model_binding"]
 
     def test_parse_component_usage(self):
         """Test extraction of component usage (PascalCase tags)."""
@@ -201,17 +198,16 @@ class TestVueParserTemplateDirectives:
         ]
 
         # Should find components (UserProfile, BaseButton, Modal)
-        if component_chunks:  # Only check if template parsing succeeded
-            assert len(component_chunks) > 0
-            # Check that component names are extracted
-            component_names = [
-                c.metadata.get("component_name") for c in component_chunks if "component_name" in c.metadata
-            ]
-            if component_names:
-                assert any(
-                    name in component_names
-                    for name in ["UserProfile", "BaseButton", "Modal"]
-                )
+        assert len(component_chunks) > 0
+        # Check that component names are extracted
+        component_names = [
+            c.metadata.get("component_name") for c in component_chunks if "component_name" in c.metadata
+        ]
+        if component_names:
+            assert any(
+                name in component_names
+                for name in ["UserProfile", "BaseButton", "Modal"]
+            )
 
     def test_parse_interpolations(self):
         """Test extraction of interpolations ({{ variable }})."""
@@ -226,12 +222,11 @@ class TestVueParserTemplateDirectives:
         ]
 
         # Should find interpolations
-        if interp_chunks:  # Only check if template parsing succeeded
-            assert len(interp_chunks) > 0
-            # Check that expressions are extracted
-            for chunk in interp_chunks:
-                if "interpolation_expression" in chunk.metadata:
-                    assert chunk.metadata["interpolation_expression"]
+        assert len(interp_chunks) > 0
+        # Check that expressions are extracted
+        for chunk in interp_chunks:
+            if "interpolation_expression" in chunk.metadata:
+                assert chunk.metadata["interpolation_expression"]
 
     def test_parse_simple_template(self):
         """Test parsing a simple template with basic directives."""

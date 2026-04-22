@@ -132,6 +132,20 @@ class VueTemplateMapping(BaseMapping):
             (interpolation
               (raw_text)? @interpolation_expr
             ) @definition
+
+            ; Component usage (PascalCase tags)
+            (element
+              (start_tag
+                (tag_name) @component_name
+                (#match? @component_name "^[A-Z]")
+              )
+            ) @definition
+
+            ; Self-closing components
+            (self_closing_tag
+              (tag_name) @component_name
+              (#match? @component_name "^[A-Z]")
+            ) @definition
         """
 
     def _get_block_query(self) -> str:
@@ -163,26 +177,12 @@ class VueTemplateMapping(BaseMapping):
         """
 
     def _get_component_query(self) -> str:
-        """Get query for component usage.
+        """Component queries are now part of the DEFINITION query.
 
         Returns:
-            Tree-sitter query for component usage
+            Empty string - components handled in _get_directive_query
         """
-        return """
-            ; Component usage (PascalCase tags)
-            (element
-              (start_tag
-                (tag_name) @component_name
-                (#match? @component_name "^[A-Z]")
-              )
-            ) @definition
-
-            ; Self-closing components
-            (self_closing_tag
-              (tag_name) @component_name
-              (#match? @component_name "^[A-Z]")
-            ) @definition
-        """
+        return ""
 
     def extract_name(
         self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
@@ -223,20 +223,26 @@ class VueTemplateMapping(BaseMapping):
                         elif directive_part.startswith("v-model"):
                             expr = self.get_expression_preview(value_part, max_length=20)
                             return f"v-model_{expr}"
-                        elif directive_part.startswith("@"):
-                            # Event handler like @click="handler"
-                            event_name = directive_part[1:]  # Remove @
+                        elif directive_part.startswith("@") or directive_part.startswith("v-on:"):
+                            # Event handler like @click="handler" or v-on:click="handler"
+                            if directive_part.startswith("@"):
+                                event_name = directive_part[1:]  # Remove @
+                            else:
+                                event_name = directive_part[5:]  # Remove v-on:
                             return f"@{event_name}"
-                        elif directive_part.startswith(":"):
-                            # Property binding like :prop="value"
-                            prop_name = directive_part[1:]  # Remove :
+                        elif directive_part.startswith(":") or directive_part.startswith("v-bind:"):
+                            # Property binding like :prop="value" or v-bind:prop="value"
+                            if directive_part.startswith(":"):
+                                prop_name = directive_part[1:]  # Remove :
+                            else:
+                                prop_name = directive_part[7:]  # Remove v-bind:
                             return f":{prop_name}"
-                        elif directive_part.startswith("v-slot:") or directive_part == "#":
+                        elif directive_part.startswith("v-slot:") or directive_part.startswith("#"):
                             # Slot usage
                             if directive_part.startswith("v-slot:"):
                                 slot_name = directive_part[7:]  # Remove v-slot:
                             else:
-                                slot_name = "default"
+                                slot_name = directive_part[1:]  # Remove #
                             return f"v-slot:{slot_name}"
 
             # Handle interpolations
@@ -253,27 +259,6 @@ class VueTemplateMapping(BaseMapping):
                 component_node = captures["component_name"]
                 component = self.get_node_text(component_node, source).strip()
                 return f"Component_{component}"
-
-            # Handle interpolations
-            if "interpolation_expr" in captures:
-                expr_node = captures["interpolation_expr"]
-                expr = self.get_node_text(expr_node, source).strip()
-                # Truncate long expressions
-                if len(expr) > 30:
-                    expr = expr[:27] + "..."
-                return f"{{{{ {expr} }}}}"
-
-            # Handle components
-            if "component_name" in captures:
-                component_node = captures["component_name"]
-                component = self.get_node_text(component_node, source).strip()
-                return f"Component_{component}"
-
-            # Handle slots
-            if "slot_name" in captures:
-                slot_node = captures["slot_name"]
-                slot = self.get_node_text(slot_node, source).strip()
-                return f"v-slot:{slot}"
 
         elif concept == UniversalConcept.BLOCK:
             # Use location-based naming for blocks
@@ -383,13 +368,13 @@ class VueTemplateMapping(BaseMapping):
                             metadata["directive_type"] = "property_binding"
                             metadata["property_name"] = directive_part[1:]  # Remove :
                             metadata["binding_expression"] = value_part
-                        elif directive_part.startswith("v-slot:") or directive_part == "#":
+                        elif directive_part.startswith("v-slot:") or directive_part.startswith("#"):
                             # Slot usage
                             metadata["directive_type"] = "slot"
                             if directive_part.startswith("v-slot:"):
                                 metadata["slot_name"] = directive_part[7:]  # Remove v-slot:
                             else:
-                                metadata["slot_name"] = "default"
+                                metadata["slot_name"] = directive_part[1:]  # Remove #
 
             # Handle interpolations
             if "interpolation_expr" in captures:
