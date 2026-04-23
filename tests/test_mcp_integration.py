@@ -35,6 +35,16 @@ from tests.utils.windows_compat import (
 )
 
 
+class _TestMCPServer(MCPServerBase):
+    """Minimal concrete MCP server for integration callback tests."""
+
+    def _register_tools(self) -> None:
+        pass
+
+    async def run(self) -> None:
+        pass
+
+
 class TestMCPIntegration:
     """Test real MCP server integration with realtime indexing."""
 
@@ -457,7 +467,6 @@ class NewlyAddedClass:
         exercised here.
         """
         import threading
-        from types import SimpleNamespace
         from unittest.mock import patch
 
         from chunkhound.services.compaction_service import CompactionService
@@ -494,19 +503,10 @@ class NewlyAddedClass:
             assert export_proceed.wait(timeout=10.0), "export_proceed never set"
             return real_export(db_p, export_dir)
 
-        def debug_log(_message: str, always: bool = False) -> None:
-            del always
-
-        server_stub = SimpleNamespace(
-            config=compaction_config,
-            services=services,
-            realtime_indexing=realtime_service,
-            _target_path=watch_dir,
-            debug_log=debug_log,
-        )
-
-        async def reindex_modified() -> None:
-            await MCPServerBase._post_compaction_reindex(server_stub)
+        server = _TestMCPServer(config=compaction_config)
+        server.services = services
+        server.realtime_indexing = realtime_service
+        server._target_path = watch_dir
 
         with patch.object(
             services.provider,
@@ -517,9 +517,10 @@ class NewlyAddedClass:
                 db_path=Path(services.provider.db_path),
                 config=compaction_config,
             )
+            server._compaction_service = compaction_service
             started = await compaction_service.compact_background(
                 provider=services.provider,
-                on_complete=reindex_modified,
+                on_complete=server._post_compaction_reindex,
             )
             assert started, "Compaction should start with zero thresholds"
 
@@ -539,6 +540,10 @@ class NewlyAddedClass:
             # callback to finish (on_complete runs inline inside the task).
             export_proceed.set()
             await asyncio.wait_for(compaction_task, timeout=30.0)
+
+        assert compaction_service.last_error is None, (
+            "Post-compaction callback must complete without recorded error"
+        )
 
         # Post-compaction reindex callback should have picked up the new content.
         after = await execute_tool(

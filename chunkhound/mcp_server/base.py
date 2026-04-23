@@ -16,20 +16,17 @@ import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.compaction_service import CompactionService
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
-
-if TYPE_CHECKING:
-    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
 
 class MCPServerBase(ABC):
@@ -127,6 +124,11 @@ class MCPServerBase(ABC):
         """Return mutable background compaction status stored in scan progress."""
         return self._scan_progress["background_compaction"]
 
+    def get_background_compaction_status(self) -> dict[str, Any]:
+        """Return a read-only snapshot of background compaction status."""
+        self._refresh_background_compaction_status()
+        return self._background_compaction_status().copy()
+
     def _mark_background_compaction_started(self) -> None:
         """Record that background compaction has been launched."""
         status = self._background_compaction_status()
@@ -195,7 +197,7 @@ class MCPServerBase(ABC):
             return
 
         status = self._background_compaction_status()
-        service_in_progress = self._compaction_service.in_progress
+        service_in_progress = self._compaction_service.is_compacting
         status["in_progress"] = service_in_progress or status["phase"] == "reindexing"
 
         if service_in_progress and status["phase"] in {"idle", "failed"}:
@@ -462,6 +464,11 @@ class MCPServerBase(ABC):
                 self._mark_background_compaction_started()
                 self.debug_log("Background compaction started")
         except Exception as e:
+            self._mark_background_compaction_failure(
+                e,
+                pending_recovery=False,
+                retry_attempted=False,
+            )
             self.debug_log(f"Background compaction failed to start: {e}", always=True)
 
     async def _post_compaction_reindex(self, is_recovery_retry: bool = False) -> None:
