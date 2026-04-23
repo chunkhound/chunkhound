@@ -4,11 +4,16 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from tests.site.tsx_runner import run_tsx_raw
+import pytest
+
+from tests.site.tsx_runner import run_tsx_raw, sanitized_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
 VERSION_FILE = ROOT / "chunkhound" / "_version.py"
+VERSION_RESOLUTION_FAILURE = (
+    "Unable to resolve ChunkHound version for docs build"
+)
 
 
 def _clean_dev_suffix(version: str) -> str:
@@ -60,6 +65,38 @@ def _normalize_version(version: str) -> str:
     return _clean_dev_suffix(version).removeprefix("v")
 
 
+def _write_version_file(repo_dir: Path, version: str) -> Path:
+    version_file = repo_dir / "chunkhound" / "_version.py"
+    version_file.parent.mkdir()
+    version_file.write_text(
+        f"__version__ = version = {version!r}\n",
+        encoding="utf-8",
+    )
+    return version_file
+
+
+def _run_version_helper(
+    repo_dir: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess:
+    version_module_uri = (ROOT / "site" / "src" / "lib" / "version.ts").as_uri()
+    script = f"""
+import process from "node:process";
+
+(async () => {{
+  process.chdir({str(repo_dir)!r});
+
+  try {{
+    const {{ getChunkhoundVersion }} = await import({version_module_uri!r});
+    console.log(getChunkhoundVersion());
+  }} catch (error) {{
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }}
+}})();
+"""
+    return run_tsx_raw(script, check=False, env=env)
+
+
 def _extract_astro_code_block_after_marker(html: str, marker: str) -> str:
     marker_index = html.find(marker)
     assert marker_index != -1, f"Missing marker {marker!r}"
@@ -75,9 +112,15 @@ def _extract_astro_code_block_after_marker(html: str, marker: str) -> str:
 
 def test_site_build_outputs_platform_aware_onboarding() -> None:
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
-    getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(encoding="utf-8")
-    cli_reference = (DIST / "docs" / "cli-reference" / "index.html").read_text(encoding="utf-8")
-    configuration = (DIST / "docs" / "configuration" / "index.html").read_text(encoding="utf-8")
+    getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    cli_reference = (DIST / "docs" / "cli-reference" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    configuration = (DIST / "docs" / "configuration" / "index.html").read_text(
+        encoding="utf-8"
+    )
     assert "macOS/Linux" in homepage
     assert "PowerShell" in homepage
     assert re.search(
@@ -130,93 +173,45 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert "cdn.jsdelivr.net" not in configuration
 
 
-def test_version_helper_fails_without_version_file_or_git_tags() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        script = f"""
-import process from "node:process";
-(async () => {{
-  process.chdir({temp_dir!r});
-
-  try {{
-    const {{ getChunkhoundVersion }} = await import({(ROOT / "site" / "src" / "lib" / "version.ts").as_uri()!r});
-    console.log(getChunkhoundVersion());
-  }} catch (error) {{
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
-  }}
-}})();
-"""
-        result = run_tsx_raw(script, check=False)
-
-    assert result.returncode == 1
-    assert (
-        "Unable to resolve ChunkHound version for docs build" in result.stderr
-        or "Unable to resolve ChunkHound version for docs build" in result.stdout
-    )
-
-
-def test_version_helper_uses_env_version_without_file_or_git_tags() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        script = f"""
-import process from "node:process";
-(async () => {{
-  process.chdir({temp_dir!r});
-
-  const {{ getChunkhoundVersion }} = await import({(ROOT / "site" / "src" / "lib" / "version.ts").as_uri()!r});
-  console.log(getChunkhoundVersion());
-}})();
-"""
-        result = run_tsx_raw(
-            script,
-            check=True,
-            env={**os.environ, "CHUNKHOUND_DOCS_VERSION": "v4.1.0b1"},
-        )
-
-    assert result.stdout.strip() == "4.1.0b1"
-
-
-def test_expected_docs_version_prefers_env_over_version_file_and_git(
-    monkeypatch,
-) -> None:
+@pytest.mark.parametrize(
+    ("scenario", "expected_version"),
+    [
+        ("env_only", "4.1.0b1"),
+        ("env_over_file_and_git", "4.1.0b2"),
+        ("version_file_only", "4.2.0b1"),
+        ("file_over_git", "4.2.1"),
+        ("git_tag_only", "4.3.0rc1"),
+        ("no_sources", None),
+    ],
+)
+def test_version_helper_contract(scenario: str, expected_version: str | None) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         repo_dir = Path(temp_dir)
-        _create_tagged_repo(repo_dir, "v4.1.0")
-        version_file = repo_dir / "chunkhound" / "_version.py"
-        version_file.parent.mkdir()
-        version_file.write_text(
-            "__version__ = version = '4.2.0b1.dev3'\n",
-            encoding="utf-8",
-        )
+        env = sanitized_subprocess_env()
 
-        monkeypatch.setenv("CHUNKHOUND_DOCS_VERSION", "v4.1.0")
+        if scenario == "env_only":
+            env["CHUNKHOUND_DOCS_VERSION"] = "v4.1.0b1"
+        elif scenario == "env_over_file_and_git":
+            env["CHUNKHOUND_DOCS_VERSION"] = "v4.1.0b2"
+            _write_version_file(repo_dir, "4.2.0b1.dev3")
+            _create_tagged_repo(repo_dir, "v4.3.0rc1")
+        elif scenario == "version_file_only":
+            _write_version_file(repo_dir, "4.2.0b1.dev3")
+        elif scenario == "file_over_git":
+            _write_version_file(repo_dir, "4.2.1.dev2")
+            _create_tagged_repo(repo_dir, "v4.3.0rc1")
+        elif scenario == "git_tag_only":
+            _create_tagged_repo(repo_dir, "v4.3.0rc1")
+        elif scenario != "no_sources":
+            raise AssertionError(f"Unhandled scenario {scenario}")
 
-        assert _expected_docs_version(repo_dir, version_file) == "4.1.0"
+        result = _run_version_helper(repo_dir, env)
+        combined_output = f"{result.stdout}\n{result.stderr}"
 
-
-def test_version_helper_prefers_env_over_version_file_and_git() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        repo_dir = Path(temp_dir)
-        _create_tagged_repo(repo_dir, "v4.1.0")
-        version_file = repo_dir / "chunkhound" / "_version.py"
-        version_file.parent.mkdir()
-        version_file.write_text(
-            "__version__ = version = '4.2.0b1.dev3'\n",
-            encoding="utf-8",
-        )
-
-        script = f"""
-import process from "node:process";
-
-(async () => {{
-  process.chdir({temp_dir!r});
-  const {{ getChunkhoundVersion }} = await import({(ROOT / "site" / "src" / "lib" / "version.ts").as_uri()!r});
-  console.log(getChunkhoundVersion());
-}})();
-"""
-        result = run_tsx_raw(
-            script,
-            check=True,
-            env={**os.environ, "CHUNKHOUND_DOCS_VERSION": "v4.1.0"},
-        )
-
-    assert result.stdout.strip() == "4.1.0"
+    if expected_version is not None:
+        assert result.returncode == 0
+        assert result.stdout.strip() == expected_version
+        assert VERSION_RESOLUTION_FAILURE not in combined_output
+    else:
+        assert result.returncode != 0
+        assert VERSION_RESOLUTION_FAILURE in combined_output
