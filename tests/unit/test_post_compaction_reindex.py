@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from chunkhound.core.config.indexing_config import IndexingConfig
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.mcp_server.base import MCPServerBase
 from tests.unit.conftest import CaptureCoordinator
 
@@ -121,6 +123,12 @@ async def test_reindex_error_is_swallowed(server: ConcreteMCPServer) -> None:
     with pytest.raises(RuntimeError, match="boom"):
         await server._post_compaction_reindex()
 
+    status = server._scan_progress["background_compaction"]
+    assert status["phase"] == "failed"
+    assert status["pending_recovery"] is True
+    assert status["retry_attempted"] is False
+    assert status["last_error"] == "boom"
+
 
 async def test_reindex_skipped_when_clear_raises(server: ConcreteMCPServer) -> None:
     """If deferred-state drain raises, reindex is not attempted."""
@@ -179,3 +187,126 @@ async def test_successful_reindex_does_not_restore_deferred_state(
 
     assert coordinator.call_count == 1
     server.realtime_indexing.restore_compaction_deferred_files.assert_not_awaited()
+    status = server._scan_progress["background_compaction"]
+    assert status["phase"] == "idle"
+    assert status["pending_recovery"] is False
+    assert status["last_error"] is None
+
+
+async def test_ensure_services_retries_failed_post_compaction_reindex_once(
+    server: ConcreteMCPServer,
+) -> None:
+    """ensure_services performs one automatic retry for failed catch-up."""
+    server.services.provider.is_connected = True
+    server._compaction_service = MagicMock()
+    server._compaction_service.in_progress = False
+    server._compaction_service.last_error = RuntimeError("needs retry")
+    server._compaction_service.clear_last_error.side_effect = lambda: setattr(
+        server._compaction_service, "last_error", None
+    )
+    server._scan_progress["background_compaction"].update(
+        {
+            "phase": "failed",
+            "pending_recovery": True,
+            "retry_attempted": False,
+            "last_error": "needs retry",
+        }
+    )
+    async def succeed_retry(*, is_recovery_retry: bool = False) -> None:
+        server._mark_background_compaction_success()
+
+    server._post_compaction_reindex = AsyncMock(side_effect=succeed_retry)
+
+    services = await server.ensure_services()
+
+    assert services is server.services
+    server._post_compaction_reindex.assert_awaited_once_with(is_recovery_retry=True)
+    status = server._scan_progress["background_compaction"]
+    assert server._compaction_service.last_error is None
+    assert status["phase"] == "idle"
+    assert status["pending_recovery"] is False
+    assert status["retry_attempted"] is False
+
+
+async def test_ensure_services_raises_after_failed_retry(
+    server: ConcreteMCPServer,
+) -> None:
+    """ensure_services returns a structured compaction failure after retry failure."""
+    server.services.provider.is_connected = True
+    server._scan_progress["background_compaction"].update(
+        {
+            "phase": "failed",
+            "pending_recovery": True,
+            "retry_attempted": False,
+            "last_error": "initial failure",
+        }
+    )
+
+    async def fail_retry(*, is_recovery_retry: bool = False) -> None:
+        server._scan_progress["background_compaction"].update(
+            {
+                "phase": "failed",
+                "pending_recovery": True,
+                "retry_attempted": is_recovery_retry,
+                "last_error": "retry failed",
+            }
+        )
+        raise RuntimeError("retry failed")
+
+    server._post_compaction_reindex = AsyncMock(side_effect=fail_retry)
+
+    with pytest.raises(CompactionError, match="retry failed") as exc_info:
+        await server.ensure_services()
+
+    assert "operation=post_reindex" in str(exc_info.value)
+    server._post_compaction_reindex.assert_awaited_once_with(is_recovery_retry=True)
+    status = server._scan_progress["background_compaction"]
+    assert status["pending_recovery"] is True
+    assert status["retry_attempted"] is True
+
+
+async def test_concurrent_ensure_services_retries_only_once(
+    server: ConcreteMCPServer,
+) -> None:
+    """Concurrent callers share one successful recovery attempt."""
+    server.services.provider.is_connected = True
+    server._compaction_service = MagicMock()
+    server._compaction_service.in_progress = False
+    server._compaction_service.last_error = RuntimeError("needs retry")
+    server._compaction_service.clear_last_error.side_effect = lambda: setattr(
+        server._compaction_service, "last_error", None
+    )
+    server._scan_progress["background_compaction"].update(
+        {
+            "phase": "failed",
+            "pending_recovery": True,
+            "retry_attempted": False,
+            "last_error": "needs retry",
+        }
+    )
+    retry_started = asyncio.Event()
+    release_retry = asyncio.Event()
+
+    async def succeed_retry(*, is_recovery_retry: bool = False) -> None:
+        retry_started.set()
+        await release_retry.wait()
+        server._mark_background_compaction_success()
+
+    server._post_compaction_reindex = AsyncMock(side_effect=succeed_retry)
+
+    first_task = asyncio.create_task(server.ensure_services())
+    await retry_started.wait()
+    second_task = asyncio.create_task(server.ensure_services())
+    await asyncio.sleep(0)
+    release_retry.set()
+
+    first_services, second_services = await asyncio.gather(first_task, second_task)
+
+    assert first_services is server.services
+    assert second_services is server.services
+    server._post_compaction_reindex.assert_awaited_once_with(is_recovery_retry=True)
+    status = server._scan_progress["background_compaction"]
+    assert server._compaction_service.last_error is None
+    assert status["phase"] == "idle"
+    assert status["pending_recovery"] is False
+    assert status["retry_attempted"] is False

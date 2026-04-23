@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions.core import ConfigurationError
@@ -92,6 +93,7 @@ class MCPServerBase(ABC):
         # (to avoid racing the foreign DuckDB handle), so we can't use
         # _initialized as an idempotency signal. See cleanup() docstring.
         self._cleanup_done = False
+        self._compaction_retry_lock = asyncio.Lock()
 
         # Background tasks
         self._deferred_start_task: asyncio.Task | None = None
@@ -1137,11 +1139,12 @@ class MCPServerBase(ABC):
                 on_complete=self._post_compaction_reindex,
             )
             if started:
+                self._mark_background_compaction_started()
                 self.debug_log("Background compaction started")
         except Exception as e:
             self.debug_log(f"Background compaction failed to start: {e}", always=True)
 
-    async def _post_compaction_reindex(self) -> None:
+    async def _post_compaction_reindex(self, is_recovery_retry: bool = False) -> None:
         """Callback after compaction - triggers full reindex.
 
         Post-compaction the DB was rebuilt from a Parquet export, so stored
@@ -1155,8 +1158,12 @@ class MCPServerBase(ABC):
             )
             return
 
+        self._mark_post_compaction_reindex_running()
         try:
-            self.debug_log("Starting post-compaction reindex...")
+            if is_recovery_retry:
+                self.debug_log("Retrying failed post-compaction reindex...", always=True)
+            else:
+                self.debug_log("Starting post-compaction reindex...")
             drained_deferred_files: set[str] = set()
 
             # Clear only stale compaction deferrals before reindex.
@@ -1188,12 +1195,18 @@ class MCPServerBase(ABC):
                 f"Post-compaction reindex complete: {stats.files_processed} files, "
                 f"{stats.chunks_created} chunks"
             )
+            self._mark_background_compaction_success()
 
         except Exception as e:
             if self.realtime_indexing and drained_deferred_files:
                 await self.realtime_indexing.restore_compaction_deferred_files(
                     drained_deferred_files
                 )
+            self._mark_background_compaction_failure(
+                e,
+                pending_recovery=True,
+                retry_attempted=is_recovery_retry,
+            )
             self.debug_log(f"Post-compaction reindex failed: {e}", always=True)
             raise
 
@@ -1284,7 +1297,19 @@ class MCPServerBase(ABC):
         if not self.services:
             raise RuntimeError("Services not initialized. Call initialize() first.")
 
+        self._refresh_background_compaction_status()
+        if self._background_compaction_status()["pending_recovery"]:
+            await self._attempt_post_compaction_recovery()
+            self._refresh_background_compaction_status()
+            status = self._background_compaction_status()
+            if status["pending_recovery"]:
+                raise CompactionError(
+                    status["last_error"] or "Post-compaction catch-up failed",
+                    operation="post_reindex",
+                )
+
         await self._connect_provider()
+        self._refresh_background_compaction_status()
         return self.services
 
     async def _connect_provider(self) -> None:

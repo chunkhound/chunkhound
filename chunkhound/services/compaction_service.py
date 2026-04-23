@@ -82,6 +82,10 @@ class CompactionService:
         """
         return self._last_error
 
+    def clear_last_error(self) -> None:
+        """Forget the previous background compaction error after recovery."""
+        self._last_error = None
+
     def _is_eligible(
         self, provider: "DuckDBProvider"
     ) -> tuple[bool, dict[str, Any]]:
