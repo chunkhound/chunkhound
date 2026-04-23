@@ -21,11 +21,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
@@ -42,9 +42,6 @@ from chunkhound.watchman_runtime.loader import (
 )
 
 _DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
-
-if TYPE_CHECKING:
-    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
 
 class MCPServerBase(ABC):
@@ -1142,6 +1139,11 @@ class MCPServerBase(ABC):
                 self._mark_background_compaction_started()
                 self.debug_log("Background compaction started")
         except Exception as e:
+            self._mark_background_compaction_failure(
+                e,
+                pending_recovery=False,
+                retry_attempted=False,
+            )
             self.debug_log(f"Background compaction failed to start: {e}", always=True)
 
     async def _post_compaction_reindex(self, is_recovery_retry: bool = False) -> None:

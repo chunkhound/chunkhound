@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.exceptions import CompactionError
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.services.compaction_service import CompactionService
 from tests.unit.conftest import CaptureCoordinator
 
 
@@ -63,7 +64,8 @@ async def test_clears_compaction_deferrals_before_reindex(
     class _OrderingCoordinator(CaptureCoordinator):
         async def process_directory(self, directory, **kwargs):
             assert realtime.deferred_files == set(), (
-                "Post-compaction reindex must run only after stale deferred state is cleared"
+                "Post-compaction reindex must run only after stale deferred "
+                "state is cleared"
             )
             return await super().process_directory(directory, **kwargs)
 
@@ -76,12 +78,15 @@ async def test_clears_compaction_deferrals_before_reindex(
 
 
 async def test_uses_force_reindex(server: ConcreteMCPServer) -> None:
-    """Post-compaction reindex always forces a full reindex regardless of the current config value."""
-    # Start with force_reindex=False to prove the implementation overrides it unconditionally.
-    # Wire model_copy so the Pydantic update chain produces a real IndexingConfig(force_reindex=True).
+    """Post-compaction reindex always forces a full reindex."""
+    # Start with force_reindex=False to prove the implementation overrides
+    # it unconditionally. Wire model_copy so the Pydantic update chain
+    # produces a real IndexingConfig(force_reindex=True).
     server.config.indexing = IndexingConfig(force_reindex=False)
-    server.config.model_copy.side_effect = lambda update=None, **kw: types.SimpleNamespace(
-        indexing=(update or {}).get("indexing", server.config.indexing)
+    server.config.model_copy.side_effect = (
+        lambda update=None, **kw: types.SimpleNamespace(
+            indexing=(update or {}).get("indexing", server.config.indexing)
+        )
     )
     coordinator = CaptureCoordinator()
     server.services.indexing_coordinator = coordinator
@@ -94,7 +99,8 @@ async def test_uses_force_reindex(server: ConcreteMCPServer) -> None:
 async def test_skips_when_no_services(server: ConcreteMCPServer) -> None:
     """_post_compaction_reindex exits early when services is None."""
     server.services = None
-    # If the guard fails, accessing None.indexing_coordinator raises AttributeError → test fails.
+    # If the guard fails, accessing None.indexing_coordinator raises
+    # AttributeError and the test fails.
     await server._post_compaction_reindex()
 
 
@@ -123,7 +129,7 @@ async def test_reindex_error_is_swallowed(server: ConcreteMCPServer) -> None:
     with pytest.raises(RuntimeError, match="boom"):
         await server._post_compaction_reindex()
 
-    status = server._scan_progress["background_compaction"]
+    status = server.get_background_compaction_status()
     assert status["phase"] == "failed"
     assert status["pending_recovery"] is True
     assert status["retry_attempted"] is False
@@ -144,7 +150,9 @@ async def test_reindex_skipped_when_clear_raises(server: ConcreteMCPServer) -> N
 
     # A partial-clear state means deferred file records are stale; proceeding
     # with reindex on inconsistent state could silently leave entries un-marked.
-    assert coordinator.call_count == 0, "reindex must not be attempted when clear raises"
+    assert coordinator.call_count == 0, (
+        "reindex must not be attempted when clear raises"
+    )
 
 
 async def test_reindex_failure_restores_deferred_state(
@@ -187,10 +195,89 @@ async def test_successful_reindex_does_not_restore_deferred_state(
 
     assert coordinator.call_count == 1
     server.realtime_indexing.restore_compaction_deferred_files.assert_not_awaited()
-    status = server._scan_progress["background_compaction"]
+    status = server.get_background_compaction_status()
     assert status["phase"] == "idle"
     assert status["pending_recovery"] is False
     assert status["last_error"] is None
+
+
+async def test_successful_reindex_clears_stale_compaction_last_error(
+    server: ConcreteMCPServer,
+) -> None:
+    """Successful catch-up clears any stale callback error on the service."""
+    coordinator = CaptureCoordinator()
+    server.services.indexing_coordinator = coordinator
+    server._compaction_service = MagicMock()
+    server._compaction_service.is_compacting = False
+    server._compaction_service.last_error = RuntimeError("stale callback failure")
+    server._compaction_service.clear_last_error.side_effect = lambda: setattr(
+        server._compaction_service, "last_error", None
+    )
+
+    await server._post_compaction_reindex()
+
+    assert coordinator.call_count == 1
+    server._compaction_service.clear_last_error.assert_called_once_with()
+    assert server._compaction_service.last_error is None
+    status = server.get_background_compaction_status()
+    assert status["phase"] == "idle"
+    assert status["last_error"] is None
+    assert status["pending_recovery"] is False
+
+
+def test_refresh_background_compaction_status_uses_real_service_property(
+    server: ConcreteMCPServer,
+) -> None:
+    """Status refresh must follow the live CompactionService state."""
+    server._compaction_service = CompactionService(
+        Path(server.config.database.path),
+        server.config,
+    )
+
+    status = server.get_background_compaction_status()
+    assert status["phase"] == "idle"
+    assert status["in_progress"] is False
+
+    with patch.object(
+        CompactionService,
+        "is_compacting",
+        new_callable=PropertyMock,
+        return_value=True,
+    ):
+        active_status = server.get_background_compaction_status()
+
+    assert active_status["phase"] == "compacting"
+    assert active_status["in_progress"] is True
+
+
+async def test_trigger_background_compaction_records_startup_failure(
+    server: ConcreteMCPServer,
+) -> None:
+    """Startup failures must be reflected in public compaction status."""
+
+    class DummyDuckDBProvider:
+        is_connected = True
+
+    provider = DummyDuckDBProvider()
+    server.services.provider = provider
+    server._compaction_service = MagicMock()
+    server._compaction_service.is_compacting = False
+    server._compaction_service.last_error = RuntimeError("launch failed")
+    server._compaction_service.compact_background = AsyncMock(
+        side_effect=RuntimeError("launch failed")
+    )
+
+    with patch(
+        "chunkhound.providers.database.duckdb_provider.DuckDBProvider",
+        DummyDuckDBProvider,
+    ):
+        await server._trigger_background_compaction()
+
+    status = server.get_background_compaction_status()
+    assert status["phase"] == "failed"
+    assert status["pending_recovery"] is False
+    assert status["retry_attempted"] is False
+    assert status["last_error"] == "launch failed"
 
 
 async def test_ensure_services_retries_failed_post_compaction_reindex_once(
@@ -199,7 +286,7 @@ async def test_ensure_services_retries_failed_post_compaction_reindex_once(
     """ensure_services performs one automatic retry for failed catch-up."""
     server.services.provider.is_connected = True
     server._compaction_service = MagicMock()
-    server._compaction_service.in_progress = False
+    server._compaction_service.is_compacting = False
     server._compaction_service.last_error = RuntimeError("needs retry")
     server._compaction_service.clear_last_error.side_effect = lambda: setattr(
         server._compaction_service, "last_error", None
@@ -231,38 +318,55 @@ async def test_ensure_services_retries_failed_post_compaction_reindex_once(
 async def test_ensure_services_raises_after_failed_retry(
     server: ConcreteMCPServer,
 ) -> None:
-    """ensure_services returns a structured compaction failure after retry failure."""
+    """ensure_services retries once, then preserves real failed recovery state."""
     server.services.provider.is_connected = True
-    server._scan_progress["background_compaction"].update(
-        {
-            "phase": "failed",
-            "pending_recovery": True,
-            "retry_attempted": False,
-            "last_error": "initial failure",
-        }
+    server.realtime_indexing = MagicMock()
+    server.realtime_indexing.drain_compaction_deferred_files = AsyncMock(
+        return_value=set()
+    )
+    server.realtime_indexing.restore_compaction_deferred_files = AsyncMock()
+    server.services.indexing_coordinator = MagicMock()
+    server.services.indexing_coordinator.process_directory = AsyncMock(
+        side_effect=[
+            RuntimeError("initial failure"),
+            RuntimeError("retry failed"),
+            AssertionError("post-compaction recovery retried more than once"),
+        ]
     )
 
-    async def fail_retry(*, is_recovery_retry: bool = False) -> None:
-        server._scan_progress["background_compaction"].update(
-            {
-                "phase": "failed",
-                "pending_recovery": True,
-                "retry_attempted": is_recovery_retry,
-                "last_error": "retry failed",
-            }
-        )
-        raise RuntimeError("retry failed")
+    with pytest.raises(RuntimeError, match="initial failure"):
+        await server._post_compaction_reindex()
 
-    server._post_compaction_reindex = AsyncMock(side_effect=fail_retry)
+    initial_status = server.get_background_compaction_status()
+    assert initial_status["phase"] == "failed"
+    assert initial_status["pending_recovery"] is True
+    assert initial_status["retry_attempted"] is False
+    assert initial_status["last_error"] == "initial failure"
 
-    with pytest.raises(CompactionError, match="retry failed") as exc_info:
+    with pytest.raises(CompactionError, match="retry failed") as first_exc_info:
         await server.ensure_services()
 
-    assert "operation=post_reindex" in str(exc_info.value)
-    server._post_compaction_reindex.assert_awaited_once_with(is_recovery_retry=True)
-    status = server._scan_progress["background_compaction"]
+    assert first_exc_info.value.operation == "post_reindex"
+    assert first_exc_info.value.reason == "retry failed"
+    assert "operation=post_reindex" in str(first_exc_info.value)
+    status_after_first_call = server.get_background_compaction_status()
+    assert status_after_first_call["phase"] == "failed"
+    assert status_after_first_call["pending_recovery"] is True
+    assert status_after_first_call["retry_attempted"] is True
+    assert status_after_first_call["last_error"] == "retry failed"
+
+    with pytest.raises(CompactionError, match="retry failed") as second_exc_info:
+        await server.ensure_services()
+
+    assert second_exc_info.value.operation == "post_reindex"
+    assert second_exc_info.value.reason == "retry failed"
+    assert "operation=post_reindex" in str(second_exc_info.value)
+    status = server.get_background_compaction_status()
+    assert status["phase"] == "failed"
     assert status["pending_recovery"] is True
     assert status["retry_attempted"] is True
+    assert status["last_error"] == "retry failed"
+    assert server.services.indexing_coordinator.process_directory.await_count == 2
 
 
 async def test_concurrent_ensure_services_retries_only_once(
@@ -271,7 +375,7 @@ async def test_concurrent_ensure_services_retries_only_once(
     """Concurrent callers share one successful recovery attempt."""
     server.services.provider.is_connected = True
     server._compaction_service = MagicMock()
-    server._compaction_service.in_progress = False
+    server._compaction_service.is_compacting = False
     server._compaction_service.last_error = RuntimeError("needs retry")
     server._compaction_service.clear_last_error.side_effect = lambda: setattr(
         server._compaction_service, "last_error", None
@@ -305,7 +409,7 @@ async def test_concurrent_ensure_services_retries_only_once(
     assert first_services is server.services
     assert second_services is server.services
     server._post_compaction_reindex.assert_awaited_once_with(is_recovery_retry=True)
-    status = server._scan_progress["background_compaction"]
+    status = server.get_background_compaction_status()
     assert server._compaction_service.last_error is None
     assert status["phase"] == "idle"
     assert status["pending_recovery"] is False
