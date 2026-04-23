@@ -109,3 +109,26 @@ async def test_stdio_handler_returns_restore_hint_for_unrecoverable_recovery():
         "Database recovery failed after interrupted compaction. "
         "Restore from backup or re-index."
     )
+
+
+@pytest.mark.asyncio
+async def test_stdio_handler_returns_post_reindex_hint():
+    """Stdio handler must surface failed post-compaction catch-up to clients."""
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    config = MagicMock()
+    config.debug = False
+
+    server = StdioMCPServer(config=config)
+    handler = _capture_stdio_handler(server)
+
+    exc = CompactionError("retry failed", operation="post_reindex")
+    with patch.object(server, "ensure_services", new_callable=AsyncMock, side_effect=exc):
+        result = await handler("search", {"query": "test"})
+
+    payload = json.loads(result[0].text)
+    assert payload["error"]["type"] == "CompactionError"
+    assert payload["error"]["retry_hint"] == (
+        "Post-compaction catch-up reindex failed. Retry after recovery or "
+        "restart the MCP server."
+    )

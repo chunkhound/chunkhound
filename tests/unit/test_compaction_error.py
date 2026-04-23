@@ -58,3 +58,9 @@ class TestCompactionErrorResponse:
         response = compaction_error_response(exc)
         hint = response["error"]["retry_hint"]
         assert hint == "Compaction failed. Check logs for details."
+
+    def test_post_reindex_failure_gives_recovery_hint(self) -> None:
+        exc = CompactionError("catch-up failed", operation="post_reindex")
+        response = compaction_error_response(exc)
+        hint = response["error"]["retry_hint"]
+        assert "Post-compaction catch-up reindex failed" in hint

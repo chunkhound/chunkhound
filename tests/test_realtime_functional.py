@@ -225,8 +225,11 @@ class TestRealtimeFunctional:
         initial_record = services.provider.get_file_by_path(str(initial_file))
         realtime_record = services.provider.get_file_by_path(str(realtime_file))
 
-        # At least one should work (helps identify which path is broken)
-        processed_count = sum(1 for record in [initial_record, realtime_record] if record is not None)
-        assert processed_count > 0, "At least one processing path should work"
+        assert initial_record is not None, (
+            "Initial scan path should index files that exist before service.start()"
+        )
+        assert realtime_record is not None, (
+            "Realtime path should index files created after service.start()"
+        )
 
         await service.stop()

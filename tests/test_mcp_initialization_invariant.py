@@ -90,6 +90,12 @@ class TestNonBlockingInitialization:
                 assert "chunks_created" in progress
                 assert "scan_started_at" in progress
                 assert "scan_completed_at" in progress
+                assert "background_compaction" in progress
+
+                background_compaction = progress["background_compaction"]
+                assert background_compaction["phase"] == "idle"
+                assert background_compaction["pending_recovery"] is False
+                assert background_compaction["retry_attempted"] is False
 
                 await server.cleanup()
 

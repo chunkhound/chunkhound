@@ -33,6 +33,11 @@ def compaction_error_response(exc: CompactionError) -> dict[str, Any]:
             "Database recovery failed after interrupted compaction. "
             "Restore from backup or re-index."
         )
+    elif exc.operation == "post_reindex":
+        error_response["error"]["retry_hint"] = (
+            "Post-compaction catch-up reindex failed. Retry after recovery or "
+            "restart the MCP server."
+        )
     elif exc.operation == "connection":
         error_response["error"]["retry_hint"] = (
             "Database compaction in progress. Retry in a few seconds."
