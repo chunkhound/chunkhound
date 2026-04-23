@@ -194,11 +194,25 @@ After presenting both outputs, ask the user:
    [X.Y.Z]: https://github.com/chunkhound/chunkhound/compare/vPREV...vX.Y.Z
    ```
 
-2. **Save GitHub Release body?** — Write the release body to a temp file and print the full `gh` command:
+2. **Create GitHub Release?** — Ask the user whether to create the release as a **draft** (safe, review in UI first) or **publish immediately**.
+
+   Write the release body to a temp file, then run:
    ```bash
+   # Save release notes to temp file
+   cat > /tmp/release_notes_X.Y.Z.md << 'EOF'
+   <GitHub Release body from Step 6>
+   EOF
+
+   # Create as draft (recommended)
    gh release create vX.Y.Z --draft --title "ChunkHound vX.Y.Z" --notes-file /tmp/release_notes_X.Y.Z.md
+
+   # OR publish immediately (only if user explicitly requested)
+   gh release create vX.Y.Z --title "ChunkHound vX.Y.Z" --notes-file /tmp/release_notes_X.Y.Z.md
    ```
-   After reviewing the draft in GitHub UI, publish with:
+
+   After running, print the URL returned by `gh release create` so the user can open it directly.
+
+   If the user chose draft, remind them to publish when ready:
    ```bash
    gh release edit vX.Y.Z --draft=false
    ```
