@@ -380,10 +380,14 @@ class LLMConfig(BaseSettings):
         "codex_reasoning_effort_synthesis",
         "map_hyde_reasoning_effort",
         "autodoc_cleanup_reasoning_effort",
+        "anthropic_effort",
+        "anthropic_thinking_mode",
+        "anthropic_thinking_display",
+        "anthropic_cache_ttl",
         mode="before",
     )
-    def normalize_codex_effort(cls, v: str | None) -> str | None:  # noqa: N805
-        """Normalize Codex effort strings."""
+    def _normalize_effort_strings(cls, v: str | None) -> str | None:  # noqa: N805
+        """Normalize effort / mode / display / ttl strings to lowercase."""
         if v is None:
             return v
         return v.strip().lower()

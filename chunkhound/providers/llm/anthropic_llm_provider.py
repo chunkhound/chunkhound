@@ -69,9 +69,13 @@ _TASK_BUDGET_PREFIXES: tuple[str, ...] = (
 
 
 def _matches_family(model: str, prefixes: tuple[str, ...]) -> bool:
-    # Require an exact match or a '-' delimiter so that 'claude-opus-4-5' does
-    # not accidentally match a hypothetical 'claude-opus-4-50' or
-    # 'claude-opus-4-5b' in a future naming scheme.
+    """True if ``model`` matches any family prefix as an exact name or a
+    prefix followed by a ``-`` delimiter.
+
+    Guards against collisions with hypothetical future model names whose
+    major-version component happens to begin with an existing prefix
+    (e.g. a future ``claude-opus-4-50`` must not inherit Opus 4.5 flags).
+    """
     return any(model == p or model.startswith(f"{p}-") for p in prefixes)
 
 
@@ -238,6 +242,11 @@ class AnthropicLLMProvider(LLMProvider):
             raise ValueError(
                 f"thinking_enabled=False conflicts with thinking_mode={requested_mode!r}. "
                 "Pass thinking_enabled=True, or use thinking_mode='off' to disable."
+            )
+
+        if requested_mode == "off" and thinking_enabled:
+            logger.debug(
+                "thinking_mode='off' overrides thinking_enabled=True; thinking disabled."
             )
 
         if requested_mode == "off" or not thinking_enabled:
@@ -470,12 +479,12 @@ class AnthropicLLMProvider(LLMProvider):
     def _ensure_thinking_max_tokens(
         self, request_kwargs: dict[str, Any], max_completion_tokens: int
     ) -> None:
-        """Raise max_tokens to accommodate manual thinking budget.
+        """Raise max_tokens to accommodate the manual thinking budget.
 
-        Adaptive thinking has no fixed budget and uses max_tokens directly.
+        Only meaningful in manual mode. Callers must gate invocation on
+        ``self._thinking_mode == "manual"`` -- adaptive thinking has no fixed
+        budget and uses max_tokens directly.
         """
-        if self._thinking_mode != "manual":
-            return
         min_max_tokens = self._thinking_budget_tokens + 1000
         if max_completion_tokens < min_max_tokens:
             logger.warning(
@@ -655,7 +664,10 @@ class AnthropicLLMProvider(LLMProvider):
             thinking_cfg = self._build_thinking_config()
             thinking_active = thinking_cfg is not None
             if thinking_cfg is not None:
-                self._ensure_thinking_max_tokens(request_kwargs, max_completion_tokens)
+                if self._thinking_mode == "manual":
+                    self._ensure_thinking_max_tokens(
+                        request_kwargs, max_completion_tokens
+                    )
                 request_kwargs["thinking"] = thinking_cfg
 
             beta_headers = self._get_beta_headers(thinking_active=thinking_active)
@@ -796,7 +808,10 @@ class AnthropicLLMProvider(LLMProvider):
             thinking_cfg = self._build_thinking_config()
             thinking_active = thinking_cfg is not None
             if thinking_cfg is not None:
-                self._ensure_thinking_max_tokens(request_kwargs, max_completion_tokens)
+                if self._thinking_mode == "manual":
+                    self._ensure_thinking_max_tokens(
+                        request_kwargs, max_completion_tokens
+                    )
                 request_kwargs["thinking"] = thinking_cfg
 
             beta_headers = self._get_beta_headers(thinking_active=thinking_active)
@@ -942,7 +957,10 @@ class AnthropicLLMProvider(LLMProvider):
                 self._build_thinking_config() if thinking_compatible else None
             )
             if thinking_cfg is not None:
-                self._ensure_thinking_max_tokens(request_kwargs, max_completion_tokens)
+                if self._thinking_mode == "manual":
+                    self._ensure_thinking_max_tokens(
+                        request_kwargs, max_completion_tokens
+                    )
                 request_kwargs["thinking"] = thinking_cfg
 
             # Structured outputs is a beta for strict tool use only; JSON
@@ -1122,7 +1140,10 @@ class AnthropicLLMProvider(LLMProvider):
             thinking_cfg = self._build_thinking_config()
             thinking_active = thinking_cfg is not None
             if thinking_cfg is not None:
-                self._ensure_thinking_max_tokens(request_kwargs, max_completion_tokens)
+                if self._thinking_mode == "manual":
+                    self._ensure_thinking_max_tokens(
+                        request_kwargs, max_completion_tokens
+                    )
                 request_kwargs["thinking"] = thinking_cfg
 
             beta_headers = self._get_beta_headers(thinking_active=thinking_active)

@@ -1237,3 +1237,98 @@ class TestLLMConfigDefaults:
             "claude-haiku-4-5-20251001",
             "claude-sonnet-4-6",
         )
+
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestRequestShape:
+    """Pin the on-the-wire request_kwargs for each message path.
+
+    Structured outputs migrated from top-level ``output_format`` to
+    ``output_config.format`` in SDK 0.96. These tests assert the migration
+    stays intact and that prompt_caching / effort / thinking flow into the
+    correct API parameters.
+    """
+
+    @pytest.mark.asyncio
+    async def test_complete_structured_uses_output_config_format(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            effort="medium",
+        )
+
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = '{"x": "ok"}'
+        response = MagicMock()
+        response.content = [text_block]
+        response.stop_reason = "end_turn"
+        response.usage = MagicMock(input_tokens=10, output_tokens=5)
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(return_value=response)
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(return_value=response)
+
+        schema = {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
+            "additionalProperties": False,
+        }
+        await provider.complete_structured("hello", schema)
+
+        # Prompt caching is on by default, output_config now carries both
+        # effort and the JSON schema. Structured outputs is GA, so the call
+        # should go to the standard endpoint with no beta headers.
+        std_called = provider._client.messages.create.call_args
+        beta_called = provider._client.beta.messages.create.call_args
+        assert std_called is not None, (
+            "complete_structured should use the standard endpoint when no "
+            "beta features are active"
+        )
+        assert beta_called is None
+        kwargs = std_called.kwargs
+        assert kwargs["output_config"] == {
+            "effort": "medium",
+            "format": {"type": "json_schema", "schema": schema},
+        }
+        assert kwargs["cache_control"] == {"type": "ephemeral"}
+        assert "output_format" not in kwargs
+        assert "betas" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_complete_structured_with_context_mgmt_uses_beta_endpoint(
+        self,
+    ):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            context_management_enabled=True,
+        )
+
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = "{}"
+        response = MagicMock()
+        response.content = [text_block]
+        response.stop_reason = "end_turn"
+        response.usage = MagicMock(input_tokens=1, output_tokens=1)
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(return_value=response)
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(return_value=response)
+
+        await provider.complete_structured("hello", {"type": "object"})
+
+        # Context management is beta-only -> beta endpoint with header.
+        beta_called = provider._client.beta.messages.create.call_args
+        assert beta_called is not None
+        assert provider._client.messages.create.call_args is None
+        assert BETA_CONTEXT_MANAGEMENT in beta_called.kwargs["betas"]
