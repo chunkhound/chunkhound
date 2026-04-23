@@ -206,6 +206,13 @@ async def async_main() -> None:
 
 def main() -> None:
     """Main entry point for the CLI."""
+    # On Windows, cp1252 terminals crash on CJK/non-Latin chars. Use backslashreplace so
+    # unencodable characters survive as \uXXXX escapes rather than being silently dropped.
+    if sys.platform == "win32":
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="backslashreplace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(errors="backslashreplace")
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:
