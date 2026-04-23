@@ -990,7 +990,7 @@ class TestTaskBudget:
 
     def test_task_budget_supported_on_opus_47(self):
         assert supports_task_budget("claude-opus-4-7") is True
-        assert supports_task_budget("claude-mythos-preview") is True
+        assert supports_task_budget("claude-mythos-preview") is False
         assert supports_task_budget("claude-opus-4-6") is False
         assert supports_task_budget("claude-sonnet-4-6") is False
 

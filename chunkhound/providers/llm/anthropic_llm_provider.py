@@ -62,10 +62,7 @@ _ADAPTIVE_ONLY_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-7",
     "claude-mythos-preview",
 )
-_TASK_BUDGET_PREFIXES: tuple[str, ...] = (
-    "claude-opus-4-7",
-    "claude-mythos-preview",
-)
+_TASK_BUDGET_PREFIXES: tuple[str, ...] = ("claude-opus-4-7",)
 
 
 def _matches_family(model: str, prefixes: tuple[str, ...]) -> bool:
@@ -202,7 +199,7 @@ class AnthropicLLMProvider(LLMProvider):
                 writes but is useful when the same prefix is reused less
                 often than every 5 minutes.
             task_budget_tokens: Total token budget across a full agentic loop
-                (beta, Opus 4.7 and Mythos). Advisory cap visible to the
+                (beta, Opus 4.7 only). Advisory cap visible to the
                 model; min 20000. Leave None for open-ended quality work.
         """
         if not ANTHROPIC_AVAILABLE:
