@@ -115,6 +115,17 @@ def _create_searchable_duckdb(path: Path, marker: str) -> None:
     conn.close()
 
 
+def _assert_marker_searchable(tmp_path: Path, db_path: Path, marker: str) -> None:
+    """Assert recovered DB content is queryable through the provider search path."""
+    provider = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
+    provider.connect()
+    try:
+        results = provider.search_chunks_regex(marker)
+        assert results, f"Expected searchable results for marker {marker!r}"
+    finally:
+        provider.disconnect()
+
+
 @pytest.fixture
 def foreign_live_pid():
     """Spawn a short-lived subprocess and yield its PID.
@@ -128,9 +139,7 @@ def foreign_live_pid():
     import subprocess
     import sys
 
-    proc = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"]
-    )
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         yield proc.pid
     finally:
@@ -187,9 +196,10 @@ class TestCrashMidSwap:
         """
         db_path = tmp_path / "chunks.duckdb"
         old_path = db_path.with_suffix(".duckdb.old")
+        marker = "backup_recovered_marker"
 
         # Create a valid backup and a corrupted primary
-        _create_valid_duckdb(old_path)
+        _create_searchable_duckdb(old_path, marker)
         db_path.write_bytes(b"not a valid duckdb file")
 
         mgr = DuckDBConnectionManager(db_path)
@@ -197,13 +207,9 @@ class TestCrashMidSwap:
         try:
             assert db_path.exists(), "db_path should be restored from backup"
             assert not old_path.exists(), ".old should be cleaned up after restore"
-            # Verify the restored file is actually usable
-            result = mgr.connection.execute(
-                "SELECT count(*) FROM files"
-            ).fetchone()
-            assert result == (0,), "Restored DB should have files table"
         finally:
             mgr.disconnect()
+        _assert_marker_searchable(tmp_path, db_path, marker)
 
     def test_connect_fails_when_both_db_and_backup_corrupt(self, tmp_path: Path):
         """If both db_path and .duckdb.old are corrupt, connect raises."""
@@ -403,9 +409,7 @@ class TestLockFileRecovery:
             with pytest.raises(CompactionError, match=_COMPACTION_MATCH) as exc_info:
                 mgr.connect()
             assert exc_info.value.operation == "connection"
-            assert lock_path.exists(), (
-                "Legacy lock with live PID should be preserved"
-            )
+            assert lock_path.exists(), "Legacy lock with live PID should be preserved"
         finally:
             lock_path.unlink(missing_ok=True)
 
@@ -688,7 +692,9 @@ class TestIntentBasedRecovery:
                 "SELECT code FROM chunks WHERE code LIKE ?",
                 [f"%{marker}%"],
             ).fetchone()
-            assert result is not None, "Recovered DB should preserve searchable chunk data"
+            assert result is not None, (
+                "Recovered DB should preserve searchable chunk data"
+            )
         finally:
             mgr.disconnect()
 
@@ -732,8 +738,9 @@ class TestIntentBasedRecovery:
         old_path = db_path.with_suffix(".duckdb.old")
         compact_path = db_path.with_suffix(".compact.duckdb")
         intent_path = Path(str(db_path) + ".swap_intent")
+        marker = "phase2_old_restored_marker"
 
-        _create_valid_duckdb(old_path)
+        _create_searchable_duckdb(old_path, marker)
         compact_path.write_bytes(b"corrupt compact db")
         intent_path.write_text("phase2")
 
@@ -744,13 +751,9 @@ class TestIntentBasedRecovery:
             assert not old_path.exists(), "old should be consumed"
             assert not compact_path.exists(), "corrupt compact should be cleaned up"
             assert not intent_path.exists(), "intent should be cleaned up"
-            # Verify the restored file is usable
-            result = mgr.connection.execute(
-                "SELECT count(*) FROM files"
-            ).fetchone()
-            assert result == (0,), "Restored DB should have files table"
         finally:
             mgr.disconnect()
+        _assert_marker_searchable(tmp_path, db_path, marker)
 
     def test_phase2_restores_old_when_db_path_exists_but_is_corrupt(
         self, tmp_path: Path
@@ -759,8 +762,9 @@ class TestIntentBasedRecovery:
         db_path = tmp_path / "chunks.duckdb"
         old_path = db_path.with_suffix(".duckdb.old")
         intent_path = Path(str(db_path) + ".swap_intent")
+        marker = "phase2_corrupt_primary_restored_marker"
 
-        _create_valid_duckdb(old_path)
+        _create_searchable_duckdb(old_path, marker)
         db_path.write_bytes(b"corrupt current db")
         intent_path.write_text("phase2")
 
@@ -770,12 +774,9 @@ class TestIntentBasedRecovery:
             assert db_path.exists(), "Should be restored from old_db"
             assert not old_path.exists(), "old should be consumed"
             assert not intent_path.exists(), "intent should be cleaned up"
-            result = mgr.connection.execute(
-                "SELECT count(*) FROM files"
-            ).fetchone()
-            assert result == (0,), "Restored DB should have files table"
         finally:
             mgr.disconnect()
+        _assert_marker_searchable(tmp_path, db_path, marker)
 
     def test_phase2_completes_swap_without_backup(self, tmp_path: Path):
         """phase2 crash: db missing, compact valid, no old_db -> install compact."""
@@ -797,7 +798,9 @@ class TestIntentBasedRecovery:
                 "SELECT code FROM chunks WHERE code LIKE ?",
                 [f"%{marker}%"],
             ).fetchone()
-            assert result is not None, "Installed DB should preserve searchable chunk data"
+            assert result is not None, (
+                "Installed DB should preserve searchable chunk data"
+            )
         finally:
             mgr.disconnect()
 
@@ -865,7 +868,9 @@ class TestSameProcessCompaction:
         with _COMPACTING_PATHS_LOCK:
             _COMPACTING_PATHS.clear()
 
-    def test_second_manager_raises_when_same_process_compacting(self, tmp_path: Path) -> None:
+    def test_second_manager_raises_when_same_process_compacting(
+        self, tmp_path: Path
+    ) -> None:
         """A second DuckDBConnectionManager must not delete a live same-process compaction lock.
 
         Regression test for the bug where Provider B (same PID, same path) treated
@@ -891,7 +896,9 @@ class TestSameProcessCompaction:
                 _COMPACTING_PATHS.discard(str(db_path))
             lock_path.unlink(missing_ok=True)
 
-    def test_failed_lock_acquisition_does_not_remove_holder_entry(self, tmp_path: Path) -> None:
+    def test_failed_lock_acquisition_does_not_remove_holder_entry(
+        self, tmp_path: Path
+    ) -> None:
         """A compact() that fails at lock acquisition must not remove the holder's registry entry.
 
         Regression guard for the discard-on-failed-acquisition bug: Provider B registers in
@@ -923,7 +930,9 @@ class TestSameProcessCompaction:
                 assert str(db_path) in _COMPACTING_PATHS, (
                     "A's registry entry must survive B's failed lock acquisition"
                 )
-            assert lock_path.exists(), "A's lock file must not be deleted by B's finally"
+            assert lock_path.exists(), (
+                "A's lock file must not be deleted by B's finally"
+            )
 
             # A third manager must still see A's compaction as live.
             mgr3 = DuckDBConnectionManager(db_path)

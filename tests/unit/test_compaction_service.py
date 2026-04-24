@@ -468,7 +468,9 @@ class TestBackgroundCompaction:
             return True
 
         with patch.object(service, "_do_compaction", successful_compaction):
-            await service.compact_background(mock_provider, on_complete=failing_callback)
+            await service.compact_background(
+                mock_provider, on_complete=failing_callback
+            )
 
             if service._compaction_task:
                 try:
@@ -786,7 +788,6 @@ class TestShutdown:
                 "Cleanup: thread did not exit"
             )
 
-
     @pytest.mark.asyncio
     async def test_shutdown_completes_when_to_thread_fails_before_start(
         self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
@@ -797,7 +798,9 @@ class TestShutdown:
 
         service = CompactionService(db_path, config_with_compaction)
 
-        with patch("asyncio.to_thread", side_effect=RuntimeError("no running event loop")):
+        with patch(
+            "asyncio.to_thread", side_effect=RuntimeError("no running event loop")
+        ):
             with pytest.raises(RuntimeError):
                 await service.compact_blocking(mock_provider)
 
@@ -959,9 +962,7 @@ class TestDuckDBProviderOptimize:
             f"Chunk count mismatch: {len(chunks_before)} -> {len(chunks_after)}"
         )
 
-    def test_optimize_cleans_up_lock_file(
-        self, provider_with_fragmentation: tuple
-    ):
+    def test_optimize_cleans_up_lock_file(self, provider_with_fragmentation: tuple):
         """Verify lock file is removed after compaction."""
         from chunkhound.providers.database.duckdb.connection_manager import (
             get_compaction_lock_path,
@@ -1014,6 +1015,24 @@ class TestDuckDBProviderOptimize:
             provider.optimize()
 
         assert lock_path.exists(), "Foreign lock file was incorrectly deleted"
+
+    def test_post_compaction_reconnect_skips_terminal_cleanup_provider(
+        self, provider_with_fragmentation: tuple
+    ):
+        """Reconnect helper must not call connect() after terminal stuck cleanup."""
+        provider, _db_path = provider_with_fragmentation
+
+        provider.mark_terminal_after_stuck_cleanup()
+        assert not provider.is_accepting_connections
+
+        with patch.object(
+            provider,
+            "connect",
+            side_effect=AssertionError("connect() must be skipped"),
+        ):
+            provider._restore_connection_after_compaction()
+
+        assert not provider.is_accepting_connections
 
 
 class TestRowWasteRatio:
@@ -1150,9 +1169,7 @@ class TestCompactionServiceEligibilityReal:
             tmp_path, db_path, threshold=0.01, min_size_mb=0
         )
         should_zero, _ = service_zero.check_should_compact(provider)
-        assert should_zero is True, (
-            "Expected compaction to fire with min_size_mb=0"
-        )
+        assert should_zero is True, "Expected compaction to fire with min_size_mb=0"
 
         # min_size=1000 MB ⇒ the small fixture DB cannot exceed it.
         service_huge = self._make_service(
@@ -1331,14 +1348,17 @@ class TestCompactionErrorRecovery:
         """Connection gate is opened even when both import and reconnect fail."""
         provider, db_path = provider_with_fragmentation
 
-        with patch.object(
-            provider,
-            "_import_database_for_compaction",
-            side_effect=RuntimeError("import crashed"),
-        ), patch.object(
-            provider,
-            "connect",
-            side_effect=RuntimeError("reconnect failed"),
+        with (
+            patch.object(
+                provider,
+                "_import_database_for_compaction",
+                side_effect=RuntimeError("import crashed"),
+            ),
+            patch.object(
+                provider,
+                "connect",
+                side_effect=RuntimeError("reconnect failed"),
+            ),
         ):
             with pytest.raises(CompactionError):
                 provider.optimize()
@@ -1374,7 +1394,9 @@ class TestCompactionErrorRecovery:
             "chunkhound.providers.database.duckdb_provider.os.replace",
             side_effect=destructive_replace,
         ):
-            with pytest.raises(CompactionError, match="Manual recovery required") as exc_info:
+            with pytest.raises(
+                CompactionError, match="Manual recovery required"
+            ) as exc_info:
                 provider.optimize()
 
             assert exc_info.value.operation == "compaction"
@@ -1475,8 +1497,11 @@ class TestPostSwapCancelCheck:
         log_buf = io.StringIO()
         sink_id = logger.add(log_buf, level="WARNING")
         try:
-            with patch("os.replace", side_effect=tracking_replace), patch.object(
-                provider._connection_manager, "_probe_db_valid", return_value=False
+            with (
+                patch("os.replace", side_effect=tracking_replace),
+                patch.object(
+                    provider._connection_manager, "_probe_db_valid", return_value=False
+                ),
             ):
                 result = provider.optimize(cancel_check=lambda: swap_complete)
         finally:
@@ -1560,10 +1585,13 @@ class TestConcurrentAccessDuringCompaction:
             except Exception as exc:  # pragma: no cover - failure path asserted below
                 compaction_result["error"] = exc
 
-        with patch.object(
-            provider, "_executor_get_file_by_path", side_effect=blocking_read
-        ), patch.object(
-            provider, "_export_database_for_compaction", side_effect=pausing_export
+        with (
+            patch.object(
+                provider, "_executor_get_file_by_path", side_effect=blocking_read
+            ),
+            patch.object(
+                provider, "_export_database_for_compaction", side_effect=pausing_export
+            ),
         ):
             read_thread: threading.Thread | None = None
             compact_thread: threading.Thread | None = None
@@ -1582,7 +1610,9 @@ class TestConcurrentAccessDuringCompaction:
                 allow_queued_read.set()
                 read_thread.join(timeout=10)
                 assert not read_thread.is_alive(), "Queued read thread did not finish"
-                assert "error" not in queued_read_result, queued_read_result.get("error")
+                assert "error" not in queued_read_result, queued_read_result.get(
+                    "error"
+                )
                 assert queued_read_result["value"] is not None
 
                 assert export_paused.wait(timeout=10), "Export phase never started"
@@ -1781,8 +1811,7 @@ class TestEmbeddingVectorSurvival:
             assert len(actual_vec) == 128
             for j, (a, b) in enumerate(zip(expected_vec, actual_vec)):
                 assert abs(a - b) < 1e-6, (
-                    f"Vector mismatch at chunk {chunk_id}, dim {j}: "
-                    f"{a} vs {b}"
+                    f"Vector mismatch at chunk {chunk_id}, dim {j}: {a} vs {b}"
                 )
 
         # Also verify non-embedding data survived
