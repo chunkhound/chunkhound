@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, AsyncContextManager, Protocol
 
 from chunkhound.core.models import Chunk, Embedding, File
 
@@ -404,6 +404,10 @@ class DatabaseProvider(Protocol):
 
     async def rollback_transaction_async(self) -> None:
         """Rollback the current transaction (asynchronous)."""
+        ...
+
+    def exclusive_transaction_span(self) -> AsyncContextManager[None]:
+        """Serialize a full transaction span across shared coordinators."""
         ...
 
     # File Processing Integration

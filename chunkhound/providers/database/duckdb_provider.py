@@ -442,8 +442,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
             else:
                 logger.info(
-                    f"Created {table_name} with regular indexes "
-                    "(HNSW index deferred)"
+                    f"Created {table_name} with regular indexes (HNSW index deferred)"
                 )
             return table_name
 
@@ -600,11 +599,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         accounted_blocks = 0
         try:
             for (table_name,) in tables:
-                result = conn.execute("""
+                result = conn.execute(
+                    """
                     SELECT COUNT(DISTINCT block_id)
                     FROM pragma_storage_info(?)
                     WHERE block_id >= 0
-                """, [table_name]).fetchone()
+                """,
+                    [table_name],
+                ).fetchone()
                 if result and result[0]:
                     accounted_blocks += int(result[0])
         except Exception as e:
@@ -627,27 +629,33 @@ class DuckDBProvider(SerialDatabaseProvider):
         total_storage_rows = 0
         try:
             for (table_name,) in tables:
-                live = conn.execute(
-                    f'SELECT COUNT(*) FROM "{table_name}"'
-                ).fetchone()[0]
+                live = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[
+                    0
+                ]
                 total_live_rows += live
 
                 # Pick the first non-list column to avoid FLOAT[N] inflation
-                col = conn.execute("""
+                col = conn.execute(
+                    """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_schema = 'main' AND table_name = ?
                     AND data_type NOT LIKE '%[%' AND data_type NOT LIKE 'LIST%'
                     ORDER BY ordinal_position
                     LIMIT 1
-                """, [table_name]).fetchone()
+                """,
+                    [table_name],
+                ).fetchone()
 
                 if col:
-                    storage = conn.execute(f"""
+                    storage = conn.execute(
+                        f"""
                         SELECT COALESCE(SUM(count), 0)
                         FROM pragma_storage_info(?)
                         WHERE column_name = ?
                           AND segment_type != 'VALIDITY'  -- exclude null bitmasks
-                    """, [table_name, col[0]]).fetchone()[0]
+                    """,
+                        [table_name, col[0]],
+                    ).fetchone()[0]
                     total_storage_rows += max(int(storage), live)
                 else:
                     total_storage_rows += live
@@ -748,18 +756,23 @@ class DuckDBProvider(SerialDatabaseProvider):
             return
 
         deferred_tables = state.get("deferred_hnsw_indexes", set())
-        logger.info(f"Creating deferred HNSW indexes for {len(deferred_tables)} table(s)")
+        logger.info(
+            f"Creating deferred HNSW indexes for {len(deferred_tables)} table(s)"
+        )
 
         for table_name, dims in deferred_tables:
             try:
                 hnsw_index_name = f"idx_hnsw_{dims}"
 
                 # Check if index already exists
-                existing = conn.execute("""
+                existing = conn.execute(
+                    """
                     SELECT index_name FROM duckdb_indexes()
                     WHERE table_name = ?
                     AND index_name = ?
-                """, [table_name, hnsw_index_name]).fetchone()
+                """,
+                    [table_name, hnsw_index_name],
+                ).fetchone()
 
                 if existing:
                     logger.debug(f"Index {hnsw_index_name} already exists, skipping")
@@ -3096,9 +3109,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         # it from firing on the next unrelated commit.
         state["deferred_checkpoint"] = False
 
-    def optimize(
-        self, cancel_check: Callable[[], bool] | None = None
-    ) -> bool:
+    def optimize(self, cancel_check: Callable[[], bool] | None = None) -> bool:
         """Optimize DuckDB storage: CHECKPOINT and full compaction.
 
         Always runs compaction when called. Callers are responsible for deciding
@@ -3200,8 +3211,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._export_database_for_compaction(db_path, export_dir)
 
             if cancel_check and cancel_check():
-                self._connection_allowed.set()  # Ungate before reconnect
-                self.connect()  # Restore connection after soft_disconnect
+                self._restore_connection_after_compaction()
                 return False
 
             # 2. Import into fresh database (connects to new file)
@@ -3212,8 +3222,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # Clean up the compacted DB since we won't swap
                 if new_db_path.exists():
                     new_db_path.unlink()
-                self._connection_allowed.set()  # Ungate before reconnect
-                self.connect()  # Restore connection after soft_disconnect
+                self._restore_connection_after_compaction()
                 return False
 
             # 3. Atomic swap
@@ -3257,8 +3266,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     return False
 
             # Reconnect to swapped database
-            self._connection_allowed.set()  # Ungate before reconnect
-            self.connect()
+            self._restore_connection_after_compaction()
 
             # Clean up old file
             try:
@@ -3266,7 +3274,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             except OSError as exc:
                 # Compaction succeeded and new DB is connected — cleanup failure is non-fatal.
                 # Recovery on next startup will handle the stale file.
-                logger.warning("Could not remove old database after compaction: %s", exc)
+                logger.warning(
+                    "Could not remove old database after compaction: %s", exc
+                )
 
             logger.info(f"Compaction complete: {db_path}")
             return True
@@ -3292,9 +3302,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                 ) from e
             # Reconnect (we disconnected for export, need to restore connection)
             if not self.is_connected:
-                self._connection_allowed.set()  # Ungate before recovery connect
                 try:
-                    self.connect()
+                    self._restore_connection_after_compaction()
                 except Exception as err:
                     logger.error(
                         f"Reconnect after compaction failed: {err}. "
@@ -3335,7 +3344,19 @@ class DuckDBProvider(SerialDatabaseProvider):
             if self.is_connected:
                 self._connection_allowed.set()
 
-    def _has_sufficient_disk_space(self, db_path: Path, multiplier: float = 3.0) -> None:
+    def _restore_connection_after_compaction(self) -> None:
+        """Reconnect after compaction unless cleanup has made the provider terminal."""
+        if self.terminal_after_stuck_cleanup:
+            logger.warning(
+                "Skipping post-compaction reconnect after terminal stuck-cleanup state"
+            )
+            return
+        self._connection_allowed.set()
+        self.connect()
+
+    def _has_sufficient_disk_space(
+        self, db_path: Path, multiplier: float = 3.0
+    ) -> None:
         """Check if sufficient disk space exists for compaction.
 
         Raises:
@@ -3440,4 +3461,3 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "HNSW persistence flag not available. "
                 "Vector indexes will rebuild on first query after compaction."
             )
-

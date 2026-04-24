@@ -216,9 +216,6 @@ class IndexingCoordinator(BaseService):
         # WHY: asyncio.Lock() must be created inside the event loop
         self._file_locks: dict[str, asyncio.Lock] = {}
         self._locks_lock = None  # Will be initialized when first needed
-        # Prevents interleaving of begin→commit spans across coroutines
-        # sharing the single-threaded serial executor connection.
-        self._transaction_lock: asyncio.Lock | None = None
 
         # Base directory for path normalization (immutable after initialization)
         # Store raw path - will resolve at usage time for consistent symlink handling
@@ -972,12 +969,7 @@ class IndexingCoordinator(BaseService):
             # Detect language for storage
             language = result.language
 
-            # Acquire transaction lock so concurrent coroutines (e.g. realtime
-            # service vs post-compaction reindex) cannot interleave BEGIN/COMMIT
-            # on the single shared DuckDB connection.
-            if self._transaction_lock is None:
-                self._transaction_lock = asyncio.Lock()
-            async with self._transaction_lock:
+            async with self._db.exclusive_transaction_span():
                 # Per-file transaction boundaries
                 try:
                     await self._db.begin_transaction_async()
@@ -1036,7 +1028,9 @@ class IndexingCoordinator(BaseService):
                         # New file or existing file with no chunks — store all
                         new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
                         ids = await self._db.insert_chunks_batch_async(new_chunk_models)
-                    logger.debug(f"Batch inserted {len(ids)} chunks for file_id {file_id}")
+                    logger.debug(
+                        f"Batch inserted {len(ids)} chunks for file_id {file_id}"
+                    )
                     stats["chunk_ids_needing_embeddings"].extend(ids)
                     stats["total_chunks"] += len(ids)
                     # Count this file as processed successfully (stored or updated)
@@ -1059,12 +1053,16 @@ class IndexingCoordinator(BaseService):
                             errs = cumulative_counters.get("errors", 0)
                             self.progress.update(
                                 file_task,
-                                info=_progress_info(stored, skipped, errs, display_chunks),
+                                info=_progress_info(
+                                    stored, skipped, errs, display_chunks
+                                ),
                             )
 
                 except Exception as e:
                     await self._db.rollback_transaction_async()
-                    stats["errors"].append({"file": str(result.file_path), "error": str(e)})
+                    stats["errors"].append(
+                        {"file": str(result.file_path), "error": str(e)}
+                    )
                     if file_task is not None and self.progress:
                         self.progress.advance(file_task, 1)
                         if cumulative_counters is not None:
@@ -1077,7 +1075,9 @@ class IndexingCoordinator(BaseService):
                             chunks_so_far = cumulative_counters.get("chunks", 0)
                             self.progress.update(
                                 file_task,
-                                info=_progress_info(stored, skipped, errs, chunks_so_far),
+                                info=_progress_info(
+                                    stored, skipped, errs, chunks_so_far
+                                ),
                             )
                     continue
 
@@ -1153,7 +1153,11 @@ class IndexingCoordinator(BaseService):
             # Phase 2.5: Change detection (skip unchanged files unless force_reindex)
             # Config escalates to force_reindex but cannot suppress an explicit True from
             # the caller; also serves as fallback for direct callers that omit the flag.
-            if not force_reindex and self.config and getattr(self.config, "indexing", None):
+            if (
+                not force_reindex
+                and self.config
+                and getattr(self.config, "indexing", None)
+            ):
                 force_reindex = bool(self.config.indexing.force_reindex)
 
             files_to_process: list[Path] = files
@@ -2880,7 +2884,9 @@ class IndexingCoordinator(BaseService):
                     FROM files
                     WHERE path = ? OR path LIKE ? ESCAPE '\\'
                 """
-                db_files = self._db.execute_query(query, [dir_prefix, escaped_prefix + "/%"])
+                db_files = self._db.execute_query(
+                    query, [dir_prefix, escaped_prefix + "/%"]
+                )
             else:
                 query = """
                     SELECT id, path

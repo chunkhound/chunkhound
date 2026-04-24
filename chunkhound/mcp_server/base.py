@@ -108,9 +108,7 @@ class MCPServerBase(ABC):
         if not always and not self.debug_mode:
             return
         # Write to debug file instead of stderr to preserve JSON-RPC protocol
-        debug_file = os.getenv(
-            "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log"
-        )
+        debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log")
         try:
             with open(debug_file, "a") as f:
                 timestamp = datetime.now().isoformat()
@@ -488,7 +486,9 @@ class MCPServerBase(ABC):
         self._mark_post_compaction_reindex_running()
         try:
             if is_recovery_retry:
-                self.debug_log("Retrying failed post-compaction reindex...", always=True)
+                self.debug_log(
+                    "Retrying failed post-compaction reindex...", always=True
+                )
             else:
                 self.debug_log("Starting post-compaction reindex...")
             drained_deferred_files: set[str] = set()
@@ -503,9 +503,11 @@ class MCPServerBase(ABC):
             # Force reindex: the DB was rebuilt from export, mtime-based
             # skip logic is unreliable after compaction.
             reindex_config = self.config.model_copy(
-                update={"indexing": self.config.indexing.model_copy(
-                    update={"force_reindex": True}
-                )}
+                update={
+                    "indexing": self.config.indexing.model_copy(
+                        update={"force_reindex": True}
+                    )
+                }
             )
 
             indexing_service = DirectoryIndexingService(
@@ -572,10 +574,17 @@ class MCPServerBase(ABC):
                                 "skipping provider disconnect to avoid corruption",
                                 always=True,
                             )
-                            if self.services and hasattr(self.services.provider, "shutdown_executor"):
+                            await self._cleanup_non_provider_resources()
+                            if self.services and hasattr(
+                                self.services.provider,
+                                "mark_terminal_after_stuck_cleanup",
+                            ):
+                                self.services.provider.mark_terminal_after_stuck_cleanup()
+                            if self.services and hasattr(
+                                self.services.provider, "shutdown_executor"
+                            ):
                                 self.services.provider.shutdown_executor()
                             self._compaction_service = None
-                            await self._cleanup_non_provider_resources()
                             # _initialized intentionally stays True: cleanup() is terminal
                             # (process exits after this), so no reconnection will follow.
                             return
@@ -655,12 +664,17 @@ class MCPServerBase(ABC):
         Uses a lock to prevent concurrent connect() calls which would
         leak a DuckDB connection handle.
         """
-        if self.services.provider.is_connected:
+        provider = self.services.provider
+        if hasattr(provider, "ensure_usable"):
+            provider.ensure_usable("connect provider")
+        if provider.is_connected:
             return
         async with self._connect_lock:
-            if not self.services.provider.is_connected:
+            if hasattr(provider, "ensure_usable"):
+                provider.ensure_usable("connect provider")
+            if not provider.is_connected:
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self.services.provider.connect)
+                await loop.run_in_executor(None, provider.connect)
 
     def ensure_embedding_manager(self) -> EmbeddingManager:
         """Ensure embedding manager is available and has providers.

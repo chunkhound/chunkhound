@@ -161,3 +161,46 @@ jobs:
       - name: Check flaky annotations
         if: failure() && steps.tests.outcome == 'failure' && hashFiles('test-results.xml') != ''
         run: uv run python scripts/check_flaky_annotations.py test-results.xml
+
+  linux-vss-compaction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Verify DuckDB VSS availability
+        run: >-
+          uv run python -c
+          "import duckdb; conn = duckdb.connect(':memory:'); conn.execute('LOAD vss'); conn.close()"
+
+      - name: Run mandatory embedding-survival compaction coverage
+        id: tests
+        run: >-
+          uv run pytest tests/unit/test_compaction_service.py -v
+          -k test_optimize_preserves_embedding_vectors
+          --junit-xml=test-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-linux-vss-compaction-py3.11
+          path: test-results.xml
+          if-no-files-found: ignore
+
+      - name: Check flaky annotations
+        if: failure() && steps.tests.outcome == 'failure' && hashFiles('test-results.xml') != ''
+        run: uv run python scripts/check_flaky_annotations.py test-results.xml

@@ -10,6 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.providers.database.serial_database_provider import (
+    SerialDatabaseProvider,
+)
 
 
 class ConcreteMCPServer(MCPServerBase):
@@ -20,6 +23,19 @@ class ConcreteMCPServer(MCPServerBase):
 
     async def run(self) -> None:
         pass
+
+
+class MinimalSerialProvider(SerialDatabaseProvider):
+    """Minimal concrete serial provider for lifecycle regression tests."""
+
+    def _create_connection(self) -> object:
+        return object()
+
+    def _get_schema_sql(self) -> list[str] | None:
+        return None
+
+    def _executor_ping(self, conn: object, state: dict[str, object]) -> str:
+        return "ok"
 
 
 class TestNonBlockingInitialization:
@@ -145,6 +161,7 @@ class TestShutdownSafety:
         with patch("chunkhound.mcp_server.base.create_services") as mock_create:
             mock_provider = MagicMock()
             mock_provider.is_connected = True
+            mock_provider.mark_terminal_after_stuck_cleanup = MagicMock()
 
             mock_services = MagicMock()
             mock_services.provider = mock_provider
@@ -169,9 +186,65 @@ class TestShutdownSafety:
                 # Provider must NOT have been closed/disconnected.
                 mock_provider.close.assert_not_called()
                 mock_provider.disconnect.assert_not_called()
+                mock_provider.mark_terminal_after_stuck_cleanup.assert_called_once_with()
+                mock_provider.shutdown_executor.assert_called_once_with()
 
                 # _initialized stays True (cleanup is terminal, no reconnection).
                 assert server._initialized
+
+    @pytest.mark.asyncio
+    async def test_stuck_compaction_cleans_non_provider_resources_before_executor_shutdown(
+        self, tmp_path: Path
+    ) -> None:
+        """Cleanup must cancel server-managed work before killing the DB executor."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            call_order: list[str] = []
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+            mock_provider.mark_terminal_after_stuck_cleanup.side_effect = (
+                lambda: call_order.append("mark_terminal")
+            )
+            mock_provider.shutdown_executor.side_effect = lambda: call_order.append(
+                "shutdown_executor"
+            )
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+
+                stuck_event = MagicMock()
+                stuck_event.is_set.return_value = False
+                stuck_event.wait.return_value = False
+
+                mock_compaction = MagicMock()
+                mock_compaction.compaction_thread_done = stuck_event
+                mock_compaction.shutdown = AsyncMock()
+                server._compaction_service = mock_compaction
+
+                async def fake_cleanup_non_provider_resources() -> None:
+                    call_order.append("cleanup_non_provider")
+
+                server._cleanup_non_provider_resources = (
+                    fake_cleanup_non_provider_resources
+                )
+
+                await server.cleanup()
+
+                assert call_order == [
+                    "cleanup_non_provider",
+                    "mark_terminal",
+                    "shutdown_executor",
+                ]
 
     @pytest.mark.asyncio
     async def test_cleanup_is_idempotent_after_stuck_compaction(
@@ -196,6 +269,7 @@ class TestShutdownSafety:
         with patch("chunkhound.mcp_server.base.create_services") as mock_create:
             mock_provider = MagicMock()
             mock_provider.is_connected = True
+            mock_provider.mark_terminal_after_stuck_cleanup = MagicMock()
             # Contract: while the compaction thread is stuck alive, the
             # provider must NEVER be closed or disconnected. Any invocation
             # of either method is a correctness violation.
@@ -236,11 +310,57 @@ class TestShutdownSafety:
                 # Provider must never have been closed across both calls
                 assert mock_provider.close.call_count == 0
                 assert mock_provider.disconnect.call_count == 0
+                mock_provider.mark_terminal_after_stuck_cleanup.assert_called_once_with()
+                mock_provider.shutdown_executor.assert_called_once_with()
 
-    @pytest.mark.asyncio
-    async def test_concurrent_cleanup_serializes_via_lock(
+    def test_terminal_cleanup_provider_rejects_subsequent_db_work(
         self, tmp_path: Path
     ) -> None:
+        """Provider operations must fail explicitly after terminal cleanup."""
+        provider = MinimalSerialProvider(
+            db_path=tmp_path / "test.db",
+            base_directory=tmp_path,
+        )
+        provider.mark_terminal_after_stuck_cleanup()
+        provider.shutdown_executor()
+
+        with pytest.raises(RuntimeError, match="terminal cleanup state"):
+            provider._execute_in_db_thread_sync("ping")
+
+    @pytest.mark.asyncio
+    async def test_connect_provider_rejects_terminal_provider_even_if_marked_connected(
+        self, tmp_path: Path
+    ) -> None:
+        """_connect_provider must fail fast on a terminal provider state."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+            mock_provider.ensure_usable.side_effect = RuntimeError(
+                "Cannot connect provider: provider entered terminal cleanup "
+                "state after stuck compaction"
+            )
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+
+                with pytest.raises(RuntimeError, match="terminal cleanup state"):
+                    await server._connect_provider()
+
+                mock_provider.connect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cleanup_serializes_via_lock(self, tmp_path: Path) -> None:
         """Two parallel cleanup() tasks must serialize and only close once.
 
         Without ``_cleanup_lock``, two concurrent callers can both pass the
@@ -270,7 +390,19 @@ class TestShutdownSafety:
 
                 # Provider closed exactly once across both concurrent calls
                 close_calls = (
-                    mock_provider.close.call_count
-                    + mock_provider.disconnect.call_count
+                    mock_provider.close.call_count + mock_provider.disconnect.call_count
                 )
                 assert close_calls == 1
+
+    def test_serial_provider_operations_fail_explicitly_after_terminal_cleanup(
+        self, tmp_path: Path
+    ) -> None:
+        """Post-terminal DB calls must fail before touching the dead executor."""
+        provider = MinimalSerialProvider(
+            db_path=tmp_path / "test.db",
+            base_directory=tmp_path,
+        )
+        provider.mark_terminal_after_stuck_cleanup()
+
+        with pytest.raises(RuntimeError, match="terminal cleanup state"):
+            provider._execute_in_db_thread_sync("connect")

@@ -1,8 +1,10 @@
 """Base class for database providers requiring single-threaded execution."""
 
+import asyncio
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -74,6 +76,15 @@ class SerialDatabaseProvider(ABC):
         self._connection_allowed = threading.Event()
         self._connection_allowed.set()
 
+        # Shared across all coordinators using this provider instance so full
+        # BEGIN -> work -> COMMIT/ROLLBACK spans cannot interleave.
+        self._transaction_span_lock = asyncio.Lock()
+
+        # Terminal lifecycle state entered only when MCP cleanup gives up
+        # waiting for a stuck compaction thread and reclaims the executor.
+        self._terminal_after_stuck_cleanup = False
+        self._executor_available = True
+
     @property
     def is_accepting_connections(self) -> bool:
         """True when accepting connections, False during compaction."""
@@ -109,7 +120,7 @@ class SerialDatabaseProvider(ABC):
     def is_connected(self) -> bool:
         """Check if database connection is active."""
         # For serial providers, we consider it connected if executor exists
-        return self._executor is not None
+        return self._executor is not None and self._executor_available
 
     @property
     def last_activity_time(self) -> float | None:
@@ -124,6 +135,7 @@ class SerialDatabaseProvider(ABC):
 
     def connect(self) -> None:
         """Establish database connection and initialize schema."""
+        self.ensure_usable("connect provider")
         try:
             # Execute connection in DB thread to ensure proper initialization
             self._execute_in_db_thread_sync("connect")
@@ -146,6 +158,14 @@ class SerialDatabaseProvider(ABC):
 
     def disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close database connection with optional checkpointing."""
+        if self._terminal_after_stuck_cleanup:
+            if self._executor_available:
+                try:
+                    self._executor.execute_sync(self, "disconnect", skip_checkpoint)
+                finally:
+                    self._executor.shutdown(wait=True)
+                    self._executor_available = False
+            return
         try:
             # Perform final operations in DB thread
             self._execute_in_db_thread_sync("disconnect", skip_checkpoint)
@@ -153,6 +173,7 @@ class SerialDatabaseProvider(ABC):
             # Shutdown destroys the thread pool, making thread-local state
             # unreachable — no explicit clear_thread_local() needed.
             self._executor.shutdown(wait=True)
+            self._executor_available = False
 
     def shutdown_executor(self) -> None:
         """Shut down executor thread pool without closing DB connection.
@@ -160,7 +181,36 @@ class SerialDatabaseProvider(ABC):
         Used during stuck-compaction cleanup where the DB handle must stay
         open but the executor thread should be reclaimed.
         """
+        self._executor_available = False
         self._executor.shutdown(wait=False)
+
+    @property
+    def terminal_after_stuck_cleanup(self) -> bool:
+        """True once cleanup has given up waiting for a stuck compaction thread."""
+        return self._terminal_after_stuck_cleanup
+
+    def mark_terminal_after_stuck_cleanup(self) -> None:
+        """Enter terminal lifecycle state after stuck-compaction cleanup."""
+        self._terminal_after_stuck_cleanup = True
+        self._executor_available = False
+        self._connection_allowed.clear()
+
+    @property
+    def executor_available(self) -> bool:
+        """True when database work can still be submitted to the executor."""
+        return self._executor_available
+
+    def ensure_usable(self, operation_name: str = "use provider") -> None:
+        """Raise a clear error when cleanup has made this provider unusable."""
+        if self._terminal_after_stuck_cleanup:
+            raise RuntimeError(
+                f"Cannot {operation_name}: provider entered terminal cleanup state "
+                "after stuck compaction"
+            )
+        if not self._executor_available:
+            raise RuntimeError(
+                f"Cannot {operation_name}: database executor is unavailable"
+            )
 
     def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close DB connection without shutting down executor.
@@ -179,10 +229,12 @@ class SerialDatabaseProvider(ABC):
 
     def _execute_in_db_thread_sync(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation synchronously in DB thread."""
+        self.ensure_usable(f"execute database operation '{operation_name}'")
         return self._executor.execute_sync(self, operation_name, *args, **kwargs)
 
     async def _execute_in_db_thread(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation asynchronously in DB thread."""
+        self.ensure_usable(f"execute database operation '{operation_name}'")
         return await self._executor.execute_async(self, operation_name, *args, **kwargs)
 
     def get_base_directory(self) -> Path:
@@ -358,6 +410,12 @@ class SerialDatabaseProvider(ABC):
             logger.debug("rollback_transaction not supported by this provider")
             return
         await self._execute_in_db_thread("rollback_transaction")
+
+    @asynccontextmanager
+    async def exclusive_transaction_span(self):
+        """Serialize full transaction spans across all users of this provider."""
+        async with self._transaction_span_lock:
+            yield
 
     async def get_file_by_path_async(
         self, path: str, as_model: bool = False
@@ -622,9 +680,7 @@ class SerialDatabaseProvider(ABC):
         # Default no-op implementation
         pass
 
-    def optimize(
-        self, cancel_check: Callable[[], bool] | None = None
-    ) -> bool:
+    def optimize(self, cancel_check: Callable[[], bool] | None = None) -> bool:
         """Optimize database storage. Provider-specific implementation.
 
         This is the unified entry point for all database optimization:

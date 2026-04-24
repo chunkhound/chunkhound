@@ -94,7 +94,7 @@ class TestMCPIntegration:
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
             embedding=embedding_config,
-            indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]}
+            indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]},
         )
 
         # Create embedding manager if API key is available
@@ -143,7 +143,12 @@ class TestMCPIntegration:
 
             result = await handle_tool_call(
                 tool_name="search",
-                arguments={"type": "regex", "query": "test", "page_size": 10, "offset": 0},
+                arguments={
+                    "type": "regex",
+                    "query": "test",
+                    "page_size": 10,
+                    "offset": 0,
+                },
                 services=services,
                 embedding_manager=None,
                 initialization_complete=init_event,
@@ -158,7 +163,9 @@ class TestMCPIntegration:
             services.provider._connection_allowed.set()
             services.provider.connect()
 
-    @pytest.mark.skipif(get_api_key_for_tests()[0] is None, reason="No API key available")
+    @pytest.mark.skipif(
+        get_api_key_for_tests()[0] is None, reason="No API key available"
+    )
     @pytest.mark.asyncio
     async def test_mcp_semantic_search_finds_new_files(self, mcp_setup):
         """Test that MCP semantic search finds newly created files."""
@@ -173,18 +180,22 @@ class TestMCPIntegration:
                 "type": "semantic",
                 "query": "unique_mcp_test_function",
                 "page_size": 10,
-                "offset": 0
-            }
+                "offset": 0,
+            },
         )
-        initial_count = len(initial_results.get('results', []))
+        initial_count = len(initial_results.get("results", []))
 
         # Create new file with unique content
         new_file = watch_dir / "mcp_test.py"
-        await write_and_index_file(services, new_file, """
+        await write_and_index_file(
+            services,
+            new_file,
+            """
 def unique_mcp_test_function():
     '''This is a unique function for MCP integration testing'''
     return "mcp_realtime_success"
-""")
+""",
+        )
 
         # Search for new content using MCP tool execution
         new_results = await execute_tool(
@@ -195,13 +206,14 @@ def unique_mcp_test_function():
                 "type": "semantic",
                 "query": "unique_mcp_test_function",
                 "page_size": 10,
-                "offset": 0
-            }
+                "offset": 0,
+            },
         )
-        new_count = len(new_results.get('results', []))
+        new_count = len(new_results.get("results", []))
 
-        assert new_count > initial_count, \
+        assert new_count > initial_count, (
             f"MCP semantic search should find new file (was {initial_count}, now {new_count})"
+        )
 
     @pytest.mark.asyncio
     async def test_mcp_regex_search_finds_modified_files(self, mcp_setup):
@@ -213,13 +225,17 @@ def unique_mcp_test_function():
         await write_and_index_file(services, test_file, "def initial_function(): pass")
 
         # Modify file with new unique content
-        await write_and_index_file(services, test_file, """
+        await write_and_index_file(
+            services,
+            test_file,
+            """
 def initial_function(): pass
 
 def modified_unique_regex_pattern():
     '''Added by modification - should be found by regex'''
     return "modification_success"
-""")
+""",
+        )
         modified_results = await execute_tool(
             tool_name="search",
             services=services,
@@ -242,13 +258,16 @@ def modified_unique_regex_pattern():
 
         # Get initial stats directly from database provider
         initial_stats = services.provider.get_stats()
-        initial_files = initial_stats.get('files', 0)
-        initial_chunks = initial_stats.get('chunks', 0)
+        initial_files = initial_stats.get("files", 0)
+        initial_chunks = initial_stats.get("chunks", 0)
 
         # Create multiple new files
         for i in range(3):
             new_file = watch_dir / f"stats_test_{i}.py"
-            await write_and_index_file(services, new_file, f"""
+            await write_and_index_file(
+                services,
+                new_file,
+                f"""
 def stats_test_function_{i}():
     '''File {i} for testing database stats updates'''
     return "stats_test_{i}"
@@ -256,16 +275,19 @@ def stats_test_function_{i}():
 class StatsTestClass_{i}:
     def method_{i}(self):
         pass
-""")
+""",
+            )
 
         updated_stats = services.provider.get_stats()
-        updated_files = updated_stats.get('files', 0)
-        updated_chunks = updated_stats.get('chunks', 0)
+        updated_files = updated_stats.get("files", 0)
+        updated_chunks = updated_stats.get("chunks", 0)
 
-        assert updated_files > initial_files, \
+        assert updated_files > initial_files, (
             f"File count should increase (was {initial_files}, now {updated_files})"
-        assert updated_chunks > initial_chunks, \
+        )
+        assert updated_chunks > initial_chunks, (
             f"Chunk count should increase (was {initial_chunks}, now {updated_chunks})"
+        )
 
     @pytest.mark.asyncio
     async def test_mcp_search_after_file_deletion(self, mcp_setup):
@@ -274,11 +296,15 @@ class StatsTestClass_{i}:
 
         # Create file with unique content
         delete_file = watch_dir / "delete_test.py"
-        await write_and_index_file(services, delete_file, """
+        await write_and_index_file(
+            services,
+            delete_file,
+            """
 def delete_test_unique_function():
     '''This function will be deleted'''
     return "to_be_deleted"
-""")
+""",
+        )
 
         # Verify content is searchable
         before_delete = await execute_tool(
@@ -289,10 +315,12 @@ def delete_test_unique_function():
                 "type": "regex",
                 "query": "delete_test_unique_function",
                 "page_size": 10,
-                "offset": 0
-            }
+                "offset": 0,
+            },
         )
-        assert len(before_delete.get('results', [])) > 0, "Content should be found before deletion"
+        assert len(before_delete.get("results", [])) > 0, (
+            "Content should be found before deletion"
+        )
 
         # Delete the file
         await remove_file_from_index(realtime_service, delete_file)
@@ -306,10 +334,12 @@ def delete_test_unique_function():
                 "type": "regex",
                 "query": "delete_test_unique_function",
                 "page_size": 10,
-                "offset": 0
-            }
+                "offset": 0,
+            },
         )
-        assert len(after_delete.get('results', [])) == 0, "Content should not be found after deletion"
+        assert len(after_delete.get("results", [])) == 0, (
+            "Content should not be found after deletion"
+        )
 
     @pytest.mark.asyncio
     async def test_file_modification_detection_comprehensive(self, mcp_setup):
@@ -331,7 +361,9 @@ def delete_test_unique_function():
         initial_record = services.provider.get_file_by_path(str(test_file.resolve()))
         assert initial_record is not None, "Initial file should exist"
         # Get chunk count for initial state
-        initial_chunks = services.provider.search_chunks_regex(".*", file_path=str(test_file.resolve()))
+        initial_chunks = services.provider.search_chunks_regex(
+            ".*", file_path=str(test_file.resolve())
+        )
         initial_chunk_count = len(initial_chunks)
 
         print(f"Initial state: chunks={initial_chunk_count}")
@@ -355,28 +387,37 @@ class NewlyAddedClass:
         modified_record = services.provider.get_file_by_path(str(test_file.resolve()))
         assert modified_record is not None, "Modified file should still exist"
         # Get chunk count for modified state
-        modified_chunks = services.provider.search_chunks_regex(".*", file_path=str(test_file.resolve()))
+        modified_chunks = services.provider.search_chunks_regex(
+            ".*", file_path=str(test_file.resolve())
+        )
         modified_chunk_count = len(modified_chunks)
 
         print(f"Modified state: chunks={modified_chunk_count}")
 
         # Key assertions for content-based change detection
 
-        assert modified_chunk_count >= initial_chunk_count, \
+        assert modified_chunk_count >= initial_chunk_count, (
             f"Chunk count should not decrease (was {initial_chunk_count}, now {modified_chunk_count})"
+        )
 
         # Check if new content is searchable
         new_func_results = services.provider.search_chunks_regex("newly_added_function")
-        assert len(new_func_results) > 0, "New function should be searchable after modification"
+        assert len(new_func_results) > 0, (
+            "New function should be searchable after modification"
+        )
 
         new_class_results = services.provider.search_chunks_regex("NewlyAddedClass")
-        assert len(new_class_results) > 0, "New class should be indexed after modification"
+        assert len(new_class_results) > 0, (
+            "New class should be indexed after modification"
+        )
 
         # Check that content-based deduplication works - old version replaced by new
         v1_results = services.provider.search_chunks_regex("version_1")
         v2_results = services.provider.search_chunks_regex("version_2")
 
-        assert len(v1_results) == 0, "Old version_1 should be replaced via content-based chunk deduplication"
+        assert len(v1_results) == 0, (
+            "Old version_1 should be replaced via content-based chunk deduplication"
+        )
         assert len(v2_results) > 0, "New version_2 should be indexed"
 
     @pytest.mark.xfail(
@@ -399,29 +440,34 @@ class NewlyAddedClass:
         test_file = watch_dir / "fs_ops_test.py"
 
         # Create with explicit file operations
-        with open(test_file, 'w') as f:
+        with open(test_file, "w") as f:
             f.write("def func(): return 'initial'")
             f.flush()
             os.fsync(f.fileno())
 
         # Wait for file to be indexed
-        found = await realtime_service.wait_for_file_indexed(test_file, timeout=get_fs_event_timeout())
+        found = await realtime_service.wait_for_file_indexed(
+            test_file, timeout=get_fs_event_timeout()
+        )
         assert found, "Initial content should be indexed"
 
         # Modify with explicit operations and different content
         realtime_service.reset_file_tracking(test_file)
-        with open(test_file, 'w') as f:
+        with open(test_file, "w") as f:
             f.write("def func(): return 'modified'\ndef new_func(): return 'added'")
             f.flush()
             os.fsync(f.fileno())
 
         # Also change mtime explicitly
         import time
+
         current_time = time.time()
         os.utime(test_file, (current_time, current_time))
 
         # Wait for modified file to be re-indexed
-        found = await realtime_service.wait_for_file_indexed(test_file, timeout=get_fs_event_timeout())
+        found = await realtime_service.wait_for_file_indexed(
+            test_file, timeout=get_fs_event_timeout()
+        )
         assert found, "Added content should be indexed"
 
         # Verify modification was detected
@@ -468,7 +514,9 @@ class NewlyAddedClass:
             found = await realtime_service.wait_for_file_indexed(
                 realtime_file, timeout=get_fs_event_timeout()
             )
-            assert found, "Files created after MCP startup should be indexed by realtime monitoring"
+            assert found, (
+                "Files created after MCP startup should be indexed by realtime monitoring"
+            )
 
             await _wait_for_scan_completed(server)
 
@@ -552,6 +600,7 @@ class NewlyAddedClass:
         from unittest.mock import patch
 
         from chunkhound.services.compaction_service import CompactionService
+
         services, realtime_service, watch_dir, temp_dir, _ = mcp_setup
 
         test_file = watch_dir / "modify_during_compact.py"
@@ -659,6 +708,162 @@ class NewlyAddedClass:
         )
 
     @pytest.mark.asyncio
+    async def test_ensure_services_recovers_failed_post_compaction_retry_end_to_end(
+        self, mcp_setup
+    ):
+        """A failed post-compaction callback is retried once via ensure_services()."""
+        import threading
+        from unittest.mock import patch
+
+        from chunkhound.services.compaction_service import CompactionService
+
+        services, realtime_service, watch_dir, temp_dir, _ = mcp_setup
+
+        test_file = watch_dir / "retry_after_compaction.py"
+        test_file.write_text("def retry_old_marker():\n    return 'OLD'\n")
+        await services.indexing_coordinator.process_file(test_file)
+
+        fake_args = SimpleNamespace(path=temp_dir)
+        compaction_config = Config(
+            args=fake_args,
+            database={
+                "path": str(Path(services.provider.db_path).parent),
+                "provider": "duckdb",
+                "compaction_enabled": True,
+                "compaction_threshold": 0.0,
+                "compaction_min_size_mb": 0,
+            },
+            indexing={"include": ["*.py"], "exclude": [], "force_reindex": True},
+        )
+
+        export_started = threading.Event()
+        export_proceed = threading.Event()
+        real_export = services.provider._export_database_for_compaction
+
+        def pausing_export(db_p, export_dir):
+            export_started.set()
+            assert export_proceed.wait(timeout=10.0), "export_proceed never set"
+            return real_export(db_p, export_dir)
+
+        server = _TestMCPServer(config=compaction_config)
+        server.services = services
+        server.realtime_indexing = realtime_service
+        server._target_path = watch_dir
+
+        real_process_directory = services.indexing_coordinator.process_directory
+        callback_attempts = 0
+
+        async def fail_once_process_directory(*args, **kwargs):
+            nonlocal callback_attempts
+            callback_attempts += 1
+            if callback_attempts == 1:
+                raise RuntimeError("simulated first callback failure")
+            return await real_process_directory(*args, **kwargs)
+
+        services.indexing_coordinator.process_directory = fail_once_process_directory
+
+        with patch.object(
+            services.provider,
+            "_export_database_for_compaction",
+            side_effect=pausing_export,
+        ):
+            compaction_service = CompactionService(
+                db_path=Path(services.provider.db_path),
+                config=compaction_config,
+            )
+            server._compaction_service = compaction_service
+            started = await compaction_service.compact_background(
+                provider=services.provider,
+                on_complete=server._post_compaction_reindex,
+            )
+            assert started, "Compaction should start with zero thresholds"
+
+            compaction_task = compaction_service._compaction_task
+            assert compaction_task is not None
+
+            await asyncio.to_thread(export_started.wait, 10.0)
+            assert export_started.is_set(), "Export phase never started"
+
+            test_file.write_text("def retry_new_marker():\n    return 'NEW'\n")
+
+            export_proceed.set()
+            await asyncio.wait_for(compaction_task, timeout=30.0)
+
+        status_after_failure = server.get_background_compaction_status()
+        assert compaction_service.last_error is not None
+        assert status_after_failure["pending_recovery"] is True
+        assert "simulated first callback failure" in status_after_failure["last_error"]
+
+        stale_new = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "retry_new_marker",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(stale_new.get("results", [])) == 0, (
+            "Search must remain stale before recovery retry runs"
+        )
+
+        stale_old = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "retry_old_marker",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(stale_old.get("results", [])) > 0, (
+            "Old content must remain searchable before recovery retry runs"
+        )
+
+        await server.ensure_services()
+
+        assert callback_attempts == 2, "ensure_services() must retry exactly once"
+        assert compaction_service.last_error is None
+
+        recovered_status = server.get_background_compaction_status()
+        assert recovered_status["pending_recovery"] is False
+        assert recovered_status["last_error"] is None
+
+        recovered_new = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "retry_new_marker",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(recovered_new.get("results", [])) > 0, (
+            "Recovery retry must make new content searchable"
+        )
+
+        recovered_old = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "retry_old_marker",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(recovered_old.get("results", [])) == 0, (
+            "Recovery retry must remove stale old content from search results"
+        )
+
+    @pytest.mark.asyncio
     async def test_mcp_search_works_after_compaction(self, mcp_setup):
         """Search results are preserved after database compaction."""
         services, _, watch_dir, _, _ = mcp_setup
@@ -683,7 +888,9 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(before.get("results", [])) > 0, "Content should exist before compaction"
+        assert len(before.get("results", [])) > 0, (
+            "Content should exist before compaction"
+        )
 
         # Compact the database
         services.provider.optimize()

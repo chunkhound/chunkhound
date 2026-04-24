@@ -1,5 +1,7 @@
 """Shared test stubs for unit tests."""
 
+from contextlib import asynccontextmanager
+
 
 class _FakeDB:
     """File-level DatabaseProvider stub for unit tests.
@@ -109,6 +111,10 @@ class _FakeDB:
 
     async def rollback_transaction_async(self):
         return self.rollback_transaction()
+
+    @asynccontextmanager
+    async def exclusive_transaction_span(self):
+        yield
 
     async def get_file_by_path_async(self, path: str, as_model: bool = False):
         return self.get_file_by_path(path, as_model)

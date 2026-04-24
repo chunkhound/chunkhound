@@ -73,55 +73,88 @@ def _run_test(db: DuckDBProvider, tmp_path: Path) -> None:
     ]
 
     import asyncio
+
     res = asyncio.run(coord._store_parsed_results(results))  # type: ignore[arg-type]
     stats = res[0] if isinstance(res, tuple) else res
 
     # Good file should be stored; bad file should be in errors
     assert stats["total_files"] == 1
-    assert stats["errors"] and any("boom" in e.get("error", "") for e in stats["errors"])  # noqa: SIM115
+    assert stats["errors"] and any(
+        "boom" in e.get("error", "") for e in stats["errors"]
+    )  # noqa: SIM115
 
 
 @pytest.mark.asyncio
-async def test_concurrent_store_no_interleaved_transactions(tmp_path: Path):
-    """Concurrent _store_parsed_results calls must not interleave transactions."""
+async def test_concurrent_store_serializes_transaction_span_entry(tmp_path: Path):
+    """Coordinator B cannot begin its transaction until coordinator A releases the span."""
     db = DuckDBProvider(db_path=tmp_path / "db", base_directory=tmp_path)
     db.connect()
     try:
-        coord = IndexingCoordinator(database_provider=db, base_directory=tmp_path)
-        n_files = 5
+        coord_a = IndexingCoordinator(database_provider=db, base_directory=tmp_path)
+        coord_b = IndexingCoordinator(database_provider=db, base_directory=tmp_path)
+        begin_calls: list[int] = []
+        first_begin_entered = asyncio.Event()
+        allow_first_begin_to_continue = asyncio.Event()
+        second_begin_entered = asyncio.Event()
+        original_begin = db.begin_transaction_async
 
-        file_results = []
-        for i in range(n_files):
-            path = tmp_path / f"file_{i}.yaml"
-            chunks = [
+        async def _tracked_begin() -> None:
+            begin_calls.append(len(begin_calls) + 1)
+            if len(begin_calls) == 1:
+                first_begin_entered.set()
+                await allow_first_begin_to_continue.wait()
+            else:
+                second_begin_entered.set()
+            await original_begin()
+
+        db.begin_transaction_async = _tracked_begin  # type: ignore[method-assign]
+
+        result_a = _pfr(
+            tmp_path / "file_a.yaml",
+            [
                 {
-                    "symbol": f"sym_{i}",
-                    "code": f"key_{i}: {i}",
+                    "symbol": "sym_a",
+                    "code": "key_a: 1",
                     "start_line": 1,
                     "end_line": 1,
                     "chunk_type": "key_value",
                     "language": Language.YAML.value,
                 }
-            ]
-            file_results.append(_pfr(path, chunks))
-
-        results = await asyncio.gather(
-            *[coord._store_parsed_results([pfr]) for pfr in file_results]
+            ],
+        )
+        result_b = _pfr(
+            tmp_path / "file_b.yaml",
+            [
+                {
+                    "symbol": "sym_b",
+                    "code": "key_b: 2",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "chunk_type": "key_value",
+                    "language": Language.YAML.value,
+                }
+            ],
         )
 
-        # Every call stored exactly one file with no errors
-        for res in results:
-            assert res["total_files"] == 1, f"Expected 1 file stored, got {res}"
-            assert not res["errors"], f"Unexpected errors: {res['errors']}"
+        task_a = asyncio.create_task(coord_a._store_parsed_results([result_a]))
+        await first_begin_entered.wait()
 
-        # Total chunks across all results match
-        total_chunks = sum(r["total_chunks"] for r in results)
-        assert total_chunks == n_files
+        task_b = asyncio.create_task(coord_b._store_parsed_results([result_b]))
+        await asyncio.sleep(0)
 
-        # All files are queryable in the DB
-        for i in range(n_files):
-            rel_path = f"file_{i}.yaml"
-            record = db.get_file_by_path(rel_path)
-            assert record is not None, f"{rel_path} not found in DB"
+        assert not second_begin_entered.is_set(), (
+            "Second coordinator reached begin_transaction_async before the first "
+            "transaction span was released"
+        )
+
+        allow_first_begin_to_continue.set()
+        stats_a, stats_b = await asyncio.gather(task_a, task_b)
+
+        assert second_begin_entered.is_set()
+        assert begin_calls == [1, 2]
+        assert stats_a["total_files"] == 1 and not stats_a["errors"]
+        assert stats_b["total_files"] == 1 and not stats_b["errors"]
+        assert db.get_file_by_path("file_a.yaml") is not None
+        assert db.get_file_by_path("file_b.yaml") is not None
     finally:
         db.disconnect()
