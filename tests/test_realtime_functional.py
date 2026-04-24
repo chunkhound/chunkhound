@@ -2780,26 +2780,23 @@ class TestRealtimeFunctional:
 
     @pytest.mark.asyncio
     @pytest.mark.native_watcher
-    async def test_background_vs_realtime_processing(self, realtime_setup):
-        """Test interaction between initial scan and real-time processing."""
+    async def test_realtime_processing_only_tracks_post_start_changes(
+        self, realtime_setup
+    ):
+        """Direct watcher tests should only require post-start realtime behavior."""
         service, watch_dir, _, services = realtime_setup
 
-        # Create files before starting service (will be found by initial scan)
-        initial_file = watch_dir / "initial.py"
-        initial_file.write_text("def initial(): pass")
+        preexisting_file = watch_dir / "preexisting.py"
+        preexisting_file.write_text("def preexisting(): pass")
 
         await service.start(watch_dir)
+        assert await service.wait_for_monitoring_ready(timeout=10.0)
 
-        # Create file after service started (real-time processing)
         realtime_file = watch_dir / "realtime.py"
-        await asyncio.sleep(0.5)  # Let initial scan start
+        service.reset_file_tracking(realtime_file)
         realtime_file.write_text("def realtime(): pass")
+        found = await service.wait_for_file_indexed(realtime_file)
 
-        # Wait for both initial scan and real-time processing
-        await asyncio.sleep(3.0)
-
-        # Both files should eventually be processed
-        initial_record = services.provider.get_file_by_path(str(initial_file))
         realtime_record = services.provider.get_file_by_path(str(realtime_file))
 
         # At least one should work (helps identify which path is broken)
