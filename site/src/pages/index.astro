@@ -1,0 +1,26 @@
+---
+import Base from "../layouts/Base.astro";
+import Nav from "../components/Nav.astro";
+import Hero from "../components/Hero.astro";
+import ProblemStatement from "../components/ProblemStatement.astro";
+import CoreInsight from "../components/CoreInsight.astro";
+import TokenEconomics from "../components/TokenEconomics.astro";
+import Capabilities from "../components/Capabilities.astro";
+import ProvenAtScale from "../components/ProvenAtScale.astro";
+import Configurator from "../components/Configurator.astro";
+import Community from "../components/Community.astro";
+---
+
+<Base>
+    <Nav currentPath={Astro.url.pathname} />
+    <main>
+        <Hero />
+        <ProblemStatement />
+        <CoreInsight />
+        <TokenEconomics />
+        <Capabilities />
+        <ProvenAtScale />
+        <Configurator />
+    </main>
+    <Community />
+</Base>

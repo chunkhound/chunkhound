@@ -127,6 +127,8 @@ class VoyageAIEmbeddingProvider:
         rerank_url: str | None = None,
         rerank_format: str = "auto",
         max_concurrent_batches: int | None = None,
+        ssl_verify: bool = True,
+        rerank_ssl_verify: bool | None = None,
     ):
         """Initialize VoyageAI embedding provider.
 
@@ -151,6 +153,10 @@ class VoyageAIEmbeddingProvider:
                 Defaults to 1 for custom endpoints (e.g. Azure ML) to avoid
                 HTTP 424 "Failed Dependency" from concurrent-request overload,
                 and to RECOMMENDED_CONCURRENCY for the official VoyageAI API.
+            ssl_verify: Verify TLS certificates for requests sent via explicit
+                custom HTTP endpoints. The VoyageAI SDK path remains verified.
+            rerank_ssl_verify: Verify TLS certificates for HTTP rerank requests.
+                Defaults to ssl_verify when unset.
         """
         if not VOYAGEAI_AVAILABLE:
             raise ImportError(
@@ -183,6 +189,10 @@ class VoyageAIEmbeddingProvider:
         self._rerank_format = rerank_format
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
+        self._ssl_verify_enabled = ssl_verify
+        self._rerank_ssl_verify_enabled = (
+            rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
+        )
 
         # For non-official custom endpoints without an API key, pass a placeholder to
         # satisfy the SDK's requirement — the server ignores the auth header.
@@ -191,14 +201,12 @@ class VoyageAIEmbeddingProvider:
         is_custom = base_url and not is_official_voyageai_endpoint(base_url)
         effective_api_key = api_key if api_key else ("no-key" if is_custom else None)
 
-        # Use the system CA bundle when available so that corporate proxy CAs
-        # (e.g. Blue Coat / AMAT) are trusted without patching certifi.
-        # self._ssl_verify is passed directly to httpx.AsyncClient(verify=...).
-        _sys_ca = "/etc/ssl/certs/ca-certificates.crt"
-        if os.path.exists(_sys_ca) and not os.environ.get("REQUESTS_CA_BUNDLE"):
-            self._ssl_verify: str | bool = _sys_ca
-        else:
-            self._ssl_verify = os.environ.get("REQUESTS_CA_BUNDLE") or True
+        self._ssl_verify = self._resolve_http_verify_setting(
+            self._ssl_verify_enabled, endpoint=base_url
+        )
+        self._rerank_ssl_verify = self._resolve_http_verify_setting(
+            self._rerank_ssl_verify_enabled, endpoint=rerank_url
+        )
 
         # Initialize client
         self._client = voyageai.Client(api_key=effective_api_key, timeout=timeout)
@@ -236,6 +244,21 @@ class VoyageAIEmbeddingProvider:
     def model(self) -> str:
         """Model name."""
         return self._model
+
+    @staticmethod
+    def _resolve_http_verify_setting(
+        ssl_verify_enabled: bool, endpoint: str | None
+    ) -> str | bool:
+        """Resolve the verify setting for explicit HTTP client calls."""
+        if endpoint is None:
+            return True
+        if not ssl_verify_enabled:
+            return False
+
+        _sys_ca = "/etc/ssl/certs/ca-certificates.crt"
+        if os.path.exists(_sys_ca) and not os.environ.get("REQUESTS_CA_BUNDLE"):
+            return _sys_ca
+        return os.environ.get("REQUESTS_CA_BUNDLE") or True
 
     @property
     def dims(self) -> int:
@@ -710,7 +733,7 @@ class VoyageAIEmbeddingProvider:
         )
 
         async with httpx.AsyncClient(
-            timeout=self._timeout, verify=self._ssl_verify
+            timeout=self._timeout, verify=self._rerank_ssl_verify
         ) as client:
             headers = {"Content-Type": "application/json"}
             if self._api_key:
@@ -768,6 +791,9 @@ class VoyageAIEmbeddingProvider:
 
         results = []
         for item in data["results"]:
+            if not isinstance(item, dict):
+                logger.warning(f"Skipping non-dict rerank result: {item!r}")
+                continue
             # Cohere: {"index": N, "relevance_score": F}
             # TEI:    {"index": N, "score": F}
             idx = item.get("index")

@@ -17,6 +17,7 @@ from typing_extensions import Self
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
 
+from ._utils import _parse_env_bool
 from .openai_utils import is_azure_openai_endpoint, is_official_openai_endpoint
 from .voyageai_utils import is_official_voyageai_endpoint
 
@@ -26,8 +27,7 @@ RERANK_MODEL_REQUIRED_COHERE = (
     "Either provide rerank_model or use rerank_format='tei'."
 )
 RERANK_BASE_URL_REQUIRED = (
-    "base_url is required when using reranking with relative rerank_url. "
-    "Either provide base_url or use an absolute rerank_url (http://...)"
+    "rerank_model or rerank_format requires base_url or explicit rerank_url"
 )
 
 
@@ -77,11 +77,9 @@ class EmbeddingConfig(BaseSettings):
     """
     OpenAI embedding configuration for ChunkHound.
 
-    Configuration Sources (in order of precedence):
-    1. CLI arguments
-    2. Environment variables (CHUNKHOUND_EMBEDDING__*)
-    3. Config files
-    4. Default values
+    Note: At the application level, Config() applies this final precedence order:
+      CLI args > explicit --config file > local .chunkhound.json > env vars > defaults.
+    Within this class, pydantic-settings applies: init kwargs > env vars > defaults.
 
     Environment Variables:
         CHUNKHOUND_EMBEDDING__API_KEY=sk-...
@@ -115,6 +113,13 @@ class EmbeddingConfig(BaseSettings):
     base_url: str | None = Field(
         default=None, description="Base URL for the embedding API"
     )
+    ssl_verify: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for embedding requests sent via explicit "
+            "custom endpoints. Ignored when base_url is not set."
+        ),
+    )
 
     # Azure OpenAI Configuration
     api_version: str | None = Field(
@@ -141,6 +146,14 @@ class EmbeddingConfig(BaseSettings):
             "Rerank endpoint URL. Absolute URLs (http/https) used "
             "as-is for separate services. Relative paths combined "
             "with base_url for same-server reranking."
+        ),
+    )
+    rerank_ssl_verify: bool | None = Field(
+        default=None,
+        description=(
+            "Verify TLS certificates for rerank requests. When unset, inherits "
+            "ssl_verify. Ignored when reranking is not sent to an explicit "
+            "rerank endpoint."
         ),
     )
 
@@ -209,17 +222,14 @@ class EmbeddingConfig(BaseSettings):
     @model_validator(mode="after")
     def validate_rerank_config(self) -> Self:
         """Validate rerank configuration using shared validation logic."""
-        # TEI format implies a relative /rerank endpoint when no explicit URL is given.
-        # Only auto-set when base_url is present so the factory can resolve it to an
-        # absolute URL; without base_url there is nothing to resolve against.
-        if (
-            self.rerank_format == "tei"
-            and self.rerank_url is None
-            and self.base_url is not None
-        ):
+        # Auto-derive rerank_url from base_url when reranking is implied
+        # but no URL given. Reranking is implied when rerank_model is set
+        # (any format) or rerank_format is "tei".
+        reranking_implied = self.rerank_model is not None or self.rerank_format == "tei"
+        if reranking_implied and self.rerank_url is None and self.base_url is not None:
             self.rerank_url = "/rerank"
         elif (
-            self.rerank_format == "tei"
+            reranking_implied
             and self.rerank_url is None
             and self.base_url is None
             and self.provider != "voyageai"
@@ -294,9 +304,11 @@ class EmbeddingConfig(BaseSettings):
         if self.api_key:
             base_config["api_key"] = self.api_key.get_secret_value()
 
-        # Add base URL if available
+        # Add base URL if available; ssl_verify is intentionally scoped here —
+        # it only applies to custom endpoints, not the official API default.
         if self.base_url:
             base_config["base_url"] = self.base_url
+            base_config["ssl_verify"] = self.ssl_verify  # irrelevant without base_url
 
         # Add Azure OpenAI configuration if available
         if self.api_version:
@@ -311,6 +323,7 @@ class EmbeddingConfig(BaseSettings):
             base_config["rerank_model"] = self.rerank_model
         base_config["rerank_url"] = self.rerank_url
         base_config["rerank_format"] = self.rerank_format
+        base_config["rerank_ssl_verify"] = self.rerank_ssl_verify
         if self.rerank_batch_size is not None:
             base_config["rerank_batch_size"] = self.rerank_batch_size
         if self.max_concurrent_batches is not None:
@@ -390,6 +403,11 @@ class EmbeddingConfig(BaseSettings):
     @classmethod
     def add_cli_arguments(cls, parser: argparse.ArgumentParser) -> None:
         """Add embedding-related CLI arguments."""
+        try:
+            boolean_optional_action = argparse.BooleanOptionalAction
+        except AttributeError:  # pragma: no cover - older Python
+            boolean_optional_action = None
+
         parser.add_argument(
             "--provider",
             "--embedding-provider",
@@ -414,6 +432,25 @@ class EmbeddingConfig(BaseSettings):
             "--embedding-base-url",
             help="Base URL for embedding API (uses env var if not specified)",
         )
+        if boolean_optional_action is not None:
+            parser.add_argument(
+                "--ssl-verify",
+                action=boolean_optional_action,
+                default=None,
+                help=(
+                    "Verify TLS certificates for embedding requests sent to the "
+                    "configured base_url. Ignored when base_url is unset."
+                ),
+            )
+            parser.add_argument(
+                "--rerank-ssl-verify",
+                action=boolean_optional_action,
+                default=None,
+                help=(
+                    "Verify TLS certificates for rerank requests. Defaults to the "
+                    "embedding --ssl-verify value when unset."
+                ),
+            )
 
         parser.add_argument(
             "--no-embeddings",
@@ -474,6 +511,9 @@ class EmbeddingConfig(BaseSettings):
             "CHUNKHOUND_EMBEDDING__MODEL", "CHUNKHOUND_EMBEDDING_MODEL"
         ):
             config["model"] = model
+        if ssl_verify_raw := os.getenv("CHUNKHOUND_EMBEDDING__SSL_VERIFY"):
+            if (ssl_verify := _parse_env_bool(ssl_verify_raw)) is not None:
+                config["ssl_verify"] = ssl_verify
 
         # Azure OpenAI configuration
         if api_version := os.getenv("CHUNKHOUND_EMBEDDING__API_VERSION"):
@@ -501,6 +541,11 @@ class EmbeddingConfig(BaseSettings):
             config["rerank_url"] = rerank_url
         if rerank_format := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_FORMAT"):
             config["rerank_format"] = rerank_format
+        if rerank_ssl_verify_raw := os.getenv(
+            "CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY"
+        ):
+            if (rerank_ssl_verify := _parse_env_bool(rerank_ssl_verify_raw)) is not None:
+                config["rerank_ssl_verify"] = rerank_ssl_verify
         if rerank_batch_size := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE"):
             try:
                 config["rerank_batch_size"] = int(rerank_batch_size)
@@ -535,6 +580,10 @@ class EmbeddingConfig(BaseSettings):
             overrides["base_url"] = args.base_url
         if hasattr(args, "embedding_base_url") and args.embedding_base_url:
             overrides["base_url"] = args.embedding_base_url
+        if hasattr(args, "ssl_verify") and args.ssl_verify is not None:
+            overrides["ssl_verify"] = args.ssl_verify
+        if hasattr(args, "rerank_ssl_verify") and args.rerank_ssl_verify is not None:
+            overrides["rerank_ssl_verify"] = args.rerank_ssl_verify
 
         # Handle Azure OpenAI arguments
         if hasattr(args, "azure_endpoint") and args.azure_endpoint:
@@ -576,4 +625,5 @@ class EmbeddingConfig(BaseSettings):
                 parts.append(f"azure_deployment={self.azure_deployment}")
         elif self.base_url:
             parts.append(f"base_url={self.base_url}")
+            parts.append(f"ssl_verify={self.ssl_verify}")
         return f"EmbeddingConfig({', '.join(parts)})"

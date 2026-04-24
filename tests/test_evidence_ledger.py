@@ -1186,6 +1186,39 @@ class TestFactExtractor:
         assert ledger.facts_count == 0
 
     @pytest.mark.asyncio
+    async def test_extract_from_cluster_handles_attribute_error_in_fact(
+        self, mock_llm_provider
+    ):
+        """Test that a malformed fact entry (e.g. string instead of dict) is skipped."""
+        mock_response = MagicMock()
+        # Array contains a string and an int where dicts are expected;
+        # calling .get() on them raises AttributeError which must be caught.
+        mock_response.content = """[
+  "not a dict",
+  42,
+  {
+    "statement": "Survives malformed siblings",
+    "file_path": "ok.py",
+    "start_line": 1,
+    "end_line": 2,
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"ok.py": "code"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        assert list(ledger.facts.values())[0].statement == "Survives malformed siblings"
+
+    @pytest.mark.asyncio
     async def test_extract_from_clusters_merges_results(self, mock_llm_provider):
         """Test extract_from_clusters merges results from multiple clusters."""
         # Create responses for two clusters

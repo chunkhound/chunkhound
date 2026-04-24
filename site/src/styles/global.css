@@ -1,0 +1,212 @@
+/* ── Fonts ─────────────────────────────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap');
+
+/* ── Design Tokens ─────────────────────────────────────────────────── */
+
+:root {
+  /* Colors — dark mode (default) */
+  --bg-page: #2b2b2b;
+  --bg-surface: #3c3c3c;
+  --bg-muted: #4f4f4f;
+  --text-primary: #f4f4f4;
+  --text-secondary: #a8a8a8;
+  --text-tertiary: #919191;
+  --text-muted: #777777;
+  --border-color: #4f4f4f;
+  --border-subtle: #3c3c3c;
+  --border-accent: color-mix(in srgb, var(--primary) 40%, var(--border-color));
+  --primary: #a9c650;
+  --primary-bright: #a1bc20;
+  --primary-bg: #263100;
+  --on-primary: #1e2600;
+  --on-primary-bg: var(--text-primary);
+  --link: #a9c650;
+  --link-hover: #c9e185;
+  --link-visited: #dff3ab;
+  --link-focus: #c9e185;
+  --link-on-primary-bg: #c9e185;
+  --link-on-primary-bg-hover: #dff3ab;
+  --link-on-primary-bg-visited: #edfec5;
+  --link-on-primary-bg-focus: #dff3ab;
+  --code-bg: #212121;
+  --code-text: #d3d3d3;
+
+  /* Spacing */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 40px;
+  --space-8: 48px;
+  --space-9: 64px;
+  --space-10: 80px;
+
+  /* Radius */
+  --radius-none: 0;
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 9px;
+  --radius-xl: 12px;
+  --radius-2xl: 18px;
+  --radius-full: 9999px;
+
+  /* Typography */
+  --text-4xl: 49px;  --lh-4xl: 60px;
+  --text-3xl: 39px;  --lh-3xl: 48px;
+  --text-2xl: 31px;  --lh-2xl: 36px;
+  --text-xl: 25px;   --lh-xl: 32px;
+  --text-lg: 20px;   --lh-lg: 32px;
+  --text-base: 16px; --lh-base: 24px;
+  --text-sm: 13px;   --lh-sm: 20px;
+  --text-xs: 10px;   --lh-xs: 16px;
+
+  /* Target sizes */
+  --target-sm: 32px;
+  --target-md: 40px;
+  --target-lg: 48px;
+  --target-xl: 56px;
+
+  /* Border widths */
+  --border-w-subtle: 1px;
+  --border-w-default: 1px;
+  --border-w-emphasis: 2px;
+  --border-w-strong: 2px;
+  --border-w-accent: 3px;
+}
+
+/* Colors — light mode (explicit toggle) */
+[data-theme="light"] {
+  --bg-page: #f4f4f4;
+  --bg-surface: #ffffff;
+  --bg-muted: #e8e8e8;
+  --text-primary: #212121;
+  --text-secondary: #5f5f5f;
+  --text-tertiary: #6e6e6e;
+  --text-muted: #707070;
+  --border-color: #d3d3d3;
+  --border-subtle: #e8e8e8;
+  --border-accent: var(--primary);
+  --primary: #8dab14;
+  --primary-bright: #a9c650;
+  --primary-bg: #e4f7b0;
+  --on-primary: #ffffff;
+  --on-primary-bg: var(--text-primary);
+  --link: #5d7000;
+  --link-hover: #485800;
+  --link-visited: #374400;
+  --link-focus: #485800;
+  --link-on-primary-bg: #485800;
+  --link-on-primary-bg-hover: #374400;
+  --link-on-primary-bg-visited: #263100;
+  --link-on-primary-bg-focus: #374400;
+  --code-bg: #2b2b2b;
+  --code-text: #d3d3d3;
+}
+
+/* Colors — light mode (OS preference auto-detection) */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg-page: #f4f4f4;
+    --bg-surface: #ffffff;
+    --bg-muted: #e8e8e8;
+    --text-primary: #212121;
+    --text-secondary: #5f5f5f;
+    --text-tertiary: #757575;
+    --text-muted: #8e8e8e;
+    --border-color: #d3d3d3;
+    --border-subtle: #e8e8e8;
+    --border-accent: var(--primary);
+    --primary: #8dab14;
+    --primary-bright: #a9c650;
+    --primary-bg: #e4f7b0;
+    --on-primary: #ffffff;
+    --on-primary-bg: var(--text-primary);
+    --link: #5d7000;
+    --link-hover: #485800;
+    --link-visited: #374400;
+    --link-focus: #485800;
+    --link-on-primary-bg: #485800;
+    --link-on-primary-bg-hover: #374400;
+    --link-on-primary-bg-visited: #263100;
+    --link-on-primary-bg-focus: #374400;
+    --code-bg: #2b2b2b;
+    --code-text: #d3d3d3;
+  }
+}
+
+/* ── Reset & Base ──────────────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  scroll-behavior: smooth;
+  transition: background 0.3s, color 0.3s, border-color 0.3s;
+}
+
+body {
+  min-height: 100vh;
+}
+
+.container {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 var(--space-6);
+}
+
+code,
+pre {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Code blocks intentionally keep a dark surface in both site themes. The
+   surface itself can vary slightly per theme, but rendered tokens always use
+   the dark Shiki palette for consistent readability. */
+pre.astro-code {
+  background-color: var(--code-bg) !important;
+  color: var(--shiki-dark) !important;
+}
+
+pre.astro-code span {
+  color: var(--shiki-dark) !important;
+}
+
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+a:visited {
+  color: var(--link-visited);
+}
+
+a:hover {
+  color: var(--link-hover);
+  text-decoration: underline;
+}
+
+a:focus-visible {
+  outline: var(--border-w-emphasis) solid var(--link-focus);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+
+img,
+svg {
+  max-width: 100%;
+  height: auto;
+}

@@ -10,11 +10,31 @@ permissions:
   contents: read
 
 jobs:
+  site-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # docs/site version resolution requires tags
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Resolve docs version
+        run: bash scripts/resolve_docs_version.sh
+      - run: npm ci --prefix site
+      - run: npm run build --prefix site
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-dist
+          path: site/dist/
+
   tests:
+    needs: site-build
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.11"]
+        python: ["3.11", "3.12"]
         include:
           # Windows CI polling monitor occasionally misses second file write within
           # 45s window — retry individual flaky tests before failing the run.
@@ -27,6 +47,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # docs/site version resolution and hatch-vcs both require tags
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
@@ -38,6 +60,14 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --locked
+
+      - name: Resolve docs version
+        run: bash scripts/resolve_docs_version.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-dist
+          path: site/dist/
 
       - name: Test collection check
         run: uv run pytest tests/ --collect-only -q --tb=no

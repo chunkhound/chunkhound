@@ -1,4 +1,6 @@
 .DS_Store
+# temp TypeScript files created by tsx_runner.py
+/tmp*.mts
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -16,6 +18,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+!site/src/lib/
+!site/src/lib/*.js
+!site/src/lib/*.ts
 lib64/
 parts/
 sdist/
@@ -143,9 +148,6 @@ venv.bak/
 
 # Rope project settings
 .ropeproject
-
-# mkdocs documentation
-/site
 
 # mypy
 .mypy_cache/
@@ -298,3 +300,11 @@ cluster_eval.json
 
 # Kiro IDE
 .kiro/
+
+# Site build artifacts
+site/node_modules/
+site/dist/
+site/.astro/
+
+# Gemini-CLI
+.gemini/settings.json

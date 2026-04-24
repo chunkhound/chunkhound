@@ -70,3 +70,49 @@ def test_build_llm_metadata_and_map_hyde_falls_back_to_synthesis(tmp_path: Path)
     assert map_hyde_provider is None
     assert llm_meta["map_hyde_provider"] == "openai"
     assert llm_meta["map_hyde_model"] == "synth-model"
+
+
+def test_build_llm_metadata_and_map_hyde_preserves_custom_openai_base_url(
+    tmp_path: Path,
+) -> None:
+    config = Config(
+        target_dir=tmp_path,
+        llm={
+            "provider": "anthropic",
+            "api_key": "test",
+            "synthesis_model": "claude-sonnet-4-5-20250929",
+            "map_hyde_provider": "openai",
+            "map_hyde_model": "llama3.2",
+            "base_url": "http://localhost:11434/v1",
+        },
+    )
+    manager = _FakeLLMManager()
+
+    llm_meta, map_hyde_provider = build_llm_metadata_and_map_hyde(
+        config=config, llm_manager=manager
+    )
+
+    assert map_hyde_provider is not None
+    assert manager.seen_configs[0]["provider"] == "openai"
+    assert manager.seen_configs[0]["model"] == "llama3.2"
+    assert manager.seen_configs[0]["base_url"] == "http://localhost:11434/v1"
+    assert llm_meta["map_hyde_provider"] == "openai"
+    assert llm_meta["map_hyde_model"] == "llama3.2"
+
+
+def test_build_llm_metadata_and_map_hyde_rejects_invalid_cross_family_override(
+    tmp_path: Path,
+) -> None:
+    config = Config(
+        target_dir=tmp_path,
+        llm={
+            "provider": "openai",
+            "api_key": "test",
+            "synthesis_model": "gpt-5",
+            "map_hyde_provider": "anthropic",
+        },
+    )
+    manager = _FakeLLMManager()
+
+    with pytest.raises(ValueError, match="Invalid map_hyde configuration"):
+        build_llm_metadata_and_map_hyde(config=config, llm_manager=manager)

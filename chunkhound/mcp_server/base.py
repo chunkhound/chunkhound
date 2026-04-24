@@ -12,6 +12,7 @@ to ensure consistent initialization while respecting protocol-specific constrain
 
 import asyncio
 import copy
+import logging
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -25,6 +26,8 @@ from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+
+logger = logging.getLogger(__name__)
 
 
 class MCPServerBase(ABC):
@@ -144,6 +147,12 @@ class MCPServerBase(ABC):
             # Initialize LLM manager with dual providers (optional - continue if it fails)
             try:
                 if self.config.llm:
+                    missing_config = self.config.llm.get_missing_config_for_roles(
+                        ("utility", "synthesis")
+                    )
+                    if missing_config:
+                        missing = ", ".join(missing_config)
+                        raise ValueError(f"Incomplete LLM configuration: {missing}")
                     utility_config, synthesis_config = (
                         self.config.llm.get_provider_configs()
                     )
@@ -154,9 +163,11 @@ class MCPServerBase(ABC):
                     )
             except ValueError as e:
                 # API key or configuration issue - expected if LLM not needed
+                logger.warning(f"LLM provider setup skipped: {e}")
                 self.debug_log(f"LLM provider setup skipped: {e}")
             except Exception as e:
                 # Unexpected error - log but continue
+                logger.warning(f"Unexpected error setting up LLM provider: {e}")
                 self.debug_log(f"Unexpected error setting up LLM provider: {e}")
 
             # Create services using unified factory (lazy connect for fast init)

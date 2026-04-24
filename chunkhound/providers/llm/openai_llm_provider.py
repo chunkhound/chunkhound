@@ -5,6 +5,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.interfaces.llm_provider import LLMResponse
 from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 
@@ -63,7 +64,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
         api_key: str | None = None,
         model: str = "gpt-5-nano-mini",
         base_url: str | None = None,
-        timeout: int = 60,
+        ssl_verify: bool = True,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
         reasoning_effort: str | None = None,
     ):
@@ -73,6 +75,7 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
             model: Model name to use
             base_url: Base URL for OpenAI API (optional for custom endpoints)
+            ssl_verify: Verify TLS certificates for requests sent via base_url
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
             reasoning_effort: Reasoning effort for reasoning models
@@ -82,6 +85,7 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             api_key=api_key,
             model=model,
             base_url=base_url,
+            ssl_verify=ssl_verify,
             timeout=timeout,
             max_retries=max_retries,
         )
@@ -243,6 +247,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                 finish_reason=finish_reason,
             )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"OpenAI Responses API completion failed: {e}")
             raise RuntimeError(f"LLM completion failed: {e}") from e
@@ -348,11 +354,11 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             # Validate content
             if content is None or not content.strip():
                 logger.error(
-                    f"Responses API structured output returned empty content "
+                    f"Responses API structured completion returned empty content "
                     f"(status={finish_reason})"
                 )
                 raise RuntimeError(
-                    f"LLM structured output returned empty response "
+                    f"LLM structured completion returned empty response "
                     f"(status={finish_reason})"
                 )
 
@@ -365,7 +371,7 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                         f"output={response.usage.output_tokens:,})"
                     )
                 raise RuntimeError(
-                    f"LLM structured output incomplete - token limit "
+                    f"LLM structured completion incomplete - token limit "
                     f"exceeded{usage_info}"
                 )
 
@@ -378,6 +384,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                 f"Failed to parse Responses API structured output as JSON: {e}"
             )
             raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Responses API structured completion failed: {e}")
             raise RuntimeError(f"LLM structured completion failed: {e}") from e

@@ -1,0 +1,42 @@
+---
+import type { MarkdownLayoutProps } from 'astro';
+import Base from './Base.astro';
+import Nav from '../components/Nav.astro';
+import DocsSidebar from '../components/DocsSidebar.astro';
+import '../styles/docs.css';
+
+type MarkdownProps = MarkdownLayoutProps<{ title?: string; description?: string }>;
+type DirectProps = { title?: string; description?: string };
+type Props = MarkdownProps | DirectProps;
+
+const title = 'frontmatter' in Astro.props ? Astro.props.frontmatter.title : Astro.props.title;
+const description = 'frontmatter' in Astro.props ? Astro.props.frontmatter.description : Astro.props.description;
+const pageTitle = title ? `${title} — ChunkHound Docs` : 'ChunkHound Docs';
+---
+
+<Base title={pageTitle} description={description}>
+  <Nav currentPath={Astro.url.pathname} />
+  <div class="docs-shell">
+    <DocsSidebar currentPath={Astro.url.pathname} />
+    <main class="docs-main">
+      {title && (
+        <nav class="docs-breadcrumb" aria-label="Breadcrumb">
+          <a href="/docs/">Guides</a>
+          <span class="docs-breadcrumb-sep" aria-hidden="true">/</span>
+          <span aria-current="page">{title}</span>
+        </nav>
+      )}
+      <article class="docs-content">
+        <slot />
+      </article>
+    </main>
+    <aside class="docs-toc" aria-label="On this page">
+      <div class="toc-title">On this page</div>
+      <nav class="toc-list" data-toc></nav>
+    </aside>
+  </div>
+
+  <script>
+  import '../scripts/docs-runtime.ts';
+  </script>
+</Base>

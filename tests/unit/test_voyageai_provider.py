@@ -342,6 +342,21 @@ class TestParseRerankResponse:
         assert len(results) == 1
         assert results[0].score == pytest.approx(0.0)
 
+    def test_non_dict_items_skipped(self, p):
+        """Test that non-dict items in results array are skipped."""
+        data = {
+            "results": [
+                {"index": 0, "relevance_score": 0.9},
+                "garbage",
+                None,
+                42,
+            ]
+        }
+        results = p._parse_rerank_response(data, num_documents=1)
+        assert len(results) == 1
+        assert results[0].index == 0
+        assert results[0].score == pytest.approx(0.9)
+
 
 # ===========================================================================
 # 6. _rerank_http_batch — mocked httpx
@@ -740,6 +755,17 @@ class TestFactoryRerankUrlResolution:
         with patch.object(voyageai, "Client", return_value=MagicMock()):
             provider = EmbeddingProviderFactory._create_voyageai_provider(config)
         assert provider._embed_semaphore._value == 7
+
+    def test_rerank_ssl_verify_override_passed_through(self):
+        config = self._make_dict(
+            base_url="https://my-endpoint.example.com",
+            ssl_verify=True,
+            rerank_url="https://other-host.example.com/rerank",
+            rerank_ssl_verify=False,
+        )
+        with patch.object(voyageai, "Client", return_value=MagicMock()):
+            provider = EmbeddingProviderFactory._create_voyageai_provider(config)
+        assert provider._rerank_ssl_verify is False
 
 
 # ===========================================================================

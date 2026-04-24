@@ -1,0 +1,112 @@
+---
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "ChunkHound — The codebase intelligence platform",
+  description = "ChunkHound — The codebase intelligence platform. Multi-hop semantic search, architecture research, and auto-documentation for AI agents. Local-first. MIT licensed. Free forever.",
+} = Astro.props;
+
+import '../styles/global.css';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta
+      name="description"
+      content={description}
+    />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content={title} />
+    <meta
+      property="og:description"
+      content={description}
+    />
+    <meta property="og:image" content="/og-image-dark.svg" />
+    <meta property="og:type" content="website" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta
+      name="twitter:description"
+      content={description}
+    />
+    <meta name="twitter:image" content="/og-image-dark.svg" />
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon-dark.svg" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" type="image/svg+xml" href="/favicon-light.svg" media="(prefers-color-scheme: light)" />
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap"
+      rel="stylesheet"
+    />
+    <script
+      defer
+      src="https://cloud.umami.is/script.js"
+      data-website-id="ab95aad1-dc04-4bc7-be56-b162a68d6aa3"
+    ></script>
+  </head>
+  <body>
+    <slot />
+
+    <script is:inline>
+      (function () {
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var html = document.documentElement;
+
+        function resolve(setting) {
+          if (setting === 'system') return mq.matches ? 'dark' : 'light';
+          return setting;
+        }
+
+        function apply(setting) {
+          html.setAttribute('data-theme-setting', setting);
+          html.setAttribute('data-theme', resolve(setting));
+          var btn = document.querySelector('.theme-toggle');
+          if (btn) {
+            var labels = { light: 'Switch to dark mode', dark: 'Switch to system theme', system: 'Switch to light mode' };
+            btn.setAttribute('aria-label', labels[setting]);
+          }
+        }
+
+        var saved = localStorage.getItem('theme');
+        apply(saved === 'light' || saved === 'dark' ? saved : 'system');
+
+        mq.addEventListener('change', function () {
+          if (html.getAttribute('data-theme-setting') === 'system') {
+            html.setAttribute('data-theme', resolve('system'));
+          }
+        });
+
+        var cycle = { light: 'dark', dark: 'system', system: 'light' };
+        window.toggleTheme = function () {
+          var next = cycle[html.getAttribute('data-theme-setting')] || 'system';
+          localStorage.setItem('theme', next);
+          apply(next);
+        };
+      })();
+
+      fetch('https://api.github.com/repos/chunkhound/chunkhound')
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.stargazers_count == null) return;
+          var count = Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(d.stargazers_count);
+          document.querySelectorAll('[data-star-count]')
+            .forEach(function (el) { el.textContent = count; });
+        })
+        .catch(function () {});
+    </script>
+  </body>
+</html>

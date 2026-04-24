@@ -51,10 +51,10 @@ pip install vllm --extra-index-url https://download.pytorch.org/whl/cpu
 
 ```bash
 # Start vLLM with a reranking model on port 8000
-vllm serve BAAI/bge-reranker-base --port 8000 --dtype auto
+vllm serve Qwen/Qwen3-Reranker-0.6B --port 8000 --dtype auto
 
 # Or with a different model
-vllm serve BAAI/bge-reranker-v2-m3 --port 8000 --dtype auto
+vllm serve Qwen/Qwen3-Reranker-0.6B --port 8000 --dtype auto
 ```
 
 The server will provide:
@@ -71,7 +71,7 @@ curl http://localhost:8000/health
 curl -X POST http://localhost:8000/rerank \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "BAAI/bge-reranker-base",
+    "model": "Qwen/Qwen3-Reranker-0.6B",
     "query": "What is the capital of France?",
     "documents": [
       "The capital of Brazil is Brasilia.",
@@ -81,7 +81,29 @@ curl -X POST http://localhost:8000/rerank \
   }'
 ```
 
-## Option 2: Using Ollama for Embeddings + vLLM for Reranking
+## Option 2: Ollama Native Reranking (Simplest)
+
+Ollama now supports reranking natively. Pull a reranker model and point ChunkHound at it:
+
+```bash
+ollama pull qwen3-embedding
+ollama pull qwen3-reranker
+```
+
+Configure ChunkHound to use Ollama for both embeddings and reranking:
+
+```bash
+export CHUNKHOUND_EMBEDDING__PROVIDER=openai
+export CHUNKHOUND_EMBEDDING__BASE_URL=http://localhost:11434/v1
+export CHUNKHOUND_EMBEDDING__MODEL=qwen3-embedding
+export CHUNKHOUND_EMBEDDING__API_KEY=dummy-key
+export CHUNKHOUND_EMBEDDING__RERANK_MODEL=qwen3-reranker
+export CHUNKHOUND_EMBEDDING__RERANK_FORMAT=cohere
+```
+
+This avoids the need for a separate vLLM server entirely.
+
+## Option 3: Using Ollama for Embeddings + vLLM for Reranking
 
 This is the typical test configuration:
 
@@ -89,7 +111,7 @@ This is the typical test configuration:
 
 ```bash
 # Pull an embedding model
-ollama pull nomic-embed-text
+ollama pull qwen3-embedding
 
 # Ollama should already be running on port 11434
 ollama serve  # If not already running
@@ -99,7 +121,7 @@ ollama serve  # If not already running
 
 ```bash
 # As described above
-vllm serve BAAI/bge-reranker-base --port 8000
+vllm serve Qwen/Qwen3-Reranker-0.6B --port 8000
 ```
 
 ### 3. Configure ChunkHound
@@ -110,11 +132,11 @@ Set environment variables:
 # Configure embeddings (Ollama)
 export CHUNKHOUND_EMBEDDING__PROVIDER=openai
 export CHUNKHOUND_EMBEDDING__BASE_URL=http://localhost:11434/v1
-export CHUNKHOUND_EMBEDDING__MODEL=nomic-embed-text
+export CHUNKHOUND_EMBEDDING__MODEL=qwen3-embedding
 export CHUNKHOUND_EMBEDDING__API_KEY=dummy-key
 
 # Configure reranking (vLLM)
-export CHUNKHOUND_EMBEDDING__RERANK_MODEL=BAAI/bge-reranker-base
+export CHUNKHOUND_EMBEDDING__RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B
 export CHUNKHOUND_EMBEDDING__RERANK_URL=http://localhost:8000/rerank
 ```
 
@@ -145,7 +167,7 @@ For production use, we recommend:
 If port 8000 is taken, use a different port:
 
 ```bash
-vllm serve BAAI/bge-reranker-base --port 8001
+vllm serve Qwen/Qwen3-Reranker-0.6B --port 8001
 export CHUNKHOUND_EMBEDDING__RERANK_URL=http://localhost:8001/rerank
 ```
 
@@ -155,10 +177,10 @@ For systems with limited RAM/VRAM:
 
 ```bash
 # Use smaller model
-vllm serve BAAI/bge-reranker-base --port 8000 --max-model-len 512
+vllm serve Qwen/Qwen3-Reranker-0.6B --port 8000 --max-model-len 512
 
 # Or use CPU mode (slower)
-vllm serve BAAI/bge-reranker-base --port 8000 --device cpu
+vllm serve Qwen/Qwen3-Reranker-0.6B --port 8000 --device cpu
 ```
 
 ### Services Not Found

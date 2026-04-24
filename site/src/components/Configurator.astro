@@ -1,0 +1,442 @@
+---
+import {
+    DEFAULT_EDITOR,
+    DEFAULT_EMBEDDING,
+    DEFAULT_LLM,
+    DEFAULT_PLATFORM,
+    buildCompactConfiguratorOutput,
+    buildEditorCommands,
+    buildFullConfiguratorOutput,
+    configWithApiKey,
+    editors,
+    embeddingProviders,
+    llmProviders,
+} from "./configurator-data";
+import CodeBlock from "./CodeBlock.astro";
+import PlatformCodeBlock from "./PlatformCodeBlock.astro";
+import { DEMO_CODE_PALETTE } from '../lib/shiki-config.js';
+
+interface Props {
+    heading?: string;
+    compact?: boolean;
+}
+
+const { heading = "Connect to your AI agent", compact = true } = Astro.props;
+
+const embeddingConfigs = Object.fromEntries(
+    embeddingProviders.map((e) => [e.id, JSON.stringify(configWithApiKey(e))]),
+);
+const llmConfigs = Object.fromEntries(
+    llmProviders.map((l) => [l.id, JSON.stringify(configWithApiKey(l))]),
+);
+const editorCmds = buildEditorCommands();
+
+const defaultEmbedding = embeddingProviders.find(
+    (e) => e.id === DEFAULT_EMBEDDING,
+)!;
+const defaultLlm = llmProviders.find((l) => l.id === DEFAULT_LLM)!;
+
+// Compact mode (homepage): single-line echo + editor cmd + chunkhound index .
+// Full mode (docs): multi-line annotated heredoc + multi-line editor heredoc,
+// no index command
+let defaultCopy: string;
+let defaultHighlighted: string;
+if (compact) {
+    const defaultOutput = buildCompactConfiguratorOutput(
+        defaultEmbedding,
+        defaultLlm,
+        DEFAULT_EDITOR,
+        DEFAULT_PLATFORM,
+    );
+    defaultCopy = defaultOutput.copy;
+    defaultHighlighted = defaultOutput.html;
+} else {
+    const defaultOutput = buildFullConfiguratorOutput(
+        defaultEmbedding,
+        defaultLlm,
+        DEFAULT_EDITOR,
+        DEFAULT_PLATFORM,
+    );
+    defaultCopy = defaultOutput.copy;
+    defaultHighlighted = defaultOutput.html;
+}
+
+---
+
+<section
+    class={`configurator ${compact ? "configurator-compact" : ""}`}
+    data-mode={compact ? "compact" : "full"}
+    aria-label="Setup configurator"
+>
+    <div class="container">
+        {heading && <h2 class="section-heading">{heading}</h2>}
+        <!-- Editor selector -->
+        <fieldset
+            class="pill-group"
+            role="radiogroup"
+            aria-label="Choose your editor"
+        >
+            <legend class="label">Works with your agent</legend>
+            <div class="pills">
+                {
+                    editors.map((e) => (
+                        <button
+                            role="radio"
+                            aria-checked={
+                                e.id === DEFAULT_EDITOR ? "true" : "false"
+                            }
+                            data-editor={e.id}
+                            data-cmd={editorCmds[e.id]}
+                            class={`pill ${e.id === DEFAULT_EDITOR ? "selected" : ""}`}
+                        >
+                            <Fragment set:html={e.svg} />
+                            <span>{e.name}</span>
+                        </button>
+                    ))
+                }
+                <span class="more">+ any MCP-compatible</span>
+            </div>
+        </fieldset>
+
+        <!-- Embedding provider selector -->
+        <fieldset
+            class="pill-group"
+            role="radiogroup"
+            aria-label="Choose your embedding provider"
+        >
+            <legend class="label">Embedding provider</legend>
+            <div class="pills">
+                {
+                    embeddingProviders.map((e) => (
+                        <button
+                            role="radio"
+                            aria-checked={
+                                e.id === DEFAULT_EMBEDDING ? "true" : "false"
+                            }
+                            data-embedding={e.id}
+                            data-config={embeddingConfigs[e.id]}
+                            data-setup-hint={e.setupHint || ""}
+                            class={`pill ${e.id === DEFAULT_EMBEDDING ? "selected" : ""}`}
+                        >
+                            <Fragment set:html={e.svg} />
+                            <span>{e.name}</span>
+                        </button>
+                    ))
+                }
+                <span class="more">+ any OpenAI-compatible</span>
+            </div>
+        </fieldset>
+
+        <!-- LLM provider selector -->
+        <fieldset
+            class="pill-group"
+            role="radiogroup"
+            aria-label="Choose your LLM provider"
+        >
+            <legend class="label">LLM provider</legend>
+            <div class="pills">
+                {
+                    llmProviders.map((l) => (
+                        <button
+                            role="radio"
+                            aria-checked={
+                                l.id === DEFAULT_LLM ? "true" : "false"
+                            }
+                            data-llm={l.id}
+                            data-config={llmConfigs[l.id]}
+                            data-setup-hint={l.setupHint || ""}
+                            class={`pill ${l.id === DEFAULT_LLM ? "selected" : ""}`}
+                        >
+                            <Fragment set:html={l.svg} />
+                            <span>{l.name}</span>
+                        </button>
+                    ))
+                }
+            </div>
+        </fieldset>
+
+        <!-- Single combined code block -->
+        <PlatformCodeBlock class="code-panel" copyBtnId="config-copy-btn" ariaLabel="Copy all commands" dataCopy={defaultCopy}>
+            <pre><code id="config-output" set:html={defaultHighlighted} /></pre>
+        </PlatformCodeBlock>
+
+        <!-- Local setup callout — shown when selected providers need local models -->
+        <div id="rerank-callout" class="rerank-callout" hidden>
+            <p class="rerank-title">Local setup</p>
+            <p class="rerank-body">Set up the models before running ChunkHound:</p>
+            <CodeBlock copyBtnId="rerank-copy-btn" ariaLabel="Copy setup commands">
+                <pre class="rerank-cmd"><code></code></pre>
+            </CodeBlock>
+        </div>
+
+        <div class="secrets-callout" role="note">
+            <p class="secrets-title">.chunkhound.json holds your API keys</p>
+            <p class="secrets-body">
+                The first command adds it to <code>.gitignore</code> so you
+                don't commit secrets. Replace the <code
+                    >&lt;YOUR_*_API_KEY&gt;</code
+                > placeholders with real keys before running. Local
+                OpenAI-compatible backends still need an explicit
+                <code>model</code>. Need <a
+                    href="/docs/configuration/#advanced-routing"
+                    >Azure OpenAI, a self-hosted endpoint, or a proxy</a
+                >?
+            </p>
+        </div>
+
+        {/* Hidden data for crawlers: all configs in DOM */}
+        <div hidden aria-hidden="true">
+            {
+                embeddingProviders.map((e) => (
+                    <pre data-seo-embedding={e.id}>
+                        {JSON.stringify(configWithApiKey(e))}
+                    </pre>
+                ))
+            }
+            {
+                llmProviders.map((l) => (
+                    <pre data-seo-llm={l.id}>
+                        {JSON.stringify(configWithApiKey(l))}
+                    </pre>
+                ))
+            }
+            {
+                editors.map((e) => (
+                    <pre data-seo-editor={e.id}>{editorCmds[e.id]}</pre>
+                ))
+            }
+        </div>
+    </div>
+</section>
+
+<script>
+    import "../scripts/configurator.ts";
+</script>
+
+<style define:vars={{ themeCmd: DEMO_CODE_PALETTE.cmd, themeString: DEMO_CODE_PALETTE.string, themeOp: DEMO_CODE_PALETTE.op, themeJsonKey: DEMO_CODE_PALETTE.jsonKey, themeComment: DEMO_CODE_PALETTE.comment, themeText: DEMO_CODE_PALETTE.text }}>
+    .configurator {
+        padding: var(--space-8) 0;
+    }
+
+    .configurator-compact {
+        padding: var(--space-5) 0;
+    }
+
+    .section-heading {
+        font-size: var(--text-2xl);
+        line-height: var(--lh-2xl);
+        font-weight: 600;
+        color: var(--text-primary);
+        text-align: center;
+        margin-bottom: var(--space-6);
+    }
+
+    .container {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 0 var(--space-6);
+    }
+
+    .configurator-compact .container {
+        max-width: none;
+        padding: 0;
+    }
+
+    .pill-group {
+        border: none;
+        padding: 0;
+        margin: 0 0 var(--space-4);
+    }
+
+    .label {
+        text-transform: uppercase;
+        font-size: var(--text-xs);
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        color: var(--text-muted);
+        margin-bottom: var(--space-3);
+        text-align: center;
+        display: block;
+    }
+
+    .pills {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: var(--space-2);
+        flex-wrap: wrap;
+    }
+
+    .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-1);
+        height: 32px;
+        padding: 0 var(--space-3);
+        border-radius: var(--radius-full);
+        border: 1px solid var(--border-color);
+        background: transparent;
+        color: var(--text-tertiary);
+        font-family: inherit;
+        font-size: var(--text-xs);
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+            color 0.2s,
+            background 0.2s,
+            border-color 0.2s;
+    }
+
+    .pill:hover {
+        color: var(--text-secondary);
+        border-color: var(--text-tertiary);
+    }
+
+    .pill.selected {
+        background: var(--primary-bg);
+        color: var(--on-primary-bg);
+        border-color: var(--primary);
+    }
+
+    .pill :global(svg) {
+        width: 16px;
+        height: 16px;
+    }
+
+    .more {
+        font-size: var(--text-sm);
+        color: var(--text-tertiary);
+        font-style: italic;
+    }
+
+    .rerank-callout {
+        max-width: 640px;
+        margin: var(--space-5) auto 0;
+        padding: var(--space-3) var(--space-4);
+        border: var(--border-w-default) solid var(--border-accent);
+        border-radius: var(--radius-lg);
+        background: var(--primary-bg);
+    }
+
+    .rerank-callout[hidden] {
+        display: none;
+    }
+
+    .rerank-title {
+        margin: 0 0 var(--space-1);
+        font-size: var(--text-sm);
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .rerank-body {
+        margin: 0 0 var(--space-2);
+        font-size: var(--text-sm);
+        color: var(--text-secondary);
+        line-height: 1.5;
+    }
+
+    .rerank-cmd {
+        margin: 0;
+        padding: var(--space-2) var(--space-3);
+        background: var(--code-bg);
+        border-radius: var(--radius-md);
+        overflow-x: auto;
+    }
+
+    .rerank-cmd code {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 14px;
+        line-height: 1.4;
+        color: var(--code-text);
+        white-space: pre;
+    }
+
+    .secrets-callout {
+        max-width: 640px;
+        margin: var(--space-4) auto 0;
+        padding: var(--space-3) var(--space-4);
+        border: var(--border-w-default) solid var(--border-accent);
+        border-radius: var(--radius-lg);
+        background: var(--primary-bg);
+    }
+
+    .secrets-title {
+        margin: 0 0 var(--space-1);
+        font-size: var(--text-sm);
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .secrets-body {
+        margin: 0;
+        font-size: var(--text-sm);
+        color: var(--text-secondary);
+        line-height: 1.5;
+    }
+
+    .secrets-body code {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.8em;
+        color: var(--text-primary);
+    }
+
+    .secrets-body a {
+        color: var(--link-on-primary-bg);
+        text-decoration: none;
+        font-weight: 600;
+    }
+
+    .secrets-body a:visited {
+        color: var(--link-on-primary-bg-visited);
+    }
+
+    .secrets-body a:hover {
+        color: var(--link-on-primary-bg-hover);
+        text-decoration: underline;
+    }
+
+    .secrets-body a:focus-visible {
+        outline-color: var(--link-on-primary-bg-focus);
+    }
+
+    :global(.code-panel) {
+        max-width: 640px;
+        margin: var(--space-5) auto 0;
+    }
+
+    /* Bash syntax highlighting — GitHub dark-dimmed token colors */
+    :global(.code-panel .sh-cmd), :global(.rerank-cmd .sh-cmd) { color: var(--themeCmd); }
+    :global(.code-panel .sh-str), :global(.rerank-cmd .sh-str) { color: var(--themeString); }
+    :global(.code-panel .sh-op),  :global(.rerank-cmd .sh-op)  { color: var(--themeOp); }
+    :global(.code-panel .sh-file), :global(.rerank-cmd .sh-file) { color: var(--themeText); }
+
+    /* JSON syntax highlighting — full-mode annotated renderer */
+    :global(.code-panel .json-key)    { color: var(--themeJsonKey); }
+    :global(.code-panel .json-string) { color: var(--themeString); }
+    :global(.code-panel .json-punct)  { color: var(--themeText); }
+    :global(.code-panel .json-comment) {
+        color: var(--themeComment);
+        font-style: italic;
+    }
+
+    @media (max-width: 768px) {
+        .rerank-callout {
+            max-width: none;
+        }
+
+        .secrets-callout {
+            max-width: none;
+        }
+
+        :global(.code-panel) {
+            max-width: none;
+        }
+    }
+
+    @media (max-width: 640px) {
+        :global(.code-panel .json-comment) {
+            display: none;
+        }
+    }
+</style>

@@ -4,6 +4,12 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import (
+    BASE_URL_CAPABLE_LLM_PROVIDERS,
+    DEFAULT_LLM_TIMEOUT,
+    OPENAI_COMPATIBLE_LLM_PROVIDERS,
+)
+from chunkhound.core.config.openai_utils import is_official_openai_endpoint
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
@@ -76,16 +82,31 @@ class LLMManager:
 
         try:
             # Build provider initialization parameters
+            model_name = config.get("model")
+            base_url = config.get("base_url")
+            if (
+                provider_name in OPENAI_COMPATIBLE_LLM_PROVIDERS
+                and not is_official_openai_endpoint(base_url)
+                and not model_name
+            ):
+                raise ValueError(
+                    "Custom OpenAI-compatible LLM endpoints require an explicit "
+                    "model. Set `llm.model` (or the per-role model override) "
+                    "when using `llm.base_url`."
+                )
+
             provider_kwargs = {
                 "api_key": config.get("api_key"),
-                "model": config.get("model", "gpt-5-nano"),
-                "timeout": config.get("timeout", 60),
+                "timeout": config.get("timeout", DEFAULT_LLM_TIMEOUT),
                 "max_retries": config.get("max_retries", 3),
             }
+            if model_name:
+                provider_kwargs["model"] = model_name
 
-            # Only pass base_url to providers that support it
-            if provider_name not in ("gemini",):
+            # Only providers that support custom endpoints should receive base_url.
+            if provider_name in BASE_URL_CAPABLE_LLM_PROVIDERS:
                 provider_kwargs["base_url"] = config.get("base_url")
+                provider_kwargs["ssl_verify"] = config.get("ssl_verify", True)
 
             # Pass reasoning_effort to OpenAI and Codex providers
             if provider_name in ("openai", "codex-cli"):

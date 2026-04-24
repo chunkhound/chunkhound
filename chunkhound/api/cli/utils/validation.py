@@ -53,12 +53,13 @@ def validate_provider_args(
             """
             No embedding provider configured. Choose from: openai, voyageai.
             To fix this, you can:
-            1) Set via --provider flag
-            2) Set CHUNKHOUND_EMBEDDING__PROVIDER environment variable
-            3) Add provider to .chunkhound.json config file
-            4) Use --no-embeddings to skip embeddings entirely.
+            1) Generate a config at https://chunkhound.ai
+            2) Set via --provider flag
+            3) Set CHUNKHOUND_EMBEDDING__PROVIDER environment variable
+            4) Add provider to .chunkhound.json config file
+            5) Use --no-embeddings to skip embeddings entirely.
             
-            For more information, see: https://ofriw.github.io/chunkhound/configuration/
+            For more information, see: https://chunkhound.ai/docs/configuration/
             """
         )
         return False

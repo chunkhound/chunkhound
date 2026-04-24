@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from chunkhound.providers.llm.codex_cli_provider import CODEX_DEFAULT_SYNTHESIS_MODEL
+
 try:
     import tomllib
 except ImportError:
@@ -149,7 +151,7 @@ def test_codex_model_resolution_defaults(monkeypatch):
 
     prov = CodexCLIProvider(model="codex")
     # "codex" alias should resolve to the default Codex reasoning model
-    assert prov._resolve_model_name("codex") == "gpt-5.1-codex"
+    assert prov._resolve_model_name("codex") == CODEX_DEFAULT_SYNTHESIS_MODEL
     # Non-alias model names should pass through unchanged
     assert prov._resolve_model_name("gpt-5.1-codex-mini") == "gpt-5.1-codex-mini"
 

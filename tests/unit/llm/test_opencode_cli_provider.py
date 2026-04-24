@@ -6,8 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.interfaces.llm_provider import LLMResponse
 from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
+
+
+def test_default_timeout():
+    """Default timeout resolves to DEFAULT_LLM_TIMEOUT."""
+    p = OpenCodeCLIProvider(model="openai/gpt-5-nano")
+    assert p.timeout == DEFAULT_LLM_TIMEOUT
 
 
 class TestOpenCodeCLIProvider:

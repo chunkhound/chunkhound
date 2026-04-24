@@ -46,15 +46,37 @@ def build_llm_metadata_and_map_hyde(
         map_hyde_provider_name or map_hyde_model_name or map_hyde_effort
     )
 
+    if needs_custom_map_hyde and llm_manager is None:
+        raise ValueError(
+            "Custom HyDE provider requested but no LLM manager is available."
+        )
+
     if llm_manager is not None and needs_custom_map_hyde:
         try:
-            map_hyde_cfg: dict[str, Any] = synth_cfg.copy()
-            if map_hyde_provider_name:
-                map_hyde_cfg["provider"] = map_hyde_provider_name
-            if map_hyde_model_name:
-                map_hyde_cfg["model"] = map_hyde_model_name
-            if map_hyde_effort:
-                map_hyde_cfg["reasoning_effort"] = str(map_hyde_effort).strip().lower()
+            map_hyde_provider_name = (
+                map_hyde_provider_name
+                if map_hyde_provider_name
+                else str(synth_cfg["provider"])
+            )
+            map_hyde_model = (
+                map_hyde_model_name
+                if map_hyde_model_name
+                else llm.resolve_model_for_role("map_hyde")
+            )
+            map_hyde_reasoning_effort = (
+                str(map_hyde_effort).strip().lower()
+                if map_hyde_effort
+                else synth_cfg.get("reasoning_effort")
+            )
+            if map_hyde_model is None:
+                raise ValueError(
+                    "Custom HyDE provider requires an explicit provider-compatible model."
+                )
+            map_hyde_cfg: dict[str, Any] = llm.build_provider_config(
+                provider=map_hyde_provider_name,
+                model=str(map_hyde_model),
+                reasoning_effort=map_hyde_reasoning_effort,
+            )
 
             map_hyde_provider = llm_manager.create_provider_for_config(map_hyde_cfg)
 
@@ -69,10 +91,12 @@ def build_llm_metadata_and_map_hyde(
                     map_hyde_cfg["reasoning_effort"]
                 )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            logger.debug(f"Code Mapper: failed to create HyDE planning provider: {exc}")
-            map_hyde_provider = None
+            logger.warning(f"Code Mapper: invalid HyDE planning provider: {exc}")
+            raise ValueError(
+                f"Invalid map_hyde configuration: {exc}"
+            ) from exc
 
-    if map_hyde_provider is None:
+    if map_hyde_provider is None and not needs_custom_map_hyde:
         synth_provider = synth_cfg.get("provider")
         synth_model = synth_cfg.get("model")
         if synth_provider:

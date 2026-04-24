@@ -1,0 +1,478 @@
+---
+import Wordmark from "./Wordmark.astro";
+import { DEMO_CODE_PALETTE } from "../lib/shiki-config.js";
+---
+
+<section class="hero">
+    <div class="container">
+        <h1 class="headline"><Wordmark size="lg" /></h1>
+        <p class="tagline">Your entire codebase, deeply understood</p>
+        <p class="subheadline">
+            Multi-hop semantic search. Architecture research. Cited reports.
+            Auto-generated documentation.
+        </p>
+        <p class="amplifier">
+            100% local · 33 languages · MIT licensed · Free forever
+        </p>
+
+        <div class="cta-row">
+            <div class="install-pill">
+                <code class="install-cmd">uv tool install chunkhound</code>
+                <button
+                    class="copy-btn"
+                    onclick="navigator.clipboard.writeText('uv tool install chunkhound')"
+                    aria-label="Copy install command"
+                >
+                    <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"
+                        ></rect>
+                        <path
+                            d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
+                        ></path>
+                    </svg>
+                </button>
+            </div>
+            <a
+                href="https://github.com/chunkhound/chunkhound"
+                class="github-btn"
+            >
+                <svg
+                    class="github-icon"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 16 16"
+                    fill="currentColor"
+                >
+                    <path
+                        d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"
+                    ></path>
+                </svg>
+                <span data-star-count>--</span>
+                <svg
+                    class="star-icon"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    stroke="none"
+                >
+                    <path
+                        d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"
+                    ></path>
+                </svg>
+            </a>
+        </div>
+
+        <div class="terminal-card">
+            <div class="terminal-dots">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+            </div>
+            <div class="terminal-lines" id="terminal-lines"></div>
+        </div>
+
+        <blockquote class="trust-quote">
+            &ldquo;We&rsquo;ve repeatedly demonstrated compressing what used to take
+            2&ndash;3 months down to 2&ndash;3 days. Claude Code orchestrates
+            tens to hundreds of deep research calls over our monorepo, zooming
+            into each subsection systematically.&rdquo;
+            <cite
+                >— Ofir Rozenfeld, AI Transformation Product Manager at <a
+                    href="https://www.appliedmaterials.com"
+                    target="_blank"
+                    rel="noopener">Applied Materials</a
+                ></cite
+            >
+        </blockquote>
+    </div>
+</section>
+
+<script is:inline>
+    (function () {
+        const container = document.getElementById("terminal-lines");
+        if (!container) return;
+
+        const STEPS = [
+            {
+                type: "prompt",
+                segments: [{ cls: "cmd", text: "chunkhound index ." }],
+            },
+            {
+                type: "output",
+                text: "Indexed 12,847 files · 33 languages · 2.1M LOC",
+            },
+            { type: "blank" },
+            {
+                type: "prompt",
+                segments: [
+                    { cls: "cmd", text: "chunkhound search " },
+                    { cls: "str", text: '"how does authentication work"' },
+                ],
+            },
+            {
+                type: "output",
+                text: "Found 42 results via 3-hop semantic traversal",
+                dim: true,
+            },
+            { type: "blank" },
+            {
+                type: "prompt",
+                segments: [
+                    { cls: "cmd", text: "chunkhound research " },
+                    { cls: "str", text: '"authentication architecture"' },
+                ],
+            },
+            {
+                type: "output",
+                text: "Generated report · 14 files · 6 components · 23 citations",
+                dim: true,
+                cursor: true,
+            },
+        ];
+
+        const CHAR_DELAY = 35;
+        const EXEC_PAUSE = 250;
+        const LOOP_DELAY = 3000;
+
+        function sleep(ms) {
+            return new Promise((r) => setTimeout(r, ms));
+        }
+
+        async function typeText(span, text) {
+            for (const ch of text) {
+                span.textContent += ch;
+                await sleep(CHAR_DELAY);
+            }
+        }
+
+        function waitVisible() {
+            return new Promise((r) => {
+                if (!document.hidden) {
+                    r();
+                    return;
+                }
+                document.addEventListener("visibilitychange", function h() {
+                    if (!document.hidden) {
+                        document.removeEventListener("visibilitychange", h);
+                        r();
+                    }
+                });
+            });
+        }
+
+        let isVisible = false;
+        let resolveInView = null;
+
+        function waitInView() {
+            if (isVisible) return Promise.resolve();
+            return new Promise((r) => {
+                resolveInView = r;
+            });
+        }
+
+        async function runAnimation() {
+            while (true) {
+                await waitVisible();
+                await waitInView();
+                container.innerHTML = "";
+                for (const step of STEPS) {
+                    if (!isVisible) {
+                        container.innerHTML = "";
+                        break;
+                    }
+                    if (step.type === "blank") {
+                        const line = document.createElement("div");
+                        line.className = "line";
+                        line.innerHTML = "&nbsp;";
+                        container.appendChild(line);
+                        continue;
+                    }
+                    if (step.type === "prompt") {
+                        const line = document.createElement("div");
+                        line.className = "line";
+                        const ps = document.createElement("span");
+                        ps.className = "prompt";
+                        ps.textContent = "$ ";
+                        line.appendChild(ps);
+                        container.appendChild(line);
+                        for (const seg of step.segments) {
+                            const span = document.createElement("span");
+                            span.className = seg.cls;
+                            line.appendChild(span);
+                            await typeText(span, seg.text);
+                        }
+                        await sleep(EXEC_PAUSE);
+                    }
+                    if (step.type === "output") {
+                        const line = document.createElement("div");
+                        line.className = "line";
+                        const span = document.createElement("span");
+                        span.className = step.dim ? "output dim" : "output";
+                        span.textContent = step.text;
+                        if (step.cursor) {
+                            const cur = document.createElement("span");
+                            cur.className = "cursor";
+                            span.appendChild(cur);
+                        }
+                        line.appendChild(span);
+                        container.appendChild(line);
+                    }
+                }
+                if (isVisible) await sleep(LOOP_DELAY);
+            }
+        }
+
+        const card = container.closest(".terminal-card") || container;
+        const observer = new IntersectionObserver(
+            function (entries) {
+                isVisible = entries[0].isIntersecting;
+                if (isVisible) {
+                    if (resolveInView) {
+                        resolveInView();
+                        resolveInView = null;
+                    }
+                } else {
+                    container.innerHTML = "";
+                }
+            },
+            { threshold: 0.5 },
+        );
+        observer.observe(card);
+        runAnimation();
+    })();
+</script>
+
+<style
+    define:vars={{
+        themeCmd: DEMO_CODE_PALETTE.cmd,
+        themeString: DEMO_CODE_PALETTE.string,
+    }}
+>
+    .hero {
+        padding: var(--space-10) 0;
+        text-align: center;
+    }
+
+    .trust-quote {
+        margin: var(--space-8) auto 0;
+        max-width: 560px;
+        padding: 0 var(--space-4);
+        text-align: center;
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+        font-weight: 400;
+        color: var(--text-secondary);
+        font-style: italic;
+    }
+
+    .trust-quote::before {
+        content: "\201C";
+        display: block;
+        font-size: 3rem;
+        line-height: 1;
+        font-weight: 700;
+        font-style: normal;
+        color: var(--primary);
+        margin-bottom: var(--space-2);
+    }
+
+    .trust-quote cite {
+        display: block;
+        margin-top: var(--space-2);
+        font-style: normal;
+        font-weight: 600;
+        font-size: var(--text-xs);
+        letter-spacing: 0.04em;
+        color: var(--text-tertiary);
+    }
+
+    .trust-quote a {
+        color: var(--link);
+        text-decoration: none;
+    }
+
+    .trust-quote a:hover {
+        color: var(--link-hover);
+        text-decoration: underline;
+    }
+
+    .amplifier {
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+        font-weight: 500;
+        color: var(--text-secondary);
+        letter-spacing: 0.02em;
+        margin-bottom: var(--space-6);
+    }
+
+    .headline {
+        margin-bottom: var(--space-2);
+    }
+
+    .tagline {
+        font-size: var(--text-xl);
+        line-height: var(--lh-xl);
+        font-weight: 600;
+        color: var(--text-secondary);
+        margin-bottom: var(--space-4);
+    }
+
+    .subheadline {
+        font-size: var(--text-lg);
+        line-height: var(--lh-lg);
+        font-weight: 500;
+        color: var(--text-secondary);
+        max-width: 640px;
+        margin: 0 auto var(--space-6);
+    }
+
+    .cta-row {
+        display: flex;
+        flex-direction: row;
+        justify-content: center;
+        align-items: center;
+        gap: var(--space-3);
+        flex-wrap: wrap;
+    }
+
+    .install-pill {
+        background: var(--primary);
+        border-radius: var(--radius-full);
+        padding: var(--space-2) var(--space-5);
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+    }
+
+    .install-cmd {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 14px;
+        color: var(--on-primary);
+    }
+
+    .copy-btn {
+        background: none;
+        border: none;
+        color: var(--on-primary);
+        cursor: pointer;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        opacity: 0.8;
+        transition: opacity 0.2s;
+    }
+    .copy-btn:hover {
+        opacity: 1;
+    }
+
+    .github-btn {
+        border: var(--border-w-default) solid var(--border-color);
+        border-radius: var(--radius-full);
+        padding: var(--space-2) var(--space-5);
+        color: var(--text-primary);
+        font-size: 14px;
+        font-weight: 500;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-2);
+    }
+    .github-btn:hover {
+        text-decoration: none;
+    }
+
+    .github-icon {
+        flex-shrink: 0;
+    }
+
+    .star-icon {
+        color: var(--primary-bright);
+        flex-shrink: 0;
+    }
+
+    .terminal-card {
+        background: var(--code-bg);
+        border-radius: var(--radius-md);
+        padding: var(--space-5);
+        max-width: 600px;
+        margin: var(--space-8) auto 0;
+        text-align: left;
+    }
+
+    .terminal-dots {
+        display: flex;
+        gap: var(--space-2);
+        margin-bottom: var(--space-4);
+    }
+
+    .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+    }
+    .dot.red {
+        background: #ff5f56;
+    }
+    .dot.yellow {
+        background: #ffbd2e;
+    }
+    .dot.green {
+        background: #27c93f;
+    }
+
+    .terminal-lines {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 14px;
+        line-height: 1.4;
+        min-height: calc(
+            8 * 1.4em
+        ); /* 8 lines × line-height — prevents layout shift during animation */
+    }
+
+    /* Terminal content — uses :global() so JS-injected elements match */
+    .terminal-lines :global(.prompt) {
+        color: var(--text-muted);
+    }
+    .terminal-lines :global(.cmd) {
+        color: var(--themeCmd);
+    }
+    .terminal-lines :global(.output) {
+        color: var(--code-text);
+    }
+    .terminal-lines :global(.dim) {
+        opacity: 0.6;
+    }
+    .terminal-lines :global(.str) {
+        color: var(--themeString);
+    }
+
+    .terminal-lines :global(.cursor) {
+        display: inline-block;
+        width: 2px;
+        height: 16px;
+        background: var(--primary-bright);
+        margin-left: 4px;
+        vertical-align: text-bottom;
+        animation: blink 1s step-end infinite;
+    }
+
+    @keyframes blink {
+        0%,
+        100% {
+            opacity: 1;
+        }
+        50% {
+            opacity: 0;
+        }
+    }
+</style>

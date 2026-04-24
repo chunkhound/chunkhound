@@ -1,14 +1,14 @@
 <p align="center">
-  <a href="https://chunkhound.github.io">
+  <a href="https://chunkhound.ai">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="public/wordmark-centered-dark.svg">
-      <img src="public/wordmark-centered.svg" alt="ChunkHound" width="400">
+      <source media="(prefers-color-scheme: dark)" srcset="site/public/wordmark-centered-dark.svg">
+      <img src="site/public/wordmark-centered.svg" alt="ChunkHound" width="400">
     </picture>
   </a>
 </p>
 
 <p align="center">
-  <strong>Local-first codebase intelligence</strong>
+  <strong>Your entire codebase, deeply understood</strong>
 </p>
 
 <p align="center">
@@ -18,38 +18,9 @@
   <a href="https://discord.gg/BAepHEXXnX"><img src="https://img.shields.io/badge/Discord-Join_Community-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
-Your AI assistant searches code but doesn't understand it. ChunkHound researches your codebase—extracting architecture, patterns, and institutional knowledge at any scale. Integrates via [MCP](https://spec.modelcontextprotocol.io/).
+ChunkHound gives AI assistants deep codebase understanding — architecture, patterns, and cross-file relationships — via [MCP](https://spec.modelcontextprotocol.io/). Works with Claude, VS Code, Cursor, Windsurf, and Zed.
 
-## Features
-
-- **[cAST Algorithm](https://arxiv.org/pdf/2506.15655)** - Research-backed semantic code chunking
-- **[Multi-Hop Semantic Search](https://chunkhound.github.io/under-the-hood/#multi-hop-semantic-search)** - Discovers interconnected code relationships beyond direct matches
-- **Semantic search** - Natural language queries like "find authentication code"
-- **Regex search** - Pattern matching without API keys
-- **Local-first** - Your code stays on your machine
-- **32 languages** with structured parsing
-  - **Programming** (via [Tree-sitter](https://tree-sitter.github.io/tree-sitter/)): Python, JavaScript, TypeScript, JSX, TSX, Java, Kotlin, Groovy, C, C++, C#, Go, Rust, Haskell, Swift, Bash, MATLAB, Makefile, Objective-C, PHP, Dart, Lua, Vue, Svelte, Zig
-  - **Configuration**: JSON, YAML, TOML, HCL, Markdown
-  - **Text-based** (custom parsers): Text files, PDF
-- **[MCP integration](https://spec.modelcontextprotocol.io/)** - Works with Claude, VS Code, Cursor, Windsurf, Zed, etc
-- **Real-time indexing** - Automatic file watching, smart diffs, seamless branch switching
-
-## Documentation
-
-**Visit [chunkhound.github.io](https://chunkhound.github.io) for complete guides:**
-- [Quickstart](https://chunkhound.github.io/quickstart/)
-- [Configuration Guide](https://chunkhound.github.io/configuration/)
-- [Architecture Deep Dive](https://chunkhound.github.io/under-the-hood/)
-
-## Requirements
-
-- Python 3.10+
-- [uv package manager](https://docs.astral.sh/uv/)
-- API keys (optional - regex search works without any keys)
-  - **Embeddings**: [VoyageAI](https://dash.voyageai.com/) (recommended) | [OpenAI](https://platform.openai.com/api-keys) | [Local with Ollama](https://ollama.ai/)
-  - **LLM (for Code Research)**: Claude Code CLI or Codex CLI (no API key needed) | [Anthropic](https://console.anthropic.com/) | [OpenAI](https://platform.openai.com/api-keys) | [Grok (xAI)](https://console.x.ai)
-
-## Installation
+## Install
 
 ```bash
 # Install uv if needed
@@ -61,7 +32,8 @@ uv tool install chunkhound
 
 ## Quick Start
 
-1. Create `.chunkhound.json` in project root
+Create `.chunkhound.json` in your project root:
+
 ```json
 {
   "embedding": {
@@ -73,13 +45,21 @@ uv tool install chunkhound
   }
 }
 ```
-> **Note:** Use `"codex-cli"` instead if you prefer Codex. Both work equally well and require no API key.
-2. Index your codebase
+
+Then index your codebase:
+
 ```bash
 chunkhound index
 ```
 
-**For configuration, IDE setup, and advanced usage, see the [documentation](https://chunkhound.github.io).**
+## Features
+
+- **[cAST Algorithm](https://arxiv.org/pdf/2506.15655)** — Research-backed semantic code chunking
+- **[Multi-Hop Semantic Search](https://chunkhound.ai/#capabilities)** — Discovers interconnected code relationships beyond direct matches
+- **Semantic + Regex search** — Natural language queries or exact pattern matching
+- **Local-first** — Your code stays on your machine
+- **32 languages** — Python, TypeScript, Rust, Go, Java, C/C++, and [more](https://chunkhound.ai/docs/getting-started/)
+- **Real-time indexing** — File watching, smart diffs, seamless branch switching
 
 ## Why ChunkHound?
 
@@ -90,11 +70,9 @@ chunkhound index
 | Knowledge Graphs | Relationship queries | Expensive | Continuous sync |
 | **ChunkHound** | Semantic + Regex + Code Research | Automatic | Incremental + realtime |
 
-**Ideal for:**
-- Large monorepos with cross-team dependencies
-- Security-sensitive codebases (local-only, no cloud)
-- Multi-language projects needing consistent search
-- Offline/air-gapped development environments
+## Documentation
+
+**[chunkhound.ai](https://chunkhound.ai)** — Quickstart, configuration, onboarding, and docs.
 
 ## License
 

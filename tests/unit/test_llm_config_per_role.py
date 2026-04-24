@@ -241,3 +241,291 @@ def test_grok_config_validation_missing_api_key_per_role():
     missing = cfg.get_missing_config()
     assert len(missing) == 1
     assert "api_key" in missing[0]
+
+
+def test_map_hyde_provider_with_custom_base_url_does_not_require_api_key():
+    """Custom Grok-compatible HyDE endpoints should not require an API key."""
+    cfg = LLMConfig(
+        provider="openai",
+        model="llama3.2",
+        map_hyde_provider="grok",
+        base_url="http://localhost:11434/v1",
+    )
+    assert cfg.is_provider_configured() is True
+    assert cfg.get_missing_config() == []
+
+
+def test_autodoc_cleanup_provider_requires_api_key():
+    """autodoc_cleanup_provider='anthropic' without api_key is flagged as unconfigured."""
+    cfg = LLMConfig(
+        provider="openai",
+        model="llama3.2",
+        autodoc_cleanup_provider="anthropic",
+        base_url="http://localhost:11434/v1",
+    )
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert any("api_key" in item for item in missing)
+    assert any("explicit provider-compatible model required" in item for item in missing)
+
+
+def test_openai_custom_endpoint_without_api_key_is_valid():
+    """Custom OpenAI-compatible endpoints should not require an API key."""
+    cfg = LLMConfig(
+        provider="openai",
+        model="llama3.2",
+        base_url="http://localhost:11434/v1",
+    )
+
+    assert cfg.is_provider_configured() is True
+    assert cfg.get_missing_config() == []
+
+
+def test_openai_custom_endpoint_requires_explicit_model():
+    """Custom OpenAI-compatible endpoints must report missing model selection."""
+    cfg = LLMConfig(
+        provider="openai",
+        base_url="http://localhost:11434/v1",
+    )
+
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert len(missing) == 1
+    assert "explicit model selection required" in missing[0]
+
+
+def test_openai_custom_endpoint_requires_explicit_model_for_per_role_provider():
+    """Per-role custom OpenAI-compatible endpoints must also report missing models."""
+    cfg = LLMConfig(
+        provider="grok",
+        utility_provider="openai",
+        base_url="http://localhost:11434/v1",
+        api_key=SecretStr("sk-test-key"),
+    )
+
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert len(missing) == 1
+    assert "explicit model selection required" in missing[0]
+    assert "utility" in missing[0]
+
+
+def test_grok_custom_endpoint_requires_explicit_model():
+    """Non-official Grok endpoints must not silently use cloud defaults."""
+    cfg = LLMConfig(
+        provider="grok",
+        base_url="http://localhost:11434/v1",
+        api_key=SecretStr("sk-test-key"),
+    )
+
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert len(missing) == 1
+    assert "explicit model selection required" in missing[0]
+    assert "utility" in missing[0]
+
+
+def test_map_hyde_custom_endpoint_requires_explicit_model() -> None:
+    """Custom endpoint HyDE roles must not inherit cloud defaults implicitly."""
+    cfg = LLMConfig(
+        provider="anthropic",
+        map_hyde_provider="openai",
+        base_url="http://localhost:11434/v1",
+        api_key=SecretStr("sk-test-key"),
+    )
+
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert len(missing) == 1
+    assert "explicit model selection required" in missing[0]
+    assert "map_hyde" in missing[0]
+
+
+def test_autodoc_cleanup_custom_endpoint_requires_explicit_model() -> None:
+    """Cleanup roles on custom endpoints must set an explicit model."""
+    cfg = LLMConfig(
+        provider="anthropic",
+        autodoc_cleanup_provider="openai",
+        base_url="http://localhost:11434/v1",
+        api_key=SecretStr("sk-test-key"),
+    )
+
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert len(missing) == 1
+    assert "explicit model selection required" in missing[0]
+    assert "autodoc_cleanup" in missing[0]
+
+
+def test_map_hyde_cross_family_override_requires_explicit_model() -> None:
+    """Cross-family HyDE overrides must not silently inherit synthesis models."""
+    cfg = LLMConfig(
+        provider="openai",
+        synthesis_model="gpt-5",
+        map_hyde_provider="anthropic",
+        api_key=SecretStr("sk-test-key"),
+    )
+
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert len(missing) == 1
+    assert "explicit provider-compatible model required" in missing[0]
+    assert "map_hyde" in missing[0]
+
+
+def test_autodoc_cleanup_cross_family_override_requires_explicit_model() -> None:
+    """Cross-family cleanup overrides must set a compatible explicit model."""
+    cfg = LLMConfig(
+        provider="openai",
+        synthesis_model="gpt-5",
+        autodoc_cleanup_provider="anthropic",
+        api_key=SecretStr("sk-test-key"),
+    )
+
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert len(missing) == 1
+    assert "explicit provider-compatible model required" in missing[0]
+    assert "autodoc_cleanup" in missing[0]
+
+
+def test_openai_official_endpoint_without_api_key_is_invalid():
+    """Official OpenAI endpoints must still require an API key."""
+    cfg = LLMConfig(
+        provider="openai",
+        model="gpt-5",
+        base_url="https://api.openai.com/v1",
+    )
+
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert len(missing) == 1
+    assert "api_key" in missing[0]
+
+
+def test_per_role_grok_on_custom_openai_base_url_does_not_require_api_key():
+    """A shared custom endpoint should be treated as keyless for Grok-compatible roles."""
+    cfg = LLMConfig(
+        provider="openai",
+        synthesis_provider="grok",
+        model="llama3.2",
+        synthesis_model="grok-4-1-fast-reasoning",
+        base_url="http://localhost:11434/v1",
+    )
+
+    assert cfg.is_provider_configured() is True
+    assert cfg.get_missing_config() == []
+
+
+def test_grok_custom_endpoint_without_api_key_is_valid():
+    """Custom Grok-compatible endpoints should not require an API key."""
+    cfg = LLMConfig(
+        provider="grok",
+        model="grok-local",
+        base_url="http://localhost:11434/v1",
+    )
+
+    assert cfg.is_provider_configured() is True
+    assert cfg.get_missing_config() == []
+
+
+def test_base_url_applies_to_anthropic_proxy_configs():
+    """Anthropic custom endpoints must keep receiving the shared base_url."""
+    cfg = LLMConfig(
+        provider="openai",
+        utility_provider="openai",
+        synthesis_provider="anthropic",
+        utility_model="llama3.2",
+        synthesis_model="claude-sonnet-4-5-20250929",
+        base_url="http://localhost:11434/v1",
+        api_key=SecretStr("sk-test-key"),
+    )
+
+    utility_config, synthesis_config = cfg.get_provider_configs()
+
+    assert utility_config["base_url"] == "http://localhost:11434/v1"
+    assert synthesis_config["base_url"] == "http://localhost:11434/v1"
+
+
+def test_ssl_verify_only_flows_when_base_url_is_set():
+    cfg = LLMConfig(
+        provider="openai",
+        utility_model="gpt-5-nano",
+        synthesis_model="gpt-5",
+        ssl_verify=False,
+    )
+
+    utility_config, synthesis_config = cfg.get_provider_configs()
+
+    assert "ssl_verify" not in utility_config
+    assert "ssl_verify" not in synthesis_config
+
+    cfg_with_base = LLMConfig(
+        provider="openai",
+        utility_model="gpt-5-nano",
+        synthesis_model="gpt-5",
+        base_url="http://localhost:11434/v1",
+        ssl_verify=False,
+    )
+
+    utility_with_base, synthesis_with_base = cfg_with_base.get_provider_configs()
+
+    assert utility_with_base["ssl_verify"] is False
+    assert synthesis_with_base["ssl_verify"] is False
+
+
+def test_ollama_provider_rejected():
+    """Test that 'ollama' raises with a migration hint."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="ollama.*removed.*base_url"):
+        LLMConfig(provider="ollama")
+
+
+def test_ollama_rejected_on_per_role_provider():
+    """Test that 'ollama' on per-role fields raises with a migration hint."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="ollama.*removed.*base_url"):
+        LLMConfig(utility_provider="ollama")
+
+    with pytest.raises(ValidationError, match="ollama.*removed.*base_url"):
+        LLMConfig(synthesis_provider="ollama")
+
+
+def test_opencode_cli_no_key_required():
+    """Test that opencode-cli is configured without an API key."""
+    cfg = LLMConfig(
+        provider="opencode-cli",
+        utility_provider="opencode-cli",
+        synthesis_provider="opencode-cli",
+    )
+    assert cfg.is_provider_configured() is True
+
+
+def test_opencode_cli_smart_model_defaults():
+    """Test opencode-cli smart model defaults."""
+    cfg = LLMConfig(provider="opencode-cli")
+    assert cfg.get_default_models() == ("opencode/grok-code", "opencode/grok-code")
+
+
+def test_utility_provider_uses_its_own_default_model():
+    """Per-role provider overrides should use that provider's defaults."""
+    cfg = LLMConfig(
+        provider="openai",
+        utility_provider="opencode-cli",
+        synthesis_model="gpt-5",
+    )
+
+    utility_config, synthesis_config = cfg.get_provider_configs()
+
+    assert utility_config["provider"] == "opencode-cli"
+    assert utility_config["model"] == "opencode/grok-code"
+    assert synthesis_config["provider"] == "openai"
+    assert synthesis_config["model"] == "gpt-5"
+
+
+def test_llm_config_default_timeout():
+    """LLMConfig default timeout is 120 seconds."""
+    cfg = LLMConfig()
+    assert cfg.timeout == 120

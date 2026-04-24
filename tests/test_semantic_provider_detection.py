@@ -20,12 +20,12 @@ async def test_semantic_search_uses_configured_provider():
     """
     # Setup: Create a mock embedding provider with non-default configuration
     mock_provider = Mock()
-    mock_provider.name = "ollama"  # NOT "openai"
+    mock_provider.name = "custom-provider"  # NOT "openai"
     mock_provider.model = "nomic-embed-text"  # NOT "text-embedding-3-small"
 
     # Create mock embedding manager
     mock_embedding_manager = Mock(spec=EmbeddingManager)
-    mock_embedding_manager.list_providers.return_value = ["ollama"]
+    mock_embedding_manager.list_providers.return_value = ["custom-provider"]
     mock_embedding_manager.get_provider.return_value = mock_provider
 
     # Create mock database services
@@ -53,8 +53,8 @@ async def test_semantic_search_uses_configured_provider():
     call_kwargs = mock_search_service.search_semantic.call_args.kwargs
 
     # CRITICAL ASSERTION: Should use configured provider, not hardcoded "openai"
-    assert call_kwargs["provider"] == "ollama", \
-        f"Expected provider='ollama' but got provider='{call_kwargs['provider']}'. " \
+    assert call_kwargs["provider"] == "custom-provider", \
+        f"Expected provider='custom-provider' but got provider='{call_kwargs['provider']}'. " \
         "Semantic search should use configured provider when not explicitly specified."
 
     # CRITICAL ASSERTION: Should use configured model, not hardcoded "text-embedding-3-small"
