@@ -1,21 +1,15 @@
-"""Real-time indexing service for MCP servers.
+"""Real-time indexing service for filesystem monitoring.
 
-This service provides continuous filesystem monitoring and incremental updates
-while maintaining search responsiveness. It leverages the existing indexing
-infrastructure and respects the single-threaded database constraint.
-
-Architecture:
-- Single event queue for filesystem changes
-- Background scan iterator for initial indexing
-- No cancellation - operations complete naturally
-- SerialDatabaseProvider handles all concurrency
+This service owns continuous filesystem monitoring and incremental updates
+after monitoring starts. MCP startup coordinates any initial directory scan
+separately so the watcher can stay focused on post-start changes.
 """
 
 import asyncio
 import gc
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -253,10 +247,6 @@ class RealtimeIndexingService:
         self._recent_file_events: dict[
             str, tuple[str, float]
         ] = {}  # Layer 3: event dedup
-
-        # Background scan state
-        self.scan_iterator: Iterator | None = None
-        self.scan_complete = False
 
         # Filesystem monitoring
         self.observer: Any | None = None
@@ -958,7 +948,6 @@ class RealtimeIndexingService:
             "queue_size": self.file_queue.qsize(),
             "pending_files": len(self.pending_files),
             "failed_files": len(self.failed_files),
-            "scan_complete": self.scan_complete,
             "observer_alive": monitoring_active,
             "watching_directory": str(self.watch_path) if self.watch_path else None,
             "watched_directories_count": len(self.watched_directories),  # Added

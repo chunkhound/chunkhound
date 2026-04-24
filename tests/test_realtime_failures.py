@@ -105,7 +105,7 @@ class TestRealtimeFailures:
         service, watch_dir, _, _ = realtime_setup
         await service.start(watch_dir)
 
-        # Wait for initial scan to complete
+        # Wait for monitoring startup to settle
         await asyncio.sleep(1.0)
 
         # Create many rapid file changes to the SAME file - should reuse timer slot
@@ -130,35 +130,29 @@ class TestRealtimeFailures:
 
     @pytest.mark.asyncio
     @pytest.mark.native_watcher
-    async def test_background_scan_conflicts_with_realtime(self, realtime_setup):
-        """Test that background scan and real-time processing conflict."""
+    async def test_post_start_modification_replaces_content_without_duplicates(
+        self, realtime_setup
+    ):
+        """Direct watcher tests should validate post-start updates, not startup scans."""
         service, watch_dir, _, services = realtime_setup
 
-        # Create file before starting (will be in initial scan)
-        initial_file = watch_dir / "conflict_test.py"
-        initial_file.write_text("def initial(): pass")
-
         await service.start(watch_dir)
+        assert await service.wait_for_monitoring_ready(timeout=10.0)
 
-        # Immediately modify the same file (real-time processing)
-        initial_file.write_text("def initial_modified(): pass")
+        test_file = watch_dir / "modified_once.py"
+        service.reset_file_tracking(test_file)
+        test_file.write_text("def version_one(): pass")
+        assert await service.wait_for_file_indexed(test_file, timeout=10.0)
 
-        # Wait for both to potentially process
-        await asyncio.sleep(1.5)
+        service.reset_file_tracking(test_file)
+        test_file.write_text("def version_two(): pass")
+        assert await service.wait_for_file_indexed(test_file, timeout=10.0)
 
-        # Check if file was processed multiple times (race condition)
-        file_record = services.provider.get_file_by_path(str(initial_file))
-        if file_record:
-            chunks = services.provider.get_chunks_by_file_id(file_record['id'])
+        version_two_results = services.provider.search_chunks_regex("version_two")
+        version_one_results = services.provider.search_chunks_regex("version_one")
 
-            # If there are duplicate chunks or processing conflicts, this will show
-            chunk_contents = [chunk.get('content', '') for chunk in chunks]
-            unique_contents = set(chunk_contents)
-
-            assert len(chunk_contents) == len(unique_contents), (
-                f"Duplicate processing detected: {len(chunk_contents)} "
-                f"chunks, {len(unique_contents)} unique"
-            )
+        assert len(version_two_results) > 0
+        assert len(version_one_results) == 0
 
         await service.stop()
 
@@ -287,7 +281,7 @@ class TestRealtimeFailures:
         service, watch_dir, _, services = realtime_setup
         await service.start(watch_dir)
 
-        # Wait for initial scan to finish
+        # Wait for monitoring startup to finish
         assert await service.wait_for_monitoring_ready(timeout=10.0)
 
         test_file = watch_dir / "compaction_deferred.py"

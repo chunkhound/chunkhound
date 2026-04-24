@@ -45,6 +45,31 @@ class _TestMCPServer(MCPServerBase):
         pass
 
 
+async def _wait_for_scan_completed(
+    server: MCPServerBase, timeout: float = 15.0
+) -> None:
+    """Wait until MCP background scan reports completion."""
+
+    async def _wait() -> None:
+        while server._scan_progress["scan_completed_at"] is None:
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(_wait(), timeout=timeout)
+
+
+async def _wait_for_realtime_started(
+    server: MCPServerBase, timeout: float = 10.0
+) -> RealtimeIndexingService:
+    """Wait until MCP deferred startup creates the realtime service."""
+
+    async def _wait() -> RealtimeIndexingService:
+        while server.realtime_indexing is None:
+            await asyncio.sleep(0.05)
+        return server.realtime_indexing
+
+    return await asyncio.wait_for(_wait(), timeout=timeout)
+
+
 class TestMCPIntegration:
     """Test real MCP server integration with realtime indexing."""
 
@@ -406,6 +431,62 @@ class NewlyAddedClass:
         # Original should be gone
         old_results = services.provider.search_chunks_regex("func.*initial")
         assert len(old_results) == 0, "Original content should be replaced"
+
+    @pytest.mark.asyncio
+    async def test_mcp_startup_scans_preexisting_files_and_realtime_indexes_new_ones(
+        self,
+    ):
+        """MCP owns startup scan; realtime service owns files created after monitoring starts."""
+        temp_dir = Path(tempfile.mkdtemp())
+        db_path = temp_dir / ".chunkhound" / "test.db"
+        watch_dir = temp_dir / "project"
+        watch_dir.mkdir(parents=True)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        fake_args = SimpleNamespace(path=watch_dir)
+        config = Config(
+            args=fake_args,
+            database={"path": str(db_path), "provider": "duckdb"},
+            indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]},
+        )
+        server = _TestMCPServer(config=config, args=fake_args)
+
+        preexisting_file = watch_dir / "before_start.py"
+        preexisting_file.write_text("def before_start(): return 'initial_scan'")
+
+        try:
+            await server.initialize()
+            realtime_service = await _wait_for_realtime_started(server)
+            assert await realtime_service.wait_for_monitoring_ready(
+                timeout=get_fs_event_timeout()
+            ), "Realtime monitoring did not become ready during MCP startup"
+
+            realtime_file = watch_dir / "after_start.py"
+            realtime_service.reset_file_tracking(realtime_file)
+            realtime_file.write_text("def after_start(): return 'realtime'")
+            found = await realtime_service.wait_for_file_indexed(
+                realtime_file, timeout=get_fs_event_timeout()
+            )
+            assert found, "Files created after MCP startup should be indexed by realtime monitoring"
+
+            await _wait_for_scan_completed(server)
+
+            assert server.services is not None
+            preexisting_record = server.services.provider.get_file_by_path(
+                str(preexisting_file.resolve())
+            )
+            realtime_record = server.services.provider.get_file_by_path(
+                str(realtime_file.resolve())
+            )
+            assert preexisting_record is not None, (
+                "MCP startup scan must index files that already exist before initialize()"
+            )
+            assert realtime_record is not None, (
+                "Realtime monitoring must index files created after initialize()"
+            )
+        finally:
+            await server.cleanup()
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
     async def test_modified_file_replaces_old_content(self, mcp_setup):
