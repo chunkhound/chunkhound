@@ -9,6 +9,9 @@ from enum import Enum
 from pathlib import Path
 from typing import NewType
 
+from chunkhound.parsers._grammar_availability import SCSS_AVAILABLE
+
+
 # String-based type aliases for better semantic clarity
 ProviderName = NewType("ProviderName", str)  # e.g., "openai"
 ModelName = NewType("ModelName", str)  # e.g., "text-embedding-3-small"
@@ -147,6 +150,7 @@ class ChunkType(Enum):
         }
 
 
+
 class Language(Enum):
     """Enumeration of programming languages and file types supported by ChunkHound."""
 
@@ -180,6 +184,12 @@ class Language(Enum):
     ELIXIR = "elixir"
     LUA = "lua"
     TWINCAT = "twincat"
+
+    # Web languages
+    HTML = "html"
+    CSS = "css"
+    SCSS = "scss"
+    JINJA = "jinja"  # .jinja, .j2, .njk — parsed with HTML grammar
 
     # Documentation languages
     MARKDOWN = "markdown"
@@ -290,10 +300,26 @@ class Language(Enum):
             ".ex": cls.ELIXIR,
             ".exs": cls.ELIXIR,
             ".lua": cls.LUA,
+            ".scss": cls.SCSS if SCSS_AVAILABLE else cls.TEXT,
+            ".html": cls.HTML,
+            ".htm": cls.HTML,
+            ".xhtml": cls.HTML,
+            ".css": cls.CSS,
+            # .sass uses indented syntax (no braces/semicolons) which is
+            # structurally incompatible with the tree-sitter SCSS grammar.
+            # Use text fallback parser instead of silently producing
+            # misaligned / empty chunks.
+            ".sass": cls.TEXT,
+            ".jinja": cls.JINJA,
+            ".j2": cls.JINJA,
+            ".njk": cls.JINJA,
             ".tcpou": cls.TWINCAT,
         }
 
-        return extension_map.get(extension, cls.UNKNOWN)
+        if extension in extension_map:
+            return extension_map[extension]
+
+        return cls.UNKNOWN
 
     @classmethod
     def from_string(cls, value: str) -> "Language":
