@@ -432,6 +432,7 @@ class NewlyAddedClass:
         old_results = services.provider.search_chunks_regex("func.*initial")
         assert len(old_results) == 0, "Original content should be replaced"
 
+    @pytest.mark.native_watcher
     @pytest.mark.asyncio
     async def test_mcp_startup_scans_preexisting_files_and_realtime_indexes_new_ones(
         self,
