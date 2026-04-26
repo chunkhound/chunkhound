@@ -3,8 +3,9 @@
 """TCP loopback IPC transport for Windows.
 
 Named pipes require pywin32 which is not a dependency.  TCP on 127.0.0.1 is
-the accepted local-only alternative for Windows dev tooling.  The port is
-OS-assigned (bind to port 0) and written into the lock file.
+the accepted local-only alternative for Windows dev tooling. Discovery picks a
+preferred runtime-scoped port and can probe to the next free same-runtime port
+before the daemon binds.
 """
 
 from __future__ import annotations
@@ -22,10 +23,10 @@ async def create_server(
         Coroutine[Any, Any, None],
     ],
 ) -> tuple[asyncio.AbstractServer, int]:
-    """Start a TCP server on *host*:*port* (use 0 to let OS assign).
+    """Start a TCP server on *host*:*port*.
 
     Returns:
-        (server, assigned_port)
+        (server, bound_port)
     """
     server = await asyncio.start_server(client_connected_cb, host=host, port=port)
     socks = server.sockets
