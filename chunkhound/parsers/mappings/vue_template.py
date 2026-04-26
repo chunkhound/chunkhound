@@ -358,15 +358,23 @@ class VueTemplateMapping(BaseMapping):
                         elif directive_part.startswith("v-model"):
                             metadata["directive_type"] = directive_part
                             metadata["model_binding"] = value_part
-                        elif directive_part.startswith("@"):
-                            # Event handler like @click="handler"
+                        elif directive_part.startswith("@") or directive_part.startswith("v-on:"):
+                            # Event handler like @click="handler" or v-on:click="handler"
                             metadata["directive_type"] = "event_handler"
-                            metadata["event_name"] = directive_part[1:]  # Remove @
+                            if directive_part.startswith("@"):
+                                event_name = directive_part[1:]  # Remove @
+                            else:
+                                event_name = directive_part[5:]  # Remove v-on:
+                            metadata["event_name"] = event_name
                             metadata["handler_expression"] = value_part
-                        elif directive_part.startswith(":"):
-                            # Property binding like :prop="value"
+                        elif directive_part.startswith(":") or directive_part.startswith("v-bind:"):
+                            # Property binding like :prop="value" or v-bind:prop="value"
                             metadata["directive_type"] = "property_binding"
-                            metadata["property_name"] = directive_part[1:]  # Remove :
+                            if directive_part.startswith(":"):
+                                prop_name = directive_part[1:]  # Remove :
+                            else:
+                                prop_name = directive_part[7:]  # Remove v-bind:
+                            metadata["property_name"] = prop_name
                             metadata["binding_expression"] = value_part
                         elif directive_part.startswith("v-slot:") or directive_part.startswith("#"):
                             # Slot usage
@@ -375,6 +383,10 @@ class VueTemplateMapping(BaseMapping):
                                 metadata["slot_name"] = directive_part[7:]  # Remove v-slot:
                             else:
                                 metadata["slot_name"] = directive_part[1:]  # Remove #
+
+            # Handle bare directives (no = sign)
+            elif directive_attr_text == "v-else":
+                metadata["directive_type"] = "v-else"
 
             # Handle interpolations
             if "interpolation_expr" in captures:

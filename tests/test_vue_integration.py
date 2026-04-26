@@ -424,22 +424,20 @@ const componentName = ref('div')
 """
         chunks = parser.parse_content(content)
 
-        # Find template chunks with cross-references
+        # Find template chunks
         template_chunks = [
             c for c in chunks
             if c.metadata and c.metadata.get('vue_section') == 'template'
         ]
 
-        # Should have cross-references to bound variables
-        refs = set()
-        for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+        # Should have extracted property binding chunks with metadata
+        binding_chunks = [
+            c for c in template_chunks
+            if c.metadata and c.metadata.get('directive_type') == 'property_binding'
+        ]
 
-        # At least some bindings should be referenced
-        expected_refs = ['imageUrl', 'linkUrl', 'dynamicClass']
-        found_refs = [ref for ref in expected_refs if ref in refs]
-        assert len(found_refs) >= 0  # Some refs should be found
+        # Should have found property bindings
+        assert len(binding_chunks) > 0
 
     def test_v_model_directives(self, parser):
         """Test v-model two-way binding extraction."""

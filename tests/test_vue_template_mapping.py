@@ -144,8 +144,8 @@ class TestVueParserTemplateDirectives:
         event_names = [
             c.metadata.get("event_name") for c in event_chunks if "event_name" in c.metadata
         ]
-        if event_names:
-            assert "click" in event_names or "submit" in event_names
+        assert event_names, "No event names extracted from event handler chunks"
+        assert "click" in event_names or "submit" in event_names
 
     def test_parse_property_bindings(self):
         """Test extraction of property bindings (:prop, v-bind)."""
@@ -203,11 +203,11 @@ class TestVueParserTemplateDirectives:
         component_names = [
             c.metadata.get("component_name") for c in component_chunks if "component_name" in c.metadata
         ]
-        if component_names:
-            assert any(
-                name in component_names
-                for name in ["UserProfile", "BaseButton", "Modal"]
-            )
+        assert component_names, "No component names extracted from component usage chunks"
+        assert any(
+            name in component_names
+            for name in ["UserProfile", "BaseButton", "Modal"]
+        )
 
     def test_parse_interpolations(self):
         """Test extraction of interpolations ({{ variable }})."""
