@@ -9,6 +9,7 @@ from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
+from chunkhound.providers.llm.grok_llm_provider import GrokLLMProvider
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
 from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
 
@@ -28,6 +29,7 @@ class LLMManager:
         "claude-code-cli": ClaudeCodeCLIProvider,
         "codex-cli": CodexCLIProvider,
         "gemini": GeminiLLMProvider,
+        "grok": GrokLLMProvider,
         "opencode-cli": OpenCodeCLIProvider,
     }
 
@@ -77,10 +79,13 @@ class LLMManager:
             provider_kwargs = {
                 "api_key": config.get("api_key"),
                 "model": config.get("model", "gpt-5-nano"),
-                "base_url": config.get("base_url"),
                 "timeout": config.get("timeout", 60),
                 "max_retries": config.get("max_retries", 3),
             }
+
+            # Only pass base_url to providers that support it
+            if provider_name not in ("gemini",):
+                provider_kwargs["base_url"] = config.get("base_url")
 
             # Pass reasoning_effort to OpenAI and Codex providers
             if provider_name in ("openai", "codex-cli"):

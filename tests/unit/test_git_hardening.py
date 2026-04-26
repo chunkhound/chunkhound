@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -62,7 +63,7 @@ def test_git_discovery_handles_timeout_gracefully(monkeypatch: pytest.MonkeyPatc
     assert stats.get("git_rows_total", 0) == 0
 
 
-@pytest.mark.skipif(not (subprocess.run(["which","git"], stdout=subprocess.DEVNULL).returncode == 0), reason="git required")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_git_discovery_handles_spaces_in_filenames(tmp_path: Path) -> None:
     repo = tmp_path / "r"
     repo.mkdir(parents=True, exist_ok=True)

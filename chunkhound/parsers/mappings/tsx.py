@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.mappings.typescript import TypeScriptMapping
-from tree_sitter import Node as TSNode
 
 
 class TSXMapping(TypeScriptMapping):
@@ -561,7 +561,9 @@ class TSXMapping(TypeScriptMapping):
 
         return chunk
 
-    def resolve_import_paths(self, import_text: str, base_dir: Path, source_file: Path) -> list[Path]:
+    def resolve_import_paths(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> list[Path]:
         """Resolve relative import path to absolute file path.
 
         Args:
@@ -572,21 +574,21 @@ class TSXMapping(TypeScriptMapping):
         Returns:
             Resolved absolute path (empty list if not resolvable)
         """
-        match = re.search(r'''from\s+['"](.+?)['"]''', import_text)
+        match = re.search(r"""from\s+['"](.+?)['"]""", import_text)
         if not match:
             return []
         import_path = match.group(1)
-        if not import_path or not import_path.startswith('.'):
+        if not import_path or not import_path.startswith("."):
             return []
         source_dir = self._resolve_source_dir(source_file, base_dir)
         resolved = (source_dir / import_path).resolve()
         if resolved.exists() and resolved.is_file():
             return [resolved]
-        for ext in ['.ts', '.tsx', '.d.ts', '.js', '.jsx']:
+        for ext in [".ts", ".tsx", ".d.ts", ".js", ".jsx"]:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
                 return [with_ext]
-        for index in ['index.ts', 'index.tsx', 'index.js']:
+        for index in ["index.ts", "index.tsx", "index.js"]:
             index_path = resolved / index
             if index_path.exists():
                 return [index_path]

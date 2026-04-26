@@ -65,19 +65,37 @@ class ImportContextService:
             return self._import_cache[file_path]
 
         # Create parser for this file
-        parser: Any = self._parser_factory.create_parser_for_file(
-            Path(file_path)
-        )
+        parser: Any = self._parser_factory.create_parser_for_file(Path(file_path))
+
+        # Handle TwinCAT (Lark-based parser with engine=None)
+        if hasattr(parser, "base_mapping") and hasattr(
+            parser.base_mapping, "extract_imports"
+        ):
+            return self._extract_lark_imports(file_path, content, parser)
 
         # Check if parser has required attributes (engine, extractor)
-        if not hasattr(parser, "engine") or not hasattr(parser, "extractor"):
+        if (
+            not hasattr(parser, "engine")
+            or parser.engine is None
+            or not hasattr(parser, "extractor")
+        ):
             logger.debug(f"Parser lacks required attributes: {file_path}")
             return []
 
         try:
+            # Preprocess content before AST parsing so language-specific
+            # transformations are applied (e.g. SCSS #{...} interpolations
+            # are replaced with same-length placeholders to avoid grammar
+            # errors).  Mirrors universal_parser.py:parse_content().
+            # content_bytes always stays on the *original* source so that
+            # extracted chunk text is faithful to what the user wrote.
+            ast_source = content
+            if hasattr(parser, "base_mapping"):
+                ast_source = parser.base_mapping.preprocess_for_ast(content)
+
             # Parse content to get AST
             content_bytes = content.encode("utf-8")
-            tree = parser.engine.parse_to_ast(content)
+            tree = parser.engine.parse_to_ast(ast_source)
             if tree is None:
                 logger.debug(f"Failed to parse file: {file_path}")
                 return []
@@ -88,20 +106,38 @@ class ImportContextService:
                 tree.root_node, content_bytes, UniversalConcept.IMPORT
             )
 
-            # Extract content from chunks
             import_lines = [chunk.content for chunk in import_chunks]
 
             # Cache and return
             self._import_cache[file_path] = import_lines
-            logger.debug(
-                f"Extracted {len(import_lines)} imports from {file_path}"
-            )
+            logger.debug(f"Extracted {len(import_lines)} imports from {file_path}")
             return import_lines
 
         except Exception as e:
-            logger.warning(
-                f"Failed to extract imports from {file_path}: {e}"
-            )
+            logger.warning(f"Failed to extract imports from {file_path}: {e}")
+            return []
+
+    def _extract_lark_imports(
+        self, file_path: str, content: str, parser: Any
+    ) -> list[str]:
+        """Extract imports from Lark-based parsers (e.g., TwinCAT).
+
+        Args:
+            file_path: File path for caching
+            content: File content to parse
+            parser: Parser instance with base_mapping.extract_imports()
+
+        Returns:
+            List of import statement strings
+        """
+        try:
+            import_chunks = parser.base_mapping.extract_imports(content)
+            import_lines = [chunk.content for chunk in import_chunks]
+            self._import_cache[file_path] = import_lines
+            logger.debug(f"Extracted {len(import_lines)} imports from {file_path}")
+            return import_lines
+        except Exception as e:
+            logger.warning(f"Failed to extract imports from {file_path}: {e}")
             return []
 
     def clear_cache(self) -> None:

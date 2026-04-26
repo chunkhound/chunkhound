@@ -91,7 +91,9 @@ class HclMapping(BaseMapping):
     def extract_name(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> str:
-        node = captures.get("definition") or (list(captures.values())[0] if captures else None)
+        node = captures.get("definition") or (
+            list(captures.values())[0] if captures else None
+        )
         if node is None:
             return f"unnamed_{concept.value}"
 
@@ -114,7 +116,11 @@ class HclMapping(BaseMapping):
         if node.type == "object_elem":
             src = self._decode(content)
             inner_key_node = captures.get("inner_key")
-            inner_key_raw = self.get_node_text(inner_key_node, src).strip() if inner_key_node else ""
+            inner_key_raw = (
+                self.get_node_text(inner_key_node, src).strip()
+                if inner_key_node
+                else ""
+            )
             inner_key = self.clean_string_literal(inner_key_raw)
 
             # Find nearest attribute ancestor to get the attribute key
@@ -146,7 +152,9 @@ class HclMapping(BaseMapping):
     def extract_content(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> str:
-        node = captures.get("definition") or (list(captures.values())[0] if captures else None)
+        node = captures.get("definition") or (
+            list(captures.values())[0] if captures else None
+        )
         if node is None:
             return ""
         start, end = node.start_byte, node.end_byte
@@ -155,8 +163,13 @@ class HclMapping(BaseMapping):
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> dict[str, Any]:
-        node = captures.get("definition") or (list(captures.values())[0] if captures else None)
-        meta: dict[str, Any] = {"concept": concept.value, "language": self.language.value}
+        node = captures.get("definition") or (
+            list(captures.values())[0] if captures else None
+        )
+        meta: dict[str, Any] = {
+            "concept": concept.value,
+            "language": self.language.value,
+        }
         if node is None:
             return meta
 
@@ -240,7 +253,6 @@ class HclMapping(BaseMapping):
     # --- Helpers ---
     def _decode(self, content: bytes) -> str:
         return content.decode("utf-8", errors="replace")
-
 
     def _block_header(self, node: Node, content: bytes) -> tuple[str, list[str]]:
         """Extract block type and labels from a `block` node.
@@ -430,31 +442,28 @@ class HclMapping(BaseMapping):
             var_body = match.group(2)
 
             # Extract default value if present
-            default_match = re.search(r'default\s*=\s*([^}\n]+)', var_body)
+            default_match = re.search(r"default\s*=\s*([^}\n]+)", var_body)
             if not default_match:
                 continue
 
             var_value = default_match.group(1).strip()
 
             # Remove trailing comments and clean up
-            var_value = re.sub(r'#.*$', '', var_value).strip()
-            var_value = re.sub(r'//.*$', '', var_value).strip()
+            var_value = re.sub(r"#.*$", "", var_value).strip()
+            var_value = re.sub(r"//.*$", "", var_value).strip()
 
             # Truncate if longer than limit
             if len(var_value) > MAX_CONSTANT_VALUE_LENGTH:
                 var_value = var_value[:MAX_CONSTANT_VALUE_LENGTH]
 
-            const_entry = {
-                "name": f"var.{var_name}",
-                "value": var_value
-            }
+            const_entry = {"name": f"var.{var_name}", "value": var_value}
 
             # Extract type if present
-            type_match = re.search(r'type\s*=\s*([^}\n]+)', var_body)
+            type_match = re.search(r"type\s*=\s*([^}\n]+)", var_body)
             if type_match:
                 var_type = type_match.group(1).strip()
-                var_type = re.sub(r'#.*$', '', var_type).strip()
-                var_type = re.sub(r'//.*$', '', var_type).strip()
+                var_type = re.sub(r"#.*$", "", var_type).strip()
+                var_type = re.sub(r"//.*$", "", var_type).strip()
                 if len(var_type) > MAX_CONSTANT_VALUE_LENGTH:
                     var_type = var_type[:MAX_CONSTANT_VALUE_LENGTH]
                 const_entry["type"] = var_type
@@ -462,28 +471,25 @@ class HclMapping(BaseMapping):
             constants.append(const_entry)
 
         # Extract from locals blocks
-        locals_pattern = r'locals\s*\{([^}]+)\}'
+        locals_pattern = r"locals\s*\{([^}]+)\}"
         for match in re.finditer(locals_pattern, source):
             locals_body = match.group(1)
 
             # Extract key = value pairs
-            pair_pattern = r'([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^}\n]+)'
+            pair_pattern = r"([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^}\n]+)"
             for pair_match in re.finditer(pair_pattern, locals_body):
                 local_name = pair_match.group(1)
                 local_value = pair_match.group(2).strip()
 
                 # Remove trailing comments and clean up
-                local_value = re.sub(r'#.*$', '', local_value).strip()
-                local_value = re.sub(r'//.*$', '', local_value).strip()
+                local_value = re.sub(r"#.*$", "", local_value).strip()
+                local_value = re.sub(r"//.*$", "", local_value).strip()
 
                 # Truncate if longer than limit
                 if len(local_value) > MAX_CONSTANT_VALUE_LENGTH:
                     local_value = local_value[:MAX_CONSTANT_VALUE_LENGTH]
 
-                constants.append({
-                    "name": f"local.{local_name}",
-                    "value": local_value
-                })
+                constants.append({"name": f"local.{local_name}", "value": local_value})
 
         # Extract from output blocks
         output_pattern = r'output\s+"([^"]+)"\s*\{[^}]*value\s*=\s*([^}\n]+)'
@@ -492,17 +498,14 @@ class HclMapping(BaseMapping):
             output_value = match.group(2).strip()
 
             # Remove trailing comments and clean up
-            output_value = re.sub(r'#.*$', '', output_value).strip()
-            output_value = re.sub(r'//.*$', '', output_value).strip()
+            output_value = re.sub(r"#.*$", "", output_value).strip()
+            output_value = re.sub(r"//.*$", "", output_value).strip()
 
             # Truncate if longer than limit
             if len(output_value) > MAX_CONSTANT_VALUE_LENGTH:
                 output_value = output_value[:MAX_CONSTANT_VALUE_LENGTH]
 
-            constants.append({
-                "name": f"output.{output_name}",
-                "value": output_value
-            })
+            constants.append({"name": f"output.{output_name}", "value": output_value})
 
         # Extract from data blocks
         data_pattern = r'data\s+"([^"]+)"\s+"([^"]+)"\s*\{'
@@ -510,9 +513,11 @@ class HclMapping(BaseMapping):
             data_type = match.group(1)
             data_name = match.group(2)
 
-            constants.append({
-                "name": f"data.{data_type}.{data_name}",
-                "value": ""  # Data sources don't have default values
-            })
+            constants.append(
+                {
+                    "name": f"data.{data_type}.{data_name}",
+                    "value": "",  # Data sources don't have default values
+                }
+            )
 
         return constants if constants else None

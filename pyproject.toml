@@ -5,8 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "chunkhound"
 dynamic = ["version"]
-description = "Local-first semantic code search with vector and regex capabilities for AI assistants via MCP"
+description = "Local-first codebase intelligence for AI assistants via MCP"
 readme = "README.md"
+keywords = [
+    "code search",
+    "semantic search",
+    "MCP",
+    "AI agents",
+    "CAST algorithm",
+    "vector search",
+]
 requires-python = ">=3.10,<3.14"
 authors = [
     {name = "Ofri Wolfus"},
@@ -37,7 +45,7 @@ dependencies = [
     "tree-sitter>=0.25.0",
     "tree-sitter-python>=0.25.0",
     "tree-sitter-markdown>=0.5.1",
-    "tree-sitter-language-pack>=0.7.3",
+    "tree-sitter-language-pack>=0.7.3,<1.0.0",
     "pydantic>=2.11.0",
     "pydantic-settings>=2.0.0",
     "loguru>=0.6.0",
@@ -47,6 +55,7 @@ dependencies = [
     "tiktoken>=0.9.0",
     "tree-sitter-groovy>=0.1.2",
     "tree-sitter-kotlin>=1.1.0",
+    "tree-sitter-elixir>=0.3.4",
     "tree-sitter-lua>=0.4.0",
     "tree-sitter-make>=0.1.0",
     "watchdog>=4.0.0",
@@ -75,7 +84,7 @@ dependencies = [
     "rich>=13.0.0",
     "readchar>=4.2.1",
     "scikit-learn>=1.3.0",
-    "hdbscan>=0.8.38",
+    "scipy>=1.7.0",
     "numpy>=1.24.0",
     "pathspec>=0.12.1",
     "pygit2>=1.12.0",
@@ -83,6 +92,9 @@ dependencies = [
     "anthropic>=0.75.0",
     "msgpack>=1.0",
     "tomli>=2.0.0; python_version < '3.11'",
+    "tree-sitter-html>=0.23.2",
+    "tree-sitter-css>=0.25.0",
+    "lark>=1.1.0",
 ]
 
 [project.optional-dependencies]
@@ -90,14 +102,16 @@ dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "pytest-timeout>=2.1.0",
+    "pytest-rerunfailures>=13.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.6.0",
 ]
 test = [
     "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0", 
+    "pytest-asyncio>=0.21.0",
     "pytest-timeout>=2.1.0",
+    "pytest-rerunfailures>=13.0",
 ]
 
 [project.scripts]
@@ -149,6 +163,10 @@ select = [
 ]
 ignore = []
 
+[tool.ruff.lint.per-file-ignores]
+# Tool descriptions are LLM-facing strings — wrapping them breaks formatting
+"chunkhound/mcp_server/tools.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true
@@ -199,6 +217,7 @@ dev = [
     "pyinstaller>=6.14.1",
     "pytest>=8.4.0",
     "pytest-asyncio>=1.0.0",
+    "pytest-rerunfailures>=13.0",
     "pytest-timeout>=2.1.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.11.12",

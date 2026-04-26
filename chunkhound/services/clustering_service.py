@@ -7,10 +7,9 @@ token-bounded clusters for parallel synthesis operations.
 
 from dataclasses import dataclass
 
-import hdbscan
 import numpy as np
 from loguru import logger
-from sklearn.cluster import KMeans  # type: ignore[import-untyped]
+from sklearn.cluster import HDBSCAN, KMeans  # type: ignore[import-untyped]
 
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 from chunkhound.interfaces.llm_provider import LLMProvider
@@ -187,9 +186,7 @@ class ClusteringService:
             self._llm_provider.estimate_tokens(content) for content in files.values()
         )
 
-        logger.info(
-            f"HDBSCAN clustering {len(files)} files ({total_tokens:,} tokens)"
-        )
+        logger.info(f"HDBSCAN clustering {len(files)} files ({total_tokens:,} tokens)")
 
         # Special case: single file
         if len(files) == 1:
@@ -226,7 +223,7 @@ class ClusteringService:
             f"Running HDBSCAN with min_cluster_size={effective_min_cluster_size}"
         )
 
-        clusterer = hdbscan.HDBSCAN(
+        clusterer = HDBSCAN(
             min_cluster_size=effective_min_cluster_size,
             min_samples=1,
             metric="euclidean",
@@ -438,7 +435,7 @@ class ClusteringService:
             f"Running HDBSCAN with min_cluster_size={effective_min_cluster_size}"
         )
 
-        clusterer = hdbscan.HDBSCAN(
+        clusterer = HDBSCAN(
             min_cluster_size=effective_min_cluster_size,
             min_samples=1,
             metric="euclidean",
@@ -486,19 +483,15 @@ class ClusteringService:
                 return [file_paths_to_split]
 
             # K-means split into 2 clusters
-            embeddings = np.array(
-                [file_embeddings[fp] for fp in file_paths_to_split]
-            )
+            embeddings = np.array([file_embeddings[fp] for fp in file_paths_to_split])
             kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
             split_labels = kmeans.fit_predict(embeddings)
 
             cluster_0 = [
-                fp for fp, lbl in zip(file_paths_to_split, split_labels)
-                if lbl == 0
+                fp for fp, lbl in zip(file_paths_to_split, split_labels) if lbl == 0
             ]
             cluster_1 = [
-                fp for fp, lbl in zip(file_paths_to_split, split_labels)
-                if lbl == 1
+                fp for fp, lbl in zip(file_paths_to_split, split_labels) if lbl == 1
             ]
 
             # Guard: k-means may return all files in one cluster (identical embeddings)

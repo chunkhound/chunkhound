@@ -279,9 +279,7 @@ class ChunkContextBuilder:
                         file_path, content
                     )
                     if imports:
-                        imports_header = (
-                            "# Imports:\n" + "\n".join(imports) + "\n\n"
-                        )
+                        imports_header = "# Imports:\n" + "\n".join(imports) + "\n\n"
                 except Exception as e:
                     logger.debug(f"Failed to extract imports from {file_path}: {e}")
 
@@ -301,7 +299,9 @@ class ChunkContextBuilder:
                     remaining = max_tokens - current_tokens
                     if remaining > 10:
                         max_chars = remaining * 4
-                        file_content_parts.append(code[:max_chars] + "\n... (truncated)")
+                        file_content_parts.append(
+                            code[:max_chars] + "\n... (truncated)"
+                        )
                     break
 
                 file_content_parts.append(code)

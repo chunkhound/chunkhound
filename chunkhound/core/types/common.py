@@ -9,6 +9,9 @@ from enum import Enum
 from pathlib import Path
 from typing import NewType
 
+from chunkhound.parsers._grammar_availability import SCSS_AVAILABLE
+
+
 # String-based type aliases for better semantic clarity
 ProviderName = NewType("ProviderName", str)  # e.g., "openai"
 ModelName = NewType("ModelName", str)  # e.g., "text-embedding-3-small"
@@ -50,6 +53,11 @@ class ChunkType(Enum):
     DATA_CLASS = "data_class"
     EXTENSION_FUNCTION = "extension_function"
 
+    # IEC 61131-3 / PLC types
+    PROGRAM = "program"
+    FUNCTION_BLOCK = "function_block"
+    ACTION = "action"
+
     # C-specific types
     VARIABLE = "variable"
     TYPE = "type"
@@ -71,6 +79,12 @@ class ChunkType(Enum):
     TABLE = "table"
     KEY_VALUE = "key_value"
     ARRAY = "array"
+
+    # Dependency types
+    IMPORT = "import"
+
+    # Embedded content types
+    EMBEDDED_SQL = "embedded_sql"
 
     # Generic types
     BLOCK = "block"
@@ -103,10 +117,20 @@ class ChunkType(Enum):
             ChunkType.CLOSURE,
             ChunkType.TRAIT,
             ChunkType.SCRIPT,
+            ChunkType.TABLE,
+            ChunkType.OBJECT,
+            ChunkType.COMPANION_OBJECT,
+            ChunkType.DATA_CLASS,
+            ChunkType.EXTENSION_FUNCTION,
             ChunkType.BLOCK,
             ChunkType.VARIABLE,
             ChunkType.TYPE,
             ChunkType.MACRO,
+            ChunkType.IMPORT,
+            ChunkType.EMBEDDED_SQL,
+            ChunkType.PROGRAM,
+            ChunkType.FUNCTION_BLOCK,
+            ChunkType.ACTION,
         }
 
     @property
@@ -124,6 +148,7 @@ class ChunkType(Enum):
             ChunkType.PARAGRAPH,
             ChunkType.CODE_BLOCK,
         }
+
 
 
 class Language(Enum):
@@ -156,7 +181,15 @@ class Language(Enum):
     SQL = "sql"
     SWIFT = "swift"
     DART = "dart"
+    ELIXIR = "elixir"
     LUA = "lua"
+    TWINCAT = "twincat"
+
+    # Web languages
+    HTML = "html"
+    CSS = "css"
+    SCSS = "scss"
+    JINJA = "jinja"  # .jinja, .j2, .njk — parsed with HTML grammar
 
     # Documentation languages
     MARKDOWN = "markdown"
@@ -191,15 +224,23 @@ class Language(Enum):
         extension = file_path.suffix.lower()
         extension_map = {
             ".py": cls.PYTHON,
+            ".pyi": cls.PYTHON,
+            ".pyw": cls.PYTHON,
             ".java": cls.JAVA,
             ".cs": cls.CSHARP,
+            ".csx": cls.CSHARP,
             ".ts": cls.TYPESCRIPT,
+            ".mts": cls.TYPESCRIPT,
+            ".cts": cls.TYPESCRIPT,
             ".js": cls.JAVASCRIPT,
+            ".mjs": cls.JAVASCRIPT,
+            ".cjs": cls.JAVASCRIPT,
             ".tsx": cls.TSX,
             ".jsx": cls.JSX,
             ".groovy": cls.GROOVY,
             ".gvy": cls.GROOVY,
             ".gy": cls.GROOVY,
+            ".gsh": cls.GROOVY,
             ".kt": cls.KOTLIN,
             ".kts": cls.KOTLIN,
             ".go": cls.GO,
@@ -211,10 +252,15 @@ class Language(Enum):
             ".sh": cls.BASH,
             ".bash": cls.BASH,
             ".zsh": cls.BASH,
+            ".fish": cls.BASH,
             ".mk": cls.MAKEFILE,
+            ".mak": cls.MAKEFILE,
             ".make": cls.MAKEFILE,
             ".md": cls.MARKDOWN,
             ".markdown": cls.MARKDOWN,
+            ".mdown": cls.MARKDOWN,
+            ".mkd": cls.MARKDOWN,
+            ".mdx": cls.MARKDOWN,
             ".dart": cls.DART,
             ".hcl": cls.HCL,
             ".tf": cls.HCL,
@@ -224,14 +270,17 @@ class Language(Enum):
             ".yml": cls.YAML,
             ".toml": cls.TOML,
             ".txt": cls.TEXT,
+            ".text": cls.TEXT,
             ".pdf": cls.PDF,
             ".c": cls.C,
             ".h": cls.C,
             ".cpp": cls.CPP,
             ".cxx": cls.CPP,
             ".cc": cls.CPP,
+            ".c++": cls.CPP,
             ".hpp": cls.CPP,
             ".hxx": cls.CPP,
+            ".hh": cls.CPP,
             ".h++": cls.CPP,
             ".rs": cls.RUST,
             ".zig": cls.ZIG,
@@ -248,10 +297,29 @@ class Language(Enum):
             ".sql": cls.SQL,
             ".swift": cls.SWIFT,
             ".swiftinterface": cls.SWIFT,
+            ".ex": cls.ELIXIR,
+            ".exs": cls.ELIXIR,
             ".lua": cls.LUA,
+            ".scss": cls.SCSS if SCSS_AVAILABLE else cls.TEXT,
+            ".html": cls.HTML,
+            ".htm": cls.HTML,
+            ".xhtml": cls.HTML,
+            ".css": cls.CSS,
+            # .sass uses indented syntax (no braces/semicolons) which is
+            # structurally incompatible with the tree-sitter SCSS grammar.
+            # Use text fallback parser instead of silently producing
+            # misaligned / empty chunks.
+            ".sass": cls.TEXT,
+            ".jinja": cls.JINJA,
+            ".j2": cls.JINJA,
+            ".njk": cls.JINJA,
+            ".tcpou": cls.TWINCAT,
         }
 
-        return extension_map.get(extension, cls.UNKNOWN)
+        if extension in extension_map:
+            return extension_map[extension]
+
+        return cls.UNKNOWN
 
     @classmethod
     def from_string(cls, value: str) -> "Language":
@@ -289,7 +357,9 @@ class Language(Enum):
             Language.SVELTE,
             Language.SWIFT,
             Language.DART,
+            Language.ELIXIR,
             Language.LUA,
+            Language.TWINCAT,
         }
 
     @property

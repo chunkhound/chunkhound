@@ -658,7 +658,11 @@ class RustMapping(BaseMapping):
 
         # Get the definition node
         def_node = captures.get("definition")
-        if not def_node or def_node.type not in ["const_item", "static_item", "let_declaration"]:
+        if not def_node or def_node.type not in [
+            "const_item",
+            "static_item",
+            "let_declaration",
+        ]:
             return None
 
         source = content.decode("utf-8")

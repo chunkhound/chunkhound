@@ -75,14 +75,15 @@ class TestGetGlobalExcludesFile:
             result = get_global_excludes_file()
             assert result == global_ignore
 
-    def test_fallback_to_home_gitignore(self, tmp_path: Path, monkeypatch) -> None:
-        """Test fallback to ~/.gitignore when ~/.gitignore_global doesn't exist."""
+    def test_does_not_fall_back_to_home_gitignore(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """~/.gitignore is always repo-scoped — never used as global excludes."""
         from chunkhound.utils.git_safe import get_global_excludes_file
 
         fake_home = tmp_path / "home"
         fake_home.mkdir()
-        gitignore = fake_home / ".gitignore"
-        gitignore.write_text("*.bak\n")
+        (fake_home / ".gitignore").write_text("*.bak\n")
 
         monkeypatch.setattr(Path, "home", lambda: fake_home)
 
@@ -92,7 +93,33 @@ class TestGetGlobalExcludesFile:
 
         with patch("subprocess.run", return_value=mock_result):
             result = get_global_excludes_file()
-            assert result == gitignore
+            assert result is None
+
+    def test_home_gitignore_ignored_even_without_git_dir(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """~/.gitignore is skipped regardless of whether ~/.git exists."""
+        from chunkhound.utils.git_safe import get_global_excludes_file
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        (fake_home / ".gitignore").write_text("*\n!.bashrc\n")
+        # No .git here — still should not be used as global excludes
+        config_dir = fake_home / ".config" / "git"
+        config_dir.mkdir(parents=True)
+        xdg_ignore = config_dir / "ignore"
+        xdg_ignore.write_text("*.swp\n")
+
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = ""
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = get_global_excludes_file()
+            # Should skip ~/.gitignore entirely and find XDG location
+            assert result == xdg_ignore
 
     def test_fallback_to_config_git_ignore(self, tmp_path: Path, monkeypatch) -> None:
         """Test fallback to ~/.config/git/ignore."""
@@ -431,3 +458,28 @@ class TestExtendWithGlobalGitignore:
 
         # Only original pattern should remain
         assert excludes == ["original"]
+
+    def test_filters_negations_and_broad_wildcards(self, tmp_path: Path) -> None:
+        """Negation patterns and catch-all wildcards must not reach the flat exclude list."""
+        from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+        from chunkhound.services.indexing_coordinator import IndexingCoordinator
+
+        db = DuckDBProvider(db_path=tmp_path / "db", base_directory=tmp_path)
+        coord = IndexingCoordinator(database_provider=db, base_directory=tmp_path)
+
+        excludes = ["original"]
+
+        # Simulate a dotfiles-style global gitignore: "* / !.bashrc / !.vimrc"
+        # After _collect_global_gitignore_patterns, "*" becomes "**/*"
+        with patch(
+            "chunkhound.utils.ignore_engine._collect_global_gitignore_patterns",
+            return_value=["**/*", "!.bashrc", "!.vimrc", "**/*.log", "**"],
+        ):
+            coord._extend_with_global_gitignore(excludes)
+
+        assert "original" in excludes
+        assert "**/*.log" in excludes  # safe pattern kept
+        assert "**/*" not in excludes  # broad wildcard filtered
+        assert "**" not in excludes  # broad wildcard filtered
+        assert "!.bashrc" not in excludes  # negation filtered
+        assert "!.vimrc" not in excludes  # negation filtered

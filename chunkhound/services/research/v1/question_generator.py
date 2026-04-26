@@ -203,9 +203,7 @@ class QuestionGenerator:
 
         # Build constants section if available
         constants_section = (
-            f"\nConstants:\n{constants_context}\n"
-            if constants_context
-            else ""
+            f"\nConstants:\n{constants_context}\n" if constants_context else ""
         )
 
         # Construct prompt with conditional gist section

@@ -1,12 +1,13 @@
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    subprocess.run(["which","git"], stdout=subprocess.DEVNULL).returncode != 0,
+    shutil.which("git") is None,
     reason="git required",
 )
 

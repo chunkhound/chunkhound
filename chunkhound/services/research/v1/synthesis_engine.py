@@ -234,7 +234,9 @@ class SynthesisEngine:
         # Build constants context section
         constants_section = ""
         if constants_context:
-            constants_section = f"\n\n{constants_context}\n\n{CONSTANTS_INSTRUCTION_FULL}"
+            constants_section = (
+                f"\n\n{constants_context}\n\n{CONSTANTS_INSTRUCTION_FULL}"
+            )
 
         # Build facts context section
         facts_section = ""
@@ -404,7 +406,9 @@ class SynthesisEngine:
         # Build constants section if available
         constants_section = ""
         if constants_context:
-            constants_section = f"\n{constants_context}\n\n{CONSTANTS_INSTRUCTION_SHORT}"
+            constants_section = (
+                f"\n{constants_context}\n\n{CONSTANTS_INSTRUCTION_SHORT}"
+            )
 
         # Build facts section if available
         facts_section = ""
@@ -563,7 +567,9 @@ Provide a comprehensive analysis focusing on the query."""
         # Build constants section if available
         constants_section = ""
         if constants_context:
-            constants_section = f"\n\n{constants_context}\n\n{CONSTANTS_INSTRUCTION_FULL}"
+            constants_section = (
+                f"\n\n{constants_context}\n\n{CONSTANTS_INSTRUCTION_FULL}"
+            )
 
         # Build facts section if available
         facts_section = ""

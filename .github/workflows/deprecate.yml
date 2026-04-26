@@ -1,0 +1,104 @@
+name: Deprecate Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deprecate (e.g. 1.2.3)'
+        required: true
+        type: string
+      reason:
+        description: 'Reason for deprecation (shown in PyPI yank message and GitHub Release)'
+        required: true
+        type: string
+
+# Usage: gh workflow run deprecate.yml -f version=1.2.3 -f reason="Critical security issue, upgrade to 1.2.4"
+
+permissions:
+  contents: write  # gh release edit to add deprecation notice
+
+jobs:
+  deprecate:
+    runs-on: ubuntu-latest
+    environment: maintainers  # requires approval from maintainer team before proceeding
+    timeout-minutes: 10
+
+    steps:
+      # TODO: Implement PyPI yank properly when next needed.
+      # The current approach POSTs to the PyPI web UI endpoint
+      # (https://pypi.org/manage/project/.../yank/), which is CSRF-protected
+      # and not a stable machine-readable API. It silently returns a redirect
+      # or 403 while reporting success, giving false confirmation during incidents.
+      # Options to evaluate: twine's removal API, PyPI's XMLRPC API, or waiting
+      # for a supported REST endpoint. Track in an issue before re-enabling.
+      #
+      # - name: Yank version from PyPI
+      #   env:
+      #     PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      #     INPUT_VERSION: ${{ github.event.inputs.version }}
+      #     INPUT_REASON: ${{ github.event.inputs.reason }}
+      #   run: |
+      #     python - <<'EOF'
+      #     import urllib.request, urllib.parse, os, sys
+      #     version = os.environ["INPUT_VERSION"]
+      #     reason  = os.environ["INPUT_REASON"]
+      #     token   = os.environ["PYPI_API_TOKEN"]
+      #     data = urllib.parse.urlencode({"yankreason": reason}).encode()
+      #     req = urllib.request.Request(
+      #         f"https://pypi.org/manage/project/chunkhound/release/{version}/yank/",
+      #         data=data, method="POST",
+      #     )
+      #     req.add_header("Authorization", f"token {token}")
+      #     req.add_header("Content-Type", "application/x-www-form-urlencoded")
+      #     try:
+      #         with urllib.request.urlopen(req) as resp:
+      #             print(f"Yanked v{version} from PyPI (HTTP {resp.status})")
+      #     except urllib.error.HTTPError as e:
+      #         print(f"PyPI yank failed: HTTP {e.code} — {e.reason}", file=sys.stderr)
+      #         sys.exit(1)
+      #     EOF
+
+      - name: Add deprecation notice to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_REASON: ${{ github.event.inputs.reason }}
+          ACTOR: ${{ github.actor }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          TAG="v${INPUT_VERSION}"
+          NOTICE="## :warning: Deprecated
+
+          This release has been deprecated on $(date -u '+%Y-%m-%d %H:%M UTC') by @${ACTOR}.
+
+          **Reason:** ${INPUT_REASON}
+
+          **Action required:** Upgrade to the latest stable release."
+
+          # Prepend the notice to the existing release body.
+          # Write to a tempfile to avoid shell-injection via metacharacters in
+          # INPUT_REASON or the existing release body (quotes, backticks, $(...)).
+          EXISTING_BODY=$(gh release view "$TAG" --repo "$REPOSITORY" --json body -q .body)
+          NOTES_FILE=$(mktemp)
+          printf '%s\n\n---\n\n%s' "$NOTICE" "$EXISTING_BODY" > "$NOTES_FILE"
+          gh release edit "$TAG" \
+            --repo "$REPOSITORY" \
+            --notes-file "$NOTES_FILE"
+          rm -f "$NOTES_FILE"
+
+      - name: Summary
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_REASON: ${{ github.event.inputs.reason }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "### Deprecation complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | \`${INPUT_VERSION}\` |" >> "$GITHUB_STEP_SUMMARY"
+          SAFE_REASON="${INPUT_REASON//|/\\|}"
+          echo "| Reason | ${SAFE_REASON} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Actor | @${ACTOR} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PyPI | Yank skipped — see TODO in workflow |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| GitHub Release | Deprecation notice added |" >> "$GITHUB_STEP_SUMMARY"

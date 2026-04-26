@@ -10,7 +10,7 @@ Architecture:
 - Extract imports using ImportContextService (via tree-sitter parsers)
 - Resolve each import using LanguageMapping.resolve_import_paths()
 - Cache resolved imports to avoid redundant resolution
-- Handle external imports gracefully (returns None, skip from results)
+- Handle external imports gracefully (returns empty list, skipped from results)
 
 Usage:
     service = ImportResolverService(parser_factory)
@@ -91,9 +91,7 @@ class ImportResolverService:
         parser: Any = self._parser_factory.create_parser_for_file(Path(file_path))
 
         # Check if parser has extractor with mapping
-        if not hasattr(parser, "extractor") or not hasattr(
-            parser.extractor, "mapping"
-        ):
+        if not hasattr(parser, "extractor") or not hasattr(parser.extractor, "mapping"):
             logger.debug(f"Parser lacks mapping for import resolution: {file_path}")
             return []
 
@@ -137,7 +135,6 @@ class ImportResolverService:
                 )
                 # Cache empty list to avoid retrying failed resolutions
                 self._resolution_cache[(file_path, import_text)] = []
-                continue
 
         logger.debug(
             f"Resolved {len(resolved_paths)}/{len(import_statements)} imports "

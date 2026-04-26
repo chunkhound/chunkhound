@@ -14,7 +14,8 @@ def create_main_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chunkhound",
         description=(
-            "Local-first semantic code search with vector and regex capabilities"
+            "Codebase intelligence for AI coding agents"
+            "—index, search, and research your code"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""

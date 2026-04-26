@@ -519,10 +519,10 @@ class GoMapping(BaseMapping):
             Path to the imported file (empty list if not found)
         """
         # Extract package path from: import "path/to/pkg" or "pkg"
-        match = re.search(r'''import\s+(?:\w+\s+)?["'](.+?)["']''', import_text)
+        match = re.search(r"""import\s+(?:\w+\s+)?["'](.+?)["']""", import_text)
         if not match:
             # Try block import format
-            match = re.search(r'''["'](.+?)["']''', import_text)
+            match = re.search(r"""["'](.+?)["']""", import_text)
 
         if not match:
             return []

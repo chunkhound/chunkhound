@@ -232,13 +232,17 @@ class BFSExplorationStrategy:
         """
         if not initial_chunks:
             logger.warning("BFSExplorationStrategy: No initial chunks to explore")
-            return initial_chunks, {
-                "nodes_explored": 0,
-                "depth_reached": 0,
-                "chunks_total": 0,
-                "chunks_added": 0,
-                "files_read": 0,
-            }, {}
+            return (
+                initial_chunks,
+                {
+                    "nodes_explored": 0,
+                    "depth_reached": 0,
+                    "chunks_total": 0,
+                    "chunks_added": 0,
+                    "files_read": 0,
+                },
+                {},
+            )
 
         logger.info(
             f"BFSExplorationStrategy: Starting BFS exploration "
@@ -271,8 +275,12 @@ class BFSExplorationStrategy:
 
         # BFS traversal
         all_nodes = await self._traverse_bfs_tree(
-            root, context, global_explored_data, path_filter, constants_context,
-            log_prefix="BFSExplorationStrategy"
+            root,
+            context,
+            global_explored_data,
+            path_filter,
+            constants_context,
+            log_prefix="BFSExplorationStrategy",
         )
 
         # Aggregate all chunks and file contents from BFS tree
@@ -280,9 +288,11 @@ class BFSExplorationStrategy:
         all_files = self._aggregate_files(all_nodes)
 
         # Apply elbow detection and reranking before returning
-        filtered_chunks, filtered_files, filter_stats = (
-            await self._filter_for_synthesis(all_chunks, root_query)
-        )
+        (
+            filtered_chunks,
+            filtered_files,
+            filter_stats,
+        ) = await self._filter_for_synthesis(all_chunks, root_query)
 
         stats = {
             "nodes_explored": len(all_nodes),
@@ -501,7 +511,11 @@ class BFSExplorationStrategy:
             # Root node always has new info
             return (
                 True,
-                {"new_chunks": len(chunks), "duplicate_chunks": 0, "total_chunks": len(chunks)},
+                {
+                    "new_chunks": len(chunks),
+                    "duplicate_chunks": 0,
+                    "total_chunks": len(chunks),
+                },
             )
 
         if not chunks:
@@ -519,7 +533,11 @@ class BFSExplorationStrategy:
 
         return (
             new_count > 0,
-            {"new_chunks": new_count, "duplicate_chunks": duplicate_count, "total_chunks": len(chunks)},
+            {
+                "new_chunks": new_count,
+                "duplicate_chunks": duplicate_count,
+                "total_chunks": len(chunks),
+            },
         )
 
     def _get_chunk_expanded_range(self, chunk: dict[str, Any]) -> tuple[int, int]:
@@ -566,7 +584,9 @@ class BFSExplorationStrategy:
 
             # Track line coverage per file
             coverage = global_explored_data.setdefault("file_line_coverage", {})
-            coverage.setdefault(file_path, set()).update(range(start_line, end_line + 1))
+            coverage.setdefault(file_path, set()).update(
+                range(start_line, end_line + 1)
+            )
 
             # Mark as "explored" if we've seen 50+ lines (heuristic to prevent re-exploration)
             if len(coverage[file_path]) > 50:
@@ -581,7 +601,9 @@ class BFSExplorationStrategy:
                 )
                 global_explored_data["chunks"].append(chunk)
 
-    def _build_exploration_gist(self, global_explored_data: dict[str, Any]) -> str | None:
+    def _build_exploration_gist(
+        self, global_explored_data: dict[str, Any]
+    ) -> str | None:
         """Build summary of explored files for follow-up generation."""
         chunks = global_explored_data["chunks"]
         if not chunks:
@@ -654,9 +676,7 @@ class BFSExplorationStrategy:
                     chunks_map[chunk_id] = chunk
         return list(chunks_map.values())
 
-    def _aggregate_files(
-        self, all_nodes: list[BFSExplorationNode]
-    ) -> dict[str, str]:
+    def _aggregate_files(self, all_nodes: list[BFSExplorationNode]) -> dict[str, str]:
         """Aggregate all file contents from BFS tree.
 
         Merges file_contents from all nodes. If the same file appears in multiple
@@ -739,8 +759,12 @@ class BFSExplorationStrategy:
 
         # BFS traversal
         all_nodes = await self._traverse_bfs_tree(
-            root, context, global_explored_data, path_filter, constants_context,
-            log_prefix="BFSExplorationStrategy.explore_raw"
+            root,
+            context,
+            global_explored_data,
+            path_filter,
+            constants_context,
+            log_prefix="BFSExplorationStrategy.explore_raw",
         )
 
         # Aggregate all chunks (NO elbow filtering, NO file reading)
@@ -804,7 +828,7 @@ class BFSExplorationStrategy:
                     if idx < 0 or idx >= len(file_paths):
                         logger.warning(
                             f"Reranker returned invalid index {idx} "
-                            f"(valid range: 0-{len(file_paths)-1}), skipping"
+                            f"(valid range: 0-{len(file_paths) - 1}), skipping"
                         )
                         continue
 
@@ -846,18 +870,19 @@ class BFSExplorationStrategy:
                     score = result.score
 
                     # Validate index within batch
-                    if (
-                        batch_relative_idx < 0
-                        or batch_relative_idx >= len(batch_file_paths)
+                    if batch_relative_idx < 0 or batch_relative_idx >= len(
+                        batch_file_paths
                     ):
                         logger.warning(
                             f"Batch {batch_idx + 1} returned invalid index "
-                            f"{batch_relative_idx} (valid range: 0-{len(batch_file_paths)-1}), "
+                            f"{batch_relative_idx} (valid range: 0-{len(batch_file_paths) - 1}), "
                             f"skipping"
                         )
                         continue
 
-                    all_results.append((batch_file_paths[batch_relative_idx], float(score)))
+                    all_results.append(
+                        (batch_file_paths[batch_relative_idx], float(score))
+                    )
 
             except Exception as e:
                 logger.error(
@@ -961,7 +986,9 @@ class BFSExplorationStrategy:
             )
         else:
             # Fallback: Use accumulated chunk scores
-            logger.warning("File reranking returned no results, falling back to chunk scores")
+            logger.warning(
+                "File reranking returned no results, falling back to chunk scores"
+            )
             for file_path, file_chunks in file_to_chunks.items():
                 file_priorities[file_path] = sum(
                     get_unified_score(c) for c in file_chunks

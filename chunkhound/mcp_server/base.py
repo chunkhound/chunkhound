@@ -63,6 +63,11 @@ class MCPServerBase(ABC):
         # Initialization state
         self._initialized = False
         self._init_lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
+
+        # Background tasks
+        self._startup_task: asyncio.Task | None = None
+        self._scan_task: asyncio.Task | None = None
 
         # Background tasks
         self._scan_task: asyncio.Task | None = None
@@ -89,8 +94,6 @@ class MCPServerBase(ABC):
             )
             try:
                 with open(debug_file, "a") as f:
-                    from datetime import datetime
-
                     timestamp = datetime.now().isoformat()
                     f.write(f"[{timestamp}] [MCP] {message}\n")
                     f.flush()
@@ -144,7 +147,9 @@ class MCPServerBase(ABC):
             # Initialize LLM manager with dual providers (optional - continue if it fails)
             try:
                 if self.config.llm:
-                    utility_config, synthesis_config = self.config.llm.get_provider_configs()
+                    utility_config, synthesis_config = (
+                        self.config.llm.get_provider_configs()
+                    )
                     self.llm_manager = LLMManager(utility_config, synthesis_config)
                     self.debug_log(
                         f"LLM providers registered: {self.config.llm.provider} "
@@ -178,7 +183,9 @@ class MCPServerBase(ABC):
             self.debug_log("Service initialization complete")
 
             # Defer DB connect + realtime start to background so initialize is fast
-            asyncio.create_task(self._deferred_connect_and_start(target_path))
+            self._startup_task = asyncio.create_task(
+                self._deferred_connect_and_start(target_path)
+            )
 
     async def _deferred_connect_and_start(self, target_path: Path) -> None:
         """Connect DB and start realtime monitoring in background."""
@@ -186,9 +193,7 @@ class MCPServerBase(ABC):
             # Ensure services exist
             if not self.services:
                 return
-            # Connect to database lazily
-            if not self.services.provider.is_connected:
-                self.services.provider.connect()
+            await self._connect_provider()
 
             # Start real-time indexing service
             self.debug_log("Starting real-time indexing service (deferred)")
@@ -288,6 +293,15 @@ class MCPServerBase(ABC):
 
         This method is idempotent - safe to call multiple times.
         """
+        # Cancel deferred startup task if still running
+        if self._startup_task is not None and not self._startup_task.done():
+            self.debug_log("Cancelling deferred startup task")
+            self._startup_task.cancel()
+            try:
+                await self._startup_task
+            except asyncio.CancelledError:
+                pass
+
         # Cancel background scan task if still running
         if self._scan_task is not None and not self._scan_task.done():
             self.debug_log("Cancelling background scan task")
@@ -311,7 +325,7 @@ class MCPServerBase(ABC):
                 self.services.provider.disconnect()
             self._initialized = False
 
-    def ensure_services(self) -> DatabaseServices:
+    async def ensure_services(self) -> DatabaseServices:
         """Ensure services are initialized and return them.
 
         Returns:
@@ -323,11 +337,21 @@ class MCPServerBase(ABC):
         if not self.services:
             raise RuntimeError("Services not initialized. Call initialize() first.")
 
-        # Ensure database connection is active
-        if not self.services.provider.is_connected:
-            self.services.provider.connect()
-
+        await self._connect_provider()
         return self.services
+
+    async def _connect_provider(self) -> None:
+        """Connect the database provider if not already connected.
+
+        Uses a lock to prevent concurrent connect() calls which would
+        leak a DuckDB connection handle.
+        """
+        if self.services.provider.is_connected:
+            return
+        async with self._connect_lock:
+            if not self.services.provider.is_connected:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self.services.provider.connect)
 
     def ensure_embedding_manager(self) -> EmbeddingManager:
         """Ensure embedding manager is available and has providers.
@@ -372,18 +396,24 @@ class MCPServerBase(ABC):
                 continue
 
             tool_params = copy.deepcopy(tool.parameters)
+            description = tool.description
 
-            if tool_name == "search" and (
-                not self.embedding_manager
-                or not self.embedding_manager.list_providers()
-            ):
-                if "type" in tool_params.get("properties", {}):
-                    tool_params["properties"]["type"]["enum"] = ["regex"]
+            if tool_name == "search":
+                if (
+                    not self.embedding_manager
+                    or not self.embedding_manager.list_providers()
+                ):
+                    if "type" in tool_params.get("properties", {}):
+                        tool_params["properties"]["type"]["enum"] = ["regex"]
+                if not self.llm_manager:
+                    from .tools import SEARCH_DESCRIPTION_NO_RESEARCH
+
+                    description = SEARCH_DESCRIPTION_NO_RESEARCH
 
             tools.append(
                 {
                     "name": tool_name,
-                    "description": tool.description,
+                    "description": description,
                     "inputSchema": tool_params,
                 }
             )

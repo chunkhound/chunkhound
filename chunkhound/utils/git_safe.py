@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 
 @dataclass
@@ -62,10 +62,13 @@ def get_global_excludes_file() -> Path | None:
     except Exception:
         pass
 
-    # Fallback: check default locations
+    # Fallback: check standard global-excludes locations.
+    # NOTE: ~/.gitignore is intentionally absent — .gitignore files are always
+    # repo-scoped.  Git itself never uses ~/.gitignore as global excludes;
+    # the standard locations are core.excludesFile (checked above) and
+    # $XDG_CONFIG_HOME/git/ignore.  ~/.gitignore_global is a common convention.
     for default in [
         Path.home() / ".gitignore_global",
-        Path.home() / ".gitignore",
         Path.home() / ".config" / "git" / "ignore",
     ]:
         if default.exists():
@@ -74,7 +77,9 @@ def get_global_excludes_file() -> Path | None:
     return None
 
 
-def run_git(args: Sequence[str], cwd: Path | None, timeout_s: float | None = None) -> subprocess.CompletedProcess:
+def run_git(
+    args: Sequence[str], cwd: Path | None, timeout_s: float | None = None
+) -> subprocess.CompletedProcess:
     cmd = ["git", *list(args)]
     env = _build_git_env()
     try:
@@ -85,7 +90,9 @@ def run_git(args: Sequence[str], cwd: Path | None, timeout_s: float | None = Non
             stderr=subprocess.PIPE,
             check=False,
             env=env,
-            timeout=timeout_s if timeout_s is not None else float(os.environ.get("CHUNKHOUND_GIT_TIMEOUT_SECONDS", "15")),
+            timeout=timeout_s
+            if timeout_s is not None
+            else float(os.environ.get("CHUNKHOUND_GIT_TIMEOUT_SECONDS", "15")),
             text=True,
         )
         return proc
@@ -94,3 +101,29 @@ def run_git(args: Sequence[str], cwd: Path | None, timeout_s: float | None = Non
     except Exception as e:
         raise GitCommandError(f"git command failed: {e}") from e
 
+
+def git_check_ignored(
+    *,
+    repo_root: Path,
+    rel_path: str,
+    timeout_s: float = 5.0,
+    on_error: Callable[[Exception], None] | None = None,
+) -> bool:
+    """Return True if Git would ignore rel_path in repo_root.
+
+    Uses `git check-ignore -q --no-index` and returns False on any errors.
+    """
+    try:
+        proc = run_git(
+            ["check-ignore", "-q", "--no-index", rel_path],
+            cwd=repo_root,
+            timeout_s=timeout_s,
+        )
+    except Exception as e:
+        if on_error is not None:
+            try:
+                on_error(e)
+            except Exception:
+                pass
+        return False
+    return proc.returncode == 0

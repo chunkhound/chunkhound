@@ -10,9 +10,8 @@ ARCHITECTURE: Global state required for stdio communication model
 from __future__ import annotations
 
 import asyncio
-import sys
 import os
-import copy
+import sys
 import logging
 import warnings
 
@@ -48,8 +47,7 @@ from chunkhound.core.config.config import Config  # noqa: E402
 from chunkhound.version import __version__  # noqa: E402
 
 from .base import MCPServerBase  # noqa: E402
-from .common import handle_tool_call, has_reranker_support  # noqa: E402
-from .tools import TOOL_REGISTRY  # noqa: E402
+from .common import handle_tool_call  # noqa: E402
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
 logging.disable(logging.CRITICAL)
@@ -105,8 +103,11 @@ class StdioMCPServer(MCPServerBase):
                     )
 
                     async def _stub_run_exec(  # type: ignore[override]
-                        self, text, cwd=None,
-                        max_tokens=1024, timeout=None,
+                        self,
+                        text,
+                        cwd=None,
+                        max_tokens=1024,
+                        timeout=None,
                         model=None,
                     ):
                         mark = os.getenv("CH_TEST_CODEX_MARK_FILE")
@@ -135,6 +136,7 @@ class StdioMCPServer(MCPServerBase):
             self.server = None  # type: ignore
         else:
             from mcp.server import Server
+
             self.server: Server = Server("ChunkHound Code Search")
 
         # Event to signal initialization completion
@@ -160,7 +162,7 @@ class StdioMCPServer(MCPServerBase):
             return await handle_tool_call(
                 tool_name=tool_name,
                 arguments=arguments,
-                services=self.ensure_services(),
+                services=await self.ensure_services(),
                 embedding_manager=self.embedding_manager,
                 initialization_complete=self._initialization_complete,
                 debug_mode=self.debug_mode,
@@ -178,7 +180,11 @@ class StdioMCPServer(MCPServerBase):
             List of MCP Tool objects with filtered schemas.
         """
         return [
-            types.Tool(name=d["name"], description=d["description"], inputSchema=d["inputSchema"])
+            types.Tool(
+                name=d["name"],
+                description=d["description"],
+                inputSchema=d["inputSchema"],
+            )
             for d in self._build_filtered_tool_dicts()
         ]
 
@@ -236,6 +242,7 @@ class StdioMCPServer(MCPServerBase):
                 async with self.server_lifespan():
                     # Run the stdio server
                     import mcp.server.stdio
+
                     async with mcp.server.stdio.stdio_server() as (
                         read_stream,
                         write_stream,
@@ -285,10 +292,95 @@ class StdioMCPServer(MCPServerBase):
         except KeyboardInterrupt:
             self.debug_log("Server interrupted by user")
         except Exception as e:
+            # NOTE: This handler intentionally does NOT re-raise after calling
+            # _respond_with_startup_error.  main() has its own except block that
+            # also calls _respond_with_startup_error — if run() ever re-raises,
+            # two JSON-RPC error objects would be written to stdout, corrupting
+            # the protocol.  Keep this invariant: run() swallows, main() catches
+            # only __init__() / pre-run() failures.
             self.debug_log(f"Server error: {e}")
             if self.debug_mode:
                 import traceback
+
                 traceback.print_exc(file=sys.stderr)
+            _respond_with_startup_error(e, getattr(self, "config", None))
+
+
+def _respond_with_startup_error(error: Exception, config: Any = None) -> None:
+    """Write startup error to a log file and send a JSON-RPC error response.
+
+    Called when the server crashes before the MCP stdio loop starts, so the
+    MCP client (e.g. Claude Code) receives a readable error instead of a
+    silent process exit.
+    """
+    import json
+    import select
+    import traceback as _tb
+    from pathlib import Path as _Path
+
+    error_msg = str(error)
+    error_traceback = _tb.format_exc()
+
+    # Generate a hint for well-known failure modes
+    hint = ""
+    if "Could not set lock" in error_msg or "Conflicting lock" in error_msg:
+        hint = (
+            "Another chunkhound process is holding a lock on the database. "
+            "Run: kill $(pgrep -f 'chunkhound mcp') to stop stale processes, "
+            "then reconnect."
+        )
+
+    # Always write to an error log (regardless of --debug flag)
+    try:
+        log_path = "/tmp/chunkhound_mcp_error.log"
+        if (
+            config is not None
+            and getattr(config, "database", None) is not None
+            and getattr(config.database, "path", None) is not None
+        ):
+            db_dir = _Path(config.database.path).parent
+            try:
+                db_dir.mkdir(parents=True, exist_ok=True)
+                log_path = str(db_dir / "startup_error.log")
+            except Exception:
+                pass
+        with open(log_path, "a") as f:
+            f.write(f"ChunkHound MCP startup error: {error_msg}\n")
+            if error_traceback and error_traceback != "NoneType: None\n":
+                f.write(f"Traceback:\n{error_traceback}\n")
+            if hint:
+                f.write(f"Hint: {hint}\n")
+    except Exception:
+        pass
+
+    # Attempt to respond to the pending initialize request so the MCP client
+    # can surface a human-readable error message.
+    try:
+        # Use select with a short timeout so we don't block if stdin is empty.
+        # NOTE: On Windows, select.select() only accepts sockets, not file
+        # objects like sys.stdin — the call will fail and fall through to
+        # the outer except, which is acceptable (best-effort semantics).
+        ready, _, _ = select.select([sys.stdin], [], [], 2.0)
+        if ready:
+            line = sys.stdin.readline()
+            if line.strip():
+                req = json.loads(line)
+                if req.get("method") == "initialize":
+                    full_msg = f"ChunkHound startup failed: {error_msg}"
+                    if hint:
+                        full_msg += f"  |  {hint}"
+                    error_resp = {
+                        "jsonrpc": "2.0",
+                        "id": req.get("id"),
+                        "error": {
+                            "code": -32000,
+                            "message": full_msg,
+                        },
+                    }
+                    sys.stdout.write(json.dumps(error_resp) + "\n")
+                    sys.stdout.flush()
+    except Exception:
+        pass
 
 
 async def main(args: Any = None) -> None:
@@ -320,14 +412,8 @@ async def main(args: Any = None) -> None:
     config, validation_errors = create_validated_config(args, "mcp")
 
     if validation_errors:
-        # CRITICAL: Cannot print to stderr in MCP mode - breaks JSON-RPC protocol
-        # Log to debug file if available, then exit
-        debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log")
-        try:
-            with open(debug_file, "a") as f:
-                f.write(f"MCP validation errors: {validation_errors}\n")
-        except Exception:
-            pass
+        msg = "; ".join(str(e) for e in validation_errors)
+        _respond_with_startup_error(Exception(f"Configuration errors: {msg}"), config)
         sys.exit(1)
 
     # Create and run the stdio server
@@ -335,16 +421,7 @@ async def main(args: Any = None) -> None:
         server = StdioMCPServer(config, args=args)
         await server.run()
     except Exception as e:
-        # CRITICAL: Cannot print to stderr in MCP mode - breaks JSON-RPC protocol
-        # Log to debug file if available, then exit
-        debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log")
-        try:
-            import traceback
-            with open(debug_file, "a") as f:
-                f.write(f"MCP server error: {e}\n")
-                traceback.print_exc(file=f)
-        except Exception:
-            pass
+        _respond_with_startup_error(e, config)
         sys.exit(1)
 
 

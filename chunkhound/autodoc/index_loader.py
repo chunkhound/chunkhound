@@ -105,4 +105,3 @@ def load_topics(
         )
 
     return topics, missing
-
