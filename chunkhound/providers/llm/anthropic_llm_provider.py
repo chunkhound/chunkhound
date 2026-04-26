@@ -1,9 +1,12 @@
 """Anthropic LLM provider implementation for ChunkHound deep research.
 
-Supports Claude 4.5 generation models including Opus 4.5 with advanced features:
-- Extended thinking with configurable budget
-- Interleaved thinking for sophisticated tool use reasoning
-- Effort parameter for token usage vs thoroughness tradeoff (Opus 4.5 only)
+Supports Claude 4.5, 4.6, 4.7, and Mythos generation models:
+- Adaptive thinking (Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos)
+- Manual extended thinking with configurable budget_tokens (Opus 4.5 and older)
+- Interleaved thinking for tool use (auto-enabled in adaptive mode)
+- Effort parameter for token usage vs thoroughness tradeoff
+- Automatic prompt caching
+- Task budgets for agentic loops (Opus 4.7 beta)
 - Context management for automatic tool result and thinking block clearing
 """
 
@@ -27,54 +30,117 @@ except ImportError:
     logger.warning("Anthropic package not available")
 
 
-# Beta headers for various features
-BETA_EFFORT = "effort-2025-11-24"
+# Beta headers
 BETA_CONTEXT_MANAGEMENT = "context-management-2025-06-27"
 BETA_INTERLEAVED_THINKING = "interleaved-thinking-2025-05-14"
 BETA_STRUCTURED_OUTPUTS = "structured-outputs-2025-11-13"
+BETA_TASK_BUDGETS = "task-budgets-2026-03-13"
 
-# Models that support effort parameter
-EFFORT_SUPPORTED_MODELS = {"claude-opus-4-5-20251101"}
+# Model-family prefixes used for capability detection. Matches both the stable
+# alias (e.g. "claude-opus-4-7") and dated variants (e.g. "claude-opus-4-7-20260416").
+_EFFORT_FAMILY_PREFIXES: tuple[str, ...] = (
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+    "claude-mythos-preview",
+)
+_MAX_EFFORT_PREFIXES: tuple[str, ...] = (
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+    "claude-mythos-preview",
+)
+_XHIGH_EFFORT_PREFIXES: tuple[str, ...] = ("claude-opus-4-7",)
+_ADAPTIVE_THINKING_PREFIXES: tuple[str, ...] = (
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+    "claude-mythos-preview",
+)
+_ADAPTIVE_ONLY_PREFIXES: tuple[str, ...] = (
+    "claude-opus-4-7",
+    "claude-mythos-preview",
+)
+_TASK_BUDGET_PREFIXES: tuple[str, ...] = ("claude-opus-4-7",)
+
+
+def _matches_family(model: str, prefixes: tuple[str, ...]) -> bool:
+    """True if ``model`` matches any family prefix as an exact name or a
+    prefix followed by a ``-`` delimiter.
+
+    Guards against collisions with hypothetical future model names whose
+    major-version component happens to begin with an existing prefix
+    (e.g. a future ``claude-opus-4-50`` must not inherit Opus 4.5 flags).
+    """
+    return any(model == p or model.startswith(f"{p}-") for p in prefixes)
+
+
+def supports_effort(model: str) -> bool:
+    """True when the model accepts the output_config.effort parameter."""
+    return _matches_family(model, _EFFORT_FAMILY_PREFIXES)
+
+
+def supports_effort_level(model: str, level: str) -> bool:
+    """True when the model supports the given effort level."""
+    if level in ("low", "medium", "high"):
+        return supports_effort(model)
+    if level == "max":
+        return _matches_family(model, _MAX_EFFORT_PREFIXES)
+    if level == "xhigh":
+        return _matches_family(model, _XHIGH_EFFORT_PREFIXES)
+    return False
+
+
+def supports_adaptive_thinking(model: str) -> bool:
+    """True when the model accepts thinking.type == 'adaptive'."""
+    return _matches_family(model, _ADAPTIVE_THINKING_PREFIXES)
+
+
+def requires_adaptive_thinking(model: str) -> bool:
+    """True when adaptive is the only supported thinking mode (rejects manual)."""
+    return _matches_family(model, _ADAPTIVE_ONLY_PREFIXES)
+
+
+def supports_task_budget(model: str) -> bool:
+    """True when the model supports the task_budget beta."""
+    return _matches_family(model, _TASK_BUDGET_PREFIXES)
 
 
 class AnthropicLLMProvider(LLMProvider):
     """Anthropic LLM provider using Claude models.
 
-    Supports extended thinking, tool use, and advanced Opus 4.5 features.
+    Supports adaptive/manual extended thinking, tool use, effort control, and
+    automatic context management across Opus 4.5/4.6/4.7 and Sonnet 4.5/4.6.
 
-    Extended Thinking:
-        - Enables Claude to show reasoning process
-        - Supported models: All Claude 4.5 models (Opus 4.5, Sonnet 4.5, Haiku 4.5)
-          and legacy models (Opus 4.1, Opus 4, Sonnet 4, Sonnet 3.7)
-        - Returns thinking, redacted_thinking, and text content blocks
-        - Thinking budget configurable (min 1024 tokens)
+    Thinking modes:
+        - Adaptive (Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos): Claude decides
+          when to think. Interleaved thinking is auto-enabled. Opus 4.7 rejects
+          manual mode.
+        - Manual (Opus 4.5 and older): fixed thinking_budget_tokens.
+        - Off: omit thinking.
 
-    Interleaved Thinking (Claude 4 models):
-        - Enables thinking between tool calls
-        - More sophisticated reasoning after receiving tool results
-        - Requires beta header: interleaved-thinking-2025-05-14
+    Effort parameter:
+        - Supported on Opus 4.5, Opus 4.6, Opus 4.7, Sonnet 4.6, Mythos.
+        - Levels: low, medium, high (default), max (4.6+), xhigh (Opus 4.7 only).
+        - Affects all tokens: text, tool calls, and thinking.
 
-    Effort Parameter (Opus 4.5 only):
-        - Controls token usage vs thoroughness tradeoff
-        - Levels: high (default), medium, low
-        - Affects all tokens: text, tool calls, and thinking
-        - Requires beta header: effort-2025-11-24
+    Interleaved thinking:
+        - Auto-enabled in adaptive mode.
+        - Manual mode on Sonnet 4.6: requires beta interleaved-thinking-2025-05-14.
 
-    Context Management:
-        - Automatic clearing of tool results and thinking blocks
-        - Helps manage long conversations within context limits
-        - Requires beta header: context-management-2025-06-27
+    Context management:
+        - Automatic clearing of tool results and thinking blocks.
+        - Requires beta header: context-management-2025-06-27.
 
-    Tool Use:
-        - Client tools: User-defined, executed on client side
-        - Server tools: Anthropic-hosted (e.g., web search)
-        - Automatic tool request/result handling
+    Tool use:
+        - Client tools (user-defined) and server tools (Anthropic-hosted).
     """
 
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "claude-sonnet-4-5-20250929",
+        model: str = "claude-sonnet-4-6",
         base_url: str | None = None,
         timeout: int = 60,
         max_retries: int = 3,
@@ -86,29 +152,55 @@ class AnthropicLLMProvider(LLMProvider):
         clear_thinking_keep_turns: int | None = None,
         clear_tool_uses_trigger_tokens: int | None = None,
         clear_tool_uses_keep: int | None = None,
+        thinking_mode: str | None = None,
+        thinking_display: str | None = None,
+        prompt_caching: bool = True,
+        cache_ttl: str | None = None,
+        task_budget_tokens: int | None = None,
     ):
         """Initialize Anthropic LLM provider.
 
         Args:
             api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
-            model: Model name to use
-                Latest models (Claude 4.5 generation):
-                - claude-opus-4-5-20251101: Most capable model with effort control
-                - claude-sonnet-4-5-20250929: Smartest model for complex agents and coding
-                - claude-haiku-4-5-20251001: Fastest model with near-frontier intelligence
-                Legacy models:
-                - claude-opus-4-1-20250805: Exceptional model for specialized reasoning
+            model: Model name to use. Supported families:
+                - claude-opus-4-7: adaptive thinking only. Effort levels
+                  low/medium/high/xhigh/max. xhigh recommended for coding.
+                - claude-opus-4-6: adaptive thinking. Effort low/medium/high/max.
+                - claude-sonnet-4-6: adaptive thinking. Effort low/medium/high/max.
+                - claude-opus-4-5-20251101: manual thinking, effort low/medium/high.
+                - claude-sonnet-4-5-20250929: manual thinking, no effort.
+                - claude-haiku-4-5-20251001: manual thinking, no effort.
             base_url: Base URL for Anthropic API (optional for custom endpoints)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
-            thinking_enabled: Enable extended thinking (shows reasoning process)
-            thinking_budget_tokens: Token budget for thinking (min 1024, recommend 10000)
-            interleaved_thinking: Enable thinking between tool calls (Claude 4 only)
-            effort: Token usage level - "low", "medium", or "high" (Opus 4.5 only)
+            thinking_enabled: Enable extended thinking. Combined with
+                thinking_mode (or auto-selected when mode is None) to choose
+                adaptive vs manual vs off.
+            thinking_budget_tokens: Token budget for manual thinking
+                (min 1024). Ignored in adaptive mode.
+            interleaved_thinking: Enable thinking between tool calls in manual
+                mode. Auto-enabled for adaptive mode regardless of this flag.
+            effort: Token usage level - "low", "medium", "high", "xhigh"
+                (Opus 4.7 only), or "max" (4.6+ only).
             context_management_enabled: Enable automatic context management
             clear_thinking_keep_turns: Number of thinking turns to preserve (None=all)
             clear_tool_uses_trigger_tokens: Token threshold to trigger tool clearing
             clear_tool_uses_keep: Number of tool use pairs to keep after clearing
+            thinking_mode: Explicit thinking mode: "adaptive", "manual", "off",
+                or "auto" / None for automatic selection based on model.
+            thinking_display: "summarized" (default on 4.6) or "omitted"
+                (default on Opus 4.7 / Mythos). Controls whether thinking text
+                is returned in the response.
+            prompt_caching: When True (default), sends a top-level
+                cache_control={"type": "ephemeral"} so the Messages API caches
+                the system prompt + message prefix automatically. Cache hits
+                cost 10% of base input, writes cost 25% more for 5m TTL.
+            cache_ttl: Cache TTL. None uses API default (5m). "1h" costs 2x
+                writes but is useful when the same prefix is reused less
+                often than every 5 minutes.
+            task_budget_tokens: Total token budget across a full agentic loop
+                (beta, Opus 4.7 only). Advisory cap visible to the
+                model; min 20000. Leave None for open-ended quality work.
         """
         if not ANTHROPIC_AVAILABLE:
             raise ImportError("Anthropic package not available")
@@ -116,17 +208,92 @@ class AnthropicLLMProvider(LLMProvider):
         self._model = model
         self._timeout = timeout
         self._max_retries = max_retries
-        self._thinking_enabled = thinking_enabled
         self._thinking_budget_tokens = max(1024, thinking_budget_tokens)
         self._interleaved_thinking = interleaved_thinking
-
-        # Effort parameter (Opus 4.5 only)
-        self._effort = effort
-        if effort and model not in EFFORT_SUPPORTED_MODELS:
+        self._prompt_caching = prompt_caching
+        self._cache_ttl = cache_ttl
+        if task_budget_tokens is not None and not supports_task_budget(model):
             logger.warning(
-                f"Effort parameter is only supported on Opus 4.5. "
-                f"Model {model} will ignore effort={effort}"
+                f"Model {model} does not support task_budget; ignoring "
+                f"task_budget_tokens={task_budget_tokens}"
             )
+            task_budget_tokens = None
+        if task_budget_tokens is not None and task_budget_tokens < 20000:
+            raise ValueError(
+                f"task_budget_tokens ({task_budget_tokens}) is below the API "
+                "minimum of 20000; set it to at least 20000 or pass None to "
+                "disable."
+            )
+        self._task_budget_tokens = task_budget_tokens
+
+        # Resolve the effective thinking mode. The historical API uses
+        # thinking_enabled (bool); new callers can pass thinking_mode directly.
+        requested_mode = (thinking_mode or "auto").lower()
+        if requested_mode not in ("auto", "off", "manual", "adaptive"):
+            raise ValueError(
+                f"Unknown thinking_mode={thinking_mode!r}; "
+                "expected one of auto, off, manual, adaptive"
+            )
+
+        if requested_mode in ("manual", "adaptive") and not thinking_enabled:
+            raise ValueError(
+                f"thinking_enabled=False conflicts with thinking_mode={requested_mode!r}. "
+                "Pass thinking_enabled=True, or use thinking_mode='off' to disable."
+            )
+
+        if requested_mode == "off" and thinking_enabled:
+            logger.debug(
+                "thinking_mode='off' overrides thinking_enabled=True; thinking disabled."
+            )
+
+        if requested_mode == "off" or not thinking_enabled:
+            resolved_mode = "off"
+        elif requested_mode == "auto":
+            resolved_mode = (
+                "adaptive" if supports_adaptive_thinking(model) else "manual"
+            )
+        elif requested_mode == "manual" and requires_adaptive_thinking(model):
+            logger.warning(
+                f"Model {model} requires adaptive thinking; falling back to "
+                "adaptive (thinking_budget_tokens is ignored in adaptive mode; "
+                "thinking can consume up to max_tokens)"
+            )
+            resolved_mode = "adaptive"
+        elif requested_mode == "adaptive" and not supports_adaptive_thinking(model):
+            logger.warning(
+                f"Model {model} does not support adaptive thinking; "
+                "falling back to manual"
+            )
+            resolved_mode = "manual"
+        else:
+            resolved_mode = requested_mode
+
+        self._thinking_mode = resolved_mode
+        self._thinking_enabled = resolved_mode in ("manual", "adaptive")
+
+        if thinking_display is not None and resolved_mode != "adaptive":
+            logger.warning(
+                f"thinking_display={thinking_display!r} only applies in adaptive "
+                f"mode; resolved mode is {resolved_mode!r}, ignoring."
+            )
+            thinking_display = None
+        self._thinking_display = thinking_display
+
+        if effort is not None:
+            effort = effort.strip().lower()
+            if not supports_effort(model):
+                logger.warning(
+                    f"Model {model} does not accept the effort parameter; "
+                    f"ignoring effort={effort!r}"
+                )
+                effort = None
+            elif not supports_effort_level(model, effort):
+                logger.warning(
+                    f"Effort level {effort!r} is not supported on {model}; "
+                    "dropping it (request would otherwise be rejected by the API)"
+                )
+                effort = None
+        self._effort = effort
 
         # Context management settings
         self._context_management_enabled = context_management_enabled
@@ -241,27 +408,88 @@ class AnthropicLLMProvider(LLMProvider):
 
         return thinking_blocks
 
-    def _get_beta_headers(self) -> list[str]:
-        """Build list of beta headers based on enabled features.
+    def _get_beta_headers(self, thinking_active: bool | None = None) -> list[str]:
+        """Build list of beta headers for the enabled features.
+
+        Args:
+            thinking_active: Override whether thinking is active for this call.
+                The interleaved-thinking beta header is only emitted when
+                manual-mode thinking is active for the request.
 
         Returns:
-            List of beta header strings to include in API requests
+            Headers for context management, manual-mode interleaved thinking,
+            and task budgets, in that order. Adaptive mode auto-enables
+            interleaved thinking without a header.
         """
-        headers = []
+        headers: list[str] = []
 
-        # Effort parameter (Opus 4.5 only)
-        if self._effort and self._model in EFFORT_SUPPORTED_MODELS:
-            headers.append(BETA_EFFORT)
-
-        # Context management
         if self._context_management_enabled:
             headers.append(BETA_CONTEXT_MANAGEMENT)
 
-        # Interleaved thinking
-        if self._interleaved_thinking and self._thinking_enabled:
+        is_thinking_active = (
+            thinking_active if thinking_active is not None else self._thinking_enabled
+        )
+        if (
+            self._interleaved_thinking
+            and self._thinking_mode == "manual"
+            and is_thinking_active
+        ):
             headers.append(BETA_INTERLEAVED_THINKING)
 
+        if self._task_budget_tokens is not None:
+            headers.append(BETA_TASK_BUDGETS)
+
         return headers
+
+    def _build_thinking_config(
+        self, thinking_active: bool | None = None
+    ) -> dict[str, Any] | None:
+        """Build the thinking request block for the configured mode.
+
+        Args:
+            thinking_active: Override whether thinking is active for this call.
+                Pass False to force thinking off even when the provider has
+                it enabled (e.g. when tool_choice is incompatible with
+                extended thinking).
+
+        Returns:
+            dict shaped for the Messages API, or None when thinking is off.
+        """
+        is_active = (
+            thinking_active if thinking_active is not None else self._thinking_enabled
+        )
+        if not is_active or self._thinking_mode == "off":
+            return None
+
+        if self._thinking_mode == "adaptive":
+            cfg: dict[str, Any] = {"type": "adaptive"}
+            if self._thinking_display:
+                cfg["display"] = self._thinking_display
+            return cfg
+
+        # Manual mode
+        return {
+            "type": "enabled",
+            "budget_tokens": self._thinking_budget_tokens,
+        }
+
+    def _ensure_thinking_max_tokens(
+        self, request_kwargs: dict[str, Any], max_completion_tokens: int
+    ) -> None:
+        """Raise max_tokens to accommodate the manual thinking budget.
+
+        Only meaningful in manual mode. Callers must gate invocation on
+        ``self._thinking_mode == "manual"`` -- adaptive thinking has no fixed
+        budget and uses max_tokens directly.
+        """
+        min_max_tokens = self._thinking_budget_tokens + 1000
+        if max_completion_tokens < min_max_tokens:
+            logger.warning(
+                f"max_completion_tokens ({max_completion_tokens}) too small for "
+                f"thinking budget ({self._thinking_budget_tokens}). "
+                f"Increasing to {min_max_tokens}"
+            )
+            request_kwargs["max_tokens"] = min_max_tokens
 
     def _build_context_management(
         self, thinking_active: bool | None = None
@@ -315,15 +543,65 @@ class AnthropicLLMProvider(LLMProvider):
 
         return {"edits": edits}
 
-    def _build_output_config(self) -> dict[str, Any] | None:
-        """Build output config for effort parameter (Opus 4.5 only).
+    def _build_output_config(
+        self, json_schema: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Build output_config with effort, structured-output format, and task budget.
+
+        Effort is applied only when the model supports it. task_budget is
+        applied only when task_budget_tokens was accepted in __init__ (which
+        requires an Opus 4.7-family model).
+
+        Args:
+            json_schema: Optional JSON schema for structured outputs.
 
         Returns:
-            Output config dict for API request, or None if not applicable
+            output_config dict or None when empty.
         """
-        if self._effort and self._model in EFFORT_SUPPORTED_MODELS:
-            return {"effort": self._effort}
-        return None
+        cfg: dict[str, Any] = {}
+        if self._effort and supports_effort_level(self._model, self._effort):
+            cfg["effort"] = self._effort
+        if json_schema is not None:
+            cfg["format"] = {"type": "json_schema", "schema": json_schema}
+        if self._task_budget_tokens is not None:
+            cfg["task_budget"] = {
+                "type": "tokens",
+                "total": self._task_budget_tokens,
+            }
+        return cfg or None
+
+    def _build_cache_control(self) -> dict[str, Any] | None:
+        """Build the top-level cache_control for automatic prompt caching."""
+        if not self._prompt_caching:
+            return None
+        cc: dict[str, Any] = {"type": "ephemeral"}
+        if self._cache_ttl:
+            cc["ttl"] = self._cache_ttl
+        return cc
+
+    def _apply_common_request_fields(
+        self,
+        request_kwargs: dict[str, Any],
+        json_schema: dict[str, Any] | None = None,
+        thinking_active: bool | None = None,
+    ) -> None:
+        """Attach output_config, cache_control, and context_management.
+
+        Pass thinking_active=False when the caller disabled thinking for this
+        specific request (e.g. tool_choice forced it off) so
+        context_management does not emit a clear_thinking edit.
+        """
+        output_config = self._build_output_config(json_schema=json_schema)
+        if output_config:
+            request_kwargs["output_config"] = output_config
+        cache_control = self._build_cache_control()
+        if cache_control:
+            request_kwargs["cache_control"] = cache_control
+        context_management = self._build_context_management(
+            thinking_active=thinking_active,
+        )
+        if context_management:
+            request_kwargs["context_management"] = context_management
 
     async def _create_message(self, request_kwargs: dict[str, Any]) -> Any:
         """Create a message using the appropriate endpoint (beta or standard).
@@ -379,38 +657,23 @@ class AnthropicLLMProvider(LLMProvider):
             if system:
                 request_kwargs["system"] = system
 
-            # Add thinking configuration if enabled
-            if self._thinking_enabled:
-                # max_tokens must be greater than thinking.budget_tokens
-                # Ensure max_tokens is at least budget + 1000 for actual response
-                min_max_tokens = self._thinking_budget_tokens + 1000
-                if max_completion_tokens < min_max_tokens:
-                    logger.warning(
-                        f"max_completion_tokens ({max_completion_tokens}) too small for "
-                        f"thinking budget ({self._thinking_budget_tokens}). "
-                        f"Increasing to {min_max_tokens}"
+            # Thinking configuration (adaptive / manual / off)
+            thinking_cfg = self._build_thinking_config()
+            thinking_active = thinking_cfg is not None
+            if thinking_cfg is not None:
+                if self._thinking_mode == "manual":
+                    self._ensure_thinking_max_tokens(
+                        request_kwargs, max_completion_tokens
                     )
-                    request_kwargs["max_tokens"] = min_max_tokens
+                request_kwargs["thinking"] = thinking_cfg
 
-                request_kwargs["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": self._thinking_budget_tokens,
-                }
-
-            # Add beta headers for advanced features
-            beta_headers = self._get_beta_headers()
+            beta_headers = self._get_beta_headers(thinking_active=thinking_active)
             if beta_headers:
                 request_kwargs["betas"] = beta_headers
 
-            # Add output config for effort parameter (Opus 4.5 only)
-            output_config = self._build_output_config()
-            if output_config:
-                request_kwargs["output_config"] = output_config
-
-            # Add context management if enabled
-            context_management = self._build_context_management()
-            if context_management:
-                request_kwargs["context_management"] = context_management
+            self._apply_common_request_fields(
+                request_kwargs, thinking_active=thinking_active
+            )
 
             response = await self._create_message(request_kwargs)
 
@@ -501,7 +764,7 @@ class AnthropicLLMProvider(LLMProvider):
         Features:
         - Guaranteed valid JSON via constrained decoding (no parsing errors)
         - Compatible with extended thinking (grammar resets between sections)
-        - Compatible with effort parameter (Opus 4.5)
+        - Compatible with the effort parameter on models that support it
         - Compatible with context management
 
         Note: Incompatible with citations and message prefilling.
@@ -532,60 +795,31 @@ class AnthropicLLMProvider(LLMProvider):
                 "messages": messages,
                 "max_tokens": max_completion_tokens,
                 "timeout": request_timeout,
-                # Native structured outputs via output_format
-                "output_format": {
-                    "type": "json_schema",
-                    "schema": json_schema,
-                },
             }
 
             # Add system prompt if provided
             if system:
                 request_kwargs["system"] = system
 
-            # Build beta headers - structured outputs is always required
-            beta_headers = [BETA_STRUCTURED_OUTPUTS]
-            if self._effort and self._model in EFFORT_SUPPORTED_MODELS:
-                beta_headers.append(BETA_EFFORT)
-            if self._context_management_enabled:
-                beta_headers.append(BETA_CONTEXT_MANAGEMENT)
-            # Extended thinking is compatible with structured outputs
-            # (grammar resets between sections, allowing Claude to think freely)
-            if self._thinking_enabled and self._interleaved_thinking:
-                beta_headers.append(BETA_INTERLEAVED_THINKING)
-
-            request_kwargs["betas"] = beta_headers
-
-            # Add thinking configuration if enabled
-            thinking_active = False
-            if self._thinking_enabled:
-                # max_tokens must be greater than thinking.budget_tokens
-                min_max_tokens = self._thinking_budget_tokens + 1000
-                if max_completion_tokens < min_max_tokens:
-                    logger.warning(
-                        f"max_completion_tokens ({max_completion_tokens}) too small for "
-                        f"thinking budget ({self._thinking_budget_tokens}). "
-                        f"Increasing to {min_max_tokens}"
+            # Thinking configuration (adaptive / manual / off)
+            thinking_cfg = self._build_thinking_config()
+            thinking_active = thinking_cfg is not None
+            if thinking_cfg is not None:
+                if self._thinking_mode == "manual":
+                    self._ensure_thinking_max_tokens(
+                        request_kwargs, max_completion_tokens
                     )
-                    request_kwargs["max_tokens"] = min_max_tokens
+                request_kwargs["thinking"] = thinking_cfg
 
-                request_kwargs["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": self._thinking_budget_tokens,
-                }
-                thinking_active = True
+            beta_headers = self._get_beta_headers(thinking_active=thinking_active)
+            if beta_headers:
+                request_kwargs["betas"] = beta_headers
 
-            # Add output config for effort parameter (Opus 4.5 only)
-            output_config = self._build_output_config()
-            if output_config:
-                request_kwargs["output_config"] = output_config
-
-            # Add context management if enabled
-            context_management = self._build_context_management(
-                thinking_active=thinking_active
+            self._apply_common_request_fields(
+                request_kwargs,
+                json_schema=json_schema,
+                thinking_active=thinking_active,
             )
-            if context_management:
-                request_kwargs["context_management"] = context_management
 
             response = await self._create_message(request_kwargs)
 
@@ -714,53 +948,30 @@ class AnthropicLLMProvider(LLMProvider):
                             "is incompatible with thinking"
                         )
 
-            # Add thinking configuration if enabled and compatible
-            if self._thinking_enabled and thinking_compatible:
-                # max_tokens must be greater than thinking.budget_tokens
-                # Ensure max_tokens is at least budget + 1000 for actual response
-                min_max_tokens = self._thinking_budget_tokens + 1000
-                if max_completion_tokens < min_max_tokens:
-                    logger.warning(
-                        f"max_completion_tokens ({max_completion_tokens}) too small for "
-                        f"thinking budget ({self._thinking_budget_tokens}). "
-                        f"Increasing to {min_max_tokens}"
+            # Thinking configuration (adaptive / manual / off), gated by
+            # tool_choice compatibility.
+            thinking_cfg = (
+                self._build_thinking_config() if thinking_compatible else None
+            )
+            if thinking_cfg is not None:
+                if self._thinking_mode == "manual":
+                    self._ensure_thinking_max_tokens(
+                        request_kwargs, max_completion_tokens
                     )
-                    request_kwargs["max_tokens"] = min_max_tokens
+                request_kwargs["thinking"] = thinking_cfg
 
-                request_kwargs["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": self._thinking_budget_tokens,
-                }
-
-            # Add beta headers for advanced features
-            beta_headers = []
-            # Check if any tools have strict: true for guaranteed schema validation
-            has_strict_tools = any(tool.get("strict") for tool in tools)
-            if has_strict_tools:
-                beta_headers.append(BETA_STRUCTURED_OUTPUTS)
-            if self._effort and self._model in EFFORT_SUPPORTED_MODELS:
-                beta_headers.append(BETA_EFFORT)
-            if self._context_management_enabled:
-                beta_headers.append(BETA_CONTEXT_MANAGEMENT)
-            # Only add interleaved thinking header if thinking is enabled and compatible
-            if (
-                self._interleaved_thinking
-                and self._thinking_enabled
-                and thinking_compatible
-            ):
-                beta_headers.append(BETA_INTERLEAVED_THINKING)
+            # Structured outputs is a beta for strict tool use only; JSON
+            # outputs via output_config.format don't need the header.
+            thinking_active = thinking_cfg is not None
+            beta_headers = self._get_beta_headers(thinking_active=thinking_active)
+            if any(tool.get("strict") for tool in tools):
+                beta_headers.insert(0, BETA_STRUCTURED_OUTPUTS)
             if beta_headers:
                 request_kwargs["betas"] = beta_headers
 
-            # Add output config for effort parameter (Opus 4.5 only)
-            output_config = self._build_output_config()
-            if output_config:
-                request_kwargs["output_config"] = output_config
-
-            # Add context management if enabled
-            context_management = self._build_context_management()
-            if context_management:
-                request_kwargs["context_management"] = context_management
+            self._apply_common_request_fields(
+                request_kwargs, thinking_active=thinking_active
+            )
 
             response = await self._create_message(request_kwargs)
 
@@ -836,12 +1047,14 @@ class AnthropicLLMProvider(LLMProvider):
                 "model": self._model,
                 "test_response": response.content[:50],
                 "thinking_enabled": self._thinking_enabled,
+                "thinking_mode": self._thinking_mode,
                 "interleaved_thinking": self._interleaved_thinking,
                 "context_management_enabled": self._context_management_enabled,
             }
-            # Only include effort if set and supported
-            if self._effort and self._model in EFFORT_SUPPORTED_MODELS:
+            if self._effort and supports_effort(self._model):
                 result["effort"] = self._effort
+            if self._thinking_display:
+                result["thinking_display"] = self._thinking_display
             return result
         except Exception as e:
             return {
@@ -920,38 +1133,23 @@ class AnthropicLLMProvider(LLMProvider):
             if system:
                 request_kwargs["system"] = system
 
-            # Add thinking configuration if enabled
-            if self._thinking_enabled:
-                # max_tokens must be greater than thinking.budget_tokens
-                # Ensure max_tokens is at least budget + 1000 for actual response
-                min_max_tokens = self._thinking_budget_tokens + 1000
-                if max_completion_tokens < min_max_tokens:
-                    logger.warning(
-                        f"max_completion_tokens ({max_completion_tokens}) too small for "
-                        f"thinking budget ({self._thinking_budget_tokens}). "
-                        f"Increasing to {min_max_tokens}"
+            # Thinking configuration (adaptive / manual / off)
+            thinking_cfg = self._build_thinking_config()
+            thinking_active = thinking_cfg is not None
+            if thinking_cfg is not None:
+                if self._thinking_mode == "manual":
+                    self._ensure_thinking_max_tokens(
+                        request_kwargs, max_completion_tokens
                     )
-                    request_kwargs["max_tokens"] = min_max_tokens
+                request_kwargs["thinking"] = thinking_cfg
 
-                request_kwargs["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": self._thinking_budget_tokens,
-                }
-
-            # Add beta headers for advanced features
-            beta_headers = self._get_beta_headers()
+            beta_headers = self._get_beta_headers(thinking_active=thinking_active)
             if beta_headers:
                 request_kwargs["betas"] = beta_headers
 
-            # Add output config for effort parameter (Opus 4.5 only)
-            output_config = self._build_output_config()
-            if output_config:
-                request_kwargs["output_config"] = output_config
-
-            # Add context management if enabled
-            context_management = self._build_context_management()
-            if context_management:
-                request_kwargs["context_management"] = context_management
+            self._apply_common_request_fields(
+                request_kwargs, thinking_active=thinking_active
+            )
 
             # Create streaming response - use beta endpoint when beta features are enabled
             beta_headers = request_kwargs.pop("betas", None)
