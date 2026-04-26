@@ -11,15 +11,42 @@ import json
 from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from loguru import logger
+
+from chunkhound.core.exceptions import CompactionError
+
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
     import mcp.types as types  # noqa: F401
 
-from .tools import TOOL_REGISTRY, execute_tool
-
-if TYPE_CHECKING:
     from chunkhound.database_factory import DatabaseServices
     from chunkhound.embeddings import EmbeddingManager
     from chunkhound.llm_manager import LLMManager
+
+from .tools import TOOL_REGISTRY, execute_tool
+
+
+def compaction_error_response(exc: CompactionError) -> dict[str, Any]:
+    """Build structured error response for a CompactionError with appropriate hint."""
+    error_response = format_error_response(exc, include_traceback=False)
+    if exc.operation == "recovery" and not exc.recoverable:
+        error_response["error"]["retry_hint"] = (
+            "Database recovery failed after interrupted compaction. "
+            "Restore from backup or re-index."
+        )
+    elif exc.operation == "post_reindex":
+        error_response["error"]["retry_hint"] = (
+            "Post-compaction catch-up reindex failed. Retry after recovery or "
+            "restart the MCP server."
+        )
+    elif exc.operation == "connection":
+        error_response["error"]["retry_hint"] = (
+            "Database compaction in progress. Retry in a few seconds."
+        )
+    else:
+        error_response["error"]["retry_hint"] = (
+            "Compaction failed. Check logs for details."
+        )
+    return error_response
 
 T = TypeVar("T")
 
@@ -224,6 +251,9 @@ async def handle_tool_call(
             response_text = format_tool_response(result, format_type="json")
         return [types.TextContent(type="text", text=response_text)]
 
+    except CompactionError as e:
+        logger.debug("Request rejected: database compaction in progress")
+        return [types.TextContent(type="text", text=json.dumps(compaction_error_response(e)))]
     except Exception as e:
         error_response = format_error_response(e, include_traceback=debug_mode)
         return [types.TextContent(type="text", text=json.dumps(error_response))]

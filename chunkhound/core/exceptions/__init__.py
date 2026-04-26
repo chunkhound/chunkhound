@@ -13,6 +13,7 @@ The exception hierarchy is designed to:
 
 from chunkhound.core.exceptions.core import (
     ChunkHoundError,
+    CompactionError,
     ConfigurationError,
     DatabaseError,
     DiskUsageLimitExceededError,
@@ -27,6 +28,7 @@ __all__ = [
     # Base exception
     "ChunkHoundError",
     # Domain-specific exceptions
+    "CompactionError",
     "ValidationError",
     "ModelError",
     "EmbeddingError",

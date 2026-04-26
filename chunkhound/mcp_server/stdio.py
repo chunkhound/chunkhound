@@ -10,6 +10,7 @@ ARCHITECTURE: Global state required for stdio communication model
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -44,10 +45,12 @@ if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps at import
     from mcp.server.models import InitializationOptions  # noqa: F401
 
 from chunkhound.core.config.config import Config  # noqa: E402
+from chunkhound.core.exceptions import CompactionError  # noqa: E402
 from chunkhound.version import __version__  # noqa: E402
 
 from .base import MCPServerBase  # noqa: E402
-from .common import handle_tool_call  # noqa: E402
+from .common import compaction_error_response, handle_tool_call  # noqa: E402
+
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
 logging.disable(logging.CRITICAL)
@@ -159,10 +162,17 @@ class StdioMCPServer(MCPServerBase):
             tool_name: str, arguments: dict[str, Any]
         ) -> list[types.TextContent]:
             """Universal tool handler that routes to the unified handler."""
+            try:
+                services = await self.ensure_services()
+            except CompactionError as exc:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps(compaction_error_response(exc)),
+                )]
             return await handle_tool_call(
                 tool_name=tool_name,
                 arguments=arguments,
-                services=await self.ensure_services(),
+                services=services,
                 embedding_manager=self.embedding_manager,
                 initialization_complete=self._initialization_complete,
                 debug_mode=self.debug_mode,

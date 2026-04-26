@@ -208,6 +208,9 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "heavy: generates large synthetic trees and is skipped by default",
+    "native_watcher: run realtime tests with native filesystem events",
+    "polling_watcher: run realtime tests with polling fallback enabled",
 ]
 
 [dependency-groups]

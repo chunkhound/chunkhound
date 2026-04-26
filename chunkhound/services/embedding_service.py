@@ -1,6 +1,7 @@
 """Embedding service for ChunkHound - manages embedding generation and caching."""
 
 import asyncio
+import os
 from typing import Any
 
 from loguru import logger
@@ -78,6 +79,47 @@ class EmbeddingService(BaseService):
 
         self.progress = progress
 
+        # Database optimization tracking for periodic maintenance.
+        # Counter tracks batches processed for periodic optimization trigger.
+        # No lock needed: asyncio event loop guarantees single-threaded execution.
+        # All counter updates happen sequentially in result processing loop (line 677).
+        self._optimization_batch_frequency = self._parse_optimization_frequency()
+        self._completed_batches = 0
+
+    def _parse_optimization_frequency(self) -> int:
+        """Parse optimization batch frequency from environment with validation.
+
+        Reads CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY environment
+        variable. Ensures value is positive integer, falls back to default
+        on any error.
+
+        Returns:
+            Positive integer batch frequency (default: 1000)
+        """
+        default_frequency = 1000
+        env_var = "CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY"
+
+        try:
+            value_str = os.getenv(env_var, str(default_frequency))
+            value = int(value_str)
+
+            if value <= 0:
+                logger.warning(
+                    f"{env_var}={value} is invalid (must be positive). "
+                    f"Using default: {default_frequency}"
+                )
+                return default_frequency
+
+            return value
+
+        except ValueError as e:
+            logger.warning(
+                f"{env_var}={os.getenv(env_var)!r} is invalid "
+                f"(must be integer). Using default: {default_frequency}. "
+                f"Error: {e}"
+            )
+            return default_frequency
+
     def set_embedding_provider(self, provider: EmbeddingProvider) -> None:
         """Set or update the embedding provider.
 
@@ -148,21 +190,6 @@ class EmbeddingService(BaseService):
             raise ValueError("chunk_ids and chunk_texts must have the same length")
 
         try:
-            # Debug log entry point to confirm our code executes
-            import os
-            from datetime import datetime
-
-            debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log")
-            timestamp = datetime.now().isoformat()
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{timestamp}] [ENTRY] Starting embedding generation for {len(chunk_ids)} chunks\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
-
             logger.debug(f"Generating embeddings for {len(chunk_ids)} chunks")
 
             # Filter out chunks that already have embeddings
@@ -187,21 +214,6 @@ class EmbeddingService(BaseService):
             chunk_sizes = [len(text) for text in chunk_texts]
             max_size = max(chunk_sizes) if chunk_sizes else 0
             total_chars = sum(chunk_sizes)
-            # Debug log to trace execution path
-            import os
-            from datetime import datetime
-
-            debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log")
-            timestamp = datetime.now().isoformat()
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{timestamp}] [TOP-LEVEL] Failed to generate embeddings (chunks: {len(chunk_sizes)}, total_chars: {total_chars}, max_chars: {max_size}): {e}\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
-
             logger.error(
                 f"[EmbSvc-L101] Failed to generate embeddings (chunks: {len(chunk_sizes)}, total_chars: {total_chars}, max_chars: {max_size}): {e}"
             )
@@ -595,23 +607,6 @@ class EmbeddingService(BaseService):
                     # Log batch details for non-retryable errors or max retries exceeded
                     batch_sizes = [len(text) for _, text in batch]
                     max_size = max(batch_sizes) if batch_sizes else 0
-                    # Debug log to trace execution path
-                    import os
-                    from datetime import datetime
-
-                    debug_file = os.getenv(
-                        "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log"
-                    )
-                    timestamp = datetime.now().isoformat()
-                    try:
-                        with open(debug_file, "a") as f:
-                            f.write(
-                                f"[{timestamp}] [BATCH-PROCESS] Batch {batch_num + 1} failed (chunks: {len(batch)}, max_chars: {max_size}): {e}\n"
-                            )
-                            f.flush()
-                    except Exception:
-                        pass
-
                     logger.error(
                         f"[EmbSvc-BatchProcess] Batch {batch_num + 1} failed (chunks: {len(batch)}, max_chars: {max_size}): {e}"
                     )
@@ -659,12 +654,15 @@ class EmbeddingService(BaseService):
 
         # Count successful embeddings and track completed batches
         total_generated = 0
-        successful_batches = 0
         for i, result in enumerate(results):
             if isinstance(result, int):
                 total_generated += result
                 if result > 0:
-                    successful_batches += 1
+                    # Track completed batches for periodic optimization
+                    self._completed_batches += 1
+                    # All batches completed above via gather(); this loop
+                    # processes results sequentially, checking after each
+                    await self._maybe_optimize_database()
             else:
                 # Find the failed batch and extract chunk details
                 failed_batch = batches[i] if i < len(batches) else []
@@ -672,36 +670,51 @@ class EmbeddingService(BaseService):
                 max_chars = max(batch_sizes) if batch_sizes else 0
                 total_chars = sum(batch_sizes)
 
-                # Use debug_log mechanism to trace the mystery logging source
-                import os
-                import traceback
-                from datetime import datetime
-
-                # Write directly to debug file like the MCP debug_log mechanism
-                debug_file = os.getenv(
-                    "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log"
-                )
-                timestamp = datetime.now().isoformat()
-                debug_msg = (
-                    f"[{timestamp}] [EMBEDDING-DEBUG] Batch {i + 1} failed "
-                    f"(chunks: {len(batch_sizes)}, total_chars: {total_chars:,}, max_chars: {max_chars:,}): {result}\n"
-                    f"[{timestamp}] [EMBEDDING-DEBUG] Stack: {' -> '.join(traceback.format_stack()[-5:])}\n"
-                )
-
-                try:
-                    with open(debug_file, "a") as f:
-                        f.write(debug_msg)
-                        f.flush()
-                except Exception:
-                    pass  # Silently fail like the original debug_log
-
-                # Also keep the standard logging
+                # Log batch failure details
                 logger.error(
                     f"[EmbSvc-AsyncBatch] Batch {i + 1} failed "
                     f"(chunks: {len(batch_sizes)}, total_chars: {total_chars:,}, max_chars: {max_chars:,}): {result}"
                 )
 
         return total_generated
+
+    async def _maybe_optimize_database(self) -> None:
+        """Trigger periodic database optimization to prevent fragment accumulation.
+
+        Invoked after each successful batch inside the gather() result loop.
+        `self._completed_batches` is an instance attribute that persists across
+        `generate_embeddings_for_chunks()` calls, so optimization fires based
+        on total batch count regardless of gather() boundaries (and may fire
+        mid-loop if the threshold is crossed).
+
+        Only runs if:
+        1. Batch counter >= configured frequency
+        2. Database provider supports optimization (has has_reclaimable_space method)
+        3. Database actually needs optimization (has free blocks to reclaim)
+        """
+        if self._completed_batches >= self._optimization_batch_frequency:
+            has_reclaimable = await asyncio.to_thread(
+                self._db.has_reclaimable_space, operation="embedding-generation"
+            )
+            if has_reclaimable:
+                # Capture batch count before reset for accurate logging
+                batch_count = self._completed_batches
+
+                logger.info(
+                    f"Optimizing database after {batch_count} embedding batches..."
+                )
+
+                try:
+                    await asyncio.to_thread(self._db.optimize_tables)
+                except Exception as e:
+                    logger.warning(
+                        f"Database optimization failed after {batch_count} batches "
+                        f"(non-fatal): {e}"
+                    )
+                # Only reset after an optimization attempt so that when
+                # has_reclaimable_space returns False the counter keeps
+                # accumulating and the very next batch re-checks immediately.
+                self._completed_batches = 0
 
     def _create_token_aware_batches(
         self, chunk_data: list[tuple[ChunkId, str]]

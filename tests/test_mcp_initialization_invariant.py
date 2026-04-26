@@ -1,10 +1,11 @@
-"""Test that MCP server initialization is non-blocking (scan runs in background)."""
+"""Test MCP server initialization invariants and shutdown safety."""
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -77,14 +78,24 @@ class TestNonBlockingInitialization:
                 server = ConcreteMCPServer(config=config)
                 await server.initialize()
 
+                # Guards the internal contract between base.py and
+                # common.py/tools.py: handle_tool_call passes _scan_progress
+                # to tool functions that expect these keys.  If the dict
+                # shape changes, this test should break so the tool
+                # parameter wiring is updated in lockstep.
                 progress = server._scan_progress
 
-                # All expected fields should exist
                 assert "is_scanning" in progress
                 assert "files_processed" in progress
                 assert "chunks_created" in progress
                 assert "scan_started_at" in progress
                 assert "scan_completed_at" in progress
+                assert "background_compaction" in progress
+
+                background_compaction = progress["background_compaction"]
+                assert background_compaction["phase"] == "idle"
+                assert background_compaction["pending_recovery"] is False
+                assert background_compaction["retry_attempted"] is False
 
                 await server.cleanup()
 
@@ -117,3 +128,149 @@ class TestNonBlockingInitialization:
                 assert server._scan_progress["scan_completed_at"] is None
 
                 await server.cleanup()
+
+
+class TestShutdownSafety:
+    """Verify cleanup() skips provider disconnect when compaction thread is stuck."""
+
+    @pytest.mark.asyncio
+    async def test_stuck_compaction_skips_provider_disconnect(self, tmp_path: Path):
+        """When compaction thread won't stop, provider.close() must not be called."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+                assert server._initialized
+
+                # Simulate a compaction service whose thread never finishes.
+                stuck_event = threading.Event()  # never set
+                mock_compaction = MagicMock()
+                mock_compaction.compaction_thread_done = stuck_event
+                mock_compaction.shutdown = AsyncMock()
+                server._compaction_service = mock_compaction
+
+                # Patch asyncio.to_thread so the 5s wait returns immediately.
+                with patch("asyncio.to_thread", new_callable=AsyncMock):
+                    await server.cleanup()
+
+                # Provider must NOT have been closed/disconnected.
+                mock_provider.close.assert_not_called()
+                mock_provider.disconnect.assert_not_called()
+
+                # _initialized stays True (cleanup is terminal, no reconnection).
+                assert server._initialized
+
+    @pytest.mark.asyncio
+    async def test_cleanup_is_idempotent_after_stuck_compaction(
+        self, tmp_path: Path
+    ) -> None:
+        """A second cleanup() after a stuck-thread path must not race the thread.
+
+        After the stuck-thread early-return, _compaction_service is cleared but
+        the provider is still connected. A second cleanup() must not fall
+        through to provider.close() — the compaction thread may still be alive.
+
+        The contract is expressed as a ``side_effect`` on ``close``/
+        ``disconnect``: deleting the ``_cleanup_done`` idempotency guard
+        causes the second call to fall through and trip the AssertionError.
+        """
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+            # Contract: while the compaction thread is stuck alive, the
+            # provider must NEVER be closed or disconnected. Any invocation
+            # of either method is a correctness violation.
+            mock_provider.close.side_effect = AssertionError(
+                "MUST NOT close provider while compaction thread is alive"
+            )
+            mock_provider.disconnect.side_effect = AssertionError(
+                "MUST NOT disconnect provider while compaction thread is alive"
+            )
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+
+                # Event-like mock: reports "not set" forever, but wait()
+                # returns immediately so the real asyncio.to_thread call
+                # inside cleanup() completes without a 5-second delay.
+                stuck_event = MagicMock()
+                stuck_event.is_set.return_value = False
+                stuck_event.wait.return_value = False
+
+                mock_compaction = MagicMock()
+                mock_compaction.compaction_thread_done = stuck_event
+                mock_compaction.shutdown = AsyncMock()
+                server._compaction_service = mock_compaction
+
+                # First call hits the stuck-thread early-return branch.
+                await server.cleanup()
+                # Second call must be a no-op guarded by _cleanup_done. If
+                # the guard is removed, this call falls through to
+                # provider.close() and the side_effect fires.
+                await server.cleanup()
+
+                # Provider must never have been closed across both calls
+                assert mock_provider.close.call_count == 0
+                assert mock_provider.disconnect.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cleanup_serializes_via_lock(
+        self, tmp_path: Path
+    ) -> None:
+        """Two parallel cleanup() tasks must serialize and only close once.
+
+        Without ``_cleanup_lock``, two concurrent callers can both pass the
+        ``_cleanup_done`` guard before the ``finally`` clause flips the flag,
+        causing a double provider close. Asserts that only one call reaches
+        the provider teardown path.
+        """
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+
+                await asyncio.gather(server.cleanup(), server.cleanup())
+
+                # Provider closed exactly once across both concurrent calls
+                close_calls = (
+                    mock_provider.close.call_count
+                    + mock_provider.disconnect.call_count
+                )
+                assert close_calls == 1

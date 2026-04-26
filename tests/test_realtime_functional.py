@@ -14,6 +14,7 @@ import pytest
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from tests.utils.realtime_test_helpers import write_and_index_file
 from tests.utils.windows_compat import should_use_polling
 
 
@@ -21,7 +22,7 @@ class TestRealtimeFunctional:
     """Functional tests for real-time indexing - test what really matters."""
 
     @pytest.fixture
-    async def realtime_setup(self):
+    async def realtime_setup(self, watcher_mode):
         """Setup real service with temp database and project directory."""
         # Resolve immediately to handle symlinks (/var -> /private/var on macOS)
         # and Windows 8.3 short path names
@@ -45,9 +46,11 @@ class TestRealtimeFunctional:
         services = create_services(db_path, config)
         services.provider.connect()
 
-        # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
-        force_polling = should_use_polling()
-        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
+        # Use the backend requested by the test instead of inferring from platform.
+        force_polling = should_use_polling(watcher_mode)
+        realtime_service = RealtimeIndexingService(
+            services, config, force_polling=force_polling
+        )
 
         yield realtime_service, watch_dir, temp_dir, services
 
@@ -65,6 +68,7 @@ class TestRealtimeFunctional:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_service_can_start_and_stop(self, realtime_setup):
         """Test basic service lifecycle - start and stop without crashing."""
         service, watch_dir, _, _ = realtime_setup
@@ -82,6 +86,7 @@ class TestRealtimeFunctional:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_filesystem_monitoring_detects_changes(self, realtime_setup):
         """Test that filesystem changes are detected and processed."""
         service, watch_dir, _, services = realtime_setup
@@ -100,6 +105,7 @@ class TestRealtimeFunctional:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_multiple_rapid_changes_handling(self, realtime_setup):
         """Test handling multiple rapid file changes - stress test for concurrency."""
         service, watch_dir, _, _ = realtime_setup
@@ -125,6 +131,7 @@ class TestRealtimeFunctional:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_service_survives_processing_errors(self, realtime_setup):
         """Test service continues working after processing errors."""
         service, watch_dir, _, _ = realtime_setup
@@ -150,20 +157,17 @@ class TestRealtimeFunctional:
         await service.stop()
 
     @pytest.mark.asyncio
-    async def test_file_type_filtering_works(self, realtime_setup):
-        """Test that only supported file types are processed."""
-        service, watch_dir, _, services = realtime_setup
-        await service.start(watch_dir)
+    async def test_file_type_filtering_works_in_direct_indexing(self, realtime_setup):
+        """Direct indexing should skip unsupported file types."""
+        _, watch_dir, _, services = realtime_setup
 
         # Create supported file
         py_file = watch_dir / "supported.py"
-        py_file.write_text("def supported(): pass")
+        await write_and_index_file(services, py_file, "def supported(): pass")
 
         # Create unsupported file
         bin_file = watch_dir / "unsupported.xyz"
-        bin_file.write_text("unsupported content")
-
-        await asyncio.sleep(1.5)
+        await write_and_index_file(services, bin_file, "unsupported content")
 
         # Check processing results
         py_record = services.provider.get_file_by_path(str(py_file))
@@ -171,35 +175,56 @@ class TestRealtimeFunctional:
 
         # Python file should be considered for processing (might still fail due to other issues)
         # Binary file should definitely be ignored
+        assert py_record is not None, "Supported file types should be indexed"
         assert bin_record is None, "Unsupported file types should be ignored"
+
+    @pytest.mark.asyncio
+    @pytest.mark.native_watcher
+    async def test_realtime_watcher_filters_unsupported_files(self, realtime_setup):
+        """Native watcher should queue supported files and ignore unsupported ones."""
+        service, watch_dir, _, services = realtime_setup
+        await service.start(watch_dir)
+
+        ignored_file = watch_dir / "ignored.xyz"
+        ignored_file.write_text("unsupported content")
+
+        tracked_file = watch_dir / "tracked.py"
+        tracked_file.write_text("def tracked(): pass")
+
+        found = await service.wait_for_file_indexed(tracked_file)
+        assert found, "Supported files should still be detected by realtime monitoring"
+
+        tracked_record = services.provider.get_file_by_path(str(tracked_file))
+        ignored_record = services.provider.get_file_by_path(str(ignored_file))
+        assert tracked_record is not None, "Supported file should be indexed"
+        assert ignored_record is None, "Unsupported file should be ignored by the watcher"
 
         await service.stop()
 
     @pytest.mark.asyncio
-    async def test_background_vs_realtime_processing(self, realtime_setup):
-        """Test interaction between initial scan and real-time processing."""
+    @pytest.mark.native_watcher
+    async def test_realtime_processing_only_tracks_post_start_changes(
+        self, realtime_setup
+    ):
+        """Direct watcher tests should only require post-start realtime behavior."""
         service, watch_dir, _, services = realtime_setup
 
-        # Create files before starting service (will be found by initial scan)
-        initial_file = watch_dir / "initial.py"
-        initial_file.write_text("def initial(): pass")
+        preexisting_file = watch_dir / "preexisting.py"
+        preexisting_file.write_text("def preexisting(): pass")
 
         await service.start(watch_dir)
+        assert await service.wait_for_monitoring_ready(timeout=10.0)
 
-        # Create file after service started (real-time processing)
         realtime_file = watch_dir / "realtime.py"
-        await asyncio.sleep(0.5)  # Let initial scan start
+        service.reset_file_tracking(realtime_file)
         realtime_file.write_text("def realtime(): pass")
+        found = await service.wait_for_file_indexed(realtime_file)
 
-        # Wait for both initial scan and real-time processing
-        await asyncio.sleep(3.0)
-
-        # Both files should eventually be processed
-        initial_record = services.provider.get_file_by_path(str(initial_file))
         realtime_record = services.provider.get_file_by_path(str(realtime_file))
 
-        # At least one should work (helps identify which path is broken)
-        processed_count = sum(1 for record in [initial_record, realtime_record] if record is not None)
-        assert processed_count > 0, "At least one processing path should work"
+        assert found, "Realtime path should index files created after service.start()"
+        assert realtime_record is not None, (
+            "Realtime path should persist files created after service.start()"
+        )
 
         await service.stop()

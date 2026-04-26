@@ -7,7 +7,7 @@ import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -16,6 +16,9 @@ from chunkhound.utils.windows_constants import (
     WINDOWS_DB_CLEANUP_DELAY,
     WINDOWS_RETRY_DELAY,
 )
+
+WatcherMode = Literal["native", "polling"]
+VALID_WATCHER_MODES: tuple[WatcherMode, ...] = ("native", "polling")
 
 
 def is_windows() -> bool:
@@ -178,37 +181,53 @@ def is_ci() -> bool:
     return bool(os.environ.get("CI"))
 
 
-def should_use_polling() -> bool:
-    """Returns True if tests should use polling mode instead of watchdog.
+def normalize_watcher_mode(
+    mode: str | None,
+    *,
+    default: WatcherMode = "native",
+) -> WatcherMode:
+    """Normalize watcher mode configuration from markers or environment."""
+    if mode is None:
+        return default
+    normalized = mode.strip().lower()
+    if not normalized:
+        return default
+    if normalized not in VALID_WATCHER_MODES:
+        raise ValueError(
+            f"Invalid watcher mode '{mode}'. Expected one of {VALID_WATCHER_MODES}."
+        )
+    return normalized
 
-    Windows CI has unreliable ReadDirectoryChangesW events that can silently
-    drop filesystem events, causing tests to hang or fail.
+
+def get_configured_watcher_mode() -> WatcherMode:
+    """Return watcher mode selected for the current test process."""
+    return normalize_watcher_mode(os.environ.get("CHUNKHOUND_TEST_WATCHER_MODE"))
+
+
+def should_use_polling(mode: str | None = None) -> bool:
+    """Return True if tests should use polling mode instead of watchdog.
+
+    Watcher mode selection is explicit so backend coverage is stable across OSes.
     """
-    return is_windows() and is_ci()
+    watcher_mode = normalize_watcher_mode(mode)
+    return watcher_mode == "polling"
 
 
 POLLING_STABILIZATION_DELAY: float = 1.0  # Seconds to wait for first poll iteration
 
 
 def get_fs_event_timeout() -> float:
-    """Get appropriate timeout for filesystem event detection.
+    """Get appropriate timeout for filesystem event detection."""
+    return 5.0 if is_ci() else 3.0
 
-    Returns longer timeouts on Windows CI where ReadDirectoryChangesW
-    can be unreliable.
+
+async def stabilize_polling_monitor(mode: str | None = None) -> None:
+    """Wait for the selected polling monitor to complete its first iteration.
+
+    Explicit watcher mode selection takes precedence over environment fallback.
+    Native watcher paths remain a no-op.
     """
-    if is_ci():
-        return 45.0 if IS_WINDOWS else 5.0
-    return 3.0
-
-
-async def stabilize_polling_monitor() -> None:
-    """Wait for polling monitor to complete first iteration on Windows CI.
-
-    No-op on platforms using native filesystem events.
-    """
-    if should_use_polling():
+    if should_use_polling(mode):
         import asyncio
 
         await asyncio.sleep(POLLING_STABILIZATION_DELAY)
-
-

@@ -6,15 +6,17 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.helpers import _Cfg, _FakeDB
 
-def _install_parser_stubs():
+
+def _install_parser_stubs(monkeypatch: pytest.MonkeyPatch):
     """Install lightweight stubs to avoid importing heavy tree-sitter modules in tests."""
     # Stub for chunkhound.parsers.universal_parser
     up = types.ModuleType("chunkhound.parsers.universal_parser")
     class _UniversalParser:  # pragma: no cover - only to satisfy type hints
         pass
     up.UniversalParser = _UniversalParser
-    sys.modules["chunkhound.parsers.universal_parser"] = up
+    monkeypatch.setitem(sys.modules, "chunkhound.parsers.universal_parser", up)
 
     # Stub for chunkhound.parsers.parser_factory
     pf = types.ModuleType("chunkhound.parsers.parser_factory")
@@ -24,53 +26,13 @@ def _install_parser_stubs():
                 return []
         return _DummyParser()
     pf.create_parser_for_language = create_parser_for_language
-    sys.modules["chunkhound.parsers.parser_factory"] = pf
-
-
-class _FakeDB:
-    """Minimal DatabaseProvider stub that serves File records by path."""
-    def __init__(self, records):
-        # records: dict[str, FileModel]
-        self._records = records
-
-    # Methods used by IndexingCoordinator in this test path
-    def get_file_by_path(self, path: str, as_model: bool = False):
-        rec = self._records.get(path)
-        if not rec:
-            return None
-        return rec if as_model else {
-            "id": rec.id,
-            "path": rec.path,
-            "size": rec.size_bytes,
-            "modified_time": rec.mtime,
-            "language": rec.language.value,
-            "content_hash": rec.content_hash,
-        }
-
-    async def get_file_by_path_async(self, path: str, as_model: bool = False):
-        return self.get_file_by_path(path, as_model)
-
-    def should_optimize(self, operation: str = "") -> bool:
-        return False
-
-
-class _Cfg:
-    class _Indexing:
-        cleanup = False
-        force_reindex = False
-        per_file_timeout_seconds = 0.0
-        # Discovery config used by coordinator
-        min_dirs_for_parallel = 4
-        max_discovery_workers = 4
-        parallel_discovery = False  # keep sequential for test stability
-
-    indexing = _Indexing()
+    monkeypatch.setitem(sys.modules, "chunkhound.parsers.parser_factory", pf)
 
 
 def test_process_directory_skips_unchanged_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CHUNKHOUND_DEBUG_SKIP", "1")
     # Install parser stubs before importing the coordinator to avoid heavy deps
-    _install_parser_stubs()
+    _install_parser_stubs(monkeypatch)
 
     # Import after stubbing
     from chunkhound.core.models.file import File

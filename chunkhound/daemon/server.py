@@ -12,6 +12,7 @@ IPC handshake (length-prefixed frames):
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 import sys
@@ -19,9 +20,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.config.config import Config
 from chunkhound.mcp_server.base import MCPServerBase
-from chunkhound.mcp_server.common import handle_tool_call
+from chunkhound.mcp_server.common import compaction_error_response, handle_tool_call
 from chunkhound.version import __version__
 
 from . import ipc
@@ -326,10 +328,27 @@ class ChunkHoundDaemon(MCPServerBase):
         tool_name: str = params.get("name", "")
         arguments: dict[str, Any] = params.get("arguments", {})
 
+        try:
+            services = await self.ensure_services()
+        except CompactionError as exc:
+            return {
+                "jsonrpc": "2.0",
+                "id": msg.get("id"),
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(compaction_error_response(exc)),
+                        }
+                    ],
+                    "isError": True,
+                },
+            }
+
         text_contents = await handle_tool_call(
             tool_name=tool_name,
             arguments=arguments,
-            services=await self.ensure_services(),
+            services=services,
             embedding_manager=self.embedding_manager,
             initialization_complete=self._initialization_complete,
             debug_mode=self.debug_mode,

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
+from loguru import logger
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -16,7 +17,7 @@ class DatabaseConfig(BaseModel):
     """Database configuration with support for multiple providers.
 
     Configuration can be provided via:
-    - Environment variables (CHUNKHOUND_DATABASE_*)
+    - Environment variables (CHUNKHOUND_DATABASE__*)
     - Configuration files
     - CLI arguments
     - Default values
@@ -47,6 +48,29 @@ class DatabaseConfig(BaseModel):
         default=None,
         ge=0.0,
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
+    )
+
+    # Compaction settings
+    compaction_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable automatic background compaction in MCP server after initial scan "
+            "when fragmentation exceeds threshold. CLI indexing uses lightweight "
+            "optimize_tables() only; use 'chunkhound repack' for full CLI compaction."
+        ),
+    )
+
+    compaction_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Fragmentation ratio that triggers compaction",
+    )
+
+    compaction_min_size_mb: int = Field(
+        default=100,
+        ge=0,
+        description="Minimum reclaimable space in MB to trigger compaction",
     )
 
     @field_validator("path")
@@ -158,8 +182,63 @@ class DatabaseConfig(BaseModel):
             try:
                 config["max_disk_usage_mb"] = float(max_disk_gb) * 1024.0
             except ValueError:
-                # Invalid value - silently ignore
-                pass
+                logger.warning(
+                    "Ignoring invalid CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB value: {!r}",
+                    max_disk_gb,
+                )
+        if compaction_enabled := os.getenv("CHUNKHOUND_DATABASE__COMPACTION_ENABLED"):
+            lowered = compaction_enabled.lower()
+            truthy = ("true", "1", "yes")
+            falsy = ("false", "0", "no")
+            if lowered in truthy:
+                config["compaction_enabled"] = True
+            elif lowered in falsy:
+                config["compaction_enabled"] = False
+            else:
+                logger.warning(
+                    "Unrecognized CHUNKHOUND_DATABASE__COMPACTION_ENABLED value: {!r}; "
+                    "defaulting to True (enabled)",
+                    compaction_enabled,
+                )
+                config["compaction_enabled"] = True
+        if compaction_threshold := os.getenv(
+            "CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD"
+        ):
+            try:
+                parsed_threshold = float(compaction_threshold)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD value: {!r}",
+                    compaction_threshold,
+                )
+            else:
+                if not (0.0 <= parsed_threshold <= 1.0):
+                    logger.warning(
+                        "Ignoring out-of-range CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD "
+                        "value: {!r} (must be 0.0–1.0)",
+                        compaction_threshold,
+                    )
+                else:
+                    config["compaction_threshold"] = parsed_threshold
+        if compaction_min_size := os.getenv(
+            "CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB"
+        ):
+            try:
+                parsed_min_size = int(compaction_min_size)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB value: {!r}",
+                    compaction_min_size,
+                )
+            else:
+                if parsed_min_size < 0:
+                    logger.warning(
+                        "Ignoring negative CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB "
+                        "value: {!r} (must be >= 0)",
+                        compaction_min_size,
+                    )
+                else:
+                    config["compaction_min_size_mb"] = parsed_min_size
         return config
 
     @classmethod

@@ -20,9 +20,11 @@ from typing import Any
 
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
+from chunkhound.services.compaction_service import CompactionService
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 
@@ -59,11 +61,20 @@ class MCPServerBase(ABC):
         self.embedding_manager: EmbeddingManager | None = None
         self.llm_manager: LLMManager | None = None
         self.realtime_indexing: RealtimeIndexingService | None = None
+        self._compaction_service: CompactionService | None = None
+        self._target_path: Path | None = None  # Stored for reindex callback
 
         # Initialization state
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
+        self._cleanup_lock = asyncio.Lock()
+        # One-shot cleanup guard. cleanup() may leave _initialized=True and
+        # the provider still connected on the stuck-compaction-thread path
+        # (to avoid racing the foreign DuckDB handle), so we can't use
+        # _initialized as an idempotency signal. See cleanup() docstring.
+        self._cleanup_done = False
+        self._compaction_retry_lock = asyncio.Lock()
 
         # Background tasks
         self._startup_task: asyncio.Task | None = None
@@ -77,26 +88,153 @@ class MCPServerBase(ABC):
             "is_scanning": False,
             "scan_started_at": None,
             "scan_completed_at": None,
+            "background_compaction": {
+                "in_progress": False,
+                "phase": "idle",
+                "last_started_at": None,
+                "last_completed_at": None,
+                "last_error": None,
+                "last_error_at": None,
+                "pending_recovery": False,
+                "retry_attempted": False,
+            },
         }
 
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
         os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
-    def debug_log(self, message: str) -> None:
-        """Log debug message to file if debug mode is enabled."""
-        if self.debug_mode:
-            # Write to debug file instead of stderr to preserve JSON-RPC protocol
-            debug_file = os.getenv(
-                "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log"
+    def debug_log(self, message: str, *, always: bool = False) -> None:
+        """Log message to file. Logged only in debug mode unless always=True."""
+        if not always and not self.debug_mode:
+            return
+        # Write to debug file instead of stderr to preserve JSON-RPC protocol
+        debug_file = os.getenv(
+            "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log"
+        )
+        try:
+            with open(debug_file, "a") as f:
+                timestamp = datetime.now().isoformat()
+                f.write(f"[{timestamp}] [MCP] {message}\n")
+                f.flush()
+        except Exception:
+            # Silently fail if we can't write to debug file
+            pass
+
+    def _background_compaction_status(self) -> dict[str, Any]:
+        """Return mutable background compaction status stored in scan progress."""
+        return self._scan_progress["background_compaction"]
+
+    def get_background_compaction_status(self) -> dict[str, Any]:
+        """Return a read-only snapshot of background compaction status."""
+        self._refresh_background_compaction_status()
+        return self._background_compaction_status().copy()
+
+    def _mark_background_compaction_started(self) -> None:
+        """Record that background compaction has been launched."""
+        status = self._background_compaction_status()
+        status.update(
+            {
+                "in_progress": True,
+                "phase": "compacting",
+                "last_started_at": datetime.now().isoformat(),
+                "last_error": None,
+                "last_error_at": None,
+                "pending_recovery": False,
+                "retry_attempted": False,
+            }
+        )
+
+    def _mark_post_compaction_reindex_running(self) -> None:
+        """Record that the catch-up reindex is running."""
+        status = self._background_compaction_status()
+        status.update(
+            {
+                "in_progress": True,
+                "phase": "reindexing",
+            }
+        )
+
+    def _mark_background_compaction_success(self) -> None:
+        """Clear sticky background compaction error state after success."""
+        if self._compaction_service is not None:
+            self._compaction_service.clear_last_error()
+        status = self._background_compaction_status()
+        status.update(
+            {
+                "in_progress": False,
+                "phase": "idle",
+                "last_completed_at": datetime.now().isoformat(),
+                "last_error": None,
+                "last_error_at": None,
+                "pending_recovery": False,
+                "retry_attempted": False,
+            }
+        )
+
+    def _mark_background_compaction_failure(
+        self,
+        error: Exception,
+        *,
+        pending_recovery: bool,
+        retry_attempted: bool,
+    ) -> None:
+        """Record a failed background compaction or catch-up phase."""
+        status = self._background_compaction_status()
+        status.update(
+            {
+                "in_progress": False,
+                "phase": "failed",
+                "last_error": str(error),
+                "last_error_at": datetime.now().isoformat(),
+                "pending_recovery": pending_recovery,
+                "retry_attempted": retry_attempted,
+            }
+        )
+
+    def _refresh_background_compaction_status(self) -> None:
+        """Synchronize MCP-visible compaction status with the live service state."""
+        if self._compaction_service is None:
+            return
+
+        status = self._background_compaction_status()
+        service_in_progress = self._compaction_service.is_compacting
+        status["in_progress"] = service_in_progress or status["phase"] == "reindexing"
+
+        if service_in_progress and status["phase"] in {"idle", "failed"}:
+            status["phase"] = "compacting"
+            return
+
+        if status["phase"] == "reindexing":
+            return
+
+        service_error = self._compaction_service.last_error
+        if service_error is not None and not status["pending_recovery"]:
+            self._mark_background_compaction_failure(
+                service_error,
+                pending_recovery=False,
+                retry_attempted=False,
             )
+            return
+
+        if not service_in_progress and status["phase"] == "compacting":
+            status["phase"] = "idle"
+
+    async def _attempt_post_compaction_recovery(self) -> None:
+        """Retry failed post-compaction catch-up exactly once."""
+        async with self._compaction_retry_lock:
+            self._refresh_background_compaction_status()
+            status = self._background_compaction_status()
+            if not status["pending_recovery"] or status["retry_attempted"]:
+                return
+
+            status["retry_attempted"] = True
             try:
-                with open(debug_file, "a") as f:
-                    timestamp = datetime.now().isoformat()
-                    f.write(f"[{timestamp}] [MCP] {message}\n")
-                    f.flush()
-            except Exception:
-                # Silently fail if we can't write to debug file
-                pass
+                await self._post_compaction_reindex(is_recovery_retry=True)
+            except Exception as exc:
+                self.debug_log(
+                    f"Automatic post-compaction recovery retry failed: {exc}",
+                    always=True,
+                )
 
     async def initialize(self) -> None:
         """Initialize services and database connection.
@@ -174,6 +312,14 @@ class MCPServerBase(ABC):
                 # Fallback to config resolution (shouldn't happen in normal usage)
                 target_path = self.config.target_dir or db_path.parent.parent
                 self.debug_log(f"Using fallback path resolution: {target_path}")
+
+            # Store target path for reindex callback
+            self._target_path = target_path
+
+            # Initialize compaction service for background compaction (MCP mode)
+            if self.config.database.provider == "duckdb":
+                self._compaction_service = CompactionService(db_path, self.config)
+                self.debug_log("CompactionService initialized for background mode")
 
             # Mark as initialized immediately (tools available)
             self._initialized = True
@@ -280,16 +426,179 @@ class MCPServerBase(ABC):
                 f"Background scan completed: {stats.files_processed} files, {stats.chunks_created} chunks"
             )
 
+            # Trigger background compaction after initial scan
+            await self._trigger_background_compaction()
+
         except Exception as e:
             self.debug_log(f"Background initial scan failed: {e}")
             self._scan_progress["is_scanning"] = False
             self._scan_progress["scan_error"] = str(e)
 
+    async def _trigger_background_compaction(self) -> None:
+        """Trigger background compaction if warranted.
+
+        Uses non-blocking compaction with a callback that triggers
+        incremental reindexing after the database swap completes.
+        """
+        if self._compaction_service is None:
+            return
+
+        if not self.services:
+            return
+
+        try:
+            from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+
+            if not isinstance(self.services.provider, DuckDBProvider):
+                self.debug_log(
+                    f"Expected DuckDBProvider, got "
+                    f"{type(self.services.provider).__name__}"
+                )
+                return
+            db_provider = self.services.provider
+            started = await self._compaction_service.compact_background(
+                provider=db_provider,
+                on_complete=self._post_compaction_reindex,
+            )
+            if started:
+                self._mark_background_compaction_started()
+                self.debug_log("Background compaction started")
+        except Exception as e:
+            self._mark_background_compaction_failure(
+                e,
+                pending_recovery=False,
+                retry_attempted=False,
+            )
+            self.debug_log(f"Background compaction failed to start: {e}", always=True)
+
+    async def _post_compaction_reindex(self, is_recovery_retry: bool = False) -> None:
+        """Callback after compaction - triggers full reindex.
+
+        Post-compaction the DB was rebuilt from a Parquet export, so stored
+        mtimes may not reflect reality (especially on Windows where mtime
+        resolution is ~100ms-2s).  force_reindex=True ensures every file is
+        re-verified.
+        """
+        if not self.services or not self._target_path:
+            self.debug_log(
+                "Skipping post-compaction reindex: services or target unavailable"
+            )
+            return
+
+        self._mark_post_compaction_reindex_running()
+        try:
+            if is_recovery_retry:
+                self.debug_log("Retrying failed post-compaction reindex...", always=True)
+            else:
+                self.debug_log("Starting post-compaction reindex...")
+            drained_deferred_files: set[str] = set()
+
+            # Clear only stale compaction deferrals before reindex.
+            # Genuine realtime failures remain visible until they are resolved.
+            if self.realtime_indexing:
+                drained_deferred_files = (
+                    await self.realtime_indexing.drain_compaction_deferred_files()
+                )
+
+            # Force reindex: the DB was rebuilt from export, mtime-based
+            # skip logic is unreliable after compaction.
+            reindex_config = self.config.model_copy(
+                update={"indexing": self.config.indexing.model_copy(
+                    update={"force_reindex": True}
+                )}
+            )
+
+            indexing_service = DirectoryIndexingService(
+                indexing_coordinator=self.services.indexing_coordinator,
+                config=reindex_config,
+                progress_callback=lambda msg: self.debug_log(f"[reindex] {msg}"),
+            )
+
+            stats = await indexing_service.process_directory(
+                self._target_path, no_embeddings=False
+            )
+
+            self.debug_log(
+                f"Post-compaction reindex complete: {stats.files_processed} files, "
+                f"{stats.chunks_created} chunks"
+            )
+            self._mark_background_compaction_success()
+
+        except Exception as e:
+            if self.realtime_indexing and drained_deferred_files:
+                await self.realtime_indexing.restore_compaction_deferred_files(
+                    drained_deferred_files
+                )
+            self._mark_background_compaction_failure(
+                e,
+                pending_recovery=True,
+                retry_attempted=is_recovery_retry,
+            )
+            self.debug_log(f"Post-compaction reindex failed: {e}", always=True)
+            raise
+
     async def cleanup(self) -> None:
         """Clean up resources and close database connection.
 
-        This method is idempotent - safe to call multiple times.
+        Idempotent and concurrent-safe — multiple callers awaiting cleanup()
+        in parallel will serialize through _cleanup_lock; only the first runs
+        the teardown, subsequent callers see _cleanup_done=True and return.
         """
+        async with self._cleanup_lock:
+            if self._cleanup_done:
+                return
+
+            try:
+                # Stop compaction service first (cancels any in-progress compaction).
+                # shutdown() signals the thread and waits for it via threading.Event.
+                # We also do a secondary check here as defense-in-depth: the compaction
+                # thread bypasses the serial executor (direct duckdb.connect()), so we
+                # must not disconnect the provider while the thread is still alive.
+                if self._compaction_service:
+                    self.debug_log("Stopping compaction service")
+                    await self._compaction_service.shutdown()
+                    if not self._compaction_service.compaction_thread_done.is_set():
+                        self.debug_log(
+                            "WARNING: compaction thread still alive after "
+                            "shutdown, waiting..."
+                        )
+                        await asyncio.to_thread(
+                            self._compaction_service.compaction_thread_done.wait,
+                            timeout=5.0,
+                        )
+                        if not self._compaction_service.compaction_thread_done.is_set():
+                            self.debug_log(
+                                "Compaction thread still alive after secondary wait — "
+                                "skipping provider disconnect to avoid corruption",
+                                always=True,
+                            )
+                            if self.services and hasattr(self.services.provider, "shutdown_executor"):
+                                self.services.provider.shutdown_executor()
+                            self._compaction_service = None
+                            await self._cleanup_non_provider_resources()
+                            # _initialized intentionally stays True: cleanup() is terminal
+                            # (process exits after this), so no reconnection will follow.
+                            return
+                    self._compaction_service = None
+
+                await self._cleanup_non_provider_resources()
+
+                if self.services and self.services.provider.is_connected:
+                    self.debug_log("Closing database connection")
+                    # Use close() for proper cleanup, with fallback to disconnect()
+                    if hasattr(self.services.provider, "close"):
+                        self.services.provider.close()
+                    else:
+                        self.services.provider.disconnect()
+                    self._initialized = False
+            finally:
+                # Mark cleanup done even on exception paths. cleanup() is terminal
+                # (process exits after) and a second call from an outer finally
+                # must not re-enter an already-half-torn-down provider.
+                self._cleanup_done = True
+
+    async def _cleanup_non_provider_resources(self) -> None:
+        """Cancel background tasks and stop real-time indexing."""
         # Cancel deferred startup task if still running
         if self._startup_task is not None and not self._startup_task.done():
             self.debug_log("Cancelling deferred startup task")
@@ -313,15 +622,6 @@ class MCPServerBase(ABC):
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
 
-        if self.services and self.services.provider.is_connected:
-            self.debug_log("Closing database connection")
-            # Use new close() method for proper cleanup, with fallback to disconnect()
-            if hasattr(self.services.provider, "close"):
-                self.services.provider.close()
-            else:
-                self.services.provider.disconnect()
-            self._initialized = False
-
     async def ensure_services(self) -> DatabaseServices:
         """Ensure services are initialized and return them.
 
@@ -334,7 +634,19 @@ class MCPServerBase(ABC):
         if not self.services:
             raise RuntimeError("Services not initialized. Call initialize() first.")
 
+        self._refresh_background_compaction_status()
+        if self._background_compaction_status()["pending_recovery"]:
+            await self._attempt_post_compaction_recovery()
+            self._refresh_background_compaction_status()
+            status = self._background_compaction_status()
+            if status["pending_recovery"]:
+                raise CompactionError(
+                    status["last_error"] or "Post-compaction catch-up failed",
+                    operation="post_reindex",
+                )
+
         await self._connect_provider()
+        self._refresh_background_compaction_status()
         return self.services
 
     async def _connect_provider(self) -> None:

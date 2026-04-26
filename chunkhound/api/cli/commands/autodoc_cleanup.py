@@ -101,6 +101,7 @@ def _log_cleanup_model_selection(
         resolved_model, _model_source = CodexCLIProvider.describe_model_resolution(
             model if isinstance(model, str) else None
         )
+        resolved_model_display = resolved_model or "provider-default"
         resolved_effort, _effort_source = (
             CodexCLIProvider.describe_reasoning_effort_resolution(
                 effort if isinstance(effort, str) else None
@@ -108,7 +109,7 @@ def _log_cleanup_model_selection(
         )
         formatter.info(
             "Cleanup model selection: "
-            f"provider={provider}, model={model} (resolved={resolved_model}), "
+            f"provider={provider}, model={model} (resolved={resolved_model_display}), "
             f"reasoning_effort={resolved_effort}{suffix}"
         )
         return
