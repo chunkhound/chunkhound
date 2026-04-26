@@ -409,7 +409,7 @@ def _validate_run_arguments(
         True if valid, False otherwise
     """
     # Validate path
-    if not validate_path(args.path, must_exist=True, must_be_dir=True):
+    if not validate_path(Path(args.path), must_exist=True, must_be_dir=True):
         return False
 
     # Ensure database directory exists
