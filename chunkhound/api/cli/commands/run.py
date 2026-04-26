@@ -24,6 +24,81 @@ from ..utils.validation import (
 )
 
 
+def _is_db_lock_error(exc: Exception) -> bool:
+    """Return True if *exc* looks like a DuckDB exclusive-lock failure."""
+    msg = str(exc).lower()
+    return (
+        "could not set lock" in msg
+        or "database is locked" in msg
+        # Windows: DuckDB reports "being used by another process" in IOException
+        or "being used by another process" in msg
+        # Windows: WAL file locked — PermissionError raised by WAL recovery code
+        or (isinstance(exc, PermissionError) and ".wal" in msg)
+        or ("locked" in msg and "duckdb" in type(exc).__module__.lower())
+    )
+
+
+async def _handle_daemon_lock_conflict(
+    project_dir: Path,
+    formatter: RichOutputFormatter,
+) -> bool:
+    """Return True only if a stuck daemon was killed and the caller should retry.
+
+    Healthy daemon  → info message, return False (never kill).
+    Stuck daemon    → prompt (interactive) or error (non-interactive).
+    No lock / stale → return False (let original error propagate).
+    """
+    from chunkhound.daemon.discovery import DaemonDiscovery
+    from chunkhound.daemon.process import pid_alive
+
+    discovery = DaemonDiscovery(project_dir)
+    lock = discovery.read_lock()
+    if lock is None:
+        return False
+    pid = lock.get("pid")
+    if not isinstance(pid, int) or not pid_alive(pid):
+        return False
+
+    is_responsive = await discovery.ping_daemon(timeout=2.0)
+
+    if is_responsive:
+        formatter.info(
+            f"A ChunkHound daemon (pid={pid}) is running and holding the database lock.\n"
+            "  To index manually, stop the daemon first:\n"
+            "    Stop all MCP clients so the daemon exits, or send it SIGTERM.\n"
+            "  Or use the daemon's built-in indexing via MCP tools."
+        )
+        return False
+
+    # Daemon is unresponsive — offer to kill in interactive mode only
+    if (
+        os.environ.get("CHUNKHOUND_MCP_MODE") == "1"
+        or os.environ.get("CHUNKHOUND_NO_PROMPTS") == "1"
+        or not sys.stdin.isatty()
+    ):
+        formatter.error(
+            f"ChunkHound daemon (pid={pid}) is unresponsive and holding the database lock. "
+            "Restart it manually to recover."
+        )
+        return False
+
+    formatter.warning(f"ChunkHound daemon (pid={pid}) is unresponsive.")
+    try:
+        reply = input("Kill it and continue indexing? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+    if reply not in ("", "y", "yes"):
+        return False
+
+    formatter.info(f"Stopping daemon (pid={pid})…")
+    if not discovery.stop_daemon(timeout=10.0):
+        formatter.error(f"Daemon (pid={pid}) did not stop within 10 s. Aborting.")
+        return False
+    formatter.success("Daemon stopped.")
+    return True
+
+
 async def run_command(args: argparse.Namespace, config: Config) -> None:
     """Execute the run command using the service layer.
 
@@ -75,7 +150,15 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
     try:
         # Configure registry with the Config object
-        configure_registry(config)
+        try:
+            configure_registry(config)
+        except Exception as lock_exc:
+            if _is_db_lock_error(lock_exc) and await _handle_daemon_lock_conflict(
+                Path(args.path).resolve(), formatter
+            ):
+                configure_registry(config)  # retry once after daemon was stopped
+            else:
+                raise
 
         formatter.success(f"Service layer initialized: {args.db}")
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
+import time
 
 
 def pid_alive(pid: int) -> bool:
@@ -21,3 +23,27 @@ def pid_alive(pid: int) -> bool:
         return True
     except ProcessLookupError:
         return False
+
+
+def stop_pid(pid: int, timeout: float = 10.0) -> bool:
+    """Send SIGTERM to pid and wait up to timeout seconds for it to die."""
+    if not pid_alive(pid):
+        return True
+    try:
+        if sys.platform == "win32":
+            import psutil
+            try:
+                psutil.Process(pid).terminate()
+            except psutil.NoSuchProcess:
+                return True
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        return not pid_alive(pid)
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
