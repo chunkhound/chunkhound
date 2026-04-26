@@ -27,7 +27,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "claude-sonnet-4-5-20250929",
+        model: str = "claude-sonnet-4-6",
         base_url: str | None = None,
         timeout: int = 60,
         max_retries: int = 3,
@@ -36,7 +36,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
 
         Args:
             api_key: Not used (subscription-based authentication)
-            model: Model name to use (e.g., "claude-sonnet-4-5-20250929")
+            model: Model name to use (e.g., "claude-sonnet-4-6", "claude-opus-4-7")
             base_url: Not used (CLI uses default endpoints)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
