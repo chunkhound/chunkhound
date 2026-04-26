@@ -106,3 +106,61 @@ def test_lancedb_path_transformation_matches_provider(tmp_path):
     # DatabaseConfig should return the same result
     assert db_path == legacy_transform
     assert db_path == test_db_path / "lancedb.lancedb"
+
+
+# --- Tests for issue #226: --db flag silent empty results ---
+
+
+def test_get_db_path_prefers_new_style_chunks_db(tmp_path):
+    """When both old-style 'db' and new-style 'chunks.db' exist, prefer new-style."""
+    test_db_path = tmp_path / "test_db"
+    test_db_path.mkdir()
+    (test_db_path / "chunks.db").write_bytes(b"new")
+    (test_db_path / "db").write_bytes(b"old")
+
+    config = DatabaseConfig(path=test_db_path, provider="duckdb")
+    assert config.get_db_path() == test_db_path / "chunks.db"
+
+
+def test_get_db_path_falls_back_to_legacy_db_file(tmp_path):
+    """When only old-style flat 'db' file exists, use it (issue #226)."""
+    test_db_path = tmp_path / "test_db"
+    test_db_path.mkdir()
+    (test_db_path / "db").write_bytes(b"legacy-duckdb")
+
+    config = DatabaseConfig(path=test_db_path, provider="duckdb")
+    assert config.get_db_path() == test_db_path / "db"
+
+
+def test_get_db_path_returns_new_style_when_neither_exists(tmp_path):
+    """When no DB file exists yet, return new-style path (for fresh index)."""
+    test_db_path = tmp_path / "test_db"
+
+    config = DatabaseConfig(path=test_db_path, provider="duckdb")
+    assert config.get_db_path() == test_db_path / "chunks.db"
+
+
+def test_get_db_path_warns_on_empty_directory(tmp_path, caplog):
+    """Warn when directory exists but has no database file (issue #226)."""
+    import logging
+
+    test_db_path = tmp_path / "test_db"
+    test_db_path.mkdir()
+
+    config = DatabaseConfig(path=test_db_path, provider="duckdb")
+    with caplog.at_level(logging.WARNING):
+        result = config.get_db_path()
+
+    # Should still return new-style path
+    assert result == test_db_path / "chunks.db"
+
+
+def test_get_db_path_legacy_file_as_direct_path(tmp_path):
+    """When --db points directly to a legacy file, use it."""
+    legacy_file = tmp_path / ".chunkhound" / "db"
+    legacy_file.parent.mkdir(parents=True)
+    legacy_file.write_bytes(b"legacy-duckdb")
+
+    config = DatabaseConfig(path=legacy_file, provider="duckdb")
+    # Should hit the existing is_file() check
+    assert config.get_db_path() == legacy_file
