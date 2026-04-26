@@ -81,8 +81,8 @@ async def test_mcp_server_uses_positional_directory_argument():
 
             # Success! The server started and responded
             # This means it correctly used the positional directory argument
-            print("✓ MCP server correctly used positional directory argument")
-            print(f"✓ Server started successfully from different working directory")
+            print("[SUCCESS] MCP server correctly used positional directory argument")
+            print(f"[SUCCESS] Server started successfully from different working directory")
 
         finally:
             # Read stderr before closing (subprocess may be blocking on it)

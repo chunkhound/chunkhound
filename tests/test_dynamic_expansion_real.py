@@ -102,7 +102,7 @@ async def _index_critical_files(db, embedding_provider, tmp_path):
                 content = full_path.read_text(encoding='utf-8')
                 temp_file_path = tmp_path / file_path
                 temp_file_path.parent.mkdir(parents=True, exist_ok=True)
-                temp_file_path.write_text(content)
+                temp_file_path.write_text(content, encoding='utf-8')
                 await coordinator.process_file(temp_file_path)
                 indexed_count += 1
                 processed_files.append(file_path)

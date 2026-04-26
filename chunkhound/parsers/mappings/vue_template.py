@@ -125,64 +125,26 @@ class VueTemplateMapping(BaseMapping):
             Tree-sitter query for directives
         """
         return """
-            ; Conditional rendering (v-if, v-else-if)
-            (directive_attribute
-              (directive_name) @directive_name
-              (#match? @directive_name "^v-if$|^v-else-if$")
-              (quoted_attribute_value
-                (attribute_value) @condition_expr
-              )?
-            ) @definition
-
-            ; List rendering (v-for)
-            (directive_attribute
-              (directive_name) @directive_name
-              (#eq? @directive_name "v-for")
-              (quoted_attribute_value
-                (attribute_value) @loop_expr
-              )?
-            ) @definition
-
-            ; Event handlers (@click, @submit, v-on:click, etc.)
-            (directive_attribute
-              (directive_name) @event_prefix
-              (#match? @event_prefix "^@|^v-on$")
-              (directive_argument)? @event_name
-              (quoted_attribute_value
-                (attribute_value) @handler_expr
-              )?
-            ) @definition
-
-            ; Property bindings (:prop, v-bind:prop)
-            (directive_attribute
-              (directive_name) @bind_prefix
-              (#match? @bind_prefix "^:|^v-bind$")
-              (directive_argument)? @prop_name
-              (quoted_attribute_value
-                (attribute_value) @bind_expr
-              )?
-            ) @definition
-
-            ; Two-way binding (v-model)
-            (directive_attribute
-              (directive_name) @directive_name
-              (#eq? @directive_name "v-model")
-              (directive_argument)? @model_arg
-              (quoted_attribute_value
-                (attribute_value) @model_expr
-              )?
-            ) @definition
+            ; All directive attributes
+            (directive_attribute) @definition
 
             ; Interpolations {{ variable }}
             (interpolation
               (raw_text)? @interpolation_expr
             ) @definition
 
-            ; Slot usage
-            (directive_attribute
-              (directive_name) @directive_name
-              (#match? @directive_name "^v-slot$|^#")
-              (directive_argument)? @slot_name
+            ; Component usage (PascalCase tags)
+            (element
+              (start_tag
+                (tag_name) @component_name
+                (#match? @component_name "^[A-Z]")
+              )
+            ) @definition
+
+            ; Self-closing components
+            (self_closing_tag
+              (tag_name) @component_name
+              (#match? @component_name "^[A-Z]")
             ) @definition
         """
 
@@ -215,26 +177,12 @@ class VueTemplateMapping(BaseMapping):
         """
 
     def _get_component_query(self) -> str:
-        """Get query for component usage.
+        """Component queries are now part of the DEFINITION query.
 
         Returns:
-            Tree-sitter query for component usage
+            Empty string - components handled in _get_directive_query
         """
-        return """
-            ; Component usage (PascalCase tags)
-            (element
-              (start_tag
-                (tag_name) @component_name
-                (#match? @component_name "^[A-Z]")
-              )
-            ) @definition
-
-            ; Self-closing components
-            (self_closing_tag
-              (tag_name) @component_name
-              (#match? @component_name "^[A-Z]")
-            ) @definition
-        """
+        return ""
 
     def extract_name(
         self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
@@ -252,55 +200,50 @@ class VueTemplateMapping(BaseMapping):
         source = content.decode("utf-8")
 
         if concept == UniversalConcept.DEFINITION:
-            # Check for directive types
-            if "directive_name" in captures:
-                directive_node = captures["directive_name"]
-                directive = self.get_node_text(directive_node, source).strip()
+            # Handle directive_attribute nodes
+            if "definition" in captures:
+                directive_attr_node = captures["definition"]
+                directive_attr_text = self.get_node_text(directive_attr_node, source).strip()
 
-                # Handle different directive types
-                if directive in ("v-if", "v-else-if"):
-                    if "condition_expr" in captures:
-                        expr_text = self.get_node_text(
-                            captures["condition_expr"], source
-                        ).strip()
-                        expr = self.get_expression_preview(expr_text, max_length=20)
-                    else:
-                        expr = "expr"
-                    return f"v-if_{expr}"
-                elif directive == "v-for":
-                    if "loop_expr" in captures:
-                        expr_text = self.get_node_text(
-                            captures["loop_expr"], source
-                        ).strip()
-                        expr = self.get_expression_preview(expr_text, max_length=20)
-                    else:
-                        expr = "expr"
-                    return f"v-for_{expr}"
-                elif directive == "v-model":
-                    if "model_expr" in captures:
-                        expr_text = self.get_node_text(
-                            captures["model_expr"], source
-                        ).strip()
-                        expr = self.get_expression_preview(expr_text, max_length=20)
-                    else:
-                        expr = "expr"
-                    return f"v-model_{expr}"
+                # Check if it's a directive attribute (contains = sign)
+                if "=" in directive_attr_text:
+                    # Parse the directive attribute
+                    parts = directive_attr_text.split("=", 1)
+                    if len(parts) == 2:
+                        directive_part = parts[0].strip()
+                        value_part = parts[1].strip().strip('"').strip("'")
 
-            # Handle event handlers
-            if "event_prefix" in captures:
-                if "event_name" in captures:
-                    event_node = captures["event_name"]
-                    event = self.get_node_text(event_node, source).strip()
-                    return f"@{event}"
-                return "@event"
-
-            # Handle property bindings
-            if "bind_prefix" in captures:
-                if "prop_name" in captures:
-                    prop_node = captures["prop_name"]
-                    prop = self.get_node_text(prop_node, source).strip()
-                    return f":{prop}"
-                return ":prop"
+                        # Check directive type based on prefix
+                        if directive_part.startswith("v-if") or directive_part.startswith("v-else-if"):
+                            expr = self.get_expression_preview(value_part, max_length=20)
+                            return f"v-if_{expr}"
+                        elif directive_part.startswith("v-for"):
+                            expr = self.get_expression_preview(value_part, max_length=20)
+                            return f"v-for_{expr}"
+                        elif directive_part.startswith("v-model"):
+                            expr = self.get_expression_preview(value_part, max_length=20)
+                            return f"v-model_{expr}"
+                        elif directive_part.startswith("@") or directive_part.startswith("v-on:"):
+                            # Event handler like @click="handler" or v-on:click="handler"
+                            if directive_part.startswith("@"):
+                                event_name = directive_part[1:]  # Remove @
+                            else:
+                                event_name = directive_part[5:]  # Remove v-on:
+                            return f"@{event_name}"
+                        elif directive_part.startswith(":") or directive_part.startswith("v-bind:"):
+                            # Property binding like :prop="value" or v-bind:prop="value"
+                            if directive_part.startswith(":"):
+                                prop_name = directive_part[1:]  # Remove :
+                            else:
+                                prop_name = directive_part[7:]  # Remove v-bind:
+                            return f":{prop_name}"
+                        elif directive_part.startswith("v-slot:") or directive_part.startswith("#"):
+                            # Slot usage
+                            if directive_part.startswith("v-slot:"):
+                                slot_name = directive_part[7:]  # Remove v-slot:
+                            else:
+                                slot_name = directive_part[1:]  # Remove #
+                            return f"v-slot:{slot_name}"
 
             # Handle interpolations
             if "interpolation_expr" in captures:
@@ -316,12 +259,6 @@ class VueTemplateMapping(BaseMapping):
                 component_node = captures["component_name"]
                 component = self.get_node_text(component_node, source).strip()
                 return f"Component_{component}"
-
-            # Handle slots
-            if "slot_name" in captures:
-                slot_node = captures["slot_name"]
-                slot = self.get_node_text(slot_node, source).strip()
-                return f"v-slot:{slot}"
 
         elif concept == UniversalConcept.BLOCK:
             # Use location-based naming for blocks
@@ -392,69 +329,64 @@ class VueTemplateMapping(BaseMapping):
         }
 
         if concept == UniversalConcept.DEFINITION:
-            # Extract directive-specific metadata
-            if "directive_name" in captures:
-                directive_node = captures["directive_name"]
-                directive = self.get_node_text(directive_node, source).strip()
-                metadata["directive_type"] = directive
+            # Handle directive_attribute nodes
+            if "definition" in captures:
+                directive_attr_node = captures["definition"]
+                directive_attr_text = self.get_node_text(directive_attr_node, source).strip()
 
-                # Extract directive arguments and values
-                if "condition_expr" in captures:
-                    expr_node = captures["condition_expr"]
-                    metadata["condition"] = self.get_node_text(
-                        expr_node, source
-                    ).strip()
+                # Check if it's a directive attribute (contains = sign)
+                if "=" in directive_attr_text:
+                    # Parse the directive attribute
+                    parts = directive_attr_text.split("=", 1)
+                    if len(parts) == 2:
+                        directive_part = parts[0].strip()
+                        value_part = parts[1].strip().strip('"').strip("'")
 
-                elif "loop_expr" in captures:
-                    expr_node = captures["loop_expr"]
-                    loop_expr = self.get_node_text(expr_node, source).strip()
-                    metadata["loop_expression"] = loop_expr
-                    # Try to parse "item in items" pattern
-                    if " in " in loop_expr:
-                        parts = loop_expr.split(" in ", 1)
-                        if len(parts) == 2:
-                            metadata["loop_variable"] = parts[0].strip()
-                            metadata["loop_iterable"] = parts[1].strip()
+                        # Check directive type based on prefix
+                        if directive_part.startswith("v-if") or directive_part.startswith("v-else-if"):
+                            metadata["directive_type"] = directive_part
+                            metadata["condition"] = value_part
+                        elif directive_part.startswith("v-for"):
+                            metadata["directive_type"] = directive_part
+                            metadata["loop_expression"] = value_part
+                            # Try to parse "item in items" pattern
+                            if " in " in value_part:
+                                loop_parts = value_part.split(" in ", 1)
+                                if len(loop_parts) == 2:
+                                    metadata["loop_variable"] = loop_parts[0].strip()
+                                    metadata["loop_iterable"] = loop_parts[1].strip()
+                        elif directive_part.startswith("v-model"):
+                            metadata["directive_type"] = directive_part
+                            metadata["model_binding"] = value_part
+                        elif directive_part.startswith("@") or directive_part.startswith("v-on:"):
+                            # Event handler like @click="handler" or v-on:click="handler"
+                            metadata["directive_type"] = "event_handler"
+                            if directive_part.startswith("@"):
+                                event_name = directive_part[1:]  # Remove @
+                            else:
+                                event_name = directive_part[5:]  # Remove v-on:
+                            metadata["event_name"] = event_name
+                            metadata["handler_expression"] = value_part
+                        elif directive_part.startswith(":") or directive_part.startswith("v-bind:"):
+                            # Property binding like :prop="value" or v-bind:prop="value"
+                            metadata["directive_type"] = "property_binding"
+                            if directive_part.startswith(":"):
+                                prop_name = directive_part[1:]  # Remove :
+                            else:
+                                prop_name = directive_part[7:]  # Remove v-bind:
+                            metadata["property_name"] = prop_name
+                            metadata["binding_expression"] = value_part
+                        elif directive_part.startswith("v-slot:") or directive_part.startswith("#"):
+                            # Slot usage
+                            metadata["directive_type"] = "slot"
+                            if directive_part.startswith("v-slot:"):
+                                metadata["slot_name"] = directive_part[7:]  # Remove v-slot:
+                            else:
+                                metadata["slot_name"] = directive_part[1:]  # Remove #
 
-                elif "model_expr" in captures:
-                    expr_node = captures["model_expr"]
-                    metadata["model_binding"] = self.get_node_text(
-                        expr_node, source
-                    ).strip()
-
-                if "model_arg" in captures:
-                    arg_node = captures["model_arg"]
-                    metadata["model_modifier"] = self.get_node_text(
-                        arg_node, source
-                    ).strip()
-
-            # Handle event handlers
-            if "event_prefix" in captures:
-                metadata["directive_type"] = "event_handler"
-                if "event_name" in captures:
-                    event_node = captures["event_name"]
-                    metadata["event_name"] = self.get_node_text(
-                        event_node, source
-                    ).strip()
-                if "handler_expr" in captures:
-                    handler_node = captures["handler_expr"]
-                    metadata["handler_expression"] = self.get_node_text(
-                        handler_node, source
-                    ).strip()
-
-            # Handle property bindings
-            if "bind_prefix" in captures:
-                metadata["directive_type"] = "property_binding"
-                if "prop_name" in captures:
-                    prop_node = captures["prop_name"]
-                    metadata["property_name"] = self.get_node_text(
-                        prop_node, source
-                    ).strip()
-                if "bind_expr" in captures:
-                    expr_node = captures["bind_expr"]
-                    metadata["binding_expression"] = self.get_node_text(
-                        expr_node, source
-                    ).strip()
+            # Handle bare directives (no = sign)
+            elif directive_attr_text == "v-else":
+                metadata["directive_type"] = "v-else"
 
             # Handle interpolations
             if "interpolation_expr" in captures:
@@ -471,12 +403,6 @@ class VueTemplateMapping(BaseMapping):
                 metadata["component_name"] = self.get_node_text(
                     component_node, source
                 ).strip()
-
-            # Handle slots
-            if "slot_name" in captures:
-                metadata["directive_type"] = "slot"
-                slot_node = captures["slot_name"]
-                metadata["slot_name"] = self.get_node_text(slot_node, source).strip()
 
         elif concept == UniversalConcept.BLOCK:
             if "directive_name" in captures:
