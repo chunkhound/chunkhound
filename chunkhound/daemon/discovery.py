@@ -614,6 +614,7 @@ class DaemonDiscovery:
         not yet connectable), waits for it rather than starting a second
         daemon.  This prevents duplicate-daemon races when two proxies start
         simultaneously.
+
         Uses an atomic starter lock to prevent two proxies from simultaneously
         spawning duplicate daemons (TOCTOU race).  The proxy that acquires the
         lock is the sole daemon starter; others skip straight to polling.
@@ -720,3 +721,70 @@ class DaemonDiscovery:
             f"ChunkHound daemon did not become reachable within "
             f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
         )
+
+    # ------------------------------------------------------------------
+    # Health check and stop
+    # ------------------------------------------------------------------
+
+    async def ping_daemon(self, timeout: float = 2.0) -> bool:
+        """Return True if the daemon's IPC event loop responds to a ping.
+
+        Uses the daemon's built-in ``ping`` RPC (server.py) which is pure
+        asyncio with no DuckDB access — a response proves the event loop is live.
+        """
+        lock = self.read_lock()
+        if lock is None:
+            return False
+        address = str(lock.get("socket_path", self.get_ipc_address()))
+        auth_token = lock.get("auth_token")
+
+        from . import ipc
+        try:
+            reader, writer = await asyncio.wait_for(
+                ipc.create_client(address), timeout=timeout
+            )
+        except Exception:
+            return False
+
+        try:
+            reg: dict[str, Any] = {"type": "register", "pid": os.getpid()}
+            if auth_token:
+                reg["auth_token"] = auth_token
+            ipc.write_frame(writer, reg)
+            await writer.drain()
+
+            ack = await asyncio.wait_for(ipc.read_frame(reader), timeout=timeout)
+            if not isinstance(ack, dict) or ack.get("type") != "registered":
+                return False
+
+            ipc.write_frame(writer, {"jsonrpc": "2.0", "id": 1, "method": "ping"})
+            await writer.drain()
+
+            resp = await asyncio.wait_for(ipc.read_frame(reader), timeout=timeout)
+            return isinstance(resp, dict) and "result" in resp
+        except Exception:
+            return False
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    def stop_daemon(self, timeout: float = 10.0) -> bool:
+        """Stop the daemon recorded in the lock file.
+
+        Returns True if the daemon is no longer running after the call.
+        """
+        from .process import stop_pid
+        lock = self.read_lock()
+        if lock is None:
+            return True
+        pid = lock.get("pid")
+        if not isinstance(pid, int) or pid <= 0:
+            self.remove_lock()
+            return True
+        stopped = stop_pid(pid, timeout=timeout)
+        if stopped:
+            self.remove_lock()
+        return stopped

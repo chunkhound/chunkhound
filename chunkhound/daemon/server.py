@@ -130,10 +130,6 @@ class ChunkHoundDaemon(MCPServerBase):
 
             self._lock_written = True
             try:
-                # The socket may already be connectable by the time we publish
-                # this entry. That is acceptable because the registry is only
-                # an index: overlapping startups still re-check overlap state
-                # under the global startup lock before launching a new daemon.
                 self._discovery.write_registry_entry(os.getpid(), self._socket_path)
             except Exception as e:
                 self.debug_log(f"Registry publish failed (non-fatal): {e}")

@@ -10,9 +10,9 @@ ARCHITECTURE: Global state required for stdio communication model
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import sys
+import logging
 import warnings
 
 # CRITICAL: Suppress SWIG warnings that break JSON-RPC protocol in CI

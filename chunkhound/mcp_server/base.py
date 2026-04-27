@@ -69,6 +69,9 @@ class MCPServerBase(ABC):
         self._startup_task: asyncio.Task | None = None
         self._scan_task: asyncio.Task | None = None
 
+        # Background tasks
+        self._scan_task: asyncio.Task | None = None
+
         # Scan progress tracking
         self._scan_complete = False
         self._scan_progress = {
