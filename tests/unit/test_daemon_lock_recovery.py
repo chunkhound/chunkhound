@@ -206,6 +206,7 @@ class TestHandleDaemonLockConflict:
         with (
             patch("chunkhound.daemon.process.pid_alive", return_value=True),
             patch.object(DaemonDiscovery, "ping_daemon", new=AsyncMock(return_value=False)),
+            patch.dict("os.environ", {"CHUNKHOUND_MCP_MODE": "0", "CHUNKHOUND_NO_PROMPTS": "0"}),
             patch("sys.stdin") as mock_stdin,
             patch("builtins.input", return_value="n"),
         ):
@@ -226,6 +227,7 @@ class TestHandleDaemonLockConflict:
             patch("chunkhound.daemon.process.pid_alive", return_value=True),
             patch.object(DaemonDiscovery, "ping_daemon", new=AsyncMock(return_value=False)),
             patch.object(DaemonDiscovery, "stop_daemon", return_value=True) as mock_stop,
+            patch.dict("os.environ", {"CHUNKHOUND_MCP_MODE": "0", "CHUNKHOUND_NO_PROMPTS": "0"}),
             patch("sys.stdin") as mock_stdin,
             patch("builtins.input", return_value="y"),
         ):
@@ -248,6 +250,7 @@ class TestHandleDaemonLockConflict:
             patch("chunkhound.daemon.process.pid_alive", return_value=True),
             patch.object(DaemonDiscovery, "ping_daemon", new=AsyncMock(return_value=False)),
             patch.object(DaemonDiscovery, "stop_daemon", return_value=False),
+            patch.dict("os.environ", {"CHUNKHOUND_MCP_MODE": "0", "CHUNKHOUND_NO_PROMPTS": "0"}),
             patch("sys.stdin") as mock_stdin,
             patch("builtins.input", return_value="y"),
         ):

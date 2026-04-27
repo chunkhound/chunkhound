@@ -241,7 +241,7 @@ async def test_index_with_stuck_daemon_kills_and_retries(tmp_path: Path) -> None
         config.embedding = None
         config.indexing = MagicMock()
 
-        env_patch = {"CHUNKHOUND_NO_PROMPTS": ""}
+        env_patch = {"CHUNKHOUND_NO_PROMPTS": "", "CHUNKHOUND_MCP_MODE": "0"}
 
         with (
             patch("chunkhound.api.cli.commands.run.configure_registry", side_effect=mock_configure_registry),
@@ -282,9 +282,10 @@ async def test_index_with_stuck_daemon_kills_and_retries(tmp_path: Path) -> None
             f"Expected configure_registry to be called twice (fail + retry), got {call_count}"
         )
 
-        # Dummy process should be dead
-        import psutil
-        assert not psutil.pid_exists(daemon_pid), (
+        # Dummy process should be dead (use zombie-aware check — psutil.pid_exists
+        # returns True for zombie processes, which appear after kill() before wait())
+        from chunkhound.daemon.process import pid_alive
+        assert not pid_alive(daemon_pid), (
             f"Expected dummy process (pid={daemon_pid}) to be killed after user confirmed"
         )
 
