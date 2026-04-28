@@ -10,8 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [4.1.0] - 2026-04-16
 
 ### Breaking Changes
-- **HTTP MCP server removed** — `chunkhound mcp http` command removed along with `--http`, `--port`, and `--host` flags. Use `chunkhound mcp` (stdio) instead — all major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
+- **HTTP MCP server removed** — `chunkhound mcp http` command removed along with `--http`, `--port`, and `--host` flags; FastMCP dependency removed. Use `chunkhound mcp` (stdio) instead — all major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
 - **Unsupported file types no longer indexed** — Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (`.txt`, `.log`, `.cfg`, `.conf`, `.ini`) are unaffected.
+- **Anthropic provider upgraded to Claude Opus 4.7/4.6 and Sonnet 4.6**
+  - `anthropic` dependency minimum bumped to `>=0.96.0,<1.0.0`
+  - Default synthesis model changed from `claude-sonnet-4-5-20250929` to `claude-sonnet-4-6`
+  - Default Claude Code CLI model changed to `claude-sonnet-4-6`
+  - Removed module symbols `BETA_EFFORT` and `EFFORT_SUPPORTED_MODELS`. Callers should use the `supports_effort(model)` / `supports_effort_level(model, level)` predicates instead.
+  - `thinking_enabled=True` on the new default now resolves to `thinking_mode="adaptive"` (previously manual), so response `thinking` blocks are shaped as `{type: "adaptive"}` instead of `{type: "enabled", budget_tokens: N}`.
+  - `anthropic_prompt_caching` defaults to `true`. Every Anthropic request now sends a top-level `cache_control: {type: "ephemeral"}`. Cache hits cost 10% of base input; writes cost 25% more (5m TTL) or 100% more (1h TTL). To preserve prior behavior, set `CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING=false` or pass `--llm-anthropic-no-prompt-caching`.
+  - Invalid `thinking_mode` values and sub-20000 `task_budget_tokens` now raise `ValueError` instead of warning-and-coercing.
 
 ### Added
 - **Elixir language support** — Full Elixir parsing (32nd language) via tree-sitter-elixir: modules, functions, macros, protocols, structs, specs, and import/alias/require statements.
@@ -21,9 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`openai_compatible` embedding provider** — Connect any OpenAI-compatible embedding endpoint with configurable SSL verification, auth, and dimension support.
 - **Azure OpenAI embeddings** — Native Azure OpenAI embedding support with `azure_endpoint`, `api_version`, and `azure_deployment` configuration options.
 - **VoyageAI ranking support** — VoyageAI provider now supports reranking for improved search result quality.
+- **Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 support** — Adaptive thinking mode (auto / off / manual / adaptive selector), expanded effort levels (`low`, `medium`, `high`, `xhigh` (Opus 4.7 only), `max` (4.6+)), automatic prompt caching with configurable TTL (`5m` / `1h`), and the task-budgets beta (Opus 4.7 only, advisory cap for agentic loops, min 20000 tokens).
+- **New `LLMConfig` fields** — `anthropic_thinking_mode`, `anthropic_thinking_display`, `anthropic_prompt_caching`, `anthropic_cache_ttl`, `anthropic_task_budget_tokens` (and matching `CHUNKHOUND_LLM_ANTHROPIC_*` env vars and `--llm-anthropic-*` CLI flags). The pre-existing `anthropic_thinking_enabled`, `anthropic_thinking_budget_tokens`, `anthropic_interleaved_thinking`, `anthropic_effort`, `anthropic_context_management_enabled`, and `anthropic_clear_*` fields are now also readable from env and CLI.
 - **Embedded SQL detection** — SQL embedded in string literals is detected and indexed by default across Python, Java, JavaScript, TypeScript, C#, Go, Rust, and PHP. Disable with `--no-detect-embedded-sql` or `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL=false`.
-- **OpenAI Responses API** — Deep code research now supports reasoning models (gpt-5.1, o-series) via the Responses API, with automatic routing based on model compatibility.
+- **OpenAI Responses API** — Deep code research now supports reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) via the Responses API, with automatic routing based on model compatibility across 30+ models.
 - **Reasoning effort control** — Configurable LLM reasoning effort (`none`/`minimal`/`low`/`medium`/`high`) for deep research via `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` with per-role overrides.
+- **Structured JSON output** — Responses API maintains schema validation consistency across both Chat Completions and Responses endpoints.
 - **Multi-client MCP daemon** — Multiple MCP clients can share a single DuckDB connection via a background daemon, eliminating lock conflicts in multi-session workflows.
 - **`--perf-diagnostics` mode** — `chunkhound index --perf-diagnostics` collects per-batch timing metrics and detects performance regressions via linear regression and z-score analysis, outputting a JSON diagnostics file.
 - **`--path-filter` for research** — `chunkhound research --path-filter <dir>` scopes deep code research to a subdirectory.
@@ -53,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - **HTTP MCP transport** — `chunkhound mcp http`, `--http`, `--port`, `--host` removed. Migrate to `chunkhound mcp` (stdio).
 - **`CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY`** — Database optimization now runs once at indexing end; the per-batch frequency config option is removed.
+
+## [4.1.0b1] - 2025-11-15
+
+### Added
+- PHP configuration files with top-level return arrays are now searchable — config patterns like `return ['key' => 'value'];` are automatically indexed.
+- Universal config-literal parsing across Python, JavaScript, TypeScript, and JSX/TSX — all exported configuration objects and arrays are now discoverable through semantic search.
 
 ## [4.0.1] - 2025-11-12
 
