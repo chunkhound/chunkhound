@@ -341,7 +341,7 @@ Run the application with proper configuration.
                     f"Unexpected result format: {fibonacci_result}"
                 fibonacci_text = fibonacci_result["content"][0]["text"]
                 assert "calculate_fibonacci" in fibonacci_text, "Should find fibonacci function"
-                fibonacci_paths = re.findall(r'## `([^`]+)`', fibonacci_text)
+                fibonacci_paths = re.findall(r'^## `([^`]+)`', fibonacci_text, re.MULTILINE)
                 assert fibonacci_paths, f"Could not parse file paths from markdown: {fibonacci_text[:200]}"
                 assert any(fp == "main.py" for fp in fibonacci_paths), \
                     f"Expected 'main.py' among result paths, got: {fibonacci_paths}"
@@ -366,7 +366,7 @@ Run the application with proper configuration.
 
                 app_text = app_result["content"][0]["text"]
                 assert "test_isolated_app_67890" in app_text, "Should find unique app identifier"
-                app_paths = re.findall(r'## `([^`]+)`', app_text)
+                app_paths = re.findall(r'^## `([^`]+)`', app_text, re.MULTILINE)
                 assert app_paths, f"Could not parse file paths from markdown: {app_text[:200]}"
                 assert any(fp == "utils.py" for fp in app_paths), \
                     f"Expected 'utils.py' among result paths, got: {app_paths}"
@@ -391,7 +391,7 @@ Run the application with proper configuration.
 
                 readme_text = readme_result["content"][0]["text"]
                 assert "unique_feature_identifier_99999" in readme_text, "Should find README content"
-                readme_paths = re.findall(r'## `([^`]+)`', readme_text)
+                readme_paths = re.findall(r'^## `([^`]+)`', readme_text, re.MULTILINE)
                 assert readme_paths, f"Could not parse file paths from markdown: {readme_text[:200]}"
                 assert any(fp == "README.md" for fp in readme_paths), \
                     f"Expected 'README.md' among result paths, got: {readme_paths}"

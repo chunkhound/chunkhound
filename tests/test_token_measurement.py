@@ -92,6 +92,10 @@ class TestTokenReduction:
             print(f"  Reduction: {reduction_pct:>5.1f}%")
             print(f"{'-'*52}")
 
+        # 40 % threshold is calibrated to a realistic multi-field result that carries
+        # metadata.raw_content (full duplicate) and code_preview (partial duplicate).
+        # For minimal single-line content these duplicates dominate overhead, so the
+        # threshold remains conservative even for small functions.
         assert reduction_pct >= 40.0, (
             f"Reduction {reduction_pct:.1f}% is below the 40% minimum. "
             f"JSON: {json_tokens} tok, Markdown: {md_tokens} tok"

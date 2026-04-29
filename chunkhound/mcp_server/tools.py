@@ -680,12 +680,13 @@ async def execute_tool(
             results_list = list(result.get("results", []))
             pagination = dict(result.get("pagination", {}))
             md = format_search_results_markdown(results_list, pagination, search_type)
-            while results_list and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
+            # Keep at least 1 result; preserve original page_size so the footer's
+            # total-page count stays calibrated to the requested page size.
+            while len(results_list) > 1 and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
                 trim = max(1, len(results_list) // 4)
                 results_list = results_list[:-trim]
                 pagination = {
                     **pagination,
-                    "page_size": len(results_list),
                     "has_more": True,
                     "next_offset": pagination.get("offset", 0) + len(results_list),
                 }

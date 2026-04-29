@@ -33,7 +33,7 @@ def _result(
         metadata={"raw_content": content},
         file_extension=".py",
         line_count=end_line - start_line + 1,
-        code_preview=content[:200],
+        code_preview=(content or "")[:200],
         is_truncated=False,
         similarity_percentage=round((similarity or 0) * 100, 2),
         **extra,
@@ -167,6 +167,26 @@ class TestFormatSearchResultsMarkdown:
             f"Fence is only {len(fence)} backticks — inner ``` will close it prematurely"
         )
 
+    def test_none_content_renders_empty_code_block(self) -> None:
+        md = self._fmt([_result(content=None)])
+        assert "```" in md
+        assert "None" not in md
+
+    def test_missing_file_path_falls_back_to_unknown(self) -> None:
+        result = _result()
+        del result["file_path"]
+        md = self._fmt([result])
+        assert "unknown" in md
+
+    def test_similarity_zero_shown_for_semantic(self) -> None:
+        md = self._fmt([_result(similarity=0.0)], search_type="semantic")
+        assert "(0%)" in md
+
+    def test_single_line_range_omits_end_line(self) -> None:
+        md = self._fmt([_result(start_line=5, end_line=5)])
+        assert "L5" in md
+        assert "L5–L5" not in md
+
 
 # ---------------------------------------------------------------------------
 # Tests for execute_tool returning str for search
@@ -249,3 +269,49 @@ class TestExecuteToolSearchReturnsMarkdown:
             f"Trim loop should have removed results; found {result_block_count} blocks"
         )
         assert "next_offset=" in result, "Trimmed response must set next_offset for the caller to page"
+
+    async def test_trim_loop_returns_at_least_one_result_when_single_oversized(self) -> None:
+        """Trim loop must never discard all results — even a single oversized result is returned."""
+        from chunkhound.mcp_server.tools import MAX_RESPONSE_TOKENS, execute_tool
+
+        # Content that alone exceeds MAX_RESPONSE_TOKENS (len // 3 > limit)
+        huge_content = "x" * (MAX_RESPONSE_TOKENS * 4)
+        svc = self._make_services(
+            [_result(file_path="big.py", content=huge_content, symbol="big_func")],
+            _pagination(has_more=False, next_offset=None, total=1),
+        )
+        result = await execute_tool(
+            tool_name="search",
+            services=svc,
+            embedding_manager=None,
+            arguments={"type": "regex", "query": "x"},
+        )
+        assert isinstance(result, str)
+        assert "big.py" in result, "Single oversized result must still appear in output"
+        assert "No results" not in result, "Trim loop must not discard the only result"
+
+    async def test_trim_loop_preserves_original_page_size_in_footer(self) -> None:
+        """Trim loop must not overwrite page_size — footer page count uses the requested page_size."""
+        from chunkhound.mcp_server.tools import execute_tool
+
+        # 10 results × 7000-char content triggers trim; page_size=10, total=50 → 5 pages
+        large_content = "x" * 7000
+        results = [
+            _result(file_path=f"file_{i}.py", content=large_content, symbol=f"func_{i}")
+            for i in range(10)
+        ]
+        svc = self._make_services(
+            results,
+            _pagination(offset=0, page_size=10, has_more=False, total=50, next_offset=10),
+        )
+        result = await execute_tool(
+            tool_name="search",
+            services=svc,
+            embedding_manager=None,
+            arguments={"type": "regex", "query": "x"},
+        )
+        assert isinstance(result, str)
+        # ceil(50 / 10) = 5 pages; if page_size were overwritten to e.g. 8 it would show "of 7 ("
+        assert "of 5 (" in result, (
+            f"Footer must use original page_size=10 (5 pages total), got: {result[-300:]}"
+        )
