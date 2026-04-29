@@ -1,4 +1,5 @@
 import os
+import subprocess
 
 import pytest
 from loguru import logger
@@ -48,6 +49,50 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_heavy)
         if not native_watchman_ready and "requires_native_watchman" in item.keywords:
             item.add_marker(skip_native_watchman)
+
+
+def _discover_free_opencode_models() -> list[str]:
+    """Discover currently free OpenCode model slugs."""
+    try:
+        result = subprocess.run(
+            ["opencode", "models"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return []
+
+        models = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "free" in line.lower():
+                # Extract just the model slug (first whitespace-delimited token)
+                slug = line.split()[0]
+                if "/" not in slug:
+                    continue
+                models.append(slug)
+        return models
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return []
+
+
+@pytest.fixture(scope="session")
+def free_opencode_model() -> str:
+    """Discover a free OpenCode model for integration tests.
+
+    Returns the first available free model slug discovered via
+    ``opencode models``. Skips the test if the CLI is unavailable
+    or no free models are found.
+    """
+    models = _discover_free_opencode_models()
+
+    if not models:
+        pytest.skip("No free OpenCode models available")
+
+    return models[0]
 
 
 @pytest.fixture
