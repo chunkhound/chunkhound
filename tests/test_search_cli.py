@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_utils import get_api_key_for_tests
+from tests.helpers.embedding_config import get_api_key_for_tests
 from tests.utils.windows_subprocess import get_safe_subprocess_env
 
 

@@ -7,6 +7,7 @@ from pydantic import SecretStr
 
 from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.llm_manager import LLMManager
+from tests.helpers import DummyProc
 
 
 def test_llm_config_per_role_provider_overrides():
@@ -87,23 +88,6 @@ def test_llm_config_codex_reasoning_effort_per_role():
     assert "reasoning_effort" not in synth2
 
 
-class _DummyProc:
-    def __init__(self, rc: int = 0, out: bytes = b"OK", err: bytes = b"") -> None:
-        self.returncode = rc
-        self._out = out
-        self._err = err
-        self.stdin = None
-
-    async def communicate(self):  # pragma: no cover - exercised indirectly
-        return self._out, self._err
-
-    def kill(self) -> None:  # pragma: no cover - trivial
-        return None
-
-    async def wait(self) -> None:  # pragma: no cover - trivial
-        return None
-
-
 @pytest.mark.asyncio
 async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeypatch, tmp_path: Path):
     """End-to-end check: LLMConfig -> LLMManager -> CodexCLI overlay config."""
@@ -113,8 +97,8 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeyp
         provider="codex-cli",
         utility_provider="codex-cli",
         synthesis_provider="codex-cli",
-        utility_model="gpt-5.1-codex",
-        synthesis_model="gpt-5.1-codex",
+        utility_model="test-config-model",
+        synthesis_model="test-config-model",
         codex_reasoning_effort_utility="low",
         codex_reasoning_effort_synthesis="high",
     )
@@ -152,7 +136,7 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeyp
 
         # Simulate a `/status`-style response from Codex
         status_text = f"MODEL={model_name};REASONING_EFFORT={effort_value}"
-        return _DummyProc(rc=0, out=status_text.encode("utf-8"), err=b"")
+        return DummyProc(rc=0, out=status_text.encode("utf-8"), err=b"")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
 
@@ -161,7 +145,7 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeyp
 
     response = await provider.complete(prompt="/status")
 
-    assert "MODEL=gpt-5.1-codex" in response.content
+    assert "MODEL=test-config-model" in response.content
     assert "REASONING_EFFORT=high" in response.content
 
 
@@ -241,3 +225,90 @@ def test_grok_config_validation_missing_api_key_per_role():
     missing = cfg.get_missing_config()
     assert len(missing) == 1
     assert "api_key" in missing[0]
+
+
+def test_opencode_cli_reasoning_effort_in_provider_configs():
+    """Test that reasoning_effort is included in opencode-cli provider configs."""
+    cfg = LLMConfig(
+        provider="opencode-cli",
+        utility_provider="opencode-cli",
+        synthesis_provider="opencode-cli",
+        utility_model="openai/gpt-5-nano",
+        synthesis_model="openai/gpt-5-nano",
+        codex_reasoning_effort="medium",
+        codex_reasoning_effort_synthesis="high",
+    )
+
+    utility_config, synthesis_config = cfg.get_provider_configs()
+
+    assert utility_config["reasoning_effort"] == "medium"
+    assert synthesis_config["reasoning_effort"] == "high"
+
+
+def test_opencode_cli_is_provider_configured_without_api_key():
+    """Test that opencode-cli is considered configured without an API key."""
+    cfg = LLMConfig(
+        provider="opencode-cli",
+        utility_provider="opencode-cli",
+        synthesis_provider="opencode-cli",
+        utility_model="openai/gpt-5-nano",
+        synthesis_model="openai/gpt-5-nano",
+    )
+
+    assert cfg.is_provider_configured() is True
+
+
+def test_opencode_cli_get_missing_config_empty():
+    """Test that opencode-cli returns no missing config items (no API key needed)."""
+    cfg = LLMConfig(
+        provider="opencode-cli",
+        utility_provider="opencode-cli",
+        synthesis_provider="opencode-cli",
+        utility_model="openai/gpt-5-nano",
+        synthesis_model="openai/gpt-5-nano",
+    )
+
+    assert cfg.get_missing_config() == []
+
+
+def test_opencode_cli_model_validator_empty_model_raises():
+    """Ensure empty model with opencode-cli provider raises ValueError."""
+    with pytest.raises(ValueError, match="opencode-cli requires a model"):
+        LLMConfig(
+            provider="opencode-cli",
+            utility_model="",
+            synthesis_model="openai/gpt-5-nano",
+        )
+
+
+def test_opencode_cli_model_validator_no_slash_raises():
+    """Ensure model without provider/model format raises ValueError."""
+    with pytest.raises(ValueError, match="opencode-cli requires a model"):
+        LLMConfig(
+            provider="opencode-cli",
+            utility_model="openai/gpt-5-nano",
+            synthesis_model="no-slash",
+        )
+
+
+def test_opencode_cli_model_validator_per_role_override():
+    """Ensure per-role override provider triggers model validation."""
+    with pytest.raises(ValueError, match="opencode-cli requires a model"):
+        LLMConfig(
+            provider="openai",
+            synthesis_provider="opencode-cli",
+            synthesis_model="bad-model",
+            utility_model="whatever",
+        )
+
+
+def test_opencode_cli_model_validator_valid_models_pass():
+    """Ensure valid provider/model format passes validation."""
+    cfg = LLMConfig(
+        provider="opencode-cli",
+        utility_model="provider-a/model-1",
+        synthesis_model="provider-b/model-2",
+    )
+    utility_config, synthesis_config = cfg.get_provider_configs()
+    assert utility_config["provider"] == "opencode-cli"
+    assert synthesis_config["provider"] == "opencode-cli"

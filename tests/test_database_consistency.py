@@ -11,7 +11,7 @@ from pathlib import Path
 
 from chunkhound.database_factory import create_services
 from chunkhound.core.config.config import Config
-from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
+from tests.helpers.embedding_config import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
 
 
 @pytest.fixture

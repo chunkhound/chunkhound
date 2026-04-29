@@ -255,15 +255,6 @@ sys.exit(asyncio.run(test()))
                 "indexing": {"include": ["*.py"]},
             }
 
-            # Add embedding config if API key available
-            # Note: code_research requires reranker+LLM to EXECUTE, but only embeddings to REGISTER
-            api_key = os.environ.get("OPENAI_API_KEY")
-            if api_key:
-                config["embedding"] = {
-                    "provider": "openai",
-                    "model": "text-embedding-3-small",
-                }
-
             config_path.write_text(json.dumps(config))
 
             # Start MCP server (it will auto-index on startup)
@@ -284,8 +275,24 @@ sys.exit(asyncio.run(test()))
                 stderr=asyncio.subprocess.PIPE,
             )
 
+            # Drain stderr in the background so the MCP server does not
+            # block on a full stderr buffer during startup.
+            stderr_lines: list[str] = []
+
+            async def _drain_stderr() -> None:
+                while True:
+                    line = await proc.stderr.readline()
+                    if not line:
+                        break
+                    stderr_lines.append(line.decode("utf-8", errors="replace").strip())
+
+            stderr_task = asyncio.create_task(_drain_stderr())
+
             client = SubprocessJsonRpcClient(proc)
             await client.start()
+            # Brief pause to let the MCP server finish its startup sequence
+            # before we send the first JSON-RPC request.
+            await asyncio.sleep(0.5)
 
             try:
                 # 1. Send initialize request
@@ -358,6 +365,13 @@ sys.exit(asyncio.run(test()))
                 pytest.fail("MCP stdio protocol handshake timed out")
             finally:
                 await client.close()
+                # Cancel the stderr drain task and wait for it to finish
+                # so we do not leak tasks or leave the process in a bad state.
+                stderr_task.cancel()
+                try:
+                    await stderr_task
+                except asyncio.CancelledError:
+                    pass
 
 
 class TestParserLoading:

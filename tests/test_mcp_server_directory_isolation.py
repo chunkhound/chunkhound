@@ -19,7 +19,7 @@ from pathlib import Path
 from chunkhound.database_factory import create_database_with_dependencies
 from chunkhound.core.config.config import Config
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
-from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict, create_embedding_manager_for_tests
+from tests.helpers.embedding_config import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict, create_embedding_manager_for_tests
 
 # Import Windows-safe subprocess utilities and JSON-RPC client
 from tests.utils import (
