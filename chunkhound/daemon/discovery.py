@@ -743,7 +743,7 @@ class DaemonDiscovery:
             reader, writer = await asyncio.wait_for(
                 ipc.create_client(address), timeout=timeout
             )
-        except Exception:
+        except (OSError, asyncio.TimeoutError, ConnectionRefusedError):
             return False
 
         try:
@@ -762,13 +762,13 @@ class DaemonDiscovery:
 
             resp = await asyncio.wait_for(ipc.read_frame(reader), timeout=timeout)
             return isinstance(resp, dict) and "result" in resp
-        except Exception:
+        except (OSError, asyncio.TimeoutError, ConnectionResetError, EOFError):
             return False
         finally:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except Exception:
+            except OSError:
                 pass
 
     def stop_daemon(self, timeout: float = 10.0) -> bool:

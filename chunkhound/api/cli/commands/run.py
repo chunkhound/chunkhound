@@ -1,6 +1,7 @@
 """Run command module - handles directory indexing operations."""
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -86,7 +87,12 @@ async def _handle_daemon_lock_conflict(
 
     formatter.warning(f"ChunkHound daemon (pid={pid}) is unresponsive.")
     try:
-        reply = input("Kill it and continue indexing? [Y/n]: ").strip().lower()
+        loop = asyncio.get_event_loop()
+        reply = (
+            await loop.run_in_executor(
+                None, lambda: input("Kill it and continue indexing? [Y/n]: ")
+            )
+        ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         return False
 

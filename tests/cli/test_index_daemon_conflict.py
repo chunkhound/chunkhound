@@ -72,8 +72,8 @@ async def pre_indexed_project_dir(tmp_path: Path) -> AsyncIterator[Path]:
     """Minimal pre-indexed project for daemon conflict tests."""
     (tmp_path / "main.py").write_text("def main():\n    pass\n")
 
-    db_path = tmp_path / ".chunkhound" / "test.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path = tmp_path / ".chunkhound" / "db"
+    db_path.mkdir(parents=True, exist_ok=True)
     config = {
         "database": {"path": str(db_path), "provider": "duckdb"},
         "indexing": {"include": ["*.py"]},
@@ -191,8 +191,8 @@ async def test_index_with_stuck_daemon_kills_and_retries(tmp_path: Path) -> None
     daemon_pid = dummy_proc.pid
 
     # Write a lock file pointing to this process
-    db_path = tmp_path / ".chunkhound" / "test.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path = tmp_path / ".chunkhound" / "db"
+    db_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / ".chunkhound.json").write_text(json.dumps({
         "database": {"path": str(db_path), "provider": "duckdb"},
     }))
