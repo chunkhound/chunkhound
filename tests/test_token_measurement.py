@@ -68,7 +68,7 @@ def _estimate_tokens(text: str) -> int:
 class TestTokenReduction:
 
     @pytest.mark.parametrize("n_results", [1, 3, 5, 10])
-    def test_measure_reduction_by_result_count(self, n_results: int, capsys):
+    def test_measure_reduction_by_result_count(self, n_results: int, capsys: pytest.CaptureFixture[str]) -> None:
         """Compare JSON vs markdown tokens for N results. Fails if reduction < 40%."""
         # NOTE: before the formatter is implemented this test will ImportError — expected.
         # Run it after the formatter is done to get real post-change numbers.
@@ -98,7 +98,7 @@ class TestTokenReduction:
             f"JSON: {json_tokens} tok, Markdown: {md_tokens} tok"
         )
 
-    def test_field_overhead_breakdown(self, capsys):
+    def test_field_overhead_breakdown(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Print token cost of every field that will be dropped."""
         result = _make_result()
 
@@ -125,7 +125,7 @@ class TestTokenReduction:
             print(f"  {'Dropped %':<30} {total_dropped/total_result*100:>5.1f}%")
             print(f"{'-'*52}")
 
-    def test_metadata_duplication_overhead(self, capsys):
+    def test_metadata_duplication_overhead(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Show how much metadata.raw_content duplicates the content field."""
         result = _make_result()
         content_tokens = _estimate_tokens(result["content"])
