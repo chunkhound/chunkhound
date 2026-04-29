@@ -129,9 +129,17 @@ def _serialize_metadata(metadata: dict | None) -> str | None:
     return json.dumps(metadata) if metadata else None
 
 
-def _deserialize_metadata(metadata_json: str | None) -> dict:
-    """Deserialize chunk metadata from JSON string."""
-    return json.loads(metadata_json) if metadata_json else {}
+def _deserialize_metadata(metadata_json: str | float | None) -> dict:
+    """Deserialize chunk metadata from JSON string.
+
+    Handles pandas NaN values (float) which represent NULL string fields.
+    """
+    if metadata_json is None or (isinstance(metadata_json, float) and np.isnan(metadata_json)):
+        return {}
+    if isinstance(metadata_json, str):
+        return json.loads(metadata_json)
+    # Handle unexpected types by converting to string first
+    return json.loads(str(metadata_json))
 
 
 def _escape_like_pattern(value: str) -> str:

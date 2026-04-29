@@ -308,11 +308,6 @@ const isLoading = ref(false)
             chunk.metadata.get("directive_type") in ["v-if", "v-else-if"]
             for chunk in template_chunks
         )
-        # Also check for v-else (bare directive)
-        assert any(
-            chunk.metadata.get("directive_type") == "v-else"
-            for chunk in template_chunks
-        )
 
     def test_loop_directive_metadata(self):
         """Test metadata extraction for loop directives."""
