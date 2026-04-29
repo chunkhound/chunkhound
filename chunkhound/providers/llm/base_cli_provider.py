@@ -24,8 +24,17 @@ class BaseCLIProvider(LLMProvider):
     - _get_provider_name(): Return the provider name string
     """
 
-    # Constants for timeouts
+    # Constants
     HEALTH_CHECK_TIMEOUT = 30  # Seconds to wait for health check
+
+    UNSUPPORTED_FLAG_MARKERS = (
+        "unexpected argument",
+        "unknown option",
+        "unrecognized option",
+        "no such option",
+        "invalid option",
+        "unknown flag",
+    )
 
     def __init__(
         self,
@@ -184,13 +193,12 @@ class BaseCLIProvider(LLMProvider):
             RuntimeError: If output is not valid JSON or doesn't match schema
         """
         # Build structured prompt with schema
-        structured_prompt = f"""Please respond with ONLY valid JSON that conforms to this schema:
-
-{json.dumps(json_schema, indent=2)}
-
-User request: {prompt}
-
-Respond with JSON only, no additional text."""
+        structured_prompt = (
+            "Please respond with ONLY valid JSON that conforms to "
+            f"this schema:\n\n{json.dumps(json_schema, indent=2)}\n\n"
+            f"User request: {prompt}\n\n"
+            "Respond with JSON only, no additional text."
+        )
 
         try:
             content = await self._run_cli_command(
@@ -304,6 +312,15 @@ Respond with JSON only, no additional text."""
             "prompt_tokens_estimated": self._estimated_prompt_tokens,
             "completion_tokens_estimated": self._estimated_completion_tokens,
         }
+
+    def _merge_prompts(self, prompt: str, system: str | None) -> str:
+        """Merge an optional system prompt with the user prompt.
+
+        Uses a standard format shared across CLI providers for consistency.
+        """
+        if system and system.strip():
+            return f"System Instructions:\n{system.strip()}\n\nUser Request:\n{prompt}"
+        return prompt
 
     def get_synthesis_concurrency(self) -> int:
         """Get recommended concurrency for parallel synthesis operations.

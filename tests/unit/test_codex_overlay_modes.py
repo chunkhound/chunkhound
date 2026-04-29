@@ -1,6 +1,7 @@
 import asyncio
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -9,22 +10,7 @@ try:
 except ImportError:
     import tomli as tomllib
 
-
-class _DummyProc:
-    def __init__(self, rc: int = 0, out: bytes = b"OK", err: bytes = b"") -> None:
-        self.returncode = rc
-        self._out = out
-        self._err = err
-        self.stdin = None
-
-    async def communicate(self):  # pragma: no cover - exercised indirectly
-        return self._out, self._err
-
-    def kill(self) -> None:  # pragma: no cover - trivial
-        return None
-
-    async def wait(self) -> None:  # pragma: no cover - trivial
-        return None
+from tests.helpers import DummyProc
 
 
 @pytest.mark.asyncio
@@ -61,12 +47,12 @@ async def test_codex_config_only_mode_uses_config_env_and_no_codex_home(monkeypa
             cfg = Path(cfg_path)
             if cfg.exists():
                 captured["config_text"] = cfg.read_text()
-        return _DummyProc(rc=0, out=b"OK", err=b"")
+        return DummyProc(rc=0, out=b"OK", err=b"")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
 
-    prov = CodexCLIProvider(model="gpt-5.1-codex-mini")
-    out = await prov._run_exec("ping", cwd=None, max_tokens=16, timeout=10, model="gpt-5.1-codex-mini")  # type: ignore[attr-defined]
+    prov = CodexCLIProvider(model="test-explicit-model")
+    out = await prov._run_exec("ping", cwd=None, max_tokens=16, timeout=10, model="test-explicit-model")  # type: ignore[attr-defined]
 
     assert out.strip() == "OK"
     assert captured["env"] is not None
@@ -88,11 +74,11 @@ async def test_codex_config_only_mode_uses_config_env_and_no_codex_home(monkeypa
     assert child_env.get("EXTRA_VAR") == "123"
     # Config toml should contain resolved model and reasoning effort default
     assert captured["config_text"] is not None
-    assert 'model = "gpt-5.1-codex-mini"' in captured["config_text"]
+    assert 'model = "test-explicit-model"' in captured["config_text"]
     assert 'model_reasoning_effort = "low"' in captured["config_text"]
     # And model configuration should live at the TOML root, not under [history]
     cfg = tomllib.loads(captured["config_text"])
-    assert cfg.get("model") == "gpt-5.1-codex-mini"
+    assert cfg.get("model") == "test-explicit-model"
     assert cfg.get("model_reasoning_effort") == "low"
     history = cfg.get("history") or {}
     assert history.get("persistence") == "none"
@@ -122,12 +108,12 @@ async def test_codex_config_only_mode_accepts_custom_reasoning_effort(monkeypatc
             cfg = Path(cfg_path)
             if cfg.exists():
                 captured["config_text"] = cfg.read_text()
-        return _DummyProc(rc=0, out=b"OK", err=b"")
+        return DummyProc(rc=0, out=b"OK", err=b"")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
 
-    prov = CodexCLIProvider(model="gpt-5.1-codex-mini", reasoning_effort="high")
-    out = await prov._run_exec("ping", cwd=None, max_tokens=16, timeout=10, model="gpt-5.1-codex-mini")  # type: ignore[attr-defined]
+    prov = CodexCLIProvider(model="test-explicit-model", reasoning_effort="high")
+    out = await prov._run_exec("ping", cwd=None, max_tokens=16, timeout=10, model="test-explicit-model")  # type: ignore[attr-defined]
 
     assert out.strip() == "OK"
     cfg_key = os.getenv("CHUNKHOUND_CODEX_CONFIG_ENV", "CODEX_CONFIG")
@@ -137,7 +123,7 @@ async def test_codex_config_only_mode_accepts_custom_reasoning_effort(monkeypatc
     assert captured["config_text"] is not None
     assert 'model_reasoning_effort = "high"' in captured["config_text"]
     cfg = tomllib.loads(captured["config_text"])
-    assert cfg.get("model") == "gpt-5.1-codex-mini"
+    assert cfg.get("model") == "test-explicit-model"
     assert cfg.get("model_reasoning_effort") == "high"
 
 
@@ -147,11 +133,16 @@ def test_codex_model_resolution_defaults(monkeypatch):
     # Ensure env override is not set
     monkeypatch.delenv("CHUNKHOUND_CODEX_DEFAULT_MODEL", raising=False)
 
-    prov = CodexCLIProvider(model="codex")
-    # "codex" alias should resolve to the default Codex reasoning model
-    assert prov._resolve_model_name("codex") == "gpt-5.1-codex"
+    with patch.object(
+        CodexCLIProvider,
+        "get_highest_priority_available_model",
+        return_value="test-discovered-model",
+    ):
+        prov = CodexCLIProvider(model="codex")
+        # "codex" alias should resolve to the mocked discovered model
+        assert prov._resolve_model_name("codex") == "test-discovered-model"
     # Non-alias model names should pass through unchanged
-    assert prov._resolve_model_name("gpt-5.1-codex-mini") == "gpt-5.1-codex-mini"
+    assert prov._resolve_model_name("test-explicit-model") == "test-explicit-model"
 
 
 def test_codex_reasoning_effort_resolution(monkeypatch):

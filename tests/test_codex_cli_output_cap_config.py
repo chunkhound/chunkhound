@@ -54,7 +54,7 @@ async def test_codex_cli_provider_passes_model_max_output_tokens_override(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
 
-    provider = CodexCLIProvider(model="gpt-5.1-codex-mini", reasoning_effort="high")
+    provider = CodexCLIProvider(model="test-explicit-model", reasoning_effort="high")
 
     resp = await provider.complete("hi", max_completion_tokens=123)
     assert resp.content == "OK"
@@ -86,7 +86,7 @@ async def test_codex_cli_provider_parses_agent_message_from_jsonl_stdout(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
 
-    provider = CodexCLIProvider(model="gpt-5.1-codex-mini", reasoning_effort="high")
+    provider = CodexCLIProvider(model="test-explicit-model", reasoning_effort="high")
     resp = await provider.complete("hi", max_completion_tokens=123)
 
     assert resp.content == "OK"
