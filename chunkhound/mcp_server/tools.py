@@ -739,6 +739,17 @@ async def execute_tool(
             answer = result.get("answer", fallback)
             return str(answer)
 
+    # search tool renders dict → lean markdown for MCP
+    # (CLI calls search_impl directly and still gets the dict)
+    if tool_name == "search":
+        if isinstance(result, dict):
+            search_type = arguments.get("type", "regex")
+            return format_search_results_markdown(
+                result.get("results", []),
+                result.get("pagination", {}),
+                search_type,
+            )
+
     # Convert result to dict if it's not already
     if hasattr(result, "__dict__"):
         return dict(result)
