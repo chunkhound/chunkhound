@@ -303,12 +303,16 @@ const isLoading = ref(false)
             c for c in chunks if c.metadata.get("vue_section") == "template"
         ]
 
-        # If template parsing succeeded, check metadata
-        if any("directive_type" in c.metadata for c in template_chunks):
-            vif_chunks = [
-                c for c in template_chunks if c.metadata.get("directive_type") in ["v-if", "v-else-if"]
-            ]
-            assert len(vif_chunks) > 0
+        # Check that conditional directives are properly extracted
+        assert any(
+            chunk.metadata.get("directive_type") in ["v-if", "v-else-if"]
+            for chunk in template_chunks
+        )
+        # Also check for v-else (bare directive)
+        assert any(
+            chunk.metadata.get("directive_type") == "v-else"
+            for chunk in template_chunks
+        )
 
     def test_loop_directive_metadata(self):
         """Test metadata extraction for loop directives."""
@@ -327,16 +331,19 @@ const items = ref([{ id: 1, name: 'Item 1' }])
             c for c in chunks if c.metadata.get("vue_section") == "template"
         ]
 
-        # If template parsing succeeded, check metadata
-        if any("directive_type" in c.metadata for c in template_chunks):
-            vfor_chunks = [
-                c for c in template_chunks if c.metadata.get("directive_type") == "v-for"
-            ]
-            if vfor_chunks:
-                # Check that loop metadata is extracted
-                for chunk in vfor_chunks:
-                    if "loop_expression" in chunk.metadata:
-                        assert "items" in chunk.metadata["loop_expression"]
+        # Check that v-for directive is properly extracted
+        assert any(
+            chunk.metadata.get("directive_type") == "v-for"
+            for chunk in template_chunks
+        )
+        # Check that loop metadata is extracted
+        vfor_chunks = [
+            chunk for chunk in template_chunks
+            if chunk.metadata.get("directive_type") == "v-for"
+        ]
+        for chunk in vfor_chunks:
+            assert "loop_expression" in chunk.metadata
+            assert "items" in chunk.metadata["loop_expression"]
 
     def test_all_chunks_have_vue_metadata(self):
         """Test that all template chunks have vue-specific metadata."""
@@ -356,3 +363,32 @@ const message = ref('Hello')
         for chunk in chunks:
             assert chunk.metadata.get("is_vue_sfc") is True
             assert chunk.metadata.get("vue_section") in ["script", "template", None]
+
+    def test_v_else_directive_metadata(self):
+        """Test metadata extraction for bare v-else directives."""
+        vue_content = '''<template>
+  <div v-if="condition">Content</div>
+  <div v-else>Else content</div>
+</template>
+
+<script setup>
+const condition = ref(true)
+</script>'''
+
+        chunks = self.parser.parse_content(vue_content)
+        template_chunks = [
+            c for c in chunks if c.metadata.get("vue_section") == "template"
+        ]
+
+        # Check that v-else directive is properly extracted
+        assert any(
+            chunk.metadata.get("directive_type") == "v-else"
+            for chunk in template_chunks
+        )
+        # Check that v-else chunk has deterministic name (not "unnamed")
+        v_else_chunks = [
+            chunk for chunk in template_chunks
+            if chunk.metadata.get("directive_type") == "v-else"
+        ]
+        for chunk in v_else_chunks:
+            assert chunk.symbol != "unnamed"

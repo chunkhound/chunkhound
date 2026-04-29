@@ -268,3 +268,110 @@ def test_migration_still_works_for_existing_databases(tmp_path):
 
     finally:
         provider.disconnect()
+
+
+
+def test_metadata_round_trip_during_migration(tmp_path):
+    """Verify metadata survives round-trip through LanceDB migration without corruption.
+
+    This test ensures that chunks with nested metadata are properly preserved
+    during schema migration, maintaining the same nested values rather than
+    becoming empty or double-serialized JSON strings.
+    """
+    pytest.importorskip("lancedb")
+
+    # Step 1: Create DB with variable-size schema and insert chunk with metadata
+    config = DatabaseConfig(path=tmp_path, provider="lancedb")
+    db_path = config.get_db_path()
+
+    provider = LanceDBProvider(
+        str(db_path),
+        base_directory=tmp_path,
+        embedding_manager=None
+    )
+    provider.connect()
+
+    try:
+        # Insert file and chunk with complex metadata
+        test_file = File(
+            path="test.vue",
+            mtime=1234567890.0,
+            language=Language.VUE,
+            size_bytes=200,
+        )
+        file_id = provider.insert_file(test_file)
+
+        complex_metadata = {
+            "vue_section": "template",
+            "is_vue_sfc": True,
+            "directive_type": "v-if",
+            "condition": "user.isLoggedIn",
+            "nested": {
+                "key": "value",
+                "array": [1, 2, {"nested": "object"}]
+            }
+        }
+
+        chunks = [
+            Chunk(
+                file_id=file_id,
+                code='<div v-if="user.isLoggedIn">Welcome</div>',
+                start_line=1,
+                end_line=1,
+                chunk_type=ChunkType.BLOCK,
+                language=Language.VUE,
+                symbol="v-if_user.isLoggedIn",
+                metadata=complex_metadata,
+            )
+        ]
+        chunk_ids = provider.insert_chunks_batch(chunks)
+
+        # Verify metadata stored correctly initially
+        initial_chunks = provider.get_chunks_by_file_id(file_id, as_model=True)
+        assert len(initial_chunks) == 1
+        initial_metadata = initial_chunks[0].metadata
+        assert initial_metadata == complex_metadata
+
+    finally:
+        provider.disconnect()
+
+    # Step 2: Reconnect with embedding manager and trigger migration
+    em = EmbeddingManager()
+    mock_provider = MagicMock()
+    mock_provider.name = "test"
+    mock_provider.model = "test-model"
+    mock_provider.dims = 384
+    em.register_provider(mock_provider, set_default=True)
+
+    provider = LanceDBProvider(
+        str(db_path),
+        base_directory=tmp_path,
+        embedding_manager=em
+    )
+    provider.connect()
+
+    try:
+        # Insert embeddings (triggers migration)
+        embeddings = [{
+            "chunk_id": chunk_ids[0],
+            "provider": "test",
+            "model": "test-model",
+            "embedding": [0.1] * 384,
+            "dims": 384,
+        }]
+
+        provider.insert_embeddings_batch(embeddings)
+
+        # Verify metadata round-tripped correctly after migration
+        migrated_chunks = provider.get_chunks_by_file_id(file_id, as_model=True)
+        assert len(migrated_chunks) == 1
+        migrated_metadata = migrated_chunks[0].metadata
+
+        # Metadata should be identical to original
+        assert migrated_metadata == complex_metadata
+        # Specifically check nested structures preserved
+        assert migrated_metadata["nested"]["key"] == "value"
+        assert migrated_metadata["nested"]["array"][2]["nested"] == "object"
+
+    finally:
+        provider.disconnect()
