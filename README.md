@@ -32,7 +32,7 @@ Your AI assistant searches code but doesn't understand it. ChunkHound researches
   - **Configuration**: JSON, YAML, TOML, HCL, Markdown
   - **Text-based** (custom parsers): Text files, PDF
 - **[MCP integration](https://spec.modelcontextprotocol.io/)** - Works with Claude, VS Code, Cursor, Windsurf, Zed, etc
-- **Real-time indexing** - Automatic file watching, smart diffs, seamless branch switching
+- **Real-time indexing** - Automatic file watching, smart diffs, seamless branch switching, and explicit backend selection (`watchdog`, `watchman`, `polling`)
 
 ## Documentation
 

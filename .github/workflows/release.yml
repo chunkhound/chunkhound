@@ -9,9 +9,8 @@ permissions:
   id-token: write  # OIDC Trusted Publishing
 
 jobs:
-  build-and-publish:
+  build-sdist:
     runs-on: ubuntu-latest
-    environment: pypi
     timeout-minutes: 15
 
     steps:
@@ -23,12 +22,64 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v3
 
-      - name: Build distributions
-        run: uv build
+      - name: Build source distribution
+        run: uv build --sdist --out-dir dist
+
+      - name: Upload source distribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-runtime-wheels:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs requires full history for version derivation
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build packaged Watchman runtime wheel
+        env:
+          CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME: "1"
+        run: uv build --wheel --clear
+
+      - name: Upload runtime wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-${{ matrix.os }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    needs: [build-sdist, build-runtime-wheels]
+    runs-on: ubuntu-latest
+    environment: pypi
+    timeout-minutes: 15
+
+    steps:
+      - name: Download staged distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-dist-*
+          path: dist
+          merge-multiple: true
 
       - name: Publish to PyPI
         id: publish
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
         # No token needed — OIDC Trusted Publishing configured on PyPI project
 
       - name: Cleanup on failure (delete release and tag)

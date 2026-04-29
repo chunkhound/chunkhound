@@ -1,8 +1,8 @@
 """Daemon discovery via lock file and IPC transport.
 
 Handles:
-- Lock file creation/reading in <project>/.chunkhound/daemon.lock
-- IPC address derivation from project directory hash (platform-specific)
+- Runtime-scoped lock file creation/reading for a canonical project root
+- Runtime-scoped IPC address derivation from project directory hash
 - Daemon liveness checking (PID + connectivity)
 - Starting a new daemon subprocess when none is running
 """
@@ -14,32 +14,60 @@ import hashlib
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .process import pid_alive
 
-# Lock file relative to project directory
-_LOCK_FILE_REL = ".chunkhound/daemon.lock"
-# Starter lock — prevents two proxies from both spawning a daemon simultaneously
-_STARTER_LOCK_REL = ".chunkhound/daemon.starter.lock"
+# Runtime-scoped lock files keyed by canonical project root hash
+_LOCKS_DIR_NAME = "daemon-locks"
+# Runtime-scoped starter locks — prevent duplicate spawns within one environment
+_STARTER_LOCKS_DIR_NAME = "daemon-starter-locks"
 # User-scoped runtime directory override (used by tests and debugging)
 _RUNTIME_DIR_ENV = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
 # User-scoped registry of running daemons, keyed by canonical project root hash
 _REGISTRY_DIR_NAME = "daemon-registry"
-# User-scoped startup lock — serializes overlap checks across project roots
+# Dedicated user-scoped registry directory override (used by tests and
+# debugging). The registry dir is intentionally not resolved from the runtime
+# dir so two daemons under different CHUNKHOUND_DAEMON_RUNTIME_DIR values can
+# still discover each other through the cross-runtime overlap gate.
+_REGISTRY_DIR_ENV = "CHUNKHOUND_DAEMON_REGISTRY_DIR"
+# Runtime-scoped startup lock — serializes overlap checks across project roots
+# within one runtime dir (note: the name is historical; this lock is NOT
+# user-scoped — see _CROSS_RUNTIME_STARTUP_LOCKS_DIR_NAME for the cross-runtime
+# per-root barrier).
 _GLOBAL_STARTUP_LOCK_NAME = "daemon.global.startup.lock"
-# Socket directory (Linux/macOS)
-_SOCKET_DIR = "/tmp"
+# User-scoped, user-wide cross-runtime startup lock — a single file that
+# serializes the find_conflicting_daemon → spawn critical section across every
+# canonical project root. Hash-keying this lock per-root only covers exact
+# same-root startups and lets two proxies on parent/child roots (e.g. /proj and
+# /proj/sub) race past each other before either publishes a registry entry, so
+# the barrier is deliberately user-wide. Daemon startup is infrequent and
+# brief, so serializing unrelated-root startups is acceptable.
+# Stored as a sibling of the user-scoped daemon-registry dir so
+# CHUNKHOUND_DAEMON_REGISTRY_DIR overrides isolate this lock in tests.
+_CROSS_RUNTIME_STARTUP_LOCK_NAME = "daemon-startup.lock"
+# Short runtime-scoped socket root (Linux/macOS) to stay within AF_UNIX limits
+_SOCKETS_DIR_NAME = "chunkhound-daemon-sockets"
+_WINDOWS_LOOPBACK_HOST = "127.0.0.1"
+_WINDOWS_PORT_BASE = 49_152
+_WINDOWS_PORT_SPAN = 16_384
 # Startup polling interval and timeout
 _STARTUP_POLL_INTERVAL = 0.1
 _STARTUP_TIMEOUT = 30.0
 _WINDOWS_REPLACE_RETRIES = 20
 _WINDOWS_REPLACE_RETRY_DELAY = 0.01
+
+
+def _is_windows_platform() -> bool:
+    return sys.platform == "win32"
 
 
 def _canonical_project_dir(project_dir: Path) -> Path:
@@ -58,6 +86,13 @@ def _normalized_project_dir(project_dir: Path) -> Path:
 def _project_dir_identity(project_dir: Path) -> str:
     """Return the stable string identity used for hashing and comparisons."""
     return str(_normalized_project_dir(project_dir))
+
+
+def _project_dir_hash(project_dir: Path, *, length: int) -> str:
+    """Return a stable hash of the canonical project identity."""
+    return hashlib.sha256(_project_dir_identity(project_dir).encode()).hexdigest()[
+        :length
+    ]
 
 
 def _runtime_owner_tag() -> str:
@@ -83,6 +118,72 @@ def _default_runtime_dir() -> Path:
             return Path(runtime_root) / suffix
 
     return Path(tempfile.gettempdir()) / suffix
+
+
+def _default_registry_dir() -> Path:
+    """Return the user-scoped registry dir for the cross-runtime overlap gate.
+
+    Deliberately independent of ``_default_runtime_dir`` so daemons launched
+    under different ``CHUNKHOUND_DAEMON_RUNTIME_DIR`` values still discover
+    each other through the cross-runtime registry pass. Callers that want
+    test isolation should override the dedicated registry env var rather
+    than leaning on the runtime-dir env var.
+    """
+    override = os.environ.get(_REGISTRY_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+
+    suffix = f"chunkhound-{_runtime_owner_tag()}-registry"
+    return Path(tempfile.gettempdir()) / suffix
+
+
+def _runtime_dir_identity(runtime_dir: Path) -> str:
+    """Return the comparison-safe runtime identity used for transport scoping."""
+    resolved = runtime_dir.expanduser().resolve()
+    if sys.platform == "win32":
+        return os.path.normcase(str(resolved))
+    return str(resolved)
+
+
+def _runtime_scoped_transport_hash(project_dir: Path, runtime_dir: Path) -> str:
+    """Return a stable transport hash scoped to the canonical root and runtime."""
+    identity = f"{_project_dir_identity(project_dir)}|{_runtime_dir_identity(runtime_dir)}"
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def _runtime_socket_scope_hash(runtime_dir: Path) -> str:
+    """Return a short stable hash for Unix socket directory scoping."""
+    return hashlib.sha256(_runtime_dir_identity(runtime_dir).encode()).hexdigest()[:12]
+
+
+def _unix_socket_root() -> Path:
+    """Return a fixed short POSIX root for daemon Unix sockets."""
+    return Path("/tmp") / _SOCKETS_DIR_NAME
+
+
+def _parse_tcp_address(address: str) -> tuple[str, int] | None:
+    """Parse a TCP loopback address or return None for other transports."""
+    if not address.startswith("tcp:"):
+        return None
+    parts = address.split(":", 2)
+    if len(parts) != 3:
+        return None
+    try:
+        return parts[1], int(parts[2])
+    except ValueError:
+        return None
+
+
+def _windows_loopback_port_is_bindable(host: str, port: int) -> bool:
+    """Return True when a Windows loopback port can be bound right now."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+    except OSError:
+        return False
+    finally:
+        sock.close()
+    return True
 
 
 def _roots_overlap(root_a: Path, root_b: Path) -> bool:
@@ -126,7 +227,7 @@ def _write_json_atomically(
                 tmp_path.replace(path)
                 break
             except PermissionError:
-                if sys.platform != "win32" or attempt >= _WINDOWS_REPLACE_RETRIES - 1:
+                if not _is_windows_platform() or attempt >= _WINDOWS_REPLACE_RETRIES - 1:
                     raise
                 time.sleep(_WINDOWS_REPLACE_RETRY_DELAY)
     except Exception:
@@ -144,6 +245,80 @@ def _write_json_atomically(
             pass
 
 
+def _parse_startup_log_timestamp(line: str) -> datetime | None:
+    if not line.startswith("["):
+        return None
+    closing = line.find("]")
+    if closing <= 1:
+        return None
+    raw_timestamp = line[1:closing]
+    normalized = (
+        raw_timestamp.replace("Z", "+00:00")
+        if raw_timestamp.endswith("Z")
+        else raw_timestamp
+    )
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _startup_elapsed_seconds(started_at: datetime) -> float:
+    if started_at.tzinfo is None:
+        return max((datetime.now() - started_at).total_seconds(), 0.0)
+    return max((datetime.now(started_at.tzinfo) - started_at).total_seconds(), 0.0)
+
+
+def _normalize_startup_breadcrumb_message(message: str) -> str:
+    normalized = message.strip()
+    if normalized.startswith("startup: "):
+        return normalized.removeprefix("startup: ").strip()
+    return normalized
+
+
+def _normalize_started_at(raw: object) -> float:
+    """Coerce a started_at metadata field to float, defaulting on garbage.
+
+    A malformed started_at must not raise during overlap-gate iteration.
+    Losing the entry is precisely the failure mode that lets a second
+    daemon slip past the cross-runtime overlap gate, so callers preserve
+    the entry and only the timestamp degrades.
+    """
+    try:
+        return float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
+@dataclass(slots=True)
+class DaemonStartupHandle:
+    """Process handle and diagnostics surface for a daemon startup attempt."""
+
+    process: subprocess.Popen[Any]
+    log_path: Path
+
+
+def _terminate_startup_handle_sync(startup: DaemonStartupHandle) -> None:
+    """Best-effort terminate for a detached daemon startup child."""
+    process = startup.process
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+
+
+async def _terminate_startup_handle(startup: DaemonStartupHandle) -> None:
+    """Best-effort async wrapper for detached daemon child termination."""
+    await asyncio.to_thread(_terminate_startup_handle_sync, startup)
+
+
 class DaemonDiscovery:
     """Locate or start the daemon for a given project directory."""
 
@@ -156,45 +331,147 @@ class DaemonDiscovery:
 
     def get_lock_path(self) -> Path:
         """Return the absolute path of the lock file."""
-        return self._project_dir / _LOCK_FILE_REL
+        return self.get_runtime_dir() / _LOCKS_DIR_NAME / (
+            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        )
 
     def get_starter_lock_path(self) -> Path:
         """Return the absolute path of the starter lock file."""
-        return self._project_dir / _STARTER_LOCK_REL
+        return self.get_runtime_dir() / _STARTER_LOCKS_DIR_NAME / (
+            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        )
 
     def get_runtime_dir(self) -> Path:
         """Return the user-scoped runtime directory for daemon metadata."""
         return _default_runtime_dir()
 
     def get_registry_dir(self) -> Path:
-        """Return the user-scoped daemon registry directory."""
-        return self.get_runtime_dir() / _REGISTRY_DIR_NAME
+        """Return the user-scoped daemon registry directory.
+
+        Not resolved under :py:meth:`get_runtime_dir` — the registry is the
+        cross-runtime overlap gate, so two daemons under different
+        runtime-dir env values must still see each other here.
+        """
+        return _default_registry_dir() / _REGISTRY_DIR_NAME
 
     def get_global_startup_lock_path(self) -> Path:
-        """Return the user-scoped global startup lock path."""
+        """Return the runtime-scoped global startup lock path.
+
+        Despite the historical name, this lock only serializes overlap checks
+        *within* one ``CHUNKHOUND_DAEMON_RUNTIME_DIR``. Cross-runtime same-root
+        serialization is owned by :py:meth:`get_cross_runtime_startup_lock_path`.
+        """
         return self.get_runtime_dir() / _GLOBAL_STARTUP_LOCK_NAME
+
+    def get_cross_runtime_startup_lock_path(self) -> Path:
+        """Return the user-wide cross-runtime startup lock path.
+
+        Deliberately stored under :py:func:`_default_registry_dir` — *not*
+        under :py:meth:`get_runtime_dir` — and deliberately a single file
+        (not hash-keyed per canonical project root). A per-root hash would
+        only serialize exact same-root startups, but the pre-registry race
+        extends to parent/child overlapping roots (e.g. ``/proj`` and
+        ``/proj/sub``) whose hashes differ, so the barrier must be user-wide.
+        Daemon startup is infrequent and brief, so serializing unrelated-root
+        startups on this file is acceptable.
+        """
+        return _default_registry_dir() / _CROSS_RUNTIME_STARTUP_LOCK_NAME
 
     def get_registry_entry_path(self) -> Path:
         """Return the registry entry path for this canonical project root."""
-        digest = hashlib.sha256(
-            _project_dir_identity(self._project_dir).encode()
-        ).hexdigest()[:16]
-        return self.get_registry_dir() / f"{digest}.json"
+        return self.get_registry_dir() / (
+            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        )
+
+    def get_socket_dir(self) -> Path:
+        """Return the runtime-scoped Unix socket directory."""
+        return _unix_socket_root() / _runtime_socket_scope_hash(self.get_runtime_dir())
+
+    def _preferred_windows_ipc_address(self) -> str:
+        """Return the preferred Windows loopback address for this runtime/root."""
+        transport_hash = _runtime_scoped_transport_hash(
+            self._project_dir,
+            self.get_runtime_dir(),
+        )
+        port = _WINDOWS_PORT_BASE + (int(transport_hash[:8], 16) % _WINDOWS_PORT_SPAN)
+        return f"tcp:{_WINDOWS_LOOPBACK_HOST}:{port}"
+
+    def _live_runtime_windows_ports(self) -> set[int]:
+        """Return live loopback ports already claimed by runtime lock files."""
+        ports: set[int] = set()
+        for entry in self._iter_validated_lock_entries():
+            parsed = _parse_tcp_address(entry["socket_path"])
+            if parsed is None:
+                continue
+            host, port = parsed
+            if host == _WINDOWS_LOOPBACK_HOST:
+                ports.add(port)
+        return ports
+
+    def _select_startup_ipc_address(self) -> str:
+        """Return the IPC address to hand to a newly spawned daemon."""
+        if sys.platform != "win32":
+            return self.get_ipc_address()
+
+        preferred = self._preferred_windows_ipc_address()
+        parsed = _parse_tcp_address(preferred)
+        if parsed is None:
+            return preferred
+
+        _host, preferred_port = parsed
+        used_ports = self._live_runtime_windows_ports()
+        for offset in range(_WINDOWS_PORT_SPAN):
+            port = _WINDOWS_PORT_BASE + (
+                (preferred_port - _WINDOWS_PORT_BASE + offset) % _WINDOWS_PORT_SPAN
+            )
+            if port in used_ports:
+                continue
+            if _windows_loopback_port_is_bindable(_WINDOWS_LOOPBACK_HOST, port):
+                return f"tcp:{_WINDOWS_LOOPBACK_HOST}:{port}"
+
+        raise RuntimeError(
+            "No free Windows daemon IPC ports remain in the current runtime scope"
+        )
 
     def get_ipc_address(self) -> str:
         """Derive a unique IPC address from the project directory.
 
-        Linux/macOS: Unix socket path in /tmp.
-        Windows: TCP loopback address with port 0 (OS-assigned at bind time).
+        Linux/macOS: runtime-scoped Unix socket path.
+        Windows: preferred runtime-scoped TCP loopback port.
         """
-        digest = hashlib.sha256(str(self._project_dir).encode()).hexdigest()[:8]
         if sys.platform == "win32":
-            return "tcp:127.0.0.1:0"
-        return os.path.join(_SOCKET_DIR, f"chunkhound-{digest}.sock")
+            return self._preferred_windows_ipc_address()
+        transport_hash = _runtime_scoped_transport_hash(
+            self._project_dir,
+            self.get_runtime_dir(),
+        )
+        return os.path.join(
+            str(self.get_socket_dir()),
+            f"chunkhound-{transport_hash[:8]}.sock",
+        )
 
     def get_socket_path(self) -> str:
-        """Compatibility alias for get_ipc_address()."""
+        """Return the authoritative socket path when a lock is published."""
+        lock = self.read_lock()
+        if lock is not None:
+            socket_path = lock.get("socket_path")
+            if isinstance(socket_path, str) and socket_path:
+                return socket_path
         return self.get_ipc_address()
+
+    def get_daemon_log_path(self) -> Path:
+        """Return the daemon log path used for startup diagnostics."""
+        return self._project_dir / ".chunkhound" / "daemon.log"
+
+    def _read_json_file(self, path: Path) -> dict[str, Any] | None:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+                return None
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
 
     # ------------------------------------------------------------------
     # Lock file I/O
@@ -208,15 +485,11 @@ class DaemonDiscovery:
             ``auth_token``, ``project_dir``, or ``None`` if the file does
             not exist or is corrupt.
         """
-        lock_path = self.get_lock_path()
-        try:
-            with open(lock_path) as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-                return None
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return None
+        return self._read_json_file(self.get_lock_path())
+
+    def read_starter_lock(self) -> dict[str, Any] | None:
+        """Read and parse the starter lock file."""
+        return self._read_json_file(self.get_starter_lock_path())
 
     def write_lock(
         self, pid: int, socket_path: str, auth_token: str | None = None
@@ -245,6 +518,178 @@ class DaemonDiscovery:
             self.get_lock_path().unlink()
         except FileNotFoundError:
             pass
+
+    def _remove_lock_file(self, lock_path: Path) -> None:
+        """Best-effort removal for stale or invalid runtime lock files."""
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _validated_lock_entry(self, lock_path: Path) -> dict[str, Any] | None:
+        """Return normalized live-daemon metadata from a runtime lock file."""
+        lock = self._read_json_file(lock_path)
+        if lock is None:
+            return None
+
+        project_dir_raw = lock.get("project_dir")
+        pid = lock.get("pid")
+        socket_path = lock.get("socket_path")
+        started_at = lock.get("started_at", 0.0)
+        if not isinstance(project_dir_raw, str) or not isinstance(pid, int):
+            self._remove_lock_file(lock_path)
+            return None
+        if not isinstance(socket_path, str) or not socket_path:
+            self._remove_lock_file(lock_path)
+            return None
+
+        root = _canonical_project_dir(Path(project_dir_raw))
+        expected_lock_path = DaemonDiscovery(root).get_lock_path()
+        if lock_path != expected_lock_path:
+            self._remove_lock_file(lock_path)
+            return None
+        if not pid_alive(pid):
+            self._remove_lock_file(lock_path)
+            return None
+
+        return {
+            "project_dir": str(root),
+            "pid": pid,
+            "socket_path": socket_path,
+            "lock_path": str(expected_lock_path),
+            "started_at": _normalize_started_at(started_at),
+        }
+
+    def _iter_validated_lock_entries(self) -> list[dict[str, Any]]:
+        """Return the current runtime's validated live daemon lock entries."""
+        lock_dir = self.get_lock_path().parent
+        if not lock_dir.exists():
+            return []
+        entries: list[dict[str, Any]] = []
+        for lock_path in lock_dir.glob("*.json"):
+            entry = self._validated_lock_entry(lock_path)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    def _tail_daemon_log(
+        self, log_path: Path | None = None, *, max_lines: int = 20
+    ) -> str | None:
+        """Return the recent daemon log tail, if one is available."""
+        path = log_path or self.get_daemon_log_path()
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        if not text:
+            return None
+        return "\n".join(text.splitlines()[-max_lines:])
+
+    def _startup_failure_context(
+        self, log_path: Path | None = None
+    ) -> dict[str, object] | None:
+        """Extract phase/error context from daemon startup breadcrumbs."""
+        log_tail = self._tail_daemon_log(log_path, max_lines=50)
+        if not log_tail:
+            return None
+
+        startup_started_at: datetime | None = None
+        last_phase: str | None = None
+        last_error: str | None = None
+        total_duration_seconds: float | None = None
+
+        for raw_line in log_tail.splitlines():
+            if "[startup]" not in raw_line:
+                continue
+            _, _, message = raw_line.partition("[startup]")
+            message = _normalize_startup_breadcrumb_message(message)
+            timestamp = _parse_startup_log_timestamp(raw_line)
+            if message.startswith("startup tracking began"):
+                startup_started_at = timestamp
+                continue
+            if message.startswith("phase started: "):
+                phase_name = message.removeprefix("phase started: ").strip()
+                last_phase = phase_name or last_phase
+                continue
+            if message.startswith("phase completed: "):
+                phase_name, _, _ = message.removeprefix("phase completed: ").partition(
+                    " duration="
+                )
+                last_phase = phase_name.strip() or last_phase
+                continue
+            if message.startswith("phase failed: "):
+                details = message.removeprefix("phase failed: ")
+                phase_name, _, remainder = details.partition(" duration=")
+                last_phase = phase_name.strip() or last_phase
+                if " error=" in remainder:
+                    error_text = remainder.split(" error=", 1)[1].strip()
+                    if error_text:
+                        last_error = error_text
+                continue
+            if message.startswith("startup failed"):
+                if " duration=" in message:
+                    duration_fragment = message.split(" duration=", 1)[1].split(
+                        "s", 1
+                    )[0]
+                    try:
+                        total_duration_seconds = float(duration_fragment)
+                    except ValueError:
+                        total_duration_seconds = None
+                if " error=" in message:
+                    error_text = message.split(" error=", 1)[1].strip()
+                    if error_text:
+                        last_error = error_text
+                continue
+
+        if (
+            last_phase is None
+            and last_error is None
+            and total_duration_seconds is None
+            and startup_started_at is None
+        ):
+            return None
+
+        elapsed_seconds = total_duration_seconds
+        if elapsed_seconds is None and startup_started_at is not None:
+            elapsed_seconds = _startup_elapsed_seconds(startup_started_at)
+
+        return {
+            "last_phase": last_phase,
+            "elapsed_seconds": elapsed_seconds,
+            "last_error": last_error,
+        }
+
+    def _format_startup_failure(
+        self,
+        *,
+        prefix: str,
+        log_path: Path | None = None,
+        returncode: int | None = None,
+    ) -> str:
+        """Build a fast-fail startup error with optional daemon log context."""
+        message = prefix
+        if returncode is not None:
+            message = f"{message} (exit code {returncode})"
+        startup_context = self._startup_failure_context(log_path)
+        if startup_context is not None:
+            context_lines: list[str] = []
+            last_phase = startup_context.get("last_phase")
+            if isinstance(last_phase, str) and last_phase:
+                context_lines.append(f"Last known startup phase: {last_phase}")
+            elapsed_seconds = startup_context.get("elapsed_seconds")
+            if isinstance(elapsed_seconds, float):
+                context_lines.append(
+                    f"Elapsed startup duration so far: {elapsed_seconds:.3f}s"
+                )
+            last_error = startup_context.get("last_error")
+            if isinstance(last_error, str) and last_error:
+                context_lines.append(f"Last startup error: {last_error}")
+            if context_lines:
+                message = f"{message}\n" + "\n".join(context_lines)
+        log_tail = self._tail_daemon_log(log_path)
+        if log_tail:
+            return f"{message}\nRecent daemon log output:\n{log_tail}"
+        return message
 
     def write_registry_entry(self, pid: int, socket_path: str) -> None:
         """Publish this daemon in the user-scoped registry."""
@@ -297,7 +742,14 @@ class DaemonDiscovery:
         return None
 
     def _validated_registry_entry(self, entry_path: Path) -> dict[str, Any] | None:
-        """Return authoritative live-daemon metadata for a registry entry."""
+        """Return authoritative live-daemon metadata for a registry entry.
+
+        Trusts the ``lock_path`` stored in the entry as the absolute path of
+        the authoritative lock file for that daemon — not a path derived
+        from the current process's runtime dir. That lets the cross-runtime
+        overlap gate validate daemons whose lock files live under a
+        different ``CHUNKHOUND_DAEMON_RUNTIME_DIR``.
+        """
         entry = self._read_registry_entry(entry_path)
         if entry is None:
             return None
@@ -305,25 +757,23 @@ class DaemonDiscovery:
         project_dir_raw = entry.get("project_dir")
         pid = entry.get("pid")
         lock_path_raw = entry.get("lock_path")
-        if not isinstance(project_dir_raw, str) or not isinstance(pid, int):
+        if (
+            not isinstance(project_dir_raw, str)
+            or not isinstance(pid, int)
+            or not isinstance(lock_path_raw, str)
+            or not lock_path_raw
+        ):
             self._remove_registry_entry_file(entry_path)
             return None
 
         root = _canonical_project_dir(Path(project_dir_raw))
-        expected_lock_path = root / _LOCK_FILE_REL
-        if (
-            not isinstance(lock_path_raw, str)
-            or Path(lock_path_raw) != expected_lock_path
-        ):
-            self._remove_registry_entry_file(entry_path)
-            return None
 
         if not pid_alive(pid):
             self._remove_registry_entry_file(entry_path)
             return None
 
-        other_discovery = DaemonDiscovery(root)
-        lock = other_discovery.read_lock()
+        stored_lock_path = Path(lock_path_raw)
+        lock = self._read_json_file(stored_lock_path)
         if lock is None:
             self._remove_registry_entry_file(entry_path)
             return None
@@ -343,25 +793,41 @@ class DaemonDiscovery:
             "project_dir": str(root),
             "pid": pid,
             "socket_path": str(lock.get("socket_path", entry.get("socket_path", ""))),
-            "lock_path": str(expected_lock_path),
-            "started_at": float(lock.get("started_at", entry.get("started_at", 0.0))),
+            "lock_path": str(stored_lock_path),
+            "started_at": _normalize_started_at(
+                lock.get("started_at", entry.get("started_at", 0.0))
+            ),
         }
 
     def find_conflicting_daemon(self) -> dict[str, Any] | None:
         """Return overlapping live-daemon metadata for a different root, if any."""
-        registry_dir = self.get_registry_dir()
-        if not registry_dir.exists():
-            return None
-
-        for entry_path in registry_dir.glob("*.json"):
-            entry = self._validated_registry_entry(entry_path)
-            if entry is None:
-                continue
+        for entry in self._iter_validated_lock_entries():
             other_root = _canonical_project_dir(Path(str(entry["project_dir"])))
             if _normalized_project_dir(other_root) == _normalized_project_dir(
                 self._project_dir
             ):
                 continue
+            if _roots_overlap(self._project_dir, other_root):
+                return entry
+
+        registry_dir = self.get_registry_dir()
+        if not registry_dir.exists():
+            return None
+
+        own_lock_path = self.get_lock_path()
+        for entry_path in registry_dir.glob("*.json"):
+            entry = self._validated_registry_entry(entry_path)
+            if entry is None:
+                continue
+            # Skip only this runtime's own registry entry for the current root.
+            # Same-root entries whose authoritative lock lives under a
+            # *different* runtime dir MUST be reported so two daemons cannot
+            # coexist on one project checkout across runtime dirs. The lock
+            # pass above owns same-runtime same-root protection; the registry
+            # pass owns cross-runtime same-root protection.
+            if Path(str(entry["lock_path"])) == own_lock_path:
+                continue
+            other_root = _canonical_project_dir(Path(str(entry["project_dir"])))
             if _roots_overlap(self._project_dir, other_root):
                 return entry
         return None
@@ -423,12 +889,20 @@ class DaemonDiscovery:
         self._release_pid_lock(self.get_starter_lock_path())
 
     def _acquire_global_startup_lock(self) -> bool:
-        """Try to acquire the user-scoped global startup lock."""
+        """Try to acquire the runtime-scoped global startup lock."""
         return self._acquire_pid_lock(self.get_global_startup_lock_path())
 
     def _release_global_startup_lock(self) -> None:
-        """Release the user-scoped global startup lock."""
+        """Release the runtime-scoped global startup lock."""
         self._release_pid_lock(self.get_global_startup_lock_path())
+
+    def _acquire_cross_runtime_startup_lock(self) -> bool:
+        """Try to acquire the user-scoped per-root cross-runtime startup lock."""
+        return self._acquire_pid_lock(self.get_cross_runtime_startup_lock_path())
+
+    def _release_cross_runtime_startup_lock(self) -> None:
+        """Release the user-scoped per-root cross-runtime startup lock."""
+        self._release_pid_lock(self.get_cross_runtime_startup_lock_path())
 
     # ------------------------------------------------------------------
     # Liveness checks
@@ -487,11 +961,24 @@ class DaemonDiscovery:
             while time.monotonic() < deadline:
                 if await self._socket_connectable(actual_address):
                     return actual_address
+                if not pid_alive(pid):
+                    raise RuntimeError(
+                        self._format_startup_failure(
+                            prefix=(
+                                "ChunkHound daemon exited before it became reachable "
+                                f"(pid={pid}, address: {actual_address})"
+                            )
+                        )
+                    )
                 remaining = deadline - time.monotonic()
                 await asyncio.sleep(min(_STARTUP_POLL_INTERVAL, max(remaining, 0.0)))
             raise RuntimeError(
-                f"ChunkHound daemon (pid={pid}) did not become reachable "
-                f"within {timeout}s (address: {actual_address})"
+                self._format_startup_failure(
+                    prefix=(
+                        f"ChunkHound daemon (pid={pid}) did not become reachable "
+                        f"within {timeout}s (address: {actual_address})"
+                    )
+                )
             )
 
         self._remove_stale_lock_artifacts(initial_address)
@@ -559,7 +1046,12 @@ class DaemonDiscovery:
 
         return forwarded
 
-    def _start_daemon_subprocess(self, args: Any) -> None:
+    def _start_daemon_subprocess(
+        self,
+        args: Any,
+        *,
+        socket_path: str | None = None,
+    ) -> DaemonStartupHandle:
         """Launch the daemon as a detached subprocess.
 
         The new process runs ``chunkhound _daemon`` with the same configuration
@@ -569,7 +1061,7 @@ class DaemonDiscovery:
         Args:
             args: Original CLI ``argparse.Namespace`` from the proxy invocation.
         """
-        socket_path = self.get_ipc_address()
+        startup_socket_path = socket_path or self._select_startup_ipc_address()
 
         cmd = [
             sys.executable,
@@ -579,7 +1071,7 @@ class DaemonDiscovery:
             "--project-dir",
             str(self._project_dir),
             "--socket-path",
-            socket_path,
+            startup_socket_path,
         ]
 
         # Forward all config flags by introspecting the daemon parser's own
@@ -594,10 +1086,10 @@ class DaemonDiscovery:
 
         # Route daemon stdout/stderr to a log file so startup failures are
         # diagnosable (especially on Windows where the IPC transport may fail).
-        log_path = self._project_dir / ".chunkhound" / "daemon.log"
+        log_path = self.get_daemon_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w") as log_file:
-            subprocess.Popen(
+            process = subprocess.Popen(
                 cmd,
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
@@ -606,6 +1098,7 @@ class DaemonDiscovery:
                 env=env,
                 cwd=str(self._project_dir),
             )
+        return DaemonStartupHandle(process=process, log_path=log_path)
 
     async def find_or_start_daemon(self, args: Any) -> str:
         """Return the IPC address of the running daemon, starting one if needed.
@@ -619,9 +1112,10 @@ class DaemonDiscovery:
         spawning duplicate daemons (TOCTOU race).  The proxy that acquires the
         lock is the sole daemon starter; others skip straight to polling.
 
-        On Windows the port is OS-assigned at bind time and stored in the lock
-        file, so we always read the lock file to obtain the actual address
-        rather than using the pre-computed address.
+        On Windows startup prefers a runtime-scoped hashed loopback port and
+        probes for a same-runtime free port under the global startup lock before
+        spawning. Once the daemon publishes its lock file, discovery always
+        pivots to that authoritative address.
 
         Args:
             args: CLI ``argparse.Namespace`` — forwarded to subprocess if daemon
@@ -644,7 +1138,14 @@ class DaemonDiscovery:
 
         deadline = time.monotonic() + _STARTUP_TIMEOUT
         while time.monotonic() < deadline:
-            if not self._acquire_global_startup_lock():
+            # User-scoped per-root startup barrier: closes the concurrent
+            # cross-runtime startup race where two proxies under different
+            # CHUNKHOUND_DAEMON_RUNTIME_DIR values both pass
+            # find_conflicting_daemon() before either publishes its registry
+            # entry. Within one runtime dir, the runtime-scoped global startup
+            # lock below still owns serialization and is strictly nested under
+            # this user-scoped lock.
+            if not self._acquire_cross_runtime_startup_lock():
                 conflict = self.find_conflicting_daemon()
                 if conflict is not None:
                     raise self._overlap_error(conflict)
@@ -664,62 +1165,137 @@ class DaemonDiscovery:
                 continue
 
             try:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
+                if not self._acquire_global_startup_lock():
+                    conflict = self.find_conflicting_daemon()
+                    if conflict is not None:
+                        raise self._overlap_error(conflict)
 
-                existing_address = await self._reuse_live_daemon(
-                    initial_address,
-                    remaining,
-                )
-                if existing_address is not None:
-                    return existing_address
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
 
-                conflict = self.find_conflicting_daemon()
-                if conflict is not None:
-                    raise self._overlap_error(conflict)
-
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-
-                # No live daemon — race to become the sole daemon starter.
-                # The global startup lock is acquired before the per-root
-                # starter lock and released after it, so no live process can
-                # hold the starter lock while we already hold the global one.
-                if not self._acquire_starter_lock():
-                    raise AssertionError(
-                        "starter lock unavailable while global startup lock is held"
+                    existing_address = await self._reuse_live_daemon(
+                        initial_address,
+                        remaining,
                     )
+                    if existing_address is not None:
+                        return existing_address
+
+                    await asyncio.sleep(min(_STARTUP_POLL_INTERVAL, remaining))
+                    continue
 
                 try:
-                    self._start_daemon_subprocess(args)
-                    poll_deadline = time.monotonic() + remaining
-                    while time.monotonic() < poll_deadline:
-                        lock = self.read_lock()
-                        if lock is not None:
-                            actual_address = str(
-                                lock.get("socket_path", initial_address)
-                            )
-                            if await self._socket_connectable(actual_address):
-                                return actual_address
-                        sleep_for = poll_deadline - time.monotonic()
-                        await asyncio.sleep(
-                            min(_STARTUP_POLL_INTERVAL, max(sleep_for, 0.0))
-                        )
-                finally:
-                    self._release_starter_lock()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
 
-                raise RuntimeError(
-                    f"ChunkHound daemon did not start within {_STARTUP_TIMEOUT}s "
-                    f"(address: {initial_address})"
-                )
+                    existing_address = await self._reuse_live_daemon(
+                        initial_address,
+                        remaining,
+                    )
+                    if existing_address is not None:
+                        return existing_address
+
+                    conflict = self.find_conflicting_daemon()
+                    if conflict is not None:
+                        raise self._overlap_error(conflict)
+
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+
+                    # No live daemon — race to become the sole daemon starter.
+                    # The global startup lock is acquired before the per-root
+                    # starter lock and released after it, so no live process
+                    # can hold the starter lock while we already hold the
+                    # global one.
+                    if not self._acquire_starter_lock():
+                        raise AssertionError(
+                            "starter lock unavailable while global startup lock is held"
+                        )
+
+                    try:
+                        startup_address = self._select_startup_ipc_address()
+                        startup = self._start_daemon_subprocess(
+                            args,
+                            socket_path=startup_address,
+                        )
+                        poll_deadline = time.monotonic() + remaining
+                        while time.monotonic() < poll_deadline:
+                            returncode = startup.process.poll()
+                            if returncode is not None:
+                                await _terminate_startup_handle(startup)
+                                raise RuntimeError(
+                                    self._format_startup_failure(
+                                        prefix=(
+                                            "ChunkHound daemon exited before it became "
+                                            f"reachable (address: {startup_address})"
+                                        ),
+                                        log_path=startup.log_path,
+                                        returncode=returncode,
+                                    )
+                                )
+                            lock = self.read_lock()
+                            if lock is not None:
+                                actual_address = str(
+                                    lock.get("socket_path", initial_address)
+                                )
+                                actual_pid = lock.get("pid")
+                                if (
+                                    isinstance(actual_pid, int)
+                                    and await self._socket_connectable(actual_address)
+                                ):
+                                    # Authoritative registry publication from
+                                    # the proxy. Cross-runtime discovery reads
+                                    # only the user-scoped registry dir, so if
+                                    # the entry is missing when we release the
+                                    # user-wide startup lock a later proxy
+                                    # cannot see this daemon (IPC addresses and
+                                    # authoritative lock files are runtime-
+                                    # scoped). The daemon's own best-effort
+                                    # write in server.py is retained as an
+                                    # idempotent secondary path, but the proxy
+                                    # is the contract owner here: any failure
+                                    # of this write must fail the startup so
+                                    # the cross-runtime barrier is never
+                                    # released over an unpublished daemon.
+                                    try:
+                                        self.write_registry_entry(
+                                            actual_pid, actual_address
+                                        )
+                                    except Exception:
+                                        await _terminate_startup_handle(startup)
+                                        raise
+                                    return actual_address
+                            sleep_for = poll_deadline - time.monotonic()
+                            await asyncio.sleep(
+                                min(_STARTUP_POLL_INTERVAL, max(sleep_for, 0.0))
+                            )
+
+                        await _terminate_startup_handle(startup)
+                        raise RuntimeError(
+                            self._format_startup_failure(
+                                prefix=(
+                                    f"ChunkHound daemon did not start within "
+                                    f"{_STARTUP_TIMEOUT}s (address: {startup_address})"
+                                ),
+                                log_path=startup.log_path,
+                            )
+                        )
+                    finally:
+                        self._release_starter_lock()
+                finally:
+                    self._release_global_startup_lock()
             finally:
-                self._release_global_startup_lock()
+                self._release_cross_runtime_startup_lock()
 
         raise RuntimeError(
-            f"ChunkHound daemon did not become reachable within "
-            f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+            self._format_startup_failure(
+                prefix=(
+                    f"ChunkHound daemon did not become reachable within "
+                    f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+                )
+            )
         )
 
     # ------------------------------------------------------------------
