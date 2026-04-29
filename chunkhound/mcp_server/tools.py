@@ -354,6 +354,94 @@ def limit_response_size(
     }
 
 
+# Extension-to-language hint for markdown code fences
+_EXT_TO_LANG: dict[str, str] = {
+    ".py": "python", ".ts": "typescript", ".tsx": "tsx",
+    ".js": "javascript", ".jsx": "jsx", ".go": "go",
+    ".rs": "rust", ".java": "java", ".cs": "csharp",
+    ".cpp": "cpp", ".c": "c", ".rb": "ruby",
+    ".sh": "bash", ".bash": "bash", ".md": "markdown",
+    ".json": "json", ".yaml": "yaml", ".yml": "yaml",
+    ".toml": "toml", ".kt": "kotlin", ".swift": "swift",
+    ".php": "php", ".scala": "scala", ".ex": "elixir",
+    ".exs": "elixir", ".hs": "haskell", ".lua": "lua",
+    ".r": "r", ".sql": "sql", ".html": "html", ".css": "css",
+}
+
+
+def format_search_results_markdown(
+    results: list[dict[str, Any]],
+    pagination: dict[str, Any],
+    search_type: str,
+) -> str:
+    """Render search results as lean markdown for MCP responses.
+
+    Drops chunk_id, chunk_type, language, metadata, file_extension,
+    line_count, code_preview, is_truncated, similarity_percentage.
+    Retains file_path, line range, symbol/name, content, and (for semantic
+    search) similarity percentage. Appends a pagination footer.
+    """
+    from pathlib import Path
+
+    if not results:
+        return "No results found."
+
+    blocks: list[str] = []
+    for result in results:
+        file_path: str = result.get("file_path") or "unknown"
+        start_line: int | None = result.get("start_line")
+        end_line: int | None = result.get("end_line")
+        content: str = result.get("content") or ""
+        symbol: str | None = result.get("symbol") or result.get("name")
+        similarity: float | None = result.get("similarity")
+
+        ext = Path(file_path).suffix.lower()
+        lang_hint = _EXT_TO_LANG.get(ext, "")
+
+        # Heading: ## `path` L10–L20 — Symbol (92%)
+        parts: list[str] = [f"## `{file_path}`"]
+        if start_line is not None:
+            line_range = (
+                f"L{start_line}–L{end_line}"
+                if end_line is not None and end_line != start_line
+                else f"L{start_line}"
+            )
+            parts.append(line_range)
+        if symbol:
+            parts.append(f"— {symbol}")
+        if search_type == "semantic" and similarity is not None:
+            pct = int(round(similarity * 100))
+            parts.append(f"({pct}%)")
+
+        heading = " ".join(parts)
+        block = f"{heading}\n\n```{lang_hint}\n{content}\n```"
+        blocks.append(block)
+
+    body = "\n\n---\n\n".join(blocks)
+
+    # Pagination footer
+    offset: int = pagination.get("offset", 0)
+    total: int | None = pagination.get("total")
+    has_more: bool = pagination.get("has_more", False)
+    next_offset: int | None = pagination.get("next_offset")
+    page_size: int = pagination.get("page_size", len(results))
+
+    start_num = offset + 1
+    end_num = offset + len(results)
+
+    if total is not None and page_size:
+        total_pages = max(1, -(-total // page_size))
+        current_page = (offset // page_size) + 1
+        footer = f"Page {current_page} of {total_pages} (results {start_num}–{end_num} of {total})"
+    else:
+        footer = f"Results {start_num}–{end_num}"
+
+    if has_more and next_offset is not None:
+        footer += f" | next_offset={next_offset}"
+
+    return f"{body}\n\n---\n{footer}"
+
+
 # =============================================================================
 # Tool Descriptions (optimized for LLM consumption)
 # =============================================================================
