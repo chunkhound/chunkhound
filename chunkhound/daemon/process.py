@@ -20,7 +20,7 @@ def pid_alive(pid: int) -> bool:
 
 
 def stop_pid(pid: int, timeout: float = 10.0) -> bool:
-    """Send SIGTERM to pid and wait up to timeout seconds for it to die."""
+    """Stop pid and wait up to timeout seconds for it to die (SIGTERM on Unix, TerminateProcess on Windows)."""
     if not pid_alive(pid):
         return True
     try:

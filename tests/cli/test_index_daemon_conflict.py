@@ -133,7 +133,7 @@ async def test_index_with_healthy_daemon_shows_running_message(
         env = get_safe_subprocess_env()
         env["CHUNKHOUND_NO_PROMPTS"] = "1"
         result = subprocess.run(
-            ["uv", "run", "chunkhound", "index", str(project_dir), "--no-embeddings"],
+            [_chunkhound_exe(), "index", str(project_dir), "--no-embeddings"],
             capture_output=True,
             text=True,
             timeout=30,

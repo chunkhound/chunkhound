@@ -87,7 +87,7 @@ async def _handle_daemon_lock_conflict(
 
     formatter.warning(f"ChunkHound daemon (pid={pid}) is unresponsive.")
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         reply = (
             await loop.run_in_executor(
                 None, lambda: input("Kill it and continue indexing? [Y/n]: ")
