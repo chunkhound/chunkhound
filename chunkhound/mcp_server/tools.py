@@ -459,7 +459,7 @@ DECISION GUIDE:
 - Concept or behavior → semantic
 - Cross-file architecture question → call code_research first
 
-OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
+OUTPUT: Markdown blocks — file path, line range, symbol name, code block, pagination footer."""
 
 SEARCH_DESCRIPTION_NO_RESEARCH = """Pinpoint specific code locations — find exact symbols, patterns, or concepts in the indexed codebase. Returns structurally-parsed code chunks (functions, classes) — large definitions may span multiple results.
 
@@ -473,7 +473,7 @@ DECISION GUIDE:
 - Known symbol or pattern → regex
 - Concept or behavior → semantic
 
-OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
+OUTPUT: Markdown blocks — file path, line range, symbol name, code block, pagination footer."""
 
 CODE_RESEARCH_DESCRIPTION = """Start here for any coding task. Call code_research first to understand the relevant code area before writing or modifying code.
 
