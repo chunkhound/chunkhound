@@ -534,16 +534,18 @@ def quicksort(arr):
             
             try:
                 # Test semantic search with services (no subprocess needed)
-                from chunkhound.mcp_server.tools import execute_tool
-                
+                from chunkhound.mcp_server.tools import search_impl
+
                 # Search for sorting algorithms semantically
-                semantic_response = await execute_tool(
-                    tool_name="search",
+                semantic_response = await search_impl(
                     services=services,
                     embedding_manager=embedding_manager,
-                    arguments={"type": "semantic", "query": "sorting algorithms", "page_size": 10, "offset": 0}
+                    type="semantic",
+                    query="sorting algorithms",
+                    page_size=10,
+                    offset=0
                 )
-                
+
                 semantic_results = semantic_response.get('results', [])
                         
                 # Should find sorting-related content from target project
