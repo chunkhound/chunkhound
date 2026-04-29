@@ -108,11 +108,11 @@ class TestTokenReduction:
             "code_preview", "metadata",
         ]
 
+        total_dropped = 0
         with capsys.disabled():
             print(f"\n{'-'*52}")
             print(f"  {'Field':<30} {'Tokens':>6}")
             print(f"{'-'*52}")
-            total_dropped = 0
             for field in dropped:
                 if field in result:
                     tokens = _estimate_tokens(json.dumps({field: result[field]}))
@@ -124,6 +124,12 @@ class TestTokenReduction:
             print(f"  {'TOTAL result (JSON)':<30} {total_result:>6}")
             print(f"  {'Dropped %':<30} {total_dropped/total_result*100:>5.1f}%")
             print(f"{'-'*52}")
+
+        total_result = _estimate_tokens(json.dumps(result))
+        assert total_dropped > 0, "Dropped fields must have non-zero token cost"
+        assert total_dropped / total_result > 0.5, (
+            f"Dropped fields should account for >50% of tokens, got {total_dropped/total_result:.1%}"
+        )
 
     def test_metadata_duplication_overhead(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Show how much metadata.raw_content duplicates the content field."""
@@ -139,3 +145,8 @@ class TestTokenReduction:
             print(f"  code_preview:              {code_preview_tokens:>6}  (partial duplicate)")
             print(f"  Total duplication:         {metadata_tokens + code_preview_tokens:>6} tokens")
             print(f"{'-'*52}")
+
+        assert metadata_tokens >= content_tokens, (
+            "metadata.raw_content should be at least as large as content (it's a full copy)"
+        )
+        assert code_preview_tokens > 0, "code_preview must have non-zero token cost"

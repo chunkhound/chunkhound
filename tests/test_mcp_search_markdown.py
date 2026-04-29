@@ -15,6 +15,7 @@ def _result(
     symbol: str | None = "MyClass.my_method",
     name: str | None = None,
     similarity: float | None = 0.92,
+    language: str = "python",
     **extra: object,
 ) -> dict:
     return dict(
@@ -28,7 +29,7 @@ def _result(
         # fields that must NOT appear in markdown output:
         chunk_id=42,
         chunk_type="function",
-        language="python",
+        language=language,
         metadata={"raw_content": content},
         file_extension=".py",
         line_count=end_line - start_line + 1,
@@ -86,8 +87,9 @@ class TestFormatSearchResultsMarkdown:
         assert "92%" in md
 
     def test_similarity_hidden_for_regex(self) -> None:
+        import re
         md = self._fmt([_result()], search_type="regex")
-        assert "similarity" not in md.lower()
+        assert not re.search(r'\(\d+%\)', md), "Similarity percentage should not appear in regex results"
 
     def test_code_block_contains_content(self) -> None:
         md = self._fmt([_result(content="def my_method(self):\n    pass")])
@@ -99,12 +101,12 @@ class TestFormatSearchResultsMarkdown:
         assert "```python" in md
 
     def test_go_fence_hint(self) -> None:
-        md = self._fmt([_result(file_path="main.go", symbol=None, name=None)])
+        md = self._fmt([_result(file_path="main.go", language="go", symbol=None, name=None)])
         assert "```go" in md
 
     def test_unknown_ext_fence_hint_is_empty(self) -> None:
-        md = self._fmt([_result(file_path="Makefile", symbol=None, name=None)])
-        assert "```" in md
+        md = self._fmt([_result(file_path="Makefile", language="unknown", symbol=None, name=None)])
+        assert "```\n" in md
 
     def test_pagination_footer_shows_totals(self) -> None:
         md = self._fmt([_result()], pagination=_pagination(total=47, next_offset=10))

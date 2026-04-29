@@ -354,21 +354,6 @@ def limit_response_size(
     }
 
 
-# Extension-to-language hint for markdown code fences
-_EXT_TO_LANG: dict[str, str] = {
-    ".py": "python", ".ts": "typescript", ".tsx": "tsx",
-    ".js": "javascript", ".jsx": "jsx", ".go": "go",
-    ".rs": "rust", ".java": "java", ".cs": "csharp",
-    ".cpp": "cpp", ".c": "c", ".rb": "ruby",
-    ".sh": "bash", ".bash": "bash", ".md": "markdown",
-    ".json": "json", ".yaml": "yaml", ".yml": "yaml",
-    ".toml": "toml", ".kt": "kotlin", ".swift": "swift",
-    ".php": "php", ".scala": "scala", ".ex": "elixir",
-    ".exs": "elixir", ".hs": "haskell", ".lua": "lua",
-    ".r": "r", ".sql": "sql", ".html": "html", ".css": "css",
-}
-
-
 def format_search_results_markdown(
     results: list[dict[str, Any]],
     pagination: dict[str, Any],
@@ -381,8 +366,6 @@ def format_search_results_markdown(
     Retains file_path, line range, symbol/name, content, and (for semantic
     search) similarity percentage. Appends a pagination footer.
     """
-    from pathlib import Path
-
     if not results:
         return "No results found."
 
@@ -395,8 +378,8 @@ def format_search_results_markdown(
         symbol: str | None = result.get("symbol") or result.get("name")
         similarity: float | None = result.get("similarity")
 
-        ext = Path(file_path).suffix.lower()
-        lang_hint = _EXT_TO_LANG.get(ext, "")
+        lang = result.get("language") or ""
+        lang_hint = "" if lang == "unknown" else lang
 
         # Heading: ## `path` L10–L20 — Symbol (92%)
         parts: list[str] = [f"## `{file_path}`"]
@@ -579,11 +562,9 @@ async def search_impl(
     # Convert file paths to native platform format
     native_results = _convert_paths_to_native(results)
 
-    # Apply response size limiting
-    response = cast(
+    return cast(
         SearchResponse, {"results": native_results, "pagination": pagination}
     )
-    return limit_response_size(response)
 
 
 @register_tool(
@@ -739,16 +720,25 @@ async def execute_tool(
             answer = result.get("answer", fallback)
             return str(answer)
 
-    # search tool renders dict → lean markdown for MCP
-    # (CLI calls search_impl directly and still gets the dict)
+    # search tool renders dict → lean markdown for MCP, with markdown-based
+    # token limiting (CLI calls search_impl directly and still gets the dict)
     if tool_name == "search":
         if isinstance(result, dict):
             search_type = arguments.get("type", "regex")
-            return format_search_results_markdown(
-                result.get("results", []),
-                result.get("pagination", {}),
-                search_type,
-            )
+            results_list = list(result.get("results", []))
+            pagination = dict(result.get("pagination", {}))
+            md = format_search_results_markdown(results_list, pagination, search_type)
+            while results_list and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
+                trim = max(1, len(results_list) // 4)
+                results_list = results_list[:-trim]
+                pagination = {
+                    **pagination,
+                    "page_size": len(results_list),
+                    "has_more": True,
+                    "next_offset": pagination.get("offset", 0) + len(results_list),
+                }
+                md = format_search_results_markdown(results_list, pagination, search_type)
+            return md
 
     # Convert result to dict if it's not already
     if hasattr(result, "__dict__"):
