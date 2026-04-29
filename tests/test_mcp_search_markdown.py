@@ -167,7 +167,6 @@ class TestExecuteToolSearchReturnsMarkdown:
         )
         return services
 
-    @pytest.mark.asyncio
     async def test_regex_search_returns_str(self) -> None:
         from chunkhound.mcp_server.tools import execute_tool
 
@@ -185,7 +184,6 @@ class TestExecuteToolSearchReturnsMarkdown:
         assert "auth.py" in result
         assert "```" in result
 
-    @pytest.mark.asyncio
     async def test_no_dropped_fields_in_mcp_output(self) -> None:
         from chunkhound.mcp_server.tools import execute_tool
 
@@ -203,3 +201,33 @@ class TestExecuteToolSearchReturnsMarkdown:
                       "file_extension", "is_truncated", "code_preview",
                       "line_count", "similarity_percentage"):
             assert field not in result, f"Dropped field '{field}' leaked into MCP output"
+
+    async def test_trim_loop_reduces_oversized_results(self) -> None:
+        """Token-limiting trim loop in execute_tool removes results until under MAX_RESPONSE_TOKENS.
+
+        10 results × 7 000-char content ≈ 70 000 chars → ~23 300 tokens > MAX_RESPONSE_TOKENS
+        (20 000).  The loop trims by 1/4 each pass; after one pass 8 results remain (~18 700
+        tokens < limit).  The response must reflect the trim: fewer blocks and next_offset set.
+        """
+        from chunkhound.mcp_server.tools import execute_tool
+
+        large_content = "x" * 7000
+        results = [
+            _result(file_path=f"file_{i}.py", content=large_content, symbol=f"func_{i}")
+            for i in range(10)
+        ]
+        svc = self._make_services(results, _pagination(has_more=False, next_offset=None, total=10))
+
+        result = await execute_tool(
+            tool_name="search",
+            services=svc,
+            embedding_manager=None,
+            arguments={"type": "regex", "query": "x"},
+        )
+
+        assert isinstance(result, str)
+        result_block_count = result.count("## `")
+        assert result_block_count < 10, (
+            f"Trim loop should have removed results; found {result_block_count} blocks"
+        )
+        assert "next_offset=" in result, "Trimmed response must set next_offset for the caller to page"
