@@ -149,6 +149,24 @@ class TestFormatSearchResultsMarkdown:
         md = self._fmt([_result(symbol=None, name=None)])
         assert " — None" not in md
 
+    def test_content_with_triple_backticks_produces_valid_fence(self) -> None:
+        """Content containing unindented ``` must not prematurely close the fence."""
+        # Unindented triple-backticks at column 0 close a CommonMark fence.
+        content_with_backticks = "before\n```\nafter"
+        md = self._fmt([_result(content=content_with_backticks)])
+        # The content must appear intact inside one balanced fence pair.
+        assert "before" in md
+        assert "after" in md
+        # Confirm the outer fence is longer than 3 backticks so the inner ```
+        # cannot close it.
+        import re
+        opening = re.search(r"^(`{3,})\w*$", md, re.MULTILINE)
+        assert opening is not None, "No opening fence found"
+        fence = opening.group(1)
+        assert len(fence) > 3, (
+            f"Fence is only {len(fence)} backticks — inner ``` will close it prematurely"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests for execute_tool returning str for search

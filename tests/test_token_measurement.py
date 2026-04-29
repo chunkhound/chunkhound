@@ -1,9 +1,8 @@
-"""Token measurement: JSON (current) vs markdown (new) search responses.
+"""Token measurement: JSON vs markdown search responses.
 
-Run BEFORE and AFTER the change to get real reduction numbers:
+Regression guard: asserts markdown is at least 40% smaller than equivalent JSON.
+Pass -s to see the printed breakdown tables:
   uv run pytest tests/test_token_measurement.py -v -s
-
-The -s flag is required to see the printed breakdown tables.
 """
 import json
 import pytest

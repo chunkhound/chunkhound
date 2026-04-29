@@ -8,6 +8,7 @@ The registry pattern ensures consistent tool metadata and behavior.
 
 import inspect
 import json
+import re
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -300,6 +301,9 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 3
 
 
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
 def format_search_results_markdown(
     results: list[dict[str, Any]],
     pagination: dict[str, Any],
@@ -343,7 +347,10 @@ def format_search_results_markdown(
             parts.append(f"({pct}%)")
 
         heading = " ".join(parts)
-        block = f"{heading}\n\n```{lang_hint}\n{content}\n```"
+        # Use a fence longer than any backtick run in the content (CommonMark §6.1).
+        max_run = max((len(m.group()) for m in _BACKTICK_RUN_RE.finditer(content)), default=0)
+        fence = "`" * max(3, max_run + 1)
+        block = f"{heading}\n\n{fence}{lang_hint}\n{content}\n{fence}"
         blocks.append(block)
 
     body = "\n\n---\n\n".join(blocks)
@@ -666,8 +673,7 @@ async def execute_tool(
             answer = result.get("answer", fallback)
             return str(answer)
 
-    # search tool renders dict → lean markdown for MCP, with markdown-based
-    # token limiting (CLI calls search_impl directly and still gets the dict)
+    # search tool renders dict → lean markdown for MCP, with markdown-based token limiting
     if tool_name == "search":
         if isinstance(result, dict):
             search_type = arguments.get("type", "regex")
