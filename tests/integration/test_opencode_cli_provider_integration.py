@@ -11,12 +11,13 @@ from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
 
 
 @pytest.fixture
-async def opencode_provider(free_opencode_model):
-    """Create an OpenCodeCLIProvider using a real free model."""
+async def opencode_provider(free_opencode_models):
+    """Create an OpenCodeCLIProvider using a real free model with optional fallback."""
     provider = OpenCodeCLIProvider(
-        model=free_opencode_model,
+        model=free_opencode_models[0],
+        fallback_model=free_opencode_models[1] if len(free_opencode_models) > 1 else None,
         timeout=30,
-        max_retries=2,
+        max_retries=1,
     )
     yield provider
 

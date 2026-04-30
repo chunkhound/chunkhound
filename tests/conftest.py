@@ -80,19 +80,12 @@ def _discover_free_opencode_models() -> list[str]:
 
 
 @pytest.fixture(scope="session")
-def free_opencode_model() -> str:
-    """Discover a free OpenCode model for integration tests.
-
-    Returns the first available free model slug discovered via
-    ``opencode models``. Skips the test if the CLI is unavailable
-    or no free models are found.
-    """
+def free_opencode_models() -> list[str]:
+    """Discover all free OpenCode model slugs for integration tests."""
     models = _discover_free_opencode_models()
-
     if not models:
         pytest.skip("No free OpenCode models available")
-
-    return models[0]
+    return models
 
 
 @pytest.fixture

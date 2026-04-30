@@ -30,7 +30,7 @@ def test_llm_config_per_role_provider_overrides():
 
 
 def test_llm_config_model_field_sets_both_roles():
-    """Test that the convenience 'model' field sets both utility and synthesis models."""
+    """Test that 'model' sets both utility and synthesis models."""
     cfg = LLMConfig(
         provider="grok",
         model="grok-4-1-fast-reas5oning",  # intentional typo to test
@@ -88,8 +88,34 @@ def test_llm_config_codex_reasoning_effort_per_role():
     assert "reasoning_effort" not in synth2
 
 
+def test_openai_rejects_xhigh_reasoning_effort():
+    with pytest.raises(ValueError, match="openai does not support"):
+        LLMConfig(
+            provider="openai",
+            utility_model="gpt-5-nano",
+            synthesis_model="gpt-5",
+            codex_reasoning_effort="xhigh",
+        )
+
+
+def test_opencode_accepts_xhigh_reasoning_effort():
+    cfg = LLMConfig(
+        provider="opencode-cli",
+        utility_model="opencode/gpt-5-nano",
+        synthesis_model="opencode/gpt-5",
+        codex_reasoning_effort="xhigh",
+    )
+
+    utility_config, synthesis_config = cfg.get_provider_configs()
+    assert utility_config["reasoning_effort"] == "xhigh"
+    assert synthesis_config["reasoning_effort"] == "xhigh"
+
+
 @pytest.mark.asyncio
-async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeypatch, tmp_path: Path):
+async def test_llm_codex_cli_status_reflects_configured_model_and_effort(
+    monkeypatch,
+    tmp_path: Path,
+):
     """End-to-end check: LLMConfig -> LLMManager -> CodexCLI overlay config."""
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
@@ -108,8 +134,18 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeyp
     # Ensure we never touch a real Codex home or binary
     monkeypatch.setenv("CHUNKHOUND_CODEX_STDIN_FIRST", "0")
     monkeypatch.setenv("CHUNKHOUND_CODEX_CONFIG_OVERRIDE", "env")
-    monkeypatch.setattr(CodexCLIProvider, "_get_base_codex_home", lambda self: None, raising=True)
-    monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider,
+        "_get_base_codex_home",
+        lambda self: None,
+        raising=True,
+    )
+    monkeypatch.setattr(
+        CodexCLIProvider,
+        "_codex_available",
+        lambda self: True,
+        raising=True,
+    )
 
     captured: dict[str, object] = {"env": None, "config_text": None}
 
@@ -138,7 +174,12 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeyp
         status_text = f"MODEL={model_name};REASONING_EFFORT={effort_value}"
         return DummyProc(rc=0, out=status_text.encode("utf-8"), err=b"")
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        _fake_create_subprocess_exec,
+        raising=True,
+    )
 
     llm_manager = LLMManager(utility_config, synthesis_config)
     provider = llm_manager.get_synthesis_provider()
@@ -147,6 +188,54 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeyp
 
     assert "MODEL=test-config-model" in response.content
     assert "REASONING_EFFORT=high" in response.content
+
+
+def test_llm_manager_forwards_anthropic_extended_config(monkeypatch):
+    captured: list[dict[str, object]] = []
+
+    class FakeAnthropicProvider:
+        def __init__(self, **kwargs):  # noqa: ANN001
+            captured.append(kwargs)
+            self.model = kwargs["model"]
+
+    monkeypatch.setitem(LLMManager._providers, "anthropic", FakeAnthropicProvider)
+
+    cfg = LLMConfig(
+        provider="anthropic",
+        api_key=SecretStr("sk-ant-test"),
+        utility_model="claude-opus-4-7",
+        synthesis_model="claude-opus-4-7",
+        anthropic_thinking_enabled=True,
+        anthropic_thinking_mode="adaptive",
+        anthropic_thinking_display="summarized",
+        anthropic_effort="xhigh",
+        anthropic_prompt_caching=True,
+        anthropic_cache_ttl="1h",
+        anthropic_task_budget_tokens=20000,
+        anthropic_context_management_enabled=True,
+        anthropic_clear_thinking_keep_turns=2,
+        anthropic_clear_tool_uses_trigger_tokens=1000,
+        anthropic_clear_tool_uses_keep=3,
+    )
+
+    utility_config, synthesis_config = cfg.get_provider_configs()
+    LLMManager(utility_config, synthesis_config)
+
+    assert len(captured) == 2
+    for kwargs in captured:
+        assert kwargs["api_key"] == "sk-ant-test"
+        assert kwargs["model"] == "claude-opus-4-7"
+        assert kwargs["thinking_enabled"] is True
+        assert kwargs["thinking_mode"] == "adaptive"
+        assert kwargs["thinking_display"] == "summarized"
+        assert kwargs["effort"] == "xhigh"
+        assert kwargs["prompt_caching"] is True
+        assert kwargs["cache_ttl"] == "1h"
+        assert kwargs["task_budget_tokens"] == 20000
+        assert kwargs["context_management_enabled"] is True
+        assert kwargs["clear_thinking_keep_turns"] == 2
+        assert kwargs["clear_tool_uses_trigger_tokens"] == 1000
+        assert kwargs["clear_tool_uses_keep"] == 3
 
 
 def test_grok_config_validation_with_api_key():

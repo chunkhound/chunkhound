@@ -687,3 +687,64 @@ class TestOpenCodeCLIProvider:
 
             with pytest.raises(RuntimeError, match="real failure"):
                 await provider._run_cli_command("Test prompt")
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_fallback_model_on_timeout(self):
+        """Test that fallback model is tried once when primary exhausts retries with timeout."""
+        fallback_text_event = json.dumps(
+            {"type": "text", "part": {"text": "Fallback response"}}
+        )
+        with patch.object(OpenCodeCLIProvider, "_opencode_available", return_value=True):
+            provider = OpenCodeCLIProvider(
+                model="test-provider/primary-model",
+                fallback_model="test-provider/fallback-model",
+                timeout=30,
+                max_retries=1,
+            )
+
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process_timeout = MagicMock()
+            mock_process_timeout.communicate = AsyncMock(
+                side_effect=asyncio.TimeoutError()
+            )
+            mock_process_timeout.wait = AsyncMock()
+            mock_process_timeout.returncode = None
+
+            mock_process_fallback = AsyncMock()
+            mock_process_fallback.communicate.return_value = (
+                fallback_text_event.encode(), b""
+            )
+            mock_process_fallback.returncode = 0
+
+            mock_subprocess.side_effect = [mock_process_timeout, mock_process_fallback]
+
+            result = await provider._run_cli_command("Test prompt")
+
+            assert result == "Fallback response"
+            assert mock_subprocess.call_count == 2
+            # Second call must use the fallback model slug
+            second_call_args = mock_subprocess.call_args_list[1][0]
+            model_idx = list(second_call_args).index("--model")
+            assert second_call_args[model_idx + 1] == "test-provider/fallback-model"
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_fallback_not_tried_on_non_timeout_error(self):
+        """Test that fallback model is NOT invoked on non-timeout failures."""
+        with patch.object(OpenCodeCLIProvider, "_opencode_available", return_value=True):
+            provider = OpenCodeCLIProvider(
+                model="test-provider/primary-model",
+                fallback_model="test-provider/fallback-model",
+                timeout=30,
+                max_retries=1,
+            )
+
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process = AsyncMock()
+            mock_process.communicate.return_value = (b"", b"model not found")
+            mock_process.returncode = 1
+            mock_subprocess.return_value = mock_process
+
+            with pytest.raises(RuntimeError, match="model not found"):
+                await provider._run_cli_command("Test prompt")
+
+            assert mock_subprocess.call_count == 1

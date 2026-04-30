@@ -37,6 +37,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         timeout: int = 60,
         max_retries: int = 3,
         reasoning_effort: str | None = None,
+        fallback_model: str | None = None,
     ):
         """Initialize OpenCode CLI provider.
 
@@ -49,6 +50,8 @@ class OpenCodeCLIProvider(BaseCLIProvider):
             max_retries: Number of retry attempts for failed requests
             reasoning_effort: Effort level mapped to --variant
                 (minimal, low, medium, high, xhigh)
+            fallback_model: Model to try once if primary model exhausts all retries
+                with timeout errors (different provider queue avoids the same hotspot).
         """
         super().__init__(api_key, model, base_url, timeout, max_retries)
         self._reasoning_effort = self._validate_reasoning_effort(reasoning_effort)
@@ -56,6 +59,10 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         # Validate model format eagerly so invalid configs fail fast
         if self._model:
             self._validate_model_format(self._model)
+
+        if fallback_model:
+            self._validate_model_format(fallback_model)
+        self._fallback_model: str | None = fallback_model
 
         # Check CLI availability
         if not self._opencode_available():
@@ -154,10 +161,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         Raises:
             RuntimeError: If CLI command fails or returns no content
         """
-        if max_completion_tokens is not None:
-            logger.warning(
-                "max_completion_tokens not supported by opencode-cli, ignoring"
-            )
+
 
         # Honor env override to disable JSON format
         use_json = os.getenv("CHUNKHOUND_OPENCODE_JSON", "1") != "0"
@@ -300,7 +304,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                             "The model may have produced no output or only tool calls."
                         )
 
-                    return "".join(text_parts)
+                    return "".join(text_parts).strip()
                 else:
                     # Plain text mode
                     output = stdout.decode("utf-8", errors="replace").strip()
@@ -329,7 +333,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                         raise last_error
                     return output
 
-            except asyncio.TimeoutError as e:
+            except asyncio.TimeoutError:
                 # Kill the subprocess if it's still running
                 if process and process.returncode is None:
                     try:
@@ -346,7 +350,8 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                         f"OpenCode CLI attempt {attempt + 1} timed out, retrying"
                     )
                     continue
-                raise last_error from e
+                # Break out of the retry loop so the fallback model check runs
+                break
 
             except Exception as e:
                 # Re-raise RuntimeError directly to avoid double-wrapping
@@ -369,5 +374,30 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                     continue
                 raise last_error from e
 
-        # Should not reach here, but just in case
+        # After exhausting per-model retries, try once with the fallback model
+        # (only on timeout — different model = different rate-limit queue)
+        if (
+            self._fallback_model is not None
+            and last_error is not None
+            and "timed out" in str(last_error)
+        ):
+            logger.info(
+                f"Primary model {self._model!r} timed out; "
+                f"trying fallback {self._fallback_model!r} once"
+            )
+            saved_model, saved_fallback, saved_retries = (
+                self._model, self._fallback_model, self._max_retries
+            )
+            self._model = self._fallback_model
+            self._fallback_model = None  # prevent infinite recursion
+            self._max_retries = 1
+            try:
+                return await self._run_cli_command(prompt, system, max_completion_tokens, timeout)
+            except RuntimeError:
+                pass  # fallback also failed — raise original error below
+            finally:
+                self._model, self._fallback_model, self._max_retries = (
+                    saved_model, saved_fallback, saved_retries
+                )
+
         raise last_error or RuntimeError("OpenCode CLI command failed after retries")
