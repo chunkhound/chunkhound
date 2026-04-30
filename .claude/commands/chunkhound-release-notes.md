@@ -8,11 +8,25 @@ You are preparing release notes for a ChunkHound production release.
 ## Step 1: Determine the version
 
 If a version was provided in `$ARGUMENTS`, use it as the release version.
+
 If no version was provided, run:
+```bash
+git fetch --tags origin 2>/dev/null || true
+LATEST_TAG=$(git tag --sort=-version:refname | head -1)
+LATEST_STABLE=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+echo "Latest tag (any):    $LATEST_TAG"
+echo "Latest stable tag:   $LATEST_STABLE"
 ```
-git tag --sort=-version:refname | head -1
-```
-Then suggest bumping the minor version (e.g. `4.1.0` → `4.2.0`) and ask the user to confirm.
+
+Then apply this logic to suggest the next version:
+- **If `LATEST_TAG` is a stable tag** (matches `v[0-9]+\.[0-9]+\.[0-9]+$`): suggest bumping
+  the minor (e.g. `v4.1.0` → `4.2.0`).
+- **If `LATEST_TAG` is a pre-release** (contains `a`, `b`, or `rc` suffix, e.g. `v4.2.0b1`):
+  strip the suffix and suggest the corresponding stable release (e.g. `v4.2.0b1` → `4.2.0`).
+  Do **not** bump the minor — the stable release that the pre-release was preparing is the
+  correct next version.
+
+Ask the user to confirm the suggested version before continuing.
 
 ## Step 2: Collect git history since last release
 
@@ -22,8 +36,16 @@ Run these commands to gather raw material:
 # Fetch all tags from origin to ensure local view is complete
 git fetch --tags origin 2>/dev/null || true
 
-# Find the previous release tag (skip pre-release tags like a1, b1, rc1)
-PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+# Determine the correct baseline tag using the same prerelease-promotion logic as Step 1:
+# - If the latest tag is a prerelease being promoted to stable (e.g. v4.2.0b1 → v4.2.0),
+#   use that prerelease tag — narrows the range to commits added since the prerelease cut.
+# - For a direct stable-to-stable release, use the previous stable tag.
+LATEST_ANY=$(git tag --sort=-version:refname | head -1)
+if echo "$LATEST_ANY" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+[a-z][0-9]+$'; then
+    PREV_TAG="$LATEST_ANY"   # prerelease promotion: baseline is the prerelease tag itself
+else
+    PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+fi
 echo "Previous release tag: $PREV_TAG"
 
 # Sanity-check: count commits in range
@@ -58,6 +80,33 @@ git log ${PREV_TAG}..HEAD --merges --format="PR: %s"
 
 Multiple commits often build one feature; one commit may span multiple concerns. Your job is to
 synthesize the commit log into a list of *capabilities that changed for the user*.
+
+### 3a: Scale check — map-reduce for large ranges
+
+Before summarizing, check `COMMIT_COUNT` from Step 2.
+
+**If `COMMIT_COUNT` ≤ 100:** proceed with single-pass summarization below.
+
+**If `COMMIT_COUNT` > 100:** use map-reduce:
+
+1. Split the commit range into batches of ≤ 50 commits each (by date or hash order).
+2. Spawn one agent per batch (use `superpowers:dispatching-parallel-agents` if available).
+   Each agent receives its batch and the same grouping rules below, and returns a candidate
+   bullet list plus a **coverage ledger** for every commit in its batch.
+3. After all agents complete, merge their candidate lists (de-duplicate overlapping features
+   across batches) and merge the ledgers into one combined ledger.
+4. Apply Step 4b de-duplication against CHANGELOG.md to the merged candidate list.
+
+**Coverage ledger format** — every commit/PR in the range must appear in exactly one row:
+
+| Commit / PR | Disposition | Note |
+|---|---|---|
+| `abc1234` feat(llm): add Gemini | included | → "Gemini LLM provider" bullet |
+| `def5678` fix(ci): flaky test | skipped | CI-only, no user impact |
+| `ghi9012` fix: follow-up to Gemini | folded | → into "Gemini LLM provider" |
+
+Present the coverage ledger to the user alongside the candidate bullet list and wait for
+confirmation before proceeding to Step 5.
 
 **How to group:**
 - Cluster all commits that contribute to the same feature (e.g. initial impl + fixes + tests +
@@ -189,10 +238,27 @@ Write a short GitHub Release body:
 
 After presenting both outputs, ask the user:
 
-1. **Update CHANGELOG.md?** — Insert the new versioned section at the top of CHANGELOG.md (after the header), replacing the existing `[Unreleased]` section if present. Reset `[Unreleased]` to an empty template. Append the comparison link:
-   ```
-   [X.Y.Z]: https://github.com/chunkhound/chunkhound/compare/vPREV...vX.Y.Z
-   ```
+1. **Update CHANGELOG.md?** — Apply these changes atomically:
+
+   a. Insert the new `## [X.Y.Z] - YYYY-MM-DD` section at the top (after the file header).
+
+   b. Replace the existing `## [Unreleased]` section with an empty template.
+
+   c. **Fold pre-release sections:** For every pre-release section whose content was folded into
+      this stable release (e.g. `## [4.1.0b1]`), **remove the entire section** from the file body.
+      Then, in the link reference block at the bottom of the file, **also remove the corresponding
+      line** (e.g. `[4.1.0b1]: https://...`). Leaving a section with no matching reference, or a
+      reference with no matching section, creates broken Markdown link integrity.
+
+   d. Add the new stable comparison link and update `[Unreleased]` to point to the new tag:
+      ```
+      [Unreleased]: https://github.com/chunkhound/chunkhound/compare/vX.Y.Z...HEAD
+      [X.Y.Z]: https://github.com/chunkhound/chunkhound/compare/vPREV...vX.Y.Z
+      ```
+      where `vPREV` is the last stable tag before this release (same `PREV_TAG` from Step 2).
+
+   Before writing, show the user a diff preview of the link reference block so they can verify
+   no dangling references remain.
 
 2. **Create GitHub Release?** — Ask the user whether to create the release as a **draft** (safe, review in UI first) or **publish immediately**.
 
