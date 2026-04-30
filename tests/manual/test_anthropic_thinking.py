@@ -22,7 +22,7 @@ import pytest
 
 from chunkhound.providers.llm.anthropic_llm_provider import (
     AnthropicLLMProvider,
-    EFFORT_SUPPORTED_MODELS,
+    supports_effort,
 )
 
 # Skip all tests in this file if no API key is available
@@ -40,7 +40,7 @@ async def test_basic_completion():
 
     provider = AnthropicLLMProvider(
         api_key=os.getenv("ANTHROPIC_API_KEY"),
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-6",
         thinking_enabled=False,
     )
 
@@ -64,7 +64,7 @@ async def test_thinking_completion():
 
     provider = AnthropicLLMProvider(
         api_key=os.getenv("ANTHROPIC_API_KEY"),
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-6",
         thinking_enabled=True,
         thinking_budget_tokens=5000,
     )
@@ -97,7 +97,7 @@ async def test_structured_output():
 
     provider = AnthropicLLMProvider(
         api_key=os.getenv("ANTHROPIC_API_KEY"),
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-6",
         thinking_enabled=False,
     )
 
@@ -118,7 +118,7 @@ async def test_structured_output():
         prompt, schema, max_completion_tokens=200
     )
 
-    print(f"\nStructured Response:")
+    print("\nStructured Response:")
     import json
 
     print(json.dumps(response, indent=2))
@@ -170,7 +170,7 @@ async def test_usage_stats():
 
     stats = provider.get_usage_stats()
 
-    print(f"\nUsage Statistics:")
+    print("\nUsage Statistics:")
     print(f"  Requests made: {stats['requests_made']}")
     print(f"  Total tokens: {stats['total_tokens']}")
     print(f"  Prompt tokens: {stats['prompt_tokens']}")
@@ -199,7 +199,7 @@ async def test_opus_45_effort():
 
     print(f"\nModel: {provider.model}")
     print(f"Effort: {provider._effort}")
-    print(f"Model in supported list: {provider.model in EFFORT_SUPPORTED_MODELS}")
+    print(f"Model supports effort: {supports_effort(provider.model)}")
 
     prompt = "What are three key benefits of functional programming? Be concise."
     print(f"\nPrompt: {prompt}")
@@ -230,7 +230,7 @@ async def test_opus_45_full_features():
         clear_thinking_keep_turns=2,
     )
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  Model: {provider.model}")
     print(f"  Thinking: {provider._thinking_enabled}")
     print(f"  Interleaved: {provider._interleaved_thinking}")

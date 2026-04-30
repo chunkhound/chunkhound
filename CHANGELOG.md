@@ -15,8 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Migration: Use `chunkhound mcp` (stdio) instead. All major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
   - Rationale: Simplified codebase, reduced dependencies, focused on primary use case (stdio is the standard for MCP)
 - **Unsupported file types no longer indexed as plain text** - Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (.txt, .log, .cfg, .conf, .ini) are unaffected.
+- **Anthropic provider upgraded to Claude Opus 4.7/4.6 and Sonnet 4.6**
+  - `anthropic` dependency minimum bumped to `>=0.96.0,<1.0.0`
+  - Default Anthropic utility and synthesis models changed to ChunkHound's `claude-haiku` sentinel. This is intentional: current Claude Haiku is capable enough for synthesis, is Anthropic's cheapest available Claude model, and Anthropic does not currently offer a true low-cost utility tier. Users who prefer maximum synthesis quality can override `synthesis_model`.
+  - Default Claude Code CLI model changed to the same `claude-haiku` sentinel, resolved offline to ChunkHound's pinned Claude Haiku fallback.
+  - Removed module symbols `BETA_EFFORT` and `EFFORT_SUPPORTED_MODELS`. Callers should use the `supports_effort(model)` / `supports_effort_level(model, level)` predicates instead.
+  - `thinking_enabled=True` with `thinking_mode="auto"` resolves to adaptive only for adaptive-capable models such as Opus 4.6/4.7, Sonnet 4.6, and Mythos. The pinned Haiku fallback remains manual-mode thinking.
+  - `anthropic_prompt_caching` defaults to `false` because ChunkHound requests rarely reuse prompt prefixes enough to offset Anthropic cache-write costs. To opt in, set `CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING=true` or pass `--llm-anthropic-prompt-caching`.
+  - Invalid `thinking_mode` values and sub-20000 `task_budget_tokens` now raise `ValueError` instead of warning-and-coercing.
 
 ### Added
+- **Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 support** - adaptive thinking mode (auto / off / manual / adaptive selector), expanded effort levels (`low`, `medium`, `high`, `xhigh` (Opus 4.7 only), `max` (4.6+)), opt-in prompt caching with configurable TTL (`5m` / `1h`), and the task-budgets beta (Opus 4.7 only, advisory cap for agentic loops, min 20000 tokens).
+- New `LLMConfig` fields (and matching `CHUNKHOUND_LLM_ANTHROPIC_*` env vars and `--llm-anthropic-*` CLI flags): `anthropic_thinking_mode`, `anthropic_thinking_display`, `anthropic_prompt_caching`, `anthropic_cache_ttl`, `anthropic_task_budget_tokens`. The pre-existing `anthropic_thinking_enabled`, `anthropic_thinking_budget_tokens`, `anthropic_interleaved_thinking`, `anthropic_effort`, `anthropic_context_management_enabled`, and `anthropic_clear_*` fields are now also readable from env and CLI.
 - **Embedded SQL detection** - SQL code embedded in string literals is now detected and indexed by default across Python, Java, JavaScript, TypeScript, C#, Go, Rust, and PHP. Disable with `--no-detect-embedded-sql` or `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL=false`.
 - OpenAI Responses API support for reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) - enables deep code research with enhanced reasoning capabilities
 - Automatic API routing between Chat Completions and Responses API based on model compatibility - supports 30+ models including all GPT-5, GPT-4.1, GPT-4o, and o-series models

@@ -94,7 +94,6 @@ class LLMManager:
                 if effort:
                     provider_kwargs["reasoning_effort"] = effort
             elif provider_name == "anthropic":
-                # Add Anthropic configuration
                 # Extended thinking
                 provider_kwargs["thinking_enabled"] = config.get(
                     "thinking_enabled", False
@@ -105,10 +104,26 @@ class LLMManager:
                 provider_kwargs["interleaved_thinking"] = config.get(
                     "interleaved_thinking", False
                 )
+                if thinking_mode := config.get("thinking_mode"):
+                    provider_kwargs["thinking_mode"] = thinking_mode
+                if thinking_display := config.get("thinking_display"):
+                    provider_kwargs["thinking_display"] = thinking_display
 
-                # Effort parameter (Opus 4.5 only)
+                # Effort parameter (Opus 4.5/4.6/4.7, Sonnet 4.6, Mythos)
                 if effort := config.get("effort"):
                     provider_kwargs["effort"] = effort
+
+                # Prompt caching is opt-in; cache writes cost extra and
+                # ChunkHound requests rarely reuse prefixes enough to benefit.
+                provider_kwargs["prompt_caching"] = config.get(
+                    "prompt_caching", False
+                )
+                if cache_ttl := config.get("cache_ttl"):
+                    provider_kwargs["cache_ttl"] = cache_ttl
+
+                # Task budgets (beta, Opus 4.7 only)
+                if (budget := config.get("task_budget_tokens")) is not None:
+                    provider_kwargs["task_budget_tokens"] = budget
 
                 # Context management
                 if config.get("context_management_enabled"):

@@ -2,11 +2,11 @@
 
 import asyncio
 import json
-import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from chunkhound.core.config.claude_model_resolution import CLAUDE_HAIKU_FALLBACK_MODEL
 from chunkhound.interfaces.llm_provider import LLMResponse
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 
@@ -38,6 +38,34 @@ class TestClaudeCodeCLIProvider:
     def test_provider_model(self, provider):
         """Test that model name is stored correctly."""
         assert provider.model == "claude-sonnet-4-5-20250929"
+
+    def test_default_model_is_haiku(self, monkeypatch):
+        """Test that Claude CLI defaults to the shared Haiku default."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        provider = ClaudeCodeCLIProvider()
+        assert provider.model == CLAUDE_HAIKU_FALLBACK_MODEL
+
+    def test_default_model_does_not_discover_via_api(self, monkeypatch):
+        """Claude CLI auth is subscription-based, so construction stays offline."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "chunkhound.core.config.claude_model_resolution."
+            "get_latest_available_haiku_model",
+            lambda api_key=None: pytest.fail("discovery should not run"),
+        )
+
+        provider = ClaudeCodeCLIProvider()
+        assert provider.model == CLAUDE_HAIKU_FALLBACK_MODEL
+
+    def test_default_model_env_override_wins(self, monkeypatch):
+        monkeypatch.setenv(
+            "CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL",
+            "claude-haiku-override",
+        )
+        provider = ClaudeCodeCLIProvider()
+        assert provider.model == "claude-haiku-override"
 
     def test_model_mapping(self, provider):
         """Test model name to CLI argument mapping."""
@@ -316,7 +344,11 @@ class TestClaudeCodeCLIProvider:
         assert mock_subprocess.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_timeout_with_already_terminated_process(self, provider, mock_subprocess):
+    async def test_timeout_with_already_terminated_process(
+        self,
+        provider,
+        mock_subprocess,
+    ):
         """Test that process is not killed if already terminated."""
         # Mock process that terminates before we can kill it
         mock_process = AsyncMock()
