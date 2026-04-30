@@ -1,0 +1,641 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from collections.abc import Callable
+from pathlib import Path
+
+import psutil
+import pytest
+
+from chunkhound.mcp_server.status import derive_daemon_status
+from chunkhound.services.realtime_indexing_service import WatchmanRealtimeAdapter
+from tests.helpers.watchman_realtime import (
+    active_session_close_handle as _active_session_close_handle,
+)
+from tests.helpers.watchman_realtime import (
+    active_watchman_disconnect_process as _active_watchman_disconnect_process,
+)
+from tests.helpers.watchman_realtime import (
+    build_watchman_service as _build_watchman_service,
+)
+from tests.helpers.watchman_realtime import (
+    wait_for_logical_indexed as _wait_for_logical_indexed,
+)
+from tests.helpers.watchman_realtime import (
+    wait_for_watchman_reconnect_state as _wait_for_watchman_reconnect_state,
+)
+
+pytestmark = pytest.mark.requires_native_watchman
+
+
+RequestCall = tuple[str, dict[str, object] | None]
+
+_POST_RESTORE_DETAILS = {
+    "backend": "watchman",
+    "loss_of_sync_reason": "disconnect",
+    "post_restore_reconciliation": True,
+    "reconnect_state": "restored",
+}
+
+
+async def _wait_for_request_call(
+    calls: list[RequestCall],
+    predicate: Callable[[RequestCall], bool],
+    *,
+    timeout: float = 5.0,
+) -> RequestCall:
+    async def _poll() -> RequestCall:
+        while True:
+            for call in tuple(calls):
+                if predicate(call):
+                    return call
+            await asyncio.sleep(0.05)
+
+    return await asyncio.wait_for(_poll(), timeout=timeout)
+
+
+def _is_loss_of_sync_request(call: RequestCall, reason: str) -> bool:
+    request_reason, details = call
+    return (
+        request_reason == "realtime_loss_of_sync"
+        and isinstance(details, dict)
+        and details.get("loss_of_sync_reason") == reason
+    )
+
+
+
+@pytest.mark.asyncio
+async def test_watchman_fresh_instance_requests_resync_without_incremental_translation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    expected_details = {
+        "backend": "watchman",
+        "loss_of_sync_reason": "fresh_instance",
+        "subscription": "chunkhound-live-indexing",
+        "clock": "c:0:2",
+    }
+    expected_call = ("realtime_loss_of_sync", expected_details)
+    request_calls: list[RequestCall] = []
+    original_request_resync = service.request_resync
+
+    async def resync_callback(
+        reason: str, details: dict[str, object] | None
+    ) -> None:
+        del reason, details
+
+    async def recording_request_resync(
+        reason: str, details: dict[str, object] | None = None
+    ) -> bool:
+        result = await original_request_resync(reason, details)
+        request_calls.append((reason, details))
+        return result
+
+    service._resync_callback = resync_callback
+    monkeypatch.setattr(service, "request_resync", recording_request_resync)
+
+    try:
+        await service.start(watch_dir)
+        queue = service.watchman_subscription_queue
+        assert queue is not None
+        request_calls.clear()
+        baseline_stats = await service.get_health()
+        baseline_loss_of_sync = baseline_stats["watchman_loss_of_sync"]
+        baseline_accepted = baseline_stats["event_queue"]["accepted"]
+
+        queue.put_nowait(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:2",
+                "is_fresh_instance": True,
+                "files": [
+                    {
+                        "name": "src/fresh.py",
+                        "exists": True,
+                        "new": True,
+                        "type": "f",
+                    }
+                ],
+            }
+        )
+
+        await _wait_for_request_call(
+            request_calls,
+            lambda call: call == expected_call,
+        )
+        stats = await service.get_health()
+
+        assert expected_call in request_calls
+        assert stats["event_queue"]["accepted"] == baseline_accepted
+        assert (
+            stats["watchman_loss_of_sync"]["count"]
+            >= baseline_loss_of_sync["count"] + 1
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["fresh_instance_count"]
+            >= baseline_loss_of_sync["fresh_instance_count"] + 1
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["recrawl_count"]
+            >= baseline_loss_of_sync["recrawl_count"]
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["disconnect_count"]
+            >= baseline_loss_of_sync["disconnect_count"]
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["translation_failure_count"]
+            >= baseline_loss_of_sync["translation_failure_count"]
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["subscription_pdu_dropped_count"]
+            >= baseline_loss_of_sync["subscription_pdu_dropped_count"]
+        )
+        assert stats["watchman_loss_of_sync"]["last_at"] is not None
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_recrawl_warning_requests_resync_without_incremental_translation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    expected_details = {
+        "backend": "watchman",
+        "loss_of_sync_reason": "recrawl",
+        "subscription": "chunkhound-live-indexing",
+        "clock": "c:0:3",
+        "warning": "Recrawled this watch due to dropped events",
+    }
+    expected_call = ("realtime_loss_of_sync", expected_details)
+    request_calls: list[RequestCall] = []
+    original_request_resync = service.request_resync
+
+    async def resync_callback(
+        reason: str, details: dict[str, object] | None
+    ) -> None:
+        del reason, details
+
+    async def recording_request_resync(
+        reason: str, details: dict[str, object] | None = None
+    ) -> bool:
+        result = await original_request_resync(reason, details)
+        request_calls.append((reason, details))
+        return result
+
+    service._resync_callback = resync_callback
+    monkeypatch.setattr(service, "request_resync", recording_request_resync)
+
+    try:
+        await service.start(watch_dir)
+        queue = service.watchman_subscription_queue
+        assert queue is not None
+        request_calls.clear()
+        baseline_stats = await service.get_health()
+        baseline_loss_of_sync = baseline_stats["watchman_loss_of_sync"]
+        baseline_accepted = baseline_stats["event_queue"]["accepted"]
+
+        queue.put_nowait(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:3",
+                "warning": "Recrawled this watch due to dropped events",
+                "files": [
+                    {
+                        "name": "src/recrawl.py",
+                        "exists": True,
+                        "new": False,
+                        "type": "f",
+                    }
+                ],
+            }
+        )
+
+        await _wait_for_request_call(
+            request_calls,
+            lambda call: call == expected_call,
+        )
+        stats = await service.get_health()
+
+        assert expected_call in request_calls
+        assert stats["event_queue"]["accepted"] == baseline_accepted
+        assert (
+            stats["watchman_loss_of_sync"]["count"]
+            >= baseline_loss_of_sync["count"] + 1
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["fresh_instance_count"]
+            >= baseline_loss_of_sync["fresh_instance_count"]
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["recrawl_count"]
+            >= baseline_loss_of_sync["recrawl_count"] + 1
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["disconnect_count"]
+            >= baseline_loss_of_sync["disconnect_count"]
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["translation_failure_count"]
+            >= baseline_loss_of_sync["translation_failure_count"]
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["subscription_pdu_dropped_count"]
+            >= baseline_loss_of_sync["subscription_pdu_dropped_count"]
+        )
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_subscription_queue_overflow_requests_resync_and_degrades_status(
+    tmp_path: Path,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    adapter = WatchmanRealtimeAdapter(service)
+    service._monitor_adapter = adapter
+    callback_calls: list[tuple[str, dict[str, object] | None]] = []
+    callback_event = asyncio.Event()
+
+    async def resync_callback(
+        reason: str, details: dict[str, object] | None
+    ) -> None:
+        callback_calls.append((reason, details))
+        if (
+            isinstance(details, dict)
+            and details.get("loss_of_sync_reason") == "subscription_pdu_dropped"
+        ):
+            callback_event.set()
+
+    try:
+        baseline_loss_of_sync = (await service.get_health())["watchman_loss_of_sync"]
+        service._resync_callback = resync_callback
+
+        adapter._record_bridge_subscription_queue_overflow(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:4",
+            },
+            queue_maxsize=1000,
+        )
+
+        while not (await service.get_health())["resync"]["needs_resync"]:
+            await asyncio.sleep(0)
+
+        pending_stats = await service.get_health()
+        pending_daemon_status = derive_daemon_status(
+            {
+                "scan_completed_at": "2026-03-14T00:00:00Z",
+                "is_scanning": False,
+                "realtime": pending_stats,
+            }
+        )
+
+        adapter._record_bridge_subscription_queue_overflow(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:5",
+            },
+            queue_maxsize=1000,
+        )
+
+        await asyncio.wait_for(callback_event.wait(), timeout=5.0)
+        stats = await service.get_health()
+        daemon_status = derive_daemon_status(
+            {
+                "scan_completed_at": "2026-03-14T00:00:00Z",
+                "is_scanning": False,
+                "realtime": stats,
+            }
+        )
+
+        expected_details = {
+            "backend": "watchman",
+            "loss_of_sync_reason": "subscription_pdu_dropped",
+            "subscription": "chunkhound-live-indexing",
+            "clock": "c:0:4",
+            "watchman_subscription_pdu_dropped": 1,
+            "watchman_subscription_queue_maxsize": 1000,
+        }
+        overflow_callbacks = [
+            call
+            for call in callback_calls
+            if isinstance(call[1], dict)
+            and call[1].get("loss_of_sync_reason") == "subscription_pdu_dropped"
+        ]
+        assert overflow_callbacks == [("realtime_loss_of_sync", expected_details)]
+        assert pending_stats["watchman_subscription_pdu_dropped"] == 1
+        assert stats["watchman_subscription_pdu_dropped"] == 2
+        assert (
+            stats["watchman_loss_of_sync"]["count"]
+            == baseline_loss_of_sync["count"] + 1
+        )
+        assert stats["watchman_loss_of_sync"]["subscription_pdu_dropped_count"] == (
+            baseline_loss_of_sync["subscription_pdu_dropped_count"] + 1
+        )
+        assert stats["watchman_loss_of_sync"]["count"] == (
+            stats["watchman_loss_of_sync"]["fresh_instance_count"]
+            + stats["watchman_loss_of_sync"]["recrawl_count"]
+            + stats["watchman_loss_of_sync"]["disconnect_count"]
+            + stats["watchman_loss_of_sync"]["translation_failure_count"]
+            + stats["watchman_loss_of_sync"]["subscription_pdu_dropped_count"]
+        )
+        assert stats["watchman_loss_of_sync"]["last_reason"] == (
+            "subscription_pdu_dropped"
+        )
+        assert stats["watchman_loss_of_sync"]["last_details"] == expected_details
+        assert pending_stats["resync"]["needs_resync"] is True
+        assert pending_daemon_status["status"] == "degraded"
+        assert stats["resync"]["needs_resync"] is False
+        assert stats["resync"]["last_reason"] == "realtime_loss_of_sync"
+        assert daemon_status["status"] == "ready"
+    finally:
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_unexpected_session_exit_requests_resync_and_restores_monitoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    request_calls: list[RequestCall] = []
+    original_request_resync = service.request_resync
+
+    async def resync_callback(
+        reason: str, details: dict[str, object] | None
+    ) -> None:
+        del reason, details
+
+    async def recording_request_resync(
+        reason: str, details: dict[str, object] | None = None
+    ) -> bool:
+        result = await original_request_resync(reason, details)
+        request_calls.append((reason, details))
+        return result
+
+    service._resync_callback = resync_callback
+    monkeypatch.setattr(service, "request_resync", recording_request_resync)
+
+    try:
+        await service.start(watch_dir)
+        adapter = service._monitor_adapter
+        assert adapter is not None
+        disconnect_process = _active_watchman_disconnect_process(adapter)
+        request_calls.clear()
+        baseline_loss_of_sync = (await service.get_health())["watchman_loss_of_sync"]
+
+        disconnect_process.terminate()
+
+        await _wait_for_request_call(
+            request_calls,
+            lambda call: (
+                _is_loss_of_sync_request(call, "disconnect")
+                and isinstance(call[1], dict)
+                and call[1].get("watchman_session_alive") is False
+            ),
+        )
+        stats = await _wait_for_watchman_reconnect_state(
+            service,
+            "restored",
+            timeout=30.0,
+        )
+        file_path = watch_dir / "src" / "watchman_reconnect_catchup.py"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(
+            "def watchman_reconnect_catchup():\n    return 7\n",
+            encoding="utf-8",
+        )
+
+        assert any(
+            _is_loss_of_sync_request(call, "disconnect")
+            and isinstance(call[1], dict)
+            and call[1].get("watchman_session_alive") is False
+            for call in request_calls
+        )
+        assert stats["watchman_session_alive"] is True
+        assert stats["watchman_connection_state"] == "connected"
+        assert (
+            stats["watchman_loss_of_sync"]["count"]
+            >= baseline_loss_of_sync["count"] + 1
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["disconnect_count"]
+            >= baseline_loss_of_sync["disconnect_count"] + 1
+        )
+        assert stats["watchman_reconnect"]["attempt_count"] >= 1
+        assert stats["watchman_reconnect"]["last_result"] == "restored"
+        assert await _wait_for_logical_indexed(services.provider, file_path)
+        assert stats["service_state"] == "running"
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_reconnect_status_reports_retrying_then_restored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    callback_event = asyncio.Event()
+
+    async def resync_callback(
+        reason: str, details: dict[str, object] | None
+    ) -> None:
+        assert reason == "realtime_loss_of_sync"
+        assert details is not None
+        callback_event.set()
+
+    service._resync_callback = resync_callback
+
+    try:
+        await service.start(watch_dir)
+        adapter = service._monitor_adapter
+        assert adapter is not None
+        monkeypatch.setattr(adapter, "_RECONNECT_INITIAL_RETRY_DELAY_SECONDS", 0.2)
+        monkeypatch.setattr(adapter, "_RECONNECT_MAX_RETRY_DELAY_SECONDS", 0.2)
+        original_establish = adapter._establish_monitoring
+        reconnect_attempts = 0
+
+        async def failing_establish(*args, **kwargs) -> None:
+            nonlocal reconnect_attempts
+            if kwargs.get("phase") != "reconnect":
+                await original_establish(*args, **kwargs)
+                return
+            reconnect_attempts += 1
+            if reconnect_attempts < 3:
+                raise RuntimeError("simulated reconnect failure")
+            await original_establish(*args, **kwargs)
+
+        monkeypatch.setattr(adapter, "_establish_monitoring", failing_establish)
+
+        disconnect_process = _active_watchman_disconnect_process(adapter)
+        disconnect_process.terminate()
+
+        retrying_stats = await _wait_for_watchman_reconnect_state(service, "retrying")
+        await asyncio.wait_for(callback_event.wait(), timeout=5.0)
+        restored_stats = await _wait_for_watchman_reconnect_state(
+            service,
+            "restored",
+            timeout=30.0,
+        )
+
+        assert retrying_stats["watchman_connection_state"] in {
+            "disconnected",
+            "sidecar_only",
+        }
+        assert retrying_stats["watchman_reconnect"]["state"] == "retrying"
+        assert retrying_stats["watchman_reconnect"]["attempt_count"] >= 1
+        assert retrying_stats["watchman_reconnect"]["last_result"] == "failed"
+        assert retrying_stats["watchman_reconnect"]["retry_delay_seconds"] is not None
+        assert "max_attempts" not in retrying_stats["watchman_reconnect"]
+        assert "simulated reconnect failure" in (
+            retrying_stats["watchman_reconnect"]["last_error"] or ""
+        )
+        assert retrying_stats["service_state"] == "degraded"
+
+        assert restored_stats["watchman_reconnect"]["attempt_count"] == 3
+        assert restored_stats["watchman_reconnect"]["last_result"] == "restored"
+        assert restored_stats["watchman_reconnect"]["last_error"] is None
+        assert restored_stats["watchman_reconnect"]["retry_delay_seconds"] is None
+        assert restored_stats["service_state"] == "running"
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_reconnect_restore_requests_post_restore_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    request_calls: list[RequestCall] = []
+    post_restore_request_started = asyncio.Event()
+    allow_post_restore_request = asyncio.Event()
+    post_restore_request_completed = asyncio.Event()
+    original_request_resync = service.request_resync
+
+    async def resync_callback(
+        reason: str, details: dict[str, object] | None
+    ) -> None:
+        del reason, details
+
+    async def recording_request_resync(
+        reason: str, details: dict[str, object] | None = None
+    ) -> bool:
+        result = await original_request_resync(reason, details)
+        request_calls.append((reason, details))
+        if (reason, details) == ("realtime_loss_of_sync", _POST_RESTORE_DETAILS):
+            post_restore_request_started.set()
+            await allow_post_restore_request.wait()
+            post_restore_request_completed.set()
+        return result
+
+    service._resync_callback = resync_callback
+    monkeypatch.setattr(service, "request_resync", recording_request_resync)
+
+    try:
+        await service.start(watch_dir)
+        adapter = service._monitor_adapter
+        assert adapter is not None
+        request_calls.clear()
+
+        disconnect_process = _active_watchman_disconnect_process(adapter)
+        disconnect_process.terminate()
+
+        await asyncio.wait_for(post_restore_request_started.wait(), timeout=30.0)
+        blocked_stats = await service.get_health()
+        assert blocked_stats["watchman_reconnect"]["state"] != "restored"
+        assert blocked_stats["watchman_reconnect"]["last_result"] != "restored"
+
+        allow_post_restore_request.set()
+        await asyncio.wait_for(post_restore_request_completed.wait(), timeout=5.0)
+        restored_stats = await _wait_for_watchman_reconnect_state(
+            service,
+            "restored",
+            timeout=30.0,
+        )
+
+        assert ("realtime_loss_of_sync", _POST_RESTORE_DETAILS) in request_calls
+        assert restored_stats["watchman_reconnect"]["last_result"] == "restored"
+    finally:
+        allow_post_restore_request.set()
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_service_stop_during_reconnect_teardown_does_not_orphan_cli_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    stop_task: asyncio.Task[None] | None = None
+    old_pid: int | None = None
+
+    try:
+        await service.start(watch_dir)
+        adapter = service._monitor_adapter
+        assert adapter is not None
+        close_handle = _active_session_close_handle(adapter)
+        disconnect_process = _active_watchman_disconnect_process(adapter)
+        old_pid = disconnect_process.pid
+
+        teardown_waiting = asyncio.Event()
+        allow_wait_closed = asyncio.Event()
+
+        monkeypatch.setattr(close_handle, "close", lambda: None)
+
+        async def blocked_wait_closed() -> None:
+            teardown_waiting.set()
+            await allow_wait_closed.wait()
+
+        monkeypatch.setattr(close_handle, "wait_closed", blocked_wait_closed)
+
+        adapter._begin_reconnect_cycle()
+        await asyncio.wait_for(teardown_waiting.wait(), timeout=5.0)
+        assert adapter._reconnect_task is not None
+
+        stop_task = asyncio.create_task(service.stop())
+        await asyncio.sleep(0)
+        allow_wait_closed.set()
+        await asyncio.wait_for(stop_task, timeout=5.0)
+        stop_task = None
+
+        assert not psutil.pid_exists(old_pid)
+    finally:
+        if stop_task is not None and not stop_task.done():
+            stop_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stop_task
+        if old_pid is not None and psutil.pid_exists(old_pid):
+            try:
+                lingering = psutil.Process(old_pid)
+                lingering.kill()
+                lingering.wait(timeout=3.0)
+            except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                pass
+        await service.stop()
+        services.provider.disconnect()

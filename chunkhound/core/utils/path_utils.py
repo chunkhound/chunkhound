@@ -14,12 +14,13 @@ def resolve_path_for_relative(path: Path, base_dir: Path) -> tuple[Path, Path]:
         base_dir: Base directory for relative path calculation
 
     Returns:
-        Tuple of (path_to_use, resolved_base_dir) ready for relative_to()
+        Tuple of (path_to_use, base_to_use) ready for relative_to()
     """
-    resolved_base = base_dir.resolve()
     if path.is_symlink():
-        return path, resolved_base
-    return path.resolve(), resolved_base
+        # Keep both unresolved: on macOS /var -> /private/var resolution would
+        # make the unresolved symlink path incompatible with a resolved base.
+        return path, base_dir
+    return path.resolve(), base_dir.resolve()
 
 
 def get_relative_path_safe(path: Path, base_dir: Path) -> Path:
@@ -38,11 +39,11 @@ def get_relative_path_safe(path: Path, base_dir: Path) -> Path:
     Raises:
         ValueError: If path is not under base_dir
     """
-    path_to_use, resolved_base = resolve_path_for_relative(path, base_dir)
+    path_to_use, base_to_use = resolve_path_for_relative(path, base_dir)
     try:
-        return path_to_use.relative_to(resolved_base)
+        return path_to_use.relative_to(base_to_use)
     except ValueError:
-        # Fallback for edge cases (e.g., symlink with different base resolution)
+        # Fallback: path genuinely not under base_dir — propagate ValueError
         return path.relative_to(base_dir)
 
 
@@ -60,13 +61,15 @@ def normalize_path_for_lookup(
 
     Args:
         input_path: Path to normalize (can be absolute or relative)
-        base_dir: Base directory for relative path calculation (required for absolute paths)
+        base_dir: Base directory for relative path calculation
+            (required for absolute paths)
 
     Returns:
         Normalized relative path with forward slashes
 
     Raises:
-        ValueError: If absolute path is provided without base_dir, or if path is not under base_dir
+        ValueError: If absolute path is provided without base_dir, or if path
+            is not under base_dir
     """
     path_obj = Path(input_path)
 
@@ -78,7 +81,8 @@ def normalize_path_for_lookup(
     if base_dir is None:
         raise ValueError(
             f"Cannot normalize absolute path without base_dir: {input_path}. "
-            f"This indicates a bug - base directory should always be available from config."
+            "This indicates a bug - base directory should always be available "
+            "from config."
         )
 
     try:
@@ -89,3 +93,29 @@ def normalize_path_for_lookup(
             f"Path {input_path} is not under base directory {base_dir}. "
             f"This indicates a configuration or indexing issue."
         )
+
+
+def normalize_realtime_path(
+    input_path: str | Path, base_dir: Path | None = None
+) -> Path:
+    """Normalize realtime paths while preserving logical project children.
+
+    Realtime events may arrive under a logical project surface that resolves
+    outside the root via a symlink or directory junction. When the path still
+    belongs to the logical project tree, keep that logical spelling instead of
+    collapsing to the physical target.
+    """
+
+    path_obj = Path(input_path).expanduser()
+    if base_dir is not None:
+        logical_base = Path(base_dir).expanduser()
+        if not path_obj.is_absolute():
+            path_obj = logical_base / path_obj
+        try:
+            relative_path = get_relative_path_safe(path_obj, logical_base)
+        except ValueError:
+            pass
+        else:
+            return logical_base / relative_path
+
+    return path_obj.resolve()

@@ -176,9 +176,12 @@ Run the application with proper configuration.
             print(f"Indexing completed successfully")
             
             # Verify database has content
-            # Use fake args to prevent find_project_root call that fails in CI
+            # Use fake args to prevent find_project_root call that fails in CI.
+            # The indexer subprocess claimed the DB under `project_dir` as its
+            # logical indexed root (Step 101 identity guard), so the verifier
+            # must reopen under the same root — not under `db_path.parent`.
             from types import SimpleNamespace
-            fake_args = SimpleNamespace(path=db_path.parent)
+            fake_args = SimpleNamespace(path=project_dir)
             config_for_db = Config(
                 args=fake_args,
                 database={"path": str(db_path), "provider": "duckdb"}

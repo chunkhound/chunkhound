@@ -20,9 +20,65 @@ jobs:
           # 45s window — retry individual flaky tests before failing the run.
           - os: windows-latest
             pytest_extra_args: "--reruns 2 --reruns-delay 5 --only-rerun AssertionError"
+            pytest_timeout_minutes: 15
+            job_timeout_minutes: 40
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Test collection check
+        run: uv run pytest tests/ --collect-only -q --tb=no
+
+      - name: Run tests
+        id: tests
+        # Two retry layers serving different failure modes:
+        # - nick-fields/retry: restarts the whole pytest process on CI-level failures
+        #   (e.g. OOM, runner hiccup).
+        # - --reruns (pytest-rerunfailures): retries individual flaky tests within a
+        #   process, used on Windows where the file-monitor can miss writes transiently.
+        # timeout_minutes * max_attempts must stay below the job-level timeout.
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08  # v3
+        with:
+          timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}
+          max_attempts: 2
+          command: uv run pytest tests/ -v --junit-xml=test-results.xml ${{ matrix.pytest_extra_args || '' }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
+          path: test-results.xml
+          if-no-files-found: ignore
+
+      - name: Check flaky annotations
+        if: failure() && steps.tests.outcome == 'failure'
+        run: uv run python scripts/check_flaky_annotations.py test-results.xml
+
+  watchman-runtime-validation:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11"]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      CHUNKHOUND_RUN_WATCHMAN_RUNTIME_VALIDATION: "1"
 
     steps:
       - name: Checkout code
@@ -39,31 +95,107 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Test collection check
-        run: uv run pytest tests/ --collect-only -q --tb=no
+      - name: Prepare Linux mount-aware Watchman fixture
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo mkdir -p /workspaces
+          if ! mountpoint -q /workspaces; then
+            sudo mount -t tmpfs -o size=256m tmpfs /workspaces
+          fi
+          sudo mkdir -p /workspaces/chunkhound_workspace
+          if ! mountpoint -q /workspaces/chunkhound_workspace; then
+            sudo mount -t tmpfs -o size=256m tmpfs /workspaces/chunkhound_workspace
+          fi
+          sudo chown -R "$(id -u):$(id -g)" /workspaces
+          {
+            echo "CHUNKHOUND_TEST_WATCHMAN_MOUNT_PARENT=/workspaces"
+            echo "CHUNKHOUND_TEST_WATCHMAN_MOUNT_CHILD=/workspaces/chunkhound_workspace"
+          } >> "$GITHUB_ENV"
 
-      - name: Run tests
-        id: tests
-        # Two retry layers serving different failure modes:
-        # - nick-fields/retry: restarts the whole pytest process on CI-level failures
-        #   (e.g. OOM, runner hiccup).
-        # - --reruns (pytest-rerunfailures): retries individual flaky tests within a
-        #   process, used on Windows where the file-monitor can miss writes transiently.
-        # timeout_minutes * max_attempts must stay below the job-level timeout (30m).
-        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08  # v3
-        with:
-          timeout_minutes: 13
-          max_attempts: 2
-          command: uv run pytest tests/ -v --junit-xml=test-results.xml ${{ matrix.pytest_extra_args || '' }}
+      - name: Run Watchman runtime validation tests
+        run: >
+          uv run pytest
+          tests/
+          -m requires_native_watchman
+          -q
 
-      - name: Upload test results
-        if: always()
+      - name: Build wheel artifacts
+        env:
+          CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME: "1"
+        run: uv build --wheel --clear
+
+      - name: Verify Watchman runtime wheel artifacts
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [[ ${#wheels[@]} -eq 0 ]]; then
+            echo "No wheel produced in dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_runtime_resources.py "${wheels[@]}"
+
+      - name: Verify installed-wheel Watchman live mutation e2e
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [[ ${#wheels[@]} -eq 0 ]]; then
+            echo "No wheel produced in dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_live_indexing_e2e.py "${wheels[@]}"
+
+      - name: Upload Watchman wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
-          path: test-results.xml
-          if-no-files-found: ignore
+          name: watchman-wheel-${{ matrix.os }}
+          path: dist/*.whl
+          if-no-files-found: error
 
-      - name: Check flaky annotations
-        if: failure() && steps.tests.outcome == 'failure'
-        run: uv run python scripts/check_flaky_annotations.py test-results.xml
+  watchman-rollout-gate:
+    needs: watchman-runtime-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CHUNKHOUND_RUN_WATCHMAN_RUNTIME_VALIDATION: "1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Download staged Watchman wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: watchman-wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify full supported Watchman wheel matrix
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [[ ${#wheels[@]} -eq 0 ]]; then
+            echo "No wheel artifacts downloaded into dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_runtime_resources.py --require-supported-matrix "${wheels[@]}"
+
+      - name: Verify source/editable Watchman fallback contract
+        run: >-
+          uv run python scripts/verify_watchman_live_indexing_e2e.py
+          --verify-source-fallback
+          --source-root .

@@ -1,6 +1,6 @@
 """Deterministic QA test suite for ChunkHound search functionality.
 
-This test converts the manual QA process from .claude/commands/qa.md into 
+This test converts the manual QA process from .claude/commands/qa.md into
 deterministic automated tests. Tests semantic_search and regex_search tools
 with real-time indexing using actual MCP server components.
 
@@ -24,10 +24,13 @@ from chunkhound.mcp_server.tools import execute_tool, search_impl
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
-    should_use_polling,
+    realtime_backend_for_tests,
 )
 
-from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
+from .test_utils import (
+    get_embedding_config_for_tests,
+    build_embedding_config_from_dict,
+)
 
 # =============================================================================
 # Test Configuration Constants
@@ -112,21 +115,24 @@ class TestQADeterministic:
 
         # Use fake args to prevent find_project_root call that fails in CI
         from types import SimpleNamespace
+
         fake_args = SimpleNamespace(path=temp_dir)
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
             embedding=embedding_config,
-            indexing={"include": ["*"], "exclude": ["*.log", "__pycache__/"]}  # More inclusive for QA
+            indexing={
+                "include": ["*"],
+                "exclude": ["*.log", "__pycache__/"],
+                "realtime_backend": realtime_backend_for_tests(),
+            },  # More inclusive for QA
         )
 
         # Create services - real MCP server components
         services = create_services(db_path, config)
         services.provider.connect()
 
-        # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
-        force_polling = should_use_polling()
-        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
+        realtime_service = RealtimeIndexingService(services, config)
         await realtime_service.start(watch_dir)
 
         # Wait for initial scan
@@ -181,7 +187,9 @@ class ExistingClass:
         existing_file.write_text(existing_content)
 
         # Wait for file to be indexed
-        found = await realtime_service.wait_for_file_indexed(existing_file, timeout=get_fs_event_timeout())
+        found = await realtime_service.wait_for_file_indexed(
+            existing_file, timeout=get_fs_event_timeout()
+        )
         assert found, "Existing content should be searchable"
 
         # Search for existing content
@@ -202,8 +210,12 @@ class ExistingClass:
             print(f"⚠ Semantic search skipped: {e}")
             semantic_count = "N/A"
 
-        assert len(existing_regex.get('results', [])) > 0, "Should find existing file content with regex"
-        print(f"✓ Existing file search: regex={len(existing_regex.get('results', []))}, semantic={semantic_count}")
+        assert len(existing_regex.get("results", [])) > 0, (
+            "Should find existing file content with regex"
+        )
+        print(
+            f"✓ Existing file search: regex={len(existing_regex.get('results', []))}, semantic={semantic_count}"
+        )
 
         # QA Item 2: Add new file and search for it
         new_file = watch_dir / "new_added_file.py"
@@ -218,7 +230,9 @@ class NewlyAddedClass:
         new_file.write_text(new_content)
 
         # Wait for file to be indexed
-        found = await realtime_service.wait_for_file_indexed(new_file, timeout=get_fs_event_timeout())
+        found = await realtime_service.wait_for_file_indexed(
+            new_file, timeout=get_fs_event_timeout()
+        )
         assert found, "New file content should be searchable"
 
         # Search for new content
@@ -237,23 +251,32 @@ class NewlyAddedClass:
         except Exception:
             new_semantic_count = "N/A"
 
-        assert len(new_regex.get('results', [])) > 0, "Should find newly added file content with regex"
-        print(f"✓ New file search: regex={len(new_regex.get('results', []))}, semantic={new_semantic_count}")
+        assert len(new_regex.get("results", [])) > 0, (
+            "Should find newly added file content with regex"
+        )
+        print(
+            f"✓ New file search: regex={len(new_regex.get('results', []))}, semantic={new_semantic_count}"
+        )
 
         # QA Item 3: Edit existing file - adding, deleting, and modifying content
 
         # 3a: Add content to existing file
-        modified_content = existing_content + """
+        modified_content = (
+            existing_content
+            + """
 
 def added_during_edit():
     '''This function was added during file edit'''
     return "added_content_edit_qa"
 """
+        )
         realtime_service.reset_file_tracking(existing_file)
         existing_file.write_text(modified_content)
 
         # Wait for modified file to be re-indexed
-        found = await realtime_service.wait_for_file_indexed(existing_file, timeout=get_fs_event_timeout())
+        found = await realtime_service.wait_for_file_indexed(
+            existing_file, timeout=get_fs_event_timeout()
+        )
         assert found, "Added content should be searchable"
 
         added_regex = await search_impl(
@@ -278,7 +301,9 @@ def added_during_edit():
         existing_file.write_text(deleted_and_modified_content)
 
         # Wait for modified file to be re-indexed
-        found = await realtime_service.wait_for_file_indexed(existing_file, timeout=get_fs_event_timeout())
+        found = await realtime_service.wait_for_file_indexed(
+            existing_file, timeout=get_fs_event_timeout()
+        )
         assert found, "Modified content should be searchable"
 
         # Check modification worked
@@ -292,8 +317,12 @@ def added_during_edit():
             type="regex", query="class ExistingClass:", page_size=10, offset=0,
         )
 
-        assert len(modified_regex.get('results', [])) > 0, "Should find modified content"
-        assert len(deleted_regex.get('results', [])) == 0, "Should not find deleted content"
+        assert len(modified_regex.get("results", [])) > 0, (
+            "Should find modified content"
+        )
+        assert len(deleted_regex.get("results", [])) == 0, (
+            "Should not find deleted content"
+        )
         print("✓ Edit (modify/delete): Found modified content, deleted content removed")
 
         # QA Item 4: Delete file and verify search results
@@ -311,7 +340,9 @@ def added_during_edit():
             type="regex", query="newly_added_content_unique_string", page_size=10, offset=0,
         )
 
-        assert len(deleted_file_regex.get('results', [])) == 0, "Should not find content from deleted file"
+        assert len(deleted_file_regex.get("results", [])) == 0, (
+            "Should not find content from deleted file"
+        )
         print("✓ File deletion: Deleted file content not found in search")
 
     @pytest.mark.asyncio
@@ -337,12 +368,12 @@ def added_during_edit():
             Language.C: '#include <stdio.h>\n\n// C QA test\nchar* qa_test_function() {\n    return "c_qa_unique";\n}',
             Language.CPP: '#include <string>\n\n// C++ QA test\nstd::string qaTestFunction() {\n    return "cpp_qa_unique";\n}',
             Language.BASH: '#!/bin/bash\n# Bash QA test\nqa_test_function() {\n    echo "bash_qa_unique"\n}',
-            Language.MARKDOWN: '# QA Test\n\nThis is a **markdown QA test** with `markdown_qa_unique` content.',
+            Language.MARKDOWN: "# QA Test\n\nThis is a **markdown QA test** with `markdown_qa_unique` content.",
             Language.JSON: '{\n    "qa_test": true,\n    "content": "json_qa_unique",\n    "type": "qa_validation"\n}',
             Language.YAML: 'qa_test: true\ncontent: "yaml_qa_unique"\ntype: qa_validation',
             Language.TOML: '[qa_test]\ncontent = "toml_qa_unique"\ntype = "qa_validation"',
-            Language.TEXT: 'Plain text QA test file.\nContains: text_qa_unique\nFor validation purposes.',
-            Language.VUE: '''<template>
+            Language.TEXT: "Plain text QA test file.\nContains: text_qa_unique\nFor validation purposes.",
+            Language.VUE: """<template>
   <div class="qa-test">
     <h1>{{ message }}</h1>
   </div>
@@ -358,8 +389,8 @@ function qaTestFunction() {
 .qa-test {
   color: blue;
 }
-</style>''',
-            Language.SVELTE: '''<script lang="ts">
+</style>""",
+            Language.SVELTE: """<script lang="ts">
   function qaTestFunction() {
     return "svelte_qa_unique";
   }
@@ -373,7 +404,7 @@ function qaTestFunction() {
   h1 {
     color: blue;
   }
-</style>''',
+</style>""",
             Language.GROOVY: 'def qaTestFunction() {\n    // Groovy QA test\n    return "groovy_qa_unique"\n}',
             Language.KOTLIN: 'fun qaTestFunction(): String {\n    // Kotlin QA test\n    return "kotlin_qa_unique"\n}',
             Language.MAKEFILE: '.PHONY: qa_test\n# Makefile QA test\nqa_test:\n\t@echo "makefile_qa_unique"',
@@ -389,6 +420,10 @@ function qaTestFunction() {
             Language.PDF: None,  # PDF is binary, skip content template
             Language.SQL: '-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT \'sql_qa_unique\'\n);',
             Language.ELIXIR: 'defmodule QATest do\n  # Elixir QA test\n  def test, do: "elixir_qa_unique"\nend',
+            Language.HTML: '<!DOCTYPE html>\n<html>\n<body>\n  <!-- HTML QA test -->\n  <p>html_qa_unique</p>\n</body>\n</html>',
+            Language.CSS: '/* CSS QA test */\n.qa-test {\n  content: "css_qa_unique";\n  color: blue;\n}',
+            Language.SCSS: '/* SCSS QA test */\n$color: blue;\n.qa-test {\n  content: "scss_qa_unique";\n  color: $color;\n}',
+            Language.JINJA: '<!DOCTYPE html>\n<html>\n<body>\n  {# Jinja QA test #}\n  <p>{{ "jinja_qa_unique" }}</p>\n</body>\n</html>',
             Language.TWINCAT: '<?xml version="1.0" encoding="utf-8"?>\n<TcPlcObject Version="1.1.0.1">\n  <POU Name="QA_TEST" Id="{00000000-0000-0000-0000-000000000001}">\n    <Declaration><![CDATA[PROGRAM QA_TEST\nVAR\n  bFlag : BOOL := TRUE;\nEND_VAR]]></Declaration>\n    <Implementation>\n      <ST><![CDATA[IF bFlag THEN\n  (* twincat_qa_unique *)\nEND_IF]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>',
         }
 
@@ -430,7 +465,11 @@ function qaTestFunction() {
             Language.PDF: ".pdf",
             Language.SQL: ".sql",
             Language.ELIXIR: ".ex",
-            Language.TWINCAT: ".tcpou",
+            Language.HTML: ".html",
+            Language.CSS: ".css",
+            Language.SCSS: ".scss",
+            Language.JINJA: ".jinja",
+            Language.TWINCAT: ".TcPOU",
         }
 
         # Validate ALL languages have test coverage (fail explicitly for new languages)
@@ -482,7 +521,7 @@ function qaTestFunction() {
 
         while (elapsed := time.monotonic() - start_time) < max_wait:
             db_stats = await services.indexing_coordinator.get_stats()
-            indexed_files = db_stats.get('files', 0)
+            indexed_files = db_stats.get("files", 0)
 
             if indexed_files >= expected_file_count:
                 print(f"📊 All {expected_file_count} files processed in {elapsed:.1f}s")
@@ -531,8 +570,10 @@ function qaTestFunction() {
             print(f"⚠ Failed languages: {failed_languages}")
 
         # QA requirement: At least major languages should work
-        major_languages = ['python', 'javascript', 'typescript', 'java', 'go']
-        working_major = [lang for lang in successful_languages if lang in major_languages]
+        major_languages = ["python", "javascript", "typescript", "java", "go"]
+        working_major = [
+            lang for lang in successful_languages if lang in major_languages
+        ]
 
         assert len(working_major) >= MIN_MAJOR_LANGUAGES_REQUIRED, f"At least {MIN_MAJOR_LANGUAGES_REQUIRED} major languages should work, got: {working_major}"
 
@@ -541,8 +582,12 @@ function qaTestFunction() {
         assert len(successful_languages) >= MIN_TOTAL_LANGUAGES_REQUIRED, f"At least {MIN_TOTAL_LANGUAGES_REQUIRED} languages should work, got {len(successful_languages)}: {successful_languages}"
 
         # Report findings for manual review
-        success_rate = len(successful_languages) / len(created_files) if created_files else 0
-        print(f"📊 Language success rate: {success_rate:.1%} ({len(successful_languages)}/{len(created_files)})")
+        success_rate = (
+            len(successful_languages) / len(created_files) if created_files else 0
+        )
+        print(
+            f"📊 Language success rate: {success_rate:.1%} ({len(successful_languages)}/{len(created_files)})"
+        )
 
         if success_rate < LOW_SUCCESS_RATE_THRESHOLD:
             print("⚠ LOW SUCCESS RATE: This may indicate indexing or parsing issues with some languages")
@@ -578,21 +623,21 @@ function qaTestFunction() {
                     end_time = time.time()
 
                     search_time = end_time - start_time
-                    search_results.append({
-                        'iteration': i,
-                        'result_count': len(results.get('results', [])),
-                        'search_time': search_time,
-                        'timestamp': end_time
-                    })
+                    search_results.append(
+                        {
+                            "iteration": i,
+                            "result_count": len(results.get("results", [])),
+                            "search_time": search_time,
+                            "timestamp": end_time,
+                        }
+                    )
 
                     # Small delay between searches
                     await asyncio.sleep(SEARCH_ITERATION_DELAY_SECONDS)
                 except Exception as e:
-                    search_results.append({
-                        'iteration': i,
-                        'error': str(e),
-                        'timestamp': time.time()
-                    })
+                    search_results.append(
+                        {"iteration": i, "error": str(e), "timestamp": time.time()}
+                    )
 
             return search_results
 
@@ -613,32 +658,34 @@ class RapidClass_{i}:
 """
                     start_time = time.time()
                     new_file.write_text(content)
-                    modifications.append({
-                        'type': 'create',
-                        'file': str(new_file),
-                        'timestamp': start_time
-                    })
+                    modifications.append(
+                        {
+                            "type": "create",
+                            "file": str(new_file),
+                            "timestamp": start_time,
+                        }
+                    )
 
                     # Modify existing file
                     if i < len(base_files):
                         existing_file, _ = base_files[i]
                         modified_content = content + f"\n# Modified at iteration {i}\n"
                         existing_file.write_text(modified_content)
-                        modifications.append({
-                            'type': 'modify',
-                            'file': str(existing_file),
-                            'timestamp': time.time()
-                        })
+                        modifications.append(
+                            {
+                                "type": "modify",
+                                "file": str(existing_file),
+                                "timestamp": time.time(),
+                            }
+                        )
 
                     # Small delay between operations
                     await asyncio.sleep(FILE_OPERATION_DELAY_SECONDS)
 
                 except Exception as e:
-                    modifications.append({
-                        'type': 'error',
-                        'error': str(e),
-                        'timestamp': time.time()
-                    })
+                    modifications.append(
+                        {"type": "error", "error": str(e), "timestamp": time.time()}
+                    )
 
             return modifications
 
@@ -649,31 +696,43 @@ class RapidClass_{i}:
         search_task = asyncio.create_task(search_during_modifications())
         modify_task = asyncio.create_task(rapid_file_modifications())
 
-        search_results, modification_results = await asyncio.gather(search_task, modify_task)
+        search_results, modification_results = await asyncio.gather(
+            search_task, modify_task
+        )
 
         end_concurrent = time.time()
         total_concurrent_time = end_concurrent - start_concurrent
 
         # Validate concurrent operation results
-        successful_searches = [r for r in search_results if 'error' not in r]
-        failed_searches = [r for r in search_results if 'error' in r]
+        successful_searches = [r for r in search_results if "error" not in r]
+        failed_searches = [r for r in search_results if "error" in r]
 
-        successful_modifications = [r for r in modification_results if 'error' not in r]
+        successful_modifications = [r for r in modification_results if "error" not in r]
 
         print(f"✓ Concurrent operations completed in {total_concurrent_time:.2f}s")
-        print(f"✓ Successful searches: {len(successful_searches)}/{len(search_results)}")
-        print(f"✓ Successful modifications: {len(successful_modifications)}/{len(modification_results)}")
+        print(
+            f"✓ Successful searches: {len(successful_searches)}/{len(search_results)}"
+        )
+        print(
+            f"✓ Successful modifications: {len(successful_modifications)}/{len(modification_results)}"
+        )
 
         # Key assertions for QA item 7
-        assert len(successful_searches) > len(search_results) * 0.8, "Most searches should succeed during concurrent operations"
-        assert len(failed_searches) == 0 or len(failed_searches) < 3, "Should have minimal search failures"
+        assert len(successful_searches) > len(search_results) * 0.8, (
+            "Most searches should succeed during concurrent operations"
+        )
+        assert len(failed_searches) == 0 or len(failed_searches) < 3, (
+            "Should have minimal search failures"
+        )
 
         # Measure average search time
-        search_times = [r['search_time'] for r in successful_searches]
+        search_times = [r["search_time"] for r in successful_searches]
         if search_times:
             avg_search_time = sum(search_times) / len(search_times)
             max_search_time = max(search_times)
-            print(f"✓ Search timing: avg={avg_search_time:.3f}s, max={max_search_time:.3f}s")
+            print(
+                f"✓ Search timing: avg={avg_search_time:.3f}s, max={max_search_time:.3f}s"
+            )
 
             # Search should not block - reasonable performance expected
             assert avg_search_time < AVG_SEARCH_TIME_LIMIT_SECONDS, f"Average search time should be < {AVG_SEARCH_TIME_LIMIT_SECONDS}s, got {avg_search_time:.3f}s"
@@ -682,9 +741,9 @@ class RapidClass_{i}:
     @pytest.mark.asyncio
     async def test_pagination_comprehensive(self, qa_setup):
         """QA Item 8: Test pagination functionality comprehensively.
-        
+
         Tests ChunkHound's chunk-based search pagination against ripgrep's line-based search.
-        Note: ChunkHound searches semantic chunks, so a chunk containing multiple pattern 
+        Note: ChunkHound searches semantic chunks, so a chunk containing multiple pattern
         occurrences counts as 1 result, while ripgrep counts each line occurrence separately.
         This explains the expected discrepancy between result counts.
         """
@@ -931,9 +990,7 @@ if __name__ == "__main__":
 
             # Format the content with actual values
             content = content_template.format(
-                file_num=i,
-                file_num_padded=f"{i:03d}",
-                pattern=common_pattern
+                file_num=i, file_num_padded=f"{i:03d}", pattern=common_pattern
             )
             file_path.write_text(content)
             created_files_for_pagination.append(file_path)
@@ -966,7 +1023,7 @@ if __name__ == "__main__":
                 type="regex", query=common_pattern, page_size=page_size, offset=offset,
             )
 
-            page_data = page_results.get('results', [])
+            page_data = page_results.get("results", [])
             if not page_data:
                 break  # No more results
 
@@ -974,20 +1031,30 @@ if __name__ == "__main__":
             page_count += 1
             offset += page_size
 
-            print(f"Page {page_count}: {len(page_data)} results (offset={offset-page_size})")
+            print(
+                f"Page {page_count}: {len(page_data)} results (offset={offset - page_size})"
+            )
 
             # Check pagination metadata if available
-            if 'pagination' in page_results:
-                pagination = page_results['pagination']
-                total_count = pagination.get('total', len(all_results))  # Track actual total
+            if "pagination" in page_results:
+                pagination = page_results["pagination"]
+                total_count = pagination.get(
+                    "total", len(all_results)
+                )  # Track actual total
                 print(f"  Pagination metadata: {pagination}")
 
-        print(f"✓ Pagination test 3: Retrieved {len(all_results)} total results across {page_count} pages")
+        print(
+            f"✓ Pagination test 3: Retrieved {len(all_results)} total results across {page_count} pages"
+        )
 
         # Validate pagination worked correctly
         # Note: May not find all files if some aren't processed yet - test pagination behavior with available data
-        assert len(all_results) >= 10, f"Should find reasonable number of results for pagination testing, got {len(all_results)}"
-        assert page_count >= 2, f"Should require multiple pages with page_size={page_size}, used {page_count} pages"
+        assert len(all_results) >= 10, (
+            f"Should find reasonable number of results for pagination testing, got {len(all_results)}"
+        )
+        assert page_count >= 2, (
+            f"Should require multiple pages with page_size={page_size}, used {page_count} pages"
+        )
 
         # Report actual vs expected for manual review
         expected_chunks = NUM_PAGINATION_TEST_FILES * EXPECTED_CHUNKS_PER_FILE
@@ -1000,35 +1067,50 @@ if __name__ == "__main__":
         # 4. Compare with external validation using ripgrep if available
         try:
             # Try to use ripgrep for external validation
-            rg_result = subprocess.run([
-                'rg', '--count', '--no-heading', common_pattern, str(watch_dir)
-            ], capture_output=True, text=True, timeout=RIPGREP_TIMEOUT_SECONDS)
+            rg_result = subprocess.run(
+                ["rg", "--count", "--no-heading", common_pattern, str(watch_dir)],
+                capture_output=True,
+                text=True,
+                timeout=RIPGREP_TIMEOUT_SECONDS,
+            )
 
             if rg_result.returncode == 0:
                 # Parse ripgrep results - count matches across files
-                rg_lines = rg_result.stdout.strip().split('\n') if rg_result.stdout.strip() else []
+                rg_lines = (
+                    rg_result.stdout.strip().split("\n")
+                    if rg_result.stdout.strip()
+                    else []
+                )
                 rg_total_matches = 0
                 for line in rg_lines:
-                    if ':' in line:
+                    if ":" in line:
                         try:
-                            count = int(line.split(':')[-1])
+                            count = int(line.split(":")[-1])
                             rg_total_matches += count
                         except ValueError:
                             pass
 
-                print(f"✓ External validation: ripgrep found {rg_total_matches} matches")
+                print(
+                    f"✓ External validation: ripgrep found {rg_total_matches} matches"
+                )
 
                 # Allow some variance due to different matching behavior
                 # ChunkHound uses chunk-based search (semantic units) vs ripgrep's line-based search
                 # A chunk containing multiple pattern occurrences counts as 1 result in ChunkHound
                 # but each line occurrence counts as 1 result in ripgrep, hence the large discrepancy
                 match_ratio = len(all_results) / max(rg_total_matches, 1)
-                assert 0.05 <= match_ratio <= 3.0, f"ChunkHound uses chunk-based search (semantic units) vs ripgrep's line-based search: {len(all_results)} chunks vs {rg_total_matches} line matches"
+                assert 0.05 <= match_ratio <= 3.0, (
+                    f"ChunkHound uses chunk-based search (semantic units) vs ripgrep's line-based search: {len(all_results)} chunks vs {rg_total_matches} line matches"
+                )
 
             else:
                 print("⚠ ripgrep not available or failed, skipping external validation")
 
-        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+        except (
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+            subprocess.SubprocessError,
+        ):
             print("⚠ ripgrep not available, skipping external validation")
 
         # 5. Test edge cases
@@ -1056,9 +1138,9 @@ if __name__ == "__main__":
         """Generate comprehensive QA report with timing measurements."""
         services, realtime_service, watch_dir, _ = qa_setup
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("COMPREHENSIVE QA VALIDATION REPORT")
-        print("="*60)
+        print("=" * 60)
 
         # Test file change reflection timing
         timing_test_file = watch_dir / "timing_validation.py"
@@ -1108,7 +1190,9 @@ if __name__ == "__main__":
         print("\n⏱ PERFORMANCE MEASUREMENTS:")
         print(f"   File change → searchable: {indexing_time:.2f}s")
         print(f"   Search execution time: {search_time:.3f}s")
-        print(f"   Search results returned: {len(performance_results.get('results', []))}")
+        print(
+            f"   Search results returned: {len(performance_results.get('results', []))}"
+        )
 
         print("\n✅ QA VALIDATION SUMMARY:")
         print("   File lifecycle operations: TESTED")
@@ -1126,7 +1210,7 @@ if __name__ == "__main__":
         print(f"   Search performance: {search_status}")
         print("   Non-blocking searches: ✅ VERIFIED")
 
-        print("="*60)
+        print("=" * 60)
 
         # Final assertions for QA requirements
         assert indexing_time <= FILE_REFLECTION_MAX_SECONDS, (
