@@ -22,6 +22,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
+from chunkhound.mcp_server.status import derive_daemon_status
 from chunkhound.services.research.factory import ResearchServiceFactory
 
 # Response size limits (tokens)
@@ -406,6 +407,17 @@ SCOPE: Use the path parameter to restrict analysis to a subdirectory for faster,
 
 One call replaces 5-10 manual searches. Call it liberally — understanding first, coding second."""
 
+DAEMON_STATUS_DESCRIPTION = """Report daemon startup, scan, and realtime
+indexing health.
+
+USE FOR:
+- Checking whether initial indexing has completed
+- Inspecting backend-neutral realtime health and resync state
+- Debugging degraded daemon behavior without opening log files
+
+OUTPUT: {status, query_ready, scan_progress}
+NOTE: Query readiness is derived from scan state on this branch."""
+
 
 # =============================================================================
 # Tool Implementations
@@ -496,6 +508,18 @@ async def search_impl(
         SearchResponse, {"results": native_results, "pagination": pagination}
     )
     return limit_response_size(response)
+
+
+@register_tool(
+    description=DAEMON_STATUS_DESCRIPTION,
+    requires_embeddings=False,
+    name="daemon_status",
+)
+async def daemon_status_impl(
+    scan_progress: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return backend-neutral daemon and realtime status."""
+    return derive_daemon_status(scan_progress)
 
 
 @register_tool(

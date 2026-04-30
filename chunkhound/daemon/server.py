@@ -52,6 +52,7 @@ class ChunkHoundDaemon(MCPServerBase):
         self._shutdown_event = asyncio.Event()
         self._initialization_complete = asyncio.Event()
         self._pid_poll_task: asyncio.Task | None = None
+        self._delayed_shutdown_task: asyncio.Task[None] | None = None
         self._client_manager = ClientManager(on_empty=self._on_all_clients_gone)
         # True only after we successfully bound the socket and wrote the lock
         self._lock_written = False
@@ -71,6 +72,10 @@ class ChunkHoundDaemon(MCPServerBase):
     def _register_tools(self) -> None:
         """No-op: daemon dispatches tools via JSON-RPC directly."""
         pass
+
+    def _realtime_startup_mode(self) -> str:
+        """Report daemon-mode startup timing for the public status surface."""
+        return "daemon"
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -97,49 +102,75 @@ class ChunkHoundDaemon(MCPServerBase):
 
             # Initialise services (DB, embeddings, realtime indexing)
             await self.initialize()
+            await self.await_startup_barrier()
             self._initialization_complete.set()
             self.debug_log("Daemon initialised")
 
-            # Generate auth token BEFORE accepting connections so every client
-            # sees a non-None token in _handle_client from the very first frame.
-            auth_token = secrets.token_hex(32)
-            self._auth_token = auth_token
-
-            # Start IPC server; on Windows actual address differs (port 0 → real port)
-            server, actual_address = await ipc.create_server(
-                self._socket_path, self._handle_client
-            )
-            self._socket_path = actual_address
-
-            # Write lock file so proxies can discover us
-            self._discovery.write_lock(
-                os.getpid(), self._socket_path, auth_token=auth_token
-            )
-
-            # Post-write validation: on Windows two daemons can race to bind
-            # different OS-assigned ports and both write the lock.  Verify our
-            # PID is the one recorded; if not, the other daemon won — shut down.
-            written_lock = self._discovery.read_lock()
-            if written_lock is None or written_lock.get("pid") != os.getpid():
-                self.debug_log(
-                    "Lock file PID mismatch after write — another daemon won the race; "
-                    "shutting down"
-                )
-                self._shutdown_event.set()
-                return
-
-            self._lock_written = True
+            self._start_startup_phase("daemon_publish")
             try:
-                # The socket may already be connectable by the time we publish
-                # this entry. That is acceptable because the registry is only
-                # an index: overlapping startups still re-check overlap state
-                # under the global startup lock before launching a new daemon.
-                self._discovery.write_registry_entry(os.getpid(), self._socket_path)
-            except Exception as e:
-                self.debug_log(f"Registry publish failed (non-fatal): {e}")
-            self.debug_log(
-                f"Lock file written (pid={os.getpid()}, address={self._socket_path})"
-            )
+                # Generate auth token BEFORE accepting connections so every client
+                # sees a non-None token in _handle_client from the very first frame.
+                auth_token = secrets.token_hex(32)
+                self._auth_token = auth_token
+
+                # Ensure the runtime-scoped Unix socket directory exists before bind.
+                if sys.platform != "win32" and not self._socket_path.startswith("tcp:"):
+                    Path(self._socket_path).parent.mkdir(parents=True, exist_ok=True)
+
+                # Start the IPC server using the authoritative transport address.
+                server, actual_address = await ipc.create_server(
+                    self._socket_path, self._handle_client
+                )
+                self._socket_path = actual_address
+
+                # Write lock file so proxies can discover us.
+                self._discovery.write_lock(
+                    os.getpid(), self._socket_path, auth_token=auth_token
+                )
+
+                # Post-write validation: verify our PID is the one recorded; if
+                # not, another daemon won the startup race.
+                written_lock = self._discovery.read_lock()
+                if written_lock is None or written_lock.get("pid") != os.getpid():
+                    message = (
+                        "Daemon publish failed: another daemon won the startup race"
+                    )
+                    self.debug_log(
+                        "Lock file PID mismatch after write — another daemon won "
+                        "the race; shutting down"
+                    )
+                    self._set_startup_failure(
+                        message,
+                        phase_name="daemon_publish",
+                    )
+                    self._resolve_startup_publish_complete()
+                    self._shutdown_event.set()
+                    return
+
+                self._lock_written = True
+                self._mark_startup_exposure_ready()
+                try:
+                    # The socket may already be connectable by the time we publish
+                    # this entry. That is acceptable because the registry is only
+                    # an index: overlapping startups still re-check overlap state
+                    # under the global startup lock before launching a new daemon.
+                    self._discovery.write_registry_entry(os.getpid(), self._socket_path)
+                except Exception as e:
+                    self.debug_log(f"Registry publish failed (non-fatal): {e}")
+                self.debug_log(
+                    "Lock file written "
+                    f"(pid={os.getpid()}, address={self._socket_path})"
+                )
+                self._complete_startup_phase("daemon_publish")
+                self._complete_startup()
+                self._resolve_startup_publish_complete()
+            except Exception as error:
+                self._set_startup_failure(
+                    f"Daemon publish failed: {error}",
+                    phase_name="daemon_publish",
+                )
+                self._resolve_startup_publish_complete()
+                raise
 
             # Start PID poll background task
             self._pid_poll_task = asyncio.create_task(self._client_manager.poll_pids())
@@ -156,13 +187,27 @@ class ChunkHoundDaemon(MCPServerBase):
             import traceback
 
             traceback.print_exc(file=sys.stderr)
+            raise
         finally:
             await self._graceful_shutdown()
 
     def _on_all_clients_gone(self) -> None:
         """Called by ClientManager when the last client disconnects."""
+        if (
+            self._delayed_shutdown_task is not None
+            and not self._delayed_shutdown_task.done()
+        ):
+            self.debug_log("Last client disconnected — shutdown already scheduled")
+            return
+
         self.debug_log("Last client disconnected — scheduling shutdown")
-        asyncio.create_task(self._delayed_shutdown())
+        task = asyncio.create_task(self._delayed_shutdown())
+        self._delayed_shutdown_task = task
+        task.add_done_callback(self._clear_delayed_shutdown_task)
+
+    def _clear_delayed_shutdown_task(self, task: asyncio.Task[None]) -> None:
+        if self._delayed_shutdown_task is task:
+            self._delayed_shutdown_task = None
 
     async def _delayed_shutdown(self) -> None:
         """Optionally wait shutdown_delay seconds before triggering shutdown."""
@@ -362,6 +407,18 @@ class ChunkHoundDaemon(MCPServerBase):
                 await self._pid_poll_task
             except asyncio.CancelledError:
                 pass
+
+        delayed_shutdown_task = self._delayed_shutdown_task
+        if delayed_shutdown_task is not None:
+            if not delayed_shutdown_task.done():
+                delayed_shutdown_task.cancel()
+            try:
+                await delayed_shutdown_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                if self._delayed_shutdown_task is delayed_shutdown_task:
+                    self._delayed_shutdown_task = None
 
         try:
             await asyncio.wait_for(self.cleanup(), timeout=10.0)

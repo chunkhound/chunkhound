@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--path-filter` for research** — `chunkhound research --path-filter <dir>` scopes deep code research to a subdirectory.
 - **PHP config-literal parsing** — PHP files with top-level `return [...]` arrays are now searchable.
 - **Universal config-literal parsing** — Exported configuration objects and arrays in Python, JavaScript, TypeScript, and JSX/TSX are now discoverable through semantic search.
+- **Watchman live-indexing operator docs** — Documents the private `.chunkhound/watchman/` sidecar, fail-fast startup/no-implicit-fallback behavior, `daemon_status` health interpretation, and the rollout/default-switch gate for making Watchman the primary backend.
+
+### Changed
+- **Watchman default backend** — Watchman is now the default realtime backend on supported native-runtime platforms; `watchdog` and `polling` remain explicit fallback backends.
 
 ### Enhanced
 - **MCP tool routing** — `code_research` and `search` tool descriptions rewritten for improved LLM routing; cross-references between tools are shown or hidden dynamically based on whether an LLM provider is configured.

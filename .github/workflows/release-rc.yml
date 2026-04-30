@@ -12,7 +12,7 @@ permissions:
   id-token: write  # OIDC Trusted Publishing
 
 jobs:
-  build-and-publish-rc:
+  validate-tag:
     runs-on: ubuntu-latest
     environment: pypi
     timeout-minutes: 15
@@ -27,6 +27,12 @@ jobs:
               print(f"::error::Tag {tag!r} is not a valid PEP 440 pre-release (expected vX.Y.Z(a|b|rc)N)")
               sys.exit(1)
 
+  build-sdist:
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -35,9 +41,63 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v3
 
-      - name: Build distributions
-        run: uv build
+      - name: Build source distribution
+        run: uv build --sdist --out-dir dist
+
+      - name: Upload source distribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-rc-dist-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-runtime-wheels:
+    needs: validate-tag
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs requires full history for version derivation
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build packaged Watchman runtime wheel
+        env:
+          CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME: "1"
+        run: uv build --wheel --clear
+
+      - name: Upload runtime wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-rc-dist-${{ matrix.os }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish-rc:
+    needs: [build-sdist, build-runtime-wheels]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    timeout-minutes: 15
+
+    steps:
+      - name: Download staged distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-rc-dist-*
+          path: dist
+          merge-multiple: true
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        # No token needed — OIDC Trusted Publishing configured on PyPI project
+        with:
+          packages-dir: dist
+          repository-url: https://test.pypi.org/legacy/
+          # No token needed — OIDC Trusted Publishing configured on TestPyPI project

@@ -16,8 +16,9 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import duckdb
 from loguru import logger
@@ -50,6 +51,123 @@ if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
 
 
+class DuckDBTransactionConflictError(RuntimeError):
+    """A guarded mutation collided with an already-open DuckDB transaction."""
+
+
+class DuckDBIndexedRootMismatchError(RuntimeError):
+    """A DuckDB database was reopened under a different indexed root than the one it was claimed for."""
+
+
+_INDEXED_ROOT_SIDECAR_SUFFIX = ".root.json"
+_INDEXED_ROOT_SIDECAR_VERSION = 1
+
+
+def _normalize_indexed_root(root: Path | str) -> str:
+    """Normalize a requested indexed root to the authoritative logical form.
+
+    Uses `expanduser()` + `absolute()` + `as_posix()`. Intentionally does not
+    call `resolve()` — the logical requested-root contract is authoritative and
+    physical/resolved paths are routing details only.
+    """
+    return Path(root).expanduser().absolute().as_posix()
+
+
+def _indexed_root_sidecar_path(db_path: Path | str) -> Path | None:
+    """Return the sidecar path for a DuckDB file, or None for :memory: databases."""
+    if str(db_path) == ":memory:":
+        return None
+    db_file = Path(db_path)
+    return db_file.with_name(db_file.name + _INDEXED_ROOT_SIDECAR_SUFFIX)
+
+
+def _read_indexed_root_sidecar(sidecar: Path) -> str:
+    """Read and validate the sidecar file, returning the stored logical root.
+
+    Raises plain `RuntimeError` on malformed/unreadable/wrong-version/missing-key
+    content. Callers that want a typed mismatch error handle that separately.
+    """
+    try:
+        raw = sidecar.read_text(encoding="utf-8")
+    except OSError as error:
+        raise RuntimeError(
+            f"Indexed-root sidecar {sidecar} could not be read: {error}"
+        ) from error
+    if not raw.strip():
+        raise RuntimeError(f"Indexed-root sidecar {sidecar} is empty")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"Indexed-root sidecar {sidecar} is not valid JSON: {error}"
+        ) from error
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Indexed-root sidecar {sidecar} must be a JSON object"
+        )
+    version = data.get("version")
+    if version != _INDEXED_ROOT_SIDECAR_VERSION:
+        raise RuntimeError(
+            f"Indexed-root sidecar {sidecar} has unsupported version {version!r}"
+        )
+    stored = data.get("indexed_root_path")
+    if not isinstance(stored, str) or not stored:
+        raise RuntimeError(
+            f"Indexed-root sidecar {sidecar} is missing indexed_root_path"
+        )
+    return stored
+
+
+def _write_indexed_root_sidecar(sidecar: Path, logical_root: str) -> bool:
+    """Exclusively claim the sidecar path, returning True only for the winner.
+
+    The final sidecar path is only published after the payload is fully written
+    and fsynced to a unique sibling temp file. That avoids exposing empty or
+    partial JSON to concurrent readers while still preserving first-writer wins.
+    """
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {
+            "version": _INDEXED_ROOT_SIDECAR_VERSION,
+            "indexed_root_path": logical_root,
+        }
+    )
+    tmp = sidecar.with_name(f"{sidecar.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with open(tmp, "x", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(tmp, sidecar)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _read_indexed_root_sidecar_after_claim_collision(sidecar: Path) -> str:
+    """Read the winner sidecar after a first-writer collision.
+
+    Some filesystems can surface the no-clobber publish collision to the loser
+    just before the published path is synchronously readable from that loser
+    thread/process. Retry only the transient not-found case; any other malformed
+    or unreadable sidecar remains fail-closed.
+    """
+    for _ in range(20):
+        try:
+            return _read_indexed_root_sidecar(sidecar)
+        except RuntimeError as error:
+            if isinstance(error.__cause__, FileNotFoundError):
+                time.sleep(0.01)
+                continue
+            raise
+    return _read_indexed_root_sidecar(sidecar)
+
+
 class DuckDBProvider(SerialDatabaseProvider):
     """DuckDB implementation of DatabaseProvider protocol.
 
@@ -57,6 +175,8 @@ class DuckDBProvider(SerialDatabaseProvider):
     # CONSTRAINT: Inherits from SerialDatabaseProvider for thread safety
     # PERFORMANCE: Uses column-store format, vectorized execution
     """
+
+    _SUPPORTED_HNSW_METRICS = frozenset({"cosine", "ip", "l2sq"})
 
     def __init__(
         self,
@@ -168,6 +288,13 @@ class DuckDBProvider(SerialDatabaseProvider):
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         try:
+            # Validate stored indexed-root identity before any file-backed DB
+            # open, WAL replay, extension load, or schema touch happens.
+            self.ensure_indexed_root_identity(
+                requested_root=self._base_directory,
+                allow_claim_if_missing=False,
+            )
+
             # Initialize connection manager FIRST - this handles WAL validation
             self._connection_manager.connect()
 
@@ -177,6 +304,70 @@ class DuckDBProvider(SerialDatabaseProvider):
         except Exception as e:
             logger.error(f"DuckDB connection failed: {e}")
             raise
+
+    def ensure_indexed_root_identity(
+        self,
+        *,
+        requested_root: Path | str,
+        allow_claim_if_missing: bool,
+    ) -> None:
+        """Validate (or claim) the authoritative indexed-root identity for this DB.
+
+        The authoritative indexed root is stored in a DB-adjacent sidecar
+        (``<dbfile>.root.json``). ``:memory:`` databases have no filesystem
+        artifact and are treated as a no-op.
+
+        Behavior:
+        - sidecar exists and matches current root: return.
+        - sidecar exists and mismatches: raise
+          ``DuckDBIndexedRootMismatchError`` without touching the DB.
+        - sidecar exists but is malformed / unreadable / wrong version:
+          raise plain ``RuntimeError`` (fail-closed; never silently rewritten).
+        - sidecar missing and ``allow_claim_if_missing`` is ``False``:
+          return (legacy migration is deferred to the first mutation-capable
+          call site).
+        - sidecar missing and ``allow_claim_if_missing`` is ``True``:
+          atomically claim the current root and log a one-time warning.
+        """
+        sidecar = _indexed_root_sidecar_path(self._connection_manager.db_path)
+        if sidecar is None:
+            return
+
+        current_root = _normalize_indexed_root(requested_root)
+
+        if sidecar.exists():
+            stored_root = _read_indexed_root_sidecar(sidecar)
+            if stored_root == current_root:
+                return
+            raise DuckDBIndexedRootMismatchError(
+                f"Refusing to open DuckDB database {self._connection_manager.db_path} "
+                f"under indexed root {current_root!r}: sidecar {sidecar} records "
+                f"previously claimed root {stored_root!r}. This database must only "
+                f"be reopened under its original indexed root."
+            )
+
+        if not allow_claim_if_missing:
+            return
+
+        if _write_indexed_root_sidecar(sidecar, current_root):
+            logger.warning(
+                "DuckDB indexed-root sidecar was missing for %s; treated as legacy "
+                "DB migration and claimed current root %s. Future opens under a "
+                "different root will fail.",
+                self._connection_manager.db_path,
+                current_root,
+            )
+            return
+
+        stored_root = _read_indexed_root_sidecar_after_claim_collision(sidecar)
+        if stored_root == current_root:
+            return
+        raise DuckDBIndexedRootMismatchError(
+            f"Refusing to open DuckDB database {self._connection_manager.db_path} "
+            f"under indexed root {current_root!r}: sidecar {sidecar} records "
+            f"previously claimed root {stored_root!r}. This database must only "
+            f"be reopened under its original indexed root."
+        )
 
     def _executor_connect(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for connect - runs in DB thread.
@@ -306,6 +497,192 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Get table name for given embedding dimensions."""
         return f"embeddings_{dims}"
 
+    def _get_embedding_provider_model_index_name(self, dims: int) -> str:
+        """Return the standard provider/model lookup index name."""
+        return f"idx_{dims}_provider_model"
+
+    def _get_embedding_unique_index_name(self, dims: int) -> str:
+        """Return the schema-backed unique index name for embedding upserts."""
+        return f"idx_{dims}_chunk_provider_model_unique"
+
+    def _executor_index_exists(
+        self, conn: Any, table_name: str, index_name: str
+    ) -> bool:
+        """Return True when duckdb_indexes() reports the named index."""
+        result = conn.execute(
+            """
+            SELECT 1
+            FROM duckdb_indexes()
+            WHERE table_name = ? AND index_name = ?
+            LIMIT 1
+            """,
+            [table_name, index_name],
+        ).fetchone()
+        return result is not None
+
+    def _executor_create_embedding_provider_model_index(
+        self, conn: Any, table_name: str, dims: int
+    ) -> None:
+        """Ensure the provider/model lookup index exists for one embedding table."""
+        index_name = self._get_embedding_provider_model_index_name(dims)
+        if self._executor_index_exists(conn, table_name, index_name):
+            return
+
+        conn.execute(
+            f"CREATE INDEX {index_name} ON {table_name}(provider, model)"
+        )
+
+    def _executor_create_embedding_unique_index(
+        self, conn: Any, table_name: str, dims: int
+    ) -> None:
+        """Create the real upsert conflict target for one embedding table."""
+        index_name = self._get_embedding_unique_index_name(dims)
+        if self._executor_index_exists(conn, table_name, index_name):
+            return
+
+        conn.execute(
+            f"""
+            CREATE UNIQUE INDEX {index_name}
+            ON {table_name}(chunk_id, provider, model)
+            """
+        )
+
+    def _executor_get_embedding_duplicate_row_ids(
+        self, conn: Any, table_name: str
+    ) -> list[int]:
+        """Return duplicate row ids that must be removed before adding uniqueness."""
+        rows = conn.execute(
+            f"""
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY chunk_id, provider, model
+                        ORDER BY created_at DESC NULLS LAST, id DESC
+                    ) AS row_num
+                FROM {table_name}
+            )
+            WHERE row_num > 1
+            ORDER BY id
+            """
+        ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def _executor_get_vector_indexes_for_table(
+        self, conn: Any, state: dict[str, Any], table_name: str
+    ) -> list[dict[str, Any]]:
+        """Return only the HNSW indexes for the target embedding table."""
+        return [
+            index_info
+            for index_info in self._executor_get_existing_vector_indexes(conn, state)
+            if index_info["table_name"] == table_name
+        ]
+
+    def _executor_run_embedding_table_hnsw_guarded_mutation(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        table_name: str,
+        mutation_label: str,
+        mutation_func: Callable[[], Any],
+        *,
+        optimize_for_bulk: bool = False,
+        transactional: bool = True,
+    ) -> Any:
+        """Run one embedding-table mutation behind a strict exact-index restore guard."""
+        if state.get("transaction_active", False) and transactional:
+            raise DuckDBTransactionConflictError(
+                f"{mutation_label} cannot run while another DuckDB transaction is active"
+            )
+
+        track_operation(state)
+        existing_indexes = self._executor_get_vector_indexes_for_table(
+            conn, state, table_name
+        )
+
+        try:
+            if transactional:
+                self._executor_begin_transaction(conn, state)
+            if optimize_for_bulk:
+                conn.execute("SET preserve_insertion_order = false")
+
+            for index_info in existing_indexes:
+                self._executor_drop_vector_index_by_name(
+                    conn, index_info["index_name"]
+                )
+
+            result = mutation_func()
+
+            for index_info in existing_indexes:
+                self._executor_recreate_vector_index_from_info(
+                    conn, state, index_info
+                )
+
+            if transactional:
+                self._executor_commit_transaction(conn, state, True)
+            else:
+                self._executor_maybe_checkpoint(conn, state, True)
+            return result
+        except Exception as e:
+            if transactional:
+                try:
+                    self._executor_rollback_transaction(conn, state)
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        f"{mutation_label} failed: {e}; rollback failed: {rollback_error}"
+                    ) from rollback_error
+            else:
+                restore_failures: list[str] = []
+                for index_info in existing_indexes:
+                    try:
+                        self._executor_recreate_vector_index_from_info(
+                            conn, state, index_info
+                        )
+                    except Exception as recreate_error:
+                        restore_failures.append(
+                            f"{index_info['index_name']}: {recreate_error}"
+                        )
+                if restore_failures:
+                    joined_failures = "; ".join(restore_failures)
+                    raise RuntimeError(
+                        f"{mutation_label} failed and HNSW restore was incomplete: "
+                        f"{joined_failures}"
+                    ) from e
+
+            raise
+
+    def _executor_ensure_embedding_upsert_contract(
+        self, conn: Any, state: dict[str, Any], table_name: str, dims: int
+    ) -> None:
+        """Ensure one embedding table has the required unique upsert contract."""
+        self._executor_create_embedding_provider_model_index(conn, table_name, dims)
+
+        unique_index_name = self._get_embedding_unique_index_name(dims)
+        if self._executor_index_exists(conn, table_name, unique_index_name):
+            return
+
+        duplicate_row_ids = self._executor_get_embedding_duplicate_row_ids(
+            conn, table_name
+        )
+
+        def _apply_contract() -> None:
+            if duplicate_row_ids:
+                self._executor_delete_embeddings_by_row_ids(
+                    conn, table_name, duplicate_row_ids
+                )
+            self._executor_create_embedding_unique_index(conn, table_name, dims)
+
+        manage_transaction = not state.get("transaction_active", False)
+        self._executor_run_embedding_table_hnsw_guarded_mutation(
+            conn,
+            state,
+            table_name,
+            f"ensure_embedding_upsert_contract({table_name})",
+            _apply_contract,
+            transactional=manage_transaction,
+        )
+
     def _ensure_embedding_table_exists(self, dims: int) -> str:
         """Ensure embedding table exists for given dimensions - delegate to connection manager."""
         return self._execute_in_db_thread_sync("ensure_embedding_table_exists", dims)
@@ -317,6 +694,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         table_name = f"embeddings_{dims}"
 
         if self._executor_table_exists(conn, state, table_name):
+            self._executor_ensure_embedding_upsert_contract(conn, state, table_name, dims)
             return table_name
 
         logger.info(f"Creating embedding table for {dims} dimensions: {table_name}")
@@ -352,6 +730,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 f"CREATE INDEX IF NOT EXISTS idx_{dims}_provider_model "
                 f"ON {table_name}(provider, model)"
             )
+            self._executor_create_embedding_unique_index(conn, table_name, dims)
 
             logger.info(
                 f"Created {table_name} with HNSW index {hnsw_index_name} "
@@ -506,6 +885,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_embeddings_1536_chunk_id ON embeddings_1536(chunk_id)
             """)
+            self._executor_create_embedding_provider_model_index(
+                conn, "embeddings_1536", 1536
+            )
 
             # Handle schema migrations for existing databases
             self._executor_migrate_schema(conn, state)
@@ -614,6 +996,25 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Add metadata column if it doesn't exist (for databases without size/signature migration)
             conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata TEXT")
 
+            for (table_name,) in conn.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_name LIKE 'embeddings_%'
+                ORDER BY table_name
+                """
+            ).fetchall():
+                try:
+                    dims = int(table_name[11:])
+                except ValueError:
+                    logger.warning(
+                        f"Skipping embedding upsert migration for unexpected table {table_name}"
+                    )
+                    continue
+                self._executor_ensure_embedding_upsert_contract(
+                    conn, state, table_name, dims
+                )
+
         except Exception as e:
             logger.error(f"Failed to migrate schema: {e}")
             raise
@@ -701,10 +1102,18 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
 
         try:
-            # Get all embeddings with their dimensions
+            # Read rows newest-first within each logical upsert key so duplicate
+            # legacy rows collapse onto the latest version during migration.
             embeddings = conn.execute("""
-                SELECT id, chunk_id, provider, model, embedding, dims, created_at
+                SELECT chunk_id, provider, model, embedding, dims, created_at
                 FROM embeddings
+                ORDER BY
+                    dims,
+                    chunk_id,
+                    provider,
+                    model,
+                    created_at DESC NULLS LAST,
+                    id DESC
             """).fetchall()
 
             if not embeddings:
@@ -712,13 +1121,29 @@ class DuckDBProvider(SerialDatabaseProvider):
                 conn.execute("DROP TABLE embeddings")
                 return
 
-            # Group by dimensions
-            by_dims = {}
+            by_dims: dict[int, list[tuple[Any, Any, Any, Any, int, Any]]] = {}
+            seen_keys_by_dims: dict[int, set[tuple[int, str, str]]] = {}
+            duplicate_count = 0
             for emb in embeddings:
-                dims = emb[5]  # dims column
-                if dims not in by_dims:
-                    by_dims[dims] = []
-                by_dims[dims].append(emb)
+                chunk_id, provider, model, embedding, dims, created_at = emb
+                dims_value = int(dims)
+                dim_rows = by_dims.setdefault(dims_value, [])
+                seen_keys = seen_keys_by_dims.setdefault(dims_value, set())
+                logical_key = (int(chunk_id), str(provider), str(model))
+                if logical_key in seen_keys:
+                    duplicate_count += 1
+                    continue
+                seen_keys.add(logical_key)
+                dim_rows.append(
+                    (
+                        int(chunk_id),
+                        provider,
+                        model,
+                        embedding,
+                        dims_value,
+                        created_at,
+                    )
+                )
 
             # Migrate each dimension group
             for dims, emb_list in by_dims.items():
@@ -726,18 +1151,19 @@ class DuckDBProvider(SerialDatabaseProvider):
                     conn, state, dims
                 )
                 logger.info(f"Migrating {len(emb_list)} embeddings to {table_name}")
-
-                # Insert data into dimension-specific table
-                for emb in emb_list:
-                    vector_str = str(emb[4])  # embedding column
-                    conn.execute(
-                        f"""
-                        INSERT INTO {table_name} 
-                        (chunk_id, provider, model, embedding, dims, created_at)
-                        VALUES (?, ?, ?, {vector_str}, ?, ?)
+                conn.executemany(
+                    f"""
+                    INSERT INTO {table_name}
+                    (chunk_id, provider, model, embedding, dims, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (chunk_id, provider, model) DO UPDATE
+                    SET
+                        embedding = EXCLUDED.embedding,
+                        dims = EXCLUDED.dims,
+                        created_at = EXCLUDED.created_at
                     """,
-                        [emb[1], emb[2], emb[3], emb[5], emb[6]],
-                    )
+                    emb_list,
+                )
 
             # Drop legacy table
             conn.execute("DROP TABLE embeddings")
@@ -745,6 +1171,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                 f"Successfully migrated embeddings to {len(by_dims)} "
                 "dimension-specific tables"
             )
+            if duplicate_count:
+                logger.info(
+                    "Coalesced "
+                    f"{duplicate_count} duplicate legacy embedding rows during migration"
+                )
 
         except Exception as e:
             logger.error(f"Failed to migrate legacy embeddings table: {e}")
@@ -783,15 +1214,20 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Ensure the table exists before creating the index
             self._executor_ensure_embedding_table_exists(conn, state, dims)
 
-            index_name = f"hnsw_{provider}_{model}_{dims}_{metric}".replace(
-                "-", "_"
-            ).replace(".", "_")
+            normalized_metric = self._normalize_hnsw_metric(metric)
+            index_name = self._custom_hnsw_index_name(
+                provider,
+                model,
+                dims,
+                normalized_metric,
+            )
 
             # Create HNSW index using VSS extension on the dimension-specific table
             conn.execute(f"""
-                CREATE INDEX {index_name} ON {table_name}
+                CREATE INDEX IF NOT EXISTS {self._quote_duckdb_identifier(index_name)}
+                ON {self._quote_duckdb_identifier(table_name)}
                 USING HNSW (embedding)
-                WITH (metric = '{metric}')
+                WITH (metric = '{normalized_metric}')
             """)
 
             logger.info(f"HNSW index {index_name} created successfully on {table_name}")
@@ -824,20 +1260,28 @@ class DuckDBProvider(SerialDatabaseProvider):
         - Standard: idx_hnsw_{dims} (from initial table creation)
         """
         # Custom index name pattern (from create_vector_index)
-        custom_index_name = f"hnsw_{provider}_{model}_{dims}_{metric}".replace(
-            "-", "_"
-        ).replace(".", "_")
+        normalized_metric = self._normalize_hnsw_metric(metric)
+        custom_index_name = self._custom_hnsw_index_name(
+            provider,
+            model,
+            dims,
+            normalized_metric,
+        )
         # Standard index name pattern (from table creation)
         standard_index_name = f"idx_hnsw_{dims}"
 
         dropped_indexes = []
         try:
             # Try to drop custom index first
-            conn.execute(f"DROP INDEX IF EXISTS {custom_index_name}")
+            conn.execute(
+                f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(custom_index_name)}"
+            )
             dropped_indexes.append(custom_index_name)
 
             # Also try to drop standard index (created during table initialization)
-            conn.execute(f"DROP INDEX IF EXISTS {standard_index_name}")
+            conn.execute(
+                f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(standard_index_name)}"
+            )
             dropped_indexes.append(standard_index_name)
 
             logger.info(f"HNSW index drop attempted: {', '.join(dropped_indexes)}")
@@ -846,6 +1290,82 @@ class DuckDBProvider(SerialDatabaseProvider):
         except Exception as e:
             logger.error(f"Failed to drop HNSW indexes: {e}")
             raise
+
+    def _quote_duckdb_identifier(self, identifier: str) -> str:
+        """Quote an identifier for DuckDB SQL."""
+        return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+
+    def _is_safe_duckdb_identifier(self, identifier: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier))
+
+    def _sanitize_hnsw_identifier_component(self, value: str) -> str:
+        sanitized = re.sub(r"[^A-Za-z0-9_]+", "_", value.strip())
+        sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+        if not sanitized:
+            return "value"
+        if sanitized[0].isdigit():
+            return f"v_{sanitized}"
+        return sanitized
+
+    def _normalize_hnsw_metric(self, metric: str) -> str:
+        normalized = metric.strip().lower()
+        if normalized not in self._SUPPORTED_HNSW_METRICS:
+            raise ValueError(
+                "Unsupported HNSW metric "
+                f"{metric!r}; expected one of {sorted(self._SUPPORTED_HNSW_METRICS)}"
+            )
+        return normalized
+
+    def _custom_hnsw_index_name(
+        self, provider: str, model: str, dims: int, metric: str
+    ) -> str:
+        normalized_metric = self._normalize_hnsw_metric(metric)
+        provider_component = self._sanitize_hnsw_identifier_component(provider)
+        model_component = self._sanitize_hnsw_identifier_component(model)
+        return (
+            f"hnsw_{provider_component}_{model_component}_{int(dims)}_"
+            f"{normalized_metric}"
+        )
+
+    def _is_hnsw_index_definition(
+        self, index_name: str, create_sql: str | None
+    ) -> bool:
+        """Return True when duckdb_indexes() describes an HNSW index."""
+        if create_sql and "USING HNSW" in create_sql.upper():
+            return True
+        return index_name.startswith("hnsw_") or index_name.startswith("idx_hnsw_")
+
+    def _extract_hnsw_metric(self, create_sql: str | None) -> str:
+        """Best-effort metric extraction from a DuckDB HNSW CREATE INDEX statement."""
+        if not create_sql:
+            return "cosine"
+
+        match = re.search(r"metric\s*=\s*'([^']+)'", create_sql, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+        return "cosine"
+
+    def _extract_custom_hnsw_identity(
+        self, index_name: str
+    ) -> tuple[str | None, str | None]:
+        """Best-effort provider/model extraction from custom HNSW index names."""
+        if not index_name.startswith("hnsw_"):
+            return None, None
+
+        parts = index_name[5:].split("_")  # Remove 'hnsw_' prefix
+        if len(parts) < 4:
+            return None, None
+
+        provider_model = "_".join(parts[:-2])
+        last_underscore = provider_model.rfind("_")
+        if last_underscore > 0:
+            return (
+                provider_model[:last_underscore],
+                provider_model[last_underscore + 1 :],
+            )
+        if provider_model:
+            return provider_model, ""
+        return None, None
 
     def get_existing_vector_indexes(self) -> list[dict[str, Any]]:
         """Get list of existing HNSW vector indexes on all embedding tables."""
@@ -856,74 +1376,46 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> list[dict[str, Any]]:
         """Executor method for get_existing_vector_indexes - runs in DB thread."""
         try:
-            # Query DuckDB system tables for indexes on all embedding tables
-            # Look for both legacy 'hnsw_' and standard 'idx_hnsw_' index patterns
             results = conn.execute("""
-                SELECT index_name, table_name
+                SELECT index_name, table_name, sql
                 FROM duckdb_indexes()
                 WHERE table_name LIKE 'embeddings_%'
-                AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
             """).fetchall()
 
             indexes = []
             for result in results:
                 index_name = result[0]
                 table_name = result[1]
+                create_sql = result[2]
+                if not self._is_hnsw_index_definition(index_name, create_sql):
+                    continue
 
-                # Handle different index naming patterns
+                try:
+                    dims = int(table_name[11:])  # Remove 'embeddings_' prefix
+                except ValueError:
+                    logger.warning(
+                        f"Could not parse dims from HNSW index {index_name} on {table_name}"
+                    )
+                    continue
+
+                provider: str | None = None
+                model: str | None = None
                 if index_name.startswith("hnsw_"):
-                    # Parse custom index name: hnsw_{provider}_{model}_{dims}_{metric}
-                    parts = index_name[5:].split("_")  # Remove 'hnsw_' prefix
-                    if len(parts) >= 4:
-                        # Reconstruct provider/model from parts (they may contain underscores)
-                        metric = parts[-1]
-                        dims_str = parts[-2]
-                        try:
-                            dims = int(dims_str)
-                            # Join remaining parts as provider_model, then split on last underscore
-                            provider_model = "_".join(parts[:-2])
-                            # Find last underscore to separate provider and model
-                            last_underscore = provider_model.rfind("_")
-                            if last_underscore > 0:
-                                provider = provider_model[:last_underscore]
-                                model = provider_model[last_underscore + 1 :]
-                            else:
-                                provider = provider_model
-                                model = ""
-
-                            indexes.append(
-                                {
-                                    "index_name": index_name,
-                                    "provider": provider,
-                                    "model": model,
-                                    "dims": dims,
-                                    "metric": metric,
-                                }
-                            )
-                        except ValueError:
-                            logger.warning(
-                                f"Could not parse dims from custom index name: {index_name}"
-                            )
-
+                    provider, model = self._extract_custom_hnsw_identity(index_name)
                 elif index_name.startswith("idx_hnsw_"):
-                    # Parse standard index name: idx_hnsw_{dims}
-                    # Extract dims from table name: embeddings_{dims}
-                    try:
-                        if table_name.startswith("embeddings_"):
-                            dims = int(table_name[11:])  # Remove 'embeddings_' prefix
-                            indexes.append(
-                                {
-                                    "index_name": index_name,
-                                    "provider": "generic",  # Standard index doesn't specify provider
-                                    "model": "generic",  # Standard index doesn't specify model
-                                    "dims": dims,
-                                    "metric": "cosine",  # Default metric for standard indexes
-                                }
-                            )
-                    except ValueError:
-                        logger.warning(
-                            f"Could not parse dims from standard index: {index_name} on {table_name}"
-                        )
+                    provider = "generic"
+                    model = "generic"
+
+                indexes.append(
+                    {
+                        "index_name": index_name,
+                        "table_name": table_name,
+                        "provider": provider,
+                        "model": model,
+                        "dims": dims,
+                        "metric": self._extract_hnsw_metric(create_sql),
+                    }
+                )
 
             return indexes
 
@@ -931,7 +1423,437 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.error(f"Failed to get existing vector indexes: {e}")
             return []
 
-    def bulk_operation_with_index_management(self, operation_func, *args, **kwargs):
+    def _executor_drop_vector_index_by_name(self, conn: Any, index_name: str) -> None:
+        """Drop a specific HNSW index by its current name."""
+        conn.execute(
+            f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(index_name)}"
+        )
+
+    def _executor_recreate_vector_index_from_info(
+        self, conn: Any, state: dict[str, Any], index_info: dict[str, Any]
+    ) -> None:
+        """Recreate one previously discovered HNSW index with its original name."""
+        table_name = str(index_info["table_name"])
+        dims = int(index_info["dims"])
+        self._executor_ensure_embedding_table_exists(conn, state, dims)
+        index_name = str(index_info["index_name"])
+        if not self._is_safe_duckdb_identifier(index_name):
+            logger.warning(
+                "Skipping HNSW index restore for unsafe identifier "
+                f"{index_name!r} on {table_name}"
+            )
+            return
+
+        try:
+            metric = self._normalize_hnsw_metric(str(index_info.get("metric", "cosine")))
+        except ValueError as error:
+            logger.warning(
+                "Skipping HNSW index restore for "
+                f"{index_name!r} on {table_name}: {error}"
+            )
+            return
+
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS {self._quote_duckdb_identifier(index_name)}
+            ON {self._quote_duckdb_identifier(table_name)}
+            USING HNSW (embedding)
+            WITH (metric = '{metric}')
+        """)
+
+    def _executor_fetch_rows_as_dicts(
+        self, conn: Any, query: str, params: list[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Execute a query in the DB thread and return row dictionaries."""
+        cursor = conn.execute(query, params or [])
+        rows = cursor.fetchall()
+        if not rows:
+            return []
+
+        column_names = [desc[0] for desc in cursor.description]
+        return [dict(zip(column_names, row)) for row in rows]
+
+    def _executor_insert_row_dict(
+        self, conn: Any, table_name: str, row: dict[str, Any]
+    ) -> None:
+        """Insert one previously snapshotted row back into a table."""
+        columns = list(row.keys())
+        placeholders = ", ".join(["?"] * len(columns))
+        conn.execute(
+            f"""
+            INSERT INTO {table_name} ({", ".join(columns)})
+            VALUES ({placeholders})
+            """,
+            [row[column] for column in columns],
+        )
+
+    def _executor_insert_row_dicts(
+        self, conn: Any, table_name: str, rows: list[dict[str, Any]]
+    ) -> None:
+        """Insert a snapshot batch back into a table with one executemany call."""
+        if not rows:
+            return
+
+        columns = list(rows[0].keys())
+        placeholders = ", ".join(["?"] * len(columns))
+        conn.executemany(
+            f"""
+            INSERT INTO {table_name} ({", ".join(columns)})
+            VALUES ({placeholders})
+            """,
+            [[row[column] for column in columns] for row in rows],
+        )
+
+    def _executor_delete_embeddings_for_chunk_ids(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
+    ) -> None:
+        """Delete embeddings for specific chunks across all embedding tables."""
+        if not chunk_ids:
+            return
+
+        placeholders = ", ".join(["?"] * len(chunk_ids))
+        for table_name in self._executor_get_all_embedding_tables(conn, state):
+            conn.execute(
+                f"DELETE FROM {table_name} WHERE chunk_id IN ({placeholders})",
+                chunk_ids,
+            )
+
+    def _executor_get_embedding_row_ids_by_chunk_ids(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
+    ) -> dict[str, list[int]]:
+        """Resolve exact embedding row ids for the target chunk ids."""
+        if not chunk_ids:
+            return {}
+
+        placeholders = ", ".join(["?"] * len(chunk_ids))
+        row_ids_by_table: dict[str, list[int]] = {}
+        for table_name in self._executor_get_all_embedding_tables(conn, state):
+            rows = conn.execute(
+                f"""
+                SELECT id
+                FROM {table_name}
+                WHERE chunk_id IN ({placeholders})
+                ORDER BY id
+                """,
+                chunk_ids,
+            ).fetchall()
+            if rows:
+                row_ids_by_table[table_name] = [int(row[0]) for row in rows]
+
+        return row_ids_by_table
+
+    def _executor_delete_embeddings_by_row_ids(
+        self, conn: Any, table_name: str, row_ids: list[int]
+    ) -> None:
+        """Delete exact embedding rows by primary key from one embedding table."""
+        if not row_ids:
+            return
+
+        placeholders = ", ".join(["?"] * len(row_ids))
+        conn.execute(f"DELETE FROM {table_name} WHERE id IN ({placeholders})", row_ids)
+
+    def _executor_delete_chunk_ids_in_active_transaction(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunk_ids: list[int],
+        mutation_label: str,
+    ) -> None:
+        """Delete chunk replacements inside an existing outer transaction.
+
+        Step 38 reopens because routing modified-file chunk replacement through the
+        generic HNSW drop/recreate guard inside `process_file(...)`'s already-open
+        transaction can later crash DuckDB during follow-up embedding inserts.
+
+        For this specific in-transaction path, delete the exact embedding rows by
+        primary key and then remove the chunk rows, while keeping Step 37's guarded
+        HNSW path for non-transactional chunk/file cleanup.
+        """
+        unique_chunk_ids = sorted({int(chunk_id) for chunk_id in chunk_ids})
+        if not unique_chunk_ids:
+            return
+
+        track_operation(state)
+        chunk_placeholders = ", ".join(["?"] * len(unique_chunk_ids))
+        row_ids_by_table = self._executor_get_embedding_row_ids_by_chunk_ids(
+            conn, state, unique_chunk_ids
+        )
+
+        for table_name, row_ids in row_ids_by_table.items():
+            self._executor_delete_embeddings_by_row_ids(conn, table_name, row_ids)
+
+            remaining_embedding_count = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM {table_name}
+                WHERE chunk_id IN ({chunk_placeholders})
+                """,
+                unique_chunk_ids,
+            ).fetchone()[0]
+            if remaining_embedding_count:
+                raise RuntimeError(
+                    f"{mutation_label} left {remaining_embedding_count} stale embedding rows "
+                    f"in {table_name}"
+                )
+
+        conn.execute(
+            f"DELETE FROM chunks WHERE id IN ({chunk_placeholders})",
+            unique_chunk_ids,
+        )
+
+        remaining_chunk_count = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM chunks
+            WHERE id IN ({chunk_placeholders})
+            """,
+            unique_chunk_ids,
+        ).fetchone()[0]
+        if remaining_chunk_count:
+            raise RuntimeError(
+                f"{mutation_label} left {remaining_chunk_count} stale chunk rows"
+            )
+
+        logger.info(
+            f"{mutation_label} completed inside the active transaction "
+            "without the HNSW drop/recreate guard"
+        )
+
+    def _executor_snapshot_file_delete_targets(
+        self, conn: Any, state: dict[str, Any], file_ids: list[int]
+    ) -> dict[str, Any]:
+        """Capture the rows needed to restore a batch file delete if mutation fails."""
+        unique_file_ids = sorted({int(file_id) for file_id in file_ids})
+        if not unique_file_ids:
+            return {
+                "file_rows": [],
+                "file_ids": [],
+                "chunk_rows": [],
+                "chunk_ids": [],
+                "embedding_rows_by_table": {},
+            }
+
+        placeholders = ", ".join(["?"] * len(unique_file_ids))
+        file_rows = self._executor_fetch_rows_as_dicts(
+            conn,
+            f"""
+            SELECT *
+            FROM files
+            WHERE id IN ({placeholders})
+            ORDER BY id
+            """,
+            unique_file_ids,
+        )
+        chunk_rows = self._executor_fetch_rows_as_dicts(
+            conn,
+            """
+            SELECT *
+            FROM chunks
+            WHERE file_id IN ({placeholders})
+            ORDER BY id
+            """.format(placeholders=placeholders),
+            unique_file_ids,
+        )
+        chunk_ids = [int(row["id"]) for row in chunk_rows]
+
+        embedding_rows_by_table: dict[str, list[dict[str, Any]]] = {}
+        if chunk_ids:
+            placeholders = ", ".join(["?"] * len(chunk_ids))
+            for table_name in self._executor_get_all_embedding_tables(conn, state):
+                rows = self._executor_fetch_rows_as_dicts(
+                    conn,
+                    f"""
+                    SELECT *
+                    FROM {table_name}
+                    WHERE chunk_id IN ({placeholders})
+                    ORDER BY id
+                    """,
+                    chunk_ids,
+                )
+                if rows:
+                    embedding_rows_by_table[table_name] = rows
+
+        return {
+            "file_rows": file_rows,
+            "file_ids": [int(row["id"]) for row in file_rows],
+            "chunk_rows": chunk_rows,
+            "chunk_ids": chunk_ids,
+            "embedding_rows_by_table": embedding_rows_by_table,
+        }
+
+    def _executor_restore_file_delete_targets(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        snapshot: dict[str, Any],
+        original_indexes: list[dict[str, Any]],
+    ) -> None:
+        """Restore file delete targets and HNSW indexes after a failed mutation."""
+        current_indexes = self._executor_get_existing_vector_indexes(conn, state)
+        for index_info in current_indexes:
+            self._executor_drop_vector_index_by_name(conn, index_info["index_name"])
+
+        chunk_ids = snapshot["chunk_ids"]
+        self._executor_delete_embeddings_for_chunk_ids(conn, state, chunk_ids)
+        if chunk_ids:
+            placeholders = ", ".join(["?"] * len(chunk_ids))
+            conn.execute(f"DELETE FROM chunks WHERE id IN ({placeholders})", chunk_ids)
+
+        file_ids = snapshot["file_ids"]
+        if file_ids:
+            placeholders = ", ".join(["?"] * len(file_ids))
+            conn.execute(f"DELETE FROM files WHERE id IN ({placeholders})", file_ids)
+
+        self._executor_insert_row_dicts(conn, "files", snapshot["file_rows"])
+        self._executor_insert_row_dicts(conn, "chunks", snapshot["chunk_rows"])
+
+        for table_name, rows in snapshot["embedding_rows_by_table"].items():
+            self._executor_insert_row_dicts(conn, table_name, rows)
+
+        for index_info in original_indexes:
+            self._executor_recreate_vector_index_from_info(conn, state, index_info)
+
+        self._executor_maybe_checkpoint(conn, state, True)
+
+    def _executor_run_hnsw_guarded_mutation(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        mutation_label: str,
+        mutation_func: Callable[[], Any],
+        *,
+        optimize_for_bulk: bool = False,
+        transactional: bool = True,
+        rollback_func: Callable[[list[dict[str, Any]]], None] | None = None,
+    ) -> Any:
+        """Run a mutation behind one transactional HNSW drop/recreate guard."""
+        if state.get("transaction_active", False) and transactional:
+            raise DuckDBTransactionConflictError(
+                f"{mutation_label} cannot run while another DuckDB transaction is active"
+            )
+
+        track_operation(state)
+        existing_indexes = self._executor_get_existing_vector_indexes(conn, state)
+        indexes_recreated = False
+
+        try:
+            if transactional:
+                self._executor_begin_transaction(conn, state)
+            if optimize_for_bulk:
+                conn.execute("SET preserve_insertion_order = false")
+
+            if existing_indexes:
+                logger.info(
+                    f"Dropping {len(existing_indexes)} HNSW indexes for {mutation_label}"
+                )
+                for index_info in existing_indexes:
+                    self._executor_drop_vector_index_by_name(
+                        conn, index_info["index_name"]
+                    )
+
+            result = mutation_func()
+
+            if existing_indexes:
+                logger.info(
+                    f"Recreating {len(existing_indexes)} HNSW indexes after {mutation_label}"
+                )
+                for index_info in existing_indexes:
+                    self._executor_recreate_vector_index_from_info(
+                        conn, state, index_info
+                    )
+                indexes_recreated = True
+
+            if transactional:
+                self._executor_commit_transaction(conn, state, True)
+            else:
+                self._executor_maybe_checkpoint(conn, state, True)
+            logger.info(f"{mutation_label} completed successfully with HNSW safety")
+            return result
+        except Exception as e:
+            if transactional and state.get("transaction_active", False):
+                try:
+                    self._executor_rollback_transaction(conn, state)
+                except Exception as rollback_error:
+                    logger.error(
+                        f"Failed to roll back {mutation_label}: {rollback_error}"
+                    )
+                    raise RuntimeError(
+                        f"{mutation_label} failed: {e}; rollback failed: {rollback_error}"
+                    ) from rollback_error
+            elif rollback_func is not None:
+                try:
+                    rollback_func(existing_indexes)
+                except Exception as rollback_error:
+                    logger.error(
+                        f"Failed to restore {mutation_label}: {rollback_error}"
+                    )
+                    raise RuntimeError(
+                        f"{mutation_label} failed: {e}; rollback failed: {rollback_error}"
+                    ) from rollback_error
+            elif existing_indexes and not indexes_recreated:
+                logger.info(
+                    f"Attempting best-effort HNSW index restore after {mutation_label} failure"
+                )
+                for index_info in existing_indexes:
+                    try:
+                        self._executor_recreate_vector_index_from_info(
+                            conn, state, index_info
+                        )
+                    except Exception as recreate_error:
+                        logger.error(
+                            "Failed to restore HNSW index "
+                            f"{index_info['index_name']} after {mutation_label}: "
+                            f"{recreate_error}"
+                        )
+
+            logger.error(f"{mutation_label} failed: {e}")
+            raise
+
+    def _executor_delete_chunk_ids_with_hnsw_safety(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunk_ids: list[int],
+        mutation_label: str,
+    ) -> None:
+        """Delete chunk rows and dependent embeddings behind the HNSW guard."""
+        unique_chunk_ids = sorted({int(chunk_id) for chunk_id in chunk_ids})
+        if not unique_chunk_ids:
+            return
+
+        if state.get("transaction_active", False):
+            self._executor_delete_chunk_ids_in_active_transaction(
+                conn,
+                state,
+                unique_chunk_ids,
+                mutation_label,
+            )
+            return
+
+        placeholders = ", ".join(["?"] * len(unique_chunk_ids))
+
+        def delete_records() -> None:
+            self._executor_delete_embeddings_for_chunk_ids(
+                conn, state, unique_chunk_ids
+            )
+            conn.execute(
+                f"DELETE FROM chunks WHERE id IN ({placeholders})",
+                unique_chunk_ids,
+            )
+
+        self._executor_run_hnsw_guarded_mutation(
+            conn,
+            state,
+            mutation_label,
+            delete_records,
+            optimize_for_bulk=len(unique_chunk_ids) > 1,
+        )
+
+    def bulk_operation_with_index_management(
+        self,
+        operation_func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         """Execute bulk operation with automatic HNSW index management and transaction safety.
 
         # PATTERN: Drop indexes → Bulk operation → Recreate indexes
@@ -947,105 +1869,21 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
 
     def _executor_bulk_operation_with_index_management_executor(
-        self, conn: Any, state: dict[str, Any], operation_func, args, kwargs
-    ):
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        operation_func: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
         """Executor method for bulk operations with index management - runs in DB thread."""
-        # Get existing indexes before starting
-        existing_indexes = self._executor_get_existing_vector_indexes(conn, state)
-        dropped_indexes = []
-
-        try:
-            # Start transaction for atomic operation
-            conn.execute("BEGIN TRANSACTION")
-            state["transaction_active"] = True
-
-            # Optimize settings for bulk loading
-            conn.execute("SET preserve_insertion_order = false")
-
-            # Drop existing HNSW vector indexes to improve bulk performance
-            if existing_indexes:
-                logger.info(
-                    f"Dropping {len(existing_indexes)} HNSW indexes for bulk operation"
-                )
-                for index_info in existing_indexes:
-                    try:
-                        self._executor_drop_vector_index(
-                            conn,
-                            state,
-                            index_info["provider"],
-                            index_info["model"],
-                            index_info["dims"],
-                            index_info["metric"],
-                        )
-                        dropped_indexes.append(index_info)
-                    except Exception as e:
-                        logger.warning(
-                            f"Could not drop index {index_info['index_name']}: {e}"
-                        )
-
-            # Execute the bulk operation
-            result = operation_func(*args, **kwargs)
-
-            # Recreate dropped indexes
-            if dropped_indexes:
-                logger.info(
-                    f"Recreating {len(dropped_indexes)} HNSW indexes after bulk operation"
-                )
-                for index_info in dropped_indexes:
-                    try:
-                        self._executor_create_vector_index(
-                            conn,
-                            state,
-                            index_info["provider"],
-                            index_info["model"],
-                            index_info["dims"],
-                            index_info["metric"],
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to recreate index {index_info['index_name']}: {e}"
-                        )
-                        # Continue with other indexes
-
-            # Commit transaction
-            conn.execute("COMMIT")
-            state["transaction_active"] = False
-
-            # Force checkpoint after bulk operations to ensure durability
-            self._executor_maybe_checkpoint(conn, state, True)
-
-            logger.info("Bulk operation completed successfully with index management")
-            return result
-
-        except Exception as e:
-            # Rollback transaction on any error
-            try:
-                conn.execute("ROLLBACK")
-                state["transaction_active"] = False
-                logger.info("Transaction rolled back due to error")
-            except Exception:
-                pass
-
-            # Attempt to recreate dropped indexes on failure
-            if dropped_indexes:
-                logger.info("Attempting to recreate dropped indexes after failure")
-                for index_info in dropped_indexes:
-                    try:
-                        self._executor_create_vector_index(
-                            conn,
-                            state,
-                            index_info["provider"],
-                            index_info["model"],
-                            index_info["dims"],
-                            index_info["metric"],
-                        )
-                    except Exception as recreate_error:
-                        logger.error(
-                            f"Failed to recreate index {index_info['index_name']}: {recreate_error}"
-                        )
-
-            logger.error(f"Bulk operation failed: {e}")
-            raise
+        return self._executor_run_hnsw_guarded_mutation(
+            conn,
+            state,
+            "bulk operation",
+            lambda: operation_func(*args, **kwargs),
+            optimize_for_bulk=True,
+        )
 
     def insert_file(self, file: File) -> int:
         """Insert file record and return file ID - delegate to file repository."""
@@ -1195,7 +2033,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         size_bytes: int | None = None,
         mtime: float | None = None,
         content_hash: str | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Update file record with new values - delegate to file repository."""
         self._execute_in_db_thread_sync(
@@ -1239,48 +2077,104 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def delete_file_completely(self, file_path: str) -> bool:
         """Delete a file and all its chunks/embeddings completely - delegate to file repository."""
-        return self._execute_in_db_thread_sync("delete_file_completely", file_path)
+        return cast(
+            bool,
+            self._execute_in_db_thread_sync("delete_file_completely", file_path),
+        )
 
     def _executor_delete_file_completely(
         self, conn: Any, state: dict[str, Any], file_path: str
     ) -> bool:
         """Executor method for delete_file_completely - runs in DB thread."""
-        # Track operation for checkpoint management
-        track_operation(state)
+        return self._executor_delete_files_batch(conn, state, [file_path]) > 0
 
-        # Get file ID first
-        # Normalize path to handle both absolute and relative paths
-        base_dir = state.get("base_directory")
-        normalized_path = normalize_path_for_lookup(file_path, base_dir)
-        result = conn.execute(
-            "SELECT id FROM files WHERE path = ?", [normalized_path]
-        ).fetchone()
-
-        if not result:
-            return False
-
-        file_id = result[0]
-
-        # Delete in correct order due to foreign key constraints
-        # 1. Delete embeddings first from all embedding tables
-        embedding_tables = self._executor_get_all_embedding_tables(conn, state)
-        for table_name in embedding_tables:
-            conn.execute(
-                f"""
-                DELETE FROM {table_name}
-                WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?)
-                """,
-                [file_id],
+    def _executor_delete_files_batch(
+        self, conn: Any, state: dict[str, Any], file_paths: list[str]
+    ) -> int:
+        """Executor method for delete_files_batch - runs in DB thread."""
+        if not file_paths:
+            return 0
+        if state.get("transaction_active", False):
+            raise DuckDBTransactionConflictError(
+                "delete_files_batch cannot run while another DuckDB transaction "
+                "is active"
             )
 
-        # 2. Delete chunks
-        conn.execute("DELETE FROM chunks WHERE file_id = ?", [file_id])
+        base_dir = state.get("base_directory")
+        normalized_paths: list[str] = []
+        seen_paths: set[str] = set()
+        for file_path in file_paths:
+            normalized_path = normalize_path_for_lookup(file_path, base_dir)
+            if normalized_path in seen_paths:
+                continue
+            normalized_paths.append(normalized_path)
+            seen_paths.add(normalized_path)
 
-        # 3. Delete file
-        conn.execute("DELETE FROM files WHERE id = ?", [file_id])
+        if not normalized_paths:
+            return 0
 
-        logger.debug(f"File {file_path} and all associated data deleted")
-        return True
+        placeholders = ", ".join(["?"] * len(normalized_paths))
+        existing_rows = self._executor_fetch_rows_as_dicts(
+            conn,
+            f"""
+            SELECT id, path
+            FROM files
+            WHERE path IN ({placeholders})
+            ORDER BY id
+            """,
+            normalized_paths,
+        )
+        if not existing_rows:
+            return 0
+
+        path_to_file_id = {
+            str(row["path"]): int(row["id"]) for row in existing_rows if row.get("path")
+        }
+        existing_paths = [
+            normalized_path
+            for normalized_path in normalized_paths
+            if normalized_path in path_to_file_id
+        ]
+        file_ids = [path_to_file_id[path] for path in existing_paths]
+        snapshot = self._executor_snapshot_file_delete_targets(conn, state, file_ids)
+        chunk_ids = snapshot["chunk_ids"]
+
+        def delete_records() -> int:
+            self._executor_delete_embeddings_for_chunk_ids(conn, state, chunk_ids)
+            if chunk_ids:
+                chunk_placeholders = ", ".join(["?"] * len(chunk_ids))
+                conn.execute(
+                    f"DELETE FROM chunks WHERE id IN ({chunk_placeholders})",
+                    chunk_ids,
+                )
+            if file_ids:
+                file_placeholders = ", ".join(["?"] * len(file_ids))
+                conn.execute(
+                    f"DELETE FROM files WHERE id IN ({file_placeholders})",
+                    file_ids,
+                )
+            return len(file_ids)
+
+        def rollback_delete(original_indexes: list[dict[str, Any]]) -> None:
+            self._executor_restore_file_delete_targets(
+                conn, state, snapshot, original_indexes
+            )
+
+        deleted_count = self._executor_run_hnsw_guarded_mutation(
+            conn,
+            state,
+            f"delete_files_batch(count={len(file_ids)}, sample={existing_paths[0]})",
+            delete_records,
+            optimize_for_bulk=len(file_ids) > 1,
+            # DuckDB currently rejects parent-row deletes inside the same explicit
+            # transaction after child-row deletes on FK-linked tables.
+            transactional=False,
+            rollback_func=rollback_delete,
+        )
+        logger.debug(
+            f"Deleted {deleted_count} files and associated data in one HNSW-safe batch"
+        )
+        return int(deleted_count)
 
     def insert_chunk(self, chunk: Chunk) -> int:
         """Insert chunk record and return chunk ID - delegate to chunk repository."""
@@ -1462,52 +2356,36 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], file_id: int
     ) -> None:
         """Executor method for delete_file_chunks - runs in DB thread."""
-        # Track operation for checkpoint management
-        track_operation(state)
-
-        conn.execute("DELETE FROM chunks WHERE file_id = ?", [file_id])
+        chunk_rows = conn.execute(
+            "SELECT id FROM chunks WHERE file_id = ? ORDER BY id",
+            [file_id],
+        ).fetchall()
+        chunk_ids = [int(row[0]) for row in chunk_rows]
+        self._executor_delete_chunk_ids_with_hnsw_safety(
+            conn,
+            state,
+            chunk_ids,
+            f"delete_file_chunks(file_id={file_id}, count={len(chunk_ids)})",
+        )
 
     def _executor_delete_chunk(
         self, conn: Any, state: dict[str, Any], chunk_id: int
     ) -> None:
         """Executor method for delete_chunk - runs in DB thread."""
-        # Track operation
-        track_operation(state)
-
-        # Delete embeddings first to avoid foreign key constraint
-        # Get all embedding tables
-        result = conn.execute("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_name LIKE 'embeddings_%'
-        """).fetchall()
-
-        for (table_name,) in result:
-            conn.execute(f"DELETE FROM {table_name} WHERE chunk_id = ?", [chunk_id])
-
-        # Then delete the chunk
-        conn.execute("DELETE FROM chunks WHERE id = ?", [chunk_id])
+        self._executor_delete_chunk_ids_with_hnsw_safety(
+            conn, state, [chunk_id], f"delete_chunk(id={chunk_id})"
+        )
 
     def _executor_delete_chunks_batch(
         self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
     ) -> None:
         """Executor method for delete_chunks_batch - runs in DB thread."""
-        if not chunk_ids:
-            return
-        # Track operation for checkpoint management
-        track_operation(state)
-        placeholders = ",".join(["?"] * len(chunk_ids))
-        # Delete embeddings first across all embedding tables
-        tables = conn.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'embeddings_%'"
-        ).fetchall()
-        for (table_name,) in tables:
-            conn.execute(
-                f"DELETE FROM {table_name} WHERE chunk_id IN ({placeholders})",
-                chunk_ids,
-            )
-        # Delete chunks
-        conn.execute(f"DELETE FROM chunks WHERE id IN ({placeholders})", chunk_ids)
+        self._executor_delete_chunk_ids_with_hnsw_safety(
+            conn,
+            state,
+            chunk_ids,
+            f"delete_chunks_batch(count={len(chunk_ids)})",
+        )
 
     def delete_chunk(self, chunk_id: int) -> None:
         """Delete a single chunk by ID with proper foreign key handling."""
@@ -1562,17 +2440,20 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _executor_get_chunks_by_file_id_query(
         self, conn: Any, state: dict[str, Any], file_id: int
-    ) -> list:
+    ) -> list[Any]:
         """Executor method for get_chunks_by_file_id query - runs in DB thread."""
-        return conn.execute(
-            """
-            SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
-                   start_byte, end_byte, language, created_at, updated_at, metadata
-            FROM chunks WHERE file_id = ?
-            ORDER BY start_line
-        """,
-            [file_id],
-        ).fetchall()
+        return cast(
+            list[Any],
+            conn.execute(
+                """
+                SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
+                       start_byte, end_byte, language, created_at, updated_at, metadata
+                FROM chunks WHERE file_id = ?
+                ORDER BY start_line
+                """,
+                [file_id],
+            ).fetchall(),
+        )
 
     def _executor_get_chunks_in_range_query(
         self,
@@ -1582,15 +2463,26 @@ class DuckDBProvider(SerialDatabaseProvider):
         start_line: int,
         end_line: int,
         query: str,
-    ) -> list:
+    ) -> list[Any]:
         """Executor method for get_chunks_in_range query - runs in DB thread.
 
         Executes the overlap query to find chunks that intersect with a line range.
         """
-        return conn.execute(
-            query,
-            [file_id, start_line, end_line, start_line, end_line, start_line, end_line],
-        ).fetchall()
+        return cast(
+            list[Any],
+            conn.execute(
+                query,
+                [
+                    file_id,
+                    start_line,
+                    end_line,
+                    start_line,
+                    end_line,
+                    start_line,
+                    end_line,
+                ],
+            ).fetchall(),
+        )
 
     def _executor_update_chunk_query(
         self, conn: Any, state: dict[str, Any], chunk_id: int, query: str, values: list
@@ -1644,8 +2536,43 @@ class DuckDBProvider(SerialDatabaseProvider):
         return file_dict
 
     def insert_embedding(self, embedding: Embedding) -> int:
-        """Insert embedding record and return embedding ID - delegate to embedding repository."""
-        return self._embedding_repository.insert_embedding(embedding)
+        """Insert embedding record and return embedding ID."""
+        return self._execute_in_db_thread_sync("insert_embedding", embedding)
+
+    def _executor_insert_embedding(
+        self, conn: Any, state: dict[str, Any], embedding: Embedding
+    ) -> int:
+        """Executor method for insert_embedding - runs in the DB thread."""
+        track_operation(state)
+
+        table_name = self._executor_ensure_embedding_table_exists(
+            conn, state, embedding.dims
+        )
+        upsert_sql = DuckDBEmbeddingRepository.build_embedding_upsert_sql(table_name)
+        conn.execute(
+            upsert_sql,
+            [
+                embedding.chunk_id,
+                embedding.provider,
+                embedding.model,
+                embedding.vector,
+                embedding.dims,
+            ],
+        )
+        result = conn.execute(
+            f"""
+            SELECT id
+            FROM {table_name}
+            WHERE chunk_id = ? AND provider = ? AND model = ?
+            """,
+            [embedding.chunk_id, embedding.provider, embedding.model],
+        ).fetchone()
+        if result is None:
+            raise RuntimeError(
+                "Embedding upsert completed without a stored row for "
+                f"{table_name} ({embedding.chunk_id}, {embedding.provider}, {embedding.model})"
+            )
+        return int(result[0])
 
     def insert_embeddings_batch(
         self,
@@ -1653,11 +2580,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         batch_size: int | None = None,
         connection=None,
     ) -> int:
-        """Insert multiple embedding vectors using executemany.
-
-        Note: This executor-based method does NOT implement HNSW index optimization.
-        For bulk inserts with HNSW drop/recreate optimization, use
-        EmbeddingRepository.insert_embeddings_batch directly.
+        """Insert multiple embeddings through the executor-owned repository path.
 
         Args:
             embeddings_data: List of embedding dictionaries
@@ -1680,66 +2603,73 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> int:
         """Executor method for insert_embeddings_batch - runs in DB thread.
 
-        Uses simple executemany for inserts. Does NOT manage HNSW indexes.
+        Uses direct batched upserts while preserving any outer executor
+        transaction that is already active.
         """
         if not embeddings_data:
             return 0
 
         # Track operation for checkpoint management
         track_operation(state)
+        transaction_started = False
+        if not state.get("transaction_active", False):
+            self._executor_begin_transaction(conn, state)
+            transaction_started = True
 
-        # Group embeddings by dimension
-        embeddings_by_dims = {}
-        for emb_data in embeddings_data:
-            dims = emb_data["dims"]
-            if dims not in embeddings_by_dims:
-                embeddings_by_dims[dims] = []
-            embeddings_by_dims[dims].append(emb_data)
+        try:
+            # Group embeddings by dimension
+            embeddings_by_dims = {}
+            for emb_data in embeddings_data:
+                dims = emb_data["dims"]
+                if dims not in embeddings_by_dims:
+                    embeddings_by_dims[dims] = []
+                embeddings_by_dims[dims].append(emb_data)
 
-        total_inserted = 0
+            total_inserted = 0
 
-        # Insert into dimension-specific tables
-        for dims, dim_embeddings in embeddings_by_dims.items():
-            # Ensure table exists
-            table_name = self._executor_ensure_embedding_table_exists(conn, state, dims)
-
-            # Prepare batch data
-            batch_data = []
-            for emb in dim_embeddings:
-                batch_data.append(
-                    (
-                        emb["chunk_id"],
-                        emb["provider"],
-                        emb["model"],
-                        emb["embedding"],
-                        dims,
-                    )
+            # Insert into dimension-specific tables
+            for dims, dim_embeddings in embeddings_by_dims.items():
+                # Ensure table exists
+                table_name = self._executor_ensure_embedding_table_exists(
+                    conn, state, dims
+                )
+                upsert_sql = DuckDBEmbeddingRepository.build_embedding_upsert_sql(
+                    table_name
                 )
 
-            # Insert in batches if specified
-            if batch_size:
-                for i in range(0, len(batch_data), batch_size):
-                    batch = batch_data[i : i + batch_size]
-                    conn.executemany(
-                        f"""
-                        INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                        VALUES (?, ?, ?, ?, ?)
-                    """,
-                        batch,
+                # Prepare batch data
+                batch_data = []
+                for emb in dim_embeddings:
+                    batch_data.append(
+                        (
+                            emb["chunk_id"],
+                            emb["provider"],
+                            emb["model"],
+                            emb["embedding"],
+                            dims,
+                        )
                     )
-                    total_inserted += len(batch)
-            else:
-                # Insert all at once
-                conn.executemany(
-                    f"""
-                    INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                    VALUES (?, ?, ?, ?, ?)
-                """,
-                    batch_data,
-                )
-                total_inserted += len(batch_data)
 
-        return total_inserted
+                # Insert in batches if specified
+                if batch_size:
+                    for i in range(0, len(batch_data), batch_size):
+                        batch = batch_data[i : i + batch_size]
+                        conn.executemany(upsert_sql, batch)
+                        total_inserted += len(batch)
+                else:
+                    # Insert all at once
+                    conn.executemany(upsert_sql, batch_data)
+                    total_inserted += len(batch_data)
+
+            if transaction_started:
+                self._executor_commit_transaction(conn, state, True)
+                transaction_started = False
+
+            return total_inserted
+        except Exception:
+            if transaction_started and state.get("transaction_active", False):
+                self._executor_rollback_transaction(conn, state)
+            raise
 
     def get_embedding_by_chunk_id(
         self, chunk_id: int, provider: str, model: str
@@ -1798,14 +2728,20 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
         """Get all chunks with their metadata including file paths - delegate to chunk repository."""
-        return self._execute_in_db_thread_sync("get_all_chunks_with_metadata")
+        return cast(
+            list[dict[str, Any]],
+            self._execute_in_db_thread_sync("get_all_chunks_with_metadata"),
+        )
 
     def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
         """Return (total_files, total_chunks) under an optional scope prefix.
 
         This is used by code_mapper coverage and must avoid loading full chunk code.
         """
-        return self._execute_in_db_thread_sync("get_scope_stats", scope_prefix)
+        return cast(
+            tuple[int, int],
+            self._execute_in_db_thread_sync("get_scope_stats", scope_prefix),
+        )
 
     def _executor_get_scope_stats(
         self, conn: Any, state: dict[str, Any], scope_prefix: str | None
@@ -1842,7 +2778,10 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
         """Return file paths under an optional scope prefix."""
-        return self._execute_in_db_thread_sync("get_scope_file_paths", scope_prefix)
+        return cast(
+            list[str],
+            self._execute_in_db_thread_sync("get_scope_file_paths", scope_prefix),
+        )
 
     def _executor_get_scope_file_paths(
         self, conn: Any, state: dict[str, Any], scope_prefix: str | None
@@ -2041,7 +2980,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 WHERE e.provider = ? AND e.model = ?
             """
 
-            params = [query_embedding, provider, model]
+            params: list[Any] = [query_embedding, provider, model]
 
             path_like: str | None = None
             if normalized_path is not None:
@@ -2132,8 +3071,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         path_filter: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform regex search on code content."""
-        return self._execute_in_db_thread_sync(
-            "search_regex", pattern, page_size, offset, path_filter
+        return cast(
+            tuple[list[dict[str, Any]], dict[str, Any]],
+            self._execute_in_db_thread_sync(
+                "search_regex", pattern, page_size, offset, path_filter
+            ),
         )
 
     def search_chunks_regex(
@@ -2420,14 +3362,17 @@ class DuckDBProvider(SerialDatabaseProvider):
         path_filter: str | None = None,
     ) -> list[dict[str, Any]]:
         """Find chunks similar to the given embedding vector."""
-        return self._execute_in_db_thread_sync(
-            "search_by_embedding",
-            query_embedding,
-            provider,
-            model,
-            limit,
-            threshold,
-            path_filter,
+        return cast(
+            list[dict[str, Any]],
+            self._execute_in_db_thread_sync(
+                "search_by_embedding",
+                query_embedding,
+                provider,
+                model,
+                limit,
+                threshold,
+                path_filter,
+            ),
         )
 
     def _executor_search_by_embedding(
@@ -2694,7 +3639,20 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, query: str, params: list[Any] | None = None
     ) -> list[dict[str, Any]]:
         """Execute a SQL query and return results."""
-        return self._execute_in_db_thread_sync("execute_query", query, params)
+        return cast(
+            list[dict[str, Any]],
+            self._execute_in_db_thread_sync("execute_query", query, params),
+        )
+
+    def list_file_paths_under_directory(
+        self, directory_prefix: str
+    ) -> list[str]:
+        escaped_prefix = escape_like_pattern(directory_prefix)
+        rows = self.execute_query(
+            "SELECT path FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+            [directory_prefix, f"{escaped_prefix}/%"],
+        )
+        return [row["path"] for row in rows if row.get("path")]
 
     def _executor_execute_query(
         self, conn: Any, state: dict[str, Any], query: str, params: list[Any] | None
