@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing_extensions import assert_never
 
 from chunkhound.core.config.claude_model_resolution import (
     CLAUDE_HAIKU_DEFAULT_SENTINEL,
@@ -571,8 +572,7 @@ class LLMConfig(BaseSettings):
             # User must set model in provider/model format.
             return ("", "")
         else:
-            # Safety fallback — all known providers are covered above
-            return ("gpt-5-nano", "gpt-5")  # type: ignore[unreachable]
+            assert_never(provider)
 
     def get_default_models(self) -> tuple[str, str]:
         """
