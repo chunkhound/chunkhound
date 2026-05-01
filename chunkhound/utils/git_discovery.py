@@ -162,6 +162,7 @@ def list_repo_files_via_git(
     # Subtree restriction is included via rel_prefix. Build additional :(glob)
     # pathspecs from includes.
     pathspecs: list[str] | None = None
+    capped = False
     if pushdown:
         try:
             from chunkhound.utils.file_patterns import (  # type: ignore
@@ -182,7 +183,6 @@ def list_repo_files_via_git(
                     cap = 128
             except Exception:
                 cap = 128
-            capped = False
             if specs and len(specs) > cap:
                 # Fallback to subtree-only restriction to guarantee correctness
                 pathspecs = [rel_prefix] if rel_prefix else None
@@ -247,11 +247,8 @@ def list_repo_files_via_git(
         "git_pushdown": bool(pushdown),
     }
     # Optionally surface whether CAP fallback was applied (best-effort)
-    try:
-        if "capped" in locals() and capped:
-            stats["git_pathspecs_capped"] = True
-    except Exception:
-        pass
+    if capped:
+        stats["git_pathspecs_capped"] = True
     return out, stats
 
 
