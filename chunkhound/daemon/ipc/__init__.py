@@ -1,11 +1,12 @@
 """IPC transport abstraction — selects Unix sockets or TCP loopback by platform.
 
 Public API:
-    create_server(address, cb) -> (server, actual_address)
-    create_client(address)     -> (reader, writer)
-    is_connectable(address)    -> bool
-    read_frame(reader)         -> Any
-    write_frame(writer, obj)   -> None
+    create_server(address, cb)                       -> (server, actual_address)
+    create_client(address)                           -> (reader, writer)
+    is_connectable(address)                          -> bool
+    authenticated_ping(address, auth_token, timeout) -> bool
+    read_frame(reader)                               -> Any
+    write_frame(writer, obj)                         -> None
 
 Address format:
     Unix/macOS : /tmp/chunkhound-daemon-sockets/<runtime-hash>/chunkhound-XXXXXXXX.sock
@@ -15,6 +16,7 @@ Address format:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -82,3 +84,45 @@ async def is_connectable(address: str) -> bool:
         from .unix_socket import is_connectable as _us_conn
 
         return await _us_conn(address)
+
+
+async def authenticated_ping(
+    address: str,
+    auth_token: str | None,
+    timeout: float = 2.0,
+) -> bool:
+    """Return True when a registered ping receives a daemon response.
+
+    Encapsulates the full connect → register → ping handshake used by both
+    DaemonDiscovery.ping_daemon() and (partially) ClientProxy.run().
+    All errors and timeouts return False; the writer is always closed on exit.
+    """
+    try:
+        reader, writer = await asyncio.wait_for(create_client(address), timeout=timeout)
+    except (OSError, asyncio.TimeoutError, ValueError, IndexError, OverflowError):
+        return False
+
+    try:
+        reg: dict[str, Any] = {"type": "register", "pid": os.getpid()}
+        if auth_token:
+            reg["auth_token"] = auth_token
+        write_frame(writer, reg)
+        await writer.drain()
+
+        ack = await asyncio.wait_for(read_frame(reader), timeout=timeout)
+        if not isinstance(ack, dict) or ack.get("type") != "registered":
+            return False
+
+        write_frame(writer, {"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        await writer.drain()
+
+        resp = await asyncio.wait_for(read_frame(reader), timeout=timeout)
+        return isinstance(resp, dict) and "result" in resp
+    except (OSError, asyncio.TimeoutError, ConnectionResetError, EOFError, ValueError):
+        return False
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except OSError:
+            pass
