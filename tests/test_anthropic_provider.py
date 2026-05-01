@@ -1285,6 +1285,52 @@ class TestLLMConfigDefaults:
             CLAUDE_HAIKU_DEFAULT_SENTINEL,
         )
 
+    def test_claude_role_overrides_use_haiku_defaults(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(
+            provider="openai",
+            utility_provider="anthropic",
+            synthesis_provider="claude-code-cli",
+        )
+        assert cfg.get_default_models() == (
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+        )
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["provider"] == "anthropic"
+        assert utility_config["model"] == CLAUDE_HAIKU_DEFAULT_SENTINEL
+        assert synthesis_config["provider"] == "claude-code-cli"
+        assert synthesis_config["model"] == CLAUDE_HAIKU_DEFAULT_SENTINEL
+
+    def test_openai_role_overrides_use_openai_defaults(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(
+            provider="anthropic",
+            utility_provider="openai",
+            synthesis_provider="openai",
+        )
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["provider"] == "openai"
+        assert utility_config["model"] == "gpt-5-nano"
+        assert synthesis_config["provider"] == "openai"
+        assert synthesis_config["model"] == "gpt-5"
+
+    def test_explicit_role_models_override_provider_defaults(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(
+            provider="openai",
+            utility_provider="anthropic",
+            utility_model="claude-sonnet-4-6",
+            synthesis_provider="claude-code-cli",
+            synthesis_model="claude-opus-4-7",
+        )
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["model"] == "claude-sonnet-4-6"
+        assert synthesis_config["model"] == "claude-opus-4-7"
+
 
 class TestClaudeHaikuModelResolution:
     """Pin latest-Haiku default model selection."""

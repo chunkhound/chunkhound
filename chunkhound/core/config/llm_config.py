@@ -445,12 +445,13 @@ class LLMConfig(BaseSettings):
         Returns:
             Tuple of (utility_config, synthesis_config)
         """
-        # Get default models if not specified
-        utility_default, synthesis_default = self.get_default_models()
-
         # Resolve providers per-role
         resolved_utility_provider = self.utility_provider or self.provider
         resolved_synthesis_provider = self.synthesis_provider or self.provider
+
+        # Get default models from each resolved role provider, not the base provider.
+        utility_default = self._get_default_models_for(resolved_utility_provider)[0]
+        synthesis_default = self._get_default_models_for(resolved_synthesis_provider)[1]
 
         base_config: dict[str, Any] = {
             "timeout": self.timeout,
@@ -534,48 +535,58 @@ class LLMConfig(BaseSettings):
 
         return utility_config, synthesis_config
 
-    def get_default_models(self) -> tuple[str, str]:
-        """
-        Get default model names for utility and synthesis based on provider.
-
-        Returns:
-            Tuple of (utility_model, synthesis_model)
-        """
+    @staticmethod
+    def _get_default_models_for(provider: LLMProviderLiteral) -> tuple[str, str]:
+        """Get default utility and synthesis model names for a provider."""
         # Provider-specific smart defaults
-        if self.provider == "openai":
+        if provider == "openai":
             return ("gpt-5-nano", "gpt-5")
-        elif self.provider == "ollama":
+        elif provider == "ollama":
             # Ollama: use same model for both (local deployment)
             return ("llama3.2", "llama3.2")
-        elif self.provider == "claude-code-cli":
+        elif provider == "claude-code-cli":
             # Claude Code CLI: shared Claude Haiku sentinel for both roles;
             # CLI construction resolves it offline to ChunkHound's pinned fallback.
             return (CLAUDE_HAIKU_DEFAULT_SENTINEL, CLAUDE_HAIKU_DEFAULT_SENTINEL)
-        elif self.provider == "codex-cli":
+        elif provider == "codex-cli":
             # Codex CLI: nominal label; require explicit model if desired
             return ("codex", "codex")
-        elif self.provider == "gemini":
+        elif provider == "gemini":
             # Gemini: Use Gemini 3 Pro for both (advanced reasoning)
             # Alternative models: gemini-2.5-pro (balanced), gemini-2.5-flash (fast)
             return ("gemini-3-pro-preview", "gemini-3-pro-preview")
-        elif self.provider == "anthropic":
+        elif provider == "anthropic":
             # Anthropic intentionally uses Claude Haiku for both utility and
             # synthesis. Haiku is capable enough for synthesis and is Anthropic's
             # cheapest Claude model; Anthropic has no true low-cost utility tier.
             return (CLAUDE_HAIKU_DEFAULT_SENTINEL, CLAUDE_HAIKU_DEFAULT_SENTINEL)
-        elif self.provider == "grok":
+        elif provider == "grok":
             # Grok reasoning models (especially grok-4-1-fast-reasoning)
             # are extremely strong across both roles — no benefit to splitting them.
             # grok-4-1-fast-reasoning: Advanced reasoning, structured outputs,
             # tool calling
             return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
-        elif self.provider == "opencode-cli":
+        elif provider == "opencode-cli":
             # OpenCode CLI: No universal default — model depends on user config.
             # User must set model in provider/model format.
             return ("", "")
         else:
             # Safety fallback — all known providers are covered above
             return ("gpt-5-nano", "gpt-5")  # type: ignore[unreachable]
+
+    def get_default_models(self) -> tuple[str, str]:
+        """
+        Get default model names for utility and synthesis based on resolved providers.
+
+        Returns:
+            Tuple of (utility_model, synthesis_model)
+        """
+        resolved_utility_provider = self.utility_provider or self.provider
+        resolved_synthesis_provider = self.synthesis_provider or self.provider
+        return (
+            self._get_default_models_for(resolved_utility_provider)[0],
+            self._get_default_models_for(resolved_synthesis_provider)[1],
+        )
 
     def is_provider_configured(self) -> bool:
         """
