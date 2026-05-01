@@ -738,8 +738,7 @@ class LLMConfig(BaseSettings):
         parser.add_argument(
             "--llm-map-hyde-model",
             help=(
-                "Override model for Code Mapper HyDE planning "
-                "(falls back to synthesis)"
+                "Override model for Code Mapper HyDE planning (falls back to synthesis)"
             ),
         )
         parser.add_argument(

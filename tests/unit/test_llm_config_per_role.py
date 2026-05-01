@@ -360,6 +360,20 @@ def test_opencode_cli_get_missing_config_empty():
     assert cfg.get_missing_config() == []
 
 
+def test_mixed_provider_get_missing_config_requires_api_key():
+    """Mixed per-role providers should require an API key if either role needs one."""
+    cfg = LLMConfig(
+        provider="opencode-cli",
+        utility_provider="opencode-cli",
+        synthesis_provider="openai",
+        utility_model="openai/gpt-5-nano",
+        synthesis_model="gpt-5",
+    )
+
+    assert cfg.is_provider_configured() is False
+    assert cfg.get_missing_config() == ["api_key (set CHUNKHOUND_LLM_API_KEY)"]
+
+
 def test_opencode_cli_model_validator_empty_model_raises():
     """Ensure empty model with opencode-cli provider raises ValueError."""
     with pytest.raises(ValueError, match="opencode-cli requires a model"):

@@ -83,7 +83,7 @@ class CodexCLIProvider(BaseCLIProvider):
         Notes:
         - The special value "codex" means "use ChunkHound's default".
         - Override defaults via CHUNKHOUND_CODEX_DEFAULT_MODEL.
-        - If no env override, dynamically discovers the cheapest available model
+        - If no env override, dynamically discovers the highest-priority available model
           via `codex debug models`, falling back to a hardcoded default.
         """
         env_override = os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL")
@@ -338,10 +338,8 @@ class CodexCLIProvider(BaseCLIProvider):
                         and "slug" in m
                     ]
                     if visible:
-                        cheapest = max(
-                            visible, key=lambda m: m.get("priority", 0)
-                        )
-                        return str(cheapest["slug"])
+                        best = max(visible, key=lambda m: m.get("priority", 0))
+                        return str(best["slug"])
             return None
         except (
             subprocess.SubprocessError,
