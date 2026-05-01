@@ -255,11 +255,22 @@ sys.exit(asyncio.run(test()))
                 "indexing": {"include": ["*.py"]},
             }
 
+            # Add embedding config if API key available
+            # Note: code_research requires reranker+LLM to EXECUTE, but only embeddings to REGISTER
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if api_key:
+                config["embedding"] = {
+                    "provider": "openai",
+                    "model": "text-embedding-3-small",
+                }
+
             config_path.write_text(json.dumps(config))
 
             # Start MCP server (it will auto-index on startup)
             mcp_env = get_safe_subprocess_env(os.environ)
             mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
+            if api_key:
+                mcp_env["CHUNKHOUND_EMBEDDING__API_KEY"] = api_key
 
             proc = await create_subprocess_exec_safe(
                 "uv",
@@ -372,6 +383,7 @@ sys.exit(asyncio.run(test()))
                     await stderr_task
                 except asyncio.CancelledError:
                     pass
+
 
 
 class TestParserLoading:
