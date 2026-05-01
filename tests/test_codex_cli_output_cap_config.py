@@ -1,43 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
-
-
-@dataclass
-class _DummyStdin:
-    buf: bytearray
-
-    def write(self, b: bytes) -> None:
-        self.buf.extend(b)
-
-    async def drain(self) -> None:
-        return
-
-    def close(self) -> None:
-        return
-
-
-class _DummyProc:
-    def __init__(self, *, stdout: bytes) -> None:
-        self.stdin = _DummyStdin(bytearray())
-        self._stdout = stdout
-        self.returncode = 0
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        return (self._stdout, b"")
-
-    def kill(self) -> None:
-        return
-
-    async def wait(self) -> int:
-        return 0
+from tests.helpers import DummyPipe, DummyProc
 
 
 @pytest.mark.asyncio
@@ -46,11 +16,11 @@ async def test_codex_cli_provider_passes_model_max_output_tokens_override(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    async def _fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _DummyProc:
+    async def _fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> DummyProc:
         # args: (binary, "exec", "-", *extra_args, ...)
         captured["args"] = list(args)
         captured["kwargs"] = kwargs
-        return _DummyProc(stdout=b"OK")
+        return DummyProc(out=b"OK", stdin=DummyPipe())
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
 
@@ -79,10 +49,10 @@ async def test_codex_cli_provider_parses_agent_message_from_jsonl_stdout(
 
     captured: dict[str, Any] = {}
 
-    async def _fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _DummyProc:
+    async def _fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> DummyProc:
         captured["args"] = list(args)
         captured["kwargs"] = kwargs
-        return _DummyProc(stdout=fixture)
+        return DummyProc(out=fixture, stdin=DummyPipe())
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
 
