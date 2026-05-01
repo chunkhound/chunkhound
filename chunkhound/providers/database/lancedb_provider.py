@@ -5,7 +5,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -586,6 +586,60 @@ class LanceDBProvider(SerialDatabaseProvider):
                 f"Failed to retrieve file ID after merge_insert for path: {normalized_path}"
             )
             return file_data["id"]
+
+    def list_file_paths_under_directory(
+        self, directory_prefix: str
+    ) -> list[str]:
+        return cast(
+            list[str],
+            self._execute_in_db_thread_sync(
+                "list_file_paths_under_directory", directory_prefix
+            ),
+        )
+
+    def _executor_list_file_paths_under_directory(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        directory_prefix: str,
+    ) -> list[str]:
+        if not self._files_table:
+            return []
+        try:  # type: ignore[unreachable]
+            # Escape both SQL string-literal quotes and LIKE metacharacters
+            # so directory names containing ', _, %, or \ cannot overmatch
+            # sibling rows. LanceDB's LIKE uses backslash escape by default.
+            literal_safe = directory_prefix.replace("'", "''")
+            like_safe = escape_like_pattern(directory_prefix, escape_quotes=True)
+            try:
+                rows = (
+                    self._files_table.search()
+                    .where(
+                        f"path = '{literal_safe}' OR "
+                        f"path LIKE '{like_safe}/%' ESCAPE '\\\\'"
+                    )
+                    .to_list()
+                )
+            except Exception:
+                # LanceDB build lacks LIKE/ESCAPE support; fall back to a
+                # full-table scan plus an exact Python prefix filter. Uses
+                # startswith on the literal prefix (not the escaped form)
+                # because the fallback operates on raw Python strings.
+                rows = self._files_table.search().to_list()
+                prefix_with_sep = f"{directory_prefix}/"
+                rows = [
+                    row
+                    for row in rows
+                    if isinstance(row.get("path"), str)
+                    and (
+                        row["path"] == directory_prefix
+                        or row["path"].startswith(prefix_with_sep)
+                    )
+                ]
+            return [row["path"] for row in rows if row.get("path")]
+        except Exception as e:
+            logger.error(f"Error listing file paths under directory: {e}")
+            return []
 
     def get_file_by_path(
         self, path: str, as_model: bool = False

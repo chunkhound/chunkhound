@@ -9,6 +9,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from chunkhound.utils.windows_constants import IS_WINDOWS
+
 from .utils.config_factory import create_validated_config
 
 # Required for PyInstaller multiprocessing support
@@ -206,6 +208,11 @@ async def async_main() -> None:
 
 def main() -> None:
     """Main entry point for the CLI."""
+    if IS_WINDOWS:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="backslashreplace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(errors="backslashreplace")
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:
