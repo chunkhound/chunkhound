@@ -486,8 +486,7 @@ class CodexCLIProvider(BaseCLIProvider):
                     if use_stdin:
                         if debug_codex:
                             logger.debug(
-                                "Codex CLI attempt %d: stdin transport "
-                                "(skip_git=%s)",
+                                "Codex CLI attempt %d: stdin transport (skip_git=%s)",
                                 attempt + 1,
                                 add_skip_git,
                             )
@@ -515,8 +514,7 @@ class CodexCLIProvider(BaseCLIProvider):
                         # argv mode
                         if debug_codex:
                             logger.debug(
-                                "Codex CLI attempt %d: argv transport "
-                                "(skip_git=%s)",
+                                "Codex CLI attempt %d: argv transport (skip_git=%s)",
                                 attempt + 1,
                                 add_skip_git,
                             )
@@ -547,9 +545,7 @@ class CodexCLIProvider(BaseCLIProvider):
                                 use_stdin,
                                 err,
                             )
-                        if add_skip_git and self._skip_git_flag_unsupported(
-                            err
-                        ):
+                        if add_skip_git and self._skip_git_flag_unsupported(err):
                             add_skip_git = False
                             logger.warning(
                                 "codex exec does not support "
@@ -615,8 +611,7 @@ class CodexCLIProvider(BaseCLIProvider):
                         )
                     if attempt < self._max_retries - 1:
                         logger.warning(
-                            f"codex exec attempt {attempt + 1} timed out; "
-                            "retrying"
+                            f"codex exec attempt {attempt + 1} timed out; retrying"
                         )
                         continue
                     raise last_error from e
@@ -653,8 +648,7 @@ class CodexCLIProvider(BaseCLIProvider):
                                     attempt + 1,
                                 )
                             logger.warning(
-                                "codex exec argv too long; "
-                                "retrying with stdin mode"
+                                "codex exec argv too long; retrying with stdin mode"
                             )
                             continue
                     raise
@@ -667,8 +661,7 @@ class CodexCLIProvider(BaseCLIProvider):
                 if overlay_home and Path(overlay_home).exists():
                     if keep_overlay:
                         logger.warning(
-                            "CHUNKHOUND_CODEX_KEEP_OVERLAY=1; "
-                            "preserving overlay at %s",
+                            "CHUNKHOUND_CODEX_KEEP_OVERLAY=1; preserving overlay at %s",
                             overlay_home,
                         )
                     else:

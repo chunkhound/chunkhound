@@ -68,9 +68,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         if not self._opencode_available():
             logger.warning("OpenCode CLI not found in PATH")
 
-    def _validate_reasoning_effort(
-        self, effort: str | None
-    ) -> str | None:
+    def _validate_reasoning_effort(self, effort: str | None) -> str | None:
         """Validate reasoning effort against allowed values.
 
         Raises:
@@ -161,7 +159,6 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         Raises:
             RuntimeError: If CLI command fails or returns no content
         """
-
 
         # Honor env override to disable JSON format
         use_json = os.getenv("CHUNKHOUND_OPENCODE_JSON", "1") != "0"
@@ -399,12 +396,18 @@ class OpenCodeCLIProvider(BaseCLIProvider):
             self._fallback_model = None  # prevent infinite recursion
             self._max_retries = 1
             try:
-                return await self._run_cli_command(prompt, system, max_completion_tokens, timeout)
-            except RuntimeError:
-                pass  # fallback also failed — raise original error below
+                return await self._run_cli_command(
+                    prompt, system, max_completion_tokens, timeout
+                )
+            except RuntimeError as fb_err:
+                logger.warning(
+                    f"Fallback model {saved_fallback!r} also failed: {fb_err}"
+                )
             finally:
                 self._model, self._fallback_model, self._max_retries = (
-                    saved_model, saved_fallback, saved_retries
+                    saved_model,
+                    saved_fallback,
+                    saved_retries,
                 )
 
         raise last_error or RuntimeError("OpenCode CLI command failed after retries")

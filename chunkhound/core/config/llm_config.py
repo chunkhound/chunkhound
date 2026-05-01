@@ -103,8 +103,7 @@ class LLMConfig(BaseSettings):
     utility_model: str = Field(
         default="",  # Will be set by get_default_models() if empty
         description=(
-            "Model for utility operations "
-            "(query expansion, follow-ups, classification)"
+            "Model for utility operations (query expansion, follow-ups, classification)"
         ),
     )
 
@@ -189,8 +188,7 @@ class LLMConfig(BaseSettings):
     anthropic_thinking_enabled: bool = Field(
         default=False,
         description=(
-            "Enable Anthropic extended thinking "
-            "(shows Claude's reasoning process)"
+            "Enable Anthropic extended thinking (shows Claude's reasoning process)"
         ),
     )
 
@@ -487,10 +485,7 @@ class LLMConfig(BaseSettings):
 
         # Add reasoning_effort for providers that support it
         utility_effort = _codex_effort_for("utility")
-        if (
-            resolved_utility_provider in REASONING_EFFORT_PROVIDERS
-            and utility_effort
-        ):
+        if resolved_utility_provider in REASONING_EFFORT_PROVIDERS and utility_effort:
             utility_config["reasoning_effort"] = utility_effort
 
         synthesis_effort = _codex_effort_for("synthesis")
@@ -615,12 +610,13 @@ class LLMConfig(BaseSettings):
         Returns:
             List of missing configuration parameter names
         """
+        resolved_utility = self.utility_provider or self.provider
+        resolved_synthesis = self.synthesis_provider or self.provider
         missing = []
-
         if (
-            self.provider not in NO_KEY_PROVIDERS
-            and not self.api_key
-        ):
+            resolved_utility not in NO_KEY_PROVIDERS
+            or resolved_synthesis not in NO_KEY_PROVIDERS
+        ) and not self.api_key:
             missing.append("api_key (set CHUNKHOUND_LLM_API_KEY)")
 
         return missing
