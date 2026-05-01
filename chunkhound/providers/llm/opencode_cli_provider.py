@@ -260,6 +260,11 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                         last_error = RuntimeError(
                             f"OpenCode CLI error: {error_message}"
                         )
+                        if text_parts:
+                            logger.debug(
+                                f"OpenCode CLI: discarded {len(text_parts)} text parts "
+                                f"before error event: {error_message}"
+                            )
                         if attempt < self._max_retries - 1:
                             logger.warning(
                                 f"OpenCode CLI attempt {attempt + 1} failed, "
@@ -386,7 +391,9 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                 f"trying fallback {self._fallback_model!r} once"
             )
             saved_model, saved_fallback, saved_retries = (
-                self._model, self._fallback_model, self._max_retries
+                self._model,
+                self._fallback_model,
+                self._max_retries,
             )
             self._model = self._fallback_model
             self._fallback_model = None  # prevent infinite recursion
