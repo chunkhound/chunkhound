@@ -8,7 +8,7 @@ from loguru import logger
 from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
 from chunkhound.autodoc.docsite import CleanupConfig
 from chunkhound.core.config.config import Config
-from chunkhound.core.config.llm_config import LLMConfig
+from chunkhound.core.config.llm_config import REASONING_EFFORT_PROVIDERS, LLMConfig
 from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
@@ -40,7 +40,7 @@ def _build_cleanup_provider_configs(
     if (
         cleanup_effort
         and isinstance(provider, str)
-        and provider in ("codex-cli", "openai")
+        and provider in REASONING_EFFORT_PROVIDERS
     ):
         synthesis_config = synthesis_config.copy()
         synthesis_config["reasoning_effort"] = cleanup_effort

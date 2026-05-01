@@ -17,15 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unsupported file types no longer indexed as plain text** - Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (.txt, .log, .cfg, .conf, .ini) are unaffected.
 - **Anthropic provider upgraded to Claude Opus 4.7/4.6 and Sonnet 4.6**
   - `anthropic` dependency minimum bumped to `>=0.96.0,<1.0.0`
-  - Default synthesis model changed from `claude-sonnet-4-5-20250929` to `claude-sonnet-4-6`
-  - Default Claude Code CLI model changed to `claude-sonnet-4-6`
+  - Default Anthropic utility and synthesis models changed to ChunkHound's `claude-haiku` sentinel. This is intentional: current Claude Haiku is capable enough for synthesis, is Anthropic's cheapest available Claude model, and Anthropic does not currently offer a true low-cost utility tier. Users who prefer maximum synthesis quality can override `synthesis_model`.
+  - Default Claude Code CLI model changed to the same `claude-haiku` sentinel, resolved offline to ChunkHound's pinned Claude Haiku fallback.
   - Removed module symbols `BETA_EFFORT` and `EFFORT_SUPPORTED_MODELS`. Callers should use the `supports_effort(model)` / `supports_effort_level(model, level)` predicates instead.
-  - `thinking_enabled=True` on the new default now resolves to `thinking_mode="adaptive"` (previously manual), so response `thinking` blocks are shaped as `{type: "adaptive"}` instead of `{type: "enabled", budget_tokens: N}`.
-  - `anthropic_prompt_caching` defaults to `true`. Every Anthropic request now sends a top-level `cache_control: {type: "ephemeral"}`. Cache hits cost 10% of base input; writes cost 25% more (5m TTL) or 100% more (1h TTL). To preserve prior behavior, set `CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING=false` or pass `--llm-anthropic-no-prompt-caching`.
+  - `thinking_enabled=True` with `thinking_mode="auto"` resolves to adaptive only for adaptive-capable models such as Opus 4.6/4.7, Sonnet 4.6, and Mythos. The pinned Haiku fallback remains manual-mode thinking.
+  - `anthropic_prompt_caching` defaults to `false` because ChunkHound requests rarely reuse prompt prefixes enough to offset Anthropic cache-write costs. To opt in, set `CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING=true` or pass `--llm-anthropic-prompt-caching`.
   - Invalid `thinking_mode` values and sub-20000 `task_budget_tokens` now raise `ValueError` instead of warning-and-coercing.
 
 ### Added
-- **Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 support** - adaptive thinking mode (auto / off / manual / adaptive selector), expanded effort levels (`low`, `medium`, `high`, `xhigh` (Opus 4.7 only), `max` (4.6+)), automatic prompt caching with configurable TTL (`5m` / `1h`), and the task-budgets beta (Opus 4.7 only, advisory cap for agentic loops, min 20000 tokens).
+- **Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 support** - adaptive thinking mode (auto / off / manual / adaptive selector), expanded effort levels (`low`, `medium`, `high`, `xhigh` (Opus 4.7 only), `max` (4.6+)), opt-in prompt caching with configurable TTL (`5m` / `1h`), and the task-budgets beta (Opus 4.7 only, advisory cap for agentic loops, min 20000 tokens).
 - New `LLMConfig` fields (and matching `CHUNKHOUND_LLM_ANTHROPIC_*` env vars and `--llm-anthropic-*` CLI flags): `anthropic_thinking_mode`, `anthropic_thinking_display`, `anthropic_prompt_caching`, `anthropic_cache_ttl`, `anthropic_task_budget_tokens`. The pre-existing `anthropic_thinking_enabled`, `anthropic_thinking_budget_tokens`, `anthropic_interleaved_thinking`, `anthropic_effort`, `anthropic_context_management_enabled`, and `anthropic_clear_*` fields are now also readable from env and CLI.
 - **Embedded SQL detection** - SQL code embedded in string literals is now detected and indexed by default across Python, Java, JavaScript, TypeScript, C#, Go, Rust, and PHP. Disable with `--no-detect-embedded-sql` or `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL=false`.
 - OpenAI Responses API support for reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) - enables deep code research with enhanced reasoning capabilities

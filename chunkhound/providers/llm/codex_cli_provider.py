@@ -8,8 +8,11 @@ code_research; keeps MCP stdio clean by never printing to stdout.
 from __future__ import annotations
 
 import asyncio
+import functools
+import json
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -44,6 +47,9 @@ class CodexCLIProvider(BaseCLIProvider):
     ) -> None:
         super().__init__(api_key, model, base_url, timeout, max_retries)
         self._reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
+        # Model resolution is deferred to first use to avoid side effects during
+        # construction (subprocess calls for dynamic discovery).
+        self._resolved_model: str | None = None
 
         if not self._codex_available():
             logger.warning("Codex CLI not found in PATH (codex)")
@@ -64,6 +70,12 @@ class CodexCLIProvider(BaseCLIProvider):
         resolved, _source = self.describe_model_resolution(requested)
         return resolved
 
+    def _get_resolved_model(self) -> str:
+        """Return cached resolved model, computing it lazily on first call."""
+        if self._resolved_model is None:
+            self._resolved_model = self._resolve_model_name(self._model)
+        return self._resolved_model
+
     @classmethod
     def describe_model_resolution(cls, requested: str | None) -> tuple[str, str]:
         """Return (resolved_model, source) for Codex CLI model selection.
@@ -71,20 +83,22 @@ class CodexCLIProvider(BaseCLIProvider):
         Notes:
         - The special value "codex" means "use ChunkHound's default".
         - Override defaults via CHUNKHOUND_CODEX_DEFAULT_MODEL.
+        - If no env override, dynamically discovers the highest-priority available model
+          via `codex debug models`, falling back to a hardcoded default.
         """
         env_override = os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL")
-        # Default to a Codex-optimized reasoning model unless explicitly overridden.
-        default_model = env_override.strip() if env_override else "gpt-5.1-codex"
-        default_source = (
-            "env:CHUNKHOUND_CODEX_DEFAULT_MODEL" if env_override else "default"
-        )
+        if env_override:
+            return env_override.strip(), "env:CHUNKHOUND_CODEX_DEFAULT_MODEL"
 
-        if not requested:
-            return default_model, default_source
-
-        model_name = requested.strip()
+        model_name = (requested or "").strip()
         if not model_name or model_name.lower() == "codex":
-            return default_model, default_source
+            discovered = cls.get_highest_priority_available_model()
+            if discovered:
+                return discovered, "discovered"
+            raise RuntimeError(
+                "Codex model discovery failed: no visible models found. "
+                "Run 'codex debug models' to inspect available models."
+            )
 
         return model_name, "explicit"
 
@@ -154,9 +168,7 @@ class CodexCLIProvider(BaseCLIProvider):
     def _extract_agent_message_from_jsonl(
         self, stdout_text: str
     ) -> tuple[str | None, dict[str, Any] | None]:
-        """Extract final agent message text and usage from `codex exec --json` output."""
-        import json
-
+        """Extract final agent message text and usage from ``codex exec --json``."""
         last_message: str | None = None
         usage: dict[str, Any] | None = None
 
@@ -166,7 +178,7 @@ class CodexCLIProvider(BaseCLIProvider):
                 continue
             try:
                 obj = json.loads(line)
-            except Exception:
+            except json.JSONDecodeError:
                 continue
 
             if obj.get("type") == "item.completed":
@@ -229,7 +241,11 @@ class CodexCLIProvider(BaseCLIProvider):
         """
         overlay = Path(tempfile.mkdtemp(prefix="chunkhound-codex-overlay-"))
         base = self._get_base_codex_home()
-        model_name = self._resolve_model_name(model_override or self._model)
+        model_name = (
+            self._resolve_model_name(model_override)
+            if model_override
+            else self._get_resolved_model()
+        )
         try:
             if base and base.exists():
                 self._copy_minimal_codex_state(base, overlay)
@@ -249,9 +265,16 @@ class CodexCLIProvider(BaseCLIProvider):
         return str(overlay)
 
     def _codex_available(self) -> bool:
-        """Return True if `codex` binary looks available (sync check)."""
-        import subprocess
+        """Return True if `codex` binary is available and functional (sync check)."""
+        return self._codex_available_status() == "ok"
 
+    def _codex_available_status(self) -> str:
+        """Return availability status: 'ok', 'not_installed', or 'broken'.
+
+        Distinguishes between a missing binary (not_installed) and
+        an installed-but-nonfunctional binary (broken, e.g. missing
+        auth or config) so health checks can report correctly.
+        """
         try:
             res = subprocess.run(
                 ["codex", "--version"],
@@ -260,10 +283,71 @@ class CodexCLIProvider(BaseCLIProvider):
                 timeout=self.VERSION_CHECK_TIMEOUT,
                 check=False,
             )
-            # Any exit status implies the binary exists; only ENOENT means absent
-            return res.returncode is not None
-        except (subprocess.SubprocessError, FileNotFoundError):
-            return False
+            return "ok" if res.returncode == 0 else "broken"
+        except FileNotFoundError:
+            return "not_installed"
+        except subprocess.SubprocessError:
+            return "broken"
+
+    @staticmethod
+    @functools.lru_cache(maxsize=1)
+    def get_highest_priority_available_model() -> str | None:
+        """Discover the highest-priority visible model from Codex CLI.
+
+        Runs `codex debug models` and returns the slug of the model with the
+        highest `priority` value among models with `visibility=list`.
+
+        The result is cached for the lifetime of the process to avoid
+        repeated subprocess calls.
+
+        Returns None if the command fails or no visible models are found.
+        """
+        codex_bin = os.getenv("CHUNKHOUND_CODEX_BIN", "codex")
+        try:
+            result = subprocess.run(
+                [codex_bin, "debug", "models"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+
+            output = result.stdout.decode("utf-8", errors="ignore")
+            # Parse as NDJSON: try each non-empty line as a JSON object.
+            # This is more robust than brace-counting when the CLI prints
+            # log lines or multiple JSON objects.
+            for line in output.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                models = obj.get("models")
+                if isinstance(models, list):
+                    visible = [
+                        m
+                        for m in models
+                        if isinstance(m, dict)
+                        and m.get("visibility") == "list"
+                        and "slug" in m
+                    ]
+                    if visible:
+                        best = max(visible, key=lambda m: m.get("priority", 0))
+                        return str(best["slug"])
+            return None
+        except (
+            subprocess.SubprocessError,
+            FileNotFoundError,
+            json.JSONDecodeError,
+        ) as e:
+            logger.debug(f"Model discovery via 'codex debug models' failed: {e}")
+        return None
 
     async def _run_exec(
         self,
@@ -281,7 +365,9 @@ class CodexCLIProvider(BaseCLIProvider):
         extra_args: list[str] = []
 
         env = os.environ.copy()
-        effective_model = self._resolve_model_name(model or self._model)
+        effective_model = (
+            self._resolve_model_name(model) if model else self._get_resolved_model()
+        )
         keep_overlay = os.getenv("CHUNKHOUND_CODEX_KEEP_OVERLAY", "0") == "1"
 
         # Optional verbose diagnostics for large prompts / transport issues.
@@ -338,16 +424,15 @@ class CodexCLIProvider(BaseCLIProvider):
             f"approval_policy={self._toml_string(approval_policy)}",
         ]
 
-        # Make reasoning effort explicit per-call (helps when using base Codex config overlays).
+        # Make reasoning effort explicit per-call.
         extra_args += [
             "-c",
             f"model_reasoning_effort={self._toml_string(self._reasoning_effort)}",
         ]
 
-        # Enforce per-call output cap. Codex CLI supports config overrides via `-c key=value`.
-        # Per docs, the key is `model_max_output_tokens` (caps completion length for Responses API).
-        # This keeps ChunkHound's `max_completion_tokens` meaningful for the CLI provider and helps
-        # prevent long "think+write" runs when the prompt requests overly-large outputs.
+        # Enforce per-call output cap via ``-c model_max_output_tokens``.
+        # This keeps ``max_completion_tokens`` meaningful for the CLI provider
+        # and prevents long runs on overly-large output requests.
         extra_args += ["-c", f"model_max_output_tokens={int(max_tokens)}"]
 
         override_mode = (
@@ -373,19 +458,19 @@ class CodexCLIProvider(BaseCLIProvider):
 
         request_timeout = timeout if timeout is not None else self._timeout
 
-        # Privacy-first strategy: use stdin by default to avoid argv leaking prompt in process list.
-        # If the CLI rejects stdin, we fallback to argv.
-        # Legacy behavior can be restored by setting CHUNKHOUND_CODEX_STDIN_FIRST=0, which will
-        # use argv for small prompts and switch to stdin only for very large inputs.
-        MAX_ARG_CHARS = int(os.getenv("CHUNKHOUND_CODEX_ARG_LIMIT", "200000"))
+        # Use stdin by default to avoid leaking prompts in the process list.
+        # Fallback to argv if the CLI rejects stdin.
+        # Set CHUNKHOUND_CODEX_STDIN_FIRST=0 to prefer argv mode.
+        max_arg_chars = int(os.getenv("CHUNKHOUND_CODEX_ARG_LIMIT", "200000"))
         stdin_first = os.getenv("CHUNKHOUND_CODEX_STDIN_FIRST", "1") != "0"
-        use_stdin = True if stdin_first else (len(content) > MAX_ARG_CHARS)
+        use_stdin = True if stdin_first else (len(content) > max_arg_chars)
         if debug_codex:
             logger.debug(
-                "Codex CLI transport selection: stdin_first=%s, use_stdin=%s, MAX_ARG_CHARS=%d",
+                "Codex CLI transport selection: stdin_first=%s, use_stdin=%s, "
+                "max_arg_chars=%d",
                 stdin_first,
                 use_stdin,
-                MAX_ARG_CHARS,
+                max_arg_chars,
             )
         # Newer Codex builds require --skip-git-repo-check; default to passing
         # it on the first attempt to avoid noisy negotiation warnings. This
@@ -401,7 +486,7 @@ class CodexCLIProvider(BaseCLIProvider):
                     if use_stdin:
                         if debug_codex:
                             logger.debug(
-                                "Codex CLI attempt %d using stdin transport (skip_git=%s)",
+                                "Codex CLI attempt %d: stdin transport (skip_git=%s)",
                                 attempt + 1,
                                 add_skip_git,
                             )
@@ -429,7 +514,7 @@ class CodexCLIProvider(BaseCLIProvider):
                         # argv mode
                         if debug_codex:
                             logger.debug(
-                                "Codex CLI attempt %d using argv transport (skip_git=%s)",
+                                "Codex CLI attempt %d: argv transport (skip_git=%s)",
                                 attempt + 1,
                                 add_skip_git,
                             )
@@ -454,7 +539,8 @@ class CodexCLIProvider(BaseCLIProvider):
                         err = self._sanitize_text(raw_err)
                         if debug_codex:
                             logger.debug(
-                                "Codex CLI non-zero exit (attempt %d, use_stdin=%s): %s",
+                                "Codex CLI non-zero exit (attempt %d, "
+                                "use_stdin=%s): %s",
                                 attempt + 1,
                                 use_stdin,
                                 err,
@@ -462,42 +548,29 @@ class CodexCLIProvider(BaseCLIProvider):
                         if add_skip_git and self._skip_git_flag_unsupported(err):
                             add_skip_git = False
                             logger.warning(
-                                "codex exec does not support --skip-git-repo-check; retrying without flag"
+                                "codex exec does not support "
+                                "--skip-git-repo-check; retrying without flag"
                             )
                             continue
                         err_lower = err.lower()
 
-                        # Skip-git repo check negotiation for newer Codex builds
+                        # Negotiate --skip-git-repo-check flag for newer Codex builds.
                         if "skip-git-repo-check" in err and not add_skip_git:
                             add_skip_git = True
                             logger.warning(
-                                "codex exec requires --skip-git-repo-check; retrying with flag"
-                            )
-                            continue
-                        # Some older Codex builds may reject the flag; fall back by removing it.
-                        if (
-                            add_skip_git
-                            and "skip-git-repo-check" in err_lower
-                            and (
-                                "unknown option" in err_lower
-                                or "unrecognized option" in err_lower
-                                or "unknown flag" in err_lower
-                                or "unexpected argument" in err_lower
-                            )
-                        ):
-                            add_skip_git = False
-                            logger.warning(
-                                "codex exec does not support --skip-git-repo-check; retrying without flag"
+                                "codex exec requires --skip-git-repo-check; "
+                                "retrying with flag"
                             )
                             continue
 
-                        # If stdin failed (e.g., BrokenPipe or codex not reading stdin), fall back to argv with truncation.
+                        # If stdin failed, fall back to argv.
                         if use_stdin and (
                             "broken pipe" in err_lower or "stdin" in err_lower
                         ):
                             use_stdin = False
                             logger.warning(
-                                "codex exec stdin not supported; retrying with argv mode"
+                                "codex exec stdin not supported; "
+                                "retrying with argv mode"
                             )
                             continue
                         last_error = RuntimeError(
@@ -505,7 +578,8 @@ class CodexCLIProvider(BaseCLIProvider):
                         )
                         if attempt < self._max_retries - 1:
                             logger.warning(
-                                f"codex exec attempt {attempt + 1} failed: {err}; retrying"
+                                f"codex exec attempt {attempt + 1} failed; "
+                                f"retrying: {err}"
                             )
                             continue
                         raise last_error
@@ -542,31 +616,35 @@ class CodexCLIProvider(BaseCLIProvider):
                         continue
                     raise last_error from e
                 except (BrokenPipeError, ConnectionResetError) as e:
-                    # Treat BrokenPipe/connection reset on stdin as "no stdin support" and fall back to argv
+                    # Treat stdin connection loss as "no stdin support".
                     if use_stdin:
                         use_stdin = False
                         if debug_codex:
                             logger.debug(
-                                "Codex CLI stdin connection lost on attempt %d; switching to argv",
+                                "Codex CLI stdin connection lost on "
+                                "attempt %d; switching to argv",
                                 attempt + 1,
                             )
                         if attempt < self._max_retries - 1:
                             logger.warning(
-                                "codex exec stdin connection lost; retrying with argv mode"
+                                "codex exec stdin connection lost; "
+                                "retrying with argv mode"
                             )
                             continue
                         raise RuntimeError(
-                            "codex exec failed: stdin connection lost and no retries left"
+                            "codex exec failed: stdin connection lost "
+                            "and no retries left"
                         ) from e
                     raise
                 except OSError as e:
-                    # Handle OS-level argv length errors by switching to stdin mode
+                    # Switch to stdin if argv is too long.
                     if e.errno == 7:  # Argument list too long
                         if not use_stdin:
                             use_stdin = True
                             if debug_codex:
                                 logger.debug(
-                                    "Codex CLI argv too long on attempt %d; switching to stdin",
+                                    "Codex CLI argv too long on attempt %d; "
+                                    "switching to stdin",
                                     attempt + 1,
                                 )
                             logger.warning(
@@ -574,9 +652,7 @@ class CodexCLIProvider(BaseCLIProvider):
                             )
                             continue
                     raise
-                # Let unexpected exceptions propagate; overlay cleanup happens in the outer finally
                 finally:
-                    # No per-attempt cleanup of overlay; cleanup performed in outer finally
                     pass
 
         finally:
@@ -585,7 +661,7 @@ class CodexCLIProvider(BaseCLIProvider):
                 if overlay_home and Path(overlay_home).exists():
                     if keep_overlay:
                         logger.warning(
-                            "CHUNKHOUND_CODEX_KEEP_OVERLAY=1; preserving Codex overlay at %s",
+                            "CHUNKHOUND_CODEX_KEEP_OVERLAY=1; preserving overlay at %s",
                             overlay_home,
                         )
                     else:
@@ -600,23 +676,11 @@ class CodexCLIProvider(BaseCLIProvider):
         limit = max_len or int(os.getenv("CHUNKHOUND_CODEX_LOG_MAX_ERR", "800"))
         return sanitize_error_text(s, max_length=limit)
 
-    def _merge_prompts(self, prompt: str, system: str | None) -> str:
-        if system and system.strip():
-            return f"System Instructions:\n{system.strip()}\n\nUser Request:\n{prompt}"
-        return prompt
-
     def _skip_git_flag_unsupported(self, err: str) -> bool:
         lowered = err.lower()
         if "--skip-git-repo-check" not in lowered:
             return False
-        unsupported_markers = (
-            "unexpected argument",
-            "unknown option",
-            "unrecognized option",
-            "no such option",
-            "invalid option",
-        )
-        return any(marker in lowered for marker in unsupported_markers)
+        return any(marker in lowered for marker in self.UNSUPPORTED_FLAG_MARKERS)
 
     # ----- BaseCLIProvider hooks -----
 
@@ -643,20 +707,27 @@ class CodexCLIProvider(BaseCLIProvider):
         )
 
     async def health_check(self) -> dict[str, Any]:
-        if not self._codex_available():
+        status = self._codex_available_status()
+        if status != "ok":
+            err_msg = (
+                "codex not installed"
+                if status == "not_installed"
+                else "codex installed but not functional (check auth/config)"
+            )
             return {
                 "status": "unhealthy",
                 "provider": self.name,
-                "error": "codex not found",
+                "error": err_msg,
             }
         try:
+            resolved_model = self._resolve_model_name(self._model)
             sample = await self.complete(
                 "Say 'OK'", max_completion_tokens=10, timeout=self.HEALTH_CHECK_TIMEOUT
             )
             return {
                 "status": "healthy",
                 "provider": self.name,
-                "model": self._model,
+                "model": resolved_model,
                 "test_response": sample.content[:50],
             }
         except Exception as e:  # noqa: BLE001

@@ -44,7 +44,7 @@ async def test_basic_completion_gemini_3():
     print(f"Model: {provider.model}")
     print(f"Thinking level: {provider._thinking_level}")
 
-    response = await provider.complete(prompt, max_completion_tokens=100)
+    response = await provider.complete(prompt, max_completion_tokens=500)
 
     print(f"\nResponse: {response.content}")
     print(f"Tokens used: {response.tokens_used}")

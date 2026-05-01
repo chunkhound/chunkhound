@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from .process import pid_alive
 
 # Runtime-scoped lock files keyed by canonical project root hash
@@ -147,7 +149,9 @@ def _runtime_dir_identity(runtime_dir: Path) -> str:
 
 def _runtime_scoped_transport_hash(project_dir: Path, runtime_dir: Path) -> str:
     """Return a stable transport hash scoped to the canonical root and runtime."""
-    identity = f"{_project_dir_identity(project_dir)}|{_runtime_dir_identity(runtime_dir)}"
+    identity = (
+        f"{_project_dir_identity(project_dir)}|{_runtime_dir_identity(runtime_dir)}"
+    )
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
@@ -227,7 +231,10 @@ def _write_json_atomically(
                 tmp_path.replace(path)
                 break
             except PermissionError:
-                if not _is_windows_platform() or attempt >= _WINDOWS_REPLACE_RETRIES - 1:
+                if (
+                    not _is_windows_platform()
+                    or attempt >= _WINDOWS_REPLACE_RETRIES - 1
+                ):
                     raise
                 time.sleep(_WINDOWS_REPLACE_RETRY_DELAY)
     except Exception:
@@ -331,14 +338,18 @@ class DaemonDiscovery:
 
     def get_lock_path(self) -> Path:
         """Return the absolute path of the lock file."""
-        return self.get_runtime_dir() / _LOCKS_DIR_NAME / (
-            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        return (
+            self.get_runtime_dir()
+            / _LOCKS_DIR_NAME
+            / (f"{_project_dir_hash(self._project_dir, length=16)}.json")
         )
 
     def get_starter_lock_path(self) -> Path:
         """Return the absolute path of the starter lock file."""
-        return self.get_runtime_dir() / _STARTER_LOCKS_DIR_NAME / (
-            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        return (
+            self.get_runtime_dir()
+            / _STARTER_LOCKS_DIR_NAME
+            / (f"{_project_dir_hash(self._project_dir, length=16)}.json")
         )
 
     def get_runtime_dir(self) -> Path:
@@ -482,8 +493,8 @@ class DaemonDiscovery:
 
         Returns:
             Dict with keys ``pid``, ``socket_path``, ``started_at``,
-            ``auth_token``, ``project_dir``, or ``None`` if the file does
-            not exist or is corrupt.
+            ``process_started_at``, ``auth_token``, ``project_dir``, or
+            ``None`` if the file does not exist or is corrupt.
         """
         return self._read_json_file(self.get_lock_path())
 
@@ -500,11 +511,14 @@ class DaemonDiscovery:
         token is generated.  On POSIX the file is chmod'd to 0o600 so only
         the owning user can read the auth token.
         """
+        from .process import process_create_time
+
         lock_path = self.get_lock_path()
         data = {
             "pid": pid,
             "socket_path": socket_path,
             "started_at": time.time(),
+            "process_started_at": process_create_time(pid),
             "project_dir": str(self._project_dir),
             "auth_token": (
                 auth_token if auth_token is not None else secrets.token_hex(32)
@@ -628,9 +642,9 @@ class DaemonDiscovery:
                 continue
             if message.startswith("startup failed"):
                 if " duration=" in message:
-                    duration_fragment = message.split(" duration=", 1)[1].split(
-                        "s", 1
-                    )[0]
+                    duration_fragment = message.split(" duration=", 1)[1].split("s", 1)[
+                        0
+                    ]
                     try:
                         total_duration_seconds = float(duration_fragment)
                     except ValueError:
@@ -1241,10 +1255,9 @@ class DaemonDiscovery:
                                     lock.get("socket_path", initial_address)
                                 )
                                 actual_pid = lock.get("pid")
-                                if (
-                                    isinstance(actual_pid, int)
-                                    and await self._socket_connectable(actual_address)
-                                ):
+                                if isinstance(
+                                    actual_pid, int
+                                ) and await self._socket_connectable(actual_address):
                                     # Authoritative registry publication from
                                     # the proxy. Cross-runtime discovery reads
                                     # only the user-scoped registry dir, so if
@@ -1311,56 +1324,54 @@ class DaemonDiscovery:
         lock = self.read_lock()
         if lock is None:
             return False
-        address = str(lock.get("socket_path", self.get_ipc_address()))
-        auth_token = lock.get("auth_token")
-
         from . import ipc
-        try:
-            reader, writer = await asyncio.wait_for(
-                ipc.create_client(address), timeout=timeout
-            )
-        except (OSError, asyncio.TimeoutError, ConnectionRefusedError):
-            return False
 
-        try:
-            reg: dict[str, Any] = {"type": "register", "pid": os.getpid()}
-            if auth_token:
-                reg["auth_token"] = auth_token
-            ipc.write_frame(writer, reg)
-            await writer.drain()
-
-            ack = await asyncio.wait_for(ipc.read_frame(reader), timeout=timeout)
-            if not isinstance(ack, dict) or ack.get("type") != "registered":
-                return False
-
-            ipc.write_frame(writer, {"jsonrpc": "2.0", "id": 1, "method": "ping"})
-            await writer.drain()
-
-            resp = await asyncio.wait_for(ipc.read_frame(reader), timeout=timeout)
-            return isinstance(resp, dict) and "result" in resp
-        except (OSError, asyncio.TimeoutError, ConnectionResetError, EOFError):
-            return False
-        finally:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except OSError:
-                pass
+        return await ipc.authenticated_ping(
+            str(lock.get("socket_path", self.get_ipc_address())),
+            lock.get("auth_token"),
+            timeout,
+        )
 
     def stop_daemon(self, timeout: float = 10.0) -> bool:
         """Stop the daemon recorded in the lock file.
 
         Returns True if the daemon is no longer running after the call.
         """
-        from .process import stop_pid
+        from .process import pid_alive, process_create_time, stop_pid
+
         lock = self.read_lock()
         if lock is None:
             return True
         pid = lock.get("pid")
         if not isinstance(pid, int) or pid <= 0:
             self.remove_lock()
+            self.remove_registry_entry()
+            return True
+        recorded_started_at = lock.get("process_started_at")
+        if not isinstance(recorded_started_at, int | float):
+            if not pid_alive(pid):
+                self.remove_lock()
+                self.remove_registry_entry()
+                return True
+            logger.warning(
+                "Lock file for pid={} has no process_started_at field; "
+                "refusing to stop without verifiable identity.",
+                pid,
+            )
+            return False
+        current_started_at = process_create_time(pid)
+        if current_started_at is None:
+            if pid_alive(pid):
+                return False
+            self.remove_lock()
+            self.remove_registry_entry()
+            return True
+        if abs(float(recorded_started_at) - current_started_at) > 0.001:
+            self.remove_lock()
+            self.remove_registry_entry()
             return True
         stopped = stop_pid(pid, timeout=timeout)
         if stopped:
             self.remove_lock()
+            self.remove_registry_entry()
         return stopped

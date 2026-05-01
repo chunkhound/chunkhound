@@ -15,7 +15,7 @@ from chunkhound.database_factory import create_services
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.embedding_service import EmbeddingService
 from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
-from .test_utils import get_api_key_for_tests
+from tests.helpers.embedding_config import get_api_key_for_tests
 
 
 class TestOversizedChunkReproduction:

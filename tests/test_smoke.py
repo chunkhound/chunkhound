@@ -269,6 +269,8 @@ sys.exit(asyncio.run(test()))
             # Start MCP server (it will auto-index on startup)
             mcp_env = get_safe_subprocess_env(os.environ)
             mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
+            if api_key:
+                mcp_env["CHUNKHOUND_EMBEDDING__API_KEY"] = api_key
 
             proc = await create_subprocess_exec_safe(
                 "uv",
@@ -284,8 +286,24 @@ sys.exit(asyncio.run(test()))
                 stderr=asyncio.subprocess.PIPE,
             )
 
+            # Drain stderr in the background so the MCP server does not
+            # block on a full stderr buffer during startup.
+            stderr_lines: list[str] = []
+
+            async def _drain_stderr() -> None:
+                while True:
+                    line = await proc.stderr.readline()
+                    if not line:
+                        break
+                    stderr_lines.append(line.decode("utf-8", errors="replace").strip())
+
+            stderr_task = asyncio.create_task(_drain_stderr())
+
             client = SubprocessJsonRpcClient(proc)
             await client.start()
+            # Brief pause to let the MCP server finish its startup sequence
+            # before we send the first JSON-RPC request.
+            await asyncio.sleep(0.5)
 
             try:
                 # 1. Send initialize request
@@ -358,6 +376,14 @@ sys.exit(asyncio.run(test()))
                 pytest.fail("MCP stdio protocol handshake timed out")
             finally:
                 await client.close()
+                # Cancel the stderr drain task and wait for it to finish
+                # so we do not leak tasks or leave the process in a bad state.
+                stderr_task.cancel()
+                try:
+                    await stderr_task
+                except asyncio.CancelledError:
+                    pass
+
 
 
 class TestParserLoading:

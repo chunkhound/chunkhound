@@ -1,7 +1,16 @@
 """Tests for Anthropic LLM provider with adaptive/manual thinking and effort."""
 
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
 import pytest
 
+from chunkhound.core.config.claude_model_resolution import (
+    CLAUDE_HAIKU_DEFAULT_SENTINEL,
+    CLAUDE_HAIKU_FALLBACK_MODEL,
+    get_latest_available_haiku_model,
+    resolve_claude_haiku_model,
+)
 from chunkhound.providers.llm.anthropic_llm_provider import (
     ANTHROPIC_AVAILABLE,
     BETA_CONTEXT_MANAGEMENT,
@@ -194,12 +203,25 @@ class TestConfiguration:
         """Test default configuration values."""
         provider = AnthropicLLMProvider(api_key="test-key")
 
-        assert provider._model == "claude-sonnet-4-6"
+        assert provider._model == CLAUDE_HAIKU_FALLBACK_MODEL
         assert provider._timeout == 60
         assert provider._max_retries == 3
         assert provider._thinking_enabled is False
         assert provider._thinking_mode == "off"
         assert provider._thinking_budget_tokens == 10000
+
+    def test_default_model_resolution_stays_offline(self, monkeypatch):
+        """Provider construction must not perform network discovery."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "chunkhound.core.config.claude_model_resolution."
+            "get_latest_available_haiku_model",
+            lambda api_key=None: pytest.fail("discovery should not run"),
+        )
+
+        provider = AnthropicLLMProvider(api_key="sk-ant-test")
+        assert provider.model == CLAUDE_HAIKU_FALLBACK_MODEL
 
     def test_custom_configuration(self):
         """Test custom configuration values."""
@@ -467,7 +489,7 @@ class TestContextManagement:
         assert result["edits"][0]["keep"] == "all"
 
     def test_build_context_management_thinking_active_override(self):
-        """Test thinking_active=False skips clear_thinking even when thinking_enabled=True.
+        """Test inactive thinking skips clear_thinking edits.
 
         This allows context management to be correctly configured for requests
         where thinking is explicitly disabled - clear_thinking_20251015 should not
@@ -938,14 +960,22 @@ class TestEffortLevels:
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
 class TestPromptCaching:
-    """Automatic prompt caching via top-level cache_control."""
+    """Opt-in prompt caching via top-level cache_control."""
 
-    def test_default_cache_control_ephemeral(self):
+    def test_cache_disabled_by_default(self):
         provider = AnthropicLLMProvider(api_key="test-key")
+        assert provider._build_cache_control() is None
+
+    def test_cache_control_ephemeral_when_enabled(self):
+        provider = AnthropicLLMProvider(api_key="test-key", prompt_caching=True)
         assert provider._build_cache_control() == {"type": "ephemeral"}
 
     def test_cache_control_with_ttl(self):
-        provider = AnthropicLLMProvider(api_key="test-key", cache_ttl="1h")
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            prompt_caching=True,
+            cache_ttl="1h",
+        )
         assert provider._build_cache_control() == {
             "type": "ephemeral",
             "ttl": "1h",
@@ -1229,14 +1259,164 @@ class TestLLMConfigEnvLoading:
 class TestLLMConfigDefaults:
     """Pin default model selection."""
 
+    def test_anthropic_prompt_caching_default_disabled(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(provider="anthropic")
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["prompt_caching"] is False
+        assert synthesis_config["prompt_caching"] is False
+
     def test_anthropic_default_models(self):
         from chunkhound.core.config.llm_config import LLMConfig
 
         cfg = LLMConfig(provider="anthropic")
         assert cfg.get_default_models() == (
-            "claude-haiku-4-5-20251001",
-            "claude-sonnet-4-6",
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
         )
+
+    def test_claude_code_default_models(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(provider="claude-code-cli")
+        assert cfg.get_default_models() == (
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+        )
+
+    def test_claude_role_overrides_use_haiku_defaults(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(
+            provider="openai",
+            utility_provider="anthropic",
+            synthesis_provider="claude-code-cli",
+        )
+        assert cfg.get_default_models() == (
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+        )
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["provider"] == "anthropic"
+        assert utility_config["model"] == CLAUDE_HAIKU_DEFAULT_SENTINEL
+        assert synthesis_config["provider"] == "claude-code-cli"
+        assert synthesis_config["model"] == CLAUDE_HAIKU_DEFAULT_SENTINEL
+
+    def test_openai_role_overrides_use_openai_defaults(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(
+            provider="anthropic",
+            utility_provider="openai",
+            synthesis_provider="openai",
+        )
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["provider"] == "openai"
+        assert utility_config["model"] == "gpt-5-nano"
+        assert synthesis_config["provider"] == "openai"
+        assert synthesis_config["model"] == "gpt-5"
+
+    def test_explicit_role_models_override_provider_defaults(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(
+            provider="openai",
+            utility_provider="anthropic",
+            utility_model="claude-sonnet-4-6",
+            synthesis_provider="claude-code-cli",
+            synthesis_model="claude-opus-4-7",
+        )
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["model"] == "claude-sonnet-4-6"
+        assert synthesis_config["model"] == "claude-opus-4-7"
+
+
+class TestClaudeHaikuModelResolution:
+    """Pin latest-Haiku default model selection."""
+
+    def test_explicit_model_passes_through(self):
+        assert resolve_claude_haiku_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
+
+    def test_env_override_wins(self, monkeypatch):
+        monkeypatch.setenv(
+            "CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL",
+            "claude-haiku-4-6-20260101",
+        )
+        assert resolve_claude_haiku_model(CLAUDE_HAIKU_DEFAULT_SENTINEL) == (
+            "claude-haiku-4-6-20260101"
+        )
+
+    def test_no_api_key_uses_fallback(self, monkeypatch):
+        get_latest_available_haiku_model.cache_clear()
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        assert resolve_claude_haiku_model(CLAUDE_HAIKU_DEFAULT_SENTINEL) == (
+            CLAUDE_HAIKU_FALLBACK_MODEL
+        )
+
+    def test_discovery_can_be_disabled(self, monkeypatch):
+        get_latest_available_haiku_model.cache_clear()
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "chunkhound.core.config.claude_model_resolution."
+            "get_latest_available_haiku_model",
+            lambda api_key=None: pytest.fail("discovery should not run"),
+        )
+
+        assert resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            discover=False,
+        ) == CLAUDE_HAIKU_FALLBACK_MODEL
+
+    def test_model_discovery_picks_newest_haiku(self, monkeypatch):
+        get_latest_available_haiku_model.cache_clear()
+
+        class FakeModels:
+            def list(self, **kwargs):
+                return [
+                    SimpleNamespace(
+                        id="claude-sonnet-4-6",
+                        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+                    ),
+                    SimpleNamespace(
+                        id="claude-haiku-4-5-20251001",
+                        created_at=datetime(2025, 10, 1, tzinfo=UTC),
+                    ),
+                    SimpleNamespace(
+                        id="claude-haiku-4-6-20260101",
+                        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    ),
+                ]
+
+        class FakeAnthropic:
+            def __init__(self, **kwargs):
+                self.models = FakeModels()
+
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+        assert resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            "sk-ant-test",
+        ) == "claude-haiku-4-6-20260101"
+
+    def test_model_discovery_failure_uses_fallback(self, monkeypatch):
+        get_latest_available_haiku_model.cache_clear()
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+
+        class FakeAnthropic:
+            def __init__(self, **kwargs):
+                raise RuntimeError("network unavailable")
+
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+        assert resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            "sk-ant-test",
+        ) == CLAUDE_HAIKU_FALLBACK_MODEL
 
 
 
@@ -1249,6 +1429,192 @@ class TestRequestShape:
     stays intact and that prompt_caching / effort / thinking flow into the
     correct API parameters.
     """
+
+    @staticmethod
+    def _text_response():
+        from unittest.mock import MagicMock
+
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = "ok"
+        response = MagicMock()
+        response.content = [text_block]
+        response.stop_reason = "end_turn"
+        response.usage = MagicMock(input_tokens=10, output_tokens=5)
+        return response
+
+    @staticmethod
+    async def _stream_events():
+        yield SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            ),
+        )
+        yield SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(text="ok"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_complete_applies_sdk_096_request_fields(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            thinking_enabled=True,
+            thinking_mode="adaptive",
+            thinking_display="summarized",
+            effort="medium",
+            prompt_caching=True,
+            cache_ttl="1h",
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+
+        response = await provider.complete(
+            "hello",
+            system="sys",
+            max_completion_tokens=1234,
+            timeout=12,
+        )
+
+        assert response.content == "ok"
+        assert provider._client.beta.messages.create.call_args is None
+        kwargs = provider._client.messages.create.call_args.kwargs
+        assert kwargs["model"] == "claude-sonnet-4-6"
+        assert kwargs["messages"] == [{"role": "user", "content": "hello"}]
+        assert kwargs["system"] == "sys"
+        assert kwargs["max_tokens"] == 1234
+        assert kwargs["timeout"] == 12
+        assert kwargs["thinking"] == {
+            "type": "adaptive",
+            "display": "summarized",
+        }
+        assert kwargs["output_config"] == {"effort": "medium"}
+        assert kwargs["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+        assert "betas" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_complete_with_tools_routes_strict_tools_to_beta(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            thinking_enabled=True,
+            thinking_mode="adaptive",
+            prompt_caching=True,
+            effort="medium",
+        )
+        response = self._text_response()
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(return_value=response)
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(return_value=response)
+
+        tool = {
+            "name": "lookup",
+            "description": "Lookup data",
+            "input_schema": {"type": "object", "properties": {}},
+            "strict": True,
+        }
+        llm_response, tool_uses = await provider.complete_with_tools(
+            "hello",
+            [tool],
+            system="sys",
+            tool_choice={"type": "auto"},
+        )
+
+        assert llm_response.content == "ok"
+        assert tool_uses == []
+        assert provider._client.messages.create.call_args is None
+        kwargs = provider._client.beta.messages.create.call_args.kwargs
+        assert kwargs["betas"] == [BETA_STRUCTURED_OUTPUTS]
+        assert kwargs["tools"] == [tool]
+        assert kwargs["tool_choice"] == {"type": "auto"}
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        assert kwargs["output_config"] == {"effort": "medium"}
+        assert kwargs["cache_control"] == {"type": "ephemeral"}
+
+    @pytest.mark.asyncio
+    async def test_complete_with_tools_suppresses_thinking_for_forced_tool(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            thinking_enabled=True,
+            thinking_mode="adaptive",
+            context_management_enabled=True,
+        )
+        response = self._text_response()
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(return_value=response)
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(return_value=response)
+
+        tool = {
+            "name": "lookup",
+            "description": "Lookup data",
+            "input_schema": {"type": "object", "properties": {}},
+        }
+        await provider.complete_with_tools(
+            "hello",
+            [tool],
+            tool_choice={"type": "tool", "name": "lookup"},
+        )
+
+        kwargs = provider._client.beta.messages.create.call_args.kwargs
+        assert kwargs["betas"] == [BETA_CONTEXT_MANAGEMENT]
+        assert "thinking" not in kwargs
+        assert kwargs["context_management"] == {
+            "edits": [{"type": "clear_tool_uses_20250919"}],
+        }
+
+    @pytest.mark.asyncio
+    async def test_complete_streaming_applies_request_fields_and_beta_routing(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            context_management_enabled=True,
+            effort="medium",
+            prompt_caching=True,
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._stream_events(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._stream_events(),
+        )
+
+        chunks = [chunk async for chunk in provider.complete_streaming("hello")]
+
+        assert chunks == ["ok"]
+        assert provider._client.messages.create.call_args is None
+        kwargs = provider._client.beta.messages.create.call_args.kwargs
+        assert kwargs["betas"] == [BETA_CONTEXT_MANAGEMENT]
+        assert kwargs["stream"] is True
+        assert kwargs["output_config"] == {"effort": "medium"}
+        assert kwargs["cache_control"] == {"type": "ephemeral"}
+        assert kwargs["context_management"] == {
+            "edits": [{"type": "clear_tool_uses_20250919"}],
+        }
 
     @pytest.mark.asyncio
     async def test_complete_structured_uses_output_config_format(self):
@@ -1281,9 +1647,9 @@ class TestRequestShape:
         }
         await provider.complete_structured("hello", schema)
 
-        # Prompt caching is on by default, output_config now carries both
-        # effort and the JSON schema. Structured outputs is GA, so the call
-        # should go to the standard endpoint with no beta headers.
+        # Prompt caching is off by default. output_config carries both effort
+        # and the JSON schema. Structured outputs is GA, so the call should go
+        # to the standard endpoint with no beta headers.
         std_called = provider._client.messages.create.call_args
         beta_called = provider._client.beta.messages.create.call_args
         assert std_called is not None, (
@@ -1296,7 +1662,7 @@ class TestRequestShape:
             "effort": "medium",
             "format": {"type": "json_schema", "schema": schema},
         }
-        assert kwargs["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in kwargs
         assert "output_format" not in kwargs
         assert "betas" not in kwargs
 

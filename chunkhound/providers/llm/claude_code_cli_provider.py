@@ -17,6 +17,10 @@ import tempfile
 
 from loguru import logger
 
+from chunkhound.core.config.claude_model_resolution import (
+    CLAUDE_HAIKU_DEFAULT_SENTINEL,
+    resolve_claude_haiku_model,
+)
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
@@ -27,7 +31,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "claude-sonnet-4-6",
+        model: str = CLAUDE_HAIKU_DEFAULT_SENTINEL,
         base_url: str | None = None,
         timeout: int = 60,
         max_retries: int = 3,
@@ -41,7 +45,13 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
         """
-        super().__init__(api_key, model, base_url, timeout, max_retries)
+        super().__init__(
+            api_key,
+            resolve_claude_haiku_model(model, api_key, discover=False),
+            base_url,
+            timeout,
+            max_retries,
+        )
 
     def _get_provider_name(self) -> str:
         """Get the provider name."""
@@ -88,7 +98,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
         model_arg = self._map_model_to_cli_arg(self._model)
         cmd = ["claude", "--print", "--model", model_arg, "--output-format", "text"]
 
-        # Disable all tools for vanilla LLM behavior (more future-proof than --disallowedTools)
+        # Disable all tools for vanilla LLM behavior.
         cmd.extend(["--tools", ""])
 
         # Prevent MCP server loading for clean LLM access
@@ -169,6 +179,8 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 raise last_error from e
 
             except Exception as e:
+                if isinstance(e, RuntimeError):
+                    raise
                 # Kill the subprocess if it's still running on unexpected errors
                 if process and process.returncode is None:
                     process.kill()

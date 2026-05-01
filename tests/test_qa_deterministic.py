@@ -27,7 +27,7 @@ from tests.utils.windows_compat import (
     realtime_backend_for_tests,
 )
 
-from .test_utils import (
+from tests.helpers.embedding_config import (
     get_embedding_config_for_tests,
     build_embedding_config_from_dict,
 )

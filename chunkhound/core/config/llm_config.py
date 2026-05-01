@@ -10,8 +10,41 @@ import argparse
 import os
 from typing import Any, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing_extensions import assert_never
+
+from chunkhound.core.config.claude_model_resolution import (
+    CLAUDE_HAIKU_DEFAULT_SENTINEL,
+)
+
+REASONING_EFFORT_PROVIDERS: tuple[str, ...] = (
+    "codex-cli",
+    "openai",
+    "opencode-cli",
+)
+
+OPENAI_REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
+
+NO_KEY_PROVIDERS: tuple[str, ...] = (
+    "ollama",
+    "claude-code-cli",
+    "codex-cli",
+    "opencode-cli",
+)
+
+LLMProviderLiteral = Literal[
+    "openai",
+    "ollama",
+    "claude-code-cli",
+    "codex-cli",
+    "gemini",
+    "anthropic",
+    "grok",
+    "opencode-cli",
+]
+
+ReasoningEffortLiteral = Literal["minimal", "low", "medium", "high", "xhigh"]
 
 
 class LLMConfig(BaseSettings):
@@ -44,58 +77,34 @@ class LLMConfig(BaseSettings):
     )
 
     # Provider Selection
-    provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
-        "gemini",
-        "anthropic",
-        "grok",
-        "opencode-cli",
-    ] = Field(
+    provider: LLMProviderLiteral = Field(
         default="openai",
         description="Default LLM provider for both roles (utility, synthesis)",
     )
 
     # Optional per-role overrides (utility vs synthesis)
-    utility_provider: (
-        Literal[
-            "openai",
-            "ollama",
-            "claude-code-cli",
-            "codex-cli",
-            "anthropic",
-            "gemini",
-            "grok",
-            "opencode-cli",
-        ]
-        | None
-    ) = Field(default=None, description="Override provider for utility ops")
+    utility_provider: LLMProviderLiteral | None = Field(
+        default=None, description="Override provider for utility ops"
+    )
 
-    synthesis_provider: (
-        Literal[
-            "openai",
-            "ollama",
-            "claude-code-cli",
-            "codex-cli",
-            "anthropic",
-            "gemini",
-            "grok",
-            "opencode-cli",
-        ]
-        | None
-    ) = Field(default=None, description="Override provider for synthesis ops")
+    synthesis_provider: LLMProviderLiteral | None = Field(
+        default=None, description="Override provider for synthesis ops"
+    )
 
     # Model Configuration (dual-model architecture)
     model: str | None = Field(
         default=None,
-        description="Convenience field to set both utility and synthesis models to the same value",
+        description=(
+            "Convenience field to set both utility and synthesis models "
+            "to the same value"
+        ),
     )
 
     utility_model: str = Field(
         default="",  # Will be set by get_default_models() if empty
-        description="Model for utility operations (query expansion, follow-ups, classification)",
+        description=(
+            "Model for utility operations (query expansion, follow-ups, classification)"
+        ),
     )
 
     synthesis_model: str = Field(
@@ -103,41 +112,33 @@ class LLMConfig(BaseSettings):
         description="Model for final synthesis (large context analysis)",
     )
 
-    codex_reasoning_effort: (
-        Literal["minimal", "low", "medium", "high", "xhigh"] | None
-    ) = Field(
-        default=None,
-        description="Default Codex CLI reasoning effort (Responses API thinking level)",
-    )
-    codex_reasoning_effort_utility: (
-        Literal["minimal", "low", "medium", "high", "xhigh"] | None
-    ) = Field(
-        default=None,
-        description="Codex CLI reasoning effort override for utility-stage operations",
-    )
-    codex_reasoning_effort_synthesis: (
-        Literal["minimal", "low", "medium", "high", "xhigh"] | None
-    ) = Field(
-        default=None,
-        description="Codex CLI reasoning effort override for synthesis-stage operations",
-    )
-
-    map_hyde_provider: (
-        Literal[
-            "openai",
-            "ollama",
-            "claude-code-cli",
-            "codex-cli",
-            "gemini",
-            "anthropic",
-            "grok",
-            "opencode-cli",
-        ]
-        | None
-    ) = Field(
+    codex_reasoning_effort: ReasoningEffortLiteral | None = Field(
         default=None,
         description=(
-            "Override provider for Code Mapper HyDE planning (points-of-interest overview). "
+            "Default reasoning effort forwarded to codex-cli, openai, "
+            "and opencode-cli providers"
+        ),
+    )
+    codex_reasoning_effort_utility: ReasoningEffortLiteral | None = Field(
+        default=None,
+        description=(
+            "Reasoning effort override for utility-stage operations "
+            "(codex-cli, openai, opencode-cli)"
+        ),
+    )
+    codex_reasoning_effort_synthesis: ReasoningEffortLiteral | None = Field(
+        default=None,
+        description=(
+            "Reasoning effort override for synthesis-stage operations "
+            "(codex-cli, openai, opencode-cli)"
+        ),
+    )
+
+    map_hyde_provider: LLMProviderLiteral | None = Field(
+        default=None,
+        description=(
+            "Override provider for Code Mapper HyDE planning "
+            "(points-of-interest overview). "
             "Falls back to the synthesis provider when unset."
         ),
     )
@@ -145,41 +146,21 @@ class LLMConfig(BaseSettings):
     map_hyde_model: str | None = Field(
         default=None,
         description=(
-            "Override model for Code Mapper HyDE planning (points-of-interest overview). "
+            "Override model for Code Mapper HyDE planning "
+            "(points-of-interest overview). "
             "Falls back to the synthesis model when unset."
         ),
     )
 
-    map_hyde_reasoning_effort: (
-        Literal[
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-        ]
-        | None
-    ) = Field(
+    map_hyde_reasoning_effort: ReasoningEffortLiteral | None = Field(
         default=None,
         description=(
-            "Codex/OpenAI reasoning effort override for Code Mapper HyDE planning. "
+            "Reasoning effort override for Code Mapper HyDE planning. "
             "Falls back to synthesis reasoning effort when unset."
         ),
     )
 
-    autodoc_cleanup_provider: (
-        Literal[
-            "openai",
-            "ollama",
-            "claude-code-cli",
-            "codex-cli",
-            "gemini",
-            "anthropic",
-            "grok",
-            "opencode-cli",
-        ]
-        | None
-    ) = Field(
+    autodoc_cleanup_provider: LLMProviderLiteral | None = Field(
         default=None,
         description=(
             "Override provider for AutoDoc LLM cleanup. "
@@ -195,19 +176,10 @@ class LLMConfig(BaseSettings):
         ),
     )
 
-    autodoc_cleanup_reasoning_effort: (
-        Literal[
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-        ]
-        | None
-    ) = Field(
+    autodoc_cleanup_reasoning_effort: ReasoningEffortLiteral | None = Field(
         default=None,
         description=(
-            "Codex/OpenAI reasoning effort override for AutoDoc LLM cleanup. "
+            "Reasoning effort override for AutoDoc LLM cleanup. "
             "Falls back to synthesis reasoning effort when unset."
         ),
     )
@@ -215,7 +187,9 @@ class LLMConfig(BaseSettings):
     # Anthropic Extended Thinking Configuration
     anthropic_thinking_enabled: bool = Field(
         default=False,
-        description="Enable Anthropic extended thinking (shows Claude's reasoning process)",
+        description=(
+            "Enable Anthropic extended thinking (shows Claude's reasoning process)"
+        ),
     )
 
     anthropic_thinking_mode: Literal["auto", "off", "manual", "adaptive"] | None = (
@@ -273,15 +247,14 @@ class LLMConfig(BaseSettings):
         ),
     )
 
-    # Anthropic Prompt Caching (automatic, ephemeral)
+    # Anthropic Prompt Caching (opt-in, ephemeral)
     anthropic_prompt_caching: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "Enable automatic prompt caching on Anthropic requests. Sends a "
-            "top-level cache_control={type:'ephemeral'} which caches the "
-            "system prompt plus conversation prefix up to the last cacheable "
-            "block. Cache hits cost 10% of base input; writes cost 25% more "
-            "for 5m TTL, 100% more for 1h TTL. Works on all active models."
+            "Opt in to Anthropic prompt caching. Disabled by default because "
+            "ChunkHound requests rarely reuse prompt prefixes enough to offset "
+            "cache-write costs. Cache hits cost 10% of base input; writes cost "
+            "25% more for 5m TTL, 100% more for 1h TTL."
         ),
     )
 
@@ -309,7 +282,10 @@ class LLMConfig(BaseSettings):
     # Anthropic Context Management
     anthropic_context_management_enabled: bool = Field(
         default=False,
-        description="Enable automatic context management (tool result and thinking block clearing)",
+        description=(
+            "Enable automatic context management "
+            "(tool result and thinking block clearing)"
+        ),
     )
 
     anthropic_clear_thinking_keep_turns: int | None = Field(
@@ -317,7 +293,8 @@ class LLMConfig(BaseSettings):
         ge=1,
         description=(
             "Number of recent assistant turns with thinking blocks to preserve. "
-            "Set to None to keep all thinking blocks. Only used when context_management_enabled=True."
+            "Set to None to keep all thinking blocks. "
+            "Only used when context_management_enabled=True."
         ),
     )
 
@@ -331,7 +308,10 @@ class LLMConfig(BaseSettings):
 
     anthropic_clear_tool_uses_keep: int | None = Field(
         default=None,
-        description="Number of recent tool use/result pairs to keep after clearing. Default is 3.",
+        description=(
+            "Number of recent tool use/result pairs to keep after clearing. "
+            "Default is 3."
+        ),
     )
 
     api_key: SecretStr | None = Field(
@@ -374,6 +354,69 @@ class LLMConfig(BaseSettings):
             if not self.synthesis_model:
                 self.synthesis_model = self.model
 
+    @model_validator(mode="after")
+    def validate_opencode_cli_model(self) -> "LLMConfig":
+        """Validate opencode-cli models use provider/model format."""
+        for role, provider_field, model_field in (
+            ("utility", self.utility_provider, self.utility_model),
+            ("synthesis", self.synthesis_provider, self.synthesis_model),
+            ("map_hyde", self.map_hyde_provider, self.map_hyde_model),
+            (
+                "autodoc_cleanup",
+                self.autodoc_cleanup_provider,
+                self.autodoc_cleanup_model,
+            ),
+        ):
+            # map_hyde and autodoc_cleanup model fields default to None,
+            # meaning "fall back to synthesis model". Skip validation
+            # when unset — synthesis is checked separately above.
+            if model_field is None:
+                continue
+            resolved = provider_field or self.provider
+            if resolved == "opencode-cli" and (
+                not model_field or "/" not in model_field
+            ):
+                raise ValueError(
+                    f"opencode-cli requires a model in provider/model format "
+                    f"for {role} (e.g., opencode/gpt-5-nano). "
+                    f"Got: {model_field!r}"
+                )
+
+        for role, provider_name, effort in (
+            (
+                "utility",
+                self.utility_provider or self.provider,
+                self.codex_reasoning_effort_utility or self.codex_reasoning_effort,
+            ),
+            (
+                "synthesis",
+                self.synthesis_provider or self.provider,
+                self.codex_reasoning_effort_synthesis or self.codex_reasoning_effort,
+            ),
+            (
+                "map_hyde",
+                self.map_hyde_provider or self.synthesis_provider or self.provider,
+                self.map_hyde_reasoning_effort,
+            ),
+            (
+                "autodoc_cleanup",
+                self.autodoc_cleanup_provider
+                or self.synthesis_provider
+                or self.provider,
+                self.autodoc_cleanup_reasoning_effort,
+            ),
+        ):
+            if (
+                provider_name == "openai"
+                and effort is not None
+                and effort not in OPENAI_REASONING_EFFORTS
+            ):
+                raise ValueError(
+                    f"openai does not support reasoning effort {effort!r} "
+                    f"for {role}; use one of {', '.join(OPENAI_REASONING_EFFORTS)}"
+                )
+        return self
+
     @field_validator(
         "codex_reasoning_effort",
         "codex_reasoning_effort_utility",
@@ -390,21 +433,24 @@ class LLMConfig(BaseSettings):
         """Normalize effort / mode / display / ttl strings to lowercase."""
         if v is None:
             return v
-        return v.strip().lower()
+        if isinstance(v, str):
+            return v.strip().lower()
+        raise ValueError(f"Expected str or None, got {type(v).__name__}")
 
     def get_provider_configs(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """
-        Get provider-specific configuration dictionaries for utility and synthesis models.
+        Get provider-specific configuration dictionaries.
 
         Returns:
             Tuple of (utility_config, synthesis_config)
         """
-        # Get default models if not specified
-        utility_default, synthesis_default = self.get_default_models()
-
         # Resolve providers per-role
         resolved_utility_provider = self.utility_provider or self.provider
         resolved_synthesis_provider = self.synthesis_provider or self.provider
+
+        # Get default models from each resolved role provider, not the base provider.
+        utility_default = self._get_default_models_for(resolved_utility_provider)[0]
+        synthesis_default = self._get_default_models_for(resolved_synthesis_provider)[1]
 
         base_config: dict[str, Any] = {
             "timeout": self.timeout,
@@ -437,13 +483,16 @@ class LLMConfig(BaseSettings):
                 return self.codex_reasoning_effort_synthesis or default_effort
             return default_effort
 
-        # Add reasoning_effort for providers that support it (OpenAI and Codex)
+        # Add reasoning_effort for providers that support it
         utility_effort = _codex_effort_for("utility")
-        if resolved_utility_provider in ("codex-cli", "openai") and utility_effort:
+        if resolved_utility_provider in REASONING_EFFORT_PROVIDERS and utility_effort:
             utility_config["reasoning_effort"] = utility_effort
 
         synthesis_effort = _codex_effort_for("synthesis")
-        if resolved_synthesis_provider in ("codex-cli", "openai") and synthesis_effort:
+        if (
+            resolved_synthesis_provider in REASONING_EFFORT_PROVIDERS
+            and synthesis_effort
+        ):
             synthesis_config["reasoning_effort"] = synthesis_effort
 
         def _apply_anthropic(target: dict[str, Any]) -> None:
@@ -482,46 +531,57 @@ class LLMConfig(BaseSettings):
 
         return utility_config, synthesis_config
 
+    @staticmethod
+    def _get_default_models_for(provider: LLMProviderLiteral) -> tuple[str, str]:
+        """Get default utility and synthesis model names for a provider."""
+        # Provider-specific smart defaults
+        if provider == "openai":
+            return ("gpt-5-nano", "gpt-5")
+        elif provider == "ollama":
+            # Ollama: use same model for both (local deployment)
+            return ("llama3.2", "llama3.2")
+        elif provider == "claude-code-cli":
+            # Claude Code CLI: shared Claude Haiku sentinel for both roles;
+            # CLI construction resolves it offline to ChunkHound's pinned fallback.
+            return (CLAUDE_HAIKU_DEFAULT_SENTINEL, CLAUDE_HAIKU_DEFAULT_SENTINEL)
+        elif provider == "codex-cli":
+            # Codex CLI: nominal label; require explicit model if desired
+            return ("codex", "codex")
+        elif provider == "gemini":
+            # Gemini: Use Gemini 3 Pro for both (advanced reasoning)
+            # Alternative models: gemini-2.5-pro (balanced), gemini-2.5-flash (fast)
+            return ("gemini-3-pro-preview", "gemini-3-pro-preview")
+        elif provider == "anthropic":
+            # Anthropic intentionally uses Claude Haiku for both utility and
+            # synthesis. Haiku is capable enough for synthesis and is Anthropic's
+            # cheapest Claude model; Anthropic has no true low-cost utility tier.
+            return (CLAUDE_HAIKU_DEFAULT_SENTINEL, CLAUDE_HAIKU_DEFAULT_SENTINEL)
+        elif provider == "grok":
+            # Grok reasoning models (especially grok-4-1-fast-reasoning)
+            # are extremely strong across both roles — no benefit to splitting them.
+            # grok-4-1-fast-reasoning: Advanced reasoning, structured outputs,
+            # tool calling
+            return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
+        elif provider == "opencode-cli":
+            # OpenCode CLI: No universal default — model depends on user config.
+            # User must set model in provider/model format.
+            return ("", "")
+        else:
+            assert_never(provider)
+
     def get_default_models(self) -> tuple[str, str]:
         """
-        Get default model names for utility and synthesis based on provider.
+        Get default model names for utility and synthesis based on resolved providers.
 
         Returns:
             Tuple of (utility_model, synthesis_model)
         """
-        # Provider-specific smart defaults
-        if self.provider == "openai":
-            return ("gpt-5-nano", "gpt-5")
-        elif self.provider == "ollama":
-            # Ollama: use same model for both (local deployment)
-            return ("llama3.2", "llama3.2")
-        elif self.provider == "claude-code-cli":
-            # Claude Code CLI: Haiku 4.5 for both utility and synthesis
-            # (Haiku 4.5 is synthesis-capable and cost-effective, unlike 3.5)
-            return ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001")
-        elif self.provider == "codex-cli":
-            # Codex CLI: nominal label; require explicit model if desired
-            return ("codex", "codex")
-        elif self.provider == "gemini":
-            # Gemini: Use Gemini 3 Pro for both (advanced reasoning)
-            # Alternative models: gemini-2.5-pro (balanced), gemini-2.5-flash (fast)
-            return ("gemini-3-pro-preview", "gemini-3-pro-preview")
-        elif self.provider == "anthropic":
-            # Anthropic defaults:
-            # - Utility: Haiku 4.5 (fast, cheap, no effort/adaptive support)
-            # - Synthesis: Sonnet 4.6 (frontier reasoning at Sonnet price, supports
-            #   adaptive thinking + effort; close to Opus 4.6 on many benchmarks)
-            # Opt-in upgrades for heavier workloads: claude-opus-4-7 (state of
-            # the art, xhigh effort), claude-opus-4-6 (previous flagship).
-            return ("claude-haiku-4-5-20251001", "claude-sonnet-4-6")
-        elif self.provider == "grok":
-            # Grok: Use the same flagship model for both utility and synthesis
-            # Intentional: Grok reasoning models (especially grok-4-1-fast-reasoning)
-            # are extremely strong across both roles — no benefit to splitting them.
-            # grok-4-1-fast-reasoning: Advanced reasoning, structured outputs, tool calling
-            return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
-        else:
-            return ("gpt-5-nano", "gpt-5")
+        resolved_utility_provider = self.utility_provider or self.provider
+        resolved_synthesis_provider = self.synthesis_provider or self.provider
+        return (
+            self._get_default_models_for(resolved_utility_provider)[0],
+            self._get_default_models_for(resolved_synthesis_provider)[1],
+        )
 
     def is_provider_configured(self) -> bool:
         """
@@ -532,10 +592,9 @@ class LLMConfig(BaseSettings):
         """
         resolved_utility_provider = self.utility_provider or self.provider
         resolved_synthesis_provider = self.synthesis_provider or self.provider
-        no_key_required = {"ollama", "claude-code-cli", "codex-cli"}
         if (
-            resolved_utility_provider in no_key_required
-            and resolved_synthesis_provider in no_key_required
+            resolved_utility_provider in NO_KEY_PROVIDERS
+            and resolved_synthesis_provider in NO_KEY_PROVIDERS
         ):
             # Ollama and Claude Code CLI don't require API key
             # Claude Code CLI uses subscription-based authentication
@@ -551,12 +610,13 @@ class LLMConfig(BaseSettings):
         Returns:
             List of missing configuration parameter names
         """
+        resolved_utility = self.utility_provider or self.provider
+        resolved_synthesis = self.synthesis_provider or self.provider
         missing = []
-
         if (
-            self.provider not in ("ollama", "claude-code-cli", "codex-cli")
-            and not self.api_key
-        ):
+            resolved_utility not in NO_KEY_PROVIDERS
+            or resolved_synthesis not in NO_KEY_PROVIDERS
+        ) and not self.api_key:
             missing.append("api_key (set CHUNKHOUND_LLM_API_KEY)")
 
         return missing
@@ -566,7 +626,10 @@ class LLMConfig(BaseSettings):
         """Add LLM-related CLI arguments."""
         parser.add_argument(
             "--llm-utility-model",
-            help="Model for utility operations (query expansion, follow-ups, classification)",
+            help=(
+                "Model for utility operations "
+                "(query expansion, follow-ups, classification)"
+            ),
         )
 
         parser.add_argument(
@@ -632,7 +695,11 @@ class LLMConfig(BaseSettings):
         parser.add_argument(
             "--llm-codex-reasoning-effort",
             choices=["minimal", "low", "medium", "high", "xhigh"],
-            help="Codex CLI reasoning effort (thinking depth) when using codex-cli provider",
+            help=(
+                "Codex CLI reasoning effort (thinking depth) "
+                "when using codex-cli, opencode-cli, or openai provider "
+                "(openai excludes xhigh)"
+            ),
         )
 
         parser.add_argument(
@@ -659,16 +726,24 @@ class LLMConfig(BaseSettings):
                 "grok",
                 "opencode-cli",
             ],
-            help="Override provider for Code Mapper HyDE planning (falls back to synthesis)",
+            help=(
+                "Override provider for Code Mapper HyDE planning "
+                "(falls back to synthesis)"
+            ),
         )
         parser.add_argument(
             "--llm-map-hyde-model",
-            help="Override model for Code Mapper HyDE planning (falls back to synthesis)",
+            help=(
+                "Override model for Code Mapper HyDE planning (falls back to synthesis)"
+            ),
         )
         parser.add_argument(
             "--llm-map-hyde-reasoning-effort",
             choices=["minimal", "low", "medium", "high", "xhigh"],
-            help="Override Codex/OpenAI reasoning effort for Code Mapper HyDE planning",
+            help=(
+                "Override reasoning effort for Code Mapper HyDE planning "
+                "(openai excludes xhigh)"
+            ),
         )
 
         parser.add_argument(
@@ -692,7 +767,10 @@ class LLMConfig(BaseSettings):
         parser.add_argument(
             "--llm-autodoc-cleanup-reasoning-effort",
             choices=["minimal", "low", "medium", "high", "xhigh"],
-            help="Override Codex/OpenAI reasoning effort for AutoDoc LLM cleanup",
+            help=(
+                "Override reasoning effort for AutoDoc LLM cleanup "
+                "(openai excludes xhigh)"
+            ),
         )
 
         anthropic_bool = argparse.BooleanOptionalAction
@@ -735,7 +813,7 @@ class LLMConfig(BaseSettings):
             dest="llm_anthropic_prompt_caching",
             action=anthropic_bool,
             default=None,
-            help="Enable automatic Anthropic prompt caching",
+            help="Enable opt-in Anthropic prompt caching",
         )
         parser.add_argument(
             "--llm-anthropic-cache-ttl",

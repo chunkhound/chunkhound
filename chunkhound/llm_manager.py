@@ -4,6 +4,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import REASONING_EFFORT_PROVIDERS
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
@@ -87,8 +88,8 @@ class LLMManager:
             if provider_name not in ("gemini",):
                 provider_kwargs["base_url"] = config.get("base_url")
 
-            # Pass reasoning_effort to OpenAI and Codex providers
-            if provider_name in ("openai", "codex-cli"):
+            # Pass reasoning_effort to providers that support it
+            if provider_name in REASONING_EFFORT_PROVIDERS:
                 effort = config.get("reasoning_effort")
                 if effort:
                     provider_kwargs["reasoning_effort"] = effort
@@ -112,9 +113,10 @@ class LLMManager:
                 if effort := config.get("effort"):
                     provider_kwargs["effort"] = effort
 
-                # Prompt caching (automatic, ephemeral)
+                # Prompt caching is opt-in; cache writes cost extra and
+                # ChunkHound requests rarely reuse prefixes enough to benefit.
                 provider_kwargs["prompt_caching"] = config.get(
-                    "prompt_caching", True
+                    "prompt_caching", False
                 )
                 if cache_ttl := config.get("cache_ttl"):
                     provider_kwargs["cache_ttl"] = cache_ttl
@@ -164,7 +166,8 @@ class LLMManager:
         """Initialize the synthesis LLM provider."""
         self._synthesis_provider = self._create_provider(self._synthesis_config)
         logger.info(
-            f"Initialized synthesis LLM provider: {self._synthesis_config.get('provider')} "
+            f"Initialized synthesis LLM provider: "
+            f"{self._synthesis_config.get('provider')} "
             f"with model: {self._synthesis_provider.model}"
         )
 
