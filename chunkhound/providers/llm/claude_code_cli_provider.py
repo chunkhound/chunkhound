@@ -179,6 +179,8 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 raise last_error from e
 
             except Exception as e:
+                if isinstance(e, RuntimeError):
+                    raise
                 # Kill the subprocess if it's still running on unexpected errors
                 if process and process.returncode is None:
                     process.kill()
