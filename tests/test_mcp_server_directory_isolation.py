@@ -343,12 +343,14 @@ Run the application with proper configuration.
                 assert "content" in fibonacci_result and len(fibonacci_result["content"]) > 0, \
                     f"Unexpected result format: {fibonacci_result}"
                 fibonacci_text = fibonacci_result["content"][0]["text"]
-                assert "calculate_fibonacci" in fibonacci_text, "Should find fibonacci function"
-                fibonacci_paths = re.findall(r'^## `([^`]+)`', fibonacci_text, re.MULTILINE)
-                assert fibonacci_paths, f"Could not parse file paths from markdown: {fibonacci_text[:200]}"
-                assert any(fp == "main.py" for fp in fibonacci_paths), \
-                    f"Expected 'main.py' among result paths, got: {fibonacci_paths}"
-                for fp in fibonacci_paths:
+                main_py_block = re.search(
+                    r'^## `main\.py`.*?(?=\n\n---|\Z)',
+                    fibonacci_text, re.MULTILINE | re.DOTALL
+                )
+                assert main_py_block, f"Expected a result block headed by main.py: {fibonacci_text[:200]}"
+                assert "calculate_fibonacci" in main_py_block.group(), \
+                    "calculate_fibonacci must appear within the main.py result block"
+                for fp in re.findall(r'^## `([^`]+)`', fibonacci_text, re.MULTILINE):
                     assert not Path(fp).is_absolute(), f"File path should be relative: {fp}"
                 print("✓ Fibonacci function found in correct directory")
                 
@@ -368,12 +370,14 @@ Run the application with proper configuration.
                 )
 
                 app_text = app_result["content"][0]["text"]
-                assert "test_isolated_app_67890" in app_text, "Should find unique app identifier"
-                app_paths = re.findall(r'^## `([^`]+)`', app_text, re.MULTILINE)
-                assert app_paths, f"Could not parse file paths from markdown: {app_text[:200]}"
-                assert any(fp == "utils.py" for fp in app_paths), \
-                    f"Expected 'utils.py' among result paths, got: {app_paths}"
-                for fp in app_paths:
+                utils_py_block = re.search(
+                    r'^## `utils\.py`.*?(?=\n\n---|\Z)',
+                    app_text, re.MULTILINE | re.DOTALL
+                )
+                assert utils_py_block, f"Expected a result block headed by utils.py: {app_text[:200]}"
+                assert "test_isolated_app_67890" in utils_py_block.group(), \
+                    "test_isolated_app_67890 must appear within the utils.py result block"
+                for fp in re.findall(r'^## `([^`]+)`', app_text, re.MULTILINE):
                     assert not Path(fp).is_absolute(), f"File path should be relative: {fp}"
                 print("✓ App identifier found in correct directory")
 
@@ -393,12 +397,14 @@ Run the application with proper configuration.
                 )
 
                 readme_text = readme_result["content"][0]["text"]
-                assert "unique_feature_identifier_99999" in readme_text, "Should find README content"
-                readme_paths = re.findall(r'^## `([^`]+)`', readme_text, re.MULTILINE)
-                assert readme_paths, f"Could not parse file paths from markdown: {readme_text[:200]}"
-                assert any(fp == "README.md" for fp in readme_paths), \
-                    f"Expected 'README.md' among result paths, got: {readme_paths}"
-                for fp in readme_paths:
+                readme_block = re.search(
+                    r'^## `README\.md`.*?(?=\n\n---|\Z)',
+                    readme_text, re.MULTILINE | re.DOTALL
+                )
+                assert readme_block, f"Expected a result block headed by README.md: {readme_text[:200]}"
+                assert "unique_feature_identifier_99999" in readme_block.group(), \
+                    "unique_feature_identifier_99999 must appear within the README.md result block"
+                for fp in re.findall(r'^## `([^`]+)`', readme_text, re.MULTILINE):
                     assert not Path(fp).is_absolute(), f"File path should be relative: {fp}"
                 print("✓ README content found in correct directory")
 

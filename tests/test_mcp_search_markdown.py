@@ -271,8 +271,8 @@ class TestExecuteToolSearchReturnsMarkdown:
         assert "next_offset=" in result, "Trimmed response must set next_offset for the caller to page"
 
     async def test_trim_loop_returns_at_least_one_result_when_single_oversized(self) -> None:
-        """Trim loop must never discard all results — even a single oversized result is returned."""
-        from chunkhound.mcp_server.tools import MAX_RESPONSE_TOKENS, execute_tool
+        """Single oversized result is truncated to fit within MAX_RESPONSE_TOKENS, not dropped."""
+        from chunkhound.mcp_server.tools import MAX_RESPONSE_TOKENS, estimate_tokens, execute_tool
 
         # Content that alone exceeds MAX_RESPONSE_TOKENS (len // 3 > limit)
         huge_content = "x" * (MAX_RESPONSE_TOKENS * 4)
@@ -289,6 +289,10 @@ class TestExecuteToolSearchReturnsMarkdown:
         assert isinstance(result, str)
         assert "big.py" in result, "Single oversized result must still appear in output"
         assert "No results" not in result, "Trim loop must not discard the only result"
+        assert estimate_tokens(result) <= MAX_RESPONSE_TOKENS, (
+            f"Single oversized result must be truncated to fit within MAX_RESPONSE_TOKENS; "
+            f"got {estimate_tokens(result)} tokens"
+        )
 
     async def test_trim_loop_preserves_original_page_size_in_footer(self) -> None:
         """Trim loop must not overwrite page_size — footer page count uses the requested page_size."""

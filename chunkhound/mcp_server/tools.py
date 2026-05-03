@@ -715,6 +715,14 @@ async def execute_tool(
                     "next_offset": pagination.get("offset", 0) + len(results_list),
                 }
                 md = format_search_results_markdown(results_list, pagination, search_type)
+            # If the single remaining result still exceeds the limit, truncate its content.
+            if results_list and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
+                result_copy = dict(results_list[0])
+                content = result_copy.get("content") or ""
+                # estimate_tokens uses len // 3; reserve ~300 chars for heading/fence/footer
+                max_content_chars = max(0, MAX_RESPONSE_TOKENS * 3 - 300)
+                result_copy["content"] = content[:max_content_chars]
+                md = format_search_results_markdown([result_copy], pagination, search_type)
             return md
 
     # Convert result to dict if it's not already
