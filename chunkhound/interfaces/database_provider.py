@@ -25,6 +25,10 @@ class ScopeAggregationProvider(Protocol):
         """
         ...
 
+    async def get_scope_file_paths_async(self, scope_prefix: str | None) -> list[str]:
+        """Async variant of get_scope_file_paths."""
+        ...
+
 
 class DatabaseProvider(Protocol):
     """Abstract protocol for database providers.

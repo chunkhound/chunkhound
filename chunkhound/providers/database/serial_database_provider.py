@@ -390,6 +390,13 @@ class SerialDatabaseProvider(ABC):
         """Async variant of delete_file_completely."""
         return await self._execute_in_db_thread("delete_file_completely", file_path)
 
+    async def get_scope_file_paths_async(self, scope_prefix: str | None) -> list[str]:
+        """Async variant of get_scope_file_paths if supported."""
+        if not hasattr(self, "_executor_get_scope_file_paths"):
+            logger.debug("get_scope_file_paths not supported by this provider")
+            return []
+        return await self._execute_in_db_thread("get_scope_file_paths", scope_prefix)
+
     async def begin_transaction_async(self) -> None:
         """Async variant of begin_transaction."""
         if not hasattr(self, "_executor_begin_transaction"):
