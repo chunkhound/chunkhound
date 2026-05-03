@@ -12,6 +12,7 @@ This test ensures:
 import asyncio
 import json
 import os
+import re
 import tempfile
 import pytest
 from pathlib import Path
@@ -338,27 +339,19 @@ Run the application with proper configuration.
                 )
                 print(f"Fibonacci response: {fibonacci_result}")
 
-                # The result has content array with text
-                if "content" in fibonacci_result and len(fibonacci_result["content"]) > 0:
-                    fibonacci_results = json.loads(fibonacci_result["content"][0]["text"])["results"]
-                else:
-                    print(f"Unexpected result format: {fibonacci_result}")
-                    fibonacci_results = []
-                assert len(fibonacci_results) > 0, "Should find fibonacci function"
-                
-                # Verify content comes from target project, not test CWD
-                found_fibonacci = False
-                for result in fibonacci_results:
-                    if "calculate_fibonacci" in result.get("content", ""):
-                        file_path = result["file_path"]
-                        # Search should return relative path from indexed project directory
-                        assert file_path == "main.py", f"Expected 'main.py', got: {file_path}"
-                        # Verify it's a relative path (not absolute)
-                        assert not Path(file_path).is_absolute(), f"File path should be relative: {file_path}"
-                        found_fibonacci = True
-                        break
-                
-                assert found_fibonacci, "Should find fibonacci function in target project"
+                # The result has content array with markdown text
+                assert "content" in fibonacci_result and len(fibonacci_result["content"]) > 0, \
+                    f"Unexpected result format: {fibonacci_result}"
+                fibonacci_text = fibonacci_result["content"][0]["text"]
+                main_py_block = re.search(
+                    r'^## `main\.py`.*?(?=\n\n---|\Z)',
+                    fibonacci_text, re.MULTILINE | re.DOTALL
+                )
+                assert main_py_block, f"Expected a result block headed by main.py: {fibonacci_text[:200]}"
+                assert "calculate_fibonacci" in main_py_block.group(), \
+                    "calculate_fibonacci must appear within the main.py result block"
+                for fp in re.findall(r'^## `([^`]+)`', fibonacci_text, re.MULTILINE):
+                    assert not Path(fp).is_absolute(), f"File path should be relative: {fp}"
                 print("✓ Fibonacci function found in correct directory")
                 
                 # Test 2: Search for unique identifier from utils.py
@@ -376,21 +369,16 @@ Run the application with proper configuration.
                     }
                 )
 
-                app_results = json.loads(app_result["content"][0]["text"])["results"]
-                assert len(app_results) > 0, "Should find unique app identifier"
-
-                found_app_id = False
-                for result in app_results:
-                    if "test_isolated_app_67890" in result.get("content", ""):
-                        file_path = result["file_path"]
-                        # Search should return relative path from indexed project directory
-                        assert file_path == "utils.py", f"Expected 'utils.py', got: {file_path}"
-                        # Verify it's a relative path (not absolute)
-                        assert not Path(file_path).is_absolute(), f"File path should be relative: {file_path}"
-                        found_app_id = True
-                        break
-
-                assert found_app_id, "Should find app identifier in target project"
+                app_text = app_result["content"][0]["text"]
+                utils_py_block = re.search(
+                    r'^## `utils\.py`.*?(?=\n\n---|\Z)',
+                    app_text, re.MULTILINE | re.DOTALL
+                )
+                assert utils_py_block, f"Expected a result block headed by utils.py: {app_text[:200]}"
+                assert "test_isolated_app_67890" in utils_py_block.group(), \
+                    "test_isolated_app_67890 must appear within the utils.py result block"
+                for fp in re.findall(r'^## `([^`]+)`', app_text, re.MULTILINE):
+                    assert not Path(fp).is_absolute(), f"File path should be relative: {fp}"
                 print("✓ App identifier found in correct directory")
 
                 # Test 3: Search for content from README
@@ -408,21 +396,16 @@ Run the application with proper configuration.
                     }
                 )
 
-                readme_results = json.loads(readme_result["content"][0]["text"])["results"]
-                assert len(readme_results) > 0, "Should find README content"
-
-                found_readme = False
-                for result in readme_results:
-                    if "unique_feature_identifier_99999" in result.get("content", ""):
-                        file_path = result["file_path"]
-                        # Search should return relative path from indexed project directory
-                        assert file_path == "README.md", f"Expected 'README.md', got: {file_path}"
-                        # Verify it's a relative path (not absolute)
-                        assert not Path(file_path).is_absolute(), f"File path should be relative: {file_path}"
-                        found_readme = True
-                        break
-
-                assert found_readme, "Should find README content in target project"
+                readme_text = readme_result["content"][0]["text"]
+                readme_block = re.search(
+                    r'^## `README\.md`.*?(?=\n\n---|\Z)',
+                    readme_text, re.MULTILINE | re.DOTALL
+                )
+                assert readme_block, f"Expected a result block headed by README.md: {readme_text[:200]}"
+                assert "unique_feature_identifier_99999" in readme_block.group(), \
+                    "unique_feature_identifier_99999 must appear within the README.md result block"
+                for fp in re.findall(r'^## `([^`]+)`', readme_text, re.MULTILINE):
+                    assert not Path(fp).is_absolute(), f"File path should be relative: {fp}"
                 print("✓ README content found in correct directory")
 
                 # Test 4: Search for class definition
@@ -440,8 +423,8 @@ Run the application with proper configuration.
                     }
                 )
 
-                class_results = json.loads(class_result["content"][0]["text"])["results"]
-                assert len(class_results) > 0, "Should find DataProcessor class"
+                class_text = class_result["content"][0]["text"]
+                assert "DataProcessor" in class_text, "Should find DataProcessor class"
                 print("✓ DataProcessor class found")
 
                 # Test 5: Verify no content from test_cwd directory
@@ -466,10 +449,11 @@ def should_not_appear():
                         }
                     }
                 )
-                isolation_results = json.loads(isolation_result["content"][0]["text"])["results"]
+                isolation_text = isolation_result["content"][0]["text"]
 
-                # Should find nothing because test_cwd is not indexed
-                assert len(isolation_results) == 0, "Should not find content from test_cwd"
+                # Should find nothing because test_cwd is not indexed - markdown has no results section
+                assert "this_should_not_be_indexed_54321" not in isolation_text, \
+                    "Should not find content from test_cwd"
                 print("✓ Content isolation verified - test_cwd content not indexed")
 
                 print("All MCP stdio communication tests passed!")
@@ -572,16 +556,18 @@ def quicksort(arr):
             
             try:
                 # Test semantic search with services (no subprocess needed)
-                from chunkhound.mcp_server.tools import execute_tool
-                
+                from chunkhound.mcp_server.tools import search_impl
+
                 # Search for sorting algorithms semantically
-                semantic_response = await execute_tool(
-                    tool_name="search",
+                semantic_response = await search_impl(
                     services=services,
                     embedding_manager=embedding_manager,
-                    arguments={"type": "semantic", "query": "sorting algorithms", "page_size": 10, "offset": 0}
+                    type="semantic",
+                    query="sorting algorithms",
+                    page_size=10,
+                    offset=0
                 )
-                
+
                 semantic_results = semantic_response.get('results', [])
                         
                 # Should find sorting-related content from target project

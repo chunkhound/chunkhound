@@ -8,6 +8,7 @@ The registry pattern ensures consistent tool metadata and behavior.
 
 import inspect
 import json
+import re
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -301,58 +302,81 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 3
 
 
-def limit_response_size(
-    response_data: SearchResponse, max_tokens: int = MAX_RESPONSE_TOKENS
-) -> SearchResponse:
-    """Limit response size to fit within token limits by reducing results."""
-    if not response_data.get("results"):
-        return response_data
+_BACKTICK_RUN_RE = re.compile(r"`+")
 
-    # Start with full response and iteratively reduce until under limit
-    limited_results = response_data["results"][:]
 
-    while limited_results:
-        # Create test response with current results
-        test_response = {
-            "results": limited_results,
-            "pagination": response_data["pagination"],
-        }
+def format_search_results_markdown(
+    results: list[dict[str, Any]],
+    pagination: dict[str, Any],
+    search_type: str,
+) -> str:
+    """Render search results as lean markdown for MCP responses.
 
-        # Estimate token count
-        response_text = json.dumps(test_response, default=str)
-        token_count = estimate_tokens(response_text)
+    Drops chunk_id, chunk_type, language, metadata, file_extension,
+    line_count, code_preview, is_truncated, similarity_percentage.
+    Retains file_path, line range, symbol/name, content, and (for semantic
+    search) similarity percentage. Appends a pagination footer.
+    """
+    if not results:
+        return "No results found."
 
-        if token_count <= max_tokens:
-            # Update pagination to reflect actual returned results
-            actual_count = len(limited_results)
-            updated_pagination = response_data["pagination"].copy()
-            updated_pagination["page_size"] = actual_count
-            updated_pagination["has_more"] = updated_pagination.get(
-                "has_more", False
-            ) or actual_count < len(response_data["results"])
-            if actual_count < len(response_data["results"]):
-                updated_pagination["next_offset"] = (
-                    updated_pagination.get("offset", 0) + actual_count
-                )
+    blocks: list[str] = []
+    for result in results:
+        file_path: str = result.get("file_path") or "unknown"
+        start_line: int | None = result.get("start_line")
+        end_line: int | None = result.get("end_line")
+        content: str = result.get("content") or ""
+        symbol: str | None = result.get("symbol") or result.get("name")
+        similarity: float | None = result.get("similarity")
 
-            return {"results": limited_results, "pagination": updated_pagination}
+        lang = result.get("language") or ""
+        lang_hint = "" if lang == "unknown" else lang
 
-        # Remove results from the end to reduce size
-        # Remove in chunks for efficiency
-        reduction_size = max(1, len(limited_results) // 4)
-        limited_results = limited_results[:-reduction_size]
+        # Heading: ## `path` L10–L20 — Symbol (92%)
+        parts: list[str] = [f"## `{file_path}`"]
+        if start_line is not None:
+            line_range = (
+                f"L{start_line}–L{end_line}"
+                if end_line is not None and end_line != start_line
+                else f"L{start_line}"
+            )
+            parts.append(line_range)
+        if symbol:
+            parts.append(f"— {symbol}")
+        if search_type == "semantic" and similarity is not None:
+            pct = int(round(similarity * 100))
+            parts.append(f"({pct}%)")
 
-    # If even empty results exceed token limit, return minimal response
-    return {
-        "results": [],
-        "pagination": {
-            "offset": response_data["pagination"].get("offset", 0),
-            "page_size": 0,
-            "has_more": len(response_data["results"]) > 0,
-            "total": response_data["pagination"].get("total", 0),
-            "next_offset": None,
-        },
-    }
+        heading = " ".join(parts)
+        # Use a fence longer than any backtick run in the content (CommonMark §6.1).
+        max_run = max((len(m.group()) for m in _BACKTICK_RUN_RE.finditer(content)), default=0)
+        fence = "`" * max(3, max_run + 1)
+        block = f"{heading}\n\n{fence}{lang_hint}\n{content}\n{fence}"
+        blocks.append(block)
+
+    body = "\n\n---\n\n".join(blocks)
+
+    # Pagination footer
+    offset: int = pagination.get("offset", 0)
+    total: int | None = pagination.get("total")
+    has_more: bool = pagination.get("has_more", False)
+    next_offset: int | None = pagination.get("next_offset")
+    page_size: int = pagination.get("page_size", len(results))
+
+    start_num = offset + 1
+    end_num = offset + len(results)
+
+    if total is not None and page_size:
+        total_pages = max(1, -(-total // page_size))
+        current_page = (offset // page_size) + 1
+        footer = f"Page {current_page} of {total_pages} (results {start_num}–{end_num} of {total})"
+    else:
+        footer = f"Results {start_num}–{end_num}"
+
+    if has_more and next_offset is not None:
+        footer += f" | next_offset={next_offset}"
+
+    return f"{body}\n\n---\n{footer}"
 
 
 # =============================================================================
@@ -372,7 +396,7 @@ DECISION GUIDE:
 - Concept or behavior → semantic
 - Cross-file architecture question → call code_research first
 
-OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
+OUTPUT: Markdown blocks — file path, line range, symbol name, code block, pagination footer."""
 
 SEARCH_DESCRIPTION_NO_RESEARCH = """Pinpoint specific code locations — find exact symbols, patterns, or concepts in the indexed codebase. Returns structurally-parsed code chunks (functions, classes) — large definitions may span multiple results.
 
@@ -386,7 +410,7 @@ DECISION GUIDE:
 - Known symbol or pattern → regex
 - Concept or behavior → semantic
 
-OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
+OUTPUT: Markdown blocks — file path, line range, symbol name, code block, pagination footer."""
 
 CODE_RESEARCH_DESCRIPTION = """Start here for any coding task. Call code_research first to understand the relevant code area before writing or modifying code.
 
@@ -503,11 +527,9 @@ async def search_impl(
     # Convert file paths to native platform format
     native_results = _convert_paths_to_native(results)
 
-    # Apply response size limiting
-    response = cast(
+    return cast(
         SearchResponse, {"results": native_results, "pagination": pagination}
     )
-    return limit_response_size(response)
 
 
 @register_tool(
@@ -674,6 +696,34 @@ async def execute_tool(
             )
             answer = result.get("answer", fallback)
             return str(answer)
+
+    # search tool renders dict → lean markdown for MCP, with markdown-based token limiting
+    if tool_name == "search":
+        if isinstance(result, dict):
+            search_type = arguments.get("type", "regex")
+            results_list = list(result.get("results", []))
+            pagination = dict(result.get("pagination", {}))
+            md = format_search_results_markdown(results_list, pagination, search_type)
+            # Keep at least 1 result; preserve original page_size so the footer's
+            # total-page count stays calibrated to the requested page size.
+            while len(results_list) > 1 and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
+                trim = max(1, len(results_list) // 4)
+                results_list = results_list[:-trim]
+                pagination = {
+                    **pagination,
+                    "has_more": True,
+                    "next_offset": pagination.get("offset", 0) + len(results_list),
+                }
+                md = format_search_results_markdown(results_list, pagination, search_type)
+            # If the single remaining result still exceeds the limit, truncate its content.
+            if results_list and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
+                result_copy = dict(results_list[0])
+                content = result_copy.get("content") or ""
+                # estimate_tokens uses len // 3; reserve ~300 chars for heading/fence/footer
+                max_content_chars = max(0, MAX_RESPONSE_TOKENS * 3 - 300)
+                result_copy["content"] = content[:max_content_chars]
+                md = format_search_results_markdown([result_copy], pagination, search_type)
+            return md
 
     # Convert result to dict if it's not already
     if hasattr(result, "__dict__"):

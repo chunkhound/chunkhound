@@ -20,7 +20,7 @@ import pytest
 from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
 from chunkhound.database_factory import create_services
-from chunkhound.mcp_server.tools import execute_tool
+from chunkhound.mcp_server.tools import execute_tool, search_impl
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
@@ -193,33 +193,19 @@ class ExistingClass:
         assert found, "Existing content should be searchable"
 
         # Search for existing content
-        existing_regex = await execute_tool(
-            "search",
-            services,
-            None,
-            {
-                "type": "regex",
-                "query": "existing_function",
-                "page_size": 10,
-                "offset": 0,
-            },
+        existing_regex = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query="existing_function", page_size=10, offset=0,
         )
 
         # Try semantic search if available, skip if not
         existing_semantic = None
         try:
-            existing_semantic = await execute_tool(
-                "search",
-                services,
-                None,
-                {
-                    "type": "semantic",
-                    "query": "existing function QA testing",
-                    "page_size": 10,
-                    "offset": 0,
-                },
+            existing_semantic = await search_impl(
+                services=services, embedding_manager=None,
+                type="semantic", query="existing function QA testing", page_size=10, offset=0,
             )
-            semantic_count = len(existing_semantic.get("results", []))
+            semantic_count = len(existing_semantic.get('results', []))
         except Exception as e:
             print(f"⚠ Semantic search skipped: {e}")
             semantic_count = "N/A"
@@ -250,32 +236,18 @@ class NewlyAddedClass:
         assert found, "New file content should be searchable"
 
         # Search for new content
-        new_regex = await execute_tool(
-            "search",
-            services,
-            None,
-            {
-                "type": "regex",
-                "query": "newly_added_content_unique_string",
-                "page_size": 10,
-                "offset": 0,
-            },
+        new_regex = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query="newly_added_content_unique_string", page_size=10, offset=0,
         )
 
         # Try semantic search if available
         try:
-            new_semantic = await execute_tool(
-                "search",
-                services,
-                None,
-                {
-                    "type": "semantic",
-                    "query": "newly added function QA validation",
-                    "page_size": 10,
-                    "offset": 0,
-                },
+            new_semantic = await search_impl(
+                services=services, embedding_manager=None,
+                type="semantic", query="newly added function QA validation", page_size=10, offset=0,
             )
-            new_semantic_count = len(new_semantic.get("results", []))
+            new_semantic_count = len(new_semantic.get('results', []))
         except Exception:
             new_semantic_count = "N/A"
 
@@ -307,20 +279,11 @@ def added_during_edit():
         )
         assert found, "Added content should be searchable"
 
-        added_regex = await execute_tool(
-            "search",
-            services,
-            None,
-            {
-                "type": "regex",
-                "query": "added_content_edit_qa",
-                "page_size": 10,
-                "offset": 0,
-            },
+        added_regex = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query="added_content_edit_qa", page_size=10, offset=0,
         )
-        assert len(added_regex.get("results", [])) > 0, (
-            "Should find content added during edit"
-        )
+        assert len(added_regex.get('results', [])) > 0, "Should find content added during edit"
         print("✓ Edit (add content): Found added content")
 
         # 3b: Delete some content and modify existing
@@ -344,28 +307,14 @@ def added_during_edit():
         assert found, "Modified content should be searchable"
 
         # Check modification worked
-        modified_regex = await execute_tool(
-            "search",
-            services,
-            None,
-            {
-                "type": "regex",
-                "query": "MODIFIED_existing_content",
-                "page_size": 10,
-                "offset": 0,
-            },
+        modified_regex = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query="MODIFIED_existing_content", page_size=10, offset=0,
         )
         # Check deletion worked - search for the actual class definition
-        deleted_regex = await execute_tool(
-            "search",
-            services,
-            None,
-            {
-                "type": "regex",
-                "query": "class ExistingClass:",
-                "page_size": 10,
-                "offset": 0,
-            },
+        deleted_regex = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query="class ExistingClass:", page_size=10, offset=0,
         )
 
         assert len(modified_regex.get("results", [])) > 0, (
@@ -386,16 +335,9 @@ def added_during_edit():
         assert removed, "Deleted file should be removed"
 
         # Search for deleted file content
-        deleted_file_regex = await execute_tool(
-            "search",
-            services,
-            None,
-            {
-                "type": "regex",
-                "query": "newly_added_content_unique_string",
-                "page_size": 10,
-                "offset": 0,
-            },
+        deleted_file_regex = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query="newly_added_content_unique_string", page_size=10, offset=0,
         )
 
         assert len(deleted_file_regex.get("results", [])) == 0, (
@@ -604,12 +546,10 @@ function qaTestFunction() {
         async def validate_language_search(language, pattern):
             """Validate a single language's content is searchable."""
             try:
-                regex_results = await execute_tool("search", services, None, {
-                    "type": "regex",
-                    "query": pattern,
-                    "page_size": 10,
-                    "offset": 0
-                })
+                regex_results = await search_impl(
+                    services=services, embedding_manager=None,
+                    type="regex", query=pattern, page_size=10, offset=0,
+                )
                 if len(regex_results.get('results', [])) > 0:
                     return (language.value, True, None)
                 return (language.value, False, "regex not found")
@@ -676,16 +616,9 @@ function qaTestFunction() {
             for i in range(NUM_CONCURRENT_SEARCHES):
                 try:
                     start_time = time.time()
-                    results = await execute_tool(
-                        "search",
-                        services,
-                        None,
-                        {
-                            "type": "regex",
-                            "query": "concurrent_qa_test",
-                            "page_size": 50,
-                            "offset": 0,
-                        },
+                    results = await search_impl(
+                        services=services, embedding_manager=None,
+                        type="regex", query="concurrent_qa_test", page_size=50, offset=0,
                     )
                     end_time = time.time()
 
@@ -819,20 +752,11 @@ class RapidClass_{i}:
         # Create files with varying amounts of searchable content
 
         # 1. Search for non-existing value (should return empty)
-        non_existing_results = await execute_tool(
-            "search",
-            services,
-            None,
-            {
-                "type": "regex",
-                "query": "non_existing_unique_pattern_qa_test_12345",
-                "page_size": 10,
-                "offset": 0,
-            },
+        non_existing_results = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query="non_existing_unique_pattern_qa_test_12345", page_size=10, offset=0,
         )
-        assert len(non_existing_results.get("results", [])) == 0, (
-            "Non-existing pattern should return empty results"
-        )
+        assert len(non_existing_results.get('results', [])) == 0, "Non-existing pattern should return empty results"
         print("✓ Pagination test 1: Non-existing pattern returns empty")
 
         # 2. Create single file with unique content (no pagination needed)
@@ -844,20 +768,11 @@ class RapidClass_{i}:
         single_file.write_text(single_content)
         await asyncio.sleep(PAGINATION_SETUP_WAIT_SECONDS)
 
-        single_results = await execute_tool(
-            "search",
-            services,
-            None,
-            {
-                "type": "regex",
-                "query": "single_unique_result_qa_test",
-                "page_size": 10,
-                "offset": 0,
-            },
+        single_results = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query="single_unique_result_qa_test", page_size=10, offset=0,
         )
-        assert len(single_results.get("results", [])) == 1, (
-            "Single unique pattern should return exactly 1 result"
-        )
+        assert len(single_results.get('results', [])) == 1, "Single unique pattern should return exactly 1 result"
         print("✓ Pagination test 2: Single result handled correctly")
 
         # 3. Create many files with common pattern to test pagination
@@ -1103,16 +1018,9 @@ if __name__ == "__main__":
         total_count = 0  # Track actual total from pagination metadata
 
         while page_count < max_pages:
-            page_results = await execute_tool(
-                "search",
-                services,
-                None,
-                {
-                    "type": "regex",
-                    "query": common_pattern,
-                    "page_size": page_size,
-                    "offset": offset,
-                },
+            page_results = await search_impl(
+                services=services, embedding_manager=None,
+                type="regex", query=common_pattern, page_size=page_size, offset=offset,
             )
 
             page_data = page_results.get("results", [])
@@ -1209,37 +1117,19 @@ if __name__ == "__main__":
         # Test offset beyond available results
         # Use total_count from pagination metadata, not len(all_results) which may be partial
         actual_total = total_count if total_count > 0 else len(all_results)
-        beyond_results = await execute_tool(
-            "search",
-            services,
-            None,
-            {
-                "type": "regex",
-                "query": common_pattern,
-                "page_size": 10,
-                "offset": actual_total + 100,  # Truly beyond all results
-            },
+        beyond_results = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query=common_pattern, page_size=10, offset=actual_total + 100,
         )
-        assert len(beyond_results.get("results", [])) == 0, (
-            f"Offset {actual_total + 100} beyond total {actual_total} should return empty"
-        )
+        assert len(beyond_results.get('results', [])) == 0, f"Offset {actual_total + 100} beyond total {actual_total} should return empty"
 
         # Test large page size
-        large_page_results = await execute_tool(
-            "search",
-            services,
-            None,
-            {
-                "type": "regex",
-                "query": common_pattern,
-                "page_size": 100,  # Larger than total results
-                "offset": 0,
-            },
+        large_page_results = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query=common_pattern, page_size=100, offset=0,
         )
-        large_page_count = len(large_page_results.get("results", []))
-        assert large_page_count <= actual_total, (
-            f"Large page size should not exceed total ({large_page_count} <= {actual_total})"
-        )
+        large_page_count = len(large_page_results.get('results', []))
+        assert large_page_count <= actual_total, f"Large page size should not exceed total ({large_page_count} <= {actual_total})"
 
         print("✓ Pagination edge cases handled correctly")
 
@@ -1270,16 +1160,9 @@ if __name__ == "__main__":
         while (elapsed := time.monotonic() - start_time) < max_wait:
             await asyncio.sleep(poll_interval)
 
-            search_results = await execute_tool(
-                "search",
-                services,
-                None,
-                {
-                    "type": "regex",
-                    "query": "timing_validation_unique_content",
-                    "page_size": 10,
-                    "offset": 0,
-                },
+            search_results = await search_impl(
+                services=services, embedding_manager=None,
+                type="regex", query="timing_validation_unique_content", page_size=10, offset=0,
             )
 
             if len(search_results.get('results', [])) > 0:
@@ -1290,11 +1173,9 @@ if __name__ == "__main__":
 
         # Test search performance
         search_start = time.time()
-        performance_results = await execute_tool(
-            "search",
-            services,
-            None,
-            {"type": "regex", "query": "function", "page_size": 50, "offset": 0},
+        performance_results = await search_impl(
+            services=services, embedding_manager=None,
+            type="regex", query="function", page_size=50, offset=0,
         )
         search_time = time.time() - search_start
 

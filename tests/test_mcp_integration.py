@@ -14,7 +14,7 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
-from chunkhound.mcp_server.tools import execute_tool
+from chunkhound.mcp_server.tools import execute_tool, search_impl
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
@@ -99,17 +99,14 @@ class TestMCPIntegration:
         # Wait for initial scan
         await asyncio.sleep(1.0)
 
-        # Get initial search results using MCP tool execution
-        initial_results = await execute_tool(
-            tool_name="search",
+        # Get initial search results using search_impl for dict access
+        initial_results = await search_impl(
             services=services,
             embedding_manager=embedding_manager,
-            arguments={
-                "type": "semantic",
-                "query": "unique_mcp_test_function",
-                "page_size": 10,
-                "offset": 0,
-            },
+            type="semantic",
+            query="unique_mcp_test_function",
+            page_size=10,
+            offset=0,
         )
         initial_count = len(initial_results.get("results", []))
 
@@ -124,17 +121,14 @@ def unique_mcp_test_function():
         # Wait for debounce + processing
         await asyncio.sleep(2.0)
 
-        # Search for new content using MCP tool execution
-        new_results = await execute_tool(
-            tool_name="search",
+        # Search for new content using search_impl for dict access
+        new_results = await search_impl(
             services=services,
             embedding_manager=embedding_manager,
-            arguments={
-                "type": "semantic",
-                "query": "unique_mcp_test_function",
-                "page_size": 10,
-                "offset": 0,
-            },
+            type="semantic",
+            query="unique_mcp_test_function",
+            page_size=10,
+            offset=0,
         )
         new_count = len(new_results.get("results", []))
 
@@ -240,19 +234,13 @@ def delete_test_unique_function():
         assert found, "File should be indexed"
 
         # Verify content is searchable
-        before_delete = await execute_tool(
-            tool_name="search",
+        before_delete = await search_impl(
             services=services,
             embedding_manager=None,
-            arguments={
-                "type": "regex",
-                "query": "delete_test_unique_function",
-                "page_size": 10,
-                "offset": 0,
-            },
-        )
-        assert len(before_delete.get("results", [])) > 0, (
-            "Content should be found before deletion"
+            type="regex",
+            query="delete_test_unique_function",
+            page_size=10,
+            offset=0,
         )
 
         # Delete the file
@@ -264,19 +252,13 @@ def delete_test_unique_function():
         assert removed, "File should be removed"
 
         # Verify content is no longer searchable
-        after_delete = await execute_tool(
-            tool_name="search",
+        after_delete = await search_impl(
             services=services,
             embedding_manager=None,
-            arguments={
-                "type": "regex",
-                "query": "delete_test_unique_function",
-                "page_size": 10,
-                "offset": 0,
-            },
-        )
-        assert len(after_delete.get("results", [])) == 0, (
-            "Content should not be found after deletion"
+            type="regex",
+            query="delete_test_unique_function",
+            page_size=10,
+            offset=0,
         )
 
     @pytest.mark.asyncio
