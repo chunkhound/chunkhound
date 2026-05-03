@@ -23,9 +23,10 @@ import voyageai
 from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.providers.embeddings.voyageai_provider import (
+    _CATEGORY_BACKOFFS,
     VoyageAIEmbeddingProvider,
+    _classify_voyageai_error,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -693,6 +694,229 @@ class TestUpstreamTimeoutRetry:
         ):
             with pytest.raises(RuntimeError, match="Embedding generation failed"):
                 await p._embed_single_batch_locked(["text"])
+
+        assert call_count == 1
+
+
+# ===========================================================================
+# 10b. Error classifier (shared between embed and rerank retry loops)
+# ===========================================================================
+
+
+# Stand-ins for VoyageAI SDK exception classes. The classifier matches on
+# ``type(e).__name__`` so the names here are what's significant, not the
+# inheritance graph.
+class _FakeRateLimitError(Exception):
+    pass
+
+
+class _FakeTryAgainError(Exception):
+    pass
+
+
+class _FakeServerError(Exception):
+    pass
+
+
+class _FakeServiceUnavailableError(Exception):
+    pass
+
+
+class _FakeAPIConnectionError(Exception):
+    pass
+
+
+class _FakeRemoteDisconnectedError(Exception):
+    pass
+
+
+class _FakeTimeoutError(Exception):
+    pass
+
+
+class TestErrorClassifier:
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            _FakeRateLimitError("429"),
+            _FakeTryAgainError("retry me"),
+            _FakeServerError("500"),
+            _FakeServiceUnavailableError("503"),
+            RuntimeError("rate limit exceeded for tier 1"),
+            RuntimeError("Voyage rate limit hit"),
+        ],
+    )
+    def test_rate_limit_category(self, exc):
+        assert _classify_voyageai_error(exc) == "rate_limit"
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            RuntimeError("HTTP 408 upstream request timeout"),
+            RuntimeError("Upstream Request Timeout"),
+            RuntimeError("upstream request timeout from proxy"),
+            RuntimeError("status 408 returned"),
+        ],
+    )
+    def test_upstream_timeout_category(self, exc):
+        assert _classify_voyageai_error(exc) == "upstream_timeout"
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            _FakeAPIConnectionError("dns lookup failed"),
+            ConnectionError("refused"),
+            _FakeRemoteDisconnectedError("conn closed"),
+            _FakeTimeoutError("socket timeout"),
+        ],
+    )
+    def test_network_category(self, exc):
+        assert _classify_voyageai_error(exc) == "network"
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ValueError("bad input"),
+            TypeError("wrong arg shape"),
+            KeyError("missing field"),
+            RuntimeError("authentication failed"),
+        ],
+    )
+    def test_non_retryable_returns_none(self, exc):
+        assert _classify_voyageai_error(exc) is None
+
+    def test_rate_limit_takes_precedence_over_network_keywords(self):
+        # A RateLimitError whose message also contains a connection-keyword
+        # must classify as rate_limit, not network — order matters because
+        # rate-limited requests should back off longer than connection drops.
+        exc = _FakeRateLimitError("rate limit; connection reset by peer")
+        assert _classify_voyageai_error(exc) == "rate_limit"
+
+    def test_rate_limit_message_takes_precedence_over_408(self):
+        # If a generic RuntimeError carries both 'rate limit' and '408',
+        # rate_limit wins (longer backoff is the safer choice).
+        exc = RuntimeError("HTTP 408 rate limit applied")
+        assert _classify_voyageai_error(exc) == "rate_limit"
+
+
+class TestCategoryBackoffs:
+    def test_rate_limit_backoff_is_30s(self):
+        assert _CATEGORY_BACKOFFS["rate_limit"] == pytest.approx(30.0)
+
+    def test_upstream_timeout_backoff_is_10s(self):
+        assert _CATEGORY_BACKOFFS["upstream_timeout"] == pytest.approx(10.0)
+
+    def test_network_has_no_entry_so_caller_uses_self_retry_delay(self):
+        # The retry loops use ``_CATEGORY_BACKOFFS.get(category, self._retry_delay)``
+        # so 'network' intentionally has no entry — the per-instance retry_delay
+        # drives generic connection retries.
+        assert "network" not in _CATEGORY_BACKOFFS
+
+
+# ===========================================================================
+# 10c. Rerank SDK path retry behavior (must match embed path)
+# ===========================================================================
+
+
+class TestRerankSdkRetry:
+    """Rerank path goes through the same shared classifier as embed —
+    these tests pin the rerank-specific retry behavior so future drift is
+    caught by a failing test, not a production stack trace."""
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_error_retried_with_30s_base_delay(self):
+        p = _make_provider(api_key="test-key", retry_attempts=2, retry_delay=0.0)
+        call_count = 0
+
+        def fake_to_thread(fn, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise _FakeRateLimitError("429 rate limit")
+
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
+            with patch(
+                "chunkhound.providers.embeddings.voyageai_provider.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep:
+                with pytest.raises(RuntimeError, match="Reranking failed"):
+                    await p._rerank_via_sdk("q", ["d1", "d2"], top_k=None)
+
+        assert call_count == 2
+        # Rate-limit base delay = 30.0, attempt=0 → 30.0 * 2^0 = 30.0
+        assert mock_sleep.call_args_list[0].args[0] == pytest.approx(30.0)
+
+    @pytest.mark.asyncio
+    async def test_408_upstream_timeout_retried_in_rerank_path(self):
+        # Regression guard: prior to PR #249 the rerank path did not retry
+        # 408s at all. The shared classifier brings it in line with embed.
+        p = _make_provider(api_key="test-key", retry_attempts=2, retry_delay=0.0)
+        call_count = 0
+
+        def fake_to_thread(fn, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("HTTP 408 upstream request timeout")
+
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
+            with patch(
+                "chunkhound.providers.embeddings.voyageai_provider.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep:
+                with pytest.raises(RuntimeError, match="Reranking failed"):
+                    await p._rerank_via_sdk("q", ["d1"], top_k=None)
+
+        assert call_count == 2
+        # Upstream-timeout base delay = 10.0
+        assert mock_sleep.call_args_list[0].args[0] == pytest.approx(10.0)
+
+    @pytest.mark.asyncio
+    async def test_network_error_retried_with_instance_retry_delay(self):
+        # Network errors fall through _CATEGORY_BACKOFFS.get() to self._retry_delay
+        p = _make_provider(api_key="test-key", retry_attempts=2, retry_delay=0.5)
+        call_count = 0
+
+        def fake_to_thread(fn, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise ConnectionError("connection reset")
+
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
+            with patch(
+                "chunkhound.providers.embeddings.voyageai_provider.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep:
+                with pytest.raises(RuntimeError, match="Reranking failed"):
+                    await p._rerank_via_sdk("q", ["d1"], top_k=None)
+
+        assert call_count == 2
+        # Network base delay = self._retry_delay (0.5), attempt=0 → 0.5 * 2^0 = 0.5
+        assert mock_sleep.call_args_list[0].args[0] == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_error_fails_immediately(self):
+        p = _make_provider(api_key="test-key", retry_attempts=3, retry_delay=0.0)
+        call_count = 0
+
+        def fake_to_thread(fn, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise ValueError("bad input")
+
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
+            with pytest.raises(RuntimeError, match="Reranking failed"):
+                await p._rerank_via_sdk("q", ["d1"], top_k=None)
 
         assert call_count == 1
 
