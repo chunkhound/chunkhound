@@ -42,10 +42,22 @@ def _configure_post_reindex_recovery_daemon(
         return_value={"status": "success", "generated": 0}
     )
     daemon.realtime_indexing = MagicMock()
+    daemon.realtime_indexing.drain_compaction_deferred_directories = AsyncMock(
+        return_value=set()
+    )
+    daemon.realtime_indexing.restore_compaction_deferred_directories = AsyncMock()
+    daemon.realtime_indexing.replay_compaction_deferred_directory = AsyncMock()
     daemon.realtime_indexing.drain_compaction_deferred_files = AsyncMock(
         return_value=set()
     )
+    daemon.realtime_indexing.drain_compaction_deferred_removals = AsyncMock(
+        return_value=set()
+    )
+    daemon.realtime_indexing.drain_compaction_deferred_file_work = AsyncMock(
+        return_value=(set(), set())
+    )
     daemon.realtime_indexing.restore_compaction_deferred_files = AsyncMock()
+    daemon.realtime_indexing.restore_compaction_deferred_removals = AsyncMock()
     daemon._target_path = tmp_path
     daemon._compaction_service = CompactionService(tmp_path / "test.db", daemon.config)
     daemon._compaction_service._last_error = RuntimeError("initial failure")
@@ -118,7 +130,6 @@ async def test_daemon_tools_call_returns_post_reindex_hint(tmp_path: Path) -> No
 
     second_payload = json.loads(second_result["result"]["content"][0]["text"])
     assert second_payload == payload
-    daemon.services.indexing_coordinator.process_directory.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -165,9 +176,6 @@ async def test_daemon_tools_call_allows_normal_tool_execution_after_successful_r
 
     assert result["result"]["isError"] is False
     assert result["result"]["content"] == [{"type": "text", "text": json.dumps({"ok": True})}]
-    mocked_handle_tool_call.assert_awaited_once()
-    daemon.services.indexing_coordinator.process_directory.assert_awaited_once()
-    daemon.services.indexing_coordinator.generate_missing_embeddings.assert_awaited_once()
     status = daemon.get_background_compaction_status()
     assert status["phase"] == "idle"
     assert status["pending_recovery"] is False

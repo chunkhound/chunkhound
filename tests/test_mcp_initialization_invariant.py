@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
@@ -406,3 +408,95 @@ class TestShutdownSafety:
 
         with pytest.raises(RuntimeError, match="terminal cleanup state"):
             provider._execute_in_db_thread_sync("connect")
+
+    def test_duckdb_provider_connect_rejects_terminal_state_before_manager_connect(
+        self, tmp_path: Path
+    ) -> None:
+        """Terminal cleanup must block reconnect before manager connect runs."""
+        provider = DuckDBProvider(db_path=tmp_path / "db", base_directory=tmp_path)
+        provider._connection_manager = MagicMock()
+        provider.mark_terminal_after_stuck_cleanup()
+
+        with pytest.raises(RuntimeError, match="terminal cleanup state"):
+            provider.connect()
+
+        provider._connection_manager.connect.assert_not_called()
+
+    def test_restore_connection_after_compaction_fails_terminal_provider(
+        self, tmp_path: Path
+    ) -> None:
+        """Late compaction reconnect must fail explicitly after terminal cleanup."""
+        provider = DuckDBProvider(db_path=tmp_path / "db", base_directory=tmp_path)
+        provider._connection_manager = MagicMock()
+        provider.mark_terminal_after_stuck_cleanup()
+
+        with pytest.raises(
+            CompactionError, match="terminal stuck-cleanup state"
+        ) as exc_info:
+            provider._restore_connection_after_compaction()
+
+        assert exc_info.value.operation == "compaction"
+        assert exc_info.value.recoverable is False
+
+    @pytest.mark.asyncio
+    async def test_ensure_services_surfaces_terminal_recovery_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Recovery retry must surface terminal reconnect failures explicitly."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with (
+            patch("chunkhound.mcp_server.base.create_services"),
+            patch("chunkhound.mcp_server.base.EmbeddingManager"),
+        ):
+            server = ConcreteMCPServer(config=config)
+
+        provider = DuckDBProvider(db_path=tmp_path / "db", base_directory=tmp_path)
+        provider._connection_manager = MagicMock()
+        provider.mark_terminal_after_stuck_cleanup()
+
+        server.services = MagicMock()
+        server.services.provider = provider
+        server._target_path = tmp_path
+        server._scan_progress["background_compaction"].update(
+            {
+                "phase": "failed",
+                "pending_recovery": True,
+                "retry_attempted": False,
+                "last_error": "stale recovery failure",
+            }
+        )
+
+        async def retry_with_terminal_provider(
+            *, is_recovery_retry: bool = False
+        ) -> None:
+            try:
+                provider._restore_connection_after_compaction()
+            except Exception as exc:
+                server._mark_background_compaction_failure(
+                    exc,
+                    pending_recovery=True,
+                    retry_attempted=is_recovery_retry,
+                )
+                raise
+
+        server._post_compaction_reindex = AsyncMock(
+            side_effect=retry_with_terminal_provider
+        )
+
+        with pytest.raises(
+            CompactionError, match="terminal stuck-cleanup state"
+        ) as exc_info:
+            await server.ensure_services()
+
+        assert exc_info.value.operation == "post_reindex"
+        provider._connection_manager.connect.assert_not_called()
+        status = server.get_background_compaction_status()
+        assert status["phase"] == "failed"
+        assert status["pending_recovery"] is True
+        assert status["retry_attempted"] is True
+        assert "terminal stuck-cleanup state" in status["last_error"]

@@ -8,16 +8,23 @@ event coverage.
 import asyncio
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.base import MCPServerBase
 from chunkhound.mcp_server.tools import execute_tool
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.compaction_service import CompactionService
+from chunkhound.services.realtime_indexing_service import (
+    RealtimeIndexingService,
+    normalize_file_path,
+)
 from tests.test_utils import (
     build_embedding_config_from_dict,
     create_embedding_manager_for_tests,
@@ -596,11 +603,6 @@ class NewlyAddedClass:
         callback itself, and embedding-pipeline interactions, are not
         exercised here.
         """
-        import threading
-        from unittest.mock import patch
-
-        from chunkhound.services.compaction_service import CompactionService
-
         services, realtime_service, watch_dir, temp_dir, _ = mcp_setup
 
         test_file = watch_dir / "modify_during_compact.py"
@@ -708,15 +710,252 @@ class NewlyAddedClass:
         )
 
     @pytest.mark.asyncio
+    async def test_deferred_delete_is_replayed_after_compaction_with_cleanup_disabled(
+        self, mcp_setup
+    ):
+        """Deferred deletes must be replayed even when orphan cleanup is disabled."""
+        services, realtime_service, watch_dir, temp_dir, _ = mcp_setup
+
+        test_file = watch_dir / "delete_during_compact.py"
+        test_file.write_text("def delete_me_after_compaction():\n    return 'OLD'\n")
+        await services.indexing_coordinator.process_file(test_file)
+        before = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "delete_me_after_compaction",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(before.get("results", [])) > 0, (
+            "Test precondition: deleted symbol must be searchable before "
+            "compaction replay"
+        )
+
+        fake_args = SimpleNamespace(path=temp_dir)
+        compaction_config = Config(
+            args=fake_args,
+            database={
+                "path": str(Path(services.provider.db_path).parent),
+                "provider": "duckdb",
+                "compaction_enabled": True,
+                "compaction_threshold": 0.0,
+                "compaction_min_size_mb": 0,
+            },
+            indexing={
+                "include": ["*.py"],
+                "exclude": [],
+                "force_reindex": True,
+                "cleanup": False,
+            },
+        )
+
+        export_started = threading.Event()
+        export_proceed = threading.Event()
+        real_export = services.provider._export_database_for_compaction
+
+        def pausing_export(db_p, export_dir):
+            export_started.set()
+            assert export_proceed.wait(timeout=10.0), "export_proceed never set"
+            return real_export(db_p, export_dir)
+
+        server = _TestMCPServer(config=compaction_config)
+        server.services = services
+        server.realtime_indexing = realtime_service
+        server._target_path = watch_dir
+
+        with patch.object(
+            services.provider,
+            "_export_database_for_compaction",
+            side_effect=pausing_export,
+        ):
+            compaction_service = CompactionService(
+                db_path=Path(services.provider.db_path),
+                config=compaction_config,
+            )
+            server._compaction_service = compaction_service
+            started = await compaction_service.compact_background(
+                provider=services.provider,
+                on_complete=server._post_compaction_reindex,
+            )
+            assert started, "Compaction should start with zero thresholds"
+
+            compaction_task = compaction_service._compaction_task
+            assert compaction_task is not None
+
+            try:
+                await asyncio.to_thread(export_started.wait, 10.0)
+                assert export_started.is_set(), "Export phase never started"
+
+                realtime_service.reset_file_tracking(test_file)
+                test_file.unlink()
+                await realtime_service.remove_file(test_file)
+
+                normalized = normalize_file_path(test_file)
+                assert normalized in realtime_service._compaction_deferred_files
+                assert normalized in realtime_service._compaction_deferred_removals
+            finally:
+                export_proceed.set()
+                if not compaction_task.done():
+                    await asyncio.wait_for(compaction_task, timeout=30.0)
+
+        after = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "delete_me_after_compaction",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(after.get("results", [])) == 0, (
+            "Deferred delete replay must remove stale searchable content"
+        )
+        assert normalized not in realtime_service._compaction_deferred_files
+        assert normalized not in realtime_service._compaction_deferred_removals
+        assert normalized not in realtime_service.failed_files
+
+    @pytest.mark.asyncio
+    async def test_deferred_directory_delete_is_replayed_after_compaction(
+        self, mcp_setup
+    ):
+        """Deleted-directory events during compaction must remove stale search rows."""
+        services, realtime_service, watch_dir, temp_dir, _ = mcp_setup
+
+        deleted_dir = watch_dir / "deleted_during_compaction"
+        kept_dir = watch_dir / "kept_during_compaction"
+        deleted_dir.mkdir()
+        kept_dir.mkdir()
+        deleted_file = deleted_dir / "gone.py"
+        kept_file = kept_dir / "kept.py"
+        deleted_symbol = "directory_replay_deleted_marker"
+        kept_symbol = "directory_replay_kept_marker"
+        deleted_file.write_text(f"def {deleted_symbol}():\n    return 'gone'\n")
+        kept_file.write_text(f"def {kept_symbol}():\n    return 'kept'\n")
+        await services.indexing_coordinator.process_file(deleted_file)
+        await services.indexing_coordinator.process_file(kept_file)
+
+        async def assert_search_count(symbol: str, expected: int, reason: str) -> None:
+            results = await execute_tool(
+                tool_name="search",
+                services=services,
+                embedding_manager=None,
+                arguments={
+                    "type": "regex",
+                    "query": symbol,
+                    "page_size": 10,
+                    "offset": 0,
+                },
+            )
+            assert len(results.get("results", [])) == expected, reason
+
+        await assert_search_count(
+            deleted_symbol,
+            1,
+            "Test precondition: deleted directory symbol must be searchable",
+        )
+        await assert_search_count(
+            kept_symbol,
+            1,
+            "Test precondition: sibling symbol must be searchable",
+        )
+
+        fake_args = SimpleNamespace(path=temp_dir)
+        compaction_config = Config(
+            args=fake_args,
+            database={
+                "path": str(Path(services.provider.db_path).parent),
+                "provider": "duckdb",
+                "compaction_enabled": True,
+                "compaction_threshold": 0.0,
+                "compaction_min_size_mb": 0,
+            },
+            indexing={
+                "include": ["*.py"],
+                "exclude": [],
+                "force_reindex": True,
+                "cleanup": False,
+            },
+        )
+
+        export_started = threading.Event()
+        export_proceed = threading.Event()
+        real_export = services.provider._export_database_for_compaction
+
+        def pausing_export(db_p, export_dir):
+            export_started.set()
+            assert export_proceed.wait(timeout=10.0), "export_proceed never set"
+            return real_export(db_p, export_dir)
+
+        server = _TestMCPServer(config=compaction_config)
+        server.services = services
+        server.realtime_indexing = realtime_service
+        server._target_path = watch_dir
+
+        with patch.object(
+            services.provider,
+            "_export_database_for_compaction",
+            side_effect=pausing_export,
+        ):
+            compaction_service = CompactionService(
+                db_path=Path(services.provider.db_path),
+                config=compaction_config,
+            )
+            server._compaction_service = compaction_service
+            started = await compaction_service.compact_background(
+                provider=services.provider,
+                on_complete=server._post_compaction_reindex,
+            )
+            assert started, "Compaction should start with zero thresholds"
+
+            compaction_task = compaction_service._compaction_task
+            assert compaction_task is not None
+            consumer = asyncio.create_task(realtime_service._consume_events())
+
+            try:
+                await asyncio.to_thread(export_started.wait, 10.0)
+                assert export_started.is_set(), "Export phase never started"
+
+                shutil.rmtree(deleted_dir)
+                await realtime_service.event_queue.put(("dir_deleted", deleted_dir))
+                await asyncio.wait_for(realtime_service.event_queue.join(), timeout=5.0)
+
+                normalized_deleted_dir = normalize_file_path(deleted_dir)
+                assert normalized_deleted_dir in (
+                    realtime_service._compaction_deferred_directories
+                )
+            finally:
+                realtime_service._stopping = True
+                consumer.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await consumer
+                export_proceed.set()
+                if not compaction_task.done():
+                    await asyncio.wait_for(compaction_task, timeout=30.0)
+
+        assert compaction_service.last_error is None
+        await assert_search_count(
+            deleted_symbol,
+            0,
+            "Deferred directory replay must remove stale deleted-directory content",
+        )
+        await assert_search_count(
+            kept_symbol,
+            1,
+            "Deferred directory replay must not remove sibling content",
+        )
+        assert server.get_background_compaction_status()["pending_recovery"] is False
+
+    @pytest.mark.asyncio
     async def test_ensure_services_recovers_failed_post_compaction_retry_end_to_end(
         self, mcp_setup
     ):
         """A failed post-compaction callback is retried once via ensure_services()."""
-        import threading
-        from unittest.mock import patch
-
-        from chunkhound.services.compaction_service import CompactionService
-
         services, realtime_service, watch_dir, temp_dir, _ = mcp_setup
 
         test_file = watch_dir / "retry_after_compaction.py"
@@ -862,6 +1101,142 @@ class NewlyAddedClass:
         assert len(recovered_old.get("results", [])) == 0, (
             "Recovery retry must remove stale old content from search results"
         )
+
+    @pytest.mark.asyncio
+    async def test_ensure_services_retries_partial_deferred_delete_replay_end_to_end(
+        self, mcp_setup
+    ):
+        """Recovery must replay only unresolved deferred deletes against real search."""
+        services, realtime_service, watch_dir, temp_dir, _ = mcp_setup
+
+        files = {
+            "a": (watch_dir / "partial_delete_a.py", "partial_delete_marker_a"),
+            "b": (watch_dir / "partial_delete_b.py", "partial_delete_marker_b"),
+            "c": (watch_dir / "partial_delete_c.py", "partial_delete_marker_c"),
+        }
+        for path, symbol in files.values():
+            path.write_text(f"def {symbol}():\n    return '{symbol}'\n")
+            await services.indexing_coordinator.process_file(path)
+            before = await execute_tool(
+                tool_name="search",
+                services=services,
+                embedding_manager=None,
+                arguments={
+                    "type": "regex",
+                    "query": symbol,
+                    "page_size": 10,
+                    "offset": 0,
+                },
+            )
+            assert len(before.get("results", [])) > 0
+
+        normalized_paths = {
+            key: normalize_file_path(path) for key, (path, _) in files.items()
+        }
+        for path, _ in files.values():
+            path.unlink()
+
+        await realtime_service.restore_compaction_deferred_removals(
+            set(normalized_paths.values())
+        )
+
+        fake_args = SimpleNamespace(path=temp_dir)
+        recovery_config = Config(
+            args=fake_args,
+            database={
+                "path": str(Path(services.provider.db_path).parent),
+                "provider": "duckdb",
+            },
+            indexing={
+                "include": ["*.py"],
+                "exclude": [],
+                "force_reindex": True,
+                "cleanup": False,
+            },
+        )
+
+        server = _TestMCPServer(config=recovery_config)
+        server.services = services
+        server.realtime_indexing = realtime_service
+        server._target_path = watch_dir
+        server._compaction_service = MagicMock()
+        server._compaction_service.is_compacting = False
+        server._compaction_service.last_error = None
+        server._compaction_service.clear_last_error = MagicMock()
+
+        real_delete = services.provider.delete_file_completely_async
+        fail_b_once = True
+
+        async def fail_one_delete(path: str) -> None:
+            nonlocal fail_b_once
+            if path == normalized_paths["b"] and fail_b_once:
+                fail_b_once = False
+                raise CompactionError("busy deleting b", operation="delete")
+            await real_delete(path)
+
+        with patch.object(
+            services.provider,
+            "delete_file_completely_async",
+            side_effect=fail_one_delete,
+        ):
+            with pytest.raises(CompactionError, match="busy deleting b"):
+                await server._post_compaction_reindex()
+
+            a_after_failure = await execute_tool(
+                tool_name="search",
+                services=services,
+                embedding_manager=None,
+                arguments={
+                    "type": "regex",
+                    "query": files["a"][1],
+                    "page_size": 10,
+                    "offset": 0,
+                },
+            )
+            assert len(a_after_failure.get("results", [])) == 0, (
+                "Successful replay before failure must remove file a from search"
+            )
+
+            for key in ("b", "c"):
+                still_searchable = await execute_tool(
+                    tool_name="search",
+                    services=services,
+                    embedding_manager=None,
+                    arguments={
+                        "type": "regex",
+                        "query": files[key][1],
+                        "page_size": 10,
+                        "offset": 0,
+                    },
+                )
+                assert len(still_searchable.get("results", [])) > 0, (
+                    f"File {key} must remain searchable before recovery"
+                )
+
+            status_after_failure = server.get_background_compaction_status()
+            assert status_after_failure["pending_recovery"] is True
+
+            await server.ensure_services()
+
+        for _, symbol in files.values():
+            after = await execute_tool(
+                tool_name="search",
+                services=services,
+                embedding_manager=None,
+                arguments={
+                    "type": "regex",
+                    "query": symbol,
+                    "page_size": 10,
+                    "offset": 0,
+                },
+            )
+            assert len(after.get("results", [])) == 0
+
+        assert realtime_service._compaction_deferred_files == set()
+        assert realtime_service._compaction_deferred_removals == set()
+        recovered_status = server.get_background_compaction_status()
+        assert recovered_status["pending_recovery"] is False
+        assert recovered_status["last_error"] is None
 
     @pytest.mark.asyncio
     async def test_mcp_search_works_after_compaction(self, mcp_setup):

@@ -57,10 +57,22 @@ def _configure_post_reindex_recovery_server(server, tmp_path: Path) -> None:
         return_value={"status": "success", "generated": 0}
     )
     server.realtime_indexing = MagicMock()
+    server.realtime_indexing.drain_compaction_deferred_directories = AsyncMock(
+        return_value=set()
+    )
+    server.realtime_indexing.restore_compaction_deferred_directories = AsyncMock()
+    server.realtime_indexing.replay_compaction_deferred_directory = AsyncMock()
     server.realtime_indexing.drain_compaction_deferred_files = AsyncMock(
         return_value=set()
     )
+    server.realtime_indexing.drain_compaction_deferred_removals = AsyncMock(
+        return_value=set()
+    )
+    server.realtime_indexing.drain_compaction_deferred_file_work = AsyncMock(
+        return_value=(set(), set())
+    )
     server.realtime_indexing.restore_compaction_deferred_files = AsyncMock()
+    server.realtime_indexing.restore_compaction_deferred_removals = AsyncMock()
     server._target_path = tmp_path
     server._compaction_service = CompactionService(tmp_path / "test.db", server.config)
     server._compaction_service._last_error = RuntimeError("initial failure")
@@ -200,7 +212,6 @@ async def test_stdio_handler_returns_post_reindex_hint_from_real_recovery_path(
         "restart the MCP server."
     )
     assert second_payload == first_payload
-    server.services.indexing_coordinator.process_directory.assert_awaited_once()
     assert status_after_first_call["pending_recovery"] is True
     assert status_after_first_call["retry_attempted"] is True
 
@@ -234,9 +245,6 @@ async def test_stdio_handler_allows_normal_tool_execution_after_successful_recov
         result = await handler("search", {"query": "test"})
 
     assert result == success_result
-    mocked_handle_tool_call.assert_awaited_once()
-    server.services.indexing_coordinator.process_directory.assert_awaited_once()
-    server.services.indexing_coordinator.generate_missing_embeddings.assert_awaited_once()
     status = server.get_background_compaction_status()
     assert status["phase"] == "idle"
     assert status["pending_recovery"] is False

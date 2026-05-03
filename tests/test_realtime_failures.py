@@ -7,12 +7,17 @@ import asyncio
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.database_factory import create_services
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime_indexing_service import (
+    RealtimeIndexingService,
+    normalize_file_path,
+)
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     is_ci,
@@ -443,10 +448,336 @@ class TestRealtimeFailures:
         assert stats["failed_files"] == 0, (
             "Compaction-deferred removals must not count as genuine failed_files"
         )
+        normalized = normalize_file_path(test_file)
+        assert normalized in service._compaction_deferred_files
+        assert normalized in service._compaction_deferred_removals
 
         services.provider._connection_allowed.set()
         services.provider.connect()
         await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_stale_queued_work_preserves_deferred_removal_state(
+        self, tmp_path: Path
+    ):
+        """A stale queued change must not erase a compaction-deferred delete."""
+        service = RealtimeIndexingService(
+            SimpleNamespace(provider=SimpleNamespace()),
+            SimpleNamespace(),
+        )
+        test_file = tmp_path / "queued_then_deleted.py"
+        test_file.write_text("def queued_then_deleted(): pass")
+        normalized = normalize_file_path(test_file)
+
+        await service.file_queue.put(("change", test_file))
+        test_file.unlink()
+        await service._defer_compaction_removal(test_file)
+
+        process_task = asyncio.create_task(service._process_loop())
+        try:
+            async with service._file_condition:
+                await asyncio.wait_for(
+                    service._file_condition.wait_for(
+                        lambda: (
+                            normalized in service._compaction_deferred_files
+                            and normalized in service._compaction_deferred_removals
+                            and normalized not in service.failed_files
+                            and service.file_queue.empty()
+                        )
+                    ),
+                    timeout=5.0,
+                )
+        finally:
+            process_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await process_task
+
+        assert normalized in service._compaction_deferred_files
+        assert normalized in service._compaction_deferred_removals
+        assert normalized not in service.failed_files
+
+    @pytest.mark.asyncio
+    async def test_replay_compaction_error_keeps_deferred_removal_state(
+        self, tmp_path: Path
+    ):
+        """Compaction-blocked replay remains retryable and not failed."""
+
+        class Provider:
+            async def delete_file_completely_async(self, path: str) -> None:
+                raise CompactionError("busy", operation="delete")
+
+        service = RealtimeIndexingService(
+            SimpleNamespace(provider=Provider()),
+            SimpleNamespace(),
+        )
+        path = normalize_file_path(tmp_path / "deleted.py")
+
+        with pytest.raises(CompactionError, match="busy"):
+            await service.replay_compaction_deferred_removal(path)
+
+        assert path not in service.failed_files
+        assert path in service._compaction_deferred_files
+        assert path in service._compaction_deferred_removals
+
+    @pytest.mark.asyncio
+    async def test_replay_generic_failure_moves_removal_to_failed_files(
+        self, tmp_path: Path
+    ):
+        """Non-compaction replay failures are visible and no longer retryable."""
+
+        class Provider:
+            async def delete_file_completely_async(self, path: str) -> None:
+                raise RuntimeError("delete failed")
+
+        service = RealtimeIndexingService(
+            SimpleNamespace(provider=Provider()),
+            SimpleNamespace(),
+        )
+        path = normalize_file_path(tmp_path / "deleted.py")
+        service._compaction_deferred_files.add(path)
+        service._compaction_deferred_removals.add(path)
+
+        with pytest.raises(RuntimeError, match="delete failed"):
+            await service.replay_compaction_deferred_removal(path)
+
+        assert path in service.failed_files
+        assert path not in service._compaction_deferred_files
+        assert path not in service._compaction_deferred_removals
+
+    @pytest.mark.asyncio
+    async def test_deleted_directory_cleanup_defers_compaction_blocked_deletes(
+        self, tmp_path: Path
+    ):
+        """Directory cleanup must preserve known deletes blocked by compaction."""
+        deleted_file = "gone/file.py"
+        base_dir = tmp_path.resolve()
+        deferred_path = normalize_file_path(base_dir / deleted_file)
+
+        class Provider:
+            def get_base_directory(self) -> Path:
+                return base_dir
+
+            async def get_scope_file_paths_async(
+                self, scope_prefix: str | None
+            ) -> list[str]:
+                assert scope_prefix == "gone/"
+                return [deleted_file]
+
+            async def delete_file_completely_async(self, path: str) -> None:
+                raise CompactionError("busy", operation="delete")
+
+        service = RealtimeIndexingService(
+            SimpleNamespace(provider=Provider()),
+            SimpleNamespace(),
+        )
+
+        await service._cleanup_deleted_directory(str(tmp_path / "gone"))
+
+        assert deferred_path not in service.failed_files
+        assert deferred_path in service._compaction_deferred_files
+        assert deferred_path in service._compaction_deferred_removals
+
+    @pytest.mark.asyncio
+    async def test_deleted_directory_lookup_compaction_error_remains_explicit(
+        self, tmp_path: Path
+    ):
+        """Lookup failures defer directory cleanup and remain explicit."""
+        base_dir = tmp_path.resolve()
+
+        class Provider:
+            def get_base_directory(self) -> Path:
+                return base_dir
+
+            async def get_scope_file_paths_async(
+                self, scope_prefix: str | None
+            ) -> list[str]:
+                raise CompactionError("busy", operation="search")
+
+        service = RealtimeIndexingService(
+            SimpleNamespace(provider=Provider()),
+            SimpleNamespace(),
+        )
+
+        with pytest.raises(CompactionError, match="busy"):
+            await service._cleanup_deleted_directory(str(tmp_path / "gone"))
+
+        assert service.failed_files == set()
+        assert service._compaction_deferred_files == set()
+        assert service._compaction_deferred_removals == set()
+        assert normalize_file_path(tmp_path / "gone") in (
+            service._compaction_deferred_directories
+        )
+
+    @pytest.mark.asyncio
+    async def test_deleted_directory_cleanup_propagates_generic_failure(
+        self, tmp_path: Path
+    ):
+        """Generic lookup failures propagate without deferring directory cleanup."""
+        base_dir = tmp_path.resolve()
+
+        class Provider:
+            def get_base_directory(self) -> Path:
+                return base_dir
+
+            async def get_scope_file_paths_async(
+                self, scope_prefix: str | None
+            ) -> list[str]:
+                raise RuntimeError("lookup failed")
+
+        service = RealtimeIndexingService(
+            SimpleNamespace(provider=Provider()),
+            SimpleNamespace(),
+        )
+
+        with pytest.raises(RuntimeError, match="lookup failed"):
+            await service._cleanup_deleted_directory(str(tmp_path / "gone"))
+
+        assert service.failed_files == set()
+        assert service._compaction_deferred_files == set()
+        assert service._compaction_deferred_removals == set()
+        assert service._compaction_deferred_directories == set()
+
+    @pytest.mark.asyncio
+    async def test_replay_deferred_directory_generic_failure_preserves_state(
+        self, tmp_path: Path
+    ):
+        """Generic replay failures must not discard deferred directories."""
+        base_dir = tmp_path.resolve()
+
+        class Provider:
+            def get_base_directory(self) -> Path:
+                return base_dir
+
+            async def get_scope_file_paths_async(
+                self, scope_prefix: str | None
+            ) -> list[str]:
+                raise RuntimeError("lookup failed")
+
+        service = RealtimeIndexingService(
+            SimpleNamespace(provider=Provider()),
+            SimpleNamespace(),
+        )
+        deleted_dir = normalize_file_path(tmp_path / "gone")
+        service._compaction_deferred_directories.add(deleted_dir)
+
+        with pytest.raises(RuntimeError, match="lookup failed"):
+            await service.replay_compaction_deferred_directory(deleted_dir)
+
+        assert deleted_dir in service._compaction_deferred_directories
+
+    @pytest.mark.asyncio
+    async def test_dir_deleted_event_task_done_when_cleanup_raises(
+        self, tmp_path: Path
+    ):
+        """Consumed directory-delete events must be acknowledged on errors."""
+        base_dir = tmp_path.resolve()
+
+        class Provider:
+            def get_base_directory(self) -> Path:
+                return base_dir
+
+            async def get_scope_file_paths_async(
+                self, scope_prefix: str | None
+            ) -> list[str]:
+                raise CompactionError("busy", operation="search")
+
+        service = RealtimeIndexingService(
+            SimpleNamespace(provider=Provider()),
+            SimpleNamespace(),
+        )
+
+        await service.event_queue.put(("dir_deleted", tmp_path / "gone"))
+        consumer = asyncio.create_task(service._consume_events())
+
+        await asyncio.wait_for(service.event_queue.join(), timeout=1.0)
+
+        service._stopping = True
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+
+    @pytest.mark.asyncio
+    async def test_drain_compaction_deferred_file_work_is_atomic(self, tmp_path: Path):
+        """Deferred files/removals must be snapshotted and cleared together."""
+        service = RealtimeIndexingService(SimpleNamespace(provider=object()), SimpleNamespace())
+        kept = normalize_file_path(tmp_path / "kept.py")
+        removed = normalize_file_path(tmp_path / "removed.py")
+
+        async with service._file_condition:
+            service._compaction_deferred_files.update({kept, removed})
+            service._compaction_deferred_removals.add(removed)
+
+        drained_files, drained_removals = (
+            await service.drain_compaction_deferred_file_work()
+        )
+
+        assert drained_files == {kept, removed}
+        assert drained_removals == {removed}
+        assert service._compaction_deferred_files == set()
+        assert service._compaction_deferred_removals == set()
+
+    @pytest.mark.asyncio
+    async def test_deleted_directory_cleanup_deletes_every_scoped_path(
+        self, tmp_path: Path
+    ):
+        """Cleanup must replay every provider-reported path without truncation."""
+        base_dir = tmp_path.resolve()
+        deleted = [f"gone/file_{index}.py" for index in range(1205)]
+        deleted_calls: list[str] = []
+
+        class Provider:
+            def get_base_directory(self) -> Path:
+                return base_dir
+
+            async def get_scope_file_paths_async(
+                self, scope_prefix: str | None
+            ) -> list[str]:
+                assert scope_prefix == "gone/"
+                return deleted
+
+            async def delete_file_completely_async(self, path: str) -> None:
+                deleted_calls.append(path)
+
+        service = RealtimeIndexingService(
+            SimpleNamespace(provider=Provider()),
+            SimpleNamespace(),
+        )
+
+        await service._cleanup_deleted_directory(str(base_dir / "gone"))
+
+        assert deleted_calls == deleted
+
+    @pytest.mark.asyncio
+    async def test_deleted_directory_cleanup_provider_scope_removes_only_deleted_prefix(
+        self, realtime_setup
+    ):
+        """Deleted directory cleanup must use stored path scope, not content regex."""
+        service, watch_dir, _, services = realtime_setup
+
+        src_dir = watch_dir / "src"
+        src2_dir = watch_dir / "src2"
+        src_dir.mkdir()
+        src2_dir.mkdir()
+        deleted_file = src_dir / "gone.py"
+        sibling_file = src2_dir / "stay.py"
+        deleted_file.write_text("def unique_deleted_symbol():\n    return 'keep path out'\n")
+        sibling_file.write_text("def unique_sibling_symbol():\n    return 'also pathless'\n")
+
+        await services.indexing_coordinator.process_file(deleted_file)
+        await services.indexing_coordinator.process_file(sibling_file)
+
+        before_deleted, _ = services.provider.search_regex("unique_deleted_symbol")
+        before_sibling, _ = services.provider.search_regex("unique_sibling_symbol")
+        assert len(before_deleted) == 1
+        assert len(before_sibling) == 1
+
+        shutil.rmtree(src_dir)
+        await service._cleanup_deleted_directory(str(src_dir))
+
+        after_deleted, _ = services.provider.search_regex("unique_deleted_symbol")
+        after_sibling, _ = services.provider.search_regex("unique_sibling_symbol")
+        assert len(after_deleted) == 0
+        assert len(after_sibling) == 1
 
     @pytest.mark.asyncio
     @pytest.mark.native_watcher
@@ -466,11 +797,15 @@ class TestRealtimeFailures:
         async with service._file_condition:
             service.failed_files.add(failed)
             service._compaction_deferred_files.add(deferred)
+            service._compaction_deferred_removals.add(deferred)
+            service._compaction_deferred_directories.add(str(watch_dir / "deleted"))
 
         await service.clear_compaction_deferred_files()
 
         assert failed in service.failed_files
         assert deferred not in service._compaction_deferred_files
+        assert deferred not in service._compaction_deferred_removals
+        assert service._compaction_deferred_directories == set()
         stats = await service.get_stats()
         assert stats["failed_files"] == 1
 
