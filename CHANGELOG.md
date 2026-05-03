@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Enhanced
 - **MCP tool routing** — `code_research` and `search` tool descriptions rewritten for improved LLM routing; cross-references between tools are shown or hidden dynamically based on whether an LLM provider is configured.
+- **Daemon overlap guard** — A user-scoped daemon registry is now validated against each project's `daemon.lock` before startup, preventing live parent/child root overlaps (e.g., running daemons for `/workspace` and `/workspace/project` simultaneously). Exact-root reuse across restarts is preserved; sibling roots are allowed.
 - **`ChunkType.IMPORT`** — Import statements across all languages now use a dedicated chunk type instead of falling through to `UNKNOWN`, improving search precision.
 - **Chunk size enforcement** — All parsers now enforce a central size guard before DB persistence; oversized chunks are split automatically, preventing embedding API failures.
 - **Windows compatibility** — Cross-platform temp directory handling for Claude Code CLI provider; `shutil.which` replaces Unix-only `which` for git binary detection.
