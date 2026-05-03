@@ -13,9 +13,8 @@ import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from loguru import logger
-
 import pytest
+from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
@@ -1016,10 +1015,10 @@ class TestDuckDBProviderOptimize:
 
         assert lock_path.exists(), "Foreign lock file was incorrectly deleted"
 
-    def test_post_compaction_reconnect_skips_terminal_cleanup_provider(
+    def test_post_compaction_reconnect_fails_for_terminal_cleanup_provider(
         self, provider_with_fragmentation: tuple
     ):
-        """Reconnect helper must not call connect() after terminal stuck cleanup."""
+        """Reconnect helper must surface terminal cleanup as CompactionError."""
         provider, _db_path = provider_with_fragmentation
 
         provider.mark_terminal_after_stuck_cleanup()
@@ -1030,8 +1029,13 @@ class TestDuckDBProviderOptimize:
             "connect",
             side_effect=AssertionError("connect() must be skipped"),
         ):
-            provider._restore_connection_after_compaction()
+            with pytest.raises(
+                CompactionError, match="terminal stuck-cleanup state"
+            ) as exc_info:
+                provider._restore_connection_after_compaction()
 
+        assert exc_info.value.operation == "compaction"
+        assert exc_info.value.recoverable is False
         assert not provider.is_accepting_connections
 
 
