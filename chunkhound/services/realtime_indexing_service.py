@@ -10,7 +10,7 @@ import gc
 import threading
 import time
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from loguru import logger
@@ -19,6 +19,7 @@ from watchdog.observers import Observer
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions import CompactionError
+from chunkhound.core.utils.path_utils import normalize_path_for_lookup
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
@@ -238,6 +239,8 @@ class RealtimeIndexingService:
         self.pending_files: set[Path] = set()
         self.failed_files: set[str] = set()
         self._compaction_deferred_files: set[str] = set()
+        self._compaction_deferred_removals: set[str] = set()
+        self._compaction_deferred_directories: set[str] = set()
 
         # Simple debouncing for rapid file changes
         self._pending_debounce: dict[str, float] = {}  # file_path -> timestamp
@@ -298,6 +301,40 @@ class RealtimeIndexingService:
             # Never let debug plumbing affect runtime
             pass
 
+    async def _defer_compaction_removal(self, path: Path | str) -> None:
+        """Defer a file deletion for later replay after compaction completes.
+
+        Maintains the invariant: _compaction_deferred_removals is a subset of
+        _compaction_deferred_files by adding the path to both sets.
+        """
+        normalized = normalize_file_path(path)
+        async with self._file_condition:
+            self.failed_files.discard(normalized)
+            self._compaction_deferred_files.add(normalized)
+            self._compaction_deferred_removals.add(normalized)
+            self._file_condition.notify_all()
+
+    async def _defer_compaction_directory(self, path: Path | str) -> None:
+        """Defer a deleted-directory cleanup for later replay after compaction.
+
+        Called when _cleanup_deleted_directory cannot complete because
+        compaction is in progress or the lookup fails.
+        """
+        normalized = normalize_file_path(path)
+        async with self._file_condition:
+            self._compaction_deferred_directories.add(normalized)
+            self._file_condition.notify_all()
+
+    async def drain_compaction_deferred_file_work(self) -> tuple[set[str], set[str]]:
+        """Atomically drain deferred file work and deferred removals together."""
+        async with self._file_condition:
+            drained_files = set(self._compaction_deferred_files)
+            drained_removals = set(self._compaction_deferred_removals)
+            self._compaction_deferred_files.clear()
+            self._compaction_deferred_removals.clear()
+            self._file_condition.notify_all()
+            return drained_files, drained_removals
+
     async def start(self, watch_path: Path) -> None:
         """Start real-time indexing service."""
         # Resolve path to canonical form for Windows 8.3 short name handling
@@ -310,6 +347,8 @@ class RealtimeIndexingService:
         self._removed_files.clear()
         self.failed_files.clear()
         self._compaction_deferred_files.clear()
+        self._compaction_deferred_removals.clear()
+        self._compaction_deferred_directories.clear()
         logger.debug(f"Starting real-time indexing for {watch_path}")
         self._debug(f"start watch on {watch_path}")
 
@@ -494,9 +533,7 @@ class RealtimeIndexingService:
             time.sleep(0.01)
 
         if self.observer.is_alive():
-            logger.debug(
-                f"Started recursive filesystem monitoring for {watch_path}"
-            )
+            logger.debug(f"Started recursive filesystem monitoring for {watch_path}")
         else:
             raise RuntimeError("Observer failed to start within timeout")
 
@@ -663,6 +700,8 @@ class RealtimeIndexingService:
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""
         while not self._stopping:
+            event_type = None
+            file_path = None
             try:
                 # Get event from async queue with timeout
                 try:
@@ -691,7 +730,6 @@ class RealtimeIndexingService:
                             f"Suppressing duplicate {event_type} event for {file_path} (within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)"
                         )
                         self._debug(f"suppressed duplicate {event_type}: {file_path}")
-                        self.event_queue.task_done()
                         continue
 
                 # Record this event
@@ -725,13 +763,17 @@ class RealtimeIndexingService:
                     await self._cleanup_deleted_directory(str(file_path))
                     self._debug(f"event dir_deleted: {file_path}")
 
-                self.event_queue.task_done()
-
             except asyncio.CancelledError:
                 raise
+            except CompactionError:
+                # Expected during compaction — directory was deferred internally
+                pass
             except Exception as e:
                 logger.error(f"Error consuming event: {e}")
                 await asyncio.sleep(0.1)  # Brief pause on error
+            finally:
+                if event_type is not None:
+                    self.event_queue.task_done()
 
     async def remove_file(self, file_path: Path) -> None:
         """Remove file from database."""
@@ -743,6 +785,7 @@ class RealtimeIndexingService:
             async with self._file_condition:
                 self.failed_files.discard(normalized)
                 self._compaction_deferred_files.discard(normalized)
+                self._compaction_deferred_removals.discard(normalized)
                 self._removed_files.add(normalized)
                 self._file_condition.notify_all()
         except CompactionError:
@@ -750,15 +793,13 @@ class RealtimeIndexingService:
                 f"Compaction in progress, deferring removal of {file_path} — "
                 "will be retried on next event or reindex"
             )
-            async with self._file_condition:
-                self.failed_files.discard(normalized)
-                self._compaction_deferred_files.add(normalized)
-                self._file_condition.notify_all()
+            await self._defer_compaction_removal(normalized)
         except Exception as e:
             logger.error(f"Error removing file {file_path}: {e}")
             async with self._file_condition:
                 self.failed_files.add(normalized)
                 self._compaction_deferred_files.discard(normalized)
+                self._compaction_deferred_removals.discard(normalized)
                 self._file_condition.notify_all()
 
     async def _add_directory_watch(self, dir_path: str) -> None:
@@ -787,27 +828,48 @@ class RealtimeIndexingService:
 
     async def _cleanup_deleted_directory(self, dir_path: str) -> None:
         """Clean up database entries for files in a deleted directory."""
+        provider = self.services.provider
         try:
-            # Get all files that were in this directory from database
-            # Use the provider's search capability to find files with this path prefix
-            search_results, _ = await self.services.provider.search_regex_async(
-                pattern=f"^{dir_path}/.*",
-                page_size=1000,  # Large page to get all matches
+            relative_dir = normalize_path_for_lookup(
+                dir_path,
+                provider.get_base_directory(),
             )
+            scope_prefix = None if relative_dir in {"", "."} else f"{relative_dir}/"
+            file_paths = await provider.get_scope_file_paths_async(scope_prefix)
+
+            cleaned_count = 0
+            deferred_count = 0
 
             # Delete each file found in the directory
-            for result in search_results:
-                file_path = result.get("file_path", result.get("path", ""))
-                if file_path:
-                    logger.debug(f"Cleaning up deleted file: {file_path}")
-                    await self.services.provider.delete_file_completely_async(file_path)
+            for file_path in file_paths:
+                logger.debug(f"Cleaning up deleted file: {file_path}")
+                try:
+                    await provider.delete_file_completely_async(file_path)
+                    cleaned_count += 1
+                except CompactionError:
+                    logger.debug(
+                        "Compaction in progress, deferring directory cleanup "
+                        f"removal of {file_path}"
+                    )
+                    await self._defer_compaction_removal(
+                        provider.get_base_directory() / file_path
+                    )
+                    deferred_count += 1
 
             logger.info(
-                f"Cleaned up {len(search_results)} files from deleted directory: {dir_path}"
+                f"Cleaned up {cleaned_count} files from deleted directory: {dir_path}; "
+                f"deferred {deferred_count} during compaction"
             )
 
+        except CompactionError:
+            await self._defer_compaction_directory(dir_path)
+            logger.debug(
+                f"Compaction blocked cleanup lookup for deleted directory {dir_path}"
+            )
+            raise
         except Exception as e:
             logger.error(f"Error cleaning up deleted directory {dir_path}: {e}")
+            raise
 
     async def _index_directory(self, dir_path: Path) -> None:
         """Index files in a newly created directory."""
@@ -853,8 +915,21 @@ class RealtimeIndexingService:
                     logger.debug(f"Skipping {file_path} - file no longer exists")
                     async with self._file_condition:
                         normalized = normalize_file_path(file_path)
+                        if normalized in self._compaction_deferred_removals:
+                            self._file_condition.notify_all()
+                            continue
+                        # Skip if any parent directory cleanup is deferred — the
+                        # file's absence is expected, not a genuine failure.
+                        parent_deferred = any(
+                            PurePath(normalized).is_relative_to(PurePath(dir_path))
+                            for dir_path in self._compaction_deferred_directories
+                        )
+                        if parent_deferred:
+                            self._file_condition.notify_all()
+                            continue
                         self.failed_files.add(normalized)
                         self._compaction_deferred_files.discard(normalized)
+                        self._compaction_deferred_removals.discard(normalized)
                         self._file_condition.notify_all()
                     continue
 
@@ -886,6 +961,7 @@ class RealtimeIndexingService:
                 async with self._file_condition:
                     self.failed_files.discard(normalized)
                     self._compaction_deferred_files.discard(normalized)
+                    self._compaction_deferred_removals.discard(normalized)
                     self._indexed_files.add(normalized)
                     self._file_condition.notify_all()
 
@@ -922,7 +998,9 @@ class RealtimeIndexingService:
                     "will be picked up on next event or reindex"
                 )
                 async with self._file_condition:
-                    self._compaction_deferred_files.add(normalize_file_path(file_path))
+                    normalized = normalize_file_path(file_path)
+                    self._compaction_deferred_files.add(normalized)
+                    self._compaction_deferred_removals.discard(normalized)
                     self._file_condition.notify_all()
             except Exception as e:
                 logger.error(f"Error processing {file_path}: {e}")
@@ -931,6 +1009,7 @@ class RealtimeIndexingService:
                     normalized = normalize_file_path(file_path)
                     self.failed_files.add(normalized)
                     self._compaction_deferred_files.discard(normalized)
+                    self._compaction_deferred_removals.discard(normalized)
                     self._file_condition.notify_all()
                 # Continue processing other files
 
@@ -969,9 +1048,82 @@ class RealtimeIndexingService:
             self._compaction_deferred_files.update(paths)
             self._file_condition.notify_all()
 
+    async def drain_compaction_deferred_removals(self) -> set[str]:
+        """Atomically remove and return deferred delete records."""
+        async with self._file_condition:
+            drained = set(self._compaction_deferred_removals)
+            self._compaction_deferred_removals.clear()
+            self._file_condition.notify_all()
+            return drained
+
+    async def restore_compaction_deferred_removals(self, paths: set[str]) -> None:
+        """Restore deferred delete records after a failed catch-up replay.
+
+        Also restores paths into _compaction_deferred_files to maintain the
+        invariant: _compaction_deferred_removals ⊆ _compaction_deferred_files.
+        """
+        if not paths:
+            return
+        async with self._file_condition:
+            self._compaction_deferred_removals.update(paths)
+            self._compaction_deferred_files.update(paths)
+            self._file_condition.notify_all()
+
+    async def drain_compaction_deferred_directories(self) -> set[str]:
+        """Atomically remove and return deferred deleted-directory cleanups."""
+        async with self._file_condition:
+            drained = set(self._compaction_deferred_directories)
+            self._compaction_deferred_directories.clear()
+            self._file_condition.notify_all()
+            return drained
+
+    async def restore_compaction_deferred_directories(self, paths: set[str]) -> None:
+        """Restore deferred deleted-directory cleanups after failed replay."""
+        if not paths:
+            return
+        async with self._file_condition:
+            self._compaction_deferred_directories.update(paths)
+            self._file_condition.notify_all()
+
+    async def replay_compaction_deferred_directory(self, path: str) -> None:
+        """Replay one deferred deleted-directory cleanup after compaction."""
+        normalized = normalize_file_path(path)
+        logger.debug(f"Replaying deferred directory cleanup: {normalized}")
+        await self._cleanup_deleted_directory(normalized)
+        async with self._file_condition:
+            self._compaction_deferred_directories.discard(normalized)
+            self._file_condition.notify_all()
+        logger.debug(f"Completed deferred directory cleanup: {normalized}")
+
+    async def replay_compaction_deferred_removal(self, path: str) -> None:
+        """Replay one deferred delete event after compaction."""
+        normalized = normalize_file_path(path)
+        try:
+            await self.services.provider.delete_file_completely_async(normalized)
+        except CompactionError:
+            await self._defer_compaction_removal(normalized)
+            raise
+        except Exception:
+            async with self._file_condition:
+                self.failed_files.add(normalized)
+                self._compaction_deferred_files.discard(normalized)
+                self._compaction_deferred_removals.discard(normalized)
+                self._file_condition.notify_all()
+            raise
+        else:
+            async with self._file_condition:
+                self.failed_files.discard(normalized)
+                self._compaction_deferred_files.discard(normalized)
+                self._compaction_deferred_removals.discard(normalized)
+                self._removed_files.add(normalized)
+                self._file_condition.notify_all()
+            logger.debug(f"Completed deferred removal replay: {normalized}")
+
     async def clear_compaction_deferred_files(self) -> None:
         """Clear stale compaction-deferral records under the file condition lock."""
         await self.drain_compaction_deferred_files()
+        await self.drain_compaction_deferred_removals()
+        await self.drain_compaction_deferred_directories()
 
     async def wait_for_monitoring_ready(self, timeout: float = 10.0) -> bool:
         """Wait for filesystem monitoring to be ready."""
@@ -1003,6 +1155,7 @@ class RealtimeIndexingService:
                     lambda: normalized in self._indexed_files
                     or normalized in self.failed_files
                     or normalized in self._compaction_deferred_files
+                    or normalized in self._compaction_deferred_removals
                     or self._stopping
                 )
 
@@ -1029,6 +1182,7 @@ class RealtimeIndexingService:
                     lambda: normalized in self._removed_files
                     or normalized in self.failed_files
                     or normalized in self._compaction_deferred_files
+                    or normalized in self._compaction_deferred_removals
                     or self._stopping
                 )
 
@@ -1049,3 +1203,4 @@ class RealtimeIndexingService:
         self._removed_files.discard(normalized)
         self.failed_files.discard(normalized)
         self._compaction_deferred_files.discard(normalized)
+        self._compaction_deferred_removals.discard(normalized)
