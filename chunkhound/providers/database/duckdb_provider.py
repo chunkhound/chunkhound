@@ -614,14 +614,29 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             result = mutation_func()
 
-            for index_info in existing_indexes:
-                self._executor_recreate_vector_index_from_info(
-                    conn, state, index_info
-                )
-
             if transactional:
-                self._executor_commit_transaction(conn, state, True)
+                # Commit before recreating HNSW indexes. DuckDB's experimental HNSW
+                # persistence crashes (SIGSEGV) when committing a transaction that both
+                # dropped and recreated an HNSW index in the same transaction. Committing
+                # first (with only the non-HNSW mutation) then recreating HNSW outside
+                # the transaction avoids this bug.
+                self._executor_commit_transaction(conn, state, False)
+                for index_info in existing_indexes:
+                    try:
+                        self._executor_recreate_vector_index_from_info(
+                            conn, state, index_info
+                        )
+                    except Exception as recreate_error:
+                        logger.warning(
+                            f"HNSW index restore failed after commit ({mutation_label}): "
+                            f"{index_info['index_name']}: {recreate_error}"
+                        )
+                self._executor_maybe_checkpoint(conn, state, True)
             else:
+                for index_info in existing_indexes:
+                    self._executor_recreate_vector_index_from_info(
+                        conn, state, index_info
+                    )
                 self._executor_maybe_checkpoint(conn, state, True)
             return result
         except Exception as e:
