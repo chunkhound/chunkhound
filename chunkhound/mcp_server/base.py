@@ -470,7 +470,15 @@ class MCPServerBase(ABC):
             self.debug_log(f"Background compaction failed to start: {e}", always=True)
 
     async def _post_compaction_reindex(self, is_recovery_retry: bool = False) -> None:
-        """Callback after compaction - triggers full reindex.
+        """Callback after compaction — replays deferred work then reindexes.
+
+        Execution order:
+        1. Replay deferred directory cleanups (must run first — affects file existence)
+        2. Replay deferred file removals (deletes stale DB entries)
+        3. Full directory reindex (force, mtime skip unreliable post-compaction)
+
+        On any failure, only unresolved work is restored — successfully processed
+        items are never re-added to deferred sets.
 
         Post-compaction the DB was rebuilt from a Parquet export, so stored
         mtimes may not reflect reality (especially on Windows where mtime
@@ -480,6 +488,11 @@ class MCPServerBase(ABC):
         if not self.services or not self._target_path:
             self.debug_log(
                 "Skipping post-compaction reindex: services or target unavailable"
+            )
+            return
+        if not self.realtime_indexing:
+            self.debug_log(
+                "Skipping post-compaction reindex: realtime indexing unavailable"
             )
             return
 
@@ -492,13 +505,47 @@ class MCPServerBase(ABC):
             else:
                 self.debug_log("Starting post-compaction reindex...")
             drained_deferred_files: set[str] = set()
+            drained_deferred_removals: set[str] = set()
+            drained_deferred_directories: set[str] = set()
+            non_removal_deferred_files: set[str] = set()
+            remaining_unattempted_removals: set[str] = set()
+            remaining_unattempted_directories: set[str] = set()
+            current_removal: str | None = None
+            current_directory: str | None = None
 
             # Clear only stale compaction deferrals before reindex.
             # Genuine realtime failures remain visible until they are resolved.
-            if self.realtime_indexing:
-                drained_deferred_files = (
-                    await self.realtime_indexing.drain_compaction_deferred_files()
+            drained_deferred_directories = (
+                await self.realtime_indexing.drain_compaction_deferred_directories()
+            )
+            remaining_unattempted_directories = set(
+                drained_deferred_directories
+            )
+            for path in sorted(drained_deferred_directories):
+                current_directory = path
+                remaining_unattempted_directories.discard(path)
+                await self.realtime_indexing.replay_compaction_deferred_directory(
+                    path
                 )
+                current_directory = None
+
+            (
+                drained_deferred_files,
+                drained_deferred_removals,
+            ) = await self.realtime_indexing.drain_compaction_deferred_file_work()
+            remaining_unattempted_removals = set(drained_deferred_removals)
+            non_removal_deferred_files = (
+                drained_deferred_files - drained_deferred_removals
+            )
+
+            if drained_deferred_removals:
+                for path in sorted(drained_deferred_removals):
+                    current_removal = path
+                    remaining_unattempted_removals.discard(path)
+                    await self.realtime_indexing.replay_compaction_deferred_removal(
+                        path
+                    )
+                    current_removal = None
 
             # Force reindex: the DB was rebuilt from export, mtime-based
             # skip logic is unreliable after compaction.
@@ -527,16 +574,59 @@ class MCPServerBase(ABC):
             self._mark_background_compaction_success()
 
         except Exception as e:
-            if self.realtime_indexing and drained_deferred_files:
+            failure_details: list[str] = [str(e)]
+            retryable_directories = set(remaining_unattempted_directories)
+            if current_directory is not None:
+                retryable_directories.add(current_directory)
+                if isinstance(e, CompactionError):
+                    failure_details.append(
+                        f"deferred directory cleanup blocked by compaction for "
+                        f"{current_directory}: {e}"
+                    )
+                else:
+                    failure_details.append(
+                        "deferred directory cleanup failed for "
+                        f"{current_directory}: {e}"
+                    )
+
+            retryable_removals = set(remaining_unattempted_removals)
+            if current_removal is not None:
+                failure_details.append(
+                    f"deferred removal replay failed for {current_removal}: {e}"
+                )
+                retryable_removals.add(current_removal)
+            failure_detail = "; ".join(d for d in failure_details if d)
+            # If no removals were drained, all deferred files are legitimate
+            # indexing work. Otherwise, restore only non-removal files plus
+            # retryable removals — never restore a successfully deleted file.
+            restore_files = (
+                drained_deferred_files
+                if not drained_deferred_removals
+                else non_removal_deferred_files | retryable_removals
+            )
+
+            if retryable_directories:
+                await self.realtime_indexing.restore_compaction_deferred_directories(
+                    retryable_directories
+                )
+            if restore_files:
                 await self.realtime_indexing.restore_compaction_deferred_files(
-                    drained_deferred_files
+                    restore_files
+                )
+            if retryable_removals:
+                await self.realtime_indexing.restore_compaction_deferred_removals(
+                    retryable_removals
                 )
             self._mark_background_compaction_failure(
                 e,
                 pending_recovery=True,
                 retry_attempted=is_recovery_retry,
             )
-            self.debug_log(f"Post-compaction reindex failed: {e}", always=True)
+            self._background_compaction_status()["last_error"] = failure_detail
+            self.debug_log(
+                f"Post-compaction reindex failed: {failure_detail}",
+                always=True,
+            )
             raise
 
     async def cleanup(self) -> None:
