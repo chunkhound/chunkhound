@@ -323,6 +323,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
+        self.ensure_usable("connect provider")
         try:
             # Validate stored indexed-root identity before any file-backed DB
             # open, WAL replay, extension load, or schema touch happens.
@@ -4339,10 +4340,12 @@ class DuckDBProvider(SerialDatabaseProvider):
     def _restore_connection_after_compaction(self) -> None:
         """Reconnect after compaction unless cleanup has made the provider terminal."""
         if self.terminal_after_stuck_cleanup:
-            logger.warning(
-                "Skipping post-compaction reconnect after terminal stuck-cleanup state"
+            raise CompactionError(
+                "Compaction cannot restore the database connection after terminal "
+                "stuck-cleanup state",
+                operation="compaction",
+                recoverable=False,
             )
-            return
         self._connection_allowed.set()
         self.connect()
 
