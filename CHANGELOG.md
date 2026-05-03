@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Elixir language support** — Full Elixir parsing (32nd language) via tree-sitter-elixir: modules, functions, macros, protocols, structs, specs, and import/alias/require statements.
 - **TwinCAT/Structured Text parser** — IEC 61131-3 Structured Text (`.TcPOU`) files for PLC development are now fully searchable.
+- **HTML, CSS, SCSS, and Jinja parsers** — Full tree-sitter parsing for web languages: HTML (`.html`, `.htm`, `.xhtml`), CSS (`.css`), SCSS/Sass (`.scss`, `.sass`), and Jinja templates (`.jinja`, `.j2`, `.njk`, `.erb`, `.ejs`). SCSS preprocessing handles `#{...}` interpolations for correct AST byte offsets. Import resolution is supported for all four languages.
 - **Grok (xAI) LLM provider** — xAI Grok models are now supported for deep code research via the `code_research` tool.
 - **Matryoshka embeddings** — OpenAI and VoyageAI providers now support Matryoshka truncation for flexible vector dimensions; default OpenAI model upgraded to `text-embedding-3-large`.
 - **`openai_compatible` embedding provider** — Connect any OpenAI-compatible embedding endpoint with configurable SSL verification, auth, and dimension support.
@@ -64,6 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **VoyageAI `api_base`→`base_url`** — voyageai ≥0.3.7 renamed the parameter; ChunkHound now detects the correct key at runtime, preventing Azure ML endpoint rejections.
 - **`tree-sitter-language-pack` 1.0.0 incompatibility** — Pinned to `<1.0.0` to prevent fresh installs from pulling the breaking release that made YAML, MATLAB, Swift, and other language-pack parsers fail at startup.
 - **Global chunk deduplication** — YAML and Universal parsers now participate in chunk deduplication, preventing duplicate chunk IDs that caused indexing failures on repeated config values.
+- **`hdbscan` startup crash under numpy 2.x** — Replaced `hdbscan` package (which uses the numpy 1.x ABI) with `sklearn.cluster.HDBSCAN` (already a dependency), eliminating MCP daemon startup failures on systems running numpy 2.x.
+- **Windows MCP unicode safety** — MCP server stdout on Windows is now reconfigured with `errors='backslashreplace'` to prevent crashes when source files contain non-UTF-8 bytes; applied to both `main()` and `main_sync()` entry points (fixes #225).
 
 ### Removed
 - **HTTP MCP transport** — `chunkhound mcp http`, `--http`, `--port`, `--host` removed. Migrate to `chunkhound mcp` (stdio).
