@@ -7,14 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-04-16
+
 ### Breaking Changes
-- **HTTP MCP server removed** - ChunkHound now supports stdio transport only for MCP connections
-  - `chunkhound mcp http` command removed
-  - `--http`, `--port`, `--host` CLI flags removed
-  - FastMCP dependency removed
-  - Migration: Use `chunkhound mcp` (stdio) instead. All major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
-  - Rationale: Simplified codebase, reduced dependencies, focused on primary use case (stdio is the standard for MCP)
-- **Unsupported file types no longer indexed as plain text** - Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (.txt, .log, .cfg, .conf, .ini) are unaffected.
+- **HTTP MCP server removed** — `chunkhound mcp http` command removed along with `--http`, `--port`, and `--host` flags; FastMCP dependency removed. Use `chunkhound mcp` (stdio) instead — all major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
+- **Unsupported file types no longer indexed** — Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (`.txt`, `.log`, `.cfg`, `.conf`, `.ini`) are unaffected.
 - **Anthropic provider upgraded to Claude Opus 4.7/4.6 and Sonnet 4.6**
   - `anthropic` dependency minimum bumped to `>=0.96.0,<1.0.0`
   - Default synthesis model changed from `claude-sonnet-4-5-20250929` to `claude-sonnet-4-6`
@@ -25,42 +22,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Invalid `thinking_mode` values and sub-20000 `task_budget_tokens` now raise `ValueError` instead of warning-and-coercing.
 
 ### Added
-- **Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 support** - adaptive thinking mode (auto / off / manual / adaptive selector), expanded effort levels (`low`, `medium`, `high`, `xhigh` (Opus 4.7 only), `max` (4.6+)), automatic prompt caching with configurable TTL (`5m` / `1h`), and the task-budgets beta (Opus 4.7 only, advisory cap for agentic loops, min 20000 tokens).
-- New `LLMConfig` fields (and matching `CHUNKHOUND_LLM_ANTHROPIC_*` env vars and `--llm-anthropic-*` CLI flags): `anthropic_thinking_mode`, `anthropic_thinking_display`, `anthropic_prompt_caching`, `anthropic_cache_ttl`, `anthropic_task_budget_tokens`. The pre-existing `anthropic_thinking_enabled`, `anthropic_thinking_budget_tokens`, `anthropic_interleaved_thinking`, `anthropic_effort`, `anthropic_context_management_enabled`, and `anthropic_clear_*` fields are now also readable from env and CLI.
-- **Embedded SQL detection** - SQL code embedded in string literals is now detected and indexed by default across Python, Java, JavaScript, TypeScript, C#, Go, Rust, and PHP. Disable with `--no-detect-embedded-sql` or `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL=false`.
-- OpenAI Responses API support for reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) - enables deep code research with enhanced reasoning capabilities
-- Automatic API routing between Chat Completions and Responses API based on model compatibility - supports 30+ models including all GPT-5, GPT-4.1, GPT-4o, and o-series models
-- Reasoning effort control for deep research LLM operations - configurable levels (none, minimal, low, medium, high) via `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` with per-role overrides for utility and synthesis operations
-- Structured JSON output support for Responses API - maintains schema validation consistency across both Chat Completions and Responses endpoints
-- Watchman live-indexing operator docs covering the private `.chunkhound/watchman/` sidecar, fail-fast startup/no implicit fallback behavior, `daemon_status` health interpretation, and the rollout/default-switch gate for making Watchman the primary backend
+- **Elixir language support** — Full Elixir parsing (32nd language) via tree-sitter-elixir: modules, functions, macros, protocols, structs, specs, and import/alias/require statements.
+- **TwinCAT/Structured Text parser** — IEC 61131-3 Structured Text (`.TcPOU`) files for PLC development are now fully searchable.
+- **HTML, CSS, SCSS, and Jinja parsers** — Full tree-sitter parsing for web languages: HTML (`.html`, `.htm`, `.xhtml`), CSS (`.css`), SCSS/Sass (`.scss`, `.sass`), and Jinja templates (`.jinja`, `.j2`, `.njk`, `.erb`, `.ejs`). SCSS preprocessing handles `#{...}` interpolations for correct AST byte offsets. Import resolution is supported for all four languages.
+- **Grok (xAI) LLM provider** — xAI Grok models are now supported for deep code research via the `code_research` tool.
+- **Matryoshka embeddings** — OpenAI and VoyageAI providers now support Matryoshka truncation for flexible vector dimensions; default OpenAI model upgraded to `text-embedding-3-large`.
+- **`openai_compatible` embedding provider** — Connect any OpenAI-compatible embedding endpoint with configurable SSL verification, auth, and dimension support.
+- **Azure OpenAI embeddings** — Native Azure OpenAI embedding support with `azure_endpoint`, `api_version`, and `azure_deployment` configuration options.
+- **VoyageAI ranking support** — VoyageAI provider now supports reranking for improved search result quality.
+- **Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 support** — Adaptive thinking mode (auto / off / manual / adaptive selector), expanded effort levels (`low`, `medium`, `high`, `xhigh` (Opus 4.7 only), `max` (4.6+)), automatic prompt caching with configurable TTL (`5m` / `1h`), and the task-budgets beta (Opus 4.7 only, advisory cap for agentic loops, min 20000 tokens).
+- **New `LLMConfig` fields** — `anthropic_thinking_mode`, `anthropic_thinking_display`, `anthropic_prompt_caching`, `anthropic_cache_ttl`, `anthropic_task_budget_tokens` (and matching `CHUNKHOUND_LLM_ANTHROPIC_*` env vars and `--llm-anthropic-*` CLI flags). The pre-existing `anthropic_thinking_enabled`, `anthropic_thinking_budget_tokens`, `anthropic_interleaved_thinking`, `anthropic_effort`, `anthropic_context_management_enabled`, and `anthropic_clear_*` fields are now also readable from env and CLI.
+- **Embedded SQL detection** — SQL embedded in string literals is detected and indexed by default across Python, Java, JavaScript, TypeScript, C#, Go, Rust, and PHP. Disable with `--no-detect-embedded-sql` or `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL=false`.
+- **OpenAI Responses API** — Deep code research now supports reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) via the Responses API, with automatic routing based on model compatibility across 30+ models.
+- **Reasoning effort control** — Configurable LLM reasoning effort (`none`/`minimal`/`low`/`medium`/`high`) for deep research via `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` with per-role overrides.
+- **Structured JSON output** — Responses API maintains schema validation consistency across both Chat Completions and Responses endpoints.
+- **Multi-client MCP daemon** — Multiple MCP clients can share a single DuckDB connection via a background daemon, eliminating lock conflicts in multi-session workflows.
+- **`--perf-diagnostics` mode** — `chunkhound index --perf-diagnostics` collects per-batch timing metrics and detects performance regressions via linear regression and z-score analysis, outputting a JSON diagnostics file.
+- **`--path-filter` for research** — `chunkhound research --path-filter <dir>` scopes deep code research to a subdirectory.
+- **PHP config-literal parsing** — PHP files with top-level `return [...]` arrays are now searchable.
+- **Universal config-literal parsing** — Exported configuration objects and arrays in Python, JavaScript, TypeScript, and JSX/TSX are now discoverable through semantic search.
+- **Watchman live-indexing operator docs** — Documents the private `.chunkhound/watchman/` sidecar, fail-fast startup/no-implicit-fallback behavior, `daemon_status` health interpretation, and the rollout/default-switch gate for making Watchman the primary backend.
 
 ### Changed
-- Watchman is now the default realtime backend only on supported native-runtime
-  platforms; `watchdog` and `polling` remain explicit fallback backends
+- **Watchman default backend** — Watchman is now the default realtime backend on supported native-runtime platforms; `watchdog` and `polling` remain explicit fallback backends.
+
+### Enhanced
+- **MCP tool routing** — `code_research` and `search` tool descriptions rewritten for improved LLM routing; cross-references between tools are shown or hidden dynamically based on whether an LLM provider is configured.
+- **Daemon overlap guard** — A user-scoped daemon registry is now validated against each project's `daemon.lock` before startup, preventing live parent/child root overlaps (e.g., running daemons for `/workspace` and `/workspace/project` simultaneously). Exact-root reuse across restarts is preserved; sibling roots are allowed.
+- **`ChunkType.IMPORT`** — Import statements across all languages now use a dedicated chunk type instead of falling through to `UNKNOWN`, improving search precision.
+- **Chunk size enforcement** — All parsers now enforce a central size guard before DB persistence; oversized chunks are split automatically, preventing embedding API failures.
+- **Windows compatibility** — Cross-platform temp directory handling for Claude Code CLI provider; `shutil.which` replaces Unix-only `which` for git binary detection.
+- **Version management** — Supports PEP 440 pre-release formats (alpha, beta, RC) with safety checks to prevent accidental releases from uncommitted work.
 
 ### Performance
-- LanceDB table creation now detects embedding dimensions upfront from configured embedding provider, eliminating O(n) table recreation penalty during first embedding insertion - significantly improves indexing performance for large codebases (e.g., 16,000+ chunks no longer require full table migration)
+- **LanceDB dimension detection** — Table creation now detects embedding dimensions upfront from the configured provider, eliminating the O(n) table recreation penalty during first embedding insertion for large codebases (e.g. 16,000+ chunks no longer require full table migration).
 
 ### Fixed
-- Global chunk deduplication now applies to all parsers (YAML, Universal) - prevents duplicate chunk IDs that caused indexing failures with repeated config values
+- **Cross-repo data loss** — Re-indexing a subdirectory in a shared workspace no longer deletes other repositories' data from the database (fixes #87).
+- **Global gitignore false exclusions** — `~/.gitignore` was incorrectly used as a global excludes fallback, causing all files to be excluded when a dotfiles repo contained broad patterns like `*` (fixes #216).
+- **MCP startup error visibility** — DuckDB lock conflicts and config validation errors now surface as JSON-RPC error responses instead of silently exiting, with a specific hint to kill stale processes on lock conflicts.
+- **Gemini LLM timeout** — All `code_research` calls no longer fail immediately; the 120s timeout was being passed as 120ms to the google-genai SDK.
+- **Gemini LLM initialization** — Gemini provider no longer fails to register when `base_url` is present in config, restoring `code_research` availability.
+- **VoyageAI `api_base`→`base_url`** — voyageai ≥0.3.7 renamed the parameter; ChunkHound now detects the correct key at runtime, preventing Azure ML endpoint rejections.
+- **`tree-sitter-language-pack` 1.0.0 incompatibility** — Pinned to `<1.0.0` to prevent fresh installs from pulling the breaking release that made YAML, MATLAB, Swift, and other language-pack parsers fail at startup.
+- **Global chunk deduplication** — YAML and Universal parsers now participate in chunk deduplication, preventing duplicate chunk IDs that caused indexing failures on repeated config values.
+- **`hdbscan` startup crash under numpy 2.x** — Replaced `hdbscan` package (which uses the numpy 1.x ABI) with `sklearn.cluster.HDBSCAN` (already a dependency), eliminating MCP daemon startup failures on systems running numpy 2.x.
+- **Windows MCP unicode safety** — MCP server stdout on Windows is now reconfigured with `errors='backslashreplace'` to prevent crashes when source files contain non-UTF-8 bytes; applied to both `main()` and `main_sync()` entry points (fixes #225).
 
 ### Removed
-- `CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY` config - optimization now runs once at indexing end
+- **HTTP MCP transport** — `chunkhound mcp http`, `--http`, `--port`, `--host` removed. Migrate to `chunkhound mcp` (stdio).
+- **`CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY`** — Database optimization now runs once at indexing end; the per-batch frequency config option is removed.
 
 ## [4.1.0b1] - 2025-11-15
 
 ### Added
-- PHP configuration files with top-level return arrays are now searchable - config patterns like `return ['key' => 'value'];` are automatically indexed
-- Universal config-literal parsing across Python, JavaScript, TypeScript, and JSX/TSX - all exported configuration objects and arrays are now discoverable through semantic search
-
-### Enhanced
-- Windows compatibility improved with cross-platform temporary directory handling for Claude Code CLI provider
-- JavaScript-family parsers (JavaScript, TypeScript, JSX/TSX) internally streamlined to reduce maintenance overhead while preserving all functionality
-- Version management now supports PEP 440 pre-release formats (beta, release candidate) for clearer update channels
-- Version tagging includes safety checks to prevent accidental releases from uncommitted work
-
-### Fixed
-- Code quality improvements addressing linting warnings for cleaner, more maintainable codebase
+- PHP configuration files with top-level return arrays are now searchable — config patterns like `return ['key' => 'value'];` are automatically indexed.
+- Universal config-literal parsing across Python, JavaScript, TypeScript, and JSX/TSX — all exported configuration objects and arrays are now discoverable through semantic search.
 
 ## [4.0.1] - 2025-11-12
 
@@ -645,8 +662,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v4.1.0b1...HEAD
-[4.1.0b1]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v4.1.0b1
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v4.1.0...HEAD
+[4.1.0]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v4.1.0
 [4.0.1]: https://github.com/chunkhound/chunkhound/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/chunkhound/chunkhound/compare/v3.3.1...v4.0.0
 [3.3.1]: https://github.com/chunkhound/chunkhound/compare/v3.3.0...v3.3.1
