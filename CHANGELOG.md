@@ -70,7 +70,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Windows MCP unicode safety** — MCP server stdout on Windows is now reconfigured with `errors='backslashreplace'` to prevent crashes when source files contain non-UTF-8 bytes; applied to both `main()` and `main_sync()` entry points (fixes #225).
 
 ### Removed
-- **HTTP MCP transport** — `chunkhound mcp http`, `--http`, `--port`, `--host` removed. Migrate to `chunkhound mcp` (stdio).
 - **`CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY`** — Database optimization now runs once at indexing end; the per-batch frequency config option is removed.
 
 ## [4.0.1] - 2025-11-12

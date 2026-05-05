@@ -40,7 +40,7 @@ git fetch --tags origin 2>/dev/null || true
 #   use that prerelease tag — narrows the range to commits added since the prerelease cut.
 # - For a direct stable-to-stable release, use the previous stable tag.
 LATEST_ANY=$(git tag --sort=-version:refname | head -1)
-if echo "$LATEST_ANY" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+[a-z][0-9]+$'; then
+if echo "$LATEST_ANY" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+[a-z]+[0-9]+$'; then
     PREV_TAG="$LATEST_ANY"   # prerelease promotion: baseline is the prerelease tag itself
 else
     PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
@@ -281,16 +281,18 @@ After presenting both outputs, ask the user:
 
    Write the release body to a temp file, then run:
    ```bash
-   # Save release notes to temp file
-   cat > /tmp/release_notes_X.Y.Z.md << 'EOF'
+   # Save release notes to temp file (portable: works on Linux, macOS, and Windows/git-bash)
+   NOTES_FILE="$(git rev-parse --show-toplevel)/.chunkhound/release_notes_X.Y.Z.md"
+   mkdir -p "$(dirname "$NOTES_FILE")"
+   cat > "$NOTES_FILE" << 'EOF'
    <GitHub Release body from Step 6>
    EOF
 
    # Create as draft (recommended)
-   gh release create vX.Y.Z --draft --title "ChunkHound vX.Y.Z" --notes-file /tmp/release_notes_X.Y.Z.md
+   gh release create vX.Y.Z --draft --title "ChunkHound vX.Y.Z" --notes-file "$NOTES_FILE"
 
    # OR publish immediately (only if user explicitly requested)
-   gh release create vX.Y.Z --title "ChunkHound vX.Y.Z" --notes-file /tmp/release_notes_X.Y.Z.md
+   gh release create vX.Y.Z --title "ChunkHound vX.Y.Z" --notes-file "$NOTES_FILE"
    ```
 
    After running, print the URL returned by `gh release create` so the user can open it directly.
