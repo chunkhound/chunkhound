@@ -73,12 +73,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **HTTP MCP transport** — `chunkhound mcp http`, `--http`, `--port`, `--host` removed. Migrate to `chunkhound mcp` (stdio).
 - **`CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY`** — Database optimization now runs once at indexing end; the per-batch frequency config option is removed.
 
-## [4.1.0b1] - 2025-11-15
-
-### Added
-- PHP configuration files with top-level return arrays are now searchable — config patterns like `return ['key' => 'value'];` are automatically indexed.
-- Universal config-literal parsing across Python, JavaScript, TypeScript, and JSX/TSX — all exported configuration objects and arrays are now discoverable through semantic search.
-
 ## [4.0.1] - 2025-11-12
 
 ### Fixed

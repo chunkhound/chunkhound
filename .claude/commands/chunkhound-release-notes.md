@@ -18,15 +18,14 @@ echo "Latest tag (any):    $LATEST_TAG"
 echo "Latest stable tag:   $LATEST_STABLE"
 ```
 
-Then apply this logic to suggest the next version:
-- **If `LATEST_TAG` is a stable tag** (matches `v[0-9]+\.[0-9]+\.[0-9]+$`): suggest bumping
-  the minor (e.g. `v4.1.0` → `4.2.0`).
+Note the release type for later:
 - **If `LATEST_TAG` is a pre-release** (contains `a`, `b`, or `rc` suffix, e.g. `v4.2.0b1`):
-  strip the suffix and suggest the corresponding stable release (e.g. `v4.2.0b1` → `4.2.0`).
-  Do **not** bump the minor — the stable release that the pre-release was preparing is the
-  correct next version.
+  the implied stable target is the version with the suffix stripped (e.g. `v4.2.0b1` → `4.2.0`).
+  Record this as the **candidate version** — it will be confirmed after content analysis in Step 4c.
+- **If `LATEST_TAG` is a stable tag**: the next version cannot be determined yet — it depends on
+  what changed. Semver analysis in Step 4c will suggest the correct bump. Continue to Step 2.
 
-Ask the user to confirm the suggested version before continuing.
+Do **not** ask the user for a version yet — version confirmation happens after Step 4c.
 
 ## Step 2: Collect git history since last release
 
@@ -89,7 +88,10 @@ Before summarizing, check `COMMIT_COUNT` from Step 2.
 
 **If `COMMIT_COUNT` > 100:** use map-reduce:
 
-1. Split the commit range into batches of ≤ 50 commits each (by date or hash order).
+1. Split the commit range into batches of ≤ 50 commits each, grouped by **logical area** (e.g.
+   parsers, LLM/research, embeddings, MCP/daemon, core engine/DB, infra/CI). Cluster commits that
+   touch related subsystems into the same batch so each agent receives coherent context. Fall back
+   to date/hash order only for commits that don't belong to any clear area.
 2. Spawn one agent per batch (use `superpowers:dispatching-parallel-agents` if available).
    Each agent receives its batch and the same grouping rules below, and returns a candidate
    bullet list plus a **coverage ledger** for every commit in its batch.
@@ -183,6 +185,21 @@ After filtering, present a two-column table to the user:
 | OpenAI Responses API | FROM [Unreleased] — will fold in |
 
 Wait for the user to confirm the table looks right before proceeding to write the CHANGELOG entry.
+
+## Step 4c: Determine and confirm the release version
+
+Now that the changelog categories are known, determine the version using full semver:
+
+- **Pre-release promotion** (Step 1 identified a candidate, e.g. `4.2.0`): use that version —
+  breaking-change analysis still applies; if the candidate version seems too low given the changes,
+  flag it to the user.
+- **Stable → stable release**: apply these rules in order (first match wins):
+  1. Any **Breaking Changes** entries → bump **major** (e.g. `v4.1.0` → `5.0.0`)
+  2. Any **Added** or **Enhanced** entries → bump **minor** (e.g. `v4.1.0` → `4.2.0`)
+  3. Only **Fixed**, **Performance**, or **Security** entries → bump **patch** (e.g. `v4.1.0` → `4.1.1`)
+
+Present the suggested version with a one-line justification (e.g. "Suggesting `5.0.0` because
+this release contains 3 breaking changes."). Ask the user to confirm or override before continuing.
 
 ## Step 5: Produce the CHANGELOG entry
 
