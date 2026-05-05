@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.1.0] - 2026-04-16
+## [5.0.0] - 2026-05-05
 
 ### Breaking Changes
 - **HTTP MCP server removed** — `chunkhound mcp http` command removed along with `--http`, `--port`, and `--host` flags; FastMCP dependency removed. Use `chunkhound mcp` (stdio) instead — all major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PHP config-literal parsing** — PHP files with top-level `return [...]` arrays are now searchable.
 - **Universal config-literal parsing** — Exported configuration objects and arrays in Python, JavaScript, TypeScript, and JSX/TSX are now discoverable through semantic search.
 - **Watchman live-indexing operator docs** — Documents the private `.chunkhound/watchman/` sidecar, fail-fast startup/no-implicit-fallback behavior, `daemon_status` health interpretation, and the rollout/default-switch gate for making Watchman the primary backend.
+- **Dart language support** — `.dart` files are now fully searchable via tree-sitter parsing: classes, functions, methods, constructors, and import/export statements (33rd language).
+- **Lua language support** — `.lua` files are now parsed and indexed via tree-sitter, covering functions, tables, and module patterns.
+- **T-SQL (SQL Server) parser** — SQL Server T-SQL (`.sql`) files are now fully parsed and searchable via tree-sitter.
+- **`chunkhound autodoc` command** — Generates a static Astro documentation site from codebase research, with provenance citations linked to source references and byte-stable output across platforms.
+- **`chunkhound codemap` command** — Maps areas of interest (POIs) in a codebase through deep code research; the `-j` flag enables parallel POI processing with automatic backoff to serial on failure.
+- **Configurable disk storage limit** — `database.max_disk_usage_mb` config option (`--max-disk-usage-gb` CLI flag, `CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB` env var) caps database growth and raises a clear error instead of filling the disk.
+- **Anthropic native structured outputs** — Anthropic provider now uses the `structured-outputs-2025-11-13` beta API for guaranteed schema-compliant JSON via constrained decoding, with type-safe Pydantic model responses and extended thinking compatibility.
+- **Global gitignore support** — ChunkHound now reads the user's global gitignore file (via `git config --global core.excludesFile`) when building the exclusion list during indexing.
 
 ### Changed
 - **Watchman default backend** — Watchman is now the default realtime backend on supported native-runtime platforms; `watchdog` and `polling` remain explicit fallback backends.
@@ -53,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Chunk size enforcement** — All parsers now enforce a central size guard before DB persistence; oversized chunks are split automatically, preventing embedding API failures.
 - **Windows compatibility** — Cross-platform temp directory handling for Claude Code CLI provider; `shutil.which` replaces Unix-only `which` for git binary detection.
 - **Version management** — Supports PEP 440 pre-release formats (alpha, beta, RC) with safety checks to prevent accidental releases from uncommitted work.
+- **Multi-client MCP daemon — index lock conflict handling** — `chunkhound index` now detects a running daemon's lock file on DuckDB conflict: a healthy daemon prints an informational message and exits cleanly; an unresponsive daemon prompts the user to kill it and retry.
+- **Python import resolution** — Import statements are now resolved more accurately in Python code research, improving cross-file symbol discovery.
 
 ### Performance
 - **LanceDB dimension detection** — Table creation now detects embedding dimensions upfront from the configured provider, eliminating the O(n) table recreation penalty during first embedding insertion for large codebases (e.g. 16,000+ chunks no longer require full table migration).
@@ -68,6 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Global chunk deduplication** — YAML and Universal parsers now participate in chunk deduplication, preventing duplicate chunk IDs that caused indexing failures on repeated config values.
 - **`hdbscan` startup crash under numpy 2.x** — Replaced `hdbscan` package (which uses the numpy 1.x ABI) with `sklearn.cluster.HDBSCAN` (already a dependency), eliminating MCP daemon startup failures on systems running numpy 2.x.
 - **Windows MCP unicode safety** — MCP server stdout on Windows is now reconfigured with `errors='backslashreplace'` to prevent crashes when source files contain non-UTF-8 bytes; applied to both `main()` and `main_sync()` entry points (fixes #225).
+- **HDBSCAN outlier cluster assignment** — Outliers in Phase 2 cluster merging were mapped to incorrect final cluster indices, causing code research results to be grouped with unrelated code. Fixed by threading the cluster-id-to-final-index mapping through the outlier merge step.
+- **Symlink path preservation** — Worktree and repository symlink paths are now stored as their symlink paths during indexing instead of being silently resolved to their targets (fixes #102).
 
 ### Removed
 - **`CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY`** — Database optimization now runs once at indexing end; the per-batch frequency config option is removed.
@@ -655,8 +667,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v4.1.0...HEAD
-[4.1.0]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v4.1.0
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...HEAD
+[5.0.0]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v5.0.0
 [4.0.1]: https://github.com/chunkhound/chunkhound/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/chunkhound/chunkhound/compare/v3.3.1...v4.0.0
 [3.3.1]: https://github.com/chunkhound/chunkhound/compare/v3.3.0...v3.3.1
