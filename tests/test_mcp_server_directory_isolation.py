@@ -424,8 +424,16 @@ Run the application with proper configuration.
                 )
 
                 class_text = class_result["content"][0]["text"]
-                assert "DataProcessor" in class_text, "Should find DataProcessor class"
-                print("✓ DataProcessor class found")
+                main_py_block = re.search(
+                    r'^## `main\.py`.*?(?=\n\n---|\Z)',
+                    class_text, re.MULTILINE | re.DOTALL
+                )
+                assert main_py_block, f"Expected a result block headed by main.py: {class_text[:200]}"
+                assert "DataProcessor" in main_py_block.group(), \
+                    "DataProcessor must appear within the main.py result block"
+                for fp in re.findall(r'^## `([^`]+)`', class_text, re.MULTILINE):
+                    assert not Path(fp).is_absolute(), f"File path should be relative: {fp}"
+                print("✓ DataProcessor class found in correct file")
 
                 # Test 5: Verify no content from test_cwd directory
                 print("Testing that no content from test_cwd is returned...")

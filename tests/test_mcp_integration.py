@@ -242,6 +242,8 @@ def delete_test_unique_function():
             page_size=10,
             offset=0,
         )
+        assert len(before_delete.get("results", [])) > 0, \
+            "File should be indexed and searchable before deletion"
 
         # Delete the file
         realtime_service.reset_file_tracking(delete_file)
