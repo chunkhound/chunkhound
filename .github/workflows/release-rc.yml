@@ -84,7 +84,7 @@ jobs:
   publish-rc:
     needs: [build-sdist, build-runtime-wheels]
     runs-on: ubuntu-latest
-    environment: testpypi
+    environment: pypi
     timeout-minutes: 15
 
     steps:
@@ -99,5 +99,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-          repository-url: https://test.pypi.org/legacy/
-          # No token needed — OIDC Trusted Publishing configured on TestPyPI project
+          # No token needed — OIDC Trusted Publishing configured on PyPI project
