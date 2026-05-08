@@ -20,13 +20,52 @@ logic for mapping Vue template AST nodes to semantic chunks.
 """
 
 from pathlib import Path
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, List, Optional
 
 from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
+
+
+@dataclass(frozen=True)
+class ParsedVueDirective:
+    base: str
+    argument: Optional[str]
+    modifiers: List[str]
+    raw: str
+
+
+def parse_vue_directive(directive: str) -> ParsedVueDirective:
+    """Parse a Vue directive token into base name, argument, and modifiers."""
+    if not directive:
+        return ParsedVueDirective("", None, [], directive)
+
+    # Shorthands: @click, :prop, #slot
+    if directive.startswith(('@', ':', '#')):
+        prefix = directive[0]
+        rest = directive[1:]
+        if '.' in rest:
+            arg, *mods = rest.split('.')
+            return ParsedVueDirective(prefix, arg, mods, directive)
+        return ParsedVueDirective(prefix, rest, [], directive)
+
+    # Long form or v-model with modifiers (v-on:click, v-model.trim, v-bind:prop)
+    if '.' in directive:
+        first, *rest = directive.split('.')
+        if ':' in first:
+            base, arg = first.split(':', 1)
+            return ParsedVueDirective(base, arg, rest, directive)
+        return ParsedVueDirective(first, None, rest, directive)
+
+    # Plain directives with argument (v-on:click, v-bind:prop) or no argument
+    if ':' in directive:
+        base, arg = directive.split(':', 1)
+        return ParsedVueDirective(base, arg, [], directive)
+
+    return ParsedVueDirective(directive, None, [], directive)
 
 
 class VueTemplateMapping(BaseMapping):
@@ -273,6 +312,7 @@ class VueTemplateMapping(BaseMapping):
                     directive = parsed["directive"]
                     argument = parsed["argument"]
                     value = parsed["value"]
+                    parsed_vue = parse_vue_directive(directive)
 
                     # Generate names based on directive type
                     if directive in ["v-if", "v-else-if"]:
@@ -281,7 +321,7 @@ class VueTemplateMapping(BaseMapping):
                     elif directive == "v-for":
                         expr = self.get_expression_preview(value, max_length=20)
                         return f"v-for_{expr}"
-                    elif directive == "v-model":
+                    elif parsed_vue.base == "v-model":
                         expr = self.get_expression_preview(value, max_length=20)
                         return f"v-model_{expr}"
                     elif directive == "@":
@@ -391,6 +431,7 @@ class VueTemplateMapping(BaseMapping):
                     directive = parsed["directive"]
                     argument = parsed["argument"]
                     value = parsed["value"]
+                    parsed_vue = parse_vue_directive(directive)
 
                     # Set metadata based on directive type
                     if directive in ["v-if", "v-else-if"]:
@@ -405,9 +446,14 @@ class VueTemplateMapping(BaseMapping):
                             if len(loop_parts) == 2:
                                 metadata["loop_variable"] = loop_parts[0].strip()
                                 metadata["loop_iterable"] = loop_parts[1].strip()
-                    elif directive == "v-model":
-                        metadata["directive_type"] = directive
+                    elif parsed_vue.base == "v-model":
+                        metadata["directive_type"] = "v-model"
                         metadata["model_binding"] = value
+                        metadata["modifiers"] = parsed_vue.modifiers
+                        if parsed_vue.argument:
+                            metadata["model_argument"] = parsed_vue.argument
+                        if value:
+                            metadata["script_references"] = [value]
                     elif directive == "@":
                         metadata["directive_type"] = "event_handler"
                         metadata["event_name"] = argument

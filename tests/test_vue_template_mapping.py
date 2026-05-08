@@ -167,7 +167,7 @@ class TestVueParserTemplateDirectives:
                 assert chunk.metadata["property_name"]
 
     def test_parse_v_model(self):
-        """Test extraction of v-model (two-way binding)."""
+        """Test extraction of v-model (two-way binding) including modifiers."""
         if not self.fixture_path.exists():
             pytest.skip("Fixture file not found")
 
@@ -180,10 +180,13 @@ class TestVueParserTemplateDirectives:
 
         # Should find v-model directives
         assert len(vmodel_chunks) > 0
-        # Check that model binding is extracted
-        for chunk in vmodel_chunks:
-            if "model_binding" in chunk.metadata:
-                assert chunk.metadata["model_binding"]
+
+        # Check plain v-model="message" (present in fixture)
+        plain_vmodel = [c for c in vmodel_chunks if c.metadata.get("model_binding") == "message"]
+        assert len(plain_vmodel) == 1
+        assert plain_vmodel[0].metadata.get("modifiers") == []
+        assert "script_references" in plain_vmodel[0].metadata
+        assert "message" in plain_vmodel[0].metadata["script_references"]
 
     def test_parse_component_usage(self):
         """Test extraction of component usage (PascalCase tags)."""

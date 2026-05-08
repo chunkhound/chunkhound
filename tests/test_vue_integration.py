@@ -440,7 +440,7 @@ const componentName = ref('div')
         assert len(binding_chunks) > 0
 
     def test_v_model_directives(self, parser):
-        """Test v-model two-way binding extraction."""
+        """Test v-model two-way binding extraction including modifiers."""
         content = """
 <template>
   <div>
@@ -465,20 +465,22 @@ const selected = ref('a')
 """
         chunks = parser.parse_content(content)
 
-        # Find template chunks
-        template_chunks = [
+        # Find v-model chunks
+        vmodel_chunks = [
             c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            if c.metadata and c.metadata.get('directive_type') == 'v-model'
         ]
 
-        # Should have references to v-model variables
-        refs = set()
-        for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+        # Should find at least one v-model chunk
+        assert len(vmodel_chunks) >= 1
 
-        # Check for v-model variables
-        assert 'text' in refs or 'description' in refs or len(template_chunks) > 0
+        # Check that at least one has modifiers (v-model.trim or v-model.number)
+        has_modifier = any(len(c.metadata.get('modifiers', [])) > 0 for c in vmodel_chunks)
+        assert has_modifier, "No v-model chunks with modifiers found"
+
+        # Check script_references are present
+        has_refs = any('script_references' in c.metadata for c in vmodel_chunks)
+        assert has_refs, "No v-model chunks with script_references found"
 
     def test_component_usage(self, parser):
         """Test component usage detection (PascalCase)."""
