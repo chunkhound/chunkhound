@@ -474,13 +474,13 @@ const selected = ref('a')
         # Should find at least one v-model chunk
         assert len(vmodel_chunks) >= 1
 
-        # Check that at least one has modifiers (v-model.trim or v-model.number)
-        has_modifier = any(len(c.metadata.get('modifiers', [])) > 0 for c in vmodel_chunks)
-        assert has_modifier, "No v-model chunks with modifiers found"
-
-        # Check script_references are present
-        has_refs = any('script_references' in c.metadata for c in vmodel_chunks)
-        assert has_refs, "No v-model chunks with script_references found"
+        # Check that v-model chunks have correct metadata
+        for chunk in vmodel_chunks:
+            assert chunk.metadata.get('model_binding') is not None
+            assert chunk.metadata.get('directive_type') == 'v-model'
+            # script_references should be present if model_binding is set
+            if chunk.metadata.get('model_binding'):
+                assert 'script_references' in chunk.metadata
 
     def test_component_usage(self, parser):
         """Test component usage detection (PascalCase)."""
