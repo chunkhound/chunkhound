@@ -30,6 +30,7 @@
   --link-on-primary-bg-focus: #dff3ab;
   --code-bg: #212121;
   --code-text: #d3d3d3;
+  --logo-invert: 1;
 
   /* Spacing */
   --space-0: 0;
@@ -104,6 +105,7 @@
   --link-on-primary-bg-focus: #374400;
   --code-bg: #2b2b2b;
   --code-text: #d3d3d3;
+  --logo-invert: 0;
 }
 
 /* Colors — light mode (OS preference auto-detection) */
@@ -134,6 +136,7 @@
     --link-on-primary-bg-focus: #374400;
     --code-bg: #2b2b2b;
     --code-text: #d3d3d3;
+    --logo-invert: 0;
   }
 }
 
