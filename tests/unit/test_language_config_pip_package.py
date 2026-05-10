@@ -33,14 +33,31 @@ def test_csharp_setup_error_references_correct_package():
     assert "tree-sitter-csharp" not in str(err)
 
 
-def test_other_languages_pip_package_defaults_correctly():
-    """Languages without an explicit pip_package still derive the name correctly."""
+# Languages whose PyPI package name diverges from the auto-derived
+# f"tree-sitter-{language_name}" pattern.
+EXPLICIT_PIP_PACKAGES = {
+    Language.CSHARP: "tree-sitter-c-sharp",   # PyPI: tree-sitter-c-sharp
+    Language.MAKEFILE: "tree-sitter-make",     # PyPI: tree-sitter-make (not tree-sitter-makefile)
+    Language.SCSS: "tree-sitter-language-pack",  # bundled in language-pack, no standalone
+}
+
+
+def test_explicit_pip_package_overrides_are_correct():
+    """Every language with a non-default pip_package must match the canonical PyPI name."""
+    for lang, expected in EXPLICIT_PIP_PACKAGES.items():
+        config = LANGUAGE_CONFIGS[lang]
+        assert config.pip_package == expected, (
+            f"{lang}: expected pip_package='{expected}', got '{config.pip_package}'"
+        )
+
+
+def test_non_overridden_languages_use_default_formula():
+    """Languages not in the explicit-override table use tree-sitter-{language_name}."""
     for lang, config in LANGUAGE_CONFIGS.items():
-        if lang == Language.CSHARP:
+        if lang in EXPLICIT_PIP_PACKAGES:
             continue
-        # All others should follow the auto-derived pattern
         expected = f"tree-sitter-{config.language_name}"
         assert config.pip_package == expected, (
-            f"Language {lang}: expected pip_package='{expected}',"
-            f" got '{config.pip_package}'"
+            f"{lang}: expected default pip_package='{expected}', got '{config.pip_package}'. "
+            "If the PyPI name differs, add an entry to EXPLICIT_PIP_PACKAGES."
         )

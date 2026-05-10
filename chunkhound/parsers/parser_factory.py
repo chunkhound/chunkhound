@@ -224,7 +224,9 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.JSON: LanguageConfig(ts_json, JsonMapping, True, "json"),
     Language.TOML: LanguageConfig(ts_toml, TomlMapping, True, "toml"),
     Language.MARKDOWN: LanguageConfig(ts_markdown, MarkdownMapping, True, "markdown"),
-    Language.MAKEFILE: LanguageConfig(ts_make, MakefileMapping, True, "makefile"),
+    Language.MAKEFILE: LanguageConfig(
+        ts_make, MakefileMapping, True, "makefile", pip_package="tree-sitter-make"
+    ),
     # Haskell (required dependency in pyproject.toml)
     Language.ELIXIR: LanguageConfig(ts_elixir, ElixirMapping, True, "elixir"),
     Language.HASKELL: LanguageConfig(ts_haskell, HaskellMapping, True, "haskell"),
@@ -252,7 +254,10 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     # Web languages
     Language.HTML: LanguageConfig(ts_html, HtmlMapping, True, "html"),
     Language.CSS: LanguageConfig(ts_css, CssMapping, True, "css"),
-    Language.SCSS: LanguageConfig(ts_scss, ScssMapping, SCSS_AVAILABLE, "scss"),
+    Language.SCSS: LanguageConfig(
+        ts_scss, ScssMapping, SCSS_AVAILABLE, "scss",
+        pip_package="tree-sitter-language-pack",
+    ),
     # JINJA uses the HTML grammar as a best-effort approximation.
     # Jinja {{ }}/{% %}/{# #} tokens are treated as plain text by the HTML
     # grammar.  A dedicated tree-sitter-jinja grammar could be added later.
