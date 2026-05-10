@@ -719,10 +719,17 @@ async def execute_tool(
             if results_list and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
                 result_copy = dict(results_list[0])
                 content = result_copy.get("content") or ""
-                # estimate_tokens uses len // 3; reserve ~300 chars for heading/fence/footer
+                # Start conservatively. Dynamic fence length (backtick-heavy content adds
+                # two fence lines of max_run+1 backticks each) means the 300-char reserve
+                # can be wildly insufficient; re-render and shrink until the actual output fits.
                 max_content_chars = max(0, MAX_RESPONSE_TOKENS * 3 - 300)
                 result_copy["content"] = content[:max_content_chars]
                 md = format_search_results_markdown([result_copy], pagination, search_type)
+                while estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0:
+                    excess_chars = (estimate_tokens(md) - MAX_RESPONSE_TOKENS) * 3
+                    max_content_chars = max(0, max_content_chars - excess_chars - 1)
+                    result_copy["content"] = content[:max_content_chars]
+                    md = format_search_results_markdown([result_copy], pagination, search_type)
             return md
 
     # Convert result to dict if it's not already

@@ -294,6 +294,36 @@ class TestExecuteToolSearchReturnsMarkdown:
             f"got {estimate_tokens(result)} tokens"
         )
 
+    async def test_trim_loop_single_oversized_backtick_heavy_content(self) -> None:
+        """Single result with a long backtick run must still fit within MAX_RESPONSE_TOKENS.
+
+        Dynamic fence length (CommonMark §6.1) adds two fence lines of max_run+1 backticks.
+        A 10 000-backtick run → ~20 000 chars of fence overhead, far past the 300-char reserve
+        the one-shot truncation assumed. The feedback loop must keep shrinking until the
+        actual rendered markdown is within budget.
+        """
+        from chunkhound.mcp_server.tools import MAX_RESPONSE_TOKENS, estimate_tokens, execute_tool
+
+        # 10 000 consecutive backticks → fence = 10 001 backticks × 2 lines ≈ 20 002 extra chars.
+        backtick_run = "`" * 10_000
+        huge_content = backtick_run + "\n" + "x" * (MAX_RESPONSE_TOKENS * 4)
+        svc = self._make_services(
+            [_result(file_path="backtick_heavy.py", content=huge_content, symbol="bt_func")],
+            _pagination(has_more=False, next_offset=None, total=1),
+        )
+        result = await execute_tool(
+            tool_name="search",
+            services=svc,
+            embedding_manager=None,
+            arguments={"type": "regex", "query": "x"},
+        )
+        assert isinstance(result, str)
+        assert "backtick_heavy.py" in result, "File path must appear in truncated output"
+        assert estimate_tokens(result) <= MAX_RESPONSE_TOKENS, (
+            f"Backtick-heavy content must be truncated to fit within MAX_RESPONSE_TOKENS; "
+            f"got {estimate_tokens(result)} tokens (fence overhead was not accounted for)"
+        )
+
     async def test_trim_loop_preserves_original_page_size_in_footer(self) -> None:
         """Trim loop must not overwrite page_size — footer page count uses the requested page_size."""
         from chunkhound.mcp_server.tools import execute_tool
