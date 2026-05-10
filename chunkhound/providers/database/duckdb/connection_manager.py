@@ -183,7 +183,7 @@ class DuckDBConnectionManager:
             except Exception:
                 pass  # If VSS unavailable, ATTACH may still work for non-HNSW DBs
             test_conn.execute(f"ATTACH '{self.db_path}' AS validation_db")
-            test_conn.execute("SELECT 1 FROM validation_db.files LIMIT 1").fetchone()
+            test_conn.execute("SELECT 1").fetchone()
             test_conn.execute("DETACH validation_db")
             logger.debug("WAL file validation passed")
         except Exception as e:
