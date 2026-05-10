@@ -169,19 +169,27 @@ class DuckDBConnectionManager:
         except OSError:
             pass
 
-        # Try a quick validation by attempting to open the database
-        # If it crashes or fails, clean up the WAL using existing logic
+        # Validate WAL by attaching the database via an in-memory connection with VSS
+        # pre-loaded. A direct duckdb.connect(file) would crash with
+        # "pure virtual function called" if the WAL contains HNSW index operations
+        # and VSS is not yet loaded — that crash is a C++ abort, not a catchable exception.
         test_conn = None
         try:
-            test_conn = duckdb.connect(str(self.db_path))
-            # Simple query to trigger WAL replay
-            test_conn.execute("SELECT 1").fetchone()
+            test_conn = duckdb.connect(":memory:")
+            try:
+                test_conn.execute("INSTALL vss")
+                test_conn.execute("LOAD vss")
+                test_conn.execute("SET hnsw_enable_experimental_persistence = true")
+            except Exception:
+                pass  # If VSS unavailable, ATTACH may still work for non-HNSW DBs
+            test_conn.execute(f"ATTACH '{self.db_path}' AS validation_db")
+            test_conn.execute("SELECT 1 FROM validation_db.files LIMIT 1").fetchone()
+            test_conn.execute("DETACH validation_db")
             logger.debug("WAL file validation passed")
         except Exception as e:
             logger.warning(f"WAL validation failed ({e}), cleaning up WAL file")
             self._handle_wal_corruption()
         finally:
-            # Ensure temporary validation connection is always closed
             if test_conn is not None:
                 try:
                     test_conn.close()
