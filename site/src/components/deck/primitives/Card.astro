@@ -1,0 +1,39 @@
+---
+import Chip from '../../Chip.astro';
+
+interface Props {
+  chip?: string;
+  heading: string;
+}
+const { chip, heading } = Astro.props;
+---
+<div class="card">
+  {chip && <Chip>{chip}</Chip>}
+  <h3 class="card-heading">{heading}</h3>
+  <p class="card-body"><slot /></p>
+</div>
+
+<style>
+  .card {
+    background: var(--bg-surface);
+    border-radius: var(--radius-xl);
+    padding: var(--space-5);
+    border: var(--border-w-default) solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .card-heading {
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: var(--space-1);
+  }
+
+  .card-body {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    line-height: var(--lh-sm);
+  }
+</style>

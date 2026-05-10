@@ -1,0 +1,14 @@
+---
+import Slide from '../Slide.astro';
+import Timeline from '../primitives/Timeline.astro';
+
+interface Props {
+  label: string;
+  steps: Array<{ phase: string; desc: string }>;
+}
+const { label, steps } = Astro.props;
+---
+<Slide>
+  <p class="section-label">{label}</p>
+  <Timeline steps={steps} />
+</Slide>

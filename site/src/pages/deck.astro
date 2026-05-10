@@ -1,0 +1,70 @@
+---
+import Deck from "../components/deck/Deck.astro";
+import CoverSlide from "../components/deck/slides/CoverSlide.astro";
+import BigStatSlide from "../components/deck/slides/BigStatSlide.astro";
+import CardGridSlide from "../components/deck/slides/CardGridSlide.astro";
+import InsightSlide from "../components/deck/slides/InsightSlide.astro";
+import OriginStorySlide from "../components/deck/slides/OriginStorySlide.astro";
+import ThankYouSlide from "../components/deck/slides/ThankYouSlide.astro";
+---
+
+<Deck title="ChunkHound — Executive Story">
+    <CoverSlide
+        tagline="AI needs a bridge into our codebase"
+        meta="And into the knowledge accumulated inside it"
+        date="2026"
+    />
+
+    <BigStatSlide
+        label="The Scale"
+        stat={{ number: "180M", label: "lines of code" }}
+        bullets={[
+            "20+ years of history.",
+            "Origins in two distinct codebases that were merged together.",
+            "Extreme configurability and backwards compatibility everywhere.",
+        ]}
+    />
+
+    <CardGridSlide
+        label="The Gap"
+        cards={[
+            {
+                chip: "Scale",
+                heading: "Top 0.001%",
+                body: "Most tools were never designed around a codebase this large.",
+            },
+            {
+                chip: "Shape",
+                heading: "Historic mess",
+                body: "Two merged histories, deep coupling, and spaghetti by necessity.",
+            },
+            {
+                chip: "Privacy",
+                heading: "Non-negotiable",
+                body: "The code and the knowledge inside it cannot become someone else's cloud dataset.",
+            },
+        ]}
+    />
+
+    <OriginStorySlide />
+
+    <BigStatSlide
+        label="The Result"
+        stat={{ number: "Months\n→ Days", label: "for system understanding" }}
+        bullets={[
+            "Before: creating a system spec could take an entire quarter to reconstruct.",
+            "Now: Claude Code + ChunkHound can produce it in a few days.",
+            "The breakthrough is not faster typing. It is accessible system understanding.",
+        ]}
+    />
+
+    <InsightSlide
+        calloutTitle="The Bigger Win"
+        variant="success"
+        quote="Knowledge. Accessible to anyone."
+        follow="Now anyone can understand how systems work today — and how they worked in the past."
+    />
+
+    <ThankYouSlide />
+</Deck>
+ 

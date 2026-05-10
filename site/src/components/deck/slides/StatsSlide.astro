@@ -1,0 +1,26 @@
+---
+import Slide from '../Slide.astro';
+import StatCell from '../primitives/StatCell.astro';
+
+interface Props {
+  label: string;
+  stats: Array<{ number: string; label: string }>;
+}
+const { label, stats } = Astro.props;
+---
+<Slide>
+  <p class="section-label">{label}</p>
+  <div class="stats-row" data-cols={stats.length}>
+    {stats.map((s) => <StatCell number={s.number} label={s.label} />)}
+  </div>
+</Slide>
+
+<style>
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-5);
+  }
+  .stats-row[data-cols="2"] { grid-template-columns: repeat(2, 1fr); }
+  .stats-row[data-cols="4"] { grid-template-columns: repeat(4, 1fr); }
+</style>

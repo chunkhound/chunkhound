@@ -1,0 +1,54 @@
+---
+import Slide from '../Slide.astro';
+import DocCode from '../../DocCode.astro';
+
+interface Props {
+  label?: string;
+  annotation: string[];
+  note?: string;
+  code: string;
+  lang?: string;
+}
+const { label = "Demo", annotation, note, code, lang = "bash" } = Astro.props;
+---
+<Slide layout="row">
+  <div class="demo-annotation">
+    <p class="section-label">{label}</p>
+    {annotation.map((p) => <p>{p}</p>)}
+    {note && <p class="demo-note">{note}</p>}
+  </div>
+  <div class="demo-code">
+    <DocCode lang={lang} code={code} />
+  </div>
+</Slide>
+
+<style>
+  .demo-annotation {
+    flex: 0 0 clamp(260px, 36vw, 540px);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .demo-annotation p {
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+    line-height: var(--lh-sm);
+  }
+
+  .demo-note {
+    color: var(--text-tertiary) !important;
+    font-style: italic;
+  }
+
+  .demo-code {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .demo-code :global(pre.astro-code) {
+    padding: var(--space-5);
+    border-radius: var(--radius-md);
+    margin: 0;
+  }
+</style>

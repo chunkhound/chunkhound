@@ -1,0 +1,367 @@
+---
+import Slide from '../Slide.astro';
+
+interface Props {
+  calloutTitle: string;
+  quote: string;
+  follow?: string;
+  variant?: "default" | "success";
+}
+const { calloutTitle, quote, follow } = Astro.props;
+---
+<Slide class="insight-slide">
+  <div class="insight-shell">
+    <div class="insight-intro">
+      <p class="section-label">{calloutTitle}</p>
+      <h1>{quote}</h1>
+    </div>
+
+    <div class="knowledge-flow" aria-label="Knowledge access transformation">
+      <article class="flow-step flow-step-before">
+        <div class="flow-icon" aria-hidden="true">
+          <svg viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="40" y="88" width="176" height="128" rx="16" stroke-width="14" />
+            <path d="M88 88V64a40 40 0 0 1 80 0v24" stroke-width="14" />
+          </svg>
+        </div>
+        <p class="flow-kicker">Before</p>
+        <h2>Locked away</h2>
+        <p>Experts · specs · legacy</p>
+      </article>
+
+      <div class="flow-bridge">
+        <div class="bridge-line"></div>
+        <div class="bridge-pill">
+          <span>ChunkHound</span>
+        </div>
+      </div>
+
+      <article class="flow-step flow-step-after">
+        <div class="flow-icon" aria-hidden="true">
+          <svg viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="64" cy="128" r="24" stroke-width="14" />
+            <circle cx="192" cy="72" r="24" stroke-width="14" />
+            <circle cx="192" cy="184" r="24" stroke-width="14" />
+            <path d="M86 118l84-37" stroke-width="14" />
+            <path d="M86 138l84 37" stroke-width="14" />
+          </svg>
+        </div>
+        <p class="flow-kicker">After</p>
+        <h2>Shared understanding</h2>
+        <p>Anyone · today · history</p>
+      </article>
+
+      {follow && <p class="insight-close">{follow}</p>}
+    </div>
+  </div>
+</Slide>
+
+<style>
+  .insight-slide :global(.slide-body) {
+    padding: var(--space-5) var(--space-8) var(--space-6);
+  }
+
+  .insight-shell {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: var(--space-8);
+    min-height: 100%;
+  }
+
+  .insight-intro {
+    max-width: 1050px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .insight-intro h1 {
+    max-width: 1120px;
+    margin: 0;
+    color: var(--text-primary);
+    font-size: clamp(44px, 4.7vw, 78px);
+    line-height: 1.12;
+    letter-spacing: -0.04em;
+  }
+
+  .knowledge-flow {
+    --flow-gap: calc(var(--space-7) * 2);
+    --bridge-column: clamp(220px, 17vw, 288px);
+    position: relative;
+    display: grid;
+    grid-template-columns:
+      max-content
+      minmax(220px, var(--bridge-column))
+      max-content;
+    grid-template-areas:
+      "before bridge after"
+      ". . close";
+    column-gap: var(--flow-gap);
+    row-gap: var(--space-4);
+    align-items: start;
+    width: fit-content;
+    max-width: 1272px;
+    margin: 0 auto;
+  }
+
+  .flow-step {
+    min-width: 0;
+    width: fit-content;
+    display: grid;
+    grid-template-rows: 48px 36px 56px 32px;
+    align-items: start;
+  }
+
+  .flow-step-before {
+    grid-area: before;
+    max-width: 488px;
+    justify-self: end;
+  }
+
+  .flow-icon {
+    width: 42px;
+    height: 42px;
+    color: var(--text-tertiary);
+    opacity: 0.62;
+  }
+
+  .flow-step-after .flow-icon {
+    color: var(--primary);
+    opacity: 0.78;
+  }
+
+  .flow-step-after {
+    grid-area: after;
+    max-width: 416px;
+    justify-self: start;
+  }
+
+  .flow-icon svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  .flow-kicker {
+    margin: 0;
+    align-self: end;
+    font-size: var(--text-xs);
+    line-height: 1;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .flow-step h2 {
+    margin: 0;
+    align-self: center;
+    color: var(--text-primary);
+    font-size: clamp(27px, 2.2vw, 36px);
+    line-height: 1.2;
+    font-weight: 600;
+    letter-spacing: -0.03em;
+  }
+
+  .flow-step p:last-child {
+    max-width: 470px;
+    margin: 0;
+    align-self: start;
+    color: var(--text-secondary);
+    font-size: clamp(17px, 1.25vw, 23px);
+    line-height: 1.45;
+  }
+
+  .flow-bridge {
+    grid-area: bridge;
+    position: relative;
+    top: 0;
+    left: auto;
+    width: var(--bridge-column);
+    height: 172px;
+  }
+
+  .bridge-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 111px;
+    height: 2px;
+    border-radius: var(--radius-full);
+    background: linear-gradient(90deg, var(--border-color), var(--primary));
+  }
+
+  .bridge-line::after {
+    content: "";
+    position: absolute;
+    right: -1px;
+    top: 50%;
+    width: 9px;
+    height: 9px;
+    border-top: 2px solid var(--primary);
+    border-right: 2px solid var(--primary);
+    transform: translateY(-50%) rotate(45deg);
+  }
+
+  .bridge-pill {
+    position: absolute;
+    top: 90px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1;
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--primary);
+    border-radius: var(--radius-full);
+    background: var(--bg-page);
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    text-align: center;
+    font-size: var(--text-xs);
+    line-height: var(--lh-xs);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .insight-close {
+    grid-area: close;
+    width: min(400px, 100%);
+    contain: inline-size;
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: clamp(15px, 1.15vw, 20px);
+    line-height: 1.45;
+    text-align: left;
+    justify-self: start;
+  }
+
+  @media print and (max-width: 900px) {
+    .knowledge-flow {
+      --flow-gap: var(--space-3);
+      --bridge-column: 160px;
+      grid-template-columns:
+        max-content
+        minmax(150px, var(--bridge-column))
+        max-content;
+    }
+  }
+
+  @media print {
+    .knowledge-flow {
+      --bridge-column: 260px;
+    }
+
+    .bridge-pill {
+      padding: var(--space-2) var(--space-3);
+      font-size: 16px;
+      line-height: 1.2;
+    }
+
+    .flow-step {
+      grid-template-rows: 48px 36px 56px 32px;
+    }
+  }
+
+  @media screen and (max-width: 760px) {
+    .insight-slide :global(.slide-body) {
+      padding: var(--space-4) var(--space-5);
+    }
+
+    .insight-shell {
+      gap: var(--space-4);
+    }
+
+    .insight-intro {
+      gap: var(--space-2);
+    }
+
+    .insight-intro :global(.section-label) {
+      font-size: 25px;
+      line-height: 1.25;
+    }
+
+    .insight-intro h1 {
+      font-size: 35px;
+      line-height: 1.12;
+    }
+
+    .knowledge-flow {
+      --flow-gap: var(--space-2);
+      grid-template-columns: 1fr;
+      grid-template-areas:
+        "before"
+        "bridge"
+        "after"
+        "close";
+      gap: var(--space-2);
+      padding-top: 0;
+      width: 100%;
+    }
+
+    .flow-step {
+      width: 100%;
+      min-height: auto;
+      padding-top: var(--space-4);
+      gap: var(--space-1);
+    }
+
+    .flow-step::before {
+      width: 40px;
+      height: 2px;
+      top: 12px;
+      left: 0;
+    }
+
+    .flow-icon {
+      display: none;
+    }
+
+    .flow-kicker {
+      font-size: 12px;
+      line-height: 1.2;
+    }
+
+    .flow-step h2 {
+      font-size: 22px;
+      line-height: 1.2;
+    }
+
+    .flow-step p:last-child {
+      max-width: none;
+      font-size: 14px;
+      line-height: 1.32;
+    }
+
+    .flow-bridge {
+      grid-area: bridge;
+      position: relative;
+      top: auto;
+      left: auto;
+      width: auto;
+      min-height: 50px;
+      padding-top: 0;
+    }
+
+    .bridge-line {
+      inset-inline: auto;
+      width: 3px;
+      height: 100%;
+    }
+
+    .bridge-pill {
+      padding: 6px var(--space-3);
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
+    .insight-close {
+      max-width: none;
+      font-size: 13px;
+      line-height: 1.35;
+      text-align: left;
+      justify-self: stretch;
+    }
+  }
+</style>

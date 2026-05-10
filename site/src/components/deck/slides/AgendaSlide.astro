@@ -1,0 +1,52 @@
+---
+import Slide from '../Slide.astro';
+
+interface Props {
+  label?: string;
+  items: string[];
+  split?: boolean;
+}
+const { label = "Agenda", items, split = false } = Astro.props;
+const splitIdx = split ? Math.ceil(items.length / 2) : items.length;
+const left = items.slice(0, splitIdx);
+const right = split ? items.slice(splitIdx) : [];
+---
+<Slide>
+  <p class="section-label">{label}</p>
+  {split ? (
+    <div class="agenda-cols">
+      <ol class="agenda-list">
+        {left.map((item) => <li>{item}</li>)}
+      </ol>
+      <ol class="agenda-list" start={splitIdx + 1}>
+        {right.map((item) => <li>{item}</li>)}
+      </ol>
+    </div>
+  ) : (
+    <ol class="agenda-list">
+      {items.map((item) => <li>{item}</li>)}
+    </ol>
+  )}
+</Slide>
+
+<style>
+  .agenda-cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-6);
+  }
+
+  .agenda-list {
+    list-style: decimal;
+    padding-left: var(--space-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .agenda-list li {
+    font-size: var(--text-base);
+    color: var(--text-secondary);
+    line-height: var(--lh-base);
+  }
+</style>

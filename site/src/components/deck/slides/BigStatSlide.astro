@@ -1,0 +1,43 @@
+---
+import Slide from '../Slide.astro';
+import StatCell from '../primitives/StatCell.astro';
+
+interface Props {
+  stat: { number: string; label: string };
+  label?: string;
+  bullets: string[];
+}
+const { stat, label, bullets } = Astro.props;
+---
+<Slide layout="row">
+  <StatCell number={stat.number} label={stat.label} size="lg" />
+  <div class="big-stat-text">
+    {label && <p class="section-label">{label}</p>}
+    <ul class="big-stat-list">
+      {bullets.map((b) => <li>{b}</li>)}
+    </ul>
+  </div>
+</Slide>
+
+<style>
+  .big-stat-text {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .big-stat-list {
+    list-style: disc;
+    padding-left: var(--space-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .big-stat-list li {
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+    color: var(--text-secondary);
+  }
+</style>

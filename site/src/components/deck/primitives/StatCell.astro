@@ -1,0 +1,55 @@
+---
+interface Props {
+  number: string;
+  label: string;
+  size?: "default" | "lg";
+}
+const { number, label, size = "default" } = Astro.props;
+const klass = size === "lg" ? "stat-cell stat-cell-lg" : "stat-cell";
+const numberClass = number.length > 6 ? "stat-number stat-number-compact" : "stat-number";
+---
+<div class={klass}>
+  <span class={numberClass}>{number}</span>
+  <span class="stat-label">{label}</span>
+</div>
+
+<style>
+  .stat-cell {
+    border-radius: var(--radius-xl);
+    padding: var(--space-5);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    text-align: center;
+  }
+
+  .stat-cell-lg {
+    flex-shrink: 0;
+    width: clamp(220px, 24vw, 360px);
+    padding: var(--space-6);
+    gap: var(--space-3);
+  }
+
+  .stat-number {
+    display: block;
+    font-size: var(--text-4xl);
+    line-height: var(--lh-4xl);
+    font-weight: 700;
+    color: var(--primary);
+  }
+
+  .stat-number-compact {
+    font-size: clamp(34px, 3.6vw, 56px);
+    line-height: 1.1;
+    white-space: pre-line;
+  }
+
+  .stat-label {
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    text-align: center;
+    line-height: 1.4;
+  }
+</style>
