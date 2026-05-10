@@ -134,11 +134,13 @@ class LanguageConfig:
         mapping_class: type[BaseMapping],
         available: bool,
         language_name: str,
+        pip_package: str | None = None,
     ):
         self.tree_sitter_module = tree_sitter_module
         self.mapping_class = mapping_class
         self.available = available
         self.language_name = language_name
+        self.pip_package = pip_package or f"tree-sitter-{language_name}"
 
     def _handle_language_result(self, result):
         """Handle language module result."""
@@ -153,8 +155,8 @@ class LanguageConfig:
         if not self.available or not self.tree_sitter_module:
             raise SetupError(
                 parser=self.language_name,
-                missing_dependency=f"tree-sitter-{self.language_name.lower()}",
-                install_command=f"pip install tree-sitter-{self.language_name.lower()}",
+                missing_dependency=self.pip_package,
+                install_command=f"pip install {self.pip_package}",
                 original_error="Tree-sitter module not available",
             )
 
@@ -208,7 +210,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.JAVA: LanguageConfig(ts_java, JavaMapping, True, "java"),
     Language.C: LanguageConfig(ts_c, CMapping, True, "c"),
     Language.CPP: LanguageConfig(ts_cpp, CppMapping, True, "cpp"),
-    Language.CSHARP: LanguageConfig(ts_csharp, CSharpMapping, True, "csharp"),
+    Language.CSHARP: LanguageConfig(ts_csharp, CSharpMapping, True, "csharp", pip_package="tree-sitter-c-sharp"),
     Language.GO: LanguageConfig(ts_go, GoMapping, True, "go"),
     Language.RUST: LanguageConfig(ts_rust, RustMapping, True, "rust"),
     Language.ZIG: LanguageConfig(ts_zig, ZigMapping, True, "zig"),
@@ -480,10 +482,8 @@ class ParserFactory:
         if not config.available:
             raise SetupError(
                 parser=config.language_name,
-                missing_dependency=f"tree-sitter-{config.language_name.lower()}",
-                install_command=(
-                    f"pip install tree-sitter-{config.language_name.lower()}"
-                ),
+                missing_dependency=config.pip_package,
+                install_command=f"pip install {config.pip_package}",
                 original_error="Tree-sitter module not available",
             )
 
@@ -515,10 +515,8 @@ class ParserFactory:
         except Exception as e:
             raise SetupError(
                 parser=config.language_name,
-                missing_dependency=f"tree-sitter-{config.language_name.lower()}",
-                install_command=(
-                    f"pip install tree-sitter-{config.language_name.lower()}"
-                ),
+                missing_dependency=config.pip_package,
+                install_command=f"pip install {config.pip_package}",
                 original_error=str(e),
             ) from e
 
@@ -629,9 +627,7 @@ class ParserFactory:
         missing = {}
         for language, config in LANGUAGE_CONFIGS.items():
             if not config.available and config.tree_sitter_module is not None:
-                missing[language] = (
-                    f"pip install tree-sitter-{config.language_name.lower()}"
-                )
+                missing[language] = f"pip install {config.pip_package}"
         return missing
 
     def clear_cache(self) -> None:
