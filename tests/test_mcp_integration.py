@@ -262,6 +262,8 @@ def delete_test_unique_function():
             page_size=10,
             offset=0,
         )
+        assert len(after_delete.get("results", [])) == 0, \
+            "Content should not be found after deletion"
 
     @pytest.mark.asyncio
     async def test_file_modification_detection_comprehensive(self, mcp_setup):
