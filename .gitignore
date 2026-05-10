@@ -1,4 +1,8 @@
 .DS_Store
+
+# Editor / IDE config
+.mcp.json
+opencode.json
 # temp TypeScript files created by tsx_runner.py
 /tmp*.mts
 # Byte-compiled / optimized / DLL files
