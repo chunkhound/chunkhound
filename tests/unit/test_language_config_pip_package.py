@@ -4,13 +4,12 @@ Regression test for issue #267: C# parser error message uses wrong pip package n
 The correct PyPI package is `tree-sitter-c-sharp`, not `tree-sitter-csharp`.
 """
 
-import pytest
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import LANGUAGE_CONFIGS
 
 
 def test_csharp_pip_package_name_is_correct():
-    """LanguageConfig for C# must reference tree-sitter-c-sharp, not tree-sitter-csharp."""
+    """C# LanguageConfig must use tree-sitter-c-sharp, not tree-sitter-csharp."""
     config = LANGUAGE_CONFIGS[Language.CSHARP]
     assert config.pip_package == "tree-sitter-c-sharp", (
         f"Wrong pip package name: got '{config.pip_package}'. "
@@ -42,5 +41,6 @@ def test_other_languages_pip_package_defaults_correctly():
         # All others should follow the auto-derived pattern
         expected = f"tree-sitter-{config.language_name}"
         assert config.pip_package == expected, (
-            f"Language {lang}: expected pip_package='{expected}', got '{config.pip_package}'"
+            f"Language {lang}: expected pip_package='{expected}',"
+            f" got '{config.pip_package}'"
         )

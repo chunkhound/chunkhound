@@ -210,7 +210,9 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.JAVA: LanguageConfig(ts_java, JavaMapping, True, "java"),
     Language.C: LanguageConfig(ts_c, CMapping, True, "c"),
     Language.CPP: LanguageConfig(ts_cpp, CppMapping, True, "cpp"),
-    Language.CSHARP: LanguageConfig(ts_csharp, CSharpMapping, True, "csharp", pip_package="tree-sitter-c-sharp"),
+    Language.CSHARP: LanguageConfig(
+        ts_csharp, CSharpMapping, True, "csharp", pip_package="tree-sitter-c-sharp"
+    ),
     Language.GO: LanguageConfig(ts_go, GoMapping, True, "go"),
     Language.RUST: LanguageConfig(ts_rust, RustMapping, True, "rust"),
     Language.ZIG: LanguageConfig(ts_zig, ZigMapping, True, "zig"),
