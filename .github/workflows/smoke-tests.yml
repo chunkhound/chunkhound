@@ -36,13 +36,24 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.11", "3.12"]
         include:
+          - os: ubuntu-latest
+            job_timeout_minutes: 30
+            retry_timeout_minutes: 13
+            pytest_timeout_seconds: 300
+          - os: macos-latest
+            job_timeout_minutes: 30
+            retry_timeout_minutes: 13
+            pytest_timeout_seconds: 300
           # Windows CI polling monitor occasionally misses second file write within
           # 45s window — retry individual flaky tests before failing the run.
           - os: windows-latest
+            job_timeout_minutes: 60
+            retry_timeout_minutes: 26
+            pytest_timeout_seconds: 600
             pytest_extra_args: "--reruns 2 --reruns-delay 5 --only-rerun AssertionError"
       fail-fast: false
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.job_timeout_minutes }}
 
     steps:
       - name: Checkout code
@@ -79,12 +90,12 @@ jobs:
         #   (e.g. OOM, runner hiccup).
         # - --reruns (pytest-rerunfailures): retries individual flaky tests within a
         #   process, used on Windows where the file-monitor can miss writes transiently.
-        # timeout_minutes * max_attempts must stay below the job-level timeout (30m).
+        # retry timeout * max_attempts must stay below the job-level timeout.
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08  # v3
         with:
-          timeout_minutes: 13
+          timeout_minutes: ${{ matrix.retry_timeout_minutes }}
           max_attempts: 2
-          command: uv run pytest tests/ -v --junit-xml=test-results.xml ${{ matrix.pytest_extra_args || '' }}
+          command: uv run pytest tests/ -v --junit-xml=test-results.xml -o timeout=${{ matrix.pytest_timeout_seconds }} ${{ matrix.pytest_extra_args || '' }}
 
       - name: Upload test results
         if: always()
