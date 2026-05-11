@@ -334,3 +334,80 @@ class TestExtensionCoverage:
             f"from_file_extension() returns UNKNOWN for extensions in "
             f"EXTENSION_TO_LANGUAGE: {sorted(missing)}"
         )
+
+
+class TestIssue277UnknownExtensions:
+    """Regression tests for issue #277: unknown extensions are silently skipped.
+
+    Files like Dockerfile (no extension) and .proto (unregistered extension)
+    were never discovered by the file walker because get_file_patterns() only
+    generates glob patterns for entries in EXTENSION_TO_LANGUAGE.
+    """
+
+    @pytest.mark.parametrize(
+        "ext,description",
+        [
+            (".proto", "Protocol Buffers / gRPC"),
+            (".graphql", "GraphQL schema/query"),
+            (".gql", "GraphQL schema/query (short)"),
+            (".xml", "XML documents"),
+            (".ini", "INI config files"),
+            (".properties", "Java properties files"),
+            (".env", "Environment variable files"),
+            (".conf", "Generic config files"),
+            (".cfg", "Generic config files (alt extension)"),
+        ],
+    )
+    def test_common_text_extensions_indexed(self, ext, description):
+        """Common text-like extensions must be discoverable and not return UNKNOWN."""
+        assert ext in EXTENSION_TO_LANGUAGE, (
+            f"{ext} ({description}) not in EXTENSION_TO_LANGUAGE — "
+            f"files with this extension will never be indexed"
+        )
+        result = Language.from_file_extension(Path(f"test{ext}"))
+        assert result != Language.UNKNOWN, (
+            f"Language.from_file_extension() returns UNKNOWN for {ext} ({description})"
+        )
+
+    @pytest.mark.parametrize(
+        "filename,description",
+        [
+            ("Dockerfile", "Docker container definition"),
+            ("dockerfile", "Docker container definition (lowercase)"),
+            ("Jenkinsfile", "Jenkins CI/CD pipeline"),
+        ],
+    )
+    def test_common_extensionless_files_indexed(self, filename, description):
+        """Extensionless files like Dockerfile must be discoverable."""
+        factory_filenames = {k.lower() for k in EXTENSION_TO_LANGUAGE if not k.startswith(".")}
+        assert filename.lower() in factory_filenames, (
+            f"{filename} ({description}) not in EXTENSION_TO_LANGUAGE — "
+            f"this file will never be indexed"
+        )
+        result = Language.from_file_extension(Path(filename))
+        assert result != Language.UNKNOWN, (
+            f"Language.from_file_extension() returns UNKNOWN for {filename} ({description})"
+        )
+
+    @pytest.mark.parametrize(
+        "filename,description",
+        [
+            ("test.proto", "Protocol Buffers"),
+            ("test.graphql", "GraphQL"),
+            ("test.gql", "GraphQL short"),
+            ("test.xml", "XML"),
+            ("test.ini", "INI config"),
+            ("test.properties", "Java properties"),
+            ("test.env", "Environment vars"),
+            ("test.conf", "Config file"),
+            ("test.cfg", "Config file alt"),
+            ("Dockerfile", "Docker"),
+            ("Jenkinsfile", "Jenkinsfile"),
+        ],
+    )
+    def test_realtime_service_indexes_newly_supported_files(self, filename, description):
+        """Realtime service must index all newly supported file types."""
+        handler = SimpleEventHandler(None, None, None)
+        assert handler._should_index(Path(filename)), (
+            f"Realtime service rejects {filename} ({description})"
+        )

@@ -210,11 +210,13 @@ class Language(Enum):
         if isinstance(file_path, str):
             file_path = Path(file_path)
 
-        # Check filename-based detection first (for Makefiles)
+        # Check filename-based detection first (for Makefiles, Dockerfiles, etc.)
         basename = file_path.name.lower()
         filename_map = {
             "makefile": cls.MAKEFILE,
             "gnumakefile": cls.MAKEFILE,
+            "dockerfile": cls.TEXT,
+            "jenkinsfile": cls.TEXT,
         }
 
         if basename in filename_map:
@@ -314,6 +316,17 @@ class Language(Enum):
             ".j2": cls.JINJA,
             ".njk": cls.JINJA,
             ".tcpou": cls.TWINCAT,
+            # Data interchange / API definition formats (TEXT fallback)
+            ".proto": cls.TEXT,
+            ".graphql": cls.TEXT,
+            ".gql": cls.TEXT,
+            ".xml": cls.TEXT,
+            # Config / properties files (TEXT fallback)
+            ".ini": cls.TEXT,
+            ".properties": cls.TEXT,
+            ".env": cls.TEXT,
+            ".conf": cls.TEXT,
+            ".cfg": cls.TEXT,
         }
 
         if extension in extension_map:
