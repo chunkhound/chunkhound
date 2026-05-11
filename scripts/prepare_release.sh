@@ -29,13 +29,10 @@ if ! git diff-index --quiet HEAD --; then
     fi
 fi
 
-# Get current version
-CURRENT_VERSION=$(grep 'version = ' pyproject.toml | head -1 | sed 's/.*version = "\([^"]*\)".*/\1/')
-echo "📋 Current version: $CURRENT_VERSION"
-
-# Clean previous builds
-echo "🧹 Cleaning previous builds..."
-rm -rf dist/ build/
+# Clean previous local build scratch without deleting staged release wheels
+echo "🧹 Cleaning previous build scratch..."
+rm -rf build/
+mkdir -p dist
 
 # Run smoke tests (mandatory before release)
 echo "🧪 Running smoke tests..."
@@ -50,20 +47,42 @@ echo "🔒 Regenerating locked requirements..."
 uv pip compile pyproject.toml --all-extras -o requirements-lock.txt
 echo "✅ Updated requirements-lock.txt with exact versions"
 
-# Build Python distributions
-echo "📦 Building distributions..."
-uv build
-echo "✅ Built wheel and source distribution"
+# Build source distribution without deleting or replacing staged platform wheels
+echo "📦 Building source distribution..."
+uv build --sdist --out-dir dist
+echo "✅ Built source distribution"
 
-# Verify AutoDoc packaged resources exist in the built wheel(s)
-echo "🔎 Verifying AutoDoc wheel resources..."
+# Verify staged platform wheels exist before release verification
+echo "📦 Checking staged platform wheel artifacts..."
+shopt -s nullglob
 WHEEL_PATHS=(dist/*.whl)
 if [[ ! -e "${WHEEL_PATHS[0]}" ]]; then
-    echo "❌ No wheel found in dist/. Did the build fail?"
+    echo "❌ No wheel found in dist/."
+    echo "   Stage the supported Linux and Windows wheels in dist/ before running prepare_release.sh."
     exit 1
 fi
+echo "✅ Found staged wheel artifacts:"
+printf '   %s\n' "${WHEEL_PATHS[@]}"
+
+# Verify AutoDoc packaged resources exist in the staged wheel(s)
+echo "🔎 Verifying AutoDoc wheel resources..."
 uv run python scripts/verify_autodoc_wheel_resources.py "${WHEEL_PATHS[@]}"
 echo "✅ AutoDoc wheel resources verified"
+
+# Verify Watchman packaged runtime resources across the full staged wheel matrix
+echo "🔎 Verifying Watchman runtime wheel resources..."
+uv run python scripts/verify_watchman_runtime_resources.py --require-supported-matrix "${WHEEL_PATHS[@]}"
+echo "✅ Watchman runtime wheel resources verified"
+
+# Verify the documented sdist/source/editable fallback contract before wheel e2e
+echo "🔎 Verifying Watchman sdist/source/editable fallback behavior..."
+uv run python scripts/verify_watchman_live_indexing_e2e.py --verify-source-fallback --source-root "$PROJECT_ROOT"
+echo "✅ Watchman sdist/source/editable fallback behavior verified"
+
+# Verify host-compatible staged wheels satisfy the managed Watchman live-indexing contract
+echo "🔎 Verifying Watchman installed-wheel live indexing..."
+uv run python scripts/verify_watchman_live_indexing_e2e.py "${WHEEL_PATHS[@]}"
+echo "✅ Watchman installed-wheel live indexing verified"
 
 # Generate checksums for release artifacts
 echo "🔐 Generating checksums..."
@@ -79,11 +98,16 @@ echo "📦 Release artifacts in dist/:"
 ls -la dist/
 echo ""
 echo "🎯 Next steps:"
-echo "1. Test the built distributions locally:"
-echo "   pip install dist/chunkhound-${CURRENT_VERSION}-py3-none-any.whl"
-echo "2. Publish to PyPI (requires API token):"
-echo "   uv publish"
-echo "3. Create GitHub release with artifacts from dist/"
+echo "1. Optionally test the built distributions locally:"
+for wheel_path in "${WHEEL_PATHS[@]}"; do
+    echo "   pip install ${wheel_path}"
+done
+echo "2. Create or update the GitHub Release draft with the artifacts from dist/"
+echo "3. Publish the GitHub Release to trigger CI-owned PyPI publishing"
+echo "   Example:"
+echo "   gh release create <tag> --draft --title \"<tag>\" --generate-notes"
+echo "   gh release edit <tag> --draft=false"
+echo "4. Do not run uv publish manually; release.yml / release-rc.yml own publishing"
 echo ""
 echo "🔒 Dependency locking:"
 echo "  - requirements-lock.txt updated with exact versions"

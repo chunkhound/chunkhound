@@ -21,10 +21,12 @@ import tree_sitter_bash as ts_bash
 import tree_sitter_c as ts_c
 import tree_sitter_c_sharp as ts_csharp
 import tree_sitter_cpp as ts_cpp
+import tree_sitter_css as ts_css
 import tree_sitter_elixir as ts_elixir
 import tree_sitter_go as ts_go
 import tree_sitter_groovy as ts_groovy
 import tree_sitter_haskell as ts_haskell
+import tree_sitter_html as ts_html
 import tree_sitter_java as ts_java
 import tree_sitter_javascript as ts_javascript
 import tree_sitter_json as ts_json
@@ -42,6 +44,7 @@ import tree_sitter_zig as ts_zig
 from tree_sitter_language_pack import get_language as _get_lang
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers._grammar_availability import SCSS_AVAILABLE
 from chunkhound.interfaces.language_parser import LanguageParser
 from chunkhound.parsers.concept_extractor import LanguageMapping
 from chunkhound.parsers.mappings import (
@@ -49,12 +52,15 @@ from chunkhound.parsers.mappings import (
     CMapping,
     CppMapping,
     CSharpMapping,
+    CssMapping,
     DartMapping,
     ElixirMapping,
     GoMapping,
     GroovyMapping,
     HaskellMapping,
     HclMapping,
+    HtmlMapping,
+    JinjaMapping,
     JavaMapping,
     JavaScriptMapping,
     JsonMapping,
@@ -69,6 +75,7 @@ from chunkhound.parsers.mappings import (
     PHPMapping,
     PythonMapping,
     RustMapping,
+    ScssMapping,
     SqlMapping,
     SvelteMapping,
     SwiftMapping,
@@ -96,10 +103,10 @@ _dart_lang = _get_lang("dart")
 class _LanguagePackWrapper:
     """Wraps a tree-sitter-language-pack Language into a ts_*-compatible module."""
 
-    def __init__(self, lang):
+    def __init__(self, lang: Any) -> None:
         self._lang = lang
 
-    def language(self):
+    def language(self) -> Any:
         return self._lang
 
 
@@ -109,6 +116,11 @@ ts_swift = _LanguagePackWrapper(_swift_lang)
 ts_yaml = _LanguagePackWrapper(_yaml_lang)
 ts_hcl = _LanguagePackWrapper(_hcl_lang)
 ts_dart = _LanguagePackWrapper(_dart_lang)
+
+_scss_lang = _get_lang("scss")
+ts_scss: _LanguagePackWrapper | None = (
+    _LanguagePackWrapper(_scss_lang) if _scss_lang else None
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,11 +134,13 @@ class LanguageConfig:
         mapping_class: type[BaseMapping],
         available: bool,
         language_name: str,
+        pip_package: str | None = None,
     ):
         self.tree_sitter_module = tree_sitter_module
         self.mapping_class = mapping_class
         self.available = available
         self.language_name = language_name
+        self.pip_package = pip_package or f"tree-sitter-{language_name}"
 
     def _handle_language_result(self, result):
         """Handle language module result."""
@@ -141,8 +155,8 @@ class LanguageConfig:
         if not self.available or not self.tree_sitter_module:
             raise SetupError(
                 parser=self.language_name,
-                missing_dependency=f"tree-sitter-{self.language_name.lower()}",
-                install_command=f"pip install tree-sitter-{self.language_name.lower()}",
+                missing_dependency=self.pip_package,
+                install_command=f"pip install {self.pip_package}",
                 original_error="Tree-sitter module not available",
             )
 
@@ -196,7 +210,9 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.JAVA: LanguageConfig(ts_java, JavaMapping, True, "java"),
     Language.C: LanguageConfig(ts_c, CMapping, True, "c"),
     Language.CPP: LanguageConfig(ts_cpp, CppMapping, True, "cpp"),
-    Language.CSHARP: LanguageConfig(ts_csharp, CSharpMapping, True, "csharp"),
+    Language.CSHARP: LanguageConfig(
+        ts_csharp, CSharpMapping, True, "csharp", pip_package="tree-sitter-c-sharp"
+    ),
     Language.GO: LanguageConfig(ts_go, GoMapping, True, "go"),
     Language.RUST: LanguageConfig(ts_rust, RustMapping, True, "rust"),
     Language.ZIG: LanguageConfig(ts_zig, ZigMapping, True, "zig"),
@@ -208,7 +224,9 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.JSON: LanguageConfig(ts_json, JsonMapping, True, "json"),
     Language.TOML: LanguageConfig(ts_toml, TomlMapping, True, "toml"),
     Language.MARKDOWN: LanguageConfig(ts_markdown, MarkdownMapping, True, "markdown"),
-    Language.MAKEFILE: LanguageConfig(ts_make, MakefileMapping, True, "makefile"),
+    Language.MAKEFILE: LanguageConfig(
+        ts_make, MakefileMapping, True, "makefile", pip_package="tree-sitter-make"
+    ),
     # Haskell (required dependency in pyproject.toml)
     Language.ELIXIR: LanguageConfig(ts_elixir, ElixirMapping, True, "elixir"),
     Language.HASKELL: LanguageConfig(ts_haskell, HaskellMapping, True, "haskell"),
@@ -233,6 +251,17 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.TSX: LanguageConfig(
         ts_typescript, TSXMapping, True, "tsx"
     ),  # TSX uses TS parser with tsx language
+    # Web languages
+    Language.HTML: LanguageConfig(ts_html, HtmlMapping, True, "html"),
+    Language.CSS: LanguageConfig(ts_css, CssMapping, True, "css"),
+    Language.SCSS: LanguageConfig(
+        ts_scss, ScssMapping, SCSS_AVAILABLE, "scss",
+        pip_package="tree-sitter-language-pack",
+    ),
+    # JINJA uses the HTML grammar as a best-effort approximation.
+    # Jinja {{ }}/{% %}/{# #} tokens are treated as plain text by the HTML
+    # grammar.  A dedicated tree-sitter-jinja grammar could be added later.
+    Language.JINJA: LanguageConfig(ts_html, JinjaMapping, True, "jinja"),
     # Non-tree-sitter languages
     Language.TEXT: LanguageConfig(
         None, TextMapping, True, "text"
@@ -339,6 +368,20 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     "GNUmakefile": Language.MAKEFILE,
     ".mk": Language.MAKEFILE,
     ".mak": Language.MAKEFILE,
+    # Web languages
+    ".html": Language.HTML,
+    ".htm": Language.HTML,
+    ".xhtml": Language.HTML,
+    ".jinja": Language.JINJA,
+    ".j2": Language.JINJA,
+    ".njk": Language.JINJA,
+    ".css": Language.CSS,
+    # .scss falls back to TEXT when the SCSS grammar is unavailable, matching
+    # the documented graceful-degradation behaviour and mirroring .sass.
+    ".scss": Language.SCSS if SCSS_AVAILABLE else Language.TEXT,
+    # .sass uses indented syntax (no braces/semicolons) which is structurally
+    # incompatible with the tree-sitter SCSS grammar — fall back to text parser.
+    ".sass": Language.TEXT,
     ".make": Language.MAKEFILE,
     # Text files (fallback)
     ".txt": Language.TEXT,
@@ -348,6 +391,21 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     # TwinCAT / IEC 61131-3 Structured Text
     ".TcPOU": Language.TWINCAT,
     ".tcpou": Language.TWINCAT,
+    # Data interchange / API definition formats (TEXT fallback)
+    ".proto": Language.TEXT,
+    ".graphql": Language.TEXT,
+    ".gql": Language.TEXT,
+    ".xml": Language.TEXT,
+    # Config / properties files (TEXT fallback)
+    ".ini": Language.TEXT,
+    ".properties": Language.TEXT,
+    ".conf": Language.TEXT,
+    ".cfg": Language.TEXT,
+    # Extensionless CI/CD and container files (TEXT fallback)
+    "Dockerfile": Language.TEXT,
+    "dockerfile": Language.TEXT,
+    "Jenkinsfile": Language.TEXT,
+    "jenkinsfile": Language.TEXT,
 }
 
 
@@ -446,10 +504,8 @@ class ParserFactory:
         if not config.available:
             raise SetupError(
                 parser=config.language_name,
-                missing_dependency=f"tree-sitter-{config.language_name.lower()}",
-                install_command=(
-                    f"pip install tree-sitter-{config.language_name.lower()}"
-                ),
+                missing_dependency=config.pip_package,
+                install_command=f"pip install {config.pip_package}",
                 original_error="Tree-sitter module not available",
             )
 
@@ -481,10 +537,8 @@ class ParserFactory:
         except Exception as e:
             raise SetupError(
                 parser=config.language_name,
-                missing_dependency=f"tree-sitter-{config.language_name.lower()}",
-                install_command=(
-                    f"pip install tree-sitter-{config.language_name.lower()}"
-                ),
+                missing_dependency=config.pip_package,
+                install_command=f"pip install {config.pip_package}",
                 original_error=str(e),
             ) from e
 
@@ -595,9 +649,7 @@ class ParserFactory:
         missing = {}
         for language, config in LANGUAGE_CONFIGS.items():
             if not config.available and config.tree_sitter_module is not None:
-                missing[language] = (
-                    f"pip install tree-sitter-{config.language_name.lower()}"
-                )
+                missing[language] = f"pip install {config.pip_package}"
         return missing
 
     def clear_cache(self) -> None:

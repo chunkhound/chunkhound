@@ -2,6 +2,7 @@
 
 import gc
 import os
+import subprocess
 import tempfile
 import time
 from collections.abc import Generator
@@ -81,9 +82,9 @@ def cleanup_database_resources(provider: Any = None) -> None:
     try:
         # Close database provider if provided
         if provider is not None:
-            if hasattr(provider, 'close'):
+            if hasattr(provider, "close"):
                 provider.close()
-            elif hasattr(provider, 'disconnect'):
+            elif hasattr(provider, "disconnect"):
                 provider.disconnect()
             # Note: Some tests may use close() instead - prefer that when available
 
@@ -117,6 +118,7 @@ def windows_safe_tempdir() -> Generator[Path, None, None]:
 
                 # Try to remove the directory
                 import shutil
+
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
                 # On Windows, retry if removal failed
@@ -187,6 +189,63 @@ def should_use_polling() -> bool:
     return is_windows() and is_ci()
 
 
+def create_windows_directory_junction(link_path: Path, target_path: Path) -> None:
+    """Create a Windows directory junction without requiring admin privileges."""
+    if not is_windows():
+        raise RuntimeError("Windows directory junctions are only supported on Windows")
+
+    resolved_target = target_path.resolve()
+    if not resolved_target.is_dir():
+        raise RuntimeError(
+            f"Windows directory junction target must exist: {resolved_target}"
+        )
+    if link_path.exists() or link_path.is_symlink():
+        raise RuntimeError(
+            f"Windows directory junction path already exists: {link_path}"
+        )
+
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link_path), str(resolved_target)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        raise RuntimeError(
+            "Failed to create Windows directory junction "
+            f"{link_path} -> {resolved_target}: {detail}"
+        )
+    if not link_path.exists():
+        raise RuntimeError(f"Windows directory junction was not created: {link_path}")
+
+
+def remove_windows_directory_junction(link_path: Path) -> None:
+    """Remove a Windows directory junction without touching its target tree."""
+    if not link_path.exists():
+        return
+    if not is_windows():
+        link_path.rmdir()
+        return
+
+    completed = subprocess.run(
+        ["cmd", "/c", "rmdir", str(link_path)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode != 0 and link_path.exists():
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        raise RuntimeError(
+            f"Failed to remove Windows directory junction {link_path}: {detail}"
+        )
+
+
+def realtime_backend_for_tests() -> str:
+    """Return the explicit realtime backend tests should configure."""
+    return "polling" if should_use_polling() else "watchdog"
+
+
 POLLING_STABILIZATION_DELAY: float = 1.0  # Seconds to wait for first poll iteration
 
 
@@ -212,3 +271,130 @@ async def stabilize_polling_monitor() -> None:
         await asyncio.sleep(POLLING_STABILIZATION_DELAY)
 
 
+async def wait_for_indexed(
+    provider, file_path, timeout: float | None = None, poll_interval: float = 0.2
+) -> bool:
+    """Wait for file to appear in database index.
+
+    Uses polling instead of fixed sleep to handle Windows CI flakiness
+    where ReadDirectoryChangesW may silently drop events.
+
+    Args:
+        provider: Database provider with get_file_by_path method
+        file_path: Path to file that should be indexed
+        timeout: Max wait time (defaults to platform-appropriate value)
+        poll_interval: Time between checks
+
+    Returns:
+        True if file was found, False on timeout
+    """
+    import asyncio
+
+    if timeout is None:
+        timeout = get_fs_event_timeout()
+
+    path_str = str(Path(file_path).resolve())
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        record = provider.get_file_by_path(path_str)
+        if record is not None:
+            return True
+        await asyncio.sleep(poll_interval)
+
+    return False
+
+
+def wait_for_indexed_sync(
+    provider, file_path, timeout: float | None = None, poll_interval: float = 0.2
+) -> bool:
+    """Sync version of wait_for_indexed."""
+    if timeout is None:
+        timeout = get_fs_event_timeout()
+
+    path_str = str(Path(file_path).resolve())
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        record = provider.get_file_by_path(path_str)
+        if record is not None:
+            return True
+        time.sleep(poll_interval)
+
+    return False
+
+
+async def wait_for_removed(
+    provider, file_path, timeout: float | None = None, poll_interval: float = 0.2
+) -> bool:
+    """Wait for file to be removed from database index.
+
+    Uses polling instead of fixed sleep to handle Windows CI flakiness.
+
+    Args:
+        provider: Database provider with get_file_by_path method
+        file_path: Path to file that should be removed
+        timeout: Max wait time (defaults to platform-appropriate value)
+        poll_interval: Time between checks
+
+    Returns:
+        True if file was removed, False on timeout
+    """
+    import asyncio
+
+    if timeout is None:
+        timeout = get_fs_event_timeout()
+
+    path_str = str(Path(file_path).resolve())
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        record = provider.get_file_by_path(path_str)
+        if record is None:
+            return True
+        await asyncio.sleep(poll_interval)
+
+    return False
+
+
+async def wait_for_regex_searchable(
+    services, query: str, timeout: float | None = None, poll_interval: float = 0.5
+) -> bool:
+    """Wait for content to be regex-searchable in the index.
+
+    Polls regex search results instead of relying on queue state,
+    handling the polling monitor timing gap on Windows CI.
+
+    Note: This helper only supports regex search. Semantic search requires
+    embedding_manager threading which is test-specific.
+
+    Args:
+        services: The services object with provider access
+        query: Regex pattern to poll for
+        timeout: Max wait time (defaults to platform-appropriate value)
+        poll_interval: Time between search polls
+
+    Returns:
+        True if content became searchable, False on timeout
+    """
+    import asyncio
+
+    from chunkhound.mcp_server.tools import execute_tool
+
+    if timeout is None:
+        timeout = get_fs_event_timeout()
+
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        results = await execute_tool(
+            "search",
+            services,
+            None,
+            {"type": "regex", "query": query, "page_size": 10, "offset": 0},
+        )
+        if len(results.get("results", [])) > 0:
+            return True
+        await asyncio.sleep(poll_interval)
+
+    return False

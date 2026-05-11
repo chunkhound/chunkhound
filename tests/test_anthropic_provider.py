@@ -6,10 +6,10 @@ from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.anthropic_llm_provider import (
     ANTHROPIC_AVAILABLE,
     BETA_CONTEXT_MANAGEMENT,
-    BETA_EFFORT,
     BETA_INTERLEAVED_THINKING,
     BETA_STRUCTURED_OUTPUTS,
-    EFFORT_SUPPORTED_MODELS,
+    supports_effort,
+    supports_effort_level,
     AnthropicLLMProvider,
 )
 
@@ -190,7 +190,7 @@ class TestConfiguration:
         """Test default configuration values."""
         provider = AnthropicLLMProvider(api_key="test-key")
 
-        assert provider._model == "claude-sonnet-4-5-20250929"
+        assert provider._model == "claude-sonnet-4-6"
         assert provider.timeout == DEFAULT_LLM_TIMEOUT
         assert provider._max_retries == 3
         assert provider._thinking_enabled is False
@@ -301,7 +301,7 @@ class TestOpus45EffortParameter:
         )
 
         assert provider._effort == "medium"
-        assert provider._model in EFFORT_SUPPORTED_MODELS
+        assert supports_effort(provider._model)
 
     def test_effort_parameter_warning_non_opus(self):
         """Test that non-Opus 4.5 models get a warning for effort parameter."""
@@ -312,9 +312,9 @@ class TestOpus45EffortParameter:
             effort="low",
         )
 
-        # Effort is stored but model doesn't support it
-        assert provider._effort == "low"
-        assert provider._model not in EFFORT_SUPPORTED_MODELS
+        # Effort is silently dropped for models that don't support it
+        assert provider._effort is None
+        assert not supports_effort(provider._model)
 
     def test_effort_levels(self):
         """Test all valid effort levels."""
@@ -501,8 +501,8 @@ class TestBetaHeaders:
         headers = provider._get_beta_headers()
         assert headers == []
 
-    def test_effort_beta_header(self):
-        """Test effort beta header is included for Opus 4.5."""
+    def test_effort_not_a_beta_header(self):
+        """Effort is no longer a beta header."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-opus-4-5-20251101",
@@ -510,10 +510,10 @@ class TestBetaHeaders:
         )
 
         headers = provider._get_beta_headers()
-        assert BETA_EFFORT in headers
+        assert BETA_CONTEXT_MANAGEMENT not in headers  # sanity: no unrelated headers
 
-    def test_effort_beta_header_not_for_sonnet(self):
-        """Test effort beta header is not included for non-Opus models."""
+    def test_effort_not_a_beta_header_for_sonnet(self):
+        """Effort is not a beta header for any model."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-sonnet-4-5-20250929",
@@ -521,7 +521,7 @@ class TestBetaHeaders:
         )
 
         headers = provider._get_beta_headers()
-        assert BETA_EFFORT not in headers
+        assert len(headers) == 0
 
     def test_context_management_beta_header(self):
         """Test context management beta header."""
@@ -534,10 +534,11 @@ class TestBetaHeaders:
         assert BETA_CONTEXT_MANAGEMENT in headers
 
     def test_interleaved_thinking_beta_header(self):
-        """Test interleaved thinking beta header."""
+        """Test interleaved thinking beta header (requires manual mode)."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             thinking_enabled=True,
+            thinking_mode="manual",
             interleaved_thinking=True,
         )
 
@@ -548,8 +549,9 @@ class TestBetaHeaders:
         """Test interleaved thinking header only added when thinking is enabled."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
-            thinking_enabled=False,
-            interleaved_thinking=True,
+            thinking_enabled=True,
+            thinking_mode="manual",
+            interleaved_thinking=False,
         )
 
         headers = provider._get_beta_headers()
@@ -562,15 +564,15 @@ class TestBetaHeaders:
             model="claude-opus-4-5-20251101",
             effort="low",
             thinking_enabled=True,
+            thinking_mode="manual",
             interleaved_thinking=True,
             context_management_enabled=True,
         )
 
         headers = provider._get_beta_headers()
-        assert BETA_EFFORT in headers
         assert BETA_CONTEXT_MANAGEMENT in headers
         assert BETA_INTERLEAVED_THINKING in headers
-        assert len(headers) == 3
+        assert len(headers) == 2
 
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
@@ -586,9 +588,9 @@ class TestOpus45ModelConfiguration:
 
         assert provider.model == "claude-opus-4-5-20251101"
 
-    def test_opus_45_in_supported_models(self):
-        """Test Opus 4.5 is in effort supported models."""
-        assert "claude-opus-4-5-20251101" in EFFORT_SUPPORTED_MODELS
+    def test_opus_45_supports_effort(self):
+        """Test Opus 4.5 supports effort parameter."""
+        assert supports_effort("claude-opus-4-5-20251101")
 
     def test_opus_45_full_configuration(self):
         """Test Opus 4.5 with all features enabled."""
@@ -735,14 +737,15 @@ class TestStructuredOutputsBetaHeaders:
             model="claude-opus-4-5-20251101",
             effort="low",
             thinking_enabled=True,
+            thinking_mode="manual",
             interleaved_thinking=True,
             context_management_enabled=True,
         )
 
         headers = provider._get_beta_headers()
-        # Should have effort, context management, interleaved thinking
-        assert BETA_EFFORT in headers
+        # Context management and interleaved thinking are beta headers
         assert BETA_CONTEXT_MANAGEMENT in headers
         assert BETA_INTERLEAVED_THINKING in headers
+        # Effort is passed via output_config, not as a beta header
         # Structured outputs is added dynamically, not in _get_beta_headers
-        assert len(headers) == 3
+        assert len(headers) == 2

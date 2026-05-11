@@ -18,6 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
 from tree_sitter import Tree
 
 from chunkhound.core.models.chunk import Chunk
@@ -248,9 +249,24 @@ class UniversalParser:
 
             return self._parse_text_content(content, file_path, file_id)
 
-        # Parse to AST using TreeSitterEngine
-        ast_tree = self.engine.parse_to_ast(content)
+        # Allow the language mapping to sanitise content before tree-sitter
+        # parsing (e.g. SCSS replaces #{...} interpolations with same-length
+        # placeholders so the grammar can parse the file without errors).
+        # content_bytes always comes from the *original* source so that
+        # extracted chunk text is faithful to what the user wrote.
+        ast_source = self.base_mapping.preprocess_for_ast(content)
         content_bytes = content.encode("utf-8")
+        ast_bytes_len = len(ast_source.encode("utf-8"))
+        if ast_bytes_len != len(content_bytes):
+            logger.warning(
+                "preprocess_for_ast changed byte length ({} → {}) for {}; "
+                "falling back to original source to avoid misaligned chunks",
+                len(content_bytes),
+                ast_bytes_len,
+                file_path,
+            )
+            ast_source = content
+        ast_tree = self.engine.parse_to_ast(ast_source)
 
         # Extract universal concepts using ConceptExtractor
         if self.extractor is None:

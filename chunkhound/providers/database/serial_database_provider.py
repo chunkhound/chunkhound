@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
@@ -283,11 +283,37 @@ class SerialDatabaseProvider(ABC):
 
     async def get_stats_async(self) -> dict[str, int]:
         """Async variant of get_stats."""
-        return await self._execute_in_db_thread("get_stats")
+        return cast(dict[str, int], await self._execute_in_db_thread("get_stats"))
+
+    def delete_file_completely(self, file_path: str) -> bool:
+        """Delete a file and all its associated chunks/embeddings."""
+        return cast(
+            bool,
+            self._execute_in_db_thread_sync("delete_file_completely", file_path),
+        )
 
     async def delete_file_completely_async(self, file_path: str) -> bool:
         """Async variant of delete_file_completely."""
-        return await self._execute_in_db_thread("delete_file_completely", file_path)
+        return cast(
+            bool,
+            await self._execute_in_db_thread("delete_file_completely", file_path),
+        )
+
+    async def delete_files_batch_async(self, file_paths: list[str]) -> int:
+        """Async variant of delete_files_batch."""
+        if not file_paths:
+            return 0
+        if hasattr(self, "_executor_delete_files_batch"):
+            return cast(
+                int,
+                await self._execute_in_db_thread("delete_files_batch", file_paths),
+            )
+
+        deleted_count = 0
+        for file_path in file_paths:
+            if await self.delete_file_completely_async(file_path):
+                deleted_count += 1
+        return deleted_count
 
     async def begin_transaction_async(self) -> None:
         """Async variant of begin_transaction."""
@@ -314,7 +340,10 @@ class SerialDatabaseProvider(ABC):
         self, path: str, as_model: bool = False
     ) -> dict[str, Any] | File | None:
         """Async variant of get_file_by_path."""
-        return await self._execute_in_db_thread("get_file_by_path", path, as_model)
+        return cast(
+            dict[str, Any] | File | None,
+            await self._execute_in_db_thread("get_file_by_path", path, as_model),
+        )
 
     async def update_file_async(self, file_id: int, **kwargs: Any) -> None:
         """Async variant of update_file."""
@@ -322,19 +351,24 @@ class SerialDatabaseProvider(ABC):
 
     async def insert_file_async(self, file: File) -> int:
         """Async variant of insert_file."""
-        return await self._execute_in_db_thread("insert_file", file)
+        return cast(int, await self._execute_in_db_thread("insert_file", file))
 
     async def get_chunks_by_file_id_async(
         self, file_id: int, as_model: bool = False
     ) -> list[dict[str, Any] | Chunk]:
         """Async variant of get_chunks_by_file_id."""
-        return await self._execute_in_db_thread(
-            "get_chunks_by_file_id", file_id, as_model
+        return cast(
+            list[dict[str, Any] | Chunk],
+            await self._execute_in_db_thread(
+                "get_chunks_by_file_id", file_id, as_model
+            ),
         )
 
     async def insert_chunks_batch_async(self, chunks: list[Chunk]) -> list[int]:
         """Async variant of insert_chunks_batch."""
-        return await self._execute_in_db_thread("insert_chunks_batch", chunks)
+        return cast(
+            list[int], await self._execute_in_db_thread("insert_chunks_batch", chunks)
+        )
 
     async def delete_chunks_batch_async(self, chunk_ids: list[int]) -> None:
         """Async variant of delete_chunks_batch."""
@@ -361,7 +395,10 @@ class SerialDatabaseProvider(ABC):
         if not hasattr(self, "_executor_search_text"):
             return [], {"error": "Text search not supported by this provider"}
 
-        return self._execute_in_db_thread_sync("search_text", query, page_size, offset)
+        return cast(
+            tuple[list[dict[str, Any]], dict[str, Any]],
+            self._execute_in_db_thread_sync("search_text", query, page_size, offset),
+        )
 
     # Capability detection methods
 
@@ -406,6 +443,22 @@ class SerialDatabaseProvider(ABC):
             logger.debug("delete_chunks_batch not supported by this provider")
             return
         self._execute_in_db_thread_sync("delete_chunks_batch", chunk_ids)
+
+    def delete_files_batch(self, file_paths: list[str]) -> int:
+        """Delete multiple files and their associated chunks/embeddings."""
+        if not file_paths:
+            return 0
+        if hasattr(self, "_executor_delete_files_batch"):
+            return cast(
+                int,
+                self._execute_in_db_thread_sync("delete_files_batch", file_paths),
+            )
+
+        deleted_count = 0
+        for file_path in file_paths:
+            if self.delete_file_completely(file_path):
+                deleted_count += 1
+        return deleted_count
 
     # File processing integration
 

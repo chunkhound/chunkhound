@@ -44,6 +44,7 @@ if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps at import
     from mcp.server.models import InitializationOptions  # noqa: F401
 
 from chunkhound.core.config.config import Config  # noqa: E402
+from chunkhound.utils.windows_constants import IS_WINDOWS  # noqa: E402
 from chunkhound.version import __version__  # noqa: E402
 
 from .base import MCPServerBase  # noqa: E402
@@ -427,6 +428,11 @@ async def main(args: Any = None) -> None:
 
 def main_sync() -> None:
     """Synchronous wrapper for CLI entry point."""
+    if IS_WINDOWS:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="backslashreplace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(errors="backslashreplace")
     asyncio.run(main())
 
 

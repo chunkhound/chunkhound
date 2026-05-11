@@ -25,12 +25,12 @@ from chunkhound.utils.text_sanitization import sanitize_error_text
 class ClaudeCodeCLIProvider(BaseCLIProvider):
     """Claude Code CLI provider using subprocess calls to claude --print."""
 
-    DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+    DEFAULT_MODEL = "claude-sonnet-4-6"
 
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = DEFAULT_MODEL,
+        model: str = "claude-sonnet-4-6",
         base_url: str | None = None,
         timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
@@ -39,7 +39,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
 
         Args:
             api_key: Not used (subscription-based authentication)
-            model: Model name to use (e.g., "claude-haiku-4-5-20251001")
+            model: Model name to use (e.g., "claude-sonnet-4-6", "claude-opus-4-7")
             base_url: Not used (CLI uses default endpoints)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests

@@ -5,23 +5,22 @@ This module tests the disk usage limiting feature that prevents ChunkHound
 from exceeding configured database size limits during indexing operations.
 """
 
-import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-import pytest
+from unittest.mock import MagicMock
 
+from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.exceptions import DiskUsageLimitExceededError
-from chunkhound.services.indexing_coordinator import IndexingCoordinator
-from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.core.types.common import Language
+from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.batch_processor import ParsedFileResult
+from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
 
 def _create_parsed_file_result(
     file_path: Path,
     chunks: list[dict] | None = None,
-    status: str = "ok"
+    status: str = "ok",
 ) -> ParsedFileResult:
     """Helper to create ParsedFileResult for testing."""
     return ParsedFileResult(
@@ -33,6 +32,28 @@ def _create_parsed_file_result(
         status=status,
         error=None,
         content_hash=None,
+    )
+
+
+def _build_process_directory_coordinator(
+    tmp_path: Path, *, max_disk_usage_mb: float
+) -> IndexingCoordinator:
+    """Build a coordinator using the production DuckDB path/config contract."""
+    database_config = DatabaseConfig(
+        path=tmp_path / "test_db",
+        provider="duckdb",
+        max_disk_usage_mb=max_disk_usage_mb,
+    )
+    db = DuckDBProvider(
+        db_path=database_config.get_db_path(),
+        base_directory=tmp_path,
+    )
+    db.connect()
+    config = Config(database=database_config, target_dir=tmp_path)
+    return IndexingCoordinator(
+        database_provider=db,
+        base_directory=tmp_path,
+        config=config,
     )
 
 
@@ -155,7 +176,8 @@ class TestIndexingCoordinatorDiskUsage:
     def test_check_disk_usage_limit_exceeded(self, tmp_path):
         """Test that error is returned when limit is exceeded."""
         db_path = tmp_path / "test_db_dir"
-        # Create the actual database file and use a limit of 0.0 to ensure it always exceeds
+        # Create the actual database file and use a limit of 0.0 so it always
+        # exceeds the configured limit.
         actual_db_path = db_path / "chunks.db"
         actual_db_path.parent.mkdir(parents=True, exist_ok=True)
         actual_db_path.write_bytes(b"x" * 100)
@@ -271,8 +293,9 @@ class TestIndexingCoordinatorDiskUsage:
         assert error.current_size_mb > 2.0
 
     def test_check_disk_usage_limit_directory_size_calculation(self, tmp_path):
-        """Test that directory size calculation works correctly for database directories."""
-        # Use a local working directory instead of tmp to avoid test failures caused by not having OS privileges to create symlink
+        """Test directory size calculation for directory-backed database paths."""
+        # Use a local working directory instead of tmp to avoid symlink-creation
+        # privilege issues in restricted test environments.
         test_dir = Path.cwd() / "test_disk_size_db"
         test_dir.mkdir(parents=True, exist_ok=True)
 
@@ -328,16 +351,9 @@ class TestIndexingCoordinatorIntegration:
 
     def test_process_directory_disk_limit_exceeded(self, tmp_path):
         """Test that process_directory returns disk_limit_exceeded status."""
-        db_path = tmp_path / "test.db"
-
-        db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
-        # Connect to initialize the database with proper schema
-        db.connect()
-        config = DatabaseConfig(max_disk_usage_mb=0.0)  # Zero limit
-        coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+        coord = _build_process_directory_coordinator(
+            tmp_path,
+            max_disk_usage_mb=0.0,
         )
 
         # Create a test file to process
@@ -353,7 +369,7 @@ class TestIndexingCoordinatorIntegration:
         assert result["limit_mb"] == 0.0
 
     def test_store_parsed_results_disk_limit_exceeded(self, tmp_path):
-        """Test that _store_parsed_results returns disk limit error when limit exceeded."""
+        """Test that _store_parsed_results surfaces disk limit errors."""
         db_path = tmp_path / "test.db"
 
         db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
@@ -382,18 +398,9 @@ class TestIndexingCoordinatorIntegration:
 
     def test_process_directory_normal_operation(self, tmp_path):
         """Test that processing works normally when under disk limit."""
-        db_path = tmp_path / "test.db"
-        # Create the actual database file with small content
-        actual_db_path = db_path / "chunks.db"
-        actual_db_path.parent.mkdir(parents=True, exist_ok=True)
-        actual_db_path.write_text("small")
-
-        db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
-        config = DatabaseConfig(max_disk_usage_mb=1024.0)  # 1GB limit
-        coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+        coord = _build_process_directory_coordinator(
+            tmp_path,
+            max_disk_usage_mb=1024.0,
         )
 
         # Create a test file to process

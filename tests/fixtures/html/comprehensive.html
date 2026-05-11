@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<!-- Main page comment -->
+<head>
+  <meta charset="UTF-8">
+  <title>Comprehensive Test Page</title>
+  <!-- Stylesheet import -->
+  <link rel="stylesheet" href="styles/main.css">
+  <link rel="stylesheet" href="styles/theme.css">
+  <!-- Script import -->
+  <script src="js/app.js"></script>
+  <script src="js/vendor/lodash.min.js"></script>
+  <!-- Inline style block -->
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: sans-serif;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header section -->
+  <header id="main-header">
+    <nav class="primary-nav" aria-label="Main navigation">
+      <a href="/">Home</a>
+      <a href="/about">About</a>
+      <a href="/contact">Contact</a>
+    </nav>
+  </header>
+
+  <main id="content">
+    <article class="blog-post">
+      <h1>Article Title</h1>
+      <p>Article content paragraph. Non-semantic elements like p, span, div should not be extracted.</p>
+      <div class="wrapper">
+        <span class="tag">ignored</span>
+      </div>
+
+      <section id="intro">
+        <h2>Introduction</h2>
+        <p>Introduction content.</p>
+      </section>
+
+      <section class="body-section">
+        <h2>Body</h2>
+        <aside aria-label="Related links">
+          <ul>
+            <li><a href="/related">Related post</a></li>
+          </ul>
+        </aside>
+      </section>
+    </article>
+
+    <!-- Form section -->
+    <form id="contact-form" method="post" action="/submit">
+      <fieldset>
+        <legend>Contact Information</legend>
+        <label for="name">Name:</label>
+        <input type="text" id="name" name="name">
+        <label for="email">Email:</label>
+        <input type="email" id="email" name="email">
+        <button type="submit">Send</button>
+      </fieldset>
+    </form>
+
+    <!-- Table section -->
+    <table id="data-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Row 1</td>
+          <td>100</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- Details and dialog -->
+    <details id="faq">
+      <summary>Frequently Asked Questions</summary>
+      <p>FAQ content here.</p>
+    </details>
+
+    <dialog id="confirm-dialog">
+      <p>Are you sure?</p>
+      <button>Yes</button>
+      <button>No</button>
+    </dialog>
+
+    <!-- Figure -->
+    <figure id="chart-figure">
+      <img src="chart.png" alt="Sales chart">
+      <figcaption>Q4 Sales Data</figcaption>
+    </figure>
+
+    <!-- Custom elements -->
+    <my-component id="widget" data-value="42">
+      <span>Custom element content</span>
+    </my-component>
+
+    <app-header class="top-bar">
+      <slot name="title">Default title</slot>
+    </app-header>
+  </main>
+
+  <footer id="site-footer">
+    <p>&copy; 2024 Test Site. All rights reserved.</p>
+  </footer>
+
+  <!-- Inline script block -->
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      var btn = document.getElementById('submit-btn');
+      if (btn) {
+        btn.addEventListener('click', function() {
+          console.log('clicked');
+        });
+      }
+    });
+  </script>
+</body>
+</html>

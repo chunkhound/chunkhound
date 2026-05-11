@@ -389,6 +389,43 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         "    email VARCHAR(255) UNIQUE\n"
         ");",
     ),
+    # === Web Languages ===
+    Language.HTML: (
+        ".html",
+        # Large HTML document
+        "<!DOCTYPE html>\n<html>\n<body>\n"
+        + _make_large_statements("  <p>Content paragraph here</p>")
+        + "\n</body>\n</html>",
+        # Normal
+        "<!DOCTYPE html>\n<html>\n<body>\n  <h1>Hello World</h1>\n</body>\n</html>",
+    ),
+    Language.CSS: (
+        ".css",
+        # Large CSS with many rules
+        ".container {\n"
+        + _make_large_statements("  color: red;")
+        + "\n}",
+        # Normal
+        ".container {\n  display: flex;\n  color: blue;\n}",
+    ),
+    Language.SCSS: (
+        ".scss",
+        # Large SCSS with nested rules
+        "$primary: blue;\n.container {\n"
+        + _make_large_statements("  color: $primary;")
+        + "\n}",
+        # Normal
+        "$color: blue;\n.container {\n  color: $color;\n  &:hover { opacity: 0.8; }\n}",
+    ),
+    Language.JINJA: (
+        ".jinja",
+        # Large Jinja template
+        "<!DOCTYPE html>\n<html>\n<body>\n"
+        + _make_large_statements("  <p>{{ item }}</p>")
+        + "\n</body>\n</html>",
+        # Normal
+        "<!DOCTYPE html>\n<html>\n<body>\n  <h1>{{ title }}</h1>\n</body>\n</html>",
+    ),
     # === Generic/Unknown ===
     Language.UNKNOWN: (
         ".unknown",

@@ -105,8 +105,16 @@ class DatabaseProvider(Protocol):
         """Delete a file and all its chunks/embeddings completely."""
         ...
 
+    def delete_files_batch(self, file_paths: list[str]) -> int:
+        """Delete multiple files and their chunks/embeddings completely."""
+        ...
+
     async def delete_file_completely_async(self, file_path: str) -> bool:
         """Delete a file and all its chunks/embeddings completely (asynchronous)."""
+        ...
+
+    async def delete_files_batch_async(self, file_paths: list[str]) -> int:
+        """Delete multiple files and their chunks/embeddings completely (asynchronous)."""
         ...
 
     async def insert_file_async(self, file: File) -> int:
@@ -317,6 +325,18 @@ class DatabaseProvider(Protocol):
         path_filter: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform regex search on code content (asynchronous)."""
+        ...
+
+    def list_file_paths_under_directory(
+        self, directory_prefix: str
+    ) -> list[str]:
+        """Return every ``files.path`` under a relative directory prefix.
+
+        Includes paths equal to ``directory_prefix`` and paths starting with
+        ``f"{directory_prefix}/"``. Used by realtime deleted-directory cleanup
+        so chunkless rows (binary, empty, or unparseable files) are still
+        enumerated alongside chunked rows.
+        """
         ...
 
     def search_text(

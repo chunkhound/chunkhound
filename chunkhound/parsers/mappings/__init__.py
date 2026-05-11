@@ -9,12 +9,14 @@ from .bash import BashMapping
 from .c import CMapping
 from .cpp import CppMapping
 from .csharp import CSharpMapping
+from .css import CssMapping
 from .dart import DartMapping
 from .elixir import ElixirMapping
 from .go import GoMapping
 from .groovy import GroovyMapping
 from .haskell import HaskellMapping
 from .hcl import HclMapping
+from .html import HtmlMapping, JinjaMapping
 from .java import JavaMapping
 from .javascript import JavaScriptMapping
 from .json import JsonMapping
@@ -29,6 +31,7 @@ from .pdf import PDFMapping
 from .php import PHPMapping
 from .python import PythonMapping
 from .rust import RustMapping
+from .scss import ScssMapping
 from .sql import SqlMapping
 from .svelte import SvelteMapping
 from .swift import SwiftMapping
@@ -47,18 +50,21 @@ __all__ = [
     "CMapping",
     "CppMapping",
     "CSharpMapping",
+    "CssMapping",
     "DartMapping",
     "ElixirMapping",
     "GoMapping",
     "GroovyMapping",
     "HaskellMapping",
+    "HclMapping",
+    "HtmlMapping",
+    "JinjaMapping",
     "JavaMapping",
     "JavaScriptMapping",
     "JsonMapping",
     "JSXMapping",
     "KotlinMapping",
     "LuaMapping",
-    "HclMapping",
     "MakefileMapping",
     "MarkdownMapping",
     "MatlabMapping",
@@ -67,6 +73,7 @@ __all__ = [
     "PHPMapping",
     "PythonMapping",
     "RustMapping",
+    "ScssMapping",
     "SqlMapping",
     "SvelteMapping",
     "SwiftMapping",

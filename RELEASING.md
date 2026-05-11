@@ -1,5 +1,9 @@
 # ChunkHound Release Guide
 
+`scripts/prepare_release.sh` is a deprecated local verification helper only; it
+does not publish anything and must not replace the GitHub Release workflow
+documented below.
+
 ## Prerequisites (one-time setup)
 
 ### 1. OIDC Trusted Publishing — PyPI

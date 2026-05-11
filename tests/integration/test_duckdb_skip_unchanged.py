@@ -143,6 +143,35 @@ def test_checksums_saved_on_first_index(tmp_path: Path):
     assert result2.get("skipped_unchanged", 0) == 3, "All 3 files should be skipped on second pass"
 
 
+def test_single_file_batch_processing_runs_off_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+    from chunkhound.services import indexing_coordinator as indexing_module
+    from chunkhound.services.indexing_coordinator import IndexingCoordinator
+
+    db_path = tmp_path / "db.duckdb"
+    provider = DuckDBProvider(db_path, base_directory=tmp_path)
+    provider.connect()
+
+    target_file = tmp_path / "single.py"
+    target_file.write_text("print('hello')\n")
+    coord = IndexingCoordinator(database_provider=provider, base_directory=tmp_path)
+
+    async def fake_to_thread(func, *args, **kwargs):
+        assert func is indexing_module.process_file_batch
+        assert args[0] == [(target_file, None)]
+        assert "config_file_size_threshold_kb" in args[1]
+        assert kwargs == {}
+        return []
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+
+    result = asyncio.run(coord._process_files_in_batches([target_file]))
+
+    assert result == []
+
+
 def test_hash_computed_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Verify hash is computed on first index, then cached on subsequent runs (performance optimization)."""
     import asyncio
@@ -340,4 +369,3 @@ def test_changed_file_gets_hash_computed(tmp_path: Path):
     assert db_file3 is not None
     hash3 = db_file3.get("content_hash")
     assert hash3 == hash2, "Hash should remain unchanged when file is unchanged"
-

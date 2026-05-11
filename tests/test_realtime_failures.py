@@ -15,7 +15,7 @@ from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
-    should_use_polling,
+    realtime_backend_for_tests,
     stabilize_polling_monitor,
 )
 
@@ -37,21 +37,22 @@ class TestRealtimeFailures:
 
         # Use fake args to prevent find_project_root call that fails in CI
         from types import SimpleNamespace
+
         fake_args = SimpleNamespace(path=temp_dir)
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]}
+            indexing={
+                "include": ["*.py", "*.js"],
+                "exclude": ["*.log"],
+                "realtime_backend": realtime_backend_for_tests(),
+            },
         )
 
         services = create_services(db_path, config)
         services.provider.connect()
 
-        # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
-        force_polling = should_use_polling()
-        realtime_service = RealtimeIndexingService(
-            services, config, force_polling=force_polling
-        )
+        realtime_service = RealtimeIndexingService(services, config)
 
         yield realtime_service, watch_dir, temp_dir, services
 
@@ -69,11 +70,35 @@ class TestRealtimeFailures:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
+    async def test_threading_integration_is_broken(self, realtime_setup):
+        """Test that threading integration between watchdog and asyncio works."""
+        service, watch_dir, _, services = realtime_setup
+        await service.start(watch_dir)
+
+        # Wait for initial scan to complete
+        await asyncio.sleep(1.0)
+
+        # Now create file AFTER initial scan - should only be caught by real-time monitoring
+        test_file = watch_dir / "realtime_test.py"
+        test_file.write_text("def realtime_test(): pass")
+
+        # Wait for debounce delay (0.5s) + processing + database commit
+        await asyncio.sleep(2.0)
+
+        # If threading integration works, file should be processed by real-time monitoring
+        # Use resolved path to match what the real-time service stores
+        file_record = services.provider.get_file_by_path(str(test_file.resolve()))
+        assert file_record is not None, (
+            "Real-time file should be processed by filesystem monitoring"
+        )
+
+        await service.stop()
+
+    @pytest.mark.asyncio
     async def test_indexing_coordinator_skip_embeddings_not_implemented(
         self, realtime_setup
     ):
-        """Test that IndexingCoordinator.process_file doesn't support
-        skip_embeddings parameter."""
+        """Test that IndexingCoordinator.process_file doesn't support skip_embeddings parameter."""
         service, watch_dir, _, services = realtime_setup
 
         # Try to call process_file with skip_embeddings directly
@@ -84,10 +109,10 @@ class TestRealtimeFailures:
         try:
             result = await services.indexing_coordinator.process_file(
                 test_file,
-                skip_embeddings=True  # This parameter might not exist
+                skip_embeddings=True,  # This parameter might not exist
             )
             # If we get here, the parameter exists but might not work correctly
-            assert result.get('embeddings_skipped'), (
+            assert result.get("embeddings_skipped"), (
                 "skip_embeddings parameter should actually skip embeddings"
             )
         except TypeError as e:
@@ -97,33 +122,28 @@ class TestRealtimeFailures:
             )
 
     @pytest.mark.asyncio
-    async def test_file_debouncing_creates_memory_leaks(self, realtime_setup):
-        """Test that file debouncing properly cleans up timers."""
+    async def test_file_debouncing_cleans_up_state(self, realtime_setup):
+        """Test that rapid changes to one file leave no stale debounce state."""
         service, watch_dir, _, _ = realtime_setup
         await service.start(watch_dir)
 
         # Wait for initial scan to complete
         await asyncio.sleep(1.0)
 
-        # Create many rapid file changes to the SAME file - should reuse timer slot
+        # Rapid writes to the same file — should coalesce into one debounce task
         test_file = watch_dir / "reused_file.py"
         for i in range(20):
-            test_file.write_text(f"def func_{i}(): pass # iteration {i}")
-            await asyncio.sleep(0.01)  # Very rapid changes to same file
+            test_file.write_text(f"def func_{i}(): pass")
+            await asyncio.sleep(0.01)
 
-        # Wait for debounce delay to let timers execute and cleanup
-        await asyncio.sleep(1.0)
-
-        # Get reference to debouncer timers after cleanup should occur
-        if service.event_handler and hasattr(service.event_handler, 'debouncer'):
-            active_timers = len(service.event_handler.debouncer.timers)
-            # Should only have 1 timer max for the single file, or 0 if cleaned up
-            assert active_timers <= 1, (
-                f"Too many active timers ({active_timers}) "
-                "- should cleanup after execution"
-            )
-
-        await service.stop()
+        # Wait for debounce delay + buffer to let the task complete and clean up
+        await asyncio.sleep(2.0)
+        assert len(service._pending_debounce) == 0, (
+            f"Stale debounce entries after processing: {list(service._pending_debounce)}"
+        )
+        assert len(service._debounce_tasks) == 0, (
+            f"Leaked debounce tasks after processing: {len(service._debounce_tasks)}"
+        )
 
     @pytest.mark.asyncio
     async def test_background_scan_conflicts_with_realtime(self, realtime_setup):
@@ -145,10 +165,10 @@ class TestRealtimeFailures:
         # Check if file was processed multiple times (race condition)
         file_record = services.provider.get_file_by_path(str(initial_file))
         if file_record:
-            chunks = services.provider.get_chunks_by_file_id(file_record['id'])
+            chunks = services.provider.get_chunks_by_file_id(file_record["id"])
 
             # If there are duplicate chunks or processing conflicts, this will show
-            chunk_contents = [chunk.get('content', '') for chunk in chunks]
+            chunk_contents = [chunk.get("content", "") for chunk in chunks]
             unique_contents = set(chunk_contents)
 
             assert len(chunk_contents) == len(unique_contents), (
@@ -222,7 +242,7 @@ class TestRealtimeFailures:
 
         # Check if service is still alive after error
         stats = await service.get_stats()
-        assert stats.get('observer_alive', False), (
+        assert stats.get("observer_alive", False), (
             "Service should survive processing errors"
         )
 
@@ -233,16 +253,15 @@ class TestRealtimeFailures:
         """Test that polling monitor cleans up resources when cancelled."""
         service, watch_dir, _, _ = realtime_setup
 
-        # Force polling mode for deterministic testing
-        service._force_polling = True
+        service.config.indexing.realtime_backend = "polling"
+        service._configured_backend = "polling"
         await service.start(watch_dir)
 
-        # Let polling run at least one cycle
+        # Let polling run at least one cycle.
         await asyncio.sleep(0.5)
 
-        # Stop service (triggers cancellation of polling task)
         await service.stop()
 
-        # Verify cleanup completed - task should be done or None
-        assert service._polling_task is None or service._polling_task.done(), \
+        assert service._polling_task is None or service._polling_task.done(), (
             "Polling task should be cleaned up after stop()"
+        )

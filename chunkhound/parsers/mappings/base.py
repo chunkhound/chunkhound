@@ -96,6 +96,18 @@ class BaseMapping(ABC):
 
     # Common helper methods with default implementations
 
+    def preprocess_for_ast(self, content: str) -> str:
+        """Transform source before feeding to tree-sitter.
+
+        Override in language-specific subclasses to work around grammar
+        limitations (e.g. unsupported syntax variants). The transformation
+        MUST preserve exact byte lengths so that AST byte-offsets remain
+        valid against the original content bytes.
+
+        Returns content unchanged by default.
+        """
+        return content
+
     def get_node_text(self, node: TSNode | None, source: str) -> str:
         """Extract text content from a tree-sitter node.
 
