@@ -52,7 +52,6 @@ jobs:
             pytest_timeout_seconds: 600
             pytest_extra_args: "--reruns 2 --reruns-delay 5 --only-rerun AssertionError"
             pytest_timeout_minutes: 20
-            job_timeout_minutes: 50
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
