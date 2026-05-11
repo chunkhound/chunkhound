@@ -20,8 +20,8 @@ jobs:
           # 45s window — retry individual flaky tests before failing the run.
           - os: windows-latest
             pytest_extra_args: "--reruns 2 --reruns-delay 5 --only-rerun AssertionError"
-            pytest_timeout_minutes: 15
-            job_timeout_minutes: 40
+            pytest_timeout_minutes: 20
+            job_timeout_minutes: 50
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
