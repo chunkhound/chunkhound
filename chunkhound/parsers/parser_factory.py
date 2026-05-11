@@ -390,7 +390,6 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     # Config / properties files (TEXT fallback)
     ".ini": Language.TEXT,
     ".properties": Language.TEXT,
-    ".env": Language.TEXT,
     ".conf": Language.TEXT,
     ".cfg": Language.TEXT,
     # Extensionless CI/CD and container files (TEXT fallback)

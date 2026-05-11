@@ -324,7 +324,6 @@ class Language(Enum):
             # Config / properties files (TEXT fallback)
             ".ini": cls.TEXT,
             ".properties": cls.TEXT,
-            ".env": cls.TEXT,
             ".conf": cls.TEXT,
             ".cfg": cls.TEXT,
         }
