@@ -391,6 +391,21 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     # TwinCAT / IEC 61131-3 Structured Text
     ".TcPOU": Language.TWINCAT,
     ".tcpou": Language.TWINCAT,
+    # Data interchange / API definition formats (TEXT fallback)
+    ".proto": Language.TEXT,
+    ".graphql": Language.TEXT,
+    ".gql": Language.TEXT,
+    ".xml": Language.TEXT,
+    # Config / properties files (TEXT fallback)
+    ".ini": Language.TEXT,
+    ".properties": Language.TEXT,
+    ".conf": Language.TEXT,
+    ".cfg": Language.TEXT,
+    # Extensionless CI/CD and container files (TEXT fallback)
+    "Dockerfile": Language.TEXT,
+    "dockerfile": Language.TEXT,
+    "Jenkinsfile": Language.TEXT,
+    "jenkinsfile": Language.TEXT,
 }
 
 
