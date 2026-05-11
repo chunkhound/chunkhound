@@ -84,7 +84,7 @@ class DirectoryIndexingService:
             include_patterns, exclude_patterns = self._resolve_file_patterns()
 
             # Directory processing (extracted from run.py:80-82, 253-284)
-            self.progress_callback("Starting file processing...")
+            self.progress_callback("Discovering files...")
             process_result = await self._process_directory_files(
                 target_path, include_patterns, exclude_patterns
             )
@@ -108,7 +108,8 @@ class DirectoryIndexingService:
 
     def _resolve_file_patterns(self) -> tuple[list[str], list[str]]:
         """Extracted from run.py:152-175 - file pattern resolution logic."""
-        # Use patterns from config (CLI overrides already applied during config creation)
+        # Use patterns from config. CLI overrides are already applied during
+        # config creation.
         include_patterns = list(self.config.indexing.include)
         exclude_patterns = list(self.config.indexing.exclude)
 
