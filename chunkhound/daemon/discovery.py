@@ -1245,6 +1245,23 @@ class DaemonDiscovery:
                                     isinstance(actual_pid, int)
                                     and await self._socket_connectable(actual_address)
                                 ):
+                                    # Final checkpoint: daemon may have crashed
+                                    # during the startup barrier (publish happens
+                                    # before barrier in daemon/server.py).
+                                    returncode = startup.process.poll()
+                                    if returncode is not None:
+                                        await _terminate_startup_handle(startup)
+                                        raise RuntimeError(
+                                            self._format_startup_failure(
+                                                prefix=(
+                                                    "ChunkHound daemon crashed after "
+                                                    "publishing lock "
+                                                    f"(address: {startup_address})"
+                                                ),
+                                                log_path=startup.log_path,
+                                                returncode=returncode,
+                                            )
+                                        )
                                     # Authoritative registry publication from
                                     # the proxy. Cross-runtime discovery reads
                                     # only the user-scoped registry dir, so if
