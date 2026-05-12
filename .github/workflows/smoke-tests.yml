@@ -59,6 +59,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # docs/site version resolution requires tags
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
@@ -67,6 +69,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
+
+      - name: Resolve docs version
+        run: bash scripts/resolve_docs_version.sh
 
       - name: Install dependencies
         run: uv sync --locked
