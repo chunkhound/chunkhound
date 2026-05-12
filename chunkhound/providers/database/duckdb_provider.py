@@ -614,18 +614,21 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             result = mutation_func()
 
+            # Commit data changes before recreating HNSW indexes. DuckDB VSS HNSW indexes
+            # do not support CreateDeltaIndex, so committing a transaction that contains an
+            # HNSW CREATE triggers a BoundIndex::CreateDeltaIndex assertion failure.
+            if transactional:
+                self._executor_commit_transaction(conn, state, False)
+
             for index_info in existing_indexes:
                 self._executor_recreate_vector_index_from_info(
                     conn, state, index_info
                 )
 
-            if transactional:
-                self._executor_commit_transaction(conn, state, True)
-            else:
-                self._executor_maybe_checkpoint(conn, state, True)
+            self._executor_maybe_checkpoint(conn, state, True)
             return result
         except Exception as e:
-            if transactional:
+            if transactional and state.get("transaction_active", False):
                 try:
                     self._executor_rollback_transaction(conn, state)
                 except Exception as rollback_error:
@@ -1752,6 +1755,12 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             result = mutation_func()
 
+            # Commit data changes before recreating HNSW indexes. DuckDB VSS HNSW indexes
+            # do not support CreateDeltaIndex, so committing a transaction that contains an
+            # HNSW CREATE triggers a BoundIndex::CreateDeltaIndex assertion failure.
+            if transactional:
+                self._executor_commit_transaction(conn, state, False)
+
             if existing_indexes:
                 logger.info(
                     f"Recreating {len(existing_indexes)} HNSW indexes after {mutation_label}"
@@ -1762,10 +1771,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     )
                 indexes_recreated = True
 
-            if transactional:
-                self._executor_commit_transaction(conn, state, True)
-            else:
-                self._executor_maybe_checkpoint(conn, state, True)
+            self._executor_maybe_checkpoint(conn, state, True)
             logger.info(f"{mutation_label} completed successfully with HNSW safety")
             return result
         except Exception as e:
