@@ -566,7 +566,23 @@ class WatchmanRealtimeAdapter:
                 "watchman_sidecar_start",
                 f"Watchman sidecar {phase} failed: {error}",
             )
-            raise RuntimeError(f"Watchman sidecar {phase} failed: {error}") from error
+            resolution = self._context.configured_backend_resolution
+            if resolution == "explicit":
+                raise RuntimeError(
+                    f"Watchman sidecar {phase} failed: {error}; "
+                    "fallback to polling is disabled because "
+                    "realtime_backend was explicitly configured"
+                ) from error
+            self._context.debug(
+                f"Watchman sidecar {phase} failed: {error}; "
+                "falling back to polling backend"
+            )
+            await self._context.start_polling_backend(
+                watch_path,
+                reason=f"Watchman sidecar {phase} failed: {error}; fell back to polling",
+            )
+            self._context.set_effective_backend("polling")
+            return
         self._context.complete_startup_phase("watchman_sidecar_start")
 
         self._context.clear_watchman_monitoring_state()

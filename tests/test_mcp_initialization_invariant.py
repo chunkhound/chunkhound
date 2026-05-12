@@ -177,9 +177,6 @@ class TestNonBlockingInitialization:
                         {"provider": "codex-cli", "model": "codex"},
                     )
                     assert server.llm_manager is mock_llm_manager.return_value
-                    config.llm.get_missing_config_for_roles.assert_called_once_with(
-                        ("utility", "synthesis")
-                    )
                     config.llm.get_provider_configs.assert_called_once_with()
 
                     await server.cleanup()

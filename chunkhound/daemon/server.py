@@ -102,10 +102,8 @@ class ChunkHoundDaemon(MCPServerBase):
 
             # Initialise services (DB, embeddings, realtime indexing)
             await self.initialize()
-            await self.await_startup_barrier()
-            self._initialization_complete.set()
-            self.debug_log("Daemon initialised")
 
+            # --- DAEMON PUBLISH FIRST (before sidecar startup barrier) ---
             self._start_startup_phase("daemon_publish")
             try:
                 # Generate auth token BEFORE accepting connections so every client
@@ -162,7 +160,6 @@ class ChunkHoundDaemon(MCPServerBase):
                     f"(pid={os.getpid()}, address={self._socket_path})"
                 )
                 self._complete_startup_phase("daemon_publish")
-                self._complete_startup()
                 self._resolve_startup_publish_complete()
             except Exception as error:
                 self._set_startup_failure(
@@ -170,7 +167,13 @@ class ChunkHoundDaemon(MCPServerBase):
                     phase_name="daemon_publish",
                 )
                 self._resolve_startup_publish_complete()
-                raise
+                self._shutdown_event.set()
+                return
+
+            # --- THEN deferred startup barrier (sidecar readiness) ---
+            self._initialization_complete.set()
+            await self.await_startup_barrier()
+            self._complete_startup()
 
             # Start PID poll background task
             self._pid_poll_task = asyncio.create_task(self._client_manager.poll_pids())
