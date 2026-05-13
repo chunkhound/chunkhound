@@ -2,6 +2,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap');
 
 /* ── Design Tokens ─────────────────────────────────────────────────── */
+/* Brand palette: cyan/teal — primary #22d3ee, bright #0891b2, dark #0e7490. */
 
 :root {
   /* Colors — dark mode (default) */
@@ -15,19 +16,19 @@
   --border-color: #4f4f4f;
   --border-subtle: #3c3c3c;
   --border-accent: color-mix(in srgb, var(--primary) 40%, var(--border-color));
-  --primary: #a9c650;
-  --primary-bright: #a1bc20;
-  --primary-bg: #263100;
-  --on-primary: #1e2600;
+  --primary: #22d3ee;
+  --primary-bright: #0891b2;
+  --primary-bg: #164e63;
+  --on-primary: #083344;
   --on-primary-bg: var(--text-primary);
-  --link: #a9c650;
-  --link-hover: #c9e185;
-  --link-visited: #dff3ab;
-  --link-focus: #c9e185;
-  --link-on-primary-bg: #c9e185;
-  --link-on-primary-bg-hover: #dff3ab;
-  --link-on-primary-bg-visited: #edfec5;
-  --link-on-primary-bg-focus: #dff3ab;
+  --link: #22d3ee;
+  --link-hover: #a5f3fc;
+  --link-visited: #cffafe;
+  --link-focus: #a5f3fc;
+  --link-on-primary-bg: #a5f3fc;
+  --link-on-primary-bg-hover: #cffafe;
+  --link-on-primary-bg-visited: #ecfeff;
+  --link-on-primary-bg-focus: #cffafe;
   --code-bg: #212121;
   --code-text: #d3d3d3;
   --logo-invert: 1;
@@ -90,19 +91,19 @@
   --border-color: #d3d3d3;
   --border-subtle: #e8e8e8;
   --border-accent: var(--primary);
-  --primary: #8dab14;
-  --primary-bright: #a9c650;
-  --primary-bg: #e4f7b0;
+  --primary: #0e7490;
+  --primary-bright: #22d3ee;
+  --primary-bg: #cffafe;
   --on-primary: #ffffff;
   --on-primary-bg: var(--text-primary);
-  --link: #5d7000;
-  --link-hover: #485800;
-  --link-visited: #374400;
-  --link-focus: #485800;
-  --link-on-primary-bg: #485800;
-  --link-on-primary-bg-hover: #374400;
-  --link-on-primary-bg-visited: #263100;
-  --link-on-primary-bg-focus: #374400;
+  --link: #0e7490;
+  --link-hover: #155e75;
+  --link-visited: #164e63;
+  --link-focus: #155e75;
+  --link-on-primary-bg: #155e75;
+  --link-on-primary-bg-hover: #164e63;
+  --link-on-primary-bg-visited: #083344;
+  --link-on-primary-bg-focus: #164e63;
   --code-bg: #2b2b2b;
   --code-text: #d3d3d3;
   --logo-invert: 0;
@@ -121,19 +122,19 @@
     --border-color: #d3d3d3;
     --border-subtle: #e8e8e8;
     --border-accent: var(--primary);
-    --primary: #8dab14;
-    --primary-bright: #a9c650;
-    --primary-bg: #e4f7b0;
+    --primary: #0e7490;
+    --primary-bright: #22d3ee;
+    --primary-bg: #cffafe;
     --on-primary: #ffffff;
     --on-primary-bg: var(--text-primary);
-    --link: #5d7000;
-    --link-hover: #485800;
-    --link-visited: #374400;
-    --link-focus: #485800;
-    --link-on-primary-bg: #485800;
-    --link-on-primary-bg-hover: #374400;
-    --link-on-primary-bg-visited: #263100;
-    --link-on-primary-bg-focus: #374400;
+    --link: #0e7490;
+    --link-hover: #155e75;
+    --link-visited: #164e63;
+    --link-focus: #155e75;
+    --link-on-primary-bg: #155e75;
+    --link-on-primary-bg-hover: #164e63;
+    --link-on-primary-bg-visited: #083344;
+    --link-on-primary-bg-focus: #164e63;
     --code-bg: #2b2b2b;
     --code-text: #d3d3d3;
     --logo-invert: 0;

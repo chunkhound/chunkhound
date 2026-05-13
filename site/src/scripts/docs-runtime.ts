@@ -159,10 +159,10 @@ async function initMermaid(): Promise<void> {
         startOnLoad: false,
         theme: "base",
         themeVariables: {
-            primaryColor: "#263100",
+            primaryColor: "#164e63",
             primaryTextColor: "#f4f4f4",
-            primaryBorderColor: "#5d7000",
-            lineColor: "#a9c650",
+            primaryBorderColor: "#0e7490",
+            lineColor: "#22d3ee",
             secondaryColor: "#3c3c3c",
             tertiaryColor: "#4f4f4f",
         },
