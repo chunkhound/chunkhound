@@ -139,13 +139,105 @@ Directory scan
 
 ## Testing
 
-- Unit test in `tests/` asserting:
-  - `Dockerfile` (text) is indexed when flag=on, skipped when flag=off
-  - A binary file (contains null bytes) is skipped even when flag=on
-  - The `**/*` pattern is appended to include list when flag=on
-  - CLI `--index-unknown-files` sets the field to `True`
-  - Env var `CHUNKHOUND_INDEXING__INDEX_UNKNOWN_FILES=true` sets the field to `True`
-- Add to smoke tests: index a directory containing an unknown-extension text file and verify it appears in results
+Tests are split into two phases: **before fix** (written first, verify current behaviour is preserved) and **after fix** (written first as failing tests that drive the implementation).
+
+### Before fix — regression guard (must pass now and after)
+
+These confirm the default "flag-off" path is untouched by the implementation.
+
+**File:** `tests/test_index_unknown_files.py`
+
+```python
+# Verify unknown files are skipped when flag=off (existing behaviour)
+def test_unknown_file_skipped_by_default(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12\n")
+    config = IndexingConfig()                         # flag defaults to False
+    assert "**/*" not in config.include               # no wildcard injected
+    results = process_file_batch([dockerfile], config.model_dump())
+    assert results[0].status == "skipped"
+    assert results[0].error == "Unknown file type"
+
+# Verify known-extension files are unaffected
+def test_known_extension_unaffected_when_flag_off(tmp_path):
+    pyfile = tmp_path / "main.py"
+    pyfile.write_text("x = 1\n")
+    config = IndexingConfig()
+    results = process_file_batch([pyfile], config.model_dump())
+    assert results[0].status != "skipped"
+
+# Verify **/* is NOT added to include when flag=off
+def test_wildcard_not_injected_when_flag_off():
+    config = IndexingConfig()
+    assert "**/*" not in config.include
+```
+
+### After fix — new behaviour (failing before implementation, passing after)
+
+**File:** `tests/test_index_unknown_files.py` (same file, separate class)
+
+```python
+# Text unknown file is indexed when flag=on
+def test_unknown_text_file_indexed_when_flag_on(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12\nRUN pip install uv\n")
+    config = IndexingConfig(index_unknown_files=True)
+    results = process_file_batch([dockerfile], config.model_dump())
+    assert results[0].status == "parsed"
+    assert len(results[0].chunks) > 0
+
+# Binary unknown file is still skipped even when flag=on
+def test_binary_unknown_file_skipped_when_flag_on(tmp_path):
+    binfile = tmp_path / "model.bin"
+    binfile.write_bytes(b"\x00\x01\x02" * 100)
+    config = IndexingConfig(index_unknown_files=True)
+    results = process_file_batch([binfile], config.model_dump())
+    assert results[0].status == "skipped"
+    assert results[0].error == "binary_file"
+
+# **/* is appended to include when flag=on
+def test_wildcard_injected_when_flag_on():
+    config = IndexingConfig(index_unknown_files=True)
+    assert "**/*" in config.include
+
+# **/* is appended even when user has custom include list
+def test_wildcard_appended_to_custom_include():
+    config = IndexingConfig(index_unknown_files=True, include=["**/*.py"])
+    assert "**/*" in config.include
+    assert "**/*.py" in config.include
+
+# CLI flag sets the field
+def test_cli_flag_sets_index_unknown_files():
+    parser = argparse.ArgumentParser()
+    IndexingConfig.add_cli_arguments(parser)
+    args = parser.parse_args(["--index-unknown-files"])
+    assert args.index_unknown_files is True
+
+# Env var sets the field
+def test_env_var_sets_index_unknown_files(monkeypatch):
+    monkeypatch.setenv("CHUNKHOUND_INDEXING__INDEX_UNKNOWN_FILES", "true")
+    config = IndexingConfig.load_from_env()
+    assert config.index_unknown_files is True
+
+# JSON config sets the field
+def test_json_config_sets_index_unknown_files():
+    config = IndexingConfig.model_validate({"index_unknown_files": True})
+    assert config.index_unknown_files is True
+```
+
+### Smoke test addition
+
+**File:** `tests/test_smoke.py` — add to the existing `TestIndexing` class (or equivalent):
+
+```python
+def test_index_unknown_extension_file(tmp_path):
+    """End-to-end: unknown-extension text file appears in results when flag=on."""
+    feature_file = tmp_path / "login.feature"
+    feature_file.write_text("Feature: Login\n  Scenario: Valid user\n")
+    config_file = tmp_path / ".chunkhound.json"
+    config_file.write_text('{"indexing": {"index_unknown_files": true}}')
+    # Run indexer, query for "Login", assert at least one result references login.feature
+```
 
 ---
 
