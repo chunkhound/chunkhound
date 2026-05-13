@@ -102,6 +102,7 @@ async def _start_proxy_process(
     *,
     runtime_dir: Path | None = None,
     stdin: int | None = asyncio.subprocess.PIPE,
+    stdout: int | None = asyncio.subprocess.PIPE,
     capture_stderr: bool = False,
     extra_env: dict[str, str] | None = None,
 ) -> asyncio.subprocess.Process:
@@ -113,7 +114,7 @@ async def _start_proxy_process(
         "mcp",
         str(project_dir),
         stdin=stdin,
-        stdout=asyncio.subprocess.PIPE,
+        stdout=stdout,
         stderr=stderr,
         env=env,
         cwd=str(project_dir),
@@ -489,7 +490,9 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
         # PID should belong to a live process (cross-platform check)
         try:
             daemon_proc = psutil.Process(pid)
-            assert daemon_proc.is_running(), f"Lock file PID {pid} exists but is not running"
+            assert daemon_proc.is_running(), (
+                f"Lock file PID {pid} exists but is not running"
+            )
         except psutil.NoSuchProcess:
             pytest.fail(f"Lock file PID {pid} is not a live process")
 
@@ -527,39 +530,74 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.requires_native_watchman
-async def test_watchman_start_failure_returns_fast_and_skips_lock_publication(
+async def test_watchman_start_failure_cleans_up_after_eager_publication(
     pre_indexed_project_dir: Path,
 ) -> None:
-    """Watchman startup failures should surface quickly without publishing a lock."""
+    """Explicit Watchman startup failure should fail fast and leave no daemon state.
+
+    The daemon publishes its socket/lock before the Watchman startup barrier runs,
+    so this test covers the eager-publication race directly. Even in that window,
+    the proxy must still surface a caller-visible startup failure instead of
+    silently exiting on EOF.
+    """
     project_dir = pre_indexed_project_dir
     config_path = project_dir / ".chunkhound.json"
     config = json.loads(config_path.read_text())
     config.setdefault("indexing", {})["realtime_backend"] = "watchman"
     config_path.write_text(json.dumps(config))
 
-    start_time = time.monotonic()
-    returncode, _stdout, stderr_text = await _run_proxy_to_failure(
+    proc = await _start_proxy_process(
         project_dir,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        capture_stderr=True,
         extra_env={"CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY": "1"},
-        timeout=20.0,
     )
-    elapsed = time.monotonic() - start_time
+    start_time = time.monotonic()
+    try:
+        returncode = await asyncio.wait_for(proc.wait(), timeout=15.0)
+        elapsed = time.monotonic() - start_time
+        stdout_text = (
+            b""
+            if proc.stdout is None
+            else await asyncio.wait_for(proc.stdout.read(), timeout=5.0)
+        ).decode()
+        stderr_text = (
+            b""
+            if proc.stderr is None
+            else await asyncio.wait_for(proc.stderr.read(), timeout=5.0)
+        ).decode()
+    finally:
+        if proc.stdin is not None and not proc.stdin.is_closing():
+            proc.stdin.close()
+            try:
+                await proc.stdin.wait_closed()
+            except Exception:
+                pass
+        if proc.returncode is None:
+            proc.kill()
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
 
-    assert returncode != 0, "Proxy should fail when watchman startup fails"
-    assert elapsed < 20.0, f"Expected fail-fast startup error, got {elapsed:.2f}s"
-    assert "Watchman sidecar startup failed" in stderr_text
-    assert "Recent daemon log output" in stderr_text
+    assert elapsed < 10.0, f"Expected fail-fast startup error, got {elapsed:.2f}s"
+    assert returncode != 0
+    assert stdout_text == ""
+
+    cleaned_up = await wait_for_daemon_full_cleanup(project_dir, timeout=20.0)
+    assert cleaned_up, "Daemon state was not fully cleaned up after startup failure"
 
     lock_path = DaemonDiscovery(project_dir).get_lock_path()
     assert not lock_path.exists(), (
-        "Daemon lock should not be published on watchman failure"
+        "Daemon lock should not remain published on watchman failure"
     )
-    assert not await wait_for_daemon_start(project_dir, timeout=1.0)
+    assert not await wait_for_daemon_start(project_dir, timeout=3.0)
 
     daemon_log_path = project_dir / ".chunkhound" / "daemon.log"
     assert daemon_log_path.exists()
     daemon_log_text = daemon_log_path.read_text(encoding="utf-8", errors="replace")
     assert "Watchman sidecar startup failed" in daemon_log_text
+    assert "closed the IPC connection before serving any MCP traffic" in stderr_text
+    assert "Watchman sidecar startup failed" in stderr_text
+    assert "Recent daemon log output" in stderr_text
 
 
 @pytest.mark.asyncio
@@ -575,11 +613,15 @@ async def test_daemon_sibling_roots_allowed(tmp_path: Path) -> None:
     try:
         proc_a, client_a = await _start_proxy(root_a, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client_a, timeout=30.0)
-        assert await wait_for_daemon_start(root_a, timeout=15.0, runtime_dir=runtime_dir)
+        assert await wait_for_daemon_start(
+            root_a, timeout=15.0, runtime_dir=runtime_dir
+        )
 
         proc_b, client_b = await _start_proxy(root_b, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client_b, timeout=30.0)
-        assert await wait_for_daemon_start(root_b, timeout=15.0, runtime_dir=runtime_dir)
+        assert await wait_for_daemon_start(
+            root_b, timeout=15.0, runtime_dir=runtime_dir
+        )
     finally:
         await asyncio.gather(
             *[
@@ -606,7 +648,9 @@ async def test_daemon_parent_then_child_blocks(tmp_path: Path) -> None:
     try:
         proc, client = await _start_proxy(parent, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client, timeout=30.0)
-        assert await wait_for_daemon_start(parent, timeout=15.0, runtime_dir=runtime_dir)
+        assert await wait_for_daemon_start(
+            parent, timeout=15.0, runtime_dir=runtime_dir
+        )
 
         returncode, _, stderr = await _run_proxy_to_failure(
             child,

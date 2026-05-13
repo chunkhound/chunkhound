@@ -659,7 +659,7 @@ class DaemonDiscovery:
             "last_error": last_error,
         }
 
-    def _format_startup_failure(
+    def format_startup_failure(
         self,
         *,
         prefix: str,
@@ -963,7 +963,7 @@ class DaemonDiscovery:
                     return actual_address
                 if not pid_alive(pid):
                     raise RuntimeError(
-                        self._format_startup_failure(
+                        self.format_startup_failure(
                             prefix=(
                                 "ChunkHound daemon exited before it became reachable "
                                 f"(pid={pid}, address: {actual_address})"
@@ -973,7 +973,7 @@ class DaemonDiscovery:
                 remaining = deadline - time.monotonic()
                 await asyncio.sleep(min(_STARTUP_POLL_INTERVAL, max(remaining, 0.0)))
             raise RuntimeError(
-                self._format_startup_failure(
+                self.format_startup_failure(
                     prefix=(
                         f"ChunkHound daemon (pid={pid}) did not become reachable "
                         f"within {timeout}s (address: {actual_address})"
@@ -1226,7 +1226,7 @@ class DaemonDiscovery:
                             if returncode is not None:
                                 await _terminate_startup_handle(startup)
                                 raise RuntimeError(
-                                    self._format_startup_failure(
+                                    self.format_startup_failure(
                                         prefix=(
                                             "ChunkHound daemon exited before it became "
                                             f"reachable (address: {startup_address})"
@@ -1252,7 +1252,7 @@ class DaemonDiscovery:
                                     if returncode is not None:
                                         await _terminate_startup_handle(startup)
                                         raise RuntimeError(
-                                            self._format_startup_failure(
+                                            self.format_startup_failure(
                                                 prefix=(
                                                     "ChunkHound daemon crashed after "
                                                     "publishing lock "
@@ -1291,7 +1291,7 @@ class DaemonDiscovery:
 
                         await _terminate_startup_handle(startup)
                         raise RuntimeError(
-                            self._format_startup_failure(
+                            self.format_startup_failure(
                                 prefix=(
                                     f"ChunkHound daemon did not start within "
                                     f"{_STARTUP_TIMEOUT}s (address: {startup_address})"
@@ -1307,7 +1307,7 @@ class DaemonDiscovery:
                 self._release_cross_runtime_startup_lock()
 
         raise RuntimeError(
-            self._format_startup_failure(
+            self.format_startup_failure(
                 prefix=(
                     f"ChunkHound daemon did not become reachable within "
                     f"{_STARTUP_TIMEOUT}s (address: {initial_address})"

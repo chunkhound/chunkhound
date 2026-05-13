@@ -16,11 +16,18 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import ipc
 from .discovery import DaemonDiscovery
+
+
+@dataclass(frozen=True)
+class _SocketForwardResult:
+    message_count: int
+    clean_close: bool
 
 
 class ClientProxy:
@@ -66,29 +73,66 @@ class ClientProxy:
                 {stdin_task, stdout_task}, return_when=asyncio.FIRST_COMPLETED
             )
 
-            # Retrieve exceptions from completed tasks to prevent
-            # "Task exception was never retrieved" noise on stderr.
-            for task in done:
-                if not task.cancelled():
-                    exc = task.exception()
-                    if exc is not None:
-                        msg = f"[chunkhound] client_proxy task error: {exc!r}\n"
-                        sys.stderr.write(msg)
-                        sys.stderr.flush()
-
-            # Cancel remaining tasks
             for task in pending:
                 task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            stdout_error = self._task_error(stdout_task)
+            stdin_error = self._task_error(stdin_task)
+            stdout_result = self._task_result(stdout_task)
+            closed_before_mcp = (
+                stdout_error is None
+                and isinstance(stdout_result, _SocketForwardResult)
+                and stdout_result.clean_close
+                and stdout_result.message_count == 0
+            )
+            if closed_before_mcp and (
+                stdin_error is None or self._is_ipc_shutdown_error(stdin_error)
+            ):
+                raise RuntimeError(
+                    self._discovery.format_startup_failure(
+                        prefix=(
+                            "ChunkHound daemon closed the IPC connection before "
+                            "serving any MCP traffic"
+                        ),
+                        log_path=self._discovery.get_daemon_log_path(),
+                    )
+                )
+            if stdout_error is not None:
+                raise stdout_error
+            if stdin_error is not None:
+                raise stdin_error
         finally:
             try:
                 writer.close()
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    @staticmethod
+    def _task_error(task: asyncio.Task[Any]) -> BaseException | None:
+        """Return the finished task error without surfacing cancellations."""
+        if not task.done() or task.cancelled():
+            return None
+        return task.exception()
+
+    @staticmethod
+    def _task_result(task: asyncio.Task[Any]) -> Any | None:
+        """Return the finished task result when it completed successfully."""
+        if not task.done() or task.cancelled():
+            return None
+        if task.exception() is not None:
+            return None
+        return task.result()
+
+    @staticmethod
+    def _is_ipc_shutdown_error(error: BaseException) -> bool:
+        """Treat transport resets as daemon-closure noise during startup failure."""
+        return isinstance(
+            error,
+            (BrokenPipeError, ConnectionAbortedError, ConnectionResetError),
+        )
 
     async def _forward_stdin_to_socket(self, writer: asyncio.StreamWriter) -> None:
         """Read JSON lines from stdin, parse, and write as IPC frames to the socket.
@@ -142,17 +186,20 @@ class ClientProxy:
             ipc.write_frame(writer, msg)
             await writer.drain()
 
-    async def _forward_socket_to_stdout(self, reader: asyncio.StreamReader) -> None:
+    async def _forward_socket_to_stdout(
+        self, reader: asyncio.StreamReader
+    ) -> _SocketForwardResult:
         """Read IPC frames from socket, serialize as JSON lines, write to stdout."""
+        message_count = 0
         while True:
             try:
                 msg = await ipc.read_frame(reader)
             except asyncio.IncompleteReadError:
-                break
-            except Exception as e:
-                sys.stderr.write(f"[chunkhound] IPC read error: {e!r}\n")
-                sys.stderr.flush()
-                break
+                return _SocketForwardResult(
+                    message_count=message_count,
+                    clean_close=True,
+                )
             line = json.dumps(msg) + "\n"
             sys.stdout.buffer.write(line.encode())
             sys.stdout.buffer.flush()
+            message_count += 1
