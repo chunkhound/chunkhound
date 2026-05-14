@@ -387,7 +387,11 @@ class TestCleanup:
             cwd=str(Path(__file__).resolve().parents[1]),
             capture_output=True,
             text=True,
-            timeout=2,
+            # Importing chunkhound.mcp_server.base has a cold-start cost of
+            # ~1.6-2.5s (transitive deps like llm_manager, database_factory,
+            # core.config).  A 2s timeout makes this test flaky; 5s is
+            # generous enough for import + the 0.05s cleanup timeout + print.
+            timeout=5,
         )
 
         assert completed.returncode == 0, completed.stderr
