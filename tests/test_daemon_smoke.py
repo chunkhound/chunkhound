@@ -595,7 +595,10 @@ async def test_watchman_start_failure_cleans_up_after_eager_publication(
     assert daemon_log_path.exists()
     daemon_log_text = daemon_log_path.read_text(encoding="utf-8", errors="replace")
     assert "Watchman sidecar startup failed" in daemon_log_text
-    assert "exited before it became reachable" in stderr_text
+    # The daemon publishes lock/socket before running the Watchman startup barrier
+    # (eager publication), so the proxy connects via IPC before the barrier fails.
+    # Error surfaces at the IPC/proxy layer, not the discovery layer.
+    assert "closed the IPC connection before serving any MCP traffic" in stderr_text
     assert "Watchman sidecar startup failed" in stderr_text
     assert "Recent daemon log output" in stderr_text
 
