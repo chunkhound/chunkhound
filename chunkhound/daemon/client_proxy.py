@@ -104,6 +104,19 @@ class ClientProxy:
             if stdin_error is not None:
                 raise stdin_error
         finally:
+            # Close stdin to unblock the Windows stdin reader thread.
+            # On Windows, _forward_stdin_threaded uses run_in_executor with a
+            # blocking readline().  When asyncio.run() shuts down after run()
+            # returns, it calls shutdown_default_executor(wait=True) which joins
+            # all thread-pool workers.  If the readline thread is still blocked
+            # waiting on the pipe (nobody wrote to it or closed the write end),
+            # shutdown hangs forever.
+            # Closing stdin here causes readline() to return b"", the thread
+            # finishes, the future resolves, and shutdown succeeds.
+            try:
+                sys.stdin.buffer.close()
+            except Exception:
+                pass
             try:
                 writer.close()
                 await writer.wait_closed()
