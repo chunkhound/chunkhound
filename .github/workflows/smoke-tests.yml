@@ -73,6 +73,11 @@ jobs:
       - name: Resolve docs version
         run: bash scripts/resolve_docs_version.sh
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --prefix site
+
       - name: Install dependencies
         run: uv sync --locked
       - name: Test collection check
