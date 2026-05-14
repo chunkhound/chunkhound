@@ -156,9 +156,7 @@ class MCPServerBase(ABC):
         self._warm_ready_initial_scan_skipped_monotonic: float | None = None
         self._warm_ready_fresh_instance_resync_requested = False
         self._warm_ready_fresh_instance_resync_total_seconds: float | None = None
-        self._warm_ready_fresh_instance_resync_completed_monotonic: float | None = (
-            None
-        )
+        self._warm_ready_fresh_instance_resync_completed_monotonic: float | None = None
         self._warm_ready_fresh_instance_resync_outcome: str | None = None
         self._warm_ready_fresh_instance_resync_authoritative = False
         self._warm_ready_double_work_logged = False
@@ -239,8 +237,7 @@ class MCPServerBase(ABC):
             )
             or (
                 self._warm_ready_fresh_instance_resync_requested
-                and self._warm_ready_fresh_instance_resync_completed_monotonic
-                is None
+                and self._warm_ready_fresh_instance_resync_completed_monotonic is None
             )
         ):
             return
@@ -806,9 +803,7 @@ class MCPServerBase(ABC):
 
         resync_started_monotonic = time.monotonic()
         loss_of_sync_reason = (
-            details.get("loss_of_sync_reason")
-            if isinstance(details, dict)
-            else None
+            details.get("loss_of_sync_reason") if isinstance(details, dict) else None
         )
         is_fresh_instance = self._is_fresh_instance_resync(reason, details)
         daemon_visible = self._realtime_startup_mode() == "daemon" and (
@@ -922,9 +917,7 @@ class MCPServerBase(ABC):
                 )
                 self._warm_ready_fresh_instance_resync_outcome = resync_outcome
                 self._warm_ready_fresh_instance_resync_authoritative = (
-                    self._is_authoritative_fresh_instance_resync_outcome(
-                        resync_outcome
-                    )
+                    self._is_authoritative_fresh_instance_resync_outcome(resync_outcome)
                 )
                 self._emit_warm_ready_summary_if_ready()
 
