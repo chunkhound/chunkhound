@@ -15,6 +15,7 @@ import copy
 import os
 import re
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -35,6 +36,8 @@ from chunkhound.services.realtime_indexing_service import RealtimeIndexingServic
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
 )
+
+_DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
 
 
 class MCPServerBase(ABC):
@@ -74,6 +77,7 @@ class MCPServerBase(ABC):
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
+        self._provider_close_future: asyncio.Future[None] | None = None
 
         # Background tasks
         self._deferred_start_task: asyncio.Task | None = None
@@ -107,21 +111,21 @@ class MCPServerBase(ABC):
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
         os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
-    def debug_log(self, message: str) -> None:
-        """Log debug message to file if debug mode is enabled."""
-        if self.debug_mode:
-            # Write to debug file instead of stderr to preserve JSON-RPC protocol
-            debug_file = os.getenv(
-                "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log"
-            )
-            try:
-                with open(debug_file, "a") as f:
-                    timestamp = datetime.now().isoformat()
-                    f.write(f"[{timestamp}] [MCP] {message}\n")
-                    f.flush()
-            except Exception:
-                # Silently fail if we can't write to debug file
-                pass
+    def debug_log(self, message: str, *, always: bool = False) -> None:
+        """Log to the MCP debug file without risking JSON-RPC corruption."""
+        if not (always or self.debug_mode):
+            return
+
+        # Write to a file instead of stderr/stdout to preserve JSON-RPC protocol.
+        debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log")
+        try:
+            with open(debug_file, "a") as f:
+                timestamp = datetime.now().isoformat()
+                f.write(f"[{timestamp}] [MCP] {message}\n")
+                f.flush()
+        except Exception:
+            # Silently fail if we can't write to debug file
+            pass
 
     def _startup_log(self, message: str) -> None:
         """Emit startup breadcrumbs to debug logs and the daemon stderr log path."""
@@ -1029,10 +1033,48 @@ class MCPServerBase(ABC):
                 )
                 raise
 
-    async def cleanup(self) -> None:
-        """Clean up resources and close database connection.
+    def _close_provider_in_background(self) -> asyncio.Future[None]:
+        """Start or reuse the provider close attempt on a daemon thread."""
+        if self._provider_close_future is not None:
+            return self._provider_close_future
 
-        This method is idempotent - safe to call multiple times.
+        if self.services is None:
+            raise RuntimeError("Services not initialized")
+
+        provider = self.services.provider
+        close_method = (
+            provider.close if hasattr(provider, "close") else provider.disconnect
+        )
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        def _complete_with_result() -> None:
+            if not future.done():
+                future.set_result(None)
+
+        def _complete_with_exception(error: Exception) -> None:
+            if not future.done():
+                future.set_exception(error)
+
+        def _run_close() -> None:
+            try:
+                close_method()
+            except Exception as e:
+                loop.call_soon_threadsafe(_complete_with_exception, e)
+                return
+            loop.call_soon_threadsafe(_complete_with_result)
+
+        threading.Thread(target=_run_close, daemon=True).start()
+        self._provider_close_future = future
+        return future
+
+    async def cleanup(self) -> None:
+        """Clean up resources and start at most one provider close attempt.
+
+        The timeout only bounds how long each cleanup call waits. A blocking
+        synchronous provider close keeps running on its daemon thread, and later
+        cleanup calls reuse that same in-flight attempt instead of starting a
+        second one.
         """
         if (
             self._deferred_start_task is not None
@@ -1070,14 +1112,29 @@ class MCPServerBase(ABC):
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
 
-        if self.services and self.services.provider.is_connected:
+        if self.services and (
+            self.services.provider.is_connected
+            or self._provider_close_future is not None
+        ):
             self.debug_log("Closing database connection")
-            # Use new close() method for proper cleanup, with fallback to disconnect()
-            if hasattr(self.services.provider, "close"):
-                self.services.provider.close()
-            else:
-                self.services.provider.disconnect()
-            self._initialized = False
+            # Run sync provider cleanup on a dedicated daemon thread so cleanup()
+            # never depends on asyncio's default executor shutdown behavior.
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._close_provider_in_background()),
+                    timeout=_DATABASE_CLOSE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                self.debug_log(
+                    "Database close exceeded "
+                    f"{_DATABASE_CLOSE_TIMEOUT_SECONDS:.1f}s and will continue in "
+                    "the background daemon thread",
+                    always=True,
+                )
+            except Exception as e:
+                self.debug_log(f"Database close failed: {e}", always=True)
+            finally:
+                self._initialized = False
 
     async def ensure_services(self) -> DatabaseServices:
         """Ensure services are initialized and return them.
