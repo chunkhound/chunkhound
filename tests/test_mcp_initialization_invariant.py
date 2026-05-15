@@ -389,9 +389,10 @@ class TestCleanup:
             text=True,
             # Importing chunkhound.mcp_server.base has a cold-start cost of
             # ~1.6-2.5s (transitive deps like llm_manager, database_factory,
-            # core.config).  A 2s timeout makes this test flaky; 5s is
-            # generous enough for import + the 0.05s cleanup timeout + print.
-            timeout=5,
+            # core.config) locally, but on macOS ARM CI runners it can take
+            # 4-5s.  A 5s timeout becomes flaky; 15s provides margin for
+            # import + the 0.05s cleanup timeout + print + cold runner.
+            timeout=15,
         )
 
         assert completed.returncode == 0, completed.stderr

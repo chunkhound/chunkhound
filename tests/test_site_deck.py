@@ -1,6 +1,9 @@
 """Smoke tests: deck page renders without build errors."""
 
+import shutil
 import subprocess
+
+import pytest
 
 
 def test_deck_astro_build_succeeds():
@@ -10,8 +13,17 @@ def test_deck_astro_build_succeeds():
     syntax, CSS parse errors, and JavaScript frontmatter issues — all of
     which are silent during development but surface at build time.
     """
+    # On Windows, npx is npx.cmd and may not be on PATH for subprocess.
+    # Use shutil.which() to find it cross-platform.
+    npx = shutil.which("npx") or shutil.which("npx.cmd")
+    if npx is None:
+        # Node.js/npm not installed — skip gracefully on CI runners
+        # that don't have it in PATH.
+        pytest.skip("npx not found on PATH")
+        return
+
     result = subprocess.run(
-        ["npx", "astro", "build"],
+        [npx, "astro", "build"],
         cwd="site",
         capture_output=True,
         text=True,
