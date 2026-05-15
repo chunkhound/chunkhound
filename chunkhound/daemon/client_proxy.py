@@ -27,7 +27,6 @@ from .discovery import DaemonDiscovery
 @dataclass(frozen=True)
 class _SocketForwardResult:
     message_count: int
-    clean_close: bool
 
 
 class ClientProxy:
@@ -38,28 +37,88 @@ class ClientProxy:
         self._args = args
         self._discovery = DaemonDiscovery(self._project_dir)
 
+    async def _connect_or_startup_failure(
+        self, address: str
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Connect to *address* or surface a daemon connection failure.
+
+        The daemon may exit between ``find_or_start_daemon()`` returning
+        and this connection attempt (e.g. startup barrier failure or
+        normal shutdown after the last client disconnected).  Catch
+        ``OSError`` and format a caller-visible diagnostic error.
+        """
+        try:
+            return await ipc.create_client(address)
+        except OSError:
+            raise RuntimeError(
+                self._discovery.format_startup_failure(
+                    prefix=(
+                        "ChunkHound daemon IPC connection failed \u2014 daemon "
+                        "may have shut down before accepting"
+                    ),
+                    log_path=self._discovery.get_daemon_log_path(),
+                )
+            )
+
+    def _startup_failure_error(self, prefix: str) -> RuntimeError:
+        """Build the standard caller-visible startup failure wrapper."""
+        return RuntimeError(
+            self._discovery.format_startup_failure(
+                prefix=prefix,
+                log_path=self._discovery.get_daemon_log_path(),
+            )
+        )
+
+    async def _register_with_daemon(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Complete the auth-token registration handshake."""
+        lock = self._discovery.read_lock()
+        if lock is None:
+            raise self._startup_failure_error(
+                "ChunkHound daemon IPC lock file removed before registration — "
+                "daemon may have shut down"
+            )
+        auth_token = lock.get("auth_token")
+
+        reg_frame: dict = {"type": "register", "pid": os.getpid()}
+        if auth_token is not None:
+            reg_frame["auth_token"] = auth_token
+
+        try:
+            ipc.write_frame(writer, reg_frame)
+            await writer.drain()
+            ack = await asyncio.wait_for(ipc.read_frame(reader), timeout=10.0)
+        except (
+            OSError,
+            EOFError,
+            asyncio.TimeoutError,
+            asyncio.IncompleteReadError,
+            BrokenPipeError,
+            ConnectionAbortedError,
+            ConnectionResetError,
+        ) as error:
+            raise self._startup_failure_error(
+                "ChunkHound daemon died during registration handshake"
+            ) from error
+
+        if not isinstance(ack, dict) or ack.get("type") != "registered":
+            raise RuntimeError(f"Unexpected registration response from daemon: {ack}")
+
     async def run(self) -> None:
         """Connect to the daemon and relay messages until stdin closes."""
         address = await self._discovery.find_or_start_daemon(self._args)
 
-        reader, writer = await ipc.create_client(address)
+        # Between find_or_start_daemon() and the registration handshake, the
+        # daemon may have started graceful shutdown and removed published
+        # artifacts (ASAP cleanup). Catch errors and surface a caller-visible
+        # startup failure rather than a raw OSError or EOF.
+        reader, writer = await self._connect_or_startup_failure(address)
+
         try:
-            # Read auth token from lock file (written by the daemon)
-            lock = self._discovery.read_lock()
-            auth_token = lock.get("auth_token") if lock else None
-
-            # Registration handshake
-            reg_frame: dict = {"type": "register", "pid": os.getpid()}
-            if auth_token is not None:
-                reg_frame["auth_token"] = auth_token
-            ipc.write_frame(writer, reg_frame)
-            await writer.drain()
-
-            ack = await asyncio.wait_for(ipc.read_frame(reader), timeout=10.0)
-            if not isinstance(ack, dict) or ack.get("type") != "registered":
-                raise RuntimeError(
-                    f"Unexpected registration response from daemon: {ack}"
-                )
+            await self._register_with_daemon(reader, writer)
 
             # Bidirectional forwarding
             # Use wait() with FIRST_COMPLETED so when stdin closes, we immediately
@@ -84,7 +143,6 @@ class ClientProxy:
             closed_before_mcp = (
                 stdout_error is None
                 and isinstance(stdout_result, _SocketForwardResult)
-                and stdout_result.clean_close
                 and stdout_result.message_count == 0
             )
             if closed_before_mcp and (
@@ -210,7 +268,6 @@ class ClientProxy:
             except asyncio.IncompleteReadError:
                 return _SocketForwardResult(
                     message_count=message_count,
-                    clean_close=True,
                 )
             line = json.dumps(msg) + "\n"
             sys.stdout.buffer.write(line.encode())

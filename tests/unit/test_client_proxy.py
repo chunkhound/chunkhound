@@ -72,7 +72,7 @@ async def test_run_prefers_formatted_startup_failure_over_transport_reset(
         side_effect=ConnectionResetError("socket reset during startup")
     )
     proxy._forward_socket_to_stdout = AsyncMock(
-        return_value=_SocketForwardResult(message_count=0, clean_close=True)
+        return_value=_SocketForwardResult(message_count=0)
     )
 
     with pytest.raises(RuntimeError, match="formatted startup failure"):
@@ -128,7 +128,7 @@ async def test_run_allows_clean_stdout_shutdown_after_first_mcp_message(
 
     proxy._forward_stdin_to_socket = blocked_stdin
     proxy._forward_socket_to_stdout = AsyncMock(
-        return_value=_SocketForwardResult(message_count=1, clean_close=True)
+        return_value=_SocketForwardResult(message_count=1)
     )
 
     await proxy.run()
@@ -153,7 +153,7 @@ async def test_forward_socket_to_stdout_returns_clean_close_on_eof(
 
     result = await proxy._forward_socket_to_stdout(asyncio.StreamReader())
 
-    assert result == _SocketForwardResult(message_count=0, clean_close=True)
+    assert result == _SocketForwardResult(message_count=0)
 
 
 @pytest.mark.asyncio
@@ -197,5 +197,122 @@ async def test_run_prefers_stdout_read_error_over_startup_failure(
 
     discovery.format_startup_failure.assert_not_called()
     assert stdin_cancelled.is_set()
+    assert writer.closed
+    assert writer.wait_closed_called
+
+
+@pytest.mark.asyncio
+async def test_connect_or_startup_failure_raises_runtime_error_on_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OSError from create_client is wrapped in RuntimeError with formatted failure."""
+    proxy, discovery, _ = _make_proxy(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        client_proxy_module.ipc,
+        "create_client",
+        AsyncMock(side_effect=OSError("connection refused")),
+    )
+
+    with pytest.raises(RuntimeError, match="formatted startup failure"):
+        await proxy._connect_or_startup_failure("tcp:127.0.0.1:9999")
+
+    discovery.format_startup_failure.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_connect_or_startup_failure_passes_through_on_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: connect_or_startup_failure returns reader/writer on success."""
+    proxy = ClientProxy(tmp_path / "repo", SimpleNamespace())
+    proxy._discovery = Mock()
+    proxy._discovery.format_startup_failure.return_value = "formatted"
+    proxy._discovery.get_daemon_log_path.return_value = tmp_path / "daemon.log"
+
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter()
+    monkeypatch.setattr(
+        client_proxy_module.ipc,
+        "create_client",
+        AsyncMock(return_value=(reader, writer)),
+    )
+
+    result_reader, result_writer = await proxy._connect_or_startup_failure(
+        "tcp:127.0.0.1:9000"
+    )
+
+    assert result_reader is reader
+    assert result_writer is writer
+
+
+@pytest.mark.asyncio
+async def test_run_raises_runtime_error_when_lock_disappears_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lock=None after connect raises RuntimeError with formatted startup failure."""
+    proxy, discovery, writer = _make_proxy(tmp_path, monkeypatch)
+    discovery.read_lock.return_value = None
+
+    proxy._forward_stdin_to_socket = AsyncMock()
+    proxy._forward_socket_to_stdout = AsyncMock(
+        return_value=_SocketForwardResult(message_count=0)
+    )
+
+    with pytest.raises(RuntimeError, match="formatted startup failure"):
+        await proxy.run()
+
+    discovery.format_startup_failure.assert_called_once()
+    assert writer.closed
+    assert writer.wait_closed_called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handshake_error",
+    [
+        asyncio.IncompleteReadError(partial=b"", expected=1),
+        asyncio.TimeoutError(),
+        ConnectionResetError("ack lost"),
+    ],
+)
+async def test_run_wraps_registration_handshake_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    handshake_error: BaseException,
+) -> None:
+    proxy, discovery, writer = _make_proxy(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        client_proxy_module.ipc,
+        "read_frame",
+        AsyncMock(side_effect=handshake_error),
+    )
+
+    with pytest.raises(RuntimeError, match="formatted startup failure"):
+        await proxy.run()
+
+    discovery.format_startup_failure.assert_called_once()
+    assert writer.closed
+    assert writer.wait_closed_called
+
+
+@pytest.mark.asyncio
+async def test_run_wraps_registration_write_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy, discovery, writer = _make_proxy(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        client_proxy_module.ipc,
+        "write_frame",
+        Mock(side_effect=BrokenPipeError("write failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="formatted startup failure"):
+        await proxy.run()
+
+    discovery.format_startup_failure.assert_called_once()
     assert writer.closed
     assert writer.wait_closed_called
