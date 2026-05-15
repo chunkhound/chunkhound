@@ -95,7 +95,7 @@ async def test_run_cancels_pending_stdout_task_before_raising_stdin_error(
         _reader: asyncio.StreamReader,
     ) -> _SocketForwardResult:
         try:
-            await asyncio.Event().wait()
+            await asyncio.sleep(3600)
         except asyncio.CancelledError:
             stdout_cancelled.set()
             raise
@@ -121,7 +121,7 @@ async def test_run_allows_clean_stdout_shutdown_after_first_mcp_message(
 
     async def blocked_stdin(_writer: asyncio.StreamWriter) -> None:
         try:
-            await asyncio.Event().wait()
+            await asyncio.sleep(3600)
         except asyncio.CancelledError:
             stdin_cancelled.set()
             raise
@@ -181,7 +181,7 @@ async def test_run_prefers_stdout_read_error_over_startup_failure(
 
     async def blocked_stdin(_writer: asyncio.StreamWriter) -> None:
         try:
-            await asyncio.Event().wait()
+            await asyncio.sleep(3600)
         except asyncio.CancelledError:
             stdin_cancelled.set()
             raise
