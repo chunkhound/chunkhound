@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -169,6 +171,53 @@ async def test_forward_socket_to_stdout_propagates_non_eof_errors(
 
     with pytest.raises(ValueError, match="bad frame"):
         await proxy._forward_socket_to_stdout(asyncio.StreamReader())
+
+
+@pytest.mark.asyncio
+async def test_forward_stdin_threaded_forwards_json_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy = ClientProxy(Path("."), SimpleNamespace())
+    lines = iter([b"not-json\n", b'{"method":"initialize"}\n', b""])
+    frames = []
+
+    stdin = SimpleNamespace(buffer=SimpleNamespace(readline=lambda: next(lines)))
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(
+        client_proxy_module.ipc,
+        "write_frame",
+        lambda _writer, frame: frames.append(frame),
+    )
+
+    await asyncio.wait_for(proxy._forward_stdin_threaded(_FakeWriter()), timeout=1.0)
+
+    assert frames == [{"method": "initialize"}]
+
+
+@pytest.mark.asyncio
+async def test_forward_stdin_threaded_cancellation_does_not_wait_for_stdin_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy = ClientProxy(Path("."), SimpleNamespace())
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_readline() -> bytes:
+        entered.set()
+        release.wait()
+        return b""
+
+    stdin = SimpleNamespace(buffer=SimpleNamespace(readline=blocked_readline))
+    monkeypatch.setattr(sys, "stdin", stdin)
+
+    task = asyncio.create_task(proxy._forward_stdin_threaded(_FakeWriter()))
+    try:
+        await asyncio.wait_for(asyncio.to_thread(entered.wait), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        release.set()
 
 
 @pytest.mark.asyncio

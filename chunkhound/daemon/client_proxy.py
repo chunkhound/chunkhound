@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -162,15 +163,9 @@ class ClientProxy:
             if stdin_error is not None:
                 raise stdin_error
         finally:
-            # Close stdin to unblock the Windows stdin reader thread.
-            # On Windows, _forward_stdin_threaded uses run_in_executor with a
-            # blocking readline().  When asyncio.run() shuts down after run()
-            # returns, it calls shutdown_default_executor(wait=True) which joins
-            # all thread-pool workers.  If the readline thread is still blocked
-            # waiting on the pipe (nobody wrote to it or closed the write end),
-            # shutdown hangs forever.
-            # Closing stdin here causes readline() to return b"", the thread
-            # finishes, the future resolves, and shutdown succeeds.
+            # Nudge the Windows daemon stdin reader toward EOF during normal
+            # cleanup. The reader thread is daemonized, so process exit no
+            # longer depends on this close succeeding.
             try:
                 sys.stdin.buffer.close()
             except Exception:
@@ -240,22 +235,51 @@ class ClientProxy:
             transport.close()
 
     async def _forward_stdin_threaded(self, writer: asyncio.StreamWriter) -> None:
-        """Windows: thread-based stdin reading via run_in_executor.
-
-        Blocking readline() in a thread pool avoids the IOCP handle
-        requirement that makes connect_read_pipe() fail on inherited pipes.
-        """
+        """Windows: read synchronous stdin without blocking executor shutdown."""
         loop = asyncio.get_running_loop()
-        while True:
-            line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
-            if not line:
-                break
+        lines: asyncio.Queue[bytes | BaseException | None] = asyncio.Queue()
+        stop = threading.Event()
+
+        def post(item: bytes | BaseException | None) -> None:
             try:
-                msg = json.loads(line.decode())
-            except json.JSONDecodeError:
-                continue
-            ipc.write_frame(writer, msg)
-            await writer.drain()
+                loop.call_soon_threadsafe(lines.put_nowait, item)
+            except RuntimeError:
+                pass
+
+        def read_stdin() -> None:
+            while not stop.is_set():
+                try:
+                    line = sys.stdin.buffer.readline()
+                except BaseException as error:
+                    post(error)
+                    return
+                if not line:
+                    post(None)
+                    return
+                post(line)
+
+        thread = threading.Thread(
+            target=read_stdin,
+            name="chunkhound-stdin-reader",
+            daemon=True,
+        )
+        thread.start()
+
+        try:
+            while True:
+                item = await lines.get()
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                try:
+                    msg = json.loads(item.decode())
+                except json.JSONDecodeError:
+                    continue
+                ipc.write_frame(writer, msg)
+                await writer.drain()
+        finally:
+            stop.set()
 
     async def _forward_socket_to_stdout(
         self, reader: asyncio.StreamReader

@@ -159,6 +159,37 @@ async def _run_proxy_to_failure(
     return proc.returncode or 0, stdout.decode(), stderr.decode()
 
 
+async def _read_process_stream(
+    stream: asyncio.StreamReader | None,
+) -> bytes:
+    """Drain a subprocess stream when it exists."""
+    if stream is None:
+        return b""
+    return await stream.read()
+
+
+async def _close_process_stdin(proc: asyncio.subprocess.Process) -> None:
+    """Close subprocess stdin without letting broken pipes hide the real failure."""
+    if proc.stdin is None or proc.stdin.is_closing():
+        return
+    proc.stdin.close()
+    try:
+        await proc.stdin.wait_closed()
+    except Exception:
+        pass
+
+
+async def _force_stop_process(proc: asyncio.subprocess.Process) -> None:
+    """Ensure a subprocess is gone before a test leaves cleanup scope."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return
+    await asyncio.wait_for(proc.wait(), timeout=5.0)
+
+
 async def _do_mcp_handshake(
     client: SubprocessJsonRpcClient, timeout: float = 30.0
 ) -> dict:
@@ -553,30 +584,32 @@ async def test_watchman_start_failure_cleans_up_after_eager_publication(
         capture_stderr=True,
         extra_env={"CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY": "1"},
     )
+    stdout_task = asyncio.create_task(_read_process_stream(proc.stdout))
+    stderr_task = asyncio.create_task(_read_process_stream(proc.stderr))
     start_time = time.monotonic()
     try:
-        returncode = await asyncio.wait_for(proc.wait(), timeout=15.0)
+        try:
+            returncode = await asyncio.wait_for(proc.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - start_time
+            await _close_process_stdin(proc)
+            await _force_stop_process(proc)
+            stdout_text = (await asyncio.wait_for(stdout_task, timeout=5.0)).decode()
+            stderr_text = (await asyncio.wait_for(stderr_task, timeout=5.0)).decode()
+            pytest.fail(
+                "Proxy did not exit while stdin remained open after "
+                f"{elapsed:.2f}s\nstdout:\n{stdout_text}\nstderr:\n{stderr_text}"
+            )
         elapsed = time.monotonic() - start_time
-        stdout_text = (
-            b""
-            if proc.stdout is None
-            else await asyncio.wait_for(proc.stdout.read(), timeout=5.0)
-        ).decode()
-        stderr_text = (
-            b""
-            if proc.stderr is None
-            else await asyncio.wait_for(proc.stderr.read(), timeout=5.0)
-        ).decode()
+        stdout_text = (await asyncio.wait_for(stdout_task, timeout=5.0)).decode()
+        stderr_text = (await asyncio.wait_for(stderr_task, timeout=5.0)).decode()
     finally:
-        if proc.stdin is not None and not proc.stdin.is_closing():
-            proc.stdin.close()
-            try:
-                await proc.stdin.wait_closed()
-            except Exception:
-                pass
-        if proc.returncode is None:
-            proc.kill()
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        await _close_process_stdin(proc)
+        await _force_stop_process(proc)
+        for task in (stdout_task, stderr_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
     assert elapsed < 10.0, f"Expected fail-fast startup error, got {elapsed:.2f}s"
     assert returncode != 0
