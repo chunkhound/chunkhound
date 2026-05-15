@@ -228,12 +228,12 @@ class TestDaemonStartupOrder:
         )
 
     @pytest.mark.asyncio
-    async def test_graceful_shutdown_removes_artifacts_before_cleanup(
+    async def test_graceful_shutdown_cleans_services_before_published_artifacts(
         self,
         config: Config,
         tmp_path: Path,
     ) -> None:
-        """Verify artifact removal happens BEFORE cleanup() in _graceful_shutdown."""
+        """Verify cleanup() runs before removing published artifacts."""
         call_order: list[str] = []
         socket_path = str(tmp_path / "test.sock")
         project_dir = tmp_path
@@ -269,41 +269,29 @@ class TestDaemonStartupOrder:
 
         daemon.cleanup = record_cleanup  # type: ignore[assignment]
 
-        # Write a lock file with the current PID so _graceful_shutdown()'s
-        # live PID check finds a match and runs shared-artifact removal.
-        lock_path = daemon._discovery.get_lock_path()
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.write_text(
-            json.dumps({
-                "pid": os.getpid(),
-                "socket_path": socket_path,
-                "started_at": 0.0,
-                "project_dir": str(daemon._project_dir),
-                "auth_token": "test-token",
-            })
-        )
+        daemon._lock_written = True
         daemon._socket_path = socket_path
 
         with patch("chunkhound.daemon.server.os.unlink", new=record_unlink):
             await daemon._graceful_shutdown()
 
         assert len(call_order) >= 3, (
-            "Expected remove_lock + unlink_socket + cleanup.start, "
+            "Expected cleanup.start + remove_lock + unlink_socket, "
             f"got: {call_order}"
         )
         cleanup_idx = call_order.index("cleanup.start")
         for artifact_step in ["remove_lock", "unlink_socket"]:
-            assert call_order.index(artifact_step) < cleanup_idx, (
-                f"Expected {artifact_step} before cleanup.start, got: {call_order}"
+            assert cleanup_idx < call_order.index(artifact_step), (
+                f"Expected cleanup.start before {artifact_step}, got: {call_order}"
             )
 
     @pytest.mark.asyncio
-    async def test_run_barrier_failure_triggers_artifact_cleanup_before_cleanup(
+    async def test_run_barrier_failure_cleans_services_before_artifacts(
         self,
         config: Config,
         tmp_path: Path,
     ) -> None:
-        """Barrier failure after eager publication must clean artifacts immediately."""
+        """Barrier failure after publication must still run cleanup first."""
         call_order: list[str] = []
         socket_path = str(tmp_path / "test.sock")
 
@@ -362,17 +350,17 @@ class TestDaemonStartupOrder:
 
         cleanup_idx = call_order.index("cleanup.start")
         for artifact_step in ["remove_lock", "unlink_socket"]:
-            assert call_order.index(artifact_step) < cleanup_idx, (
-                f"Expected {artifact_step} before cleanup.start, got: {call_order}"
+            assert cleanup_idx < call_order.index(artifact_step), (
+                f"Expected cleanup.start before {artifact_step}, got: {call_order}"
             )
 
     @pytest.mark.asyncio
-    async def test_graceful_shutdown_leaves_replacement_registry_entry_during_interleaving(
+    async def test_graceful_shutdown_removes_registry_after_published_lock(
         self,
         config: Config,
         tmp_path: Path,
     ) -> None:
-        """Old daemon shutdown must not touch the shared registry path."""
+        """A daemon that published its lock also removes its registry entry."""
         socket_path = str(tmp_path / "test.sock")
 
         daemon = ChunkHoundDaemon(
@@ -397,35 +385,20 @@ class TestDaemonStartupOrder:
             )
         )
 
-        replacement_entry = {
-            "project_dir": str(tmp_path),
-            "pid": os.getpid() + 1,
-            "socket_path": "replacement.sock",
-            "lock_path": str(discovery.get_lock_path()),
-            "started_at": 1.0,
-        }
-
-        def replace_registry() -> None:
-            registry_path.write_text(json.dumps(replacement_entry))
-
-        discovery.read_lock = MagicMock(return_value={"pid": os.getpid()})  # type: ignore[assignment]
-        discovery.remove_lock = MagicMock(side_effect=replace_registry)  # type: ignore[assignment]
+        daemon._lock_written = True
         daemon.cleanup = AsyncMock()  # type: ignore[assignment]
 
-        with patch("chunkhound.daemon.server.os.unlink", new=lambda _path: None):
-            await daemon._graceful_shutdown()
+        await daemon._graceful_shutdown()
 
-        assert json.loads(registry_path.read_text()) == replacement_entry, (
-            "Shutdown should leave a replacement daemon's registry entry intact"
-        )
+        assert not registry_path.exists()
 
     @pytest.mark.asyncio
-    async def test_graceful_shutdown_skips_shared_artifact_removal_without_live_lock(
+    async def test_graceful_shutdown_skips_artifact_removal_without_published_lock(
         self,
         config: Config,
         tmp_path: Path,
     ) -> None:
-        """Without a live lock file, shared artifact removal must not run."""
+        """Without a published lock, artifact removal must not run."""
         socket_path = str(tmp_path / "test.sock")
         project_dir = tmp_path
 
@@ -449,27 +422,23 @@ class TestDaemonStartupOrder:
 
         daemon._discovery.remove_lock = record_remove_lock  # type: ignore[assignment]
 
-        # No lock file on disk — _graceful_shutdown should detect this
-        # via the live PID check and skip artifact removal.
-        assert not daemon._discovery.get_lock_path().exists()
-
         with patch("chunkhound.daemon.server.os.unlink", new=record_unlink):
             await daemon._graceful_shutdown()
 
         assert not removed_lock, (
-            "remove_lock should not be called when no lock file is present"
+            "remove_lock should not be called before this daemon publishes a lock"
         )
-        assert unlinked_socket, (
-            "socket unlink should always run even without lock ownership"
+        assert not unlinked_socket, (
+            "socket unlink should not run before this daemon publishes a lock"
         )
 
     @pytest.mark.asyncio
-    async def test_run_race_loss_cleans_up_socket(
+    async def test_run_race_loss_does_not_remove_socket(
         self,
         config: Config,
         tmp_path: Path,
     ) -> None:
-        """PID mismatch in run() must clean up the bound socket before returning."""
+        """PID mismatch in run() must not remove another daemon's socket."""
         socket_path = str(tmp_path / "test.sock")
 
         daemon = ChunkHoundDaemon(
@@ -518,8 +487,8 @@ class TestDaemonStartupOrder:
             mock_create.return_value = (mock_server, socket_path)
             await daemon.run()
 
-        assert socket_unlinked, (
-            "Socket should be unlinked even when lock is owned by another daemon"
+        assert not socket_unlinked, (
+            "Socket should not be unlinked when lock publication was not won"
         )
 
 
