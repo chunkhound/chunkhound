@@ -16,13 +16,16 @@ import asyncio
 import json
 import os
 import sys
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import ipc
 from .discovery import DaemonDiscovery
+
+_WINDOWS_STDIN_POLL_INTERVAL = 0.01
+_WINDOWS_STDIN_READ_CHUNK_SIZE = 65536
+_WINDOWS_PIPE_CLOSED_ERRORS = {6, 38, 109}  # invalid handle, EOF, broken pipe
 
 
 @dataclass(frozen=True)
@@ -163,9 +166,8 @@ class ClientProxy:
             if stdin_error is not None:
                 raise stdin_error
         finally:
-            # Nudge the Windows daemon stdin reader toward EOF during normal
-            # cleanup. The reader thread is daemonized, so process exit no
-            # longer depends on this close succeeding.
+            # Nudge stdin toward EOF during normal cleanup without making
+            # process exit depend on the peer closing its pipe first.
             try:
                 sys.stdin.buffer.close()
             except Exception:
@@ -203,13 +205,12 @@ class ClientProxy:
     async def _forward_stdin_to_socket(self, writer: asyncio.StreamWriter) -> None:
         """Read JSON lines from stdin, parse, and write as IPC frames to the socket.
 
-        Windows uses a thread-executor approach because ProactorEventLoop's
-        connect_read_pipe() requires overlapped-I/O handles, but inherited stdin
-        pipes are synchronous from the child's perspective and fail silently.
-        Unix uses connect_read_pipe() for true async I/O.
+        Windows polls the inherited synchronous pipe before reading because
+        ProactorEventLoop requires overlapped-I/O handles. Unix uses
+        connect_read_pipe() for true async I/O.
         """
         if sys.platform == "win32":
-            await self._forward_stdin_threaded(writer)
+            await self._forward_stdin_windows(writer)
         else:
             await self._forward_stdin_async(writer)
 
@@ -234,52 +235,79 @@ class ClientProxy:
         finally:
             transport.close()
 
-    async def _forward_stdin_threaded(self, writer: asyncio.StreamWriter) -> None:
-        """Windows: read synchronous stdin without blocking executor shutdown."""
-        loop = asyncio.get_running_loop()
-        lines: asyncio.Queue[bytes | BaseException | None] = asyncio.Queue()
-        stop = threading.Event()
+    async def _forward_stdin_windows(self, writer: asyncio.StreamWriter) -> None:
+        """Windows: poll synchronous stdin so cancellation never waits for EOF."""
+        fd = sys.stdin.buffer.fileno()
+        handle = self._windows_stdin_handle(fd)
+        buffer = bytearray()
 
-        def post(item: bytes | BaseException | None) -> None:
-            try:
-                loop.call_soon_threadsafe(lines.put_nowait, item)
-            except RuntimeError:
-                pass
+        while True:
+            available = self._windows_pipe_bytes_available(handle)
+            if available is None:
+                if buffer:
+                    await self._write_stdin_line(writer, bytes(buffer))
+                break
+            if available == 0:
+                await asyncio.sleep(_WINDOWS_STDIN_POLL_INTERVAL)
+                continue
 
-        def read_stdin() -> None:
-            while not stop.is_set():
-                try:
-                    line = sys.stdin.buffer.readline()
-                except BaseException as error:
-                    post(error)
-                    return
-                if not line:
-                    post(None)
-                    return
-                post(line)
+            chunk = os.read(fd, min(available, _WINDOWS_STDIN_READ_CHUNK_SIZE))
+            if not chunk:
+                if buffer:
+                    await self._write_stdin_line(writer, bytes(buffer))
+                break
 
-        thread = threading.Thread(
-            target=read_stdin,
-            name="chunkhound-stdin-reader",
-            daemon=True,
-        )
-        thread.start()
-
-        try:
+            buffer.extend(chunk)
             while True:
-                item = await lines.get()
-                if item is None:
+                newline = buffer.find(b"\n")
+                if newline < 0:
                     break
-                if isinstance(item, BaseException):
-                    raise item
-                try:
-                    msg = json.loads(item.decode())
-                except json.JSONDecodeError:
-                    continue
-                ipc.write_frame(writer, msg)
-                await writer.drain()
-        finally:
-            stop.set()
+                line = bytes(buffer[: newline + 1])
+                del buffer[: newline + 1]
+                await self._write_stdin_line(writer, line)
+
+    @staticmethod
+    def _windows_stdin_handle(fd: int) -> int:
+        """Return the Windows OS handle for stdin fd."""
+        import importlib
+
+        msvcrt = importlib.import_module("msvcrt")
+        return int(getattr(msvcrt, "get_osfhandle")(fd))
+
+    @staticmethod
+    def _windows_pipe_bytes_available(handle: int) -> int | None:
+        """Return available pipe bytes, or None when the pipe has closed."""
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        available = ctypes.c_ulong()
+        ok = kernel32.PeekNamedPipe(
+            ctypes.c_void_p(handle),
+            None,
+            0,
+            None,
+            ctypes.byref(available),
+            None,
+        )
+        if ok:
+            return int(available.value)
+        error = int(getattr(ctypes, "get_last_error")())
+        if error in _WINDOWS_PIPE_CLOSED_ERRORS:
+            return None
+        raise OSError(error, "PeekNamedPipe failed")
+
+    async def _write_stdin_line(
+        self,
+        writer: asyncio.StreamWriter,
+        line: bytes,
+    ) -> None:
+        """Parse one JSON-RPC stdin line and forward valid messages."""
+        try:
+            msg = json.loads(line.decode())
+        except json.JSONDecodeError:
+            return
+        ipc.write_frame(writer, msg)
+        await writer.drain()
 
     async def _forward_socket_to_stdout(
         self, reader: asyncio.StreamReader
