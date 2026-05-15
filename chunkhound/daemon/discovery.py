@@ -147,7 +147,10 @@ def _runtime_dir_identity(runtime_dir: Path) -> str:
 
 def _runtime_scoped_transport_hash(project_dir: Path, runtime_dir: Path) -> str:
     """Return a stable transport hash scoped to the canonical root and runtime."""
-    identity = f"{_project_dir_identity(project_dir)}|{_runtime_dir_identity(runtime_dir)}"
+    identity = (
+        f"{_project_dir_identity(project_dir)}|"
+        f"{_runtime_dir_identity(runtime_dir)}"
+    )
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
@@ -227,7 +230,10 @@ def _write_json_atomically(
                 tmp_path.replace(path)
                 break
             except PermissionError:
-                if not _is_windows_platform() or attempt >= _WINDOWS_REPLACE_RETRIES - 1:
+                if (
+                    not _is_windows_platform()
+                    or attempt >= _WINDOWS_REPLACE_RETRIES - 1
+                ):
                     raise
                 time.sleep(_WINDOWS_REPLACE_RETRY_DELAY)
     except Exception:
