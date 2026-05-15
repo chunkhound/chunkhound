@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -1049,13 +1050,33 @@ class MCPServerBase(ABC):
             if not future.done():
                 future.set_exception(error)
 
+        def _try_call_soon_threadsafe(callback: Callable[[], None]) -> None:
+            """Call loop.call_soon_threadsafe safely, even after loop is closed.
+
+            The daemon thread may outlive the event loop (cleanup timed out,
+            provider.close() is still running on the background thread).
+            call_soon_threadsafe on a closed loop raises RuntimeError;
+            we swallow it here since the future is already done/abandoned.
+            """
+            try:
+                loop.call_soon_threadsafe(callback)
+            except RuntimeError:
+                pass
+
         def _run_close() -> None:
+            error: Exception | None = None
             try:
                 close_method()
-            except Exception as e:
-                loop.call_soon_threadsafe(_complete_with_exception, e)
-                return
-            loop.call_soon_threadsafe(_complete_with_result)
+            except Exception as exc:
+                error = exc
+                self.debug_log(
+                    f"Provider close on daemon thread failed: {exc}",
+                    always=True,
+                )
+            if error is not None:
+                _try_call_soon_threadsafe(lambda: _complete_with_exception(error))
+            else:
+                _try_call_soon_threadsafe(_complete_with_result)
 
         threading.Thread(target=_run_close, daemon=True).start()
         self._provider_close_future = future

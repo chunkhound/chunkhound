@@ -398,6 +398,29 @@ class TestCleanup:
         assert "cleanup returned" in completed.stdout
 
     @pytest.mark.asyncio
+    async def test_cleanup_ignores_closed_loop_race_when_close_thread_finishes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = CloseOnlyProvider()
+        server = self._make_server(tmp_path, provider)
+        loop = asyncio.get_running_loop()
+
+        monkeypatch.setattr(
+            "chunkhound.mcp_server.base._DATABASE_CLOSE_TIMEOUT_SECONDS",
+            0.01,
+        )
+        monkeypatch.setattr(
+            loop,
+            "call_soon_threadsafe",
+            MagicMock(side_effect=RuntimeError("Event loop is closed")),
+        )
+
+        await server.cleanup()
+
+        assert provider.close_calls == 1
+        assert not server._initialized
+
+    @pytest.mark.asyncio
     async def test_cleanup_logs_close_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
