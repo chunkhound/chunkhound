@@ -54,8 +54,6 @@ class ChunkHoundDaemon(MCPServerBase):
         self._pid_poll_task: asyncio.Task | None = None
         self._delayed_shutdown_task: asyncio.Task[None] | None = None
         self._client_manager = ClientManager(on_empty=self._on_all_clients_gone)
-        # True only after we successfully bound the socket and wrote the lock
-        self._lock_written = False
         self._auth_token: str | None = None  # Set before accepting connections
         delay_str = os.environ.get(
             "CHUNKHOUND_DAEMON_SHUTDOWN_DELAY", str(_DEFAULT_SHUTDOWN_DELAY)
@@ -145,7 +143,6 @@ class ChunkHoundDaemon(MCPServerBase):
                     self._shutdown_event.set()
                     return
 
-                self._lock_written = True
                 self._mark_startup_exposure_ready()
                 try:
                     # The socket may already be connectable by the time we publish
@@ -401,8 +398,10 @@ class ChunkHoundDaemon(MCPServerBase):
     async def _graceful_shutdown(self) -> None:
         """Stop background tasks, clean up services, remove lock file.
 
-        Only removes the lock file and socket if this daemon instance
-        successfully wrote the lock (i.e. won the startup race).
+        Only removes lock and registry artifacts if *this daemon instance*
+        still owns the published lock (live PID check from disk).  The IPC
+        socket is always cleaned — it is unique per daemon instance and safe
+        to remove regardless of lock ownership.
         """
         if self._pid_poll_task is not None and not self._pid_poll_task.done():
             self._pid_poll_task.cancel()
@@ -423,27 +422,75 @@ class ChunkHoundDaemon(MCPServerBase):
                 if self._delayed_shutdown_task is delayed_shutdown_task:
                     self._delayed_shutdown_task = None
 
+        # Remove published artifacts BEFORE cleanup() so they don't linger
+        # during the DB close timeout (up to 10s). The daemon publishes
+        # lock/socket/registry before the startup barrier (eager publication),
+        # so on barrier failure we must remove them ASAP.
+
+        # Guard: only remove artifacts if *this daemon instance* still
+        # owns the published lock.  Read the live lock from disk and
+        # compare PID rather than relying on a cached boolean that can
+        # be False even after write_lock() succeeded (race between
+        # write_lock() and _lock_written = True).
+        lock_data = self._discovery.read_lock()
+        we_own_lock = (
+            lock_data is not None
+            and isinstance(lock_data.get("pid"), int)
+            and lock_data["pid"] == os.getpid()
+        )
+        if we_own_lock:
+            # Lock file — well-known path; only remove if we own it.
+            try:
+                self._discovery.remove_lock()
+                self.debug_log("Removed IPC lock file")
+            except Exception as e:
+                self.debug_log(f"Lock removal failed (non-fatal): {e}")
+
+            # Do not unlink the shared registry file here. Once our
+            # authoritative lock is gone, discovery will treat any leftover
+            # registry entry as stale and opportunistically remove it.
+        else:
+            if lock_data is not None:
+                self.debug_log(
+                    "Skipping artifact cleanup — another daemon owns the lock "
+                    f"(lock pid={lock_data.get('pid')}, our pid={os.getpid()})"
+                )
+            else:
+                self.debug_log(
+                    "Skipping artifact cleanup — no lock file found"
+                )
+
+        # Always clean up our socket — unique per daemon instance, safe without
+        # lock ownership.  Daemons that bound a socket but lost the startup race
+        # (PID mismatch) or exited with an exception after create_server() still
+        # need socket cleanup, and _graceful_shutdown runs via the finally block
+        # for both paths.
+        if sys.platform != "win32" and not self._socket_path.startswith("tcp:"):
+            try:
+                os.unlink(self._socket_path)
+                self.debug_log("Removed IPC socket")
+            except FileNotFoundError:
+                self.debug_log("IPC socket already removed")
+        else:
+            self.debug_log("Skipping socket cleanup — TCP transport")
+
+        cleanup_ok = True
         try:
-            await asyncio.wait_for(self.cleanup(), timeout=10.0)
-        except (asyncio.TimeoutError, Exception) as e:
+            # cleanup() already has its own 10s timeout
+            # (_DATABASE_CLOSE_TIMEOUT_SECONDS), so no outer wrap needed.
+            # A redundant outer wait_for would double the shutdown window
+            # on slow platforms (DuckDB close on Windows).
+            await self.cleanup()
+        except asyncio.TimeoutError:
+            cleanup_ok = False
+            self.debug_log("Cleanup timed out — DB close deferred to background")
+        except Exception as e:
             self.debug_log(f"Cleanup error (non-fatal): {e}")
 
-        # Only remove lock file and socket if we successfully bound the server.
-        # If two daemons race to start, the loser must not delete the winner's
-        # lock file or socket path — doing so would make the winner unreachable.
-        if self._lock_written:
-            self._discovery.remove_lock()
-
-            # Remove socket file on Unix; TCP loopback needs no cleanup
-            if sys.platform != "win32" and not self._socket_path.startswith("tcp:"):
-                try:
-                    os.unlink(self._socket_path)
-                except FileNotFoundError:
-                    pass
-
-            try:
-                self._discovery.remove_registry_entry()
-            except Exception as e:
-                self.debug_log(f"Registry cleanup failed (non-fatal): {e}")
-
-        self.debug_log("Daemon shutdown complete")
+        if cleanup_ok:
+            self.debug_log("Daemon shutdown complete")
+        else:
+            self.debug_log(
+                "Daemon artifacts removed — DB close still pending in "
+                "background thread"
+            )

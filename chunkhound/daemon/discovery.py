@@ -702,13 +702,6 @@ class DaemonDiscovery:
         }
         _write_json_atomically(self.get_registry_entry_path(), data)
 
-    def remove_registry_entry(self) -> None:
-        """Remove this daemon's registry entry if present."""
-        try:
-            self.get_registry_entry_path().unlink()
-        except FileNotFoundError:
-            pass
-
     def _overlap_error(self, conflict: dict[str, Any]) -> RuntimeError:
         """Build the overlap error raised when a conflicting daemon is live."""
         conflict_root = str(conflict["project_dir"])
