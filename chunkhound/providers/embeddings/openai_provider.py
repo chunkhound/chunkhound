@@ -259,7 +259,7 @@ class OpenAIEmbeddingProvider:
         self._max_tokens = max_tokens
         self._rerank_batch_size = rerank_batch_size
         self._ssl_verify = ssl_verify
-        self._rerank_ssl_verify = (
+        self._rerank_ssl_verify: bool = (
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
         )
 
