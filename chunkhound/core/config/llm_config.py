@@ -8,8 +8,9 @@ variables, config files, CLI arguments).
 
 import argparse
 import os
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
+from loguru import logger
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import assert_never
@@ -38,11 +39,14 @@ LLMProviderLiteral = Literal[
     "ollama",
     "claude-code-cli",
     "codex-cli",
+    "deepseek",
     "gemini",
     "anthropic",
     "grok",
     "opencode-cli",
 ]
+
+_PROVIDER_CHOICES: list[str] = list(get_args(LLMProviderLiteral))
 
 ReasoningEffortLiteral = Literal["minimal", "low", "medium", "high", "xhigh"]
 
@@ -364,32 +368,71 @@ class LLMConfig(BaseSettings):
 
     @model_validator(mode="after")
     def validate_opencode_cli_model(self) -> "LLMConfig":
-        """Validate opencode-cli models use provider/model format."""
-        for role, provider_field, model_field in (
-            ("utility", self.utility_provider, self.utility_model),
-            ("synthesis", self.synthesis_provider, self.synthesis_model),
-            ("map_hyde", self.map_hyde_provider, self.map_hyde_model),
+        """Validate provider/model compatibility for role-specific overrides."""
+        resolved_synthesis_provider = self.synthesis_provider or self.provider
+        resolved_synthesis_model = self.synthesis_model
+
+        for role, role_provider, role_model in (
+            (
+                "map_hyde",
+                self.map_hyde_provider,
+                self.map_hyde_model,
+            ),
             (
                 "autodoc_cleanup",
                 self.autodoc_cleanup_provider,
                 self.autodoc_cleanup_model,
             ),
         ):
-            # map_hyde and autodoc_cleanup model fields default to None,
-            # meaning "fall back to synthesis model". Skip validation
-            # when unset — synthesis is checked separately above.
-            if model_field is None:
-                continue
-            resolved = provider_field or self.provider
-            if resolved == "opencode-cli" and (
-                not model_field or "/" not in model_field
+            if (
+                role_provider is not None
+                and role_provider != resolved_synthesis_provider
+                and not role_model
             ):
+                raise ValueError(
+                    f"{role} provider override requires an explicit {role}_model "
+                    f"when switching providers from {resolved_synthesis_provider!r} "
+                    f"to {role_provider!r}."
+                )
+
+        for role, provider_name, model_name in (
+            ("utility", self.utility_provider or self.provider, self.utility_model),
+            ("synthesis", resolved_synthesis_provider, resolved_synthesis_model),
+            (
+                "map_hyde",
+                self.map_hyde_provider or resolved_synthesis_provider,
+                self.map_hyde_model or resolved_synthesis_model,
+            ),
+            (
+                "autodoc_cleanup",
+                self.autodoc_cleanup_provider or resolved_synthesis_provider,
+                self.autodoc_cleanup_model or resolved_synthesis_model,
+            ),
+        ):
+            if provider_name != "opencode-cli":
+                continue
+            if not model_name or "/" not in model_name:
                 raise ValueError(
                     f"opencode-cli requires a model in provider/model format "
                     f"for {role} (e.g., opencode/gpt-5-nano). "
-                    f"Got: {model_field!r}"
+                    f"Got: {model_name!r}"
+                )
+            model_provider_name, model_part = model_name.split("/", 1)
+            if not model_provider_name.strip():
+                raise ValueError(
+                    f"opencode-cli model for {role} has an empty provider segment "
+                    f"before '/'. Got: {model_name!r}"
+                )
+            if not model_part.strip():
+                raise ValueError(
+                    f"opencode-cli model for {role} has an empty model segment "
+                    f"after '/'. Got: {model_name!r}"
                 )
 
+        # Fallback chain mirrors runtime resolution in:
+        #   build_llm_metadata_and_map_hyde (code_mapper/llm.py)
+        #   _build_cleanup_provider_configs (api/cli/commands/autodoc_cleanup.py)
+        # Keep these three in sync when changing inheritance logic.
         for role, provider_name, effort in (
             (
                 "utility",
@@ -403,14 +446,12 @@ class LLMConfig(BaseSettings):
             ),
             (
                 "map_hyde",
-                self.map_hyde_provider or self.synthesis_provider or self.provider,
+                self.map_hyde_provider or resolved_synthesis_provider,
                 self.map_hyde_reasoning_effort,
             ),
             (
                 "autodoc_cleanup",
-                self.autodoc_cleanup_provider
-                or self.synthesis_provider
-                or self.provider,
+                self.autodoc_cleanup_provider or resolved_synthesis_provider,
                 self.autodoc_cleanup_reasoning_effort,
             ),
         ):
@@ -580,6 +621,12 @@ class LLMConfig(BaseSettings):
             # grok-4-1-fast-reasoning: Advanced reasoning, structured outputs,
             # tool calling
             return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
+        elif provider == "deepseek":
+            # deepseek-v4-flash for both roles: it's the current general-purpose model
+            # (fast enough for utility, capable enough for synthesis). deepseek-chat is
+            # deprecated and routes here until July 2026. Revisit when DeepSeek releases
+            # a distinct cheaper/faster utility-tier model.
+            return ("deepseek-v4-flash", "deepseek-v4-flash")
         elif provider == "opencode-cli":
             # OpenCode CLI: No universal default — model depends on user config.
             # User must set model in provider/model format.
@@ -667,46 +714,19 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-provider",
-            choices=[
-                "openai",
-                "ollama",
-                "claude-code-cli",
-                "codex-cli",
-                "anthropic",
-                "gemini",
-                "grok",
-                "opencode-cli",
-            ],
+            choices=_PROVIDER_CHOICES,
             help="Default LLM provider for both roles",
         )
 
         parser.add_argument(
             "--llm-utility-provider",
-            choices=[
-                "openai",
-                "ollama",
-                "claude-code-cli",
-                "codex-cli",
-                "anthropic",
-                "gemini",
-                "grok",
-                "opencode-cli",
-            ],
+            choices=_PROVIDER_CHOICES,
             help="Override LLM provider for utility operations",
         )
 
         parser.add_argument(
             "--llm-synthesis-provider",
-            choices=[
-                "openai",
-                "ollama",
-                "claude-code-cli",
-                "codex-cli",
-                "anthropic",
-                "gemini",
-                "grok",
-                "opencode-cli",
-            ],
+            choices=_PROVIDER_CHOICES,
             help="Override LLM provider for synthesis operations",
         )
 
@@ -745,16 +765,7 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-map-hyde-provider",
-            choices=[
-                "openai",
-                "ollama",
-                "claude-code-cli",
-                "codex-cli",
-                "anthropic",
-                "gemini",
-                "grok",
-                "opencode-cli",
-            ],
+            choices=_PROVIDER_CHOICES,
             help=(
                 "Override provider for Code Mapper HyDE planning "
                 "(falls back to synthesis)"
@@ -777,16 +788,7 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-autodoc-cleanup-provider",
-            choices=[
-                "openai",
-                "ollama",
-                "claude-code-cli",
-                "codex-cli",
-                "anthropic",
-                "gemini",
-                "grok",
-                "opencode-cli",
-            ],
+            choices=_PROVIDER_CHOICES,
             help="Override provider for AutoDoc LLM cleanup (falls back to synthesis)",
         )
         parser.add_argument(
@@ -1107,3 +1109,121 @@ class LLMConfig(BaseSettings):
             f"api_key={api_key_display}, "
             f"base_url={self.base_url})"
         )
+
+
+def strip_cross_provider_overrides(
+    cfg: dict[str, Any],
+    target_provider: str,
+    role_name: str,
+    *,
+    source_provider: str | None = None,
+) -> None:
+    """Strip provider-specific settings when switching to a different provider.
+
+    Removes keys from *cfg* that are tied to the source provider and may be
+    invalid or misleading for the target provider:
+
+    - ``reasoning_effort`` — stripped unconditionally (provider-specific semantics)
+    - ``supports_structured_outputs`` — stripped unconditionally (capability flag)
+    - ``api_key`` — stripped only when switching to a **no-key provider**
+      (e.g. ``ollama``, ``claude-code-cli``). For keyed providers the global
+      credential works across providers.
+
+    ``base_url`` is preserved across provider switches because ChunkHound
+    exposes a single shared gateway/proxy endpoint knob rather than
+    provider-specific base URLs.
+
+    When ``source_provider == target_provider`` the dict is left untouched
+    (same-provider override preserves inherited settings).
+    """
+    resolved_source = source_provider or cfg.get("provider")
+    if resolved_source == target_provider:
+        return
+
+    for key in (
+        "reasoning_effort",
+        "supports_structured_outputs",
+    ):
+        dropped = cfg.pop(key, None)
+        if dropped is not None:
+            logger.debug(
+                f"{role_name}: dropped inherited {key}={dropped!r} "
+                f"when switching provider {resolved_source!r} -> {target_provider!r}"
+            )
+
+    # Only strip api_key when the target does not use credentials (no-key providers).
+    # For keyed providers the global credential from LLMConfig works across providers.
+    if target_provider in NO_KEY_PROVIDERS:
+        dropped = cfg.pop("api_key", None)
+        if dropped is not None:
+            logger.debug(
+                f"{role_name}: dropped inherited api_key "
+                f"when switching to no-key provider {target_provider!r}"
+            )
+
+
+def apply_role_override(
+    base_cfg: dict[str, Any],
+    *,
+    target_provider: str | None = None,
+    target_model: str | None = None,
+    target_effort: str | None = None,
+    role_name: str,
+) -> dict[str, Any]:
+    """Clone *base_cfg* and safely apply role-specific provider/model/effort overrides.
+
+    When *target_provider* differs from the source provider (from ``base_cfg``),
+    provider-specific settings (``reasoning_effort``,
+    ``supports_structured_outputs``, and ``api_key`` for no-key providers) are
+    stripped to prevent cross-provider leaks, while shared ``base_url`` is
+    preserved. The original dict is not mutated.
+
+    Args:
+        base_cfg: Source configuration dict (will not be mutated).
+        target_provider: Override provider. If None, keeps the source provider.
+        target_model: Override model. If None, keeps the source model only when
+            the provider is unchanged. Provider switches drop the inherited
+            model so callers do not accidentally mix providers and models.
+        target_effort: Override reasoning effort (e.g. "high", "xhigh").
+            If None, keeps the source effort. Only applied when the resolved
+            provider supports ``reasoning_effort``.
+        role_name: Human-readable role name for diagnostic log messages
+            (e.g. ``"map_hyde"``, ``"autodoc_cleanup"``).
+
+    Returns:
+        New config dict with overrides applied.
+    """
+    cfg = base_cfg.copy()
+
+    provider_changed = False
+    if target_provider is not None:
+        source_provider = base_cfg.get("provider")
+        provider_changed = source_provider != target_provider
+        cfg["provider"] = target_provider
+        strip_cross_provider_overrides(
+            cfg,
+            target_provider,
+            role_name,
+            source_provider=source_provider,
+        )
+
+    if target_model is not None:
+        cfg["model"] = target_model
+    elif provider_changed:
+        dropped_model = cfg.pop("model", None)
+        if dropped_model is not None:
+            logger.debug(
+                f"{role_name}: dropped inherited model={dropped_model!r} "
+                f"when switching providers"
+            )
+
+    if target_effort is not None:
+        effective_effort = str(target_effort).strip().lower()
+        resolved_provider = cfg.get("provider")
+        if (
+            resolved_provider is not None
+            and resolved_provider in REASONING_EFFORT_PROVIDERS
+        ):
+            cfg["reasoning_effort"] = effective_effort
+
+    return cfg
