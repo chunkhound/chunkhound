@@ -24,6 +24,7 @@ class GrokLLMProvider(OpenAICompatibleProvider):
         base_url: str | None = None,
         timeout: int = 60,
         max_retries: int = 3,
+        supports_structured_outputs: bool | None = None,
     ):
         """Initialize Grok LLM provider.
 
@@ -33,6 +34,8 @@ class GrokLLMProvider(OpenAICompatibleProvider):
             base_url: Base URL (defaults to https://api.x.ai/v1)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts
+            supports_structured_outputs: Override class-level structured
+                output support flag
         """
 
         super().__init__(
@@ -41,6 +44,7 @@ class GrokLLMProvider(OpenAICompatibleProvider):
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
+            supports_structured_outputs=supports_structured_outputs,
         )
 
     def _get_default_base_url(self) -> str:

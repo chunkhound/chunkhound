@@ -13,7 +13,7 @@ from loguru import logger
 
 from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
-from chunkhound.utils.json_extraction import extract_json_from_response
+from chunkhound.utils.json_extraction import parse_and_validate_structured_json
 
 
 class BaseCLIProvider(LLMProvider):
@@ -227,23 +227,7 @@ class BaseCLIProvider(LLMProvider):
             self._estimated_completion_tokens += completion_tokens
             self._estimated_tokens_used += total_tokens
 
-            # Extract JSON from response (handle markdown code blocks)
-            json_content = extract_json_from_response(content)
-
-            # Parse JSON
-            parsed = json.loads(json_content)
-
-            # Ensure parsed is a dict
-            if not isinstance(parsed, dict):
-                raise ValueError(f"Expected JSON object, got {type(parsed).__name__}")
-
-            # Basic schema validation (check required fields if specified)
-            if "required" in json_schema:
-                missing = [
-                    field for field in json_schema["required"] if field not in parsed
-                ]
-                if missing:
-                    raise ValueError(f"Missing required fields: {missing}")
+            parsed = parse_and_validate_structured_json(content, json_schema)
 
             return parsed
 
