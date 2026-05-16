@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -320,17 +319,12 @@ class TestStopPid:
     ):
         from chunkhound.daemon.process import stop_pid
 
-        signals: list[int] = []
         alive_states = iter([True, True, False])
         monotonic_values = iter([0.0, 10.0, 10.0, 20.0])
+        mock_proc = MagicMock()
 
-        monkeypatch.setattr("chunkhound.daemon.process.sys.platform", "linux")
         monkeypatch.setattr(
             "chunkhound.daemon.process.pid_alive", lambda pid: next(alive_states)
-        )
-        monkeypatch.setattr(
-            "chunkhound.daemon.process.os.kill",
-            lambda pid, sig: signals.append(sig),
         )
         monkeypatch.setattr(
             "chunkhound.daemon.process.time.monotonic",
@@ -338,25 +332,23 @@ class TestStopPid:
         )
         monkeypatch.setattr("chunkhound.daemon.process.time.sleep", lambda _: None)
 
-        assert stop_pid(12345, timeout=10.0) is True
-        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        with patch("psutil.Process", return_value=mock_proc):
+            assert stop_pid(12345, timeout=10.0) is True
+
+        mock_proc.terminate.assert_called_once()
+        mock_proc.kill.assert_called_once()
 
     def test_force_kill_uses_remaining_timeout_budget(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         from chunkhound.daemon.process import stop_pid
 
-        signals: list[int] = []
         alive_states = iter([True, True, True])
         monotonic_values = iter([0.0, 10.0, 10.0])
+        mock_proc = MagicMock()
 
-        monkeypatch.setattr("chunkhound.daemon.process.sys.platform", "linux")
         monkeypatch.setattr(
             "chunkhound.daemon.process.pid_alive", lambda pid: next(alive_states)
-        )
-        monkeypatch.setattr(
-            "chunkhound.daemon.process.os.kill",
-            lambda pid, sig: signals.append(sig),
         )
         monkeypatch.setattr(
             "chunkhound.daemon.process.time.monotonic",
@@ -364,8 +356,11 @@ class TestStopPid:
         )
         monkeypatch.setattr("chunkhound.daemon.process.time.sleep", lambda _: None)
 
-        assert stop_pid(12345, timeout=10.0) is False
-        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        with patch("psutil.Process", return_value=mock_proc):
+            assert stop_pid(12345, timeout=10.0) is False
+
+        mock_proc.terminate.assert_called_once()
+        mock_proc.kill.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

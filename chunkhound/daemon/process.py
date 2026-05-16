@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import signal
-import sys
 import time
 
 
@@ -33,25 +30,24 @@ def process_create_time(pid: int) -> float | None:
 
 
 def stop_pid(pid: int, timeout: float = 10.0) -> bool:
-    """Stop pid and wait up to timeout seconds for it to die."""
+    """Stop pid and wait up to timeout seconds for it to die.
+
+    Uses psutil for cross-platform terminate→kill escalation:
+      graceful: Process.terminate() (SIGTERM on POSIX, TerminateProcess on Windows)
+      forceful: Process.kill()     (SIGKILL on POSIX, TerminateProcess on Windows)
+    """
+    import psutil
+
     if not pid_alive(pid):
         return True
     deadline = time.monotonic() + timeout
+
+    # Phase 1: graceful terminate
     try:
-        if sys.platform == "win32":
-            import psutil
-            try:
-                psutil.Process(pid).terminate()
-            except psutil.NoSuchProcess:
-                return True
-            except psutil.AccessDenied:
-                return not pid_alive(pid)
-        else:
-            os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        # Process vanished between pid_alive check and kill — already gone.
+        psutil.Process(pid).terminate()
+    except psutil.NoSuchProcess:
         return True
-    except (PermissionError, OSError):
+    except psutil.AccessDenied:
         return not pid_alive(pid)
 
     while True:
@@ -62,20 +58,12 @@ def stop_pid(pid: int, timeout: float = 10.0) -> bool:
             break
         time.sleep(min(0.1, remaining))
 
+    # Phase 2: force kill
     try:
-        if sys.platform == "win32":
-            import psutil
-            try:
-                psutil.Process(pid).kill()
-            except psutil.NoSuchProcess:
-                return True
-            except psutil.AccessDenied:
-                return not pid_alive(pid)
-        else:
-            os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
+        psutil.Process(pid).kill()
+    except psutil.NoSuchProcess:
         return True
-    except (PermissionError, OSError):
+    except psutil.AccessDenied:
         return not pid_alive(pid)
 
     while True:
