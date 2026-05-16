@@ -115,12 +115,7 @@ class Config(BaseModel):
                     with open(local_config_path) as f:
                         local_config = json.load(f)
                         self._deep_merge(config_data, local_config)
-                        # Mark exclude list as user-supplied when present in local file
-                        idx = config_data.get("indexing") or {}
-                        exc = idx.get("exclude") if isinstance(idx, dict) else None
-                        if isinstance(exc, list):
-                            idx["exclude_user_supplied"] = True
-                            config_data["indexing"] = idx
+                        self._mark_exclude_user_supplied(config_data)
                 except json.JSONDecodeError as e:
                     raise ValueError(
                         f"Invalid JSON in config file {local_config_path}: {e}. "
@@ -138,12 +133,7 @@ class Config(BaseModel):
                 with open(config_file) as f:
                     file_config = json.load(f)
                     self._deep_merge(config_data, file_config)
-                    # Mark exclude list as user-supplied when present in file
-                    idx = config_data.get("indexing") or {}
-                    exc = idx.get("exclude") if isinstance(idx, dict) else None
-                    if isinstance(exc, list):
-                        idx["exclude_user_supplied"] = True
-                        config_data["indexing"] = idx
+                    self._mark_exclude_user_supplied(config_data)
             except json.JSONDecodeError as e:
                 raise ValueError(
                     f"Invalid JSON in config file {config_file}: {e}. "
@@ -153,20 +143,12 @@ class Config(BaseModel):
         # 5. Apply CLI arguments (highest precedence)
         if args:
             cli_overrides = self._extract_cli_overrides(args)
-            # If CLI provided an explicit exclude list, mark it as user-supplied
-            idx = cli_overrides.get("indexing") or {}
-            if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
-                idx["exclude_user_supplied"] = True
-                cli_overrides["indexing"] = idx
+            self._mark_exclude_user_supplied(cli_overrides)
             self._deep_merge(config_data, cli_overrides)
 
         # 6. Apply any direct kwargs (for testing)
         if kwargs:
-            # If direct kwargs include an explicit exclude list, mark it as user-supplied
-            idx = kwargs.get("indexing") or {}
-            if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
-                idx["exclude_user_supplied"] = True
-                kwargs["indexing"] = idx
+            self._mark_exclude_user_supplied(kwargs)
             self._deep_merge(config_data, kwargs)
 
         # Special handling for EmbeddingConfig
@@ -189,6 +171,13 @@ class Config(BaseModel):
 
         # Initialize the model
         super().__init__(**config_data)
+
+    @staticmethod
+    def _mark_exclude_user_supplied(data: dict[str, Any]) -> None:
+        """Mark exclude list as user-supplied when present in indexing config."""
+        idx = data.get("indexing")
+        if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
+            idx["exclude_user_supplied"] = True
 
     def _load_env_vars(self) -> dict[str, Any]:
         """Load configuration from environment variables.
@@ -337,23 +326,20 @@ class Config(BaseModel):
                 f"Missing required configuration: {item}" for item in missing_config
             )
 
-        requires_llm = command == "research" or (
-            command == "map" and not getattr(args, "overview_only", False)
-        ) or (
-            command == "autodoc" and not getattr(args, "assets_only", False)
+        requires_llm = (
+            command == "research"
+            or (command == "map" and not getattr(args, "overview_only", False))
+            or (command == "autodoc" and not getattr(args, "assets_only", False))
         )
         if requires_llm:
             if self.llm is None:
                 errors.append("No LLM provider configured")
             else:
                 llm_roles = ["utility", "synthesis"]
-                if (
-                    command == "map"
-                    and (
-                        self.llm.map_hyde_provider
-                        or self.llm.map_hyde_model
-                        or self.llm.map_hyde_reasoning_effort
-                    )
+                if command == "map" and (
+                    self.llm.map_hyde_provider
+                    or self.llm.map_hyde_model
+                    or self.llm.map_hyde_reasoning_effort
                 ):
                     llm_roles.append("map_hyde")
                 if command == "autodoc":
