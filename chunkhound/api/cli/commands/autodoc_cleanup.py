@@ -8,7 +8,10 @@ from loguru import logger
 from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
 from chunkhound.autodoc.docsite import CleanupConfig
 from chunkhound.core.config.config import Config
-from chunkhound.core.config.llm_config import REASONING_EFFORT_PROVIDERS, LLMConfig
+from chunkhound.core.config.llm_config import (
+    LLMConfig,
+    apply_role_override,
+)
 from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
@@ -28,22 +31,14 @@ def _build_cleanup_provider_configs(
     cleanup_model = llm_config.autodoc_cleanup_model
     cleanup_effort = llm_config.autodoc_cleanup_reasoning_effort
 
-    if cleanup_provider:
-        synthesis_config = synthesis_config.copy()
-        synthesis_config["provider"] = cleanup_provider
-
-    if cleanup_model:
-        synthesis_config = synthesis_config.copy()
-        synthesis_config["model"] = cleanup_model
-
-    provider = synthesis_config.get("provider")
-    if (
-        cleanup_effort
-        and isinstance(provider, str)
-        and provider in REASONING_EFFORT_PROVIDERS
-    ):
-        synthesis_config = synthesis_config.copy()
-        synthesis_config["reasoning_effort"] = cleanup_effort
+    if cleanup_provider or cleanup_model or cleanup_effort:
+        synthesis_config = apply_role_override(
+            synthesis_config,
+            target_provider=cleanup_provider,
+            target_model=cleanup_model,
+            target_effort=cleanup_effort,
+            role_name="autodoc_cleanup",
+        )
 
     return utility_config, synthesis_config
 
