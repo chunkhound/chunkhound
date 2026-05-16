@@ -407,9 +407,7 @@ class LLMConfig(BaseSettings):
         for field in provider_fields:
             v = data.get(field)
             if isinstance(v, str) and v.lower() in REMOVED_PROVIDERS:
-                raise ValueError(
-                    f"{REMOVED_PROVIDERS[v.lower()]} (found in '{field}')"
-                )
+                raise ValueError(f"{REMOVED_PROVIDERS[v.lower()]} (found in '{field}')")
         return data
 
     @field_validator("base_url")
@@ -457,18 +455,25 @@ class LLMConfig(BaseSettings):
     def _get_default_models_for_provider(self, provider: str) -> tuple[str, str]:
         """Return the provider-specific utility/synthesis defaults."""
         if provider == "openai":
+            # nano for fast utility ops, gpt-5 for quality synthesis
             return ("gpt-5-nano", "gpt-5")
         elif provider == "claude-code-cli":
+            # CLI wrapper — single model handles both roles
             return ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001")
         elif provider == "codex-cli":
+            # Codex handles reasoning natively — same model for both
             return ("codex", "codex")
         elif provider == "gemini":
+            # pro-preview is the best available for both roles
             return ("gemini-3-pro-preview", "gemini-3-pro-preview")
         elif provider == "anthropic":
+            # haiku for cheap/fast utility, sonnet for quality synthesis
             return ("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929")
         elif provider == "grok":
+            # fast-reasoning is the best throughput/quality tradeoff
             return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
         elif provider == "opencode-cli":
+            # wraps grok-code — single model for both roles
             return ("opencode/grok-code", "opencode/grok-code")
         return ("gpt-5-nano", "gpt-5")
 
@@ -523,9 +528,7 @@ class LLMConfig(BaseSettings):
                         self.anthropic_clear_tool_uses_trigger_tokens
                     )
                 if self.anthropic_clear_tool_uses_keep is not None:
-                    config["clear_tool_uses_keep"] = (
-                        self.anthropic_clear_tool_uses_keep
-                    )
+                    config["clear_tool_uses_keep"] = self.anthropic_clear_tool_uses_keep
 
         return config
 
@@ -753,8 +756,7 @@ class LLMConfig(BaseSettings):
         if cross_family_roles:
             roles_text = ", ".join(cross_family_roles)
             missing.append(
-                "explicit provider-compatible model required for roles: "
-                f"{roles_text}"
+                f"explicit provider-compatible model required for roles: {roles_text}"
             )
 
         return missing
