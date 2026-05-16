@@ -130,9 +130,22 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                 f"Run 'opencode models' to see available models."
             )
 
-        provider, _ = model.split("/", 1)
+        provider, model_name = model.split("/", 1)
+        provider = provider.strip()
+        model_name = model_name.strip()
         if not provider:
             raise ValueError(f"Provider cannot be empty in model: {model}")
+        if not model_name:
+            raise ValueError(f"Model cannot be empty in model: {model}")
+
+    def _describe_command_context(self, *, use_json: bool) -> str:
+        """Build sanitized CLI context for errors without leaking prompt text."""
+        parts = ["command=opencode run", f"model={self._model}"]
+        if use_json:
+            parts.append("format=json")
+        if self._reasoning_effort:
+            parts.append(f"variant={self._reasoning_effort}")
+        return ", ".join(parts)
 
     async def _run_cli_command(
         self,
@@ -204,6 +217,11 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                     process.communicate(),
                     timeout=request_timeout,
                 )
+                stderr_msg = (
+                    stderr.decode("utf-8", errors="replace").strip()
+                    if stderr
+                    else "Unknown error"
+                )
 
                 if use_json:
                     # Parse NDJSON output
@@ -270,13 +288,8 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                             continue
                         raise last_error
 
-                    # If exit code is non-zero and we have no text, report stderr
-                    if process.returncode != 0 and not text_parts:
-                        stderr_msg = (
-                            stderr.decode("utf-8", errors="replace").strip()
-                            if stderr
-                            else "Unknown error"
-                        )
+                    # Process failures must not be masked by partial streamed text.
+                    if process.returncode != 0:
                         # If --format json is unsupported, retry in plain text mode
                         if self._format_json_flag_unsupported(stderr_msg):
                             use_json = False
@@ -285,9 +298,15 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                                 "retrying in plain text mode"
                             )
                             continue
+                        if text_parts:
+                            logger.debug(
+                                f"OpenCode CLI: discarded {len(text_parts)} text parts "
+                                f"from failed process (exit {process.returncode})"
+                            )
                         last_error = RuntimeError(
                             f"OpenCode CLI command failed (exit {process.returncode}): "
-                            f"{stderr_msg} (command: {' '.join(cmd)})"
+                            f"{stderr_msg} "
+                            f"({self._describe_command_context(use_json=use_json)})"
                         )
                         if attempt < self._max_retries - 1:
                             logger.warning(
@@ -310,22 +329,24 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                 else:
                     # Plain text mode
                     output = stdout.decode("utf-8", errors="replace").strip()
-                    if not output:
-                        stderr_msg = (
-                            stderr.decode("utf-8", errors="replace").strip()
-                            if stderr
-                            else "Unknown error"
+                    if process.returncode != 0:
+                        last_error = RuntimeError(
+                            f"OpenCode CLI command failed "
+                            f"(exit {process.returncode}): "
+                            f"{stderr_msg} "
+                            f"({self._describe_command_context(use_json=use_json)})"
                         )
-                        if process.returncode != 0:
-                            last_error = RuntimeError(
-                                f"OpenCode CLI command failed "
-                                f"(exit {process.returncode}): "
-                                f"{stderr_msg} (command: {' '.join(cmd)})"
+                        if attempt < self._max_retries - 1:
+                            logger.warning(
+                                f"OpenCode CLI attempt {attempt + 1} failed, "
+                                f"retrying: {stderr_msg}"
                             )
-                        else:
-                            last_error = RuntimeError(
-                                "OpenCode CLI returned empty output"
-                            )
+                            continue
+                        raise last_error
+                    if not output:
+                        last_error = RuntimeError(
+                            "OpenCode CLI returned empty output"
+                        )
                         if attempt < self._max_retries - 1:
                             logger.warning(
                                 f"OpenCode CLI attempt {attempt + 1} "
@@ -345,7 +366,8 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                     await process.wait()
 
                 last_error = RuntimeError(
-                    f"OpenCode CLI command timed out after {request_timeout}s"
+                    f"OpenCode CLI command timed out after {request_timeout}s "
+                    f"({self._describe_command_context(use_json=use_json)})"
                 )
                 if attempt < self._max_retries - 1:
                     logger.warning(
@@ -369,7 +391,8 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                     await process.wait()
 
                 last_error = RuntimeError(
-                    f"OpenCode CLI command failed: {e} (command: {' '.join(cmd)})"
+                    f"OpenCode CLI command failed: {e} "
+                    f"({self._describe_command_context(use_json=use_json)})"
                 )
                 if attempt < self._max_retries - 1:
                     logger.warning(f"OpenCode CLI attempt {attempt + 1} failed: {e}")

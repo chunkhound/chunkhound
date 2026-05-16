@@ -229,7 +229,65 @@ class TestClaudeCodeCLIProvider:
             "required": ["result", "data"],
         }
 
-        with pytest.raises(RuntimeError, match="Missing required fields"):
+        with pytest.raises(RuntimeError, match="schema validation failed"):
+            await provider.complete_structured("Test prompt", schema)
+
+    @pytest.mark.asyncio
+    async def test_complete_structured_rejects_additional_properties(
+        self, provider, mock_subprocess
+    ):
+        """Test full JSON Schema validation in CLI fallback mode."""
+        json_response = {"result": "success", "extra": True}
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (
+            json.dumps(json_response).encode("utf-8"),
+            b"",
+        )
+        mock_subprocess.return_value = mock_process
+
+        schema = {
+            "type": "object",
+            "properties": {"result": {"type": "string"}},
+            "required": ["result"],
+            "additionalProperties": False,
+        }
+
+        with pytest.raises(RuntimeError, match="schema validation failed"):
+            await provider.complete_structured("Test prompt", schema)
+
+    @pytest.mark.asyncio
+    async def test_complete_structured_rejects_nested_schema_violation(
+        self, provider, mock_subprocess
+    ):
+        """Nested array/object constraints must be enforced."""
+        json_response = {"items": [{"label": 7}]}
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (
+            json.dumps(json_response).encode("utf-8"),
+            b"",
+        )
+        mock_subprocess.return_value = mock_process
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"label": {"type": "string"}},
+                        "required": ["label"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+
+        with pytest.raises(RuntimeError, match="schema validation failed"):
             await provider.complete_structured("Test prompt", schema)
 
     @pytest.mark.asyncio

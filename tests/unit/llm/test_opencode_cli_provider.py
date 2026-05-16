@@ -49,6 +49,12 @@ class TestOpenCodeCLIProvider:
         with pytest.raises(ValueError, match="Provider cannot be empty"):
             provider._validate_model_format("/gpt-5")
 
+        with pytest.raises(ValueError, match="Model cannot be empty"):
+            provider._validate_model_format("openai/")
+
+        with pytest.raises(ValueError, match="Model cannot be empty"):
+            provider._validate_model_format("openai/   ")
+
         with pytest.raises(ValueError, match="opencode-cli requires a model"):
             provider._validate_model_format("")
 
@@ -159,10 +165,7 @@ class TestOpenCodeCLIProvider:
 
             with pytest.raises(
                 RuntimeError,
-                match=(
-                    "LLM structured completion failed.*"
-                    r"Missing required fields: \['value'\]"
-                ),
+                match=("LLM structured completion failed.*schema validation failed"),
             ):
                 await provider.complete_structured("Test prompt", schema)
 
@@ -261,18 +264,39 @@ class TestOpenCodeCLIProvider:
         """Test CLI command timeout."""
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = MagicMock()
-            mock_process.communicate = AsyncMock(
-                side_effect=asyncio.TimeoutError()
-            )
+            mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
             mock_process.wait = AsyncMock()
             mock_process.returncode = None
             mock_subprocess.return_value = mock_process
 
-            with pytest.raises(RuntimeError, match="timed out"):
+            with pytest.raises(RuntimeError, match="timed out") as exc:
                 await provider._run_cli_command("Test prompt")
 
+            msg = str(exc.value)
+            assert "model=test-provider/test-model" in msg
+            assert "Test prompt" not in msg
             mock_process.kill.assert_called()
             mock_process.wait.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_failure_redacts_prompt_from_error(self, provider):
+        """Error text must not leak prompt payloads from argv construction."""
+        secret_prompt = "SECRET PROMPT PAYLOAD"
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process = AsyncMock()
+            mock_process.communicate.return_value = (b"", b"Persistent CLI error")
+            mock_process.returncode = 1
+            mock_subprocess.return_value = mock_process
+
+            with pytest.raises(
+                RuntimeError, match="OpenCode CLI command failed"
+            ) as exc:
+                await provider._run_cli_command(secret_prompt)
+
+            msg = str(exc.value)
+            assert "command=opencode run" in msg
+            assert "model=test-provider/test-model" in msg
+            assert secret_prompt not in msg
 
     def test_init_invalid_model_format(self, provider):
         """Test provider creation with invalid model format fails fast."""
@@ -287,10 +311,12 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_ndjson_error_event(self, provider):
         """Test NDJSON error detection when CLI exits 0 but returns error event."""
-        error_event = json.dumps({
-            "type": "error",
-            "error": {"data": {"message": "model not available"}},
-        })
+        error_event = json.dumps(
+            {
+                "type": "error",
+                "error": {"data": {"message": "model not available"}},
+            }
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (error_event.encode(), b"")
@@ -303,10 +329,12 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_error_event_null_data(self, provider):
         """Test NDJSON error event with null data field does not crash."""
-        error_event = json.dumps({
-            "type": "error",
-            "error": {"data": None, "message": "backend error"},
-        })
+        error_event = json.dumps(
+            {
+                "type": "error",
+                "error": {"data": None, "message": "backend error"},
+            }
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (error_event.encode(), b"")
@@ -319,14 +347,18 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_retry_on_ndjson_error_then_success(self, provider):
         """Test retry on NDJSON error event, then success."""
-        error_event = json.dumps({
-            "type": "error",
-            "error": {"message": "temporary failure"},
-        })
-        text_event = json.dumps({
-            "type": "text",
-            "part": {"text": "Success response"},
-        })
+        error_event = json.dumps(
+            {
+                "type": "error",
+                "error": {"message": "temporary failure"},
+            }
+        )
+        text_event = json.dumps(
+            {
+                "type": "text",
+                "part": {"text": "Success response"},
+            }
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process_fail = AsyncMock()
             mock_process_fail.communicate.return_value = (error_event.encode(), b"")
@@ -359,10 +391,12 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_multiple_text_events(self, provider):
         """Test that multiple text events are concatenated."""
-        events = "\n".join([
-            json.dumps({"type": "text", "part": {"text": "Hello "}}),
-            json.dumps({"type": "text", "part": {"text": "World"}}),
-        ])
+        events = "\n".join(
+            [
+                json.dumps({"type": "text", "part": {"text": "Hello "}}),
+                json.dumps({"type": "text", "part": {"text": "World"}}),
+            ]
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (events.encode(), b"")
@@ -376,10 +410,12 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_text_then_error(self, provider):
         """Test that error event after text events raises and discards partial text."""
-        events = "\n".join([
-            json.dumps({"type": "text", "part": {"text": "Partial"}}),
-            json.dumps({"type": "error", "error": {"message": "Failed"}}),
-        ])
+        events = "\n".join(
+            [
+                json.dumps({"type": "text", "part": {"text": "Partial"}}),
+                json.dumps({"type": "error", "error": {"message": "Failed"}}),
+            ]
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (events.encode(), b"")
@@ -405,11 +441,13 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_non_dict_json_event(self, provider):
         """Test that non-dict JSON lines are skipped."""
-        events = "\n".join([
-            json.dumps([1, 2, 3]),
-            json.dumps("just a string"),
-            json.dumps({"type": "text", "part": {"text": "OK"}}),
-        ])
+        events = "\n".join(
+            [
+                json.dumps([1, 2, 3]),
+                json.dumps("just a string"),
+                json.dumps({"type": "text", "part": {"text": "OK"}}),
+            ]
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (events.encode(), b"")
@@ -423,11 +461,13 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_malformed_json_interleaved(self, provider):
         """Test that malformed JSON lines are skipped and valid lines are processed."""
-        events = "\n".join([
-            json.dumps({"type": "text", "part": {"text": "Before"}}),
-            '{"type": "text", "part": {", "text": "bad json"',
-            json.dumps({"type": "text", "part": {"text": "After"}}),
-        ])
+        events = "\n".join(
+            [
+                json.dumps({"type": "text", "part": {"text": "Before"}}),
+                '{"type": "text", "part": {", "text": "bad json"',
+                json.dumps({"type": "text", "part": {"text": "After"}}),
+            ]
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (events.encode(), b"")
@@ -441,11 +481,13 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_null_part_text(self, provider):
         """Test that null or missing part.text is handled gracefully."""
-        events = "\n".join([
-            json.dumps({"type": "text", "part": {}}),
-            json.dumps({"type": "text", "part": {"text": None}}),
-            json.dumps({"type": "text", "part": {"text": "OK"}}),
-        ])
+        events = "\n".join(
+            [
+                json.dumps({"type": "text", "part": {}}),
+                json.dumps({"type": "text", "part": {"text": None}}),
+                json.dumps({"type": "text", "part": {"text": "OK"}}),
+            ]
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (events.encode(), b"")
@@ -458,10 +500,12 @@ class TestOpenCodeCLIProvider:
 
     @pytest.mark.asyncio
     async def test_run_cli_command_error_event_null_error(self, provider):
-        """Test error event with null/missing error field falls back to Unknown error."""
-        events = "\n".join([
-            json.dumps({"type": "error", "error": None}),
-        ])
+        """Test null/missing error field falls back to Unknown error."""
+        events = "\n".join(
+            [
+                json.dumps({"type": "error", "error": None}),
+            ]
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (events.encode(), b"")
@@ -474,9 +518,11 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_error_event_missing_error_key(self, provider):
         """Test error event without error key falls back to Unknown error."""
-        events = "\n".join([
-            json.dumps({"type": "error"}),
-        ])
+        events = "\n".join(
+            [
+                json.dumps({"type": "error"}),
+            ]
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (events.encode(), b"")
@@ -488,23 +534,82 @@ class TestOpenCodeCLIProvider:
 
     @pytest.mark.asyncio
     async def test_run_cli_command_nonzero_exit_with_text(self, provider):
-        """Test that non-zero exit code with text content still returns text."""
-        events = "\n".join([
-            json.dumps({"type": "text", "part": {"text": "Partial output"}}),
-        ])
+        """Test that non-zero exit code with text content still raises."""
+        events = "\n".join(
+            [
+                json.dumps({"type": "text", "part": {"text": "Partial output"}}),
+            ]
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (events.encode(), b"Some stderr")
             mock_process.returncode = 1
             mock_subprocess.return_value = mock_process
 
-            result = await provider._run_cli_command("Test prompt")
+            with pytest.raises(RuntimeError, match="Some stderr"):
+                await provider._run_cli_command("Test prompt")
 
-            assert result == "Partial output"
+            assert mock_subprocess.call_count == provider._max_retries
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_nonzero_exit_with_text_logs_discard(
+        self,
+        provider,
+    ):
+        """Non-zero exit with streamed text must log the discard count at DEBUG."""
+        from loguru import logger as _loguru_logger
+
+        captured: list[str] = []
+        sink_id = _loguru_logger.add(
+            lambda msg: captured.append(msg),
+            level="DEBUG",
+            format="{message}",
+        )
+        try:
+            events = "\n".join(
+                [
+                    json.dumps({"type": "text", "part": {"text": "Partial"}}),
+                ]
+            )
+            with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+                mock_process = AsyncMock()
+                mock_process.communicate.return_value = (events.encode(), b"stderr")
+                mock_process.returncode = 1
+                mock_subprocess.return_value = mock_process
+
+                with pytest.raises(RuntimeError):
+                    await provider._run_cli_command("Test prompt")
+
+            assert any("discarded 1 text parts" in msg for msg in captured), (
+                f"Expected discard log not found in: {captured}"
+            )
+        finally:
+            _loguru_logger.remove(sink_id)
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_plain_text_nonzero_exit_with_stdout_raises(
+        self, provider, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Plain-text fallback must not treat failed processes as success."""
+        monkeypatch.setenv("CHUNKHOUND_OPENCODE_JSON", "0")
+
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process = AsyncMock()
+            mock_process.communicate.return_value = (
+                b"Partial output",
+                b"Some stderr",
+            )
+            mock_process.returncode = 1
+            mock_subprocess.return_value = mock_process
+
+            with pytest.raises(RuntimeError, match="Some stderr"):
+                await provider._run_cli_command("Test prompt")
+
+            assert mock_subprocess.call_count == provider._max_retries
 
     @pytest.mark.asyncio
     async def test_run_cli_command_invalid_utf8_in_stdout(self, provider):
-        """Test that invalid UTF-8 bytes in stdout are replaced and parsing continues."""
+        """Test invalid UTF-8 bytes are replaced and parsing continues."""
         valid_event = json.dumps({"type": "text", "part": {"text": "OK"}})
         # Place invalid bytes on their own line so the NDJSON parser skips
         # the unparseable line and still finds the valid event.
@@ -560,10 +665,12 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_error_event_string_data(self, provider):
         """Test error event where error.data is a plain string, not a dict."""
-        error_event = json.dumps({
-            "type": "error",
-            "error": {"data": "rate limited"},
-        })
+        error_event = json.dumps(
+            {
+                "type": "error",
+                "error": {"data": "rate limited"},
+            }
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (error_event.encode(), b"")
@@ -576,10 +683,12 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_text_event_non_dict_part(self, provider):
         """Test that non-dict part in text event is safely skipped."""
-        events = "\n".join([
-            json.dumps({"type": "text", "part": "plain string, not a dict"}),
-            json.dumps({"type": "text", "part": {"text": "OK"}}),
-        ])
+        events = "\n".join(
+            [
+                json.dumps({"type": "text", "part": "plain string, not a dict"}),
+                json.dumps({"type": "text", "part": {"text": "OK"}}),
+            ]
+        )
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (events.encode(), b"")
@@ -600,9 +709,7 @@ class TestOpenCodeCLIProvider:
             mock_subprocess.return_value = mock_process
 
             with pytest.raises(RuntimeError):
-                await provider._run_cli_command(
-                    "Test prompt", system="System message"
-                )
+                await provider._run_cli_command("Test prompt", system="System message")
 
             call_args = mock_subprocess.call_args[0]
             # The last positional arg is the combined message
@@ -610,8 +717,6 @@ class TestOpenCodeCLIProvider:
             assert message_arg == (
                 "System Instructions:\nSystem message\n\nUser Request:\nTest prompt"
             )
-
-
 
     def test_format_json_flag_unsupported_markers(self, provider):
         """Test predicate recognizes all unsupported-flag marker strings."""
@@ -638,7 +743,8 @@ class TestOpenCodeCLIProvider:
             # Attempt 2: plain text succeeds
             mock_process_1 = AsyncMock()
             mock_process_1.communicate.return_value = (
-                b"", b"error: unrecognized option --format json"
+                b"",
+                b"error: unrecognized option --format json",
             )
             mock_process_1.returncode = 2
 
@@ -675,7 +781,8 @@ class TestOpenCodeCLIProvider:
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process_1 = AsyncMock()
             mock_process_1.communicate.return_value = (
-                b"", b"error: unrecognized option --format json"
+                b"",
+                b"error: unrecognized option --format json",
             )
             mock_process_1.returncode = 2
 
@@ -690,11 +797,13 @@ class TestOpenCodeCLIProvider:
 
     @pytest.mark.asyncio
     async def test_run_cli_command_fallback_model_on_timeout(self):
-        """Test that fallback model is tried once when primary exhausts retries with timeout."""
+        """Test fallback model after primary retries exhaust with timeout."""
         fallback_text_event = json.dumps(
             {"type": "text", "part": {"text": "Fallback response"}}
         )
-        with patch.object(OpenCodeCLIProvider, "_opencode_available", return_value=True):
+        with patch.object(
+            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        ):
             provider = OpenCodeCLIProvider(
                 model="test-provider/primary-model",
                 fallback_model="test-provider/fallback-model",
@@ -712,7 +821,8 @@ class TestOpenCodeCLIProvider:
 
             mock_process_fallback = AsyncMock()
             mock_process_fallback.communicate.return_value = (
-                fallback_text_event.encode(), b""
+                fallback_text_event.encode(),
+                b"",
             )
             mock_process_fallback.returncode = 0
 
@@ -730,7 +840,9 @@ class TestOpenCodeCLIProvider:
     @pytest.mark.asyncio
     async def test_run_cli_command_fallback_not_tried_on_non_timeout_error(self):
         """Test that fallback model is NOT invoked on non-timeout failures."""
-        with patch.object(OpenCodeCLIProvider, "_opencode_available", return_value=True):
+        with patch.object(
+            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        ):
             provider = OpenCodeCLIProvider(
                 model="test-provider/primary-model",
                 fallback_model="test-provider/fallback-model",

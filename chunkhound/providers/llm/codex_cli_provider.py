@@ -81,10 +81,10 @@ class CodexCLIProvider(BaseCLIProvider):
         """Return (resolved_model, source) for Codex CLI model selection.
 
         Notes:
-        - The special value "codex" means "use ChunkHound's default".
-        - Override defaults via CHUNKHOUND_CODEX_DEFAULT_MODEL.
+        - The special value "codex" means "discover the local Codex default".
+        - Override discovery via CHUNKHOUND_CODEX_DEFAULT_MODEL.
         - If no env override, dynamically discovers the highest-priority available model
-          via `codex debug models`, falling back to a hardcoded default.
+          via `codex debug models`.
         """
         env_override = os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL")
         if env_override:
@@ -97,7 +97,8 @@ class CodexCLIProvider(BaseCLIProvider):
                 return discovered, "discovered"
             raise RuntimeError(
                 "Codex model discovery failed: no visible models found. "
-                "Run 'codex debug models' to inspect available models."
+                "Run 'codex debug models' to inspect available models, or configure "
+                "an explicit model via LLM config or CHUNKHOUND_CODEX_DEFAULT_MODEL."
             )
 
         return model_name, "explicit"
