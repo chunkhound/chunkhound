@@ -329,6 +329,14 @@ class LLMConfig(BaseSettings):
     # Internal settings
     timeout: int = Field(default=60, description="Internal timeout for LLM calls")
     max_retries: int = Field(default=3, description="Internal max retries")
+    supports_structured_outputs: bool | None = Field(
+        default=None,
+        description=(
+            "Override structured output support detection. Set to false for "
+            "providers whose API does not support OpenAI's native json_schema "
+            "response_format (e.g. DeepSeek)"
+        ),
+    )
 
     @field_validator("base_url")
     def validate_base_url(cls, v: str | None) -> str | None:  # noqa: N805
@@ -470,10 +478,20 @@ class LLMConfig(BaseSettings):
         utility_config["provider"] = resolved_utility_provider
         utility_config["model"] = self.utility_model or utility_default
 
+        if self.supports_structured_outputs is not None:
+            utility_config["supports_structured_outputs"] = (
+                self.supports_structured_outputs
+            )
+
         # Build synthesis config
         synthesis_config = base_config.copy()
         synthesis_config["provider"] = resolved_synthesis_provider
         synthesis_config["model"] = self.synthesis_model or synthesis_default
+
+        if self.supports_structured_outputs is not None:
+            synthesis_config["supports_structured_outputs"] = (
+                self.supports_structured_outputs
+            )
 
         def _codex_effort_for(role: str) -> str | None:
             default_effort = self.codex_reasoning_effort
@@ -715,6 +733,17 @@ class LLMConfig(BaseSettings):
         )
 
         parser.add_argument(
+            "--llm-supports-structured-outputs",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help=(
+                "Override structured output support detection. "
+                "Set to false for providers without native json_schema "
+                "response_format (e.g., DeepSeek)."
+            ),
+        )
+
+        parser.add_argument(
             "--llm-map-hyde-provider",
             choices=[
                 "openai",
@@ -914,6 +943,11 @@ class LLMConfig(BaseSettings):
                 "anthropic_context_management_enabled",
             ),
         )
+
+        sso_val = _bool_env("CHUNKHOUND_LLM_SUPPORTS_STRUCTURED_OUTPUTS")
+        if sso_val is not None:
+            config["supports_structured_outputs"] = sso_val
+
         for env_name, key in bool_fields:
             bool_val = _bool_env(env_name)
             if bool_val is not None:
@@ -978,6 +1012,11 @@ class LLMConfig(BaseSettings):
             overrides["utility_provider"] = args.llm_utility_provider
         if hasattr(args, "llm_synthesis_provider") and args.llm_synthesis_provider:
             overrides["synthesis_provider"] = args.llm_synthesis_provider
+
+        sso = getattr(args, "llm_supports_structured_outputs", None)
+        if sso is not None:
+            overrides["supports_structured_outputs"] = sso
+
         if (
             hasattr(args, "llm_codex_reasoning_effort")
             and args.llm_codex_reasoning_effort
