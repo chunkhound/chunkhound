@@ -1036,9 +1036,6 @@ class MCPServerBase(ABC):
             raise RuntimeError("Services not initialized")
 
         provider = self.services.provider
-        close_method = (
-            provider.close if hasattr(provider, "close") else provider.disconnect
-        )
         loop = asyncio.get_running_loop()
         future = loop.create_future()
 
@@ -1066,7 +1063,14 @@ class MCPServerBase(ABC):
         def _run_close() -> None:
             error: Exception | None = None
             try:
-                close_method()
+                # close() is the authoritative cleanup API when available.
+                # Do not fall back to disconnect() after a close() failure: some
+                # providers implement close() by delegating to disconnect(), so a
+                # fallback would hide the original error and risk double teardown.
+                if hasattr(provider, "close"):
+                    provider.close()
+                else:
+                    provider.disconnect()
             except Exception as exc:
                 error = exc
                 self.debug_log(

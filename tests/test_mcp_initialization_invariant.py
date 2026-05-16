@@ -83,6 +83,23 @@ class FailingCloseProvider:
         raise RuntimeError("close exploded")
 
 
+class FailingCloseWithDisconnectProvider:
+    """Provider whose close() fails even though disconnect() exists."""
+
+    def __init__(self) -> None:
+        self.is_connected = True
+        self.close_calls = 0
+        self.disconnect_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        raise RuntimeError("close exploded")
+
+    def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        self.is_connected = False
+
+
 class TestNonBlockingInitialization:
     """Verify initialization returns before scan completes."""
 
@@ -433,5 +450,22 @@ class TestCleanup:
 
         await server.cleanup()
 
+        assert not server._initialized
+        assert "Database close failed: close exploded" in debug_file.read_text()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_does_not_fallback_to_disconnect_after_close_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = FailingCloseWithDisconnectProvider()
+        server = self._make_server(tmp_path, provider)
+        debug_file = tmp_path / "cleanup.log"
+
+        monkeypatch.setenv("CHUNKHOUND_DEBUG_FILE", str(debug_file))
+
+        await server.cleanup()
+
+        assert provider.close_calls == 1
+        assert provider.disconnect_calls == 0
         assert not server._initialized
         assert "Database close failed: close exploded" in debug_file.read_text()
