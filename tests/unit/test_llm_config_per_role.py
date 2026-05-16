@@ -482,15 +482,18 @@ def test_ollama_provider_rejected():
         LLMConfig(provider="ollama")
 
 
-def test_ollama_rejected_on_per_role_provider():
-    """Test that 'ollama' on per-role fields raises with a migration hint."""
+@pytest.mark.parametrize("field", [
+    "utility_provider",
+    "synthesis_provider",
+    "map_hyde_provider",
+    "autodoc_cleanup_provider",
+])
+def test_ollama_rejected_on_per_role_provider(field: str):
+    """Test that 'ollama' on any per-role provider field raises with a migration hint."""
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError, match="ollama.*removed.*base_url"):
-        LLMConfig(utility_provider="ollama")
-
-    with pytest.raises(ValidationError, match="ollama.*removed.*base_url"):
-        LLMConfig(synthesis_provider="ollama")
+        LLMConfig(**{field: "ollama"})
 
 
 def test_opencode_cli_no_key_required():
