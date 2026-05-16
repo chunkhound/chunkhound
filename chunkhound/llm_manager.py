@@ -9,8 +9,10 @@ from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+from chunkhound.providers.llm.deepseek_llm_provider import DeepSeekLLMProvider
 from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
 from chunkhound.providers.llm.grok_llm_provider import GrokLLMProvider
+from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
 from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
 
@@ -29,6 +31,7 @@ class LLMManager:
         "anthropic": AnthropicLLMProvider,
         "claude-code-cli": ClaudeCodeCLIProvider,
         "codex-cli": CodexCLIProvider,
+        "deepseek": DeepSeekLLMProvider,
         "gemini": GeminiLLMProvider,
         "grok": GrokLLMProvider,
         "opencode-cli": OpenCodeCLIProvider,
@@ -87,6 +90,13 @@ class LLMManager:
             # Only pass base_url to providers that support it
             if provider_name not in ("gemini",):
                 provider_kwargs["base_url"] = config.get("base_url")
+
+            # Allow OpenAI-compatible providers without native structured
+            # outputs to opt out (e.g. DeepSeek — use prompt-based fallback)
+            if issubclass(provider_class, OpenAICompatibleProvider):
+                sso = config.get("supports_structured_outputs")
+                if sso is not None:
+                    provider_kwargs["supports_structured_outputs"] = sso
 
             # Pass reasoning_effort to providers that support it
             if provider_name in REASONING_EFFORT_PROVIDERS:

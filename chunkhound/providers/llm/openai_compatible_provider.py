@@ -16,6 +16,10 @@ from loguru import logger
 
 from chunkhound.core.utils.token_utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
+from chunkhound.utils.json_extraction import (
+    build_schema_system_instruction,
+    parse_and_validate_structured_json,
+)
 
 try:
     from openai import AsyncOpenAI
@@ -32,7 +36,14 @@ class OpenAICompatibleProvider(LLMProvider):
 
     Handles Chat Completions API with structured outputs.
     Subclasses can override base URL and provider name.
+
+    Set ``_supports_structured_outputs=False`` (class or instance) for
+    providers whose APIs do not support OpenAI's native ``response_format``
+    with ``type: "json_schema"`` (e.g. DeepSeek). The fallback injects the
+    JSON schema into the system prompt instead.
     """
+
+    _supports_structured_outputs: bool = True
 
     def __init__(
         self,
@@ -41,6 +52,7 @@ class OpenAICompatibleProvider(LLMProvider):
         base_url: str | None = None,
         timeout: int = 60,
         max_retries: int = 3,
+        supports_structured_outputs: bool | None = None,
     ):
         """Initialize OpenAI-compatible provider.
 
@@ -50,6 +62,8 @@ class OpenAICompatibleProvider(LLMProvider):
             base_url: Base URL (defaults to subclass implementation)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
+            supports_structured_outputs: Override class-level flag.
+                When explicitly set, takes precedence over the class default.
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -59,6 +73,8 @@ class OpenAICompatibleProvider(LLMProvider):
         self._model = model
         self._timeout = timeout
         self._max_retries = max_retries
+        if supports_structured_outputs is not None:
+            self._supports_structured_outputs = supports_structured_outputs
 
         # Use provided base_url or subclass default
         effective_base_url = base_url or self._get_default_base_url()
@@ -93,6 +109,16 @@ class OpenAICompatibleProvider(LLMProvider):
         Subclasses must implement this to return their name.
         """
         raise NotImplementedError("Subclasses must implement _get_provider_name")
+
+    def _get_max_completion_tokens_param_name(self) -> str:
+        """Get the output-token parameter name for chat completions requests."""
+        return "max_completion_tokens"
+
+    def _parse_structured_response(
+        self, content: str, json_schema: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Parse and validate a structured response against the JSON schema."""
+        return parse_and_validate_structured_json(content, json_schema)
 
     @property
     def name(self) -> str:
@@ -129,12 +155,13 @@ class OpenAICompatibleProvider(LLMProvider):
         request_timeout = timeout if timeout is not None else self._timeout
 
         try:
+            max_tokens_param = self._get_max_completion_tokens_param_name()
             response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=messages,
-                max_completion_tokens=max_completion_tokens,
+                **{max_tokens_param: max_completion_tokens},
                 timeout=request_timeout,
-            )
+            )  # type: ignore[call-overload]
 
             self._requests_made += 1
             if response.usage:
@@ -207,7 +234,11 @@ class OpenAICompatibleProvider(LLMProvider):
     ) -> dict[str, Any]:
         """Generate a structured JSON completion conforming to the given schema.
 
-        Uses JSON Schema validation for structured outputs.
+        Uses native ``response_format`` with ``type: "json_schema"`` when the
+        provider supports it (``_supports_structured_outputs = True``).
+        Otherwise injects the schema into the system prompt and parses the
+        free-form text response — ``extract_json_from_response`` handles
+        markdown code blocks and raw JSON alike.
 
         Args:
             prompt: The user prompt
@@ -219,30 +250,55 @@ class OpenAICompatibleProvider(LLMProvider):
         Returns:
             Parsed JSON object conforming to schema
         """
-        # Build messages
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
-        # Use provided timeout or default
         request_timeout = timeout if timeout is not None else self._timeout
+        max_tokens_param = self._get_max_completion_tokens_param_name()
 
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                max_completion_tokens=max_completion_tokens,
-                timeout=request_timeout,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "structured_response",
-                        "strict": True,
-                        "schema": json_schema,
+            if self._supports_structured_outputs:
+                # Native structured outputs path
+                messages = []
+                if system:
+                    messages.append({"role": "system", "content": system})
+                messages.append({"role": "user", "content": prompt})
+
+                response = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    **{max_tokens_param: max_completion_tokens},
+                    timeout=request_timeout,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "structured_response",
+                            "strict": True,
+                            "schema": json_schema,
+                        },
                     },
-                },
-            )
+                )  # type: ignore[call-overload]
+            else:
+                logger.debug(
+                    f"{self.name}: using prompt-based structured output fallback "
+                    "(provider does not support native json_schema response_format)"
+                )
+                # Prompt-based fallback: inject schema into system message
+                schema_instruction = build_schema_system_instruction(json_schema)
+                if system:
+                    effective_system = f"{system}\n\n{schema_instruction}"
+                else:
+                    effective_system = schema_instruction
+
+                messages = [
+                    {"role": "system", "content": effective_system},
+                    {"role": "user", "content": prompt},
+                ]
+
+                response = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    **{max_tokens_param: max_completion_tokens},
+                    timeout=request_timeout,
+                    response_format={"type": "json_object"},
+                )  # type: ignore[call-overload]
 
             self._requests_made += 1
             if response.usage:
@@ -253,18 +309,9 @@ class OpenAICompatibleProvider(LLMProvider):
             content = response.choices[0].message.content
             finish_reason = response.choices[0].finish_reason
 
-            # Validate content
-            if content is None or not content.strip():
-                logger.error(
-                    f"{self.name} structured completion returned empty content "
-                    f"(finish_reason={finish_reason})"
-                )
-                raise RuntimeError(
-                    f"LLM structured completion returned empty response "
-                    f"(finish_reason={finish_reason})"
-                )
-
-            # Check for truncation
+            # Check for truncation FIRST (more actionable — includes token counts)
+            # Must precede the empty-content check: when finish_reason="length" and
+            # content is empty/whitespace, the token-count info points at the fix.
             if finish_reason == "length":
                 usage_info = ""
                 if response.usage:
@@ -281,14 +328,26 @@ class OpenAICompatibleProvider(LLMProvider):
                     "Consider increasing the token limit or reducing input context."
                 )
 
+            # Validate content (only reached if finish_reason != "length")
+            if content is None or not content.strip():
+                logger.error(
+                    f"{self.name} structured completion returned empty content "
+                    f"(finish_reason={finish_reason})"
+                )
+                raise RuntimeError(
+                    f"LLM structured completion returned empty response "
+                    f"(finish_reason={finish_reason})"
+                )
+
             # Parse JSON
             try:
-                parsed = json.loads(content)
-                return parsed
+                return self._parse_structured_response(content, json_schema)
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse structured output as JSON: {e}")
                 raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"{self.name} structured completion failed: {e}")
             raise RuntimeError(f"LLM structured completion failed: {e}") from e
