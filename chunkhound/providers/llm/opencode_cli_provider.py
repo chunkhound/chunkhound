@@ -184,7 +184,14 @@ class OpenCodeCLIProvider(BaseCLIProvider):
 
         # Run command with retry logic
         last_error = None
-        for attempt in range(self._max_retries):
+        # Retry loop: runs up to _max_retries iterations. If the last retry
+        # was in JSON mode and produced no text, one extra plain-text attempt
+        # is granted via _extra_plain_retry so we never silently give up after
+        # a format-mode mismatch.
+        _extra_plain_retry = False
+        for attempt in range(self._max_retries + 1):
+            if attempt >= self._max_retries and not _extra_plain_retry:
+                break
             # Build CLI command (rebuilt each attempt to support flag negotiation)
             cmd = [
                 "opencode",
@@ -316,9 +323,19 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                             continue
                         raise last_error
 
-                    # If no text was extracted, report failure immediately.
-                    # Retrying with identical parameters is futile — the model
-                    # will produce the same (empty) output every time.
+                    # If no text was extracted and we're in JSON mode, retry
+                    # once in plain text mode. The model may have produced output
+                    # that doesn't conform to the expected NDJSON format.
+                    if not text_parts and use_json:
+                        use_json = False
+                        if attempt >= self._max_retries - 1:
+                            _extra_plain_retry = True
+                        logger.info(
+                            f"OpenCode CLI ({self._model}) returned no text "
+                            f"content in JSON mode; retrying in plain text mode"
+                        )
+                        continue
+
                     if not text_parts:
                         raise RuntimeError(
                             "OpenCode CLI returned no text content. "

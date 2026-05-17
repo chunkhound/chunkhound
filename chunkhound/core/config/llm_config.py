@@ -16,7 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import assert_never
 
 from chunkhound.core.config.claude_model_resolution import (
-    CLAUDE_HAIKU_DEFAULT_SENTINEL,
+    CLAUDE_HAIKU_SENTINEL,
 )
 
 REASONING_EFFORT_PROVIDERS: tuple[str, ...] = (
@@ -395,7 +395,11 @@ class LLMConfig(BaseSettings):
                     f"to {role_provider!r}."
                 )
 
-        for role, provider_name, model_name in (
+        # model_post_init propagates self.model to role-specific fields, but
+        # this model_validator runs *before* model_post_init in Pydantic v2.
+        # Fall back to self.model when the role-specific model is empty so the
+        # convenience ``model="provider/model"`` field works at construction time.
+        for role, provider_name, role_model in (
             ("utility", self.utility_provider or self.provider, self.utility_model),
             ("synthesis", resolved_synthesis_provider, resolved_synthesis_model),
             (
@@ -411,6 +415,7 @@ class LLMConfig(BaseSettings):
         ):
             if provider_name != "opencode-cli":
                 continue
+            model_name = role_model or self.model or ""
             if not model_name or "/" not in model_name:
                 raise ValueError(
                     f"opencode-cli requires a model in provider/model format "
@@ -601,8 +606,8 @@ class LLMConfig(BaseSettings):
             return ("llama3.2", "llama3.2")
         elif provider == "claude-code-cli":
             # Claude Code CLI: shared Claude Haiku sentinel for both roles;
-            # CLI construction resolves it offline to ChunkHound's pinned fallback.
-            return (CLAUDE_HAIKU_DEFAULT_SENTINEL, CLAUDE_HAIKU_DEFAULT_SENTINEL)
+            # the CLI resolves ``haiku`` to the latest available model.
+            return (CLAUDE_HAIKU_SENTINEL, CLAUDE_HAIKU_SENTINEL)
         elif provider == "codex-cli":
             # Codex CLI: nominal label; require explicit model if desired
             return ("codex", "codex")
@@ -614,7 +619,7 @@ class LLMConfig(BaseSettings):
             # Anthropic intentionally uses Claude Haiku for both utility and
             # synthesis. Haiku is capable enough for synthesis and is Anthropic's
             # cheapest Claude model; Anthropic has no true low-cost utility tier.
-            return (CLAUDE_HAIKU_DEFAULT_SENTINEL, CLAUDE_HAIKU_DEFAULT_SENTINEL)
+            return (CLAUDE_HAIKU_SENTINEL, CLAUDE_HAIKU_SENTINEL)
         elif provider == "grok":
             # Grok reasoning models (especially grok-4-1-fast-reasoning)
             # are extremely strong across both roles — no benefit to splitting them.
@@ -632,6 +637,8 @@ class LLMConfig(BaseSettings):
             # User must set model in provider/model format.
             return ("", "")
         else:
+            # Type-level exhaustiveness check — mypy will flag if a new
+            # LLMProviderLiteral variant is added without a matching branch.
             assert_never(provider)
 
     def get_default_models(self) -> tuple[str, str]:
@@ -1119,6 +1126,10 @@ def strip_cross_provider_overrides(
     source_provider: str | None = None,
 ) -> None:
     """Strip provider-specific settings when switching to a different provider.
+
+    **⚠️ MUTATES** *cfg* **in-place.** The sole caller
+    (:py:func:`apply_role_override`) passes a ``.copy()``, but future callers
+    must do the same or risk silently corrupting their source dict.
 
     Removes keys from *cfg* that are tied to the source provider and may be
     invalid or misleading for the target provider:
