@@ -18,8 +18,10 @@ import tempfile
 from loguru import logger
 
 from chunkhound.core.config.claude_model_resolution import (
-    CLAUDE_HAIKU_DEFAULT_SENTINEL,
-    resolve_claude_haiku_model,
+    CLAUDE_HAIKU_SENTINEL,
+    CLAUDE_OPUS_SENTINEL,
+    CLAUDE_SONNET_SENTINEL,
+    resolve_claude_cli_model,
 )
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
@@ -31,47 +33,58 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = CLAUDE_HAIKU_DEFAULT_SENTINEL,
+        model: str = CLAUDE_HAIKU_SENTINEL,
         base_url: str | None = None,
         timeout: int = 60,
         max_retries: int = 3,
     ):
         """Initialize Claude Code CLI provider.
 
+        The CLI natively resolves aliases (``haiku``, ``sonnet``, ``opus``)
+        to the latest available model. ChunkHound still honors its own
+        ``CHUNKHOUND_CLAUDE_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL`` overrides
+        before passing anything to the CLI. Without a ChunkHound override,
+        sentinels are mapped to bare aliases so the CLI can stay fresh.
+        Explicit full names (e.g. ``claude-sonnet-4-5-20250929``) pass
+        through unchanged.
+
         Args:
             api_key: Not used (subscription-based authentication)
-            model: Model name to use (e.g., "claude-sonnet-4-6", "claude-opus-4-7")
+            model: Model sentinel or full name.
+                Sentinels: ``claude-haiku``, ``claude-sonnet``, ``claude-opus``
+                Full names: ``claude-sonnet-4-5-20250929`` (pinned to version)
             base_url: Not used (CLI uses default endpoints)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
         """
-        super().__init__(
-            api_key,
-            resolve_claude_haiku_model(model, api_key, discover=False),
-            base_url,
-            timeout,
-            max_retries,
-        )
+        super().__init__(api_key, model, base_url, timeout, max_retries)
+        self._model = resolve_claude_cli_model(model)
 
     def _get_provider_name(self) -> str:
         """Get the provider name."""
         return "claude-code-cli"
 
     def _map_model_to_cli_arg(self, model: str) -> str:
-        """Map full model name to CLI model argument.
+        """Map ChunkHound sentinel to CLI bare alias.
 
-        The Claude Code CLI accepts full model names directly
-        (e.g., "claude-sonnet-4-5-20250929"). Short names like "sonnet-4-5"
-        are NOT accepted and result in exit code 1.
+        The Claude Code CLI accepts bare aliases (``haiku``, ``sonnet``,
+        ``opus``) and full model names (``claude-sonnet-4-5-20250929``).
+        ChunkHound's sentinels are ``claude-``-prefixed; strip that prefix
+        for the CLI.  Partial names like ``sonnet-4-5`` are **not** accepted
+        by the CLI (only bare aliases or full dated names).
 
         Args:
-            model: Full model name (e.g., "claude-sonnet-4-5-20250929")
+            model: Model sentinel or full name.
 
         Returns:
-            CLI model argument (same as input - full model name)
+            CLI-compatible ``--model`` argument.
         """
-        # Pass through model name as-is - CLI requires full names
-        return model
+        sentinel_to_cli = {
+            CLAUDE_HAIKU_SENTINEL: "haiku",
+            CLAUDE_SONNET_SENTINEL: "sonnet",
+            CLAUDE_OPUS_SENTINEL: "opus",
+        }
+        return sentinel_to_cli.get(model.strip().lower(), model)
 
     async def _run_cli_command(
         self,
