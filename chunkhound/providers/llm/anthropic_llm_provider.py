@@ -23,8 +23,8 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.config.claude_model_resolution import (
-    CLAUDE_HAIKU_DEFAULT_SENTINEL,
-    resolve_claude_haiku_model,
+    CLAUDE_HAIKU_SENTINEL,
+    resolve_claude_model,
 )
 from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
@@ -149,7 +149,7 @@ class AnthropicLLMProvider(LLMProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = CLAUDE_HAIKU_DEFAULT_SENTINEL,
+        model: str = CLAUDE_HAIKU_SENTINEL,
         base_url: str | None = None,
         timeout: int = 60,
         max_retries: int = 3,
@@ -218,7 +218,7 @@ class AnthropicLLMProvider(LLMProvider):
         if not ANTHROPIC_AVAILABLE:
             raise ImportError("Anthropic package not available")
 
-        self._model = resolve_claude_haiku_model(model, api_key, discover=False)
+        self._model = resolve_claude_model(model, api_key)
         self._timeout = timeout
         self._max_retries = max_retries
         self._thinking_budget_tokens = max(1024, thinking_budget_tokens)
