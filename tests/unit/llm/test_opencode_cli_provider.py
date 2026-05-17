@@ -375,18 +375,114 @@ class TestOpenCodeCLIProvider:
             assert result == "Success response"
             assert mock_subprocess.call_count == 2
 
+    @staticmethod
+    def _assert_json_then_plain(mock_subprocess):
+        """Verify first call used --format and second did not."""
+        first_args = mock_subprocess.call_args_list[0][0]
+        second_args = mock_subprocess.call_args_list[1][0]
+        assert "--format" in first_args
+        assert "--format" not in second_args
+
     @pytest.mark.asyncio
-    async def test_run_cli_command_no_text_content(self, provider):
-        """Test error when NDJSON has no text events."""
+    async def test_run_cli_command_no_text_in_json_fails(self, provider):
+        """When NDJSON has no text events, provider retries in plain-text mode."""
         status_event = json.dumps({"type": "status", "data": "running"})
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
-            mock_process = AsyncMock()
-            mock_process.communicate.return_value = (status_event.encode(), b"")
-            mock_process.returncode = 0
-            mock_subprocess.return_value = mock_process
+            # First call (JSON): NDJSON with no text events
+            # Second call (plain text): empty stdout
+            mock_first = AsyncMock()
+            mock_first.communicate.return_value = (status_event.encode(), b"")
+            mock_first.returncode = 0
+            mock_second = AsyncMock()
+            mock_second.communicate.return_value = (b"", b"")
+            mock_second.returncode = 0
+            mock_subprocess.side_effect = [mock_first, mock_second]
 
-            with pytest.raises(RuntimeError, match="no text content"):
+            with pytest.raises(RuntimeError, match="empty output"):
                 await provider._run_cli_command("Test prompt")
+            # Two calls: JSON mode (no text) → plain text fallback (no text)
+            assert mock_subprocess.call_count == provider._max_retries
+            self._assert_json_then_plain(mock_subprocess)
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_no_text_in_json_recovers(self, provider):
+        """When JSON has no text events, plain text fallback recovers."""
+        status_event = json.dumps({"type": "status", "data": "running"})
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            # First call (JSON): NDJSON with no text events
+            mock_first = AsyncMock()
+            mock_first.communicate.return_value = (status_event.encode(), b"")
+            mock_first.returncode = 0
+            # Second call (plain text): actual output
+            mock_second = AsyncMock()
+            mock_second.communicate.return_value = (b"Success response", b"")
+            mock_second.returncode = 0
+            mock_subprocess.side_effect = [mock_first, mock_second]
+
+            result = await provider._run_cli_command("Test prompt")
+
+            assert result == "Success response"
+            assert mock_subprocess.call_count == provider._max_retries
+            self._assert_json_then_plain(mock_subprocess)
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_json_fallback_with_one_retry(self):
+        """JSON no-text fallback gets one plain-text retry even at max_retries=1."""
+        status_event = json.dumps({"type": "status", "data": "running"})
+        with patch.object(
+            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        ):
+            provider = OpenCodeCLIProvider(
+                model="test-provider/test-model",
+                timeout=30,
+                max_retries=1,
+            )
+
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_first = AsyncMock()
+            mock_first.communicate.return_value = (status_event.encode(), b"")
+            mock_first.returncode = 0
+
+            mock_second = AsyncMock()
+            mock_second.communicate.return_value = (b"Success response", b"")
+            mock_second.returncode = 0
+
+            mock_subprocess.side_effect = [mock_first, mock_second]
+
+            result = await provider._run_cli_command("Test prompt")
+
+            assert result == "Success response"
+            assert mock_subprocess.call_count == 2
+            self._assert_json_then_plain(mock_subprocess)
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_json_then_plain_both_fail_with_one_retry(self):
+        """max_retries=1: JSON no-text → plain text also empty → RuntimeError."""
+        status_event = json.dumps({"type": "status", "data": "running"})
+        with patch.object(
+            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        ):
+            provider = OpenCodeCLIProvider(
+                model="test-provider/test-model",
+                timeout=30,
+                max_retries=1,
+            )
+
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_first = AsyncMock()
+            mock_first.communicate.return_value = (status_event.encode(), b"")
+            mock_first.returncode = 0
+
+            mock_second = AsyncMock()
+            mock_second.communicate.return_value = (b"", b"")
+            mock_second.returncode = 0
+
+            mock_subprocess.side_effect = [mock_first, mock_second]
+
+            with pytest.raises(RuntimeError, match="empty output"):
+                await provider._run_cli_command("Test prompt")
+            assert mock_subprocess.call_count == 2
+            self._assert_json_then_plain(mock_subprocess)
 
     @pytest.mark.asyncio
     async def test_run_cli_command_multiple_text_events(self, provider):

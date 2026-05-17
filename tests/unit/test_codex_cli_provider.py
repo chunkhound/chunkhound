@@ -43,6 +43,7 @@ def test_codex_cli_model_resolution_discovery_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chunkhound.providers.llm.codex_cli_provider import (
+        CODEX_FALLBACK_MODEL,
         CodexCLIProvider,  # type: ignore[attr-defined]
     )
 
@@ -52,11 +53,9 @@ def test_codex_cli_model_resolution_discovery_failure(
         "get_highest_priority_available_model",
         return_value=None,
     ):
-        with pytest.raises(
-            RuntimeError,
-            match="CHUNKHOUND_CODEX_DEFAULT_MODEL",
-        ):
-            CodexCLIProvider.describe_model_resolution("codex")
+        resolved, source = CodexCLIProvider.describe_model_resolution("codex")
+        assert resolved == CODEX_FALLBACK_MODEL
+        assert source == "fallback"
 
 
 def test_codex_cli_model_resolution_env_override(

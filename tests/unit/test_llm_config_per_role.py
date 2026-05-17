@@ -127,6 +127,27 @@ def test_opencode_accepts_xhigh_reasoning_effort():
     assert synthesis_config["reasoning_effort"] == "xhigh"
 
 
+def test_opencode_cli_model_convenience_field_sets_both_roles():
+    """Test that 'model' convenience field works for opencode-cli.
+
+    Pydantic v2 runs model_validator *before* model_post_init,
+    so the validator must fall back to self.model when role-specific
+    fields are empty. This test guards against regressions in that
+    ordering-dependent fix.
+    """
+    cfg = LLMConfig(
+        provider="opencode-cli",
+        model="opencode/gpt-5-nano",
+    )
+
+    util_conf, synth_conf = cfg.get_provider_configs()
+
+    assert util_conf["provider"] == "opencode-cli"
+    assert util_conf["model"] == "opencode/gpt-5-nano"
+    assert synth_conf["provider"] == "opencode-cli"
+    assert synth_conf["model"] == "opencode/gpt-5-nano"
+
+
 def test_deepseek_does_not_forward_structured_outputs_override_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ):

@@ -8,8 +8,15 @@ import pytest
 from chunkhound.core.config.claude_model_resolution import (
     CLAUDE_HAIKU_DEFAULT_SENTINEL,
     CLAUDE_HAIKU_FALLBACK_MODEL,
-    get_latest_available_haiku_model,
+    CLAUDE_HAIKU_SENTINEL,
+    CLAUDE_OPUS_FALLBACK,
+    CLAUDE_OPUS_SENTINEL,
+    CLAUDE_SONNET_FALLBACK,
+    CLAUDE_SONNET_SENTINEL,
+    clear_claude_cache,
+    clear_haiku_cache,
     resolve_claude_haiku_model,
+    resolve_claude_model,
 )
 from chunkhound.providers.llm.anthropic_llm_provider import (
     ANTHROPIC_AVAILABLE,
@@ -1335,6 +1342,12 @@ class TestLLMConfigDefaults:
 class TestClaudeHaikuModelResolution:
     """Pin latest-Haiku default model selection."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_claude_cache(self):
+        clear_claude_cache()
+        yield
+        clear_claude_cache()
+
     def test_explicit_model_passes_through(self):
         assert resolve_claude_haiku_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
 
@@ -1348,7 +1361,6 @@ class TestClaudeHaikuModelResolution:
         )
 
     def test_no_api_key_uses_fallback(self, monkeypatch):
-        get_latest_available_haiku_model.cache_clear()
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         assert resolve_claude_haiku_model(CLAUDE_HAIKU_DEFAULT_SENTINEL) == (
@@ -1356,7 +1368,6 @@ class TestClaudeHaikuModelResolution:
         )
 
     def test_discovery_can_be_disabled(self, monkeypatch):
-        get_latest_available_haiku_model.cache_clear()
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
         monkeypatch.setattr(
@@ -1371,8 +1382,6 @@ class TestClaudeHaikuModelResolution:
         ) == CLAUDE_HAIKU_FALLBACK_MODEL
 
     def test_model_discovery_picks_newest_haiku(self, monkeypatch):
-        get_latest_available_haiku_model.cache_clear()
-
         class FakeModels:
             def list(self, **kwargs):
                 return [
@@ -1403,7 +1412,6 @@ class TestClaudeHaikuModelResolution:
         ) == "claude-haiku-4-6-20260101"
 
     def test_model_discovery_failure_uses_fallback(self, monkeypatch):
-        get_latest_available_haiku_model.cache_clear()
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
 
         class FakeAnthropic:
@@ -1418,6 +1426,243 @@ class TestClaudeHaikuModelResolution:
             "sk-ant-test",
         ) == CLAUDE_HAIKU_FALLBACK_MODEL
 
+    @staticmethod
+    def _all_fake_models():
+        """Return mock models for all three tiers."""
+        return [
+            SimpleNamespace(
+                id="claude-haiku-4-6-20260101",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            SimpleNamespace(
+                id="claude-sonnet-4-6-20260217",
+                created_at=datetime(2026, 2, 17, tzinfo=UTC),
+            ),
+            SimpleNamespace(
+                id="claude-opus-4-7-20260416",
+                created_at=datetime(2026, 4, 16, tzinfo=UTC),
+            ),
+        ]
+
+    def _make_counting_anthropic(self, monkeypatch):
+        """Create a CountingAnthropic mock that tracks API calls."""
+        import anthropic
+
+        class _FakeModels:
+            def list(self, **kwargs):
+                return TestClaudeHaikuModelResolution._all_fake_models()
+
+        class CountingAnthropic:
+            def __init__(self, **kwargs):
+                CountingAnthropic.call_count += 1
+                self.models = _FakeModels()
+
+        CountingAnthropic.call_count = 0
+        monkeypatch.setattr(anthropic, "Anthropic", CountingAnthropic)
+        return CountingAnthropic
+
+    def test_model_discovery_cache_ignores_different_api_key(
+        self, monkeypatch
+    ):
+        """Cache is keyed independently of api_key (intentional: credential isolation).
+
+        After first successful discovery, subsequent calls return the cached
+        result regardless of which api_key is passed — credentials never appear
+        in cache metadata.
+        """
+        counter = self._make_counting_anthropic(monkeypatch)
+
+        # First call — populates cache
+        result1 = resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL, "sk-ant-test"
+        )
+        assert result1 == "claude-haiku-4-6-20260101"
+        assert counter.call_count == 1
+
+        # Second call — must return cached, must NOT hit Anthropic API
+        result2 = resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL, "sk-ant-different-key"
+        )
+        assert result2 == result1
+        assert counter.call_count == 1  # Still 1 — cached
+
+    def test_clear_haiku_cache_resets_state(self, monkeypatch):
+        """clear_haiku_cache() causes re-discovery on next call."""
+        counter = self._make_counting_anthropic(monkeypatch)
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL", raising=False)
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL", raising=False)
+
+        # Populate cache
+        resolve_claude_haiku_model(CLAUDE_HAIKU_DEFAULT_SENTINEL, "sk-ant-test")
+        assert counter.call_count == 1
+
+        # Clear and re-discover — must hit API again
+        clear_haiku_cache()
+        result = resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL, "sk-ant-test"
+        )
+        assert result == "claude-haiku-4-6-20260101"
+        assert counter.call_count == 2  # Re-discovered after clear
+
+    # ── Sonnet / Opus sentinel tests ─────────────────────────────────────
+
+    def test_sonnet_sentinel_passes_through_explicit_name(self):
+        """Explicit sonnet model name passes through unchanged."""
+        assert resolve_claude_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
+
+    def test_opus_sentinel_passes_through_explicit_name(self):
+        """Explicit opus model name passes through unchanged."""
+        assert resolve_claude_model("claude-opus-4-7") == "claude-opus-4-7"
+
+    def test_sonnet_env_override_wins(self, monkeypatch):
+        """Sonnet sentinel honors the ChunkHound env override."""
+        monkeypatch.setenv(
+            "CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL",
+            "claude-sonnet-4-6-20260217",
+        )
+        assert resolve_claude_model(CLAUDE_SONNET_SENTINEL) == (
+            "claude-sonnet-4-6-20260217"
+        )
+
+    def test_opus_env_override_wins(self, monkeypatch):
+        """Opus sentinel honors the ChunkHound env override."""
+        monkeypatch.setenv(
+            "CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL",
+            "claude-opus-4-7-20260416",
+        )
+        assert resolve_claude_model(CLAUDE_OPUS_SENTINEL) == (
+            "claude-opus-4-7-20260416"
+        )
+
+    def test_sonnet_discovery_can_be_disabled(self, monkeypatch):
+        """Sonnet sentinel returns the pinned fallback when discovery is off."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "chunkhound.core.config.claude_model_resolution._discover_latest_model",
+            lambda *args, **kwargs: pytest.fail("discovery should not run"),
+        )
+
+        assert resolve_claude_model(CLAUDE_SONNET_SENTINEL, discover=False) == (
+            CLAUDE_SONNET_FALLBACK
+        )
+
+    def test_opus_discovery_can_be_disabled(self, monkeypatch):
+        """Opus sentinel returns the pinned fallback when discovery is off."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "chunkhound.core.config.claude_model_resolution._discover_latest_model",
+            lambda *args, **kwargs: pytest.fail("discovery should not run"),
+        )
+
+        assert resolve_claude_model(CLAUDE_OPUS_SENTINEL, discover=False) == (
+            CLAUDE_OPUS_FALLBACK
+        )
+
+    def test_sonnet_sentinel_discovery_cached_independently(
+        self, monkeypatch
+    ):
+        """Sonnet cache entry is independent of Haiku."""
+        counter = self._make_counting_anthropic(monkeypatch)
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL", raising=False)
+
+        # First call — populates sonnet cache
+        result1 = resolve_claude_model(
+            CLAUDE_SONNET_SENTINEL, "sk-ant-test", discover=True
+        )
+        assert result1 == "claude-sonnet-4-6-20260217"
+        assert counter.call_count == 1
+
+        # Second call — cache hit, no API call
+        result2 = resolve_claude_model(
+            CLAUDE_SONNET_SENTINEL, "sk-ant-different", discover=True
+        )
+        assert result2 == result1
+        assert counter.call_count == 1
+
+    def test_opus_sentinel_discovery_cached_independently(
+        self, monkeypatch
+    ):
+        """Opus cache entry is independent of Haiku and Sonnet."""
+        counter = self._make_counting_anthropic(monkeypatch)
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL", raising=False)
+
+        result1 = resolve_claude_model(
+            CLAUDE_OPUS_SENTINEL, "sk-ant-test", discover=True
+        )
+        assert result1 == "claude-opus-4-7-20260416"
+        assert counter.call_count == 1
+
+        result2 = resolve_claude_model(
+            CLAUDE_OPUS_SENTINEL, "sk-ant-different", discover=True
+        )
+        assert result2 == result1
+        assert counter.call_count == 1
+
+    def test_sentinels_have_independent_cache_entries(
+        self, monkeypatch
+    ):
+        """Each sentinel has its own cache entry; discovering one does not
+        populate another."""
+        counter = self._make_counting_anthropic(monkeypatch)
+        for env in (
+            "CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL",
+            "CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL",
+            "CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL",
+        ):
+            monkeypatch.delenv(env, raising=False)
+
+        # Discover Haiku first
+        resolve_claude_model(CLAUDE_HAIKU_SENTINEL, "sk-ant-test", discover=True)
+        assert counter.call_count == 1
+
+        # Discover Sonnet — must make a new API call
+        resolve_claude_model(CLAUDE_SONNET_SENTINEL, "sk-ant-test", discover=True)
+        assert counter.call_count == 2
+
+        # Discover Opus — must make another API call
+        resolve_claude_model(CLAUDE_OPUS_SENTINEL, "sk-ant-test", discover=True)
+        assert counter.call_count == 3
+
+    def test_sonnet_sentinel_no_api_key_uses_fallback(self, monkeypatch):
+        """Sonnet sentinel without API key returns fallback."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        result = resolve_claude_model(CLAUDE_SONNET_SENTINEL, discover=True)
+        assert result == CLAUDE_SONNET_FALLBACK
+
+    def test_opus_sentinel_no_api_key_uses_fallback(self, monkeypatch):
+        """Opus sentinel without API key returns fallback."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        result = resolve_claude_model(CLAUDE_OPUS_SENTINEL, discover=True)
+        assert result == CLAUDE_OPUS_FALLBACK
+
+    def test_clear_claude_cache_clears_all(self, monkeypatch):
+        """clear_claude_cache() clears cache for all sentinels."""
+        counter = self._make_counting_anthropic(monkeypatch)
+        for env in (
+            "CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL",
+            "CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL",
+            "CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL",
+        ):
+            monkeypatch.delenv(env, raising=False)
+
+        # Populate all three caches
+        for sentinel in (
+            CLAUDE_HAIKU_SENTINEL,
+            CLAUDE_SONNET_SENTINEL,
+            CLAUDE_OPUS_SENTINEL,
+        ):
+            resolve_claude_model(sentinel, "sk-ant-test", discover=True)
+        assert counter.call_count == 3
+
+        # Clear all and re-discover one — must hit API again
+        clear_claude_cache()
+        resolve_claude_model(CLAUDE_HAIKU_SENTINEL, "sk-ant-test", discover=True)
+        assert counter.call_count == 4  # Re-discovered after full clear
 
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")

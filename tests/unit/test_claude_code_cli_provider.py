@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from chunkhound.core.config.claude_model_resolution import CLAUDE_HAIKU_FALLBACK_MODEL
+from chunkhound.core.config.claude_model_resolution import (
+    CLAUDE_HAIKU_SENTINEL,
+    CLAUDE_OPUS_SENTINEL,
+    CLAUDE_SONNET_SENTINEL,
+)
 from chunkhound.interfaces.llm_provider import LLMResponse
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 
@@ -40,14 +44,16 @@ class TestClaudeCodeCLIProvider:
         assert provider.model == "claude-sonnet-4-5-20250929"
 
     def test_default_model_is_haiku(self, monkeypatch):
-        """Test that Claude CLI defaults to the shared Haiku default."""
+        """Test that Claude CLI defaults to the shared Haiku sentinel."""
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         provider = ClaudeCodeCLIProvider()
-        assert provider.model == CLAUDE_HAIKU_FALLBACK_MODEL
+        assert provider.model == CLAUDE_HAIKU_SENTINEL
 
-    def test_default_model_does_not_discover_via_api(self, monkeypatch):
-        """Claude CLI auth is subscription-based, so construction stays offline."""
+    def test_default_model_stores_sentinel_when_no_chunkhound_override(
+        self, monkeypatch
+    ):
+        """Without a ChunkHound override, the CLI sentinel stays unresolved."""
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
         monkeypatch.setattr(
@@ -57,34 +63,70 @@ class TestClaudeCodeCLIProvider:
         )
 
         provider = ClaudeCodeCLIProvider()
-        assert provider.model == CLAUDE_HAIKU_FALLBACK_MODEL
+        assert provider.model == CLAUDE_HAIKU_SENTINEL
 
-    def test_default_model_env_override_wins(self, monkeypatch):
+    def test_chunkhound_env_override_resolves_before_cli(self, monkeypatch):
+        """ChunkHound Claude overrides still pin the CLI model."""
         monkeypatch.setenv(
-            "CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL",
-            "claude-haiku-override",
-        )
-        provider = ClaudeCodeCLIProvider()
-        assert provider.model == "claude-haiku-override"
-
-    def test_model_mapping(self, provider):
-        """Test model name to CLI argument mapping."""
-        # CLI accepts full model names directly - no mapping needed
-        assert (
-            provider._map_model_to_cli_arg("claude-sonnet-4-5-20250929")
-            == "claude-sonnet-4-5-20250929"
-        )
-        assert (
-            provider._map_model_to_cli_arg("claude-3-5-sonnet-20241022")
-            == "claude-3-5-sonnet-20241022"
-        )
-        assert (
-            provider._map_model_to_cli_arg("claude-3-5-haiku-20241022")
-            == "claude-3-5-haiku-20241022"
+            "CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL",
+            "claude-sonnet-4-6-20260217",
         )
 
-        # Any model name is passed through as-is
-        assert provider._map_model_to_cli_arg("custom-model") == "custom-model"
+        provider = ClaudeCodeCLIProvider(model=CLAUDE_SONNET_SENTINEL)
+
+        assert provider.model == "claude-sonnet-4-6-20260217"
+
+    @pytest.mark.asyncio
+    async def test_complete_uses_cli_alias_for_sentinel(
+        self, mock_subprocess
+    ):
+        """Sentinels reach the subprocess as bare Claude CLI aliases."""
+        provider = ClaudeCodeCLIProvider(model=CLAUDE_SONNET_SENTINEL)
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"Test response", b"")
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("Test prompt")
+
+        cmd = mock_subprocess.call_args.args
+        assert cmd[cmd.index("--model") + 1] == "sonnet"
+
+    @pytest.mark.asyncio
+    async def test_complete_uses_chunkhound_env_override_model(
+        self, mock_subprocess, monkeypatch
+    ):
+        """ChunkHound Claude overrides must reach the CLI unchanged."""
+        monkeypatch.setenv(
+            "CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL",
+            "claude-opus-4-7-20260416",
+        )
+        provider = ClaudeCodeCLIProvider(model=CLAUDE_OPUS_SENTINEL)
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"Test response", b"")
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("Test prompt")
+
+        cmd = mock_subprocess.call_args.args
+        assert cmd[cmd.index("--model") + 1] == "claude-opus-4-7-20260416"
+
+    @pytest.mark.asyncio
+    async def test_complete_uses_explicit_full_model_name(
+        self, mock_subprocess
+    ):
+        """Explicit Claude model names must reach the CLI unchanged."""
+        provider = ClaudeCodeCLIProvider(model="claude-sonnet-4-5-20250929")
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"Test response", b"")
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("Test prompt")
+
+        cmd = mock_subprocess.call_args.args
+        assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-5-20250929"
 
     @pytest.mark.asyncio
     async def test_complete_success(self, provider, mock_subprocess):
