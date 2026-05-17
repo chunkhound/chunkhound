@@ -1,7 +1,7 @@
 """High-value functional tests for GrokLLMProvider (chat completions path)."""
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from chunkhound.providers.llm.grok_llm_provider import GrokLLMProvider
 from chunkhound.interfaces.llm_provider import LLMResponse
@@ -108,4 +108,69 @@ class TestGrokLLMProvider:
             base_url="https://custom.api.x.ai/v1"
         )
         assert str(provider._client.base_url) == "https://custom.api.x.ai/v1/"
+
+
+class TestNativeStructuredOutputPath:
+    """Verify the native structured-output path for providers that support it."""
+
+    SCHEMA = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+
+    def _make_mock_response(self, content: str):
+        choice = MagicMock()
+        choice.message.content = content
+        choice.finish_reason = "stop"
+
+        usage = MagicMock()
+        usage.prompt_tokens = 10
+        usage.completion_tokens = 20
+        usage.total_tokens = 30
+
+        resp = MagicMock()
+        resp.choices = [choice]
+        resp.usage = usage
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_native_path_sends_response_format(self, mock_grok_client):
+        """Native path must include response_format with json_schema."""
+        mock_grok_client.chat.completions.create.return_value = (
+            self._make_mock_response('{"answer": "42"}')
+        )
+
+        provider = GrokLLMProvider(api_key="sk-test")
+        await provider.complete_structured(
+            "What is the answer?",
+            json_schema=self.SCHEMA,
+        )
+
+        call_kwargs = mock_grok_client.chat.completions.create.call_args[1]
+        assert "response_format" in call_kwargs
+        assert call_kwargs["response_format"]["type"] == "json_schema"
+
+    @pytest.mark.asyncio
+    async def test_constructor_override_false_via_openai(self, mock_grok_client):
+        """Constructor override must force the fallback structured-output path."""
+        mock_grok_client.chat.completions.create.return_value = (
+            self._make_mock_response('{"answer": "42"}')
+        )
+
+        provider = GrokLLMProvider(
+            api_key="sk-test",
+            supports_structured_outputs=False,
+        )
+        assert provider._supports_structured_outputs is False
+        await provider.complete_structured(
+            "What is the answer?",
+            json_schema=self.SCHEMA,
+        )
+
+        call_kwargs = mock_grok_client.chat.completions.create.call_args[1]
+        assert call_kwargs.get("response_format") == {"type": "json_object"}, (
+            f"Expected json_object response_format, got: {call_kwargs.get('response_format')}"
+        )
 

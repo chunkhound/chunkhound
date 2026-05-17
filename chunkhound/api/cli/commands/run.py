@@ -13,6 +13,7 @@ from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.utils.path_utils import get_relative_path_safe
+from chunkhound.daemon.process import pid_alive
 from chunkhound.registry import configure_registry, create_indexing_coordinator
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.version import __version__
@@ -52,7 +53,6 @@ async def _handle_daemon_lock_conflict(
     No lock / stale → return False (let original error propagate).
     """
     from chunkhound.daemon.discovery import DaemonDiscovery
-    from chunkhound.daemon.process import pid_alive
 
     discovery = DaemonDiscovery(project_dir)
     lock = discovery.read_lock()
@@ -65,8 +65,9 @@ async def _handle_daemon_lock_conflict(
     is_responsive = await discovery.ping_daemon(timeout=2.0)
 
     if is_responsive:
-        formatter.info(
-            f"A ChunkHound daemon (pid={pid}) is running and holding the database lock.\n"
+        formatter.warning(
+            f"A ChunkHound daemon (pid={pid}) is running and holding the "
+            "database lock.\n"
             "  To index manually, stop the daemon first:\n"
             "    Stop all MCP clients so the daemon exits, or send it SIGTERM.\n"
             "  Or use the daemon's built-in indexing via MCP tools."
@@ -80,18 +81,16 @@ async def _handle_daemon_lock_conflict(
         or not sys.stdin.isatty()
     ):
         formatter.error(
-            f"ChunkHound daemon (pid={pid}) is unresponsive and holding the database lock. "
+            f"ChunkHound daemon (pid={pid}) is unresponsive and holding the "
+            "database lock. "
             "Restart it manually to recover."
         )
         return False
 
     formatter.warning(f"ChunkHound daemon (pid={pid}) is unresponsive.")
     try:
-        loop = asyncio.get_running_loop()
         reply = (
-            await loop.run_in_executor(
-                None, lambda: input("Kill it and continue indexing? [Y/n]: ")
-            )
+            await asyncio.to_thread(input, "Kill it and continue indexing? [Y/n]: ")
         ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         return False
@@ -100,7 +99,7 @@ async def _handle_daemon_lock_conflict(
         return False
 
     formatter.info(f"Stopping daemon (pid={pid})…")
-    if not discovery.stop_daemon(timeout=10.0):
+    if not await asyncio.to_thread(discovery.stop_daemon, timeout=10.0):
         formatter.error(f"Daemon (pid={pid}) did not stop within 10 s. Aborting.")
         return False
     formatter.success("Daemon stopped.")
@@ -296,7 +295,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
             if skipped_timeouts and os.environ.get("CHUNKHOUND_MCP_MODE") == "1":
                 formatter.info(
                     f"{len(skipped_timeouts)} files timed out. "
-                    "Prompts are disabled in MCP mode. To exclude them, add to .chunkhound.json under indexing.exclude."
+                    "Prompts are disabled in MCP mode. To exclude them, add to "
+                    ".chunkhound.json under indexing.exclude."
                 )
                 return
 
@@ -329,7 +329,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                         rel_paths.append(rel)
 
                 formatter.info(
-                    f"{len(rel_paths)} timed-out files can be excluded from future runs."
+                    f"{len(rel_paths)} timed-out files can be excluded from "
+                    "future runs."
                 )
                 reply = (
                     input("Add these to indexing.exclude in .chunkhound.json? [y/N]: ")
@@ -371,7 +372,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                             encoding="utf-8",
                         )
                         formatter.success(
-                            f"Added {added} file(s) to indexing.exclude in {local_config_path}"
+                            f"Added {added} file(s) to indexing.exclude in "
+                            f"{local_config_path}"
                         )
                     else:
                         formatter.info("All timed-out files already excluded.")
@@ -473,7 +475,8 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
         Path(args.path).resolve() if hasattr(args, "path") else Path.cwd().resolve()
     )
 
-    # Optional debug output about ignore configuration (stderr to avoid breaking JSON piping)
+    # Optional debug output about ignore configuration (stderr to avoid breaking
+    # JSON piping)
     try:
         if getattr(args, "debug_ignores", False):
             from chunkhound.core.config.indexing_config import IndexingConfig as _IdxCfg
@@ -493,7 +496,8 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
 
             print(f"[debug-ignores] CH root: {base_dir}", file=sys.stderr)
             print(f"[debug-ignores] Active sources: {sources}", file=sys.stderr)
-            # Show first 10 normalized default excludes to quickly confirm runtime defaults
+            # Show first 10 normalized default excludes to quickly confirm
+            # runtime defaults
             first_n = defaults[:10]
             print("[debug-ignores] Default excludes (first 10):", file=sys.stderr)
             for pat in first_n:
@@ -638,7 +642,8 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
         # Soft-fail; simulate is best-effort
         pass
 
-    # Respect config_file_size_threshold_kb for structured config languages to mirror real indexing
+    # Respect config_file_size_threshold_kb for structured config languages to
+    # mirror real indexing
     try:
         from chunkhound.core.types.common import Language as _Lang
 

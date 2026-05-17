@@ -1,7 +1,6 @@
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -52,9 +51,9 @@ def test_codex_exec_help_available():
 def test_codex_exec_simple_prompt():
     """Run a tiny non-interactive prompt through `codex exec`.
 
-    Attempts to select the fast model via `--model gpt-5.1-codex` when supported,
-    otherwise falls back to default model. Skips if Codex is unavailable and
-    xfails if the CLI is not authenticated.
+    Dynamically discovers the cheapest available model via `codex debug models`
+    to stay resilient across model catalog changes. Skips if Codex is unavailable
+    and xfails if the CLI is not authenticated.
     """
     codex_bin = os.getenv("CHUNKHOUND_CODEX_BIN") or shutil.which("codex")
     if not codex_bin:
@@ -79,7 +78,12 @@ def test_codex_exec_simple_prompt():
     if not base_home:
         pytest.xfail("No base CODEX_HOME found to inherit auth from.")
 
-    overlay = provider._build_overlay_home()
+    # Dynamically discover the cheapest available model
+    cheapest_model = CodexCLIProvider.get_highest_priority_available_model()
+    if not cheapest_model:
+        pytest.xfail("Could not discover available Codex models.")
+
+    overlay = provider._build_overlay_home(model_override=cheapest_model)
     try:
         env["CODEX_HOME"] = overlay
 
@@ -90,14 +94,16 @@ def test_codex_exec_simple_prompt():
             "Overlay config.toml does not disable history persistence."
         )
         assert "mcp_servers" not in content.lower(), "Overlay config.toml must not define MCP servers."
-        assert 'model = "gpt-5.1-codex"' in content, "Overlay config.toml must set model to gpt-5.1-codex."
+        assert f'model = "{cheapest_model}"' in content, (
+            f"Overlay config.toml must set model to {cheapest_model}."
+        )
         assert "model_reasoning_effort" in content and "low" in content.lower(), (
             "Overlay config.toml must set model_reasoning_effort to low."
         )
 
         # Try explicit model/effort flags first; gracefully remove if unsupported
         base = [codex_bin, "exec", prompt]
-        flags = ["--model", "gpt-5.1-codex", "--model-reasoning-effort", "low", "--skip-git-repo-check"]
+        flags = ["--model", cheapest_model, "--model-reasoning-effort", "low", "--skip-git-repo-check"]
 
         def try_exec(args):
             p = run_cmd(args)
@@ -109,7 +115,7 @@ def test_codex_exec_simple_prompt():
 
         proc, out, err = try_exec(base + flags)
         if proc.returncode != 0 and "unexpected argument '--model-reasoning-effort'" in err:
-            flags = ["--model", "gpt-5.1-codex", "--skip-git-repo-check"]
+            flags = ["--model", cheapest_model, "--skip-git-repo-check"]
             proc, out, err = try_exec(base + flags)
         if proc.returncode != 0 and "unexpected argument '--model'" in err:
             # Try only skip-git flag
@@ -142,6 +148,7 @@ def test_codex_exec_status_reports_overlay_model(monkeypatch):
 
     Runs `codex exec "/status"` against a provider-built overlay and asserts
     that the reported model and reasoning effort match the overlay configuration.
+    Uses the cheapest available model discovered dynamically.
     """
     codex_bin = os.getenv("CHUNKHOUND_CODEX_BIN") or shutil.which("codex")
     if not codex_bin:
@@ -152,8 +159,14 @@ def test_codex_exec_status_reports_overlay_model(monkeypatch):
     monkeypatch.delenv("CHUNKHOUND_CODEX_REASONING_EFFORT", raising=False)
 
     env = os.environ.copy()
-    # Use an explicit model/effort combination to verify overlay wiring
-    provider = CodexCLIProvider(model="gpt-5.1-codex-mini", reasoning_effort="medium")
+
+    # Dynamically discover the cheapest available model
+    cheapest_model = CodexCLIProvider.get_highest_priority_available_model()
+    if not cheapest_model:
+        pytest.xfail("Could not discover available Codex models.")
+
+    # Use the discovered model with medium reasoning effort to verify overlay wiring
+    provider = CodexCLIProvider(model=cheapest_model, reasoning_effort="medium")
     base_home = provider._get_base_codex_home()
     if not base_home:
         pytest.xfail("No base CODEX_HOME found to inherit auth from.")
@@ -165,7 +178,7 @@ def test_codex_exec_status_reports_overlay_model(monkeypatch):
         cfg = Path(overlay) / "config.toml"
         cfg_text = cfg.read_text(encoding="utf-8")
         # Sanity: overlay config should encode the expected model/effort
-        assert 'model = "gpt-5.1-codex-mini"' in cfg_text
+        assert f'model = "{cheapest_model}"' in cfg_text
         assert 'model_reasoning_effort = "medium"' in cfg_text
 
         proc = subprocess.run(
@@ -186,7 +199,7 @@ def test_codex_exec_status_reports_overlay_model(monkeypatch):
 
         combined = f"{out}\n{err}".lower()
         # `/status` should report the effective model and reasoning effort
-        assert "model: gpt-5.1-codex-mini" in combined, combined
+        assert f"model: {cheapest_model}" in combined, combined
         assert "reasoning effort: medium" in combined, combined
     finally:
         shutil.rmtree(overlay, ignore_errors=True)

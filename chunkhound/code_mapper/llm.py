@@ -5,6 +5,9 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.config.llm_config import (
+    apply_role_override,
+)
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
 
@@ -48,13 +51,13 @@ def build_llm_metadata_and_map_hyde(
 
     if llm_manager is not None and needs_custom_map_hyde:
         try:
-            map_hyde_cfg: dict[str, Any] = synth_cfg.copy()
-            if map_hyde_provider_name:
-                map_hyde_cfg["provider"] = map_hyde_provider_name
-            if map_hyde_model_name:
-                map_hyde_cfg["model"] = map_hyde_model_name
-            if map_hyde_effort:
-                map_hyde_cfg["reasoning_effort"] = str(map_hyde_effort).strip().lower()
+            map_hyde_cfg: dict[str, Any] = apply_role_override(
+                synth_cfg,
+                target_provider=map_hyde_provider_name,
+                target_model=map_hyde_model_name,
+                target_effort=map_hyde_effort,
+                role_name="map_hyde",
+            )
 
             map_hyde_provider = llm_manager.create_provider_for_config(map_hyde_cfg)
 

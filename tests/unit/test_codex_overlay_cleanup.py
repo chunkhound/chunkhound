@@ -1,41 +1,10 @@
 import asyncio
-import os
-import shutil
-import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-
-class _DummyPipe:
-    def __init__(self) -> None:  # pragma: no cover - trivial
-        self._buf = b""
-
-    def write(self, data: bytes) -> None:  # pragma: no cover - trivial
-        self._buf += data
-
-    async def drain(self) -> None:  # pragma: no cover - trivial
-        return None
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        return None
-
-
-class _DummyProc:
-    def __init__(self, rc: int = 0, out: bytes = b"OK", err: bytes = b"") -> None:
-        self.returncode = rc
-        self._out = out
-        self._err = err
-        self.stdin = _DummyPipe()
-
-    async def communicate(self):  # pragma: no cover - exercised indirectly
-        return self._out, self._err
-
-    def kill(self) -> None:  # pragma: no cover - trivial
-        return None
-
-    async def wait(self) -> None:  # pragma: no cover - trivial
-        return None
+from tests.helpers import DummyPipe, DummyProc
 
 
 @pytest.mark.asyncio
@@ -65,20 +34,25 @@ async def test_codex_overlay_cleanup(monkeypatch, tmp_path: Path):
 
     # Stub out subprocess creation to avoid calling real codex
     async def _fake_create_subprocess_exec(*args, **kwargs):  # noqa: ANN001
-        return _DummyProc(rc=0, out=b"OK", err=b"")
+        return DummyProc(rc=0, out=b"OK", err=b"", stdin=DummyPipe())
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
 
-    prov = CodexCLIProvider(model="codex")
+    with patch.object(
+        CodexCLIProvider,
+        "get_highest_priority_available_model",
+        return_value="test-discovered-model",
+    ):
+        prov = CodexCLIProvider(model="codex")
 
-    # Sanity: overlay exists before run
-    assert overlay_dir.exists()
+        # Sanity: overlay exists before run
+        assert overlay_dir.exists()
 
-    # Run via argv path (short content) and ensure success
-    out = await prov._run_exec("ping", cwd=None, max_tokens=16, timeout=10, model="codex")  # type: ignore[attr-defined]
-    assert out.strip() == "OK"
+        # Run via argv path (short content) and ensure success
+        out = await prov._run_exec("ping", cwd=None, max_tokens=16, timeout=10, model="codex")  # type: ignore[attr-defined]
+        assert out.strip() == "OK"
 
     # Overlay should be cleaned up by provider
     assert not overlay_dir.exists(), "overlay CODEX_HOME was not cleaned up"
-    # "codex" alias should resolve to the default Codex model
-    assert requested_model.get("value") == "gpt-5.1-codex"
+    # "codex" alias should resolve to the mocked discovered model
+    assert requested_model.get("value") == "test-discovered-model"

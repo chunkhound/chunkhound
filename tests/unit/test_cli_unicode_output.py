@@ -1,4 +1,5 @@
 """Tests for Unicode-safe stdout/stderr configuration in CLI entry points."""
+
 import asyncio
 import io
 import sys
@@ -86,9 +87,33 @@ def test_main_no_crash_when_reconfigure_absent(monkeypatch: pytest.MonkeyPatch):
         main()
 
 
-# ---------------------------------------------------------------------------
-# MCP main_sync() entry point
-# ---------------------------------------------------------------------------
+def test_main_reconfigured_stream_encodes_unicode_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """main() makes real cp1252 streams safe for non-CP1252 characters."""
+    stdout_buffer = io.BytesIO()
+    stderr_buffer = io.BytesIO()
+    stdout = io.TextIOWrapper(
+        stdout_buffer, encoding="cp1252", errors="strict", write_through=True
+    )
+    stderr = io.TextIOWrapper(
+        stderr_buffer, encoding="cp1252", errors="strict", write_through=True
+    )
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    monkeypatch.setattr("chunkhound.api.cli.main.IS_WINDOWS", True)
+    _stub_asyncio_run(monkeypatch)
+
+    from chunkhound.api.cli.main import main
+
+    with pytest.raises(SystemExit):
+        main()
+
+    stdout.write("\U0001f50e")
+    stderr.write("\U0001f50e")
+
+    assert b"\\U0001f50e" in stdout_buffer.getvalue()
+    assert b"\\U0001f50e" in stderr_buffer.getvalue()
 
 
 def test_main_sync_sets_backslashreplace_on_windows(monkeypatch: pytest.MonkeyPatch):
@@ -108,8 +133,37 @@ def test_main_sync_sets_backslashreplace_on_windows(monkeypatch: pytest.MonkeyPa
     assert stderr.errors == "backslashreplace"
 
 
+def test_main_sync_reconfigured_stream_encodes_unicode_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """main_sync() makes real cp1252 streams safe for non-CP1252 characters."""
+    stdout_buffer = io.BytesIO()
+    stderr_buffer = io.BytesIO()
+    stdout = io.TextIOWrapper(
+        stdout_buffer, encoding="cp1252", errors="strict", write_through=True
+    )
+    stderr = io.TextIOWrapper(
+        stderr_buffer, encoding="cp1252", errors="strict", write_through=True
+    )
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    monkeypatch.setattr("chunkhound.mcp_server.stdio.IS_WINDOWS", True)
+    _stub_asyncio_run(monkeypatch)
+
+    from chunkhound.mcp_server.stdio import main_sync
+
+    with pytest.raises(SystemExit):
+        main_sync()
+
+    stdout.write("\U0001f50e")
+    stderr.write("\U0001f50e")
+
+    assert b"\\U0001f50e" in stdout_buffer.getvalue()
+    assert b"\\U0001f50e" in stderr_buffer.getvalue()
+
+
 def test_main_sync_skips_reconfigure_on_non_windows(monkeypatch: pytest.MonkeyPatch):
-    """main_sync() must not reconfigure stdout/stderr on Linux/macOS."""
+    """main_sync() must not reconfigure stdout/stderr."""
     stdout, stderr = TrackingWriter(), TrackingWriter()
     monkeypatch.setattr(sys, "stdout", stdout)
     monkeypatch.setattr(sys, "stderr", stderr)

@@ -307,3 +307,6 @@ chunkhound/watchman_runtime/platforms/windows-x86_64/.chunkhound-hydrated.json
 
 # Kiro IDE
 .kiro/
+
+# OpenCode
+opencode.json

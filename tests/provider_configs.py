@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from .test_utils import get_api_key_for_tests
+from tests.helpers.embedding_config import get_api_key_for_tests
 
 
 def services_available(auto_start_rerank: bool = True) -> bool:
