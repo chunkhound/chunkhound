@@ -22,6 +22,10 @@ from loguru import logger
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
+# Static fallback when model discovery fails (no binary, unauthenticated, etc.).
+# Update when new Codex models ship.
+CODEX_FALLBACK_MODEL = "gpt-5.1-codex"
+
 
 class CodexCLIProvider(BaseCLIProvider):
     """Provider that shells out to `codex exec`.
@@ -85,6 +89,8 @@ class CodexCLIProvider(BaseCLIProvider):
         - Override discovery via CHUNKHOUND_CODEX_DEFAULT_MODEL.
         - If no env override, dynamically discovers the highest-priority available model
           via `codex debug models`.
+        - If discovery fails, falls back to a static default so existing
+          configurations degrade gracefully.
         """
         env_override = os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL")
         if env_override:
@@ -95,11 +101,15 @@ class CodexCLIProvider(BaseCLIProvider):
             discovered = cls.get_highest_priority_available_model()
             if discovered:
                 return discovered, "discovered"
-            raise RuntimeError(
-                "Codex model discovery failed: no visible models found. "
-                "Run 'codex debug models' to inspect available models, or configure "
-                "an explicit model via LLM config or CHUNKHOUND_CODEX_DEFAULT_MODEL."
+            # Static fallback so existing configs degrade gracefully when
+            # discovery fails (no codex binary, unauthenticated, etc.).
+            logger.warning(
+                "Codex model discovery failed; falling back to "
+                "%r. Check 'codex debug models' or "
+                "set CHUNKHOUND_CODEX_DEFAULT_MODEL.",
+                CODEX_FALLBACK_MODEL,
             )
+            return CODEX_FALLBACK_MODEL, "fallback"
 
         return model_name, "explicit"
 
