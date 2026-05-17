@@ -92,6 +92,11 @@ class DatabaseConfig(BaseModel):
         if self.provider == "duckdb" and not is_memory:
             if self.path.exists() and self.path.is_file():
                 return self.path
+            # User explicitly supplied a file path (e.g. --db .../chunks.db or .../my.duckdb).
+            # Create only the parent directory and return the path as-is.
+            if self.path.suffix:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                return self.path
 
         if not is_memory:
             # For directory-style layouts, ensure the base path exists.
