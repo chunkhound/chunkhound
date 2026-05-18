@@ -47,6 +47,37 @@ def add_research_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Optional path filter (e.g., 'src/', 'tests/')",
     )
 
+    # Git commit inputs — mutually exclusive
+    diff_group = research_parser.add_mutually_exclusive_group()
+    diff_group.add_argument(
+        "--commit-range",
+        type=str,
+        default=None,
+        dest="commit_range",
+        help="Git revision range to research (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0').",
+    )
+    diff_group.add_argument(
+        "--commit-hash",
+        type=str,
+        default=None,
+        dest="commit_hash",
+        help="Single commit hash — researches from that commit to HEAD.",
+    )
+    diff_group.add_argument(
+        "--last-n",
+        type=int,
+        default=None,
+        dest="last_n_commits",
+        help="Research the last N commits (equivalent to HEAD~N..HEAD).",
+    )
+    research_parser.add_argument(
+        "--vector-source",
+        choices=["diff", "db", "both"],
+        default="both",
+        dest="vector_source",
+        help="Search scope when commit input given: 'both' (default), 'diff', or 'db'.",
+    )
+
     # Add common arguments
     add_common_arguments(research_parser)
 
