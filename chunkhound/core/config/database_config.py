@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
+from loguru import logger
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -98,7 +99,42 @@ class DatabaseConfig(BaseModel):
             self.path.mkdir(parents=True, exist_ok=True)
 
         if self.provider == "duckdb":
-            return self.path if is_memory else self.path / "chunks.db"
+            if is_memory:
+                return self.path
+
+            new_style = self.path / "chunks.db"
+            if new_style.exists():
+                return new_style
+
+            # Backwards-compatible: older versions stored the DB as a flat
+            # file named "db" inside the .chunkhound directory.
+            old_style = self.path / "db"
+            if old_style.exists() and old_style.is_file():
+                logger.debug(
+                    "Found legacy database file at {}; using it instead of {}",
+                    old_style,
+                    new_style,
+                )
+                return old_style
+
+            # Neither exists yet — this is either a fresh index (caller will
+            # create chunks.db) or a misconfigured --db path.  Log a warning
+            # so silent-empty-result scenarios are easier to debug (#226).
+            if not any(self.path.iterdir()):
+                logger.warning(
+                    "Database directory {} exists but is empty — queries will "
+                    "return 0 results. Run 'chunkhound index' first or check "
+                    "your --db path.",
+                    self.path,
+                )
+            elif not new_style.exists():
+                logger.warning(
+                    "No database file found at {} (expected chunks.db or "
+                    "legacy db file). Queries may return 0 results.",
+                    self.path,
+                )
+
+            return new_style
         elif self.provider == "lancedb":
             # LanceDB adds .lancedb suffix to prevent naming collisions
             # and clarify storage structure (see lancedb_provider.py:111-113)
