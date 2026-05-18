@@ -372,6 +372,13 @@ DECISION GUIDE:
 - Concept or behavior → semantic
 - Cross-file architecture question → call code_research first
 
+GIT HISTORY SEARCH (type='semantic' only):
+- commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
+- commit_hash: Single commit hash shorthand — searches from that commit to HEAD (equivalent to '<hash>..HEAD').
+- last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
+- vector_source: Controls search scope when commit input given. 'both' (default) merges diff and DB results. 'diff' searches only changed code. 'db' ignores commit input and searches DB only.
+Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
+
 OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
 SEARCH_DESCRIPTION_NO_RESEARCH = """Pinpoint specific code locations — find exact symbols, patterns, or concepts in the indexed codebase. Returns structurally-parsed code chunks (functions, classes) — large definitions may span multiple results.
@@ -437,6 +444,10 @@ async def search_impl(
     path: str | None = None,
     page_size: int = 10,
     offset: int = 0,
+    commit_range: str | None = None,
+    commit_hash: str | None = None,
+    last_n_commits: int | None = None,
+    vector_source: str = "both",
 ) -> SearchResponse:
     """Unified search dispatching to regex or semantic based on type.
 
@@ -448,6 +459,10 @@ async def search_impl(
         path: Optional relative subdirectory to restrict search scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         page_size: Number of results per page (1-100)
         offset: Starting offset for pagination
+        commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
+        commit_hash: Single commit hash shorthand — searches from that commit to HEAD (equivalent to '<hash>..HEAD').
+        last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
+        vector_source: Controls search scope when commit input given. 'both' (default) merges diff and DB results. 'diff' searches only changed code. 'db' ignores commit input and searches DB only.
 
     Returns:
         Dict with 'results' and 'pagination' keys
@@ -464,6 +479,37 @@ async def search_impl(
     # Validate and constrain parameters
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
+
+    # Resolve effective commit range (mutually exclusive inputs)
+    if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
+        raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
+    effective_commit_range: str | None = commit_range
+    if commit_hash is not None:
+        effective_commit_range = f"{commit_hash}..HEAD"
+    elif last_n_commits is not None:
+        effective_commit_range = f"HEAD~{last_n_commits}..HEAD"
+
+    if effective_commit_range is not None and type == "semantic":
+        from chunkhound.core.git_diff import run_git_diff, parse_diff_to_chunks
+        from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
+        import pathlib
+
+        raw_diff = await run_git_diff(effective_commit_range, cwd=pathlib.Path.cwd())
+        diff_chunks = parse_diff_to_chunks(raw_diff)
+        diff_embeddings: list[list[float]] = []
+        if diff_chunks:
+            emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])
+            diff_embeddings = emb_result.embeddings
+
+        vs = vector_source if vector_source in ("diff", "db", "both") else "both"
+        diff_service = DiffAwareSearchService(
+            original=services.search_service,
+            diff_chunks=diff_chunks,
+            diff_embeddings=diff_embeddings,
+            vector_source=vs,
+            embedding_manager=embedding_manager,
+        )
+        services = services._replace(search_service=diff_service)  # type: ignore[arg-type]
 
     if type == "semantic":
         # Validate embedding manager for semantic search
