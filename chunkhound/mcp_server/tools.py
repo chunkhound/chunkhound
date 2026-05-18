@@ -473,6 +473,13 @@ EXAMPLES:
 
 SCOPE: Use the path parameter to restrict analysis to a subdirectory for faster, focused results.
 
+GIT HISTORY RESEARCH:
+- commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
+- commit_hash: Single commit hash shorthand — researches from that commit to HEAD (equivalent to '<hash>..HEAD').
+- last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
+- vector_source: Controls search scope when commit input given. 'both' (default) merges diff and DB results. 'diff' researches only changed code. 'db' ignores commit input and uses DB only.
+Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
+
 One call replaces 5-10 manual searches. Call it liberally — understanding first, coding second."""
 
 DAEMON_STATUS_DESCRIPTION = """Report daemon startup, scan, and realtime
@@ -560,7 +567,7 @@ async def search_impl(
         raw_diff = await run_git_diff(effective_commit_range, cwd=pathlib.Path.cwd())
         diff_chunks = parse_diff_to_chunks(raw_diff)
         diff_embeddings: list[list[float]] = []
-        if diff_chunks:
+        if diff_chunks and embedding_manager is not None:
             emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])
             diff_embeddings = emb_result.embeddings
 
@@ -644,6 +651,10 @@ async def deep_research_impl(
     progress: Any = None,
     path: str | None = None,
     config: Config | None = None,
+    commit_range: str | None = None,
+    commit_hash: str | None = None,
+    last_n_commits: int | None = None,
+    vector_source: str = "both",
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -655,6 +666,10 @@ async def deep_research_impl(
         progress: Optional Rich Progress instance for terminal UI (None for MCP)
         path: Optional relative subdirectory to restrict analysis scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         config: Application configuration (optional, defaults to environment config)
+        commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
+        commit_hash: Single commit hash shorthand — researches from that commit to HEAD (equivalent to '<hash>..HEAD').
+        last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
+        vector_source: Controls search scope when commit input given. 'both' (default) merges diff and DB results. 'diff' researches only changed code. 'db' ignores commit input and uses DB only.
 
     Returns:
         Dict with answer and metadata
@@ -685,6 +700,37 @@ async def deep_research_impl(
             "Code research requires a provider with reranking support. "
             "Configure a rerank_model in your embedding configuration."
         )
+
+    # Resolve effective commit range (mutually exclusive inputs)
+    if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
+        raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
+    effective_commit_range: str | None = commit_range
+    if commit_hash is not None:
+        effective_commit_range = f"{commit_hash}..HEAD"
+    elif last_n_commits is not None:
+        effective_commit_range = f"HEAD~{last_n_commits}..HEAD"
+
+    if effective_commit_range is not None:
+        from chunkhound.core.git_diff import run_git_diff, parse_diff_to_chunks
+        from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
+        import pathlib
+
+        raw_diff = await run_git_diff(effective_commit_range, cwd=pathlib.Path.cwd())
+        diff_chunks = parse_diff_to_chunks(raw_diff)
+        diff_embeddings: list[list[float]] = []
+        if diff_chunks:
+            emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])
+            diff_embeddings = emb_result.embeddings
+
+        vs = vector_source if vector_source in ("diff", "db", "both") else "both"
+        diff_service = DiffAwareSearchService(
+            original=services.search_service,
+            diff_chunks=diff_chunks,
+            diff_embeddings=diff_embeddings,
+            vector_source=vs,
+            embedding_manager=embedding_manager,
+        )
+        services = services._replace(search_service=diff_service)  # type: ignore[arg-type]
 
     # Create default config from environment if not provided
     if config is None:
