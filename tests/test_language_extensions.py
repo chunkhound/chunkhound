@@ -378,7 +378,7 @@ class TestIssue277UnknownExtensions:
     )
     def test_common_extensionless_files_indexed(self, filename, description):
         """Extensionless files like Dockerfile must be discoverable."""
-        factory_filenames = {k.lower() for k in EXTENSION_TO_LANGUAGE if not k.startswith(".")}
+        factory_filenames = Language.get_all_filename_patterns()
         assert filename.lower() in factory_filenames, (
             f"{filename} ({description}) not in EXTENSION_TO_LANGUAGE — "
             f"this file will never be indexed"
