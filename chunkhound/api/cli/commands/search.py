@@ -79,6 +79,17 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
     elif args.multi_hop:
         force_strategy = "multi_hop"
 
+    # Guard: force_strategy flags are incompatible with commit-scoped diff search
+    if force_strategy and any([
+        getattr(args, "commit_range", None),
+        getattr(args, "commit_hash", None),
+        getattr(args, "last_n_commits", None),
+    ]):
+        formatter.error(
+            "--commit-range/--commit-hash/--last-n cannot be combined with --single-hop/--multi-hop."
+        )
+        sys.exit(1)
+
     try:
         search_type = "regex" if args.regex else "semantic"
 
@@ -92,6 +103,10 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
                 page_size=args.page_size,
                 offset=args.offset,
                 path=args.path_filter,
+                commit_range=getattr(args, "commit_range", None),
+                commit_hash=getattr(args, "commit_hash", None),
+                last_n_commits=getattr(args, "last_n_commits", None),
+                vector_source=getattr(args, "vector_source", "both"),
             )
             result_dict = cast(dict[str, Any], result)
         else:
