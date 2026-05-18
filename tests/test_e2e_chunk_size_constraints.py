@@ -434,6 +434,13 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Normal
         "Unknown file type content line one.\nSecond line of unknown content.",
     ),
+    Language.GIT_DIFF: (
+        ".patch",
+        # Large diff — in-memory pseudo-language, no file parser; uses same text fallback
+        "diff --git a/foo.py b/foo.py\n" + _make_large_statements("+    line of diff content"),
+        # Normal
+        "diff --git a/foo.py b/foo.py\n+added line\n-removed line\n",
+    ),
     Language.TWINCAT: (
         ".TcPOU",
         # Large FUNCTION_BLOCK - triggers line-based split

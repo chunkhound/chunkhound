@@ -66,8 +66,7 @@ async def test_empty_diff(tmp_path: Path) -> None:
     assert result == ""
 
 
-def test_unsafe_ref_rejected() -> None:
+@pytest.mark.asyncio
+async def test_unsafe_ref_rejected() -> None:
     with pytest.raises(ValueError, match="Unsafe git ref rejected"):
-        asyncio.get_event_loop().run_until_complete(
-            run_git_diff("--output=/tmp/x", Path("/tmp"))
-        )
+        await run_git_diff("--output=/tmp/x", Path("/tmp"))
