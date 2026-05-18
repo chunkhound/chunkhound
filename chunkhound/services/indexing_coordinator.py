@@ -2299,7 +2299,17 @@ class IndexingCoordinator(BaseService):
                     if indexing_config is not None
                     else []
                 )
-                repo_roots = self._get_or_detect_repo_roots(directory, eff)
+                if indexing_config is not None and callable(
+                    getattr(indexing_config, "resolve_ignore_sources", None)
+                ):
+                    sources = indexing_config.resolve_ignore_sources()
+                else:
+                    sources = ["gitignore"]
+                repo_roots = self._get_or_detect_repo_roots(
+                    directory,
+                    eff,
+                    prune_ignored_gitfile_roots=("gitignore" in (sources or [])),
+                )
             except Exception:
                 repo_roots = []
             if not repo_roots:
