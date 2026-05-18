@@ -385,7 +385,7 @@ class TestDocsVersionWorkflowContract:
         [
             (".github/workflows/smoke-tests.yml", "site-build"),
             (".github/workflows/smoke-tests.yml", "tests"),
-            (".github/workflows/deploy.yml", "build"),
+            (".github/workflows/deploy.yml", "deploy"),
         ],
     )
     def test_docs_build_jobs_use_shared_resolver_script(
@@ -406,7 +406,7 @@ class TestDocsVersionWorkflowContract:
         [
             (".github/workflows/smoke-tests.yml", "site-build"),
             (".github/workflows/smoke-tests.yml", "tests"),
-            (".github/workflows/deploy.yml", "build"),
+            (".github/workflows/deploy.yml", "deploy"),
         ],
     )
     def test_docs_build_jobs_checkout_with_full_history(
@@ -435,7 +435,7 @@ class TestDocsVersionWorkflowContract:
             ),
             (
                 ".github/workflows/deploy.yml",
-                "build",
+                "deploy",
                 "site build step",
                 lambda step: step.get("run") == "npm run build --prefix site",
             ),
