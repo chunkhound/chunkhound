@@ -195,7 +195,7 @@ async def test_ssl_connection_error_reproduces_user_issue():
         # If we get here, the SSL issue is fixed!
         assert len(embeddings) == 1
         assert len(embeddings[0]) == 1536  # Mock embedding dimension
-        print("✓ SSL connection issue is FIXED - embeddings generated successfully!")
+        print("[SUCCESS] SSL connection issue is FIXED - embeddings generated successfully!")
         
     finally:
         server.stop()
@@ -240,7 +240,7 @@ async def test_httpx_ssl_verify_env_var_doesnt_work():
         
         # If we get here, either the env var started working OR SSL config was fixed
         assert len(embeddings) == 1
-        print("✓ HTTPX_SSL_VERIFY=0 environment variable now works, OR SSL config was fixed")
+        print("[SUCCESS] HTTPX_SSL_VERIFY=0 environment variable now works, OR SSL config was fixed")
         
     finally:
         # Restore original environment

@@ -424,25 +424,23 @@ const componentName = ref('div')
 """
         chunks = parser.parse_content(content)
 
-        # Find template chunks with cross-references
+        # Find template chunks
         template_chunks = [
             c for c in chunks
             if c.metadata and c.metadata.get('vue_section') == 'template'
         ]
 
-        # Should have cross-references to bound variables
-        refs = set()
-        for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+        # Should have extracted property binding chunks with metadata
+        binding_chunks = [
+            c for c in template_chunks
+            if c.metadata and c.metadata.get('directive_type') == 'property_binding'
+        ]
 
-        # At least some bindings should be referenced
-        expected_refs = ['imageUrl', 'linkUrl', 'dynamicClass']
-        found_refs = [ref for ref in expected_refs if ref in refs]
-        assert len(found_refs) >= 0  # Some refs should be found
+        # Should have found property bindings
+        assert len(binding_chunks) > 0
 
     def test_v_model_directives(self, parser):
-        """Test v-model two-way binding extraction."""
+        """Test v-model two-way binding extraction including modifiers."""
         content = """
 <template>
   <div>
@@ -467,20 +465,22 @@ const selected = ref('a')
 """
         chunks = parser.parse_content(content)
 
-        # Find template chunks
-        template_chunks = [
+        # Find v-model chunks
+        vmodel_chunks = [
             c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            if c.metadata and c.metadata.get('directive_type') == 'v-model'
         ]
 
-        # Should have references to v-model variables
-        refs = set()
-        for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+        # Should find at least one v-model chunk
+        assert len(vmodel_chunks) >= 1
 
-        # Check for v-model variables
-        assert 'text' in refs or 'description' in refs or len(template_chunks) > 0
+        # Check that v-model chunks have correct metadata
+        for chunk in vmodel_chunks:
+            assert chunk.metadata.get('model_binding') is not None
+            assert chunk.metadata.get('directive_type') == 'v-model'
+            # script_references should be present if model_binding is set
+            if chunk.metadata.get('model_binding'):
+                assert 'script_references' in chunk.metadata
 
     def test_component_usage(self, parser):
         """Test component usage detection (PascalCase)."""
