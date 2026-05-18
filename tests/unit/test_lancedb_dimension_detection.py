@@ -159,7 +159,7 @@ class TestLanceDBDimensionDetection:
         db_path = tmp_path / "test.lancedb"
 
         mock_provider = MagicMock()
-        mock_provider.name = "ollama"
+        mock_provider.name = "custom-provider"
         mock_provider.model = "nomic-embed-text"
         mock_provider.dims = 768
 

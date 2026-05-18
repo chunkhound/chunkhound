@@ -13,9 +13,12 @@ to ensure consistent initialization while respecting protocol-specific constrain
 import asyncio
 import copy
 import os
+import re
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -29,13 +32,13 @@ from chunkhound.interfaces.embedding_provider import (
 )
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
-from chunkhound.services.realtime_indexing_service import (
-    RealtimeIndexingService,
-    RealtimeStartupStatusTracker,
-)
+from chunkhound.services.realtime import RealtimeStartupStatusTracker
+from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
 )
+
+_DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
 
 
 class MCPServerBase(ABC):
@@ -75,6 +78,7 @@ class MCPServerBase(ABC):
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
+        self._provider_close_future: asyncio.Future[None] | None = None
 
         # Background tasks
         self._deferred_start_task: asyncio.Task | None = None
@@ -93,7 +97,6 @@ class MCPServerBase(ABC):
         self._reset_warm_ready_tracking()
 
         # Scan progress tracking
-        self._scan_complete = False
         self._scan_progress: dict[str, Any] = {
             "files_processed": 0,
             "chunks_created": 0,
@@ -109,21 +112,21 @@ class MCPServerBase(ABC):
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
         os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
-    def debug_log(self, message: str) -> None:
-        """Log debug message to file if debug mode is enabled."""
-        if self.debug_mode:
-            # Write to debug file instead of stderr to preserve JSON-RPC protocol
-            debug_file = os.getenv(
-                "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log"
-            )
-            try:
-                with open(debug_file, "a") as f:
-                    timestamp = datetime.now().isoformat()
-                    f.write(f"[{timestamp}] [MCP] {message}\n")
-                    f.flush()
-            except Exception:
-                # Silently fail if we can't write to debug file
-                pass
+    def debug_log(self, message: str, *, always: bool = False) -> None:
+        """Log to the MCP debug file without risking JSON-RPC corruption."""
+        if not (always or self.debug_mode):
+            return
+
+        # Write to a file instead of stderr/stdout to preserve JSON-RPC protocol.
+        debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log")
+        try:
+            with open(debug_file, "a") as f:
+                timestamp = datetime.now().isoformat()
+                f.write(f"[{timestamp}] [MCP] {message}\n")
+                f.flush()
+        except Exception:
+            # Silently fail if we can't write to debug file
+            pass
 
     def _startup_log(self, message: str) -> None:
         """Emit startup breadcrumbs to debug logs and the daemon stderr log path."""
@@ -142,6 +145,11 @@ class MCPServerBase(ABC):
         return "stdio"
 
     def _reset_warm_ready_tracking(self) -> None:
+        """Reset all warm-ready timing state for a fresh initialization cycle.
+
+        Called at the start of every ``initialize()`` invocation so that
+        repeated calls (e.g., after a failed init) produce fresh metrics.
+        """
         self._warm_ready_started_monotonic: float | None = None
         self._warm_ready_summary_emitted = False
         self._warm_ready_initial_scan_total_seconds: float | None = None
@@ -149,9 +157,7 @@ class MCPServerBase(ABC):
         self._warm_ready_initial_scan_skipped_monotonic: float | None = None
         self._warm_ready_fresh_instance_resync_requested = False
         self._warm_ready_fresh_instance_resync_total_seconds: float | None = None
-        self._warm_ready_fresh_instance_resync_completed_monotonic: float | None = (
-            None
-        )
+        self._warm_ready_fresh_instance_resync_completed_monotonic: float | None = None
         self._warm_ready_fresh_instance_resync_outcome: str | None = None
         self._warm_ready_fresh_instance_resync_authoritative = False
         self._warm_ready_double_work_logged = False
@@ -183,6 +189,14 @@ class MCPServerBase(ABC):
         )
 
     def _warm_ready_window_active(self) -> bool:
+        """Return True if the warm-ready measurement window is still open.
+
+        The window opens when ``initialize()`` records the start monotonic
+        clock and closes once ``_emit_warm_ready_summary_if_ready()`` has
+        fired (i.e., the one-shot summary has been emitted). While the
+        window is active, timing logs for resync and scan events include
+        ``daemon_visible=True`` so operators see them on stderr.
+        """
         return (
             self._warm_ready_started_monotonic is not None
             and not self._warm_ready_summary_emitted
@@ -206,18 +220,26 @@ class MCPServerBase(ABC):
         self.debug_log(formatted)
 
     def _emit_warm_ready_summary_if_ready(self) -> None:
-        if self._warm_ready_summary_emitted:
-            return
-        if self._warm_ready_started_monotonic is None:
-            return
+        """Emit a one-shot timing summary if all scan work has completed.
+
+        Aggregates ``blocking_startup`` (phases tracked by
+        ``RealtimeStartupStatusTracker``) with ``warm_ready`` (total
+        wall time including deferred initial scan and/or fresh-instance
+        resync). Emitted exactly once; subsequent calls are no-ops.
+        """
+        # Early exit: already emitted, never started, no scan work done,
+        # or a pending fresh-instance resync is still in-flight.
         if (
-            self._warm_ready_initial_scan_completed_monotonic is None
-            and self._warm_ready_initial_scan_skipped_monotonic is None
-        ):
-            return
-        if (
-            self._warm_ready_fresh_instance_resync_requested
-            and self._warm_ready_fresh_instance_resync_completed_monotonic is None
+            self._warm_ready_summary_emitted
+            or self._warm_ready_started_monotonic is None
+            or (
+                self._warm_ready_initial_scan_completed_monotonic is None
+                and self._warm_ready_initial_scan_skipped_monotonic is None
+            )
+            or (
+                self._warm_ready_fresh_instance_resync_requested
+                and self._warm_ready_fresh_instance_resync_completed_monotonic is None
+            )
         ):
             return
 
@@ -226,29 +248,19 @@ class MCPServerBase(ABC):
         if not isinstance(blocking_startup, (int, float)):
             return
 
-        last_adjacent_completed = self._warm_ready_initial_scan_completed_monotonic
-        if self._warm_ready_initial_scan_skipped_monotonic is not None:
-            if last_adjacent_completed is None:
-                last_adjacent_completed = (
-                    self._warm_ready_initial_scan_skipped_monotonic
-                )
-            else:
-                last_adjacent_completed = max(
-                    last_adjacent_completed,
-                    self._warm_ready_initial_scan_skipped_monotonic,
-                )
-        if self._warm_ready_fresh_instance_resync_completed_monotonic is not None:
-            if last_adjacent_completed is None:
-                last_adjacent_completed = (
-                    self._warm_ready_fresh_instance_resync_completed_monotonic
-                )
-            else:
-                last_adjacent_completed = max(
-                    last_adjacent_completed,
-                    self._warm_ready_fresh_instance_resync_completed_monotonic,
-                )
-        if last_adjacent_completed is None:
+        # Find the latest completion time across initial scan, skip, and resync.
+        completed_candidates = [
+            v
+            for v in [
+                self._warm_ready_initial_scan_completed_monotonic,
+                self._warm_ready_initial_scan_skipped_monotonic,
+                self._warm_ready_fresh_instance_resync_completed_monotonic,
+            ]
+            if v is not None
+        ]
+        if not completed_candidates:
             return
+        last_adjacent_completed = max(completed_candidates)
         warm_ready_total = self._duration_seconds(
             self._warm_ready_started_monotonic,
             last_adjacent_completed,
@@ -511,7 +523,15 @@ class MCPServerBase(ABC):
             )
 
     async def await_startup_barrier(self) -> None:
-        """Block daemon exposure until strict realtime startup requirements pass."""
+        """Block daemon exposure until strict realtime startup requirements pass.
+
+        Raises:
+            RuntimeError: If the startup barrier fails for any reason (Watchman
+                not configured, deferred startup not started, task cancelled,
+                realtime monitoring not ready, etc.). Daemon must always raise
+                rather than silently returning, ensuring the caller sees every
+                failure and can trigger graceful shutdown via the finally block.
+        """
         self._start_startup_phase("startup_barrier")
         if not self.requires_strict_startup_barrier():
             self._complete_startup_phase("startup_barrier")
@@ -519,57 +539,68 @@ class MCPServerBase(ABC):
 
         if self._deferred_start_task is None:
             message = "Watchman startup barrier requested before deferred startup began"
+            self.debug_log(f"Startup barrier: {message}")
             self._set_startup_failure(message, phase_name="startup_barrier")
-            raise RuntimeError(
-                "Watchman startup barrier requested before deferred startup began"
-            )
+            self._record_realtime_failure(message)
+            raise RuntimeError(message)
 
         try:
             await asyncio.shield(self._deferred_start_task)
-        except asyncio.CancelledError as error:
+        except asyncio.CancelledError:
             message = "Watchman deferred startup was cancelled before readiness"
+            self.debug_log(f"Startup barrier: {message}")
             self._set_startup_failure(message, phase_name="startup_barrier")
-            raise RuntimeError(message) from error
+            self._record_realtime_failure(message)
+            raise RuntimeError(message)
+
         if self._startup_failure_message is not None:
-            self._set_startup_failure(
-                self._startup_failure_message,
-                phase_name="startup_barrier",
-            )
-            raise RuntimeError(self._startup_failure_message)
+            msg = self._startup_failure_message
+            self.debug_log(f"Startup barrier: {msg}")
+            self._set_startup_failure(msg, phase_name="startup_barrier")
+            self._record_realtime_failure(msg)
+            raise RuntimeError(msg)
 
         if self._realtime_start_task is None:
             message = (
                 "Watchman startup barrier requested but realtime startup task "
                 "was never created"
             )
+            self.debug_log(f"Startup barrier: {message}")
             self._set_startup_failure(message, phase_name="startup_barrier")
+            self._record_realtime_failure(message)
             raise RuntimeError(message)
 
         try:
             await asyncio.shield(self._realtime_start_task)
-        except asyncio.CancelledError as error:
+        except asyncio.CancelledError:
             message = "Watchman realtime startup was cancelled before readiness"
+            self.debug_log(f"Startup barrier: {message}")
             self._set_startup_failure(message, phase_name="startup_barrier")
-            raise RuntimeError(message) from error
+            self._record_realtime_failure(message)
+            raise RuntimeError(message)
         except Exception as error:
             message = self._startup_failure_message or str(error)
+            self.debug_log(f"Startup barrier: {message}")
             self._set_startup_failure(message, phase_name="startup_barrier")
-            raise RuntimeError(message) from error
+            self._record_realtime_failure(message)
+            raise RuntimeError(message)
 
         startup_failure_message = self._current_startup_failure_message()
         if startup_failure_message is not None:
-            self._set_startup_failure(
-                startup_failure_message,
-                phase_name="startup_barrier",
-            )
-            raise RuntimeError(startup_failure_message)
+            msg = startup_failure_message
+            self.debug_log(f"Startup barrier: {msg}")
+            self._set_startup_failure(msg, phase_name="startup_barrier")
+            self._record_realtime_failure(msg)
+            raise RuntimeError(msg)
 
         if (
             self.realtime_indexing is None
             or not self.realtime_indexing.monitoring_ready.is_set()
         ):
             message = "Watchman startup finished without monitoring readiness"
+            self.debug_log(f"Startup barrier: {message}")
             self._set_startup_failure(message, phase_name="startup_barrier")
+            self._record_realtime_failure(message)
             raise RuntimeError(message)
         self._complete_startup_phase("startup_barrier")
 
@@ -773,9 +804,7 @@ class MCPServerBase(ABC):
 
         resync_started_monotonic = time.monotonic()
         loss_of_sync_reason = (
-            details.get("loss_of_sync_reason")
-            if isinstance(details, dict)
-            else None
+            details.get("loss_of_sync_reason") if isinstance(details, dict) else None
         )
         is_fresh_instance = self._is_fresh_instance_resync(reason, details)
         daemon_visible = self._realtime_startup_mode() == "daemon" and (
@@ -889,9 +918,7 @@ class MCPServerBase(ABC):
                 )
                 self._warm_ready_fresh_instance_resync_outcome = resync_outcome
                 self._warm_ready_fresh_instance_resync_authoritative = (
-                    self._is_authoritative_fresh_instance_resync_outcome(
-                        resync_outcome
-                    )
+                    self._is_authoritative_fresh_instance_resync_outcome(resync_outcome)
                 )
                 self._emit_warm_ready_summary_if_ready()
 
@@ -933,7 +960,6 @@ class MCPServerBase(ABC):
                     # Parse progress messages to update counters
                     if "files processed" in message:
                         # Extract numbers from progress messages
-                        import re
 
                         match = re.search(
                             r"(\d+) files processed.*?(\d+) chunks", message
@@ -967,7 +993,6 @@ class MCPServerBase(ABC):
                         "scan_completed_at": datetime.now().isoformat(),
                     }
                 )
-                self._scan_complete = True
 
                 self.debug_log(
                     f"{trigger} scan completed: "
@@ -1002,10 +1027,72 @@ class MCPServerBase(ABC):
                 )
                 raise
 
-    async def cleanup(self) -> None:
-        """Clean up resources and close database connection.
+    def _close_provider_in_background(self) -> asyncio.Future[None]:
+        """Start or reuse the provider close attempt on a daemon thread."""
+        if self._provider_close_future is not None:
+            return self._provider_close_future
 
-        This method is idempotent - safe to call multiple times.
+        if self.services is None:
+            raise RuntimeError("Services not initialized")
+
+        provider = self.services.provider
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        def _complete_with_result() -> None:
+            if not future.done():
+                future.set_result(None)
+
+        def _complete_with_exception(error: Exception) -> None:
+            if not future.done():
+                future.set_exception(error)
+
+        def _try_call_soon_threadsafe(callback: Callable[[], None]) -> None:
+            """Call loop.call_soon_threadsafe safely, even after loop is closed.
+
+            The daemon thread may outlive the event loop (cleanup timed out,
+            provider.close() is still running on the background thread).
+            call_soon_threadsafe on a closed loop raises RuntimeError;
+            we swallow it here since the future is already done/abandoned.
+            """
+            try:
+                loop.call_soon_threadsafe(callback)
+            except RuntimeError:
+                pass
+
+        def _run_close() -> None:
+            error: Exception | None = None
+            try:
+                # close() is the authoritative cleanup API when available.
+                # Do not fall back to disconnect() after a close() failure: some
+                # providers implement close() by delegating to disconnect(), so a
+                # fallback would hide the original error and risk double teardown.
+                if hasattr(provider, "close"):
+                    provider.close()
+                else:
+                    provider.disconnect()
+            except Exception as exc:
+                error = exc
+                self.debug_log(
+                    f"Provider close on daemon thread failed: {exc}",
+                    always=True,
+                )
+            if error is not None:
+                _try_call_soon_threadsafe(lambda: _complete_with_exception(error))
+            else:
+                _try_call_soon_threadsafe(_complete_with_result)
+
+        threading.Thread(target=_run_close, daemon=True).start()
+        self._provider_close_future = future
+        return future
+
+    async def cleanup(self) -> None:
+        """Clean up resources and start at most one provider close attempt.
+
+        The timeout only bounds how long each cleanup call waits. A blocking
+        synchronous provider close keeps running on its daemon thread, and later
+        cleanup calls reuse that same in-flight attempt instead of starting a
+        second one.
         """
         if (
             self._deferred_start_task is not None
@@ -1043,14 +1130,29 @@ class MCPServerBase(ABC):
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
 
-        if self.services and self.services.provider.is_connected:
+        if self.services and (
+            self.services.provider.is_connected
+            or self._provider_close_future is not None
+        ):
             self.debug_log("Closing database connection")
-            # Use new close() method for proper cleanup, with fallback to disconnect()
-            if hasattr(self.services.provider, "close"):
-                self.services.provider.close()
-            else:
-                self.services.provider.disconnect()
-            self._initialized = False
+            # Run sync provider cleanup on a dedicated daemon thread so cleanup()
+            # never depends on asyncio's default executor shutdown behavior.
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._close_provider_in_background()),
+                    timeout=_DATABASE_CLOSE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                self.debug_log(
+                    "Database close exceeded "
+                    f"{_DATABASE_CLOSE_TIMEOUT_SECONDS:.1f}s and will continue in "
+                    "the background daemon thread",
+                    always=True,
+                )
+            except Exception as e:
+                self.debug_log(f"Database close failed: {e}", always=True)
+            finally:
+                self._initialized = False
 
     async def ensure_services(self) -> DatabaseServices:
         """Ensure services are initialized and return them.

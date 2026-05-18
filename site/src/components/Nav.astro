@@ -1,0 +1,201 @@
+---
+import Wordmark from "./Wordmark.astro";
+
+interface Props {
+  currentPath: string;
+}
+
+const { currentPath } = Astro.props;
+
+const tabs = [
+  { label: "Guides", href: "/docs/getting-started/", activePrefix: "/docs/" },
+];
+---
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="/" class="nav-wordmark">
+      <Wordmark size="sm" />
+    </a>
+
+    <div class="nav-tabs" aria-label="Sections">
+      {tabs.map((tab) => (
+        <a
+          href={tab.href}
+          class:list={["nav-tab", { active: currentPath.startsWith(tab.activePrefix ?? tab.href) }]}
+        >
+          {tab.label}
+        </a>
+      ))}
+    </div>
+
+    <div class="nav-actions">
+      <button
+        class="theme-toggle"
+        onclick="toggleTheme()"
+        aria-label="Toggle theme"
+      >
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="8" cy="8" r="3" />
+          <line x1="8" y1="0.5" x2="8" y2="2.5" />
+          <line x1="8" y1="13.5" x2="8" y2="15.5" />
+          <line x1="0.5" y1="8" x2="2.5" y2="8" />
+          <line x1="13.5" y1="8" x2="15.5" y2="8" />
+          <line x1="2.7" y1="2.7" x2="4.1" y2="4.1" />
+          <line x1="11.9" y1="11.9" x2="13.3" y2="13.3" />
+          <line x1="2.7" y1="13.3" x2="4.1" y2="11.9" />
+          <line x1="11.9" y1="4.1" x2="13.3" y2="2.7" />
+        </svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13.6 9.8A6 6 0 0 1 6.2 2.4 6 6 0 1 0 13.6 9.8z" />
+        </svg>
+        <svg class="icon-system" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="1.5" y="1.5" width="13" height="9" rx="1" />
+          <line x1="5.5" y1="13.5" x2="10.5" y2="13.5" />
+          <line x1="8" y1="10.5" x2="8" y2="13.5" />
+        </svg>
+      </button>
+
+      <a
+        href="https://github.com/chunkhound/chunkhound"
+        class="nav-github-link"
+        aria-label="GitHub"
+      >
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"></path>
+        </svg>
+      </a>
+    </div>
+  </div>
+</nav>
+
+<style>
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    height: var(--target-xl);
+    background: color-mix(in srgb, var(--bg-page) 85%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: var(--border-w-subtle) solid var(--border-subtle);
+  }
+
+  .nav-inner {
+    max-width: 1440px;
+    margin: 0 auto;
+    padding: 0 var(--space-6);
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+  }
+
+  .nav-wordmark {
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .nav-wordmark:hover {
+    text-decoration: none;
+  }
+
+  /* ── Section tabs ─────────────────────────────────────────────── */
+
+  .nav-tabs {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    gap: var(--space-4);
+    transform: translateY(2px);
+  }
+
+  .nav-tab {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-bottom: var(--border-w-accent) solid transparent;
+    transition: color 0.2s, border-color 0.2s;
+  }
+
+  .nav-tab:hover {
+    color: var(--text-primary);
+    text-decoration: none;
+  }
+
+  .nav-tab.active {
+    color: var(--text-primary);
+    border-bottom-color: var(--primary);
+  }
+
+  /* ── Right actions ────────────────────────────────────────────── */
+
+  .nav-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-left: auto;
+  }
+
+  .theme-toggle {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: var(--radius-md);
+    transition: color 0.2s, background-color 0.2s;
+  }
+
+  .theme-toggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-muted);
+  }
+
+  .icon-sun,
+  .icon-moon,
+  .icon-system {
+    display: none;
+  }
+
+  :global([data-theme-setting="light"]) .icon-sun {
+    display: block;
+  }
+  :global([data-theme-setting="dark"]) .icon-moon {
+    display: block;
+  }
+  :global([data-theme-setting="system"]) .icon-system {
+    display: block;
+  }
+
+  .nav-github-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    color: var(--text-secondary);
+    transition: color 0.2s;
+  }
+
+  .nav-github-link:hover {
+    color: var(--text-primary);
+  }
+
+  /* ── Mobile (<=900px) ─────────────────────────────────────────── */
+
+  @media (max-width: 900px) {
+    .nav-tabs {
+      display: none;
+    }
+  }
+</style>

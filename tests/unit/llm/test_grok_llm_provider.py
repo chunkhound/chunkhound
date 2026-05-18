@@ -3,6 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.grok_llm_provider import GrokLLMProvider
 from chunkhound.interfaces.llm_provider import LLMResponse
 
@@ -20,9 +21,16 @@ def provider():
     return GrokLLMProvider(
         api_key="test-api-key-123",
         model="grok-4-1-fast-reasoning",
-        timeout=60,
+        timeout=DEFAULT_LLM_TIMEOUT,
         max_retries=3,
     )
+
+
+def test_default_timeout():
+    """Default timeout resolves to 120."""
+    from chunkhound.providers.llm.grok_llm_provider import GrokLLMProvider
+    p = GrokLLMProvider(api_key="test-key")
+    assert p.timeout == DEFAULT_LLM_TIMEOUT
 
 
 class TestGrokLLMProvider:

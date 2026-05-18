@@ -17,6 +17,7 @@ import tempfile
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 
 
@@ -28,7 +29,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         api_key: str | None = None,
         model: str = "opencode/grok-code",
         base_url: str | None = None,
-        timeout: int = 60,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
         """Initialize OpenCode CLI provider.
