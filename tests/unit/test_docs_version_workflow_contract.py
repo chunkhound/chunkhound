@@ -471,3 +471,98 @@ class TestDocsVersionWorkflowContract:
         contents = (ROOT / path).read_text(encoding="utf-8")
 
         assert INLINE_RESOLVE_SNIPPET not in contents
+
+    def test_deploy_workflow_reuses_tested_site_artifact(self) -> None:
+        workflow = _load_workflow(".github/workflows/deploy.yml")
+        steps = cast(list[dict[str, Any]], workflow["jobs"]["deploy"]["steps"])
+        download_index = _find_step_index(
+            steps,
+            "site artifact download step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/download-artifact@"
+            ),
+        )
+        download_step = steps[download_index]
+
+        assert download_step["if"] == "github.event_name == 'workflow_run'"
+        assert download_step["with"]["name"] == "site-dist"
+        assert download_step["with"]["path"] == "site/dist/"
+        assert download_step["with"]["run-id"] == "${{ github.event.workflow_run.id }}"
+        assert download_step["with"]["github-token"] == "${{ github.token }}"
+
+    def test_deploy_workflow_keeps_success_gate_for_automatic_runs(self) -> None:
+        workflow = _load_workflow(".github/workflows/deploy.yml")
+        deploy_job = cast(dict[str, Any], workflow["jobs"]["deploy"])
+
+        assert "github.event.workflow_run.conclusion == 'success'" in deploy_job["if"]
+
+    def test_site_workflows_create_nojekyll_before_upload(self) -> None:
+        workflows_and_jobs = [
+            (".github/workflows/smoke-tests.yml", "site-build"),
+            (".github/workflows/deploy.yml", "deploy"),
+        ]
+
+        for path, job_name in workflows_and_jobs:
+            steps = _job_steps(path, job_name)
+            nojekyll_index = _find_step_index(
+                steps,
+                ".nojekyll creation step",
+                lambda step: step.get("run") == "touch site/dist/.nojekyll",
+            )
+            upload_index = _find_step_index(
+                steps,
+                "site artifact upload step",
+                lambda step: str(step.get("uses", "")).startswith(
+                    ("actions/upload-artifact@", "actions/upload-pages-artifact@")
+                )
+                and step.get("with", {}).get("path") == "site/dist/",
+            )
+
+            assert nojekyll_index < upload_index
+
+    def test_deploy_path_b_build_steps_have_conditional_guards(self) -> None:
+        """Every build step on the workflow_dispatch fallback path must be
+        guarded with if: github.event_name != 'workflow_run' to maintain
+        mutual exclusivity with the artifact download path."""
+        steps = _job_steps(".github/workflows/deploy.yml", "deploy")
+        build_step_checks: list[tuple[str, Callable[[dict], bool]]] = [
+            (
+                "checkout",
+                lambda s: str(s.get("uses", "")).startswith("actions/checkout@"),
+            ),
+            (
+                "setup-node",
+                lambda s: str(s.get("uses", "")).startswith("actions/setup-node@"),
+            ),
+            (
+                "resolve docs version",
+                lambda s: s.get("run") == "bash scripts/resolve_docs_version.sh",
+            ),
+            (
+                "npm ci",
+                lambda s: s.get("run") == "npm ci --prefix site",
+            ),
+            (
+                "npm run build",
+                lambda s: s.get("run") == "npm run build --prefix site",
+            ),
+        ]
+        for name, predicate in build_step_checks:
+            idx = _find_step_index(steps, f"deploy build step: {name}", predicate)
+            assert steps[idx].get("if") == "github.event_name != 'workflow_run'", (
+                f"Build step '{name}' in deploy.yml must be guarded with "
+                f"github.event_name != 'workflow_run'"
+            )
+
+    def test_deploy_workflow_has_artifact_read_permission(self) -> None:
+        """The deploy workflow must have actions: read permission for
+        artifact download from the Tests workflow run."""
+        workflow = _load_workflow(".github/workflows/deploy.yml")
+        permissions = workflow.get("permissions", {})
+        assert isinstance(permissions, dict), (
+            "deploy.yml permissions must be a dict (not a blanket string "
+            "like 'read-all')"
+        )
+        assert permissions.get("actions") == "read", (
+            "deploy.yml must have 'actions: read' for download-artifact to work"
+        )
