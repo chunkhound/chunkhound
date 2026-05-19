@@ -531,7 +531,7 @@ function qaTestFunction() {
         }
 
         # Validate ALL languages have test coverage (fail explicitly for new languages)
-        testable_languages = {lang for lang in Language if lang != Language.UNKNOWN}
+        testable_languages = {lang for lang in Language if lang not in (Language.UNKNOWN, Language.GIT_DIFF)}
         missing_templates = testable_languages - set(content_templates.keys())
         missing_extensions = testable_languages - set(extension_map.keys())
         # Languages must be in BOTH dicts to be tested

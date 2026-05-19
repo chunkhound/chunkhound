@@ -30,6 +30,9 @@ MAX_RESPONSE_TOKENS = 20000
 MIN_RESPONSE_TOKENS = 1000
 MAX_ALLOWED_TOKENS = 25000
 
+# Diff chunk cap: prevent OOM when commit_range spans thousands of changed files
+MAX_DIFF_CHUNKS = 500
+
 
 # =============================================================================
 # Schema Generation Infrastructure
@@ -372,6 +375,13 @@ DECISION GUIDE:
 - Concept or behavior → semantic
 - Cross-file architecture question → call code_research first
 
+GIT HISTORY SEARCH (type='semantic' only):
+- commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
+- commit_hash: Single commit hash shorthand — searches from that commit to HEAD (equivalent to '<hash>..HEAD').
+- last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
+- vector_source: Controls search scope when commit input given. 'both' (default) merges diff and DB results. 'diff' searches only changed code. 'db' ignores commit input and searches DB only.
+Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
+
 OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
 SEARCH_DESCRIPTION_NO_RESEARCH = """Pinpoint specific code locations — find exact symbols, patterns, or concepts in the indexed codebase. Returns structurally-parsed code chunks (functions, classes) — large definitions may span multiple results.
@@ -405,6 +415,13 @@ EXAMPLES:
 
 SCOPE: Use the path parameter to restrict analysis to a subdirectory for faster, focused results.
 
+GIT HISTORY RESEARCH:
+- commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
+- commit_hash: Single commit hash shorthand — researches from that commit to HEAD (equivalent to '<hash>..HEAD').
+- last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
+- vector_source: Controls search scope when commit input given. 'both' (default) merges diff and DB results. 'diff' researches only changed code. 'db' ignores commit input and uses DB only.
+Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
+
 One call replaces 5-10 manual searches. Call it liberally — understanding first, coding second."""
 
 DAEMON_STATUS_DESCRIPTION = """Report daemon startup, scan, and realtime
@@ -424,6 +441,21 @@ NOTE: Query readiness is derived from scan state on this branch."""
 # =============================================================================
 
 
+def _resolve_commit_range(
+    commit_range: str | None,
+    commit_hash: str | None,
+    last_n_commits: int | None,
+) -> str | None:
+    """Resolve mutually-exclusive commit inputs to a single git revision range."""
+    if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
+        raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
+    if commit_hash is not None:
+        return f"{commit_hash}..HEAD"
+    if last_n_commits is not None:
+        return f"HEAD~{last_n_commits}..HEAD"
+    return commit_range
+
+
 @register_tool(
     description=SEARCH_DESCRIPTION,
     requires_embeddings=False,
@@ -437,6 +469,10 @@ async def search_impl(
     path: str | None = None,
     page_size: int = 10,
     offset: int = 0,
+    commit_range: str | None = None,
+    commit_hash: str | None = None,
+    last_n_commits: int | None = None,
+    vector_source: str = "both",
 ) -> SearchResponse:
     """Unified search dispatching to regex or semantic based on type.
 
@@ -448,6 +484,10 @@ async def search_impl(
         path: Optional relative subdirectory to restrict search scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         page_size: Number of results per page (1-100)
         offset: Starting offset for pagination
+        commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
+        commit_hash: Single commit hash shorthand — searches from that commit to HEAD (equivalent to '<hash>..HEAD').
+        last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
+        vector_source: Controls search scope when commit input given. 'both' (default) merges diff and DB results. 'diff' searches only changed code. 'db' ignores commit input and searches DB only.
 
     Returns:
         Dict with 'results' and 'pagination' keys
@@ -464,6 +504,38 @@ async def search_impl(
     # Validate and constrain parameters
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
+
+    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+
+    if effective_commit_range is not None and type == "semantic":
+        from chunkhound.core.git_diff import run_git_diff, parse_diff_to_chunks
+        from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
+        from chunkhound.utils.project_detection import find_project_root
+        from loguru import logger as _log
+
+        raw_diff = await run_git_diff(effective_commit_range, cwd=find_project_root(None))
+        diff_chunks = parse_diff_to_chunks(raw_diff)
+        if len(diff_chunks) > MAX_DIFF_CHUNKS:
+            _log.warning(
+                "diff range produced {} chunks; capping at {} to avoid OOM",
+                len(diff_chunks),
+                MAX_DIFF_CHUNKS,
+            )
+            diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
+        diff_embeddings: list[list[float]] = []
+        if diff_chunks and embedding_manager is not None:
+            emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])
+            diff_embeddings = emb_result.embeddings
+
+        vs = vector_source if vector_source in ("diff", "db", "both") else "both"
+        diff_service = DiffAwareSearchService(
+            original=services.search_service,
+            diff_chunks=diff_chunks,
+            diff_embeddings=diff_embeddings,
+            vector_source=vs,
+            embedding_manager=embedding_manager,
+        )
+        services = services._replace(search_service=diff_service)  # type: ignore[arg-type]
 
     if type == "semantic":
         # Validate embedding manager for semantic search
@@ -537,6 +609,10 @@ async def deep_research_impl(
     progress: Any = None,
     path: str | None = None,
     config: Config | None = None,
+    commit_range: str | None = None,
+    commit_hash: str | None = None,
+    last_n_commits: int | None = None,
+    vector_source: str = "both",
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -548,6 +624,10 @@ async def deep_research_impl(
         progress: Optional Rich Progress instance for terminal UI (None for MCP)
         path: Optional relative subdirectory to restrict analysis scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         config: Application configuration (optional, defaults to environment config)
+        commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
+        commit_hash: Single commit hash shorthand — researches from that commit to HEAD (equivalent to '<hash>..HEAD').
+        last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
+        vector_source: Controls search scope when commit input given. 'both' (default) merges diff and DB results. 'diff' researches only changed code. 'db' ignores commit input and uses DB only.
 
     Returns:
         Dict with answer and metadata
@@ -578,6 +658,38 @@ async def deep_research_impl(
             "Code research requires a provider with reranking support. "
             "Configure a rerank_model in your embedding configuration."
         )
+
+    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+
+    if effective_commit_range is not None:
+        from chunkhound.core.git_diff import run_git_diff, parse_diff_to_chunks
+        from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
+        from chunkhound.utils.project_detection import find_project_root
+        from loguru import logger as _log
+
+        raw_diff = await run_git_diff(effective_commit_range, cwd=find_project_root(None))
+        diff_chunks = parse_diff_to_chunks(raw_diff)
+        if len(diff_chunks) > MAX_DIFF_CHUNKS:
+            _log.warning(
+                "diff range produced {} chunks; capping at {} to avoid OOM",
+                len(diff_chunks),
+                MAX_DIFF_CHUNKS,
+            )
+            diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
+        diff_embeddings: list[list[float]] = []
+        if diff_chunks:
+            emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])
+            diff_embeddings = emb_result.embeddings
+
+        vs = vector_source if vector_source in ("diff", "db", "both") else "both"
+        diff_service = DiffAwareSearchService(
+            original=services.search_service,
+            diff_chunks=diff_chunks,
+            diff_embeddings=diff_embeddings,
+            vector_source=vs,
+            embedding_manager=embedding_manager,
+        )
+        services = services._replace(search_service=diff_service)  # type: ignore[arg-type]
 
     # Create default config from environment if not provided
     if config is None:
