@@ -72,7 +72,7 @@ def parse_diff_to_chunks(raw_diff: str) -> list[Chunk]:
                 continue
 
             hunk_start = new_start
-            hunk_end = new_start
+            hunk_end = new_start + new_count - 1
             if context_text:
                 symbol = context_text
             elif current_file is not None:
@@ -85,9 +85,6 @@ def parse_diff_to_chunks(raw_diff: str) -> list[Chunk]:
 
         if in_hunk:
             hunk_lines.append(line)
-            # track end line: count added lines (lines starting with '+' but not '+++')
-            if stripped.startswith('+') and not stripped.startswith('+++'):
-                hunk_end += 1
 
     flush_hunk()
     return chunks

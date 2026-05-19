@@ -162,13 +162,14 @@ class DiffAwareSearchService:
         # 3. Sort indices by score descending
         sorted_indices = np.argsort(scores)[::-1].tolist()
 
-        # G1 — path_filter
+        # G1 — path_filter (normalise to dir prefix to avoid partial name matches)
         if path_filter:
+            _pf = path_filter.rstrip('/') + '/'
             sorted_indices = [
                 i
                 for i in sorted_indices
                 if self._diff_chunks[i].file_path
-                and str(self._diff_chunks[i].file_path).startswith(path_filter)
+                and str(self._diff_chunks[i].file_path).startswith(_pf)
             ]
 
         # 4. Apply threshold
@@ -241,20 +242,24 @@ class DiffAwareSearchService:
             )
 
         # vector_source == "both"
-        diff_task = asyncio.ensure_future(
+        # Diff chunks are in-memory — fetch all of them (no cost).
+        # DB fetch uses offset+page_size as a lower bound; multiply for headroom.
+        diff_fetch = len(self._diff_chunks) if self._diff_chunks else (offset + page_size)
+        db_fetch = max(offset + page_size, page_size * 3)
+        diff_task = asyncio.create_task(
             self._search_diff(
                 query=query,
-                page_size=page_size,
-                offset=offset,
+                page_size=diff_fetch,
+                offset=0,
                 threshold=None,  # filter after merge
                 path_filter=path_filter,
             )
         )
-        db_task = asyncio.ensure_future(
+        db_task = asyncio.create_task(
             self._original.search_semantic(
                 query=query,
-                page_size=page_size,
-                offset=offset,
+                page_size=db_fetch,
+                offset=0,
                 threshold=None,  # filter after merge
                 provider=provider,
                 model=model,

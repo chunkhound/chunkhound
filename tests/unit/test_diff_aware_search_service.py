@@ -382,6 +382,65 @@ async def test_b3_both_mode_handles_distance_based_db_results():
 
 
 # ---------------------------------------------------------------------------
+# path_filter normalization — no partial directory name match
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_path_filter_does_not_match_partial_directory_name():
+    """path_filter='src' must not match 'src_utils/foo.py'."""
+    chunk_match = make_chunk("in_src", file_path="src/auth.py", start_line=1)
+    chunk_no_match = make_chunk("in_src_utils", file_path="src_utils/helper.py", start_line=1)
+    diff_embeddings = [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    manager = make_embedding_manager([[1.0, 0.0, 0.0]])
+    original = make_original()
+
+    svc = DiffAwareSearchService(
+        original, [chunk_match, chunk_no_match], diff_embeddings, "diff", manager
+    )
+    results, _ = await svc.search_semantic("query", path_filter="src")
+
+    paths = [r["file_path"] for r in results]
+    assert "src/auth.py" in paths
+    assert "src_utils/helper.py" not in paths
+
+
+# ---------------------------------------------------------------------------
+# "both" mode multi-page pagination correctness
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_both_mode_pagination_second_page_does_not_skip_results():
+    """offset=2, page_size=1 in both mode returns the 3rd-ranked merged result."""
+    # 3 diff chunks with known score order: chunk_a > chunk_b > chunk_c
+    chunk_a = make_chunk("a", file_path="src/a.py", start_line=1)
+    chunk_b = make_chunk("b", file_path="src/b.py", start_line=1)
+    chunk_c = make_chunk("c", file_path="src/c.py", start_line=1)
+    # query = [1,0,0]; embeddings score: a=1.0, b=0.5, c=0.0
+    diff_embeddings = [
+        [1.0, 0.0, 0.0],
+        [0.5, 0.866, 0.0],
+        [0.0, 1.0, 0.0],
+    ]
+    # DB returns nothing new
+    original = make_original(semantic_results=[])
+    manager = make_embedding_manager([[1.0, 0.0, 0.0]])
+
+    svc = DiffAwareSearchService(
+        original, [chunk_a, chunk_b, chunk_c], diff_embeddings, "both", manager
+    )
+
+    # Page 1 (offset=0, page_size=2): should be [a, b]
+    page1, p1_meta = await svc.search_semantic("query", page_size=2, offset=0)
+    assert [r["file_path"] for r in page1] == ["src/a.py", "src/b.py"]
+    assert p1_meta["has_more"] is True
+
+    # Page 2 (offset=2, page_size=2): should be [c]
+    page2, p2_meta = await svc.search_semantic("query", page_size=2, offset=2)
+    assert [r["file_path"] for r in page2] == ["src/c.py"]
+    assert p2_meta["has_more"] is False
+
+
+# ---------------------------------------------------------------------------
 # Empty diff_embeddings with vector_source="both"
 # ---------------------------------------------------------------------------
 

@@ -36,6 +36,9 @@ MAX_RESPONSE_TOKENS = 20000
 MIN_RESPONSE_TOKENS = 1000
 MAX_ALLOWED_TOKENS = 25000
 
+# Diff chunk cap: prevent OOM when commit_range spans thousands of changed files
+MAX_DIFF_CHUNKS = 500
+
 
 def _summarize_subprocess_stderr(stderr: bytes) -> str:
     """Return the user-visible stderr summary for MCP subprocess failures."""
@@ -501,6 +504,21 @@ WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, bu
 # =============================================================================
 
 
+def _resolve_commit_range(
+    commit_range: str | None,
+    commit_hash: str | None,
+    last_n_commits: int | None,
+) -> str | None:
+    """Resolve mutually-exclusive commit inputs to a single git revision range."""
+    if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
+        raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
+    if commit_hash is not None:
+        return f"{commit_hash}..HEAD"
+    if last_n_commits is not None:
+        return f"HEAD~{last_n_commits}..HEAD"
+    return commit_range
+
+
 @register_tool(
     description=SEARCH_DESCRIPTION,
     requires_embeddings=False,
@@ -550,22 +568,23 @@ async def search_impl(
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
 
-    # Resolve effective commit range (mutually exclusive inputs)
-    if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
-        raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
-    effective_commit_range: str | None = commit_range
-    if commit_hash is not None:
-        effective_commit_range = f"{commit_hash}..HEAD"
-    elif last_n_commits is not None:
-        effective_commit_range = f"HEAD~{last_n_commits}..HEAD"
+    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
 
     if effective_commit_range is not None and type == "semantic":
         from chunkhound.core.git_diff import run_git_diff, parse_diff_to_chunks
         from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
-        import pathlib
+        from chunkhound.utils.project_detection import find_project_root
+        from loguru import logger as _log
 
-        raw_diff = await run_git_diff(effective_commit_range, cwd=pathlib.Path.cwd())
+        raw_diff = await run_git_diff(effective_commit_range, cwd=find_project_root(None))
         diff_chunks = parse_diff_to_chunks(raw_diff)
+        if len(diff_chunks) > MAX_DIFF_CHUNKS:
+            _log.warning(
+                "diff range produced {} chunks; capping at {} to avoid OOM",
+                len(diff_chunks),
+                MAX_DIFF_CHUNKS,
+            )
+            diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
         diff_embeddings: list[list[float]] = []
         if diff_chunks and embedding_manager is not None:
             emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])
@@ -701,22 +720,23 @@ async def deep_research_impl(
             "Configure a rerank_model in your embedding configuration."
         )
 
-    # Resolve effective commit range (mutually exclusive inputs)
-    if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
-        raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
-    effective_commit_range: str | None = commit_range
-    if commit_hash is not None:
-        effective_commit_range = f"{commit_hash}..HEAD"
-    elif last_n_commits is not None:
-        effective_commit_range = f"HEAD~{last_n_commits}..HEAD"
+    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
 
     if effective_commit_range is not None:
         from chunkhound.core.git_diff import run_git_diff, parse_diff_to_chunks
         from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
-        import pathlib
+        from chunkhound.utils.project_detection import find_project_root
+        from loguru import logger as _log
 
-        raw_diff = await run_git_diff(effective_commit_range, cwd=pathlib.Path.cwd())
+        raw_diff = await run_git_diff(effective_commit_range, cwd=find_project_root(None))
         diff_chunks = parse_diff_to_chunks(raw_diff)
+        if len(diff_chunks) > MAX_DIFF_CHUNKS:
+            _log.warning(
+                "diff range produced {} chunks; capping at {} to avoid OOM",
+                len(diff_chunks),
+                MAX_DIFF_CHUNKS,
+            )
+            diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
         diff_embeddings: list[list[float]] = []
         if diff_chunks:
             emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])

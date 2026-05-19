@@ -127,3 +127,36 @@ def build_forwarded_argv(
                 resolved = val.resolve() if isinstance(val, Path) else val
                 forwarded.extend([flag, str(resolved)])
     return forwarded
+
+
+def add_git_diff_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add mutually-exclusive git commit-range arguments shared by search and research."""
+    diff_group = parser.add_mutually_exclusive_group()
+    diff_group.add_argument(
+        "--commit-range",
+        type=str,
+        default=None,
+        dest="commit_range",
+        help="Git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0').",
+    )
+    diff_group.add_argument(
+        "--commit-hash",
+        type=str,
+        default=None,
+        dest="commit_hash",
+        help="Single commit hash — from that commit to HEAD.",
+    )
+    diff_group.add_argument(
+        "--last-n",
+        type=int,
+        default=None,
+        dest="last_n_commits",
+        help="Last N commits (equivalent to HEAD~N..HEAD).",
+    )
+    parser.add_argument(
+        "--vector-source",
+        choices=["diff", "db", "both"],
+        default="both",
+        dest="vector_source",
+        help="Search scope when commit input given: 'both' (default), 'diff', or 'db'.",
+    )

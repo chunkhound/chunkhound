@@ -116,6 +116,24 @@ diff --git a/x.py b/x.py
     assert len(chunks) == 0
 
 
+def test_end_line_computed_from_hunk_header() -> None:
+    # @@ -1,3 +1,4 @@ → new_start=1, new_count=4 → end_line = 1+4-1 = 4
+    chunks = parse_diff_to_chunks(SINGLE_HUNK_DIFF)
+    assert len(chunks) == 1
+    assert chunks[0].start_line == 1
+    assert chunks[0].end_line == 4
+
+
+def test_multi_hunk_end_lines() -> None:
+    # First hunk: @@ -1,2 +1,3 @@ → end_line = 1+3-1 = 3
+    # Second hunk: @@ -10,2 +11,3 @@ → end_line = 11+3-1 = 13
+    chunks = parse_diff_to_chunks(MULTI_HUNK_SAME_FILE)
+    assert chunks[0].start_line == 1
+    assert chunks[0].end_line == 3
+    assert chunks[1].start_line == 11
+    assert chunks[1].end_line == 13
+
+
 def test_dev_null_path_chunk_skipped() -> None:
     chunks = parse_diff_to_chunks(DEV_NULL_DIFF)
     assert len(chunks) == 0
