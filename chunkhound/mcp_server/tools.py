@@ -361,21 +361,6 @@ def limit_response_size(
     }
 
 
-def _websearch_timeout() -> float:
-    """Overall wall-clock timeout (seconds) for the websearch subprocess.
-
-    Reads CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS; falls back to 600.0 on
-    unset or malformed values.
-    """
-    raw = os.environ.get("CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS")
-    if raw is None:
-        return 600.0
-    try:
-        return float(raw)
-    except ValueError:
-        return 600.0
-
-
 # =============================================================================
 # Tool Descriptions (optimized for LLM consumption)
 # =============================================================================
@@ -658,6 +643,7 @@ async def websearch_impl(
         _build_quickresearch_argv_core,
         _fetch_and_save,
         _search,
+        _websearch_timeout,
     )
     from chunkhound.mcp_server.common import MCPError
     from chunkhound.utils.websearch_postprocess import replace_paths_with_urls

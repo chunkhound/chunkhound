@@ -30,6 +30,21 @@ from ..utils.rich_output import RichOutputFormatter
 _MAX_FETCH_CONCURRENCY = 5
 
 
+def _websearch_timeout() -> float:
+    """Overall wall-clock timeout (seconds) for the websearch subprocess.
+
+    Reads CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS; falls back to 600.0 on
+    unset or malformed values.
+    """
+    raw = os.environ.get("CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS")
+    if raw is None:
+        return 600.0
+    try:
+        return float(raw)
+    except ValueError:
+        return 600.0
+
+
 class _NextFormParser(html.parser.HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -434,6 +449,7 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
             "CHUNKHOUND_NO_PROMPTS": "1",
             "CHUNKHOUND_QUICKRESEARCH_QUIET": "1",
         }
+        timeout_s = _websearch_timeout()
         try:
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -444,7 +460,11 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
                 stderr=None,
                 text=True,
                 env=env,
+                timeout=timeout_s,
             )
+        except subprocess.TimeoutExpired:
+            formatter.error(f"websearch timed out after {timeout_s:.0f}s")
+            sys.exit(124)
         except subprocess.CalledProcessError as e:
             formatter.error(f"Research failed (exit {e.returncode})")
             sys.exit(e.returncode)
