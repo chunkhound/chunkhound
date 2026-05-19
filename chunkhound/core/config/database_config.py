@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+_EXPLICIT_DB_SUFFIXES = {".db", ".duckdb"}
+
 
 class DatabaseConfig(BaseModel):
     """Database configuration with support for multiple providers.
@@ -91,6 +93,11 @@ class DatabaseConfig(BaseModel):
         # to create a directory at that location.
         if self.provider == "duckdb" and not is_memory:
             if self.path.exists() and self.path.is_file():
+                return self.path
+            # Path ends with a known DB extension (.db / .duckdb) — treat as an explicit
+            # database file rather than a directory layout. Create the parent and return as-is.
+            if self.path.suffix.lower() in _EXPLICIT_DB_SUFFIXES:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
                 return self.path
 
         if not is_memory:
