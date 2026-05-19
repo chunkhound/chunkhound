@@ -127,3 +127,12 @@ def test_get_db_path_explicit_duckdb_extension(tmp_path):
 
     assert result == explicit_path
     assert result.parent.is_dir()
+
+
+def test_get_db_path_versioned_dir_not_treated_as_file(tmp_path):
+    """--db /data/v2.1 (directory intent) must still append /chunks.db."""
+    versioned_dir = tmp_path / "v2.1"
+    config = DatabaseConfig(path=versioned_dir, provider="duckdb")
+    result = config.get_db_path()
+
+    assert result == versioned_dir / "chunks.db"

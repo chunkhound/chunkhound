@@ -100,6 +100,7 @@ PyPI trusted publisher required for `release-rc.yml`:
 - **Preferred: pass project directory as positional arg** — `chunkhound search "query" /path/to/project` — this reads `.chunkhound.json` and resolves the DB correctly
 - **For MCP:** `chunkhound mcp --db /path/to/project/.chunkhound` (the path from `.chunkhound.json`'s `database.path`)
 - **`--db` with wrong subpath silently returns 0 results** — no error, just empty. Always verify with a regex search first.
+- `--db` accepts either a directory (uses `.../chunks.db` internally) or an explicit file path (`.db` / `.duckdb` extension returned as-is)
 - Default DB path: `.chunkhound/db/chunks.db` (directory structure, not flat file)
 - Old-style flat `.chunkhound` files (pre-v4) block directory creation — move aside before re-indexing
 - Project-local `.chunkhound.json` with relative `"path": ".chunkhound"` resolves to CWD, not the project dir — use `--db` with absolute paths when indexing remote projects
