@@ -158,6 +158,76 @@ def test_process_file_avoids_in_transaction_hnsw_guard_for_modified_chunk_delete
         provider.disconnect(skip_checkpoint=True)
 
 
+def test_reindex_with_existing_hnsw_does_not_crash_connection(
+    tmp_path: Path,
+):
+    """Regression test for issue #280: HNSW recreation must happen after COMMIT.
+
+    Before the fix, _executor_run_hnsw_guarded_mutation would recreate the HNSW
+    index inside the open transaction, triggering:
+      BoundIndex::CreateDeltaIndex is not supported for this index type
+    which fatally invalidates the DuckDB connection.
+
+    This test exercises the full index → embed → re-index path without
+    monkeypatching so any regression in commit ordering causes a real crash.
+    """
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+    try:
+        coordinator = IndexingCoordinator(provider, tmp_path)
+
+        test_file = tmp_path / "sample.py"
+        test_file.write_text(
+            "def alpha():\n"
+            "    return 1\n\n"
+            "def beta():\n"
+            "    return 2\n"
+        )
+
+        first_result = asyncio.run(
+            coordinator.process_file(test_file, skip_embeddings=True)
+        )
+        assert first_result["status"] == "success"
+
+        first_chunk_ids = [
+            int(c["id"])
+            for c in provider.get_chunks_by_file_id(
+                first_result["file_id"], as_model=False
+            )
+        ]
+        _seed_embeddings(provider, first_chunk_ids)
+
+        hnsw_indexes = _get_hnsw_index_names(provider)
+        if not hnsw_indexes:
+            pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+
+        # Modify the file so re-indexing deletes old chunks while HNSW indexes exist.
+        # Before the fix this triggered the CreateDeltaIndex assertion failure.
+        test_file.write_text(
+            "def alpha():\n"
+            "    return 1\n\n"
+            "def gamma():\n"
+            "    return 3\n"
+        )
+
+        second_result = asyncio.run(
+            coordinator.process_file(test_file, skip_embeddings=True)
+        )
+        assert second_result["status"] == "success"
+
+        # Connection must still be usable — it would be dead if CreateDeltaIndex fired.
+        live_count = provider.execute_query(
+            "SELECT COUNT(*) AS count FROM chunks", []
+        )
+        assert live_count[0]["count"] > 0
+
+        assert _get_hnsw_index_names(provider) == hnsw_indexes
+    finally:
+        provider.disconnect(skip_checkpoint=True)
+
+
 def test_delete_chunks_batch_still_uses_hnsw_guard_outside_transaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

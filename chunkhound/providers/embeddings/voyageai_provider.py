@@ -101,6 +101,64 @@ VOYAGE_MODEL_CONFIG = {
 }
 
 
+# Base backoff (seconds) for each retry category. Network errors fall through
+# to the per-provider ``self._retry_delay`` so the existing instance setting
+# still drives generic connection retries.
+_CATEGORY_BACKOFFS: dict[str, float] = {
+    # TPM / RPM windows on VoyageAI are 60s; 30s lets the window partially
+    # drain before the first retry.
+    "rate_limit": 30.0,
+    # Azure ML / proxy 408s mean the upstream endpoint is overloaded; give it
+    # room to recover before we hit it again.
+    "upstream_timeout": 10.0,
+}
+
+
+def _classify_voyageai_error(e: Exception) -> str | None:
+    """Classify a VoyageAI SDK exception for retry decisions.
+
+    Returns one of ``"rate_limit"``, ``"upstream_timeout"``, ``"network"``,
+    or ``None`` for a non-retryable error. Shared by the embedding and
+    reranking code paths so their retry behavior cannot silently drift
+    apart (a prior bug where the rerank path was missing ``str(e)`` went
+    unnoticed for exactly this reason).
+    """
+    error_type = type(e).__name__
+    error_str = str(e)
+    error_lower = error_str.lower()
+
+    # Rate limit / server errors from the VoyageAI SDK (HTTP 429, 5xx).
+    # The ``"rate limit"`` substring match is a fallback for custom
+    # endpoints (Azure ML, self-hosted proxies) that surface 429s as
+    # generic ``RuntimeError`` / ``Exception`` rather than a dedicated
+    # SDK exception class.
+    if (
+        "RateLimitError" in error_type
+        or "TryAgain" in error_type
+        or "ServerError" in error_type
+        or "ServiceUnavailableError" in error_type
+        or "rate limit" in error_lower
+    ):
+        return "rate_limit"
+
+    # HTTP 408 (upstream request timeout) from Azure ML / proxies: treat
+    # as transient and retry with a longer initial backoff.
+    if "408" in error_str or "upstream request timeout" in error_lower:
+        return "upstream_timeout"
+
+    # Network / transient connection errors.
+    if (
+        "APIConnectionError" in error_type
+        or "ConnectionError" in error_type
+        or "RemoteDisconnected" in error_type
+        or "Timeout" in error_type
+        or "TimeoutError" in error_type
+    ):
+        return "network"
+
+    return None
+
+
 class VoyageAIEmbeddingProvider:
     """VoyageAI embedding provider using voyage-3.5 by default."""
 
@@ -127,6 +185,8 @@ class VoyageAIEmbeddingProvider:
         rerank_url: str | None = None,
         rerank_format: str = "auto",
         max_concurrent_batches: int | None = None,
+        ssl_verify: bool = True,
+        rerank_ssl_verify: bool | None = None,
     ):
         """Initialize VoyageAI embedding provider.
 
@@ -151,6 +211,10 @@ class VoyageAIEmbeddingProvider:
                 Defaults to 1 for custom endpoints (e.g. Azure ML) to avoid
                 HTTP 424 "Failed Dependency" from concurrent-request overload,
                 and to RECOMMENDED_CONCURRENCY for the official VoyageAI API.
+            ssl_verify: Verify TLS certificates for requests sent via explicit
+                custom HTTP endpoints. The VoyageAI SDK path remains verified.
+            rerank_ssl_verify: Verify TLS certificates for HTTP rerank requests.
+                Defaults to ssl_verify when unset.
         """
         if not VOYAGEAI_AVAILABLE:
             raise ImportError(
@@ -183,6 +247,10 @@ class VoyageAIEmbeddingProvider:
         self._rerank_format = rerank_format
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
+        self._ssl_verify_enabled = ssl_verify
+        self._rerank_ssl_verify_enabled = (
+            rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
+        )
 
         # For non-official custom endpoints without an API key, pass a placeholder to
         # satisfy the SDK's requirement — the server ignores the auth header.
@@ -191,14 +259,12 @@ class VoyageAIEmbeddingProvider:
         is_custom = base_url and not is_official_voyageai_endpoint(base_url)
         effective_api_key = api_key if api_key else ("no-key" if is_custom else None)
 
-        # Use the system CA bundle when available so that corporate proxy CAs
-        # (e.g. Blue Coat / AMAT) are trusted without patching certifi.
-        # self._ssl_verify is passed directly to httpx.AsyncClient(verify=...).
-        _sys_ca = "/etc/ssl/certs/ca-certificates.crt"
-        if os.path.exists(_sys_ca) and not os.environ.get("REQUESTS_CA_BUNDLE"):
-            self._ssl_verify: str | bool = _sys_ca
-        else:
-            self._ssl_verify = os.environ.get("REQUESTS_CA_BUNDLE") or True
+        self._ssl_verify = self._resolve_http_verify_setting(
+            self._ssl_verify_enabled, endpoint=base_url
+        )
+        self._rerank_ssl_verify = self._resolve_http_verify_setting(
+            self._rerank_ssl_verify_enabled, endpoint=rerank_url
+        )
 
         # Initialize client
         self._client = voyageai.Client(api_key=effective_api_key, timeout=timeout)
@@ -236,6 +302,21 @@ class VoyageAIEmbeddingProvider:
     def model(self) -> str:
         """Model name."""
         return self._model
+
+    @staticmethod
+    def _resolve_http_verify_setting(
+        ssl_verify_enabled: bool, endpoint: str | None
+    ) -> str | bool:
+        """Resolve the verify setting for explicit HTTP client calls."""
+        if endpoint is None:
+            return True
+        if not ssl_verify_enabled:
+            return False
+
+        _sys_ca = "/etc/ssl/certs/ca-certificates.crt"
+        if os.path.exists(_sys_ca) and not os.environ.get("REQUESTS_CA_BUNDLE"):
+            return _sys_ca
+        return os.environ.get("REQUESTS_CA_BUNDLE") or True
 
     @property
     def dims(self) -> int:
@@ -323,33 +404,12 @@ class VoyageAIEmbeddingProvider:
                 return [embedding for embedding in result.embeddings]
 
             except Exception as e:
-                # Classify error type for retry decision
                 error_type = type(e).__name__
                 error_module = type(e).__module__
-                error_str = str(e)
+                category = _classify_voyageai_error(e)
 
-                # Network / transient errors that should be retried
-                is_network_error = any(
-                    [
-                        "APIConnectionError" in error_type,
-                        "ConnectionError" in error_type,
-                        "RemoteDisconnected" in error_type,
-                        "Timeout" in error_type,
-                        "TimeoutError" in error_type,
-                    ]
-                )
-
-                # HTTP 408 (upstream request timeout) from Azure ML / proxies:
-                # treat as transient and retry with a longer initial backoff
-                is_upstream_timeout = "408" in error_str or (
-                    "upstream request timeout" in error_str.lower()
-                )
-
-                if (
-                    is_network_error or is_upstream_timeout
-                ) and attempt < self._retry_attempts - 1:
-                    # Longer backoff for upstream timeouts — endpoint needs time to recover
-                    base_delay = 10.0 if is_upstream_timeout else self._retry_delay
+                if category is not None and attempt < self._retry_attempts - 1:
+                    base_delay = _CATEGORY_BACKOFFS.get(category, self._retry_delay)
                     delay = base_delay * (2**attempt)
                     logger.warning(
                         f"VoyageAI embedding failed with {error_module}.{error_type} "
@@ -359,8 +419,7 @@ class VoyageAIEmbeddingProvider:
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    # Non-retryable error or last attempt - log and raise
-                    if is_network_error or is_upstream_timeout:
+                    if category is not None:
                         logger.error(
                             f"VoyageAI embedding failed after {self._retry_attempts} attempts: {e}"
                         )
@@ -639,17 +698,11 @@ class VoyageAIEmbeddingProvider:
             except Exception as e:
                 error_type = type(e).__name__
                 error_module = type(e).__module__
-                is_network_error = any(
-                    [
-                        "APIConnectionError" in error_type,
-                        "ConnectionError" in error_type,
-                        "RemoteDisconnected" in error_type,
-                        "Timeout" in error_type,
-                        "TimeoutError" in error_type,
-                    ]
-                )
-                if is_network_error and attempt < self._retry_attempts - 1:
-                    delay = self._retry_delay * (2**attempt)
+                category = _classify_voyageai_error(e)
+
+                if category is not None and attempt < self._retry_attempts - 1:
+                    base_delay = _CATEGORY_BACKOFFS.get(category, self._retry_delay)
+                    delay = base_delay * (2**attempt)
                     logger.warning(
                         f"VoyageAI reranking failed with {error_module}.{error_type} "
                         f"(attempt {attempt + 1}/{self._retry_attempts}): {e}. "
@@ -658,7 +711,7 @@ class VoyageAIEmbeddingProvider:
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    if is_network_error:
+                    if category is not None:
                         logger.error(
                             f"VoyageAI reranking failed after {self._retry_attempts} attempts: {e}"
                         )
@@ -710,7 +763,7 @@ class VoyageAIEmbeddingProvider:
         )
 
         async with httpx.AsyncClient(
-            timeout=self._timeout, verify=self._ssl_verify
+            timeout=self._timeout, verify=self._rerank_ssl_verify
         ) as client:
             headers = {"Content-Type": "application/json"}
             if self._api_key:
@@ -768,6 +821,9 @@ class VoyageAIEmbeddingProvider:
 
         results = []
         for item in data["results"]:
+            if not isinstance(item, dict):
+                logger.warning(f"Skipping non-dict rerank result: {item!r}")
+                continue
             # Cohere: {"index": N, "relevance_score": F}
             # TEI:    {"index": N, "score": F}
             idx = item.get("index")

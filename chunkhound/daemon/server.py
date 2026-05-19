@@ -54,7 +54,7 @@ class ChunkHoundDaemon(MCPServerBase):
         self._pid_poll_task: asyncio.Task | None = None
         self._delayed_shutdown_task: asyncio.Task[None] | None = None
         self._client_manager = ClientManager(on_empty=self._on_all_clients_gone)
-        # True only after we successfully bound the socket and wrote the lock
+        # True only after we successfully bound the socket and published our lock.
         self._lock_written = False
         self._auth_token: str | None = None  # Set before accepting connections
         delay_str = os.environ.get(
@@ -102,10 +102,8 @@ class ChunkHoundDaemon(MCPServerBase):
 
             # Initialise services (DB, embeddings, realtime indexing)
             await self.initialize()
-            await self.await_startup_barrier()
-            self._initialization_complete.set()
-            self.debug_log("Daemon initialised")
 
+            # --- DAEMON PUBLISH FIRST (before sidecar startup barrier) ---
             self._start_startup_phase("daemon_publish")
             try:
                 # Generate auth token BEFORE accepting connections so every client
@@ -162,7 +160,6 @@ class ChunkHoundDaemon(MCPServerBase):
                     f"(pid={os.getpid()}, address={self._socket_path})"
                 )
                 self._complete_startup_phase("daemon_publish")
-                self._complete_startup()
                 self._resolve_startup_publish_complete()
             except Exception as error:
                 self._set_startup_failure(
@@ -170,7 +167,13 @@ class ChunkHoundDaemon(MCPServerBase):
                     phase_name="daemon_publish",
                 )
                 self._resolve_startup_publish_complete()
-                raise
+                self._shutdown_event.set()
+                return
+
+            # --- THEN deferred startup barrier (sidecar readiness) ---
+            self._initialization_complete.set()
+            await self.await_startup_barrier()
+            self._complete_startup()
 
             # Start PID poll background task
             self._pid_poll_task = asyncio.create_task(self._client_manager.poll_pids())
@@ -396,10 +399,10 @@ class ChunkHoundDaemon(MCPServerBase):
     # ------------------------------------------------------------------
 
     async def _graceful_shutdown(self) -> None:
-        """Stop background tasks, clean up services, remove lock file.
+        """Stop background tasks, clean up services, remove published artifacts.
 
-        Only removes the lock file and socket if this daemon instance
-        successfully wrote the lock (i.e. won the startup race).
+        Only the daemon that won publication may remove shared artifacts. Race
+        losers must not delete the winner's lock, socket path, or registry entry.
         """
         if self._pid_poll_task is not None and not self._pid_poll_task.done():
             self._pid_poll_task.cancel()
@@ -425,18 +428,21 @@ class ChunkHoundDaemon(MCPServerBase):
         except (asyncio.TimeoutError, Exception) as e:
             self.debug_log(f"Cleanup error (non-fatal): {e}")
 
-        # Only remove lock file and socket if we successfully bound the server.
-        # If two daemons race to start, the loser must not delete the winner's
-        # lock file or socket path — doing so would make the winner unreachable.
         if self._lock_written:
-            self._discovery.remove_lock()
+            try:
+                self._discovery.remove_lock()
+                self.debug_log("Removed IPC lock file")
+            except Exception as e:
+                self.debug_log(f"Lock removal failed (non-fatal): {e}")
 
-            # Remove socket file on Unix; TCP loopback needs no cleanup
             if sys.platform != "win32" and not self._socket_path.startswith("tcp:"):
                 try:
                     os.unlink(self._socket_path)
+                    self.debug_log("Removed IPC socket")
                 except FileNotFoundError:
                     pass
+            else:
+                self.debug_log("Skipping socket cleanup — TCP transport")
 
             try:
                 self._discovery.remove_registry_entry()

@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from chunkhound.providers.llm.codex_cli_provider import CODEX_DEFAULT_SYNTHESIS_MODEL
+
 
 class _DummyPipe:
     def __init__(self) -> None:  # pragma: no cover - trivial
@@ -77,4 +79,4 @@ async def test_codex_stdin_is_default(monkeypatch, tmp_path: Path):
     # Ensure overlay is cleaned
     assert not overlay_dir.exists(), "overlay CODEX_HOME should be removed after run"
     # "codex" alias should resolve to the default Codex model
-    assert requested_model.get("value") == "gpt-5.1-codex"
+    assert requested_model.get("value") == CODEX_DEFAULT_SYNTHESIS_MODEL

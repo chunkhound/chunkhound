@@ -147,7 +147,7 @@ def get_reranking_providers() -> list[tuple[str, type, dict[str, Any]]]:
                 {
                     "api_key": "dummy-key",
                     "base_url": "http://localhost:11434/v1",
-                    "model": "nomic-embed-text",
+                    "model": "qwen3-embedding",
                     "rerank_model": "test-model",
                     "rerank_url": "http://localhost:8001/rerank",
                     "batch_size": 100,

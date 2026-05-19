@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.interfaces.llm_provider import LLMResponse
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 
@@ -314,6 +315,11 @@ class TestClaudeCodeCLIProvider:
 
         # Should have tried max_retries (3) times
         assert mock_subprocess.call_count == 3
+
+    def test_default_timeout(self):
+        """Test that default timeout (no explicit param) resolves to 120."""
+        p = ClaudeCodeCLIProvider()
+        assert p.timeout == DEFAULT_LLM_TIMEOUT
 
     @pytest.mark.asyncio
     async def test_timeout_with_already_terminated_process(self, provider, mock_subprocess):

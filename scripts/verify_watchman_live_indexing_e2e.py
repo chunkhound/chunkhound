@@ -549,6 +549,12 @@ def _has_nested_watchman_health(realtime: dict[str, Any]) -> bool:
     )
 
 
+def _is_polling_fallback_ready_state(realtime: dict[str, Any]) -> bool:
+    sidecar_state = realtime.get("watchman_sidecar_state")
+    effective_backend = realtime.get("effective_backend")
+    return sidecar_state == "stopped" and effective_backend == "polling"
+
+
 async def _wait_for_ready(client: SubprocessJsonRpcClient) -> dict[str, Any]:
     deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
     last_status: dict[str, Any] | None = None
@@ -560,16 +566,21 @@ async def _wait_for_ready(client: SubprocessJsonRpcClient) -> dict[str, Any]:
         )
         last_status = _parse_tool_json(result)
         realtime = last_status.get("scan_progress", {}).get("realtime", {})
-        if (
-            last_status.get("status") == "ready"
-            and realtime.get("watchman_connection_state") == "connected"
-            and realtime.get("watchman_subscription_count") == 1
-            and _has_nested_watchman_health(realtime)
-        ):
-            return last_status
+        if last_status.get("status") == "ready":
+            if realtime.get("watchman_sidecar_state") == "running":
+                # Full Watchman readiness: connected, subscribed, healthy
+                if (
+                    realtime.get("watchman_connection_state") == "connected"
+                    and realtime.get("watchman_subscription_count") == 1
+                    and _has_nested_watchman_health(realtime)
+                ):
+                    return last_status
+            elif _is_polling_fallback_ready_state(realtime):
+                # Polling fallback is only ready once status is explicit.
+                return last_status
         await asyncio.sleep(0.5)
 
-    raise RuntimeError(f"Timed out waiting for ready Watchman daemon: {last_status}")
+    raise RuntimeError(f"Timed out waiting for ready daemon: {last_status}")
 
 
 async def _wait_for_search_hit(
@@ -959,41 +970,71 @@ async def _verify_wheel(wheel_path: Path) -> None:
 
             ready_status = await _wait_for_ready(client)
             realtime = ready_status["scan_progress"]["realtime"]
-            if realtime.get("watchman_sidecar_state") != "running":
-                raise RuntimeError(f"Unexpected Watchman sidecar state: {realtime}")
-            if not _has_nested_watchman_health(realtime):
-                raise RuntimeError(
-                    "Ready Watchman daemon_status payload was missing nested health "
-                    f"structure: {realtime}"
-                )
-            _assert_sidecar_uses_installed_runtime(realtime, venv_dir=venv_dir)
+            sidecar_state = realtime.get("watchman_sidecar_state")
+            effective_backend = realtime.get("effective_backend")
+            if sidecar_state == "running":
+                # Full Watchman health check path
+                if not _has_nested_watchman_health(realtime):
+                    raise RuntimeError(
+                        "Ready Watchman daemon_status payload was missing nested "
+                        f"health structure: {realtime}"
+                    )
+                _assert_sidecar_uses_installed_runtime(realtime, venv_dir=venv_dir)
 
-            live_file.parent.mkdir(parents=True, exist_ok=True)
-            live_file.write_text(
-                f"def {live_symbol}():\n    return 'live'\n",
-                encoding="utf-8",
-            )
+                live_file.parent.mkdir(parents=True, exist_ok=True)
+                live_file.write_text(
+                    f"def {live_symbol}():\n    return 'live'\n",
+                    encoding="utf-8",
+                )
 
-            await _wait_for_search_hit(client, query=live_symbol)
+                await _wait_for_search_hit(client, query=live_symbol)
 
-            final_status = _parse_tool_json(
-                await client.send_request(
-                    "tools/call",
-                    {"name": "daemon_status", "arguments": {}},
-                    timeout=15.0,
+                final_status = _parse_tool_json(
+                    await client.send_request(
+                        "tools/call",
+                        {"name": "daemon_status", "arguments": {}},
+                        timeout=15.0,
+                    )
                 )
-            )
-            final_realtime = final_status["scan_progress"]["realtime"]
-            if not _has_nested_watchman_health(final_realtime):
-                raise RuntimeError(
-                    "Final Watchman daemon_status payload was missing nested health "
-                    f"structure: {final_realtime}"
+                final_realtime = final_status["scan_progress"]["realtime"]
+                if not _has_nested_watchman_health(final_realtime):
+                    raise RuntimeError(
+                        "Final Watchman daemon_status payload was missing nested "
+                        f"health structure: {final_realtime}"
+                    )
+                if int(final_realtime.get("watchman_subscription_pdu_count", 0)) < 1:
+                    raise RuntimeError(
+                        "Live mutation became searchable, but no subscription PDUs "
+                        f"were recorded: {final_realtime}"
+                    )
+            else:
+                # Degraded mode — Watchman sidecar unavailable, polling fallback active
+                if effective_backend != "polling":
+                    raise RuntimeError(
+                        "Daemon in degraded mode but effective_backend is "
+                        f"'{effective_backend}' (expected 'polling'): {realtime}"
+                    )
+
+                live_file.parent.mkdir(parents=True, exist_ok=True)
+                live_file.write_text(
+                    f"def {live_symbol}():\n    return 'live'\n",
+                    encoding="utf-8",
                 )
-            if int(final_realtime.get("watchman_subscription_pdu_count", 0)) < 1:
-                raise RuntimeError(
-                    "Live mutation became searchable, but no subscription PDUs were "
-                    f"recorded: {final_realtime}"
+                await _wait_for_search_hit(client, query=live_symbol)
+
+                final_status = _parse_tool_json(
+                    await client.send_request(
+                        "tools/call",
+                        {"name": "daemon_status", "arguments": {}},
+                        timeout=15.0,
+                    )
                 )
+                final_realtime = final_status["scan_progress"]["realtime"]
+                if not _is_polling_fallback_ready_state(final_realtime):
+                    raise RuntimeError(
+                        "Polling fallback stopped being explicit after live mutation: "
+                        f"{final_realtime}"
+                    )
         finally:
             await client.close()
             if proc.stderr is not None:

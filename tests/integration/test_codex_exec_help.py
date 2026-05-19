@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+from chunkhound.providers.llm.codex_cli_provider import CODEX_DEFAULT_SYNTHESIS_MODEL, CodexCLIProvider
 
 
 @pytest.mark.integration
@@ -90,7 +90,7 @@ def test_codex_exec_simple_prompt():
             "Overlay config.toml does not disable history persistence."
         )
         assert "mcp_servers" not in content.lower(), "Overlay config.toml must not define MCP servers."
-        assert 'model = "gpt-5.1-codex"' in content, "Overlay config.toml must set model to gpt-5.1-codex."
+        assert f'model = "{CODEX_DEFAULT_SYNTHESIS_MODEL}"' in content, "Overlay config.toml must set model to the default synthesis model."
         assert "model_reasoning_effort" in content and "low" in content.lower(), (
             "Overlay config.toml must set model_reasoning_effort to low."
         )
@@ -122,6 +122,10 @@ def test_codex_exec_simple_prompt():
         auth_hints = ("login", "authenticate", "not logged in", "sign in", "unauthorized")
         if proc.returncode != 0 and any(h in err for h in auth_hints):
             pytest.xfail("Codex CLI not authenticated in this environment.")
+
+        account_hints = ("not supported", "invalid_request_error", "chatgpt account", "subscription required")
+        if proc.returncode != 0 and any(h in err for h in account_hints):
+            pytest.xfail("Model not supported for this account type — requires OpenAI API account.")
 
         assert proc.returncode == 0, f"codex exec failed: rc={proc.returncode}, stderr={err!r}"
         assert out, "codex exec produced no output"

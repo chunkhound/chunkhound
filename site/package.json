@@ -1,0 +1,17 @@
+{
+  "name": "chunkhound-site",
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "astro": "^6.1.5",
+    "mermaid": "^11.0.0",
+    "remark-gfm": "^4.0.0",
+    "tsx": "^4.8.1"
+  }
+}

@@ -17,6 +17,7 @@ import tempfile
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
@@ -24,12 +25,14 @@ from chunkhound.utils.text_sanitization import sanitize_error_text
 class ClaudeCodeCLIProvider(BaseCLIProvider):
     """Claude Code CLI provider using subprocess calls to claude --print."""
 
+    DEFAULT_MODEL = "claude-sonnet-4-6"
+
     def __init__(
         self,
         api_key: str | None = None,
         model: str = "claude-sonnet-4-6",
         base_url: str | None = None,
-        timeout: int = 60,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
         """Initialize Claude Code CLI provider.

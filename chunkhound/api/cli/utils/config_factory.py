@@ -5,8 +5,36 @@ instances, eliminating duplication across CLI commands and MCP servers.
 """
 
 import argparse
+from pathlib import Path
 
+from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.config import Config
+from chunkhound.core.config.indexing_config import IndexingConfig
+from chunkhound.core.config.mcp_config import MCPConfig
+from chunkhound.core.config.research_config import ResearchConfig
+
+
+def _fallback_config(args: argparse.Namespace) -> Config:
+    """Construct a minimal config object when validated loading fails."""
+    target_dir = getattr(args, "path", None)
+    resolved_target = None
+    if target_dir is not None:
+        try:
+            resolved_target = Path(target_dir).resolve()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            resolved_target = None
+
+    return Config.model_construct(
+        database=DatabaseConfig(),
+        embedding=None,
+        llm=None,
+        mcp=MCPConfig(),
+        indexing=IndexingConfig(),
+        research=ResearchConfig(),
+        debug=False,
+        target_dir=resolved_target,
+        embeddings_disabled=bool(getattr(args, "no_embeddings", False)),
+    )
 
 
 def create_validated_config(
@@ -24,8 +52,12 @@ def create_validated_config(
     Returns:
         tuple: (config_instance, validation_errors)
     """
-    config = Config(args=args)
-    validation_errors = config.validate_for_command(command)
+    try:
+        config = Config(args=args)
+    except ValueError as exc:
+        return _fallback_config(args), [str(exc)]
+
+    validation_errors = config.validate_for_command(command, args)
     return config, validation_errors
 
 

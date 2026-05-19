@@ -1,5 +1,8 @@
 import pytest
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+from chunkhound.providers.llm.codex_cli_provider import CODEX_DEFAULT_SYNTHESIS_MODEL
+
 
 def test_codex_cli_provider_import_and_name():
     # Red test: module does not exist yet
@@ -14,7 +17,7 @@ def test_codex_cli_model_resolution_defaults(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.delenv("CHUNKHOUND_CODEX_DEFAULT_MODEL", raising=False)
     resolved, source = CodexCLIProvider.describe_model_resolution("codex")
-    assert resolved == "gpt-5.1-codex"
+    assert resolved == CODEX_DEFAULT_SYNTHESIS_MODEL
     assert source in {"default", "env:CHUNKHOUND_CODEX_DEFAULT_MODEL"}
 
 
@@ -34,3 +37,10 @@ def test_codex_cli_effort_resolution_default(monkeypatch: pytest.MonkeyPatch) ->
     resolved, source = CodexCLIProvider.describe_reasoning_effort_resolution(None)
     assert resolved == "low"
     assert source == "default"
+
+
+def test_default_timeout():
+    """Default timeout resolves to DEFAULT_LLM_TIMEOUT."""
+    from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+    p = CodexCLIProvider()
+    assert p.timeout == DEFAULT_LLM_TIMEOUT
