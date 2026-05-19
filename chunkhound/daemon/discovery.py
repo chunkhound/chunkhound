@@ -1011,46 +1011,18 @@ class DaemonDiscovery:
         """
         import argparse as _ap
 
+        from chunkhound.api.cli.parsers.common_arguments import build_forwarded_argv
         from chunkhound.api.cli.parsers.daemon_parser import add_daemon_subparser
 
-        # Build a temporary daemon parser solely for introspection.
-        _tmp = _ap.ArgumentParser()
+        _tmp = _ap.ArgumentParser(add_help=False)
         daemon_parser = add_daemon_subparser(_tmp.add_subparsers())
-
-        # These dests are daemon-specific positional/required args that have
-        # no equivalent in the mcp parser and are already handled explicitly.
-        _skip_dests = {"project_dir", "socket_path", "help"}
-
-        forwarded: list[str] = []
-        for action in daemon_parser._actions:
-            if not action.option_strings:
-                continue  # positional — skip
-            dest = action.dest
-            if dest in _skip_dests:
-                continue
-            val = getattr(args, dest, None)
-            if val is None:
-                continue
-            flag = action.option_strings[0]
-            if action.const is True:
-                # store_true: only add the flag when the value is True
-                if val:
-                    forwarded.append(flag)
-            elif action.const is False:
-                # store_false: only add the flag when the value is False
-                if not val:
-                    forwarded.append(flag)
-            elif isinstance(val, list):
-                # append action (e.g. --include / --exclude)
-                for item in val:
-                    forwarded.extend([flag, str(item)])
-            else:
-                # Regular store action — forward only when explicitly set
-                # (i.e. different from the action's declared default).
-                if val != action.default:
-                    forwarded.extend([flag, str(val)])
-
-        return forwarded
+        # project_dir and socket_path are daemon-specific positionals already
+        # placed explicitly in the command; skip them here.
+        return build_forwarded_argv(
+            daemon_parser,
+            args,
+            skip_dests={"project_dir", "socket_path", "help"},
+        )
 
     def _start_daemon_subprocess(
         self,

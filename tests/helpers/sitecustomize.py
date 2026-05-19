@@ -93,8 +93,71 @@ def _patch_capability_checks() -> None:
         pass
 
 
+def _patch_websearch_for_tests() -> None:
+    """Stub the websearch pipeline so stdio integration tests run offline.
+
+    Activated by CH_TEST_WEBSEARCH_STUB=1. Flips capability gating off for the
+    websearch tool and replaces the three lazy-imported helpers with trivial
+    stubs: _search returns fixed results, _fetch_and_save is a no-op, and the
+    subprocess launch runs a one-line `print('ANSWER')` command.
+    """
+    try:
+        from chunkhound.mcp_server.tools import TOOL_REGISTRY
+
+        if "websearch" in TOOL_REGISTRY:
+            tool = TOOL_REGISTRY["websearch"]
+            tool.requires_embeddings = False
+            tool.requires_llm = False
+            tool.requires_reranker = False
+    except ImportError:
+        pass
+
+    try:
+        import sys as _sys
+
+        from chunkhound.api.cli.commands import websearch as ws_mod
+
+        # Touch each symbol before rebinding so a rename surfaces as
+        # AttributeError at import time instead of silently leaving the
+        # stub inactive while tests hit the real network.
+        ws_mod._search  # noqa: B018
+        ws_mod._fetch_and_save  # noqa: B018
+        ws_mod._build_quickresearch_argv_core  # noqa: B018
+
+        def _stub_search(query, limit=30, progress_callback=None):
+            return [
+                ("Stub Result One", "https://example.invalid/one", "first stub"),
+                ("Stub Result Two", "https://example.invalid/two", "second stub"),
+                ("Stub Result Three", "https://example.invalid/three", "third stub"),
+            ][:limit]
+
+        async def _stub_fetch_and_save(
+            urls, tmpdir, progress_callback=None, warning_callback=None,
+            mapping=None,
+        ):
+            # Write minimal .md files so _quickresearch (stubbed separately)
+            # has input should it ever run.
+            for i, url in enumerate(urls):
+                name = f"stub_{i}.md"
+                (tmpdir / name).write_text("stub content", encoding="utf-8")
+                if mapping is not None:
+                    mapping[name] = url
+
+        def _stub_build_argv(query, tmpdir, path_filter, config):
+            return [_sys.executable, "-c", "print('ANSWER')"]
+
+        ws_mod._search = _stub_search  # type: ignore[assignment]
+        ws_mod._fetch_and_save = _stub_fetch_and_save  # type: ignore[assignment]
+        ws_mod._build_quickresearch_argv_core = _stub_build_argv  # type: ignore[assignment]
+    except ImportError:
+        pass
+
+
 if os.getenv("CH_TEST_PATCH_CODEX") == "1":  # activate only for tests that request it
     _patch_codex_cli_provider()
     if os.getenv("CH_TEST_FORCE_SYNTHESIS") == "1":
         _force_code_research_synthesis()
         _patch_capability_checks()
+
+if os.getenv("CH_TEST_WEBSEARCH_STUB") == "1":
+    _patch_websearch_for_tests()
