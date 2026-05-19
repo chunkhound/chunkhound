@@ -123,3 +123,16 @@ def test_main_sync_skips_reconfigure_on_non_windows(monkeypatch: pytest.MonkeyPa
 
     assert stdout.reconfigure_calls == []
     assert stderr.reconfigure_calls == []
+
+
+def test_main_sync_no_crash_when_reconfigure_absent(monkeypatch: pytest.MonkeyPatch):
+    """main_sync() must not raise when streams lack reconfigure()."""
+    monkeypatch.setattr(sys, "stdout", NoReconfigureWriter())
+    monkeypatch.setattr(sys, "stderr", NoReconfigureWriter())
+    monkeypatch.setattr("chunkhound.mcp_server.stdio.IS_WINDOWS", True)
+    _stub_asyncio_run(monkeypatch)
+
+    from chunkhound.mcp_server.stdio import main_sync
+
+    with pytest.raises(SystemExit):
+        main_sync()
