@@ -89,7 +89,11 @@ class DiffAwareSearchService:
         self._embedding_manager = embedding_manager
 
         if diff_embeddings:
-            mat = np.array(diff_embeddings, dtype=np.float32)
+            # Guard: embedding provider may return more/fewer embeddings than inputs
+            # (batching boundary bug observed in Qwen3 provider). Clamp both to min.
+            M = min(len(diff_embeddings), len(diff_chunks))
+            self._diff_chunks = diff_chunks[:M]
+            mat = np.array(diff_embeddings[:M], dtype=np.float32)
             norms = np.linalg.norm(mat, axis=1, keepdims=True)
             norms = np.clip(norms, np.float32(1e-9), None)  # avoid upcast via float32
             self._norm_matrix: np.ndarray | None = mat / norms
