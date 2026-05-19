@@ -247,7 +247,7 @@ class TestExecuteToolSearchReturnsMarkdown:
         (20 000).  The loop trims by 1/4 each pass; after one pass 8 results remain (~18 700
         tokens < limit).  The response must reflect the trim: fewer blocks and next_offset set.
         """
-        from chunkhound.mcp_server.tools import execute_tool
+        from chunkhound.mcp_server.tools import MAX_RESPONSE_TOKENS, estimate_tokens, execute_tool
 
         large_content = "x" * 7000
         results = [
@@ -269,6 +269,10 @@ class TestExecuteToolSearchReturnsMarkdown:
             f"Trim loop should have removed results; found {result_block_count} blocks"
         )
         assert "next_offset=" in result, "Trimmed response must set next_offset for the caller to page"
+        assert estimate_tokens(result) <= MAX_RESPONSE_TOKENS, (
+            f"Trim loop must reduce output to within MAX_RESPONSE_TOKENS; "
+            f"got {estimate_tokens(result)} tokens"
+        )
 
     async def test_trim_loop_returns_at_least_one_result_when_single_oversized(self) -> None:
         """Single oversized result is truncated to fit within MAX_RESPONSE_TOKENS, not dropped."""
