@@ -1,7 +1,7 @@
-"""Unit tests for the DuckDuckGo pagination loop (``_search``) and form POST.
+"""Unit tests for the DuckDuckGo pagination loop (``search``) and form POST.
 
 Covers:
-- ``_search`` pagination termination conditions (limit, empty page, missing
+- ``search`` pagination termination conditions (limit, empty page, missing
   Next form) and its forwarding of query params.
 - ``_fetch`` POSTing url-encoded params to the DDG HTML endpoint with the
   required User-Agent header.
@@ -15,7 +15,7 @@ from io import BytesIO
 
 import pytest
 
-from chunkhound.api.cli.commands import websearch as ws_mod
+from chunkhound.utils import websearch_core as ws_mod
 
 # ---------------------------------------------------------------------------
 # HTML fixture builders
@@ -52,7 +52,7 @@ def _page_html(
 
 
 # ---------------------------------------------------------------------------
-# _search
+# search
 # ---------------------------------------------------------------------------
 
 
@@ -82,7 +82,7 @@ def test_search_single_page_under_limit(monkeypatch) -> None:
     )
     calls = _install_fetch_sequence(monkeypatch, [page])
 
-    out = ws_mod._search("foo", limit=30)
+    out = ws_mod.search("foo", limit=30)
 
     assert [url for _, url, _ in out] == ["https://a/", "https://b/", "https://c/"]
     assert len(calls) == 1
@@ -92,7 +92,7 @@ def test_search_forwards_query_on_first_fetch(monkeypatch) -> None:
     page = _page_html([("A", "https://a/", "d")])
     calls = _install_fetch_sequence(monkeypatch, [page])
 
-    ws_mod._search("hello world", limit=30)
+    ws_mod.search("hello world", limit=30)
 
     assert calls[0] == {"q": "hello world", "b": ""}
 
@@ -106,7 +106,7 @@ def test_search_paginates_until_limit(monkeypatch) -> None:
     page2 = _page_html([("T" + str(i), f"https://p2-{i}/", "d") for i in range(20)])
     calls = _install_fetch_sequence(monkeypatch, [page1, page2])
 
-    out = ws_mod._search("q", limit=30)
+    out = ws_mod.search("q", limit=30)
 
     assert len(out) == 30
     assert len(calls) == 2
@@ -123,7 +123,7 @@ def test_search_halts_on_empty_second_page(monkeypatch) -> None:
     page2 = _page_html([], next_params=None)
     calls = _install_fetch_sequence(monkeypatch, [page1, page2])
 
-    out = ws_mod._search("q", limit=30)
+    out = ws_mod.search("q", limit=30)
 
     assert len(out) == 5
     assert len(calls) == 2
@@ -136,7 +136,7 @@ def test_search_halts_when_no_next_form(monkeypatch) -> None:
     )
     calls = _install_fetch_sequence(monkeypatch, [page1])
 
-    out = ws_mod._search("q", limit=30)
+    out = ws_mod.search("q", limit=30)
 
     assert len(out) == 7
     assert len(calls) == 1
@@ -152,7 +152,7 @@ def test_search_progress_callback_invoked_per_page(monkeypatch) -> None:
     _install_fetch_sequence(monkeypatch, [page1, page2])
 
     seen: list[str] = []
-    ws_mod._search("q", limit=30, progress_callback=seen.append)
+    ws_mod.search("q", limit=30, progress_callback=seen.append)
 
     assert seen == ["Fetching page 1...", "Fetching page 2..."]
 

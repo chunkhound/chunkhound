@@ -1,7 +1,7 @@
 """Integration tests for the CLI ``websearch_command`` entry point.
 
 Mirrors the in-process patching style of ``tests/unit/test_websearch_mcp_errors.py``:
-imports the async command directly, stubs ``_search`` / ``_fetch_and_save``
+imports the async command directly, stubs ``search`` / ``fetch_and_save``
 / ``subprocess.run`` / ``_build_quickresearch_argv``, and asserts on exit
 codes, tmpdir creation, and subprocess invocation flags.
 """
@@ -90,7 +90,7 @@ async def test_websearch_command_urlerror_exits_1(monkeypatch, patched) -> None:
     def raise_url_error(*args, **kwargs):
         raise urllib.error.URLError("boom")
 
-    monkeypatch.setattr(ws_mod, "_search", raise_url_error)
+    monkeypatch.setattr(ws_mod, "search", raise_url_error)
 
     with pytest.raises(SystemExit) as exc:
         await ws_mod.websearch_command(_make_args(), config=None)
@@ -104,7 +104,7 @@ async def test_websearch_command_urlerror_exits_1(monkeypatch, patched) -> None:
 async def test_websearch_command_empty_results_returns_without_exit(
     monkeypatch, patched
 ) -> None:
-    monkeypatch.setattr(ws_mod, "_search", _stub_search([]))
+    monkeypatch.setattr(ws_mod, "search", _stub_search([]))
 
     errors: list[str] = []
     monkeypatch.setattr(
@@ -125,8 +125,8 @@ async def test_websearch_command_empty_results_returns_without_exit(
 async def test_websearch_command_happy_path_runs_subprocess(
     monkeypatch, patched
 ) -> None:
-    monkeypatch.setattr(ws_mod, "_search", _stub_search(_default_results()))
-    monkeypatch.setattr(ws_mod, "_fetch_and_save", _noop_fetch_and_save)
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _noop_fetch_and_save)
 
     captured: dict[str, object] = {}
 
@@ -157,8 +157,8 @@ async def test_websearch_command_happy_path_runs_subprocess(
 async def test_websearch_command_subprocess_failure_exits_with_returncode(
     monkeypatch, patched
 ) -> None:
-    monkeypatch.setattr(ws_mod, "_search", _stub_search(_default_results()))
-    monkeypatch.setattr(ws_mod, "_fetch_and_save", _noop_fetch_and_save)
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _noop_fetch_and_save)
 
     def fake_run(cmd, **kwargs):
         raise subprocess.CalledProcessError(returncode=2, cmd=cmd)
@@ -176,7 +176,7 @@ async def test_websearch_command_fetch_and_save_receives_only_urls(
     monkeypatch, patched
 ) -> None:
     results = _default_results()
-    monkeypatch.setattr(ws_mod, "_search", _stub_search(results))
+    monkeypatch.setattr(ws_mod, "search", _stub_search(results))
     received: dict[str, object] = {}
 
     async def capturing_fetch(
@@ -185,7 +185,7 @@ async def test_websearch_command_fetch_and_save_receives_only_urls(
         received["urls"] = list(urls)
         received["tmpdir"] = tmpdir
 
-    monkeypatch.setattr(ws_mod, "_fetch_and_save", capturing_fetch)
+    monkeypatch.setattr(ws_mod, "fetch_and_save", capturing_fetch)
     monkeypatch.setattr(
         ws_mod.subprocess, "run",
         lambda cmd, **kw: type("R", (), {"returncode": 0, "stdout": ""})(),

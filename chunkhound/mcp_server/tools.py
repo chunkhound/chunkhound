@@ -639,13 +639,13 @@ async def websearch_impl(
         Markdown: research answer (with tmpdir paths rewritten to source URLs)
         + optional fetch-warning block.
     """
-    from chunkhound.api.cli.commands.websearch import (
-        _build_quickresearch_argv_core,
-        _fetch_and_save,
-        _search,
-        _websearch_timeout,
-    )
     from chunkhound.mcp_server.common import MCPError
+    from chunkhound.utils.websearch_core import (
+        build_quickresearch_argv_core,
+        fetch_and_save,
+        search,
+        websearch_timeout,
+    )
     from chunkhound.utils.websearch_postprocess import replace_paths_with_urls
 
     if config is None:
@@ -654,7 +654,7 @@ async def websearch_impl(
     limit = max(1, min(limit, 50))
 
     try:
-        results = await asyncio.to_thread(_search, query, limit, None)
+        results = await asyncio.to_thread(search, query, limit, None)
     except urllib.error.URLError as e:
         raise MCPError(f"Web search failed: {e.reason}") from e
     if not results:
@@ -665,7 +665,7 @@ async def websearch_impl(
     tmpdir = Path(tempfile.mkdtemp(prefix="chunkhound_websearch_mcp_"))
     proc: asyncio.subprocess.Process | None = None
     try:
-        await _fetch_and_save(
+        await fetch_and_save(
             [url for _, url, _ in results],
             tmpdir,
             progress_callback=None,
@@ -673,7 +673,7 @@ async def websearch_impl(
             mapping=mapping,
         )
 
-        cmd = _build_quickresearch_argv_core(query, tmpdir, path_filter, config)
+        cmd = build_quickresearch_argv_core(query, tmpdir, path_filter, config)
         # Scrub CHUNKHOUND_MCP_MODE so the child's RichOutputFormatter.error()
         # is not silenced — we rely on its stderr output to populate the
         # MCPError tail on subprocess failure.
@@ -687,7 +687,7 @@ async def websearch_impl(
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        timeout_s = _websearch_timeout()
+        timeout_s = websearch_timeout()
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout_s

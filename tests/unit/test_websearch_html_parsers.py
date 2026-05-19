@@ -7,7 +7,7 @@ feed inline HTML snippets and assert on the parsed output.
 
 from __future__ import annotations
 
-from chunkhound.api.cli.commands.websearch import _NextFormParser, _ResultParser
+from chunkhound.utils.websearch_core import _NextFormParser, _ResultParser
 
 # ---------------------------------------------------------------------------
 # _ResultParser

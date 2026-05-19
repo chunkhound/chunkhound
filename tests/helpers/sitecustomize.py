@@ -98,7 +98,7 @@ def _patch_websearch_for_tests() -> None:
 
     Activated by CH_TEST_WEBSEARCH_STUB=1. Flips capability gating off for the
     websearch tool and replaces the three lazy-imported helpers with trivial
-    stubs: _search returns fixed results, _fetch_and_save is a no-op, and the
+    stubs: search returns fixed results, fetch_and_save is a no-op, and the
     subprocess launch runs a one-line `print('ANSWER')` command.
     """
     try:
@@ -115,14 +115,14 @@ def _patch_websearch_for_tests() -> None:
     try:
         import sys as _sys
 
-        from chunkhound.api.cli.commands import websearch as ws_mod
+        from chunkhound.utils import websearch_core as ws_core
 
         # Touch each symbol before rebinding so a rename surfaces as
         # AttributeError at import time instead of silently leaving the
         # stub inactive while tests hit the real network.
-        ws_mod._search  # noqa: B018
-        ws_mod._fetch_and_save  # noqa: B018
-        ws_mod._build_quickresearch_argv_core  # noqa: B018
+        ws_core.search  # noqa: B018
+        ws_core.fetch_and_save  # noqa: B018
+        ws_core.build_quickresearch_argv_core  # noqa: B018
 
         def _stub_search(query, limit=30, progress_callback=None):
             return [
@@ -146,9 +146,9 @@ def _patch_websearch_for_tests() -> None:
         def _stub_build_argv(query, tmpdir, path_filter, config):
             return [_sys.executable, "-c", "print('ANSWER')"]
 
-        ws_mod._search = _stub_search  # type: ignore[assignment]
-        ws_mod._fetch_and_save = _stub_fetch_and_save  # type: ignore[assignment]
-        ws_mod._build_quickresearch_argv_core = _stub_build_argv  # type: ignore[assignment]
+        ws_core.search = _stub_search  # type: ignore[assignment]
+        ws_core.fetch_and_save = _stub_fetch_and_save  # type: ignore[assignment]
+        ws_core.build_quickresearch_argv_core = _stub_build_argv  # type: ignore[assignment]
     except ImportError:
         pass
 

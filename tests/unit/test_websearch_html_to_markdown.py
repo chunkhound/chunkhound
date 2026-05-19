@@ -13,7 +13,7 @@ Covers the two conversion contracts enforced by the implementation:
 
 from __future__ import annotations
 
-from chunkhound.api.cli.commands.websearch import _html_to_markdown
+from chunkhound.utils.websearch_core import _html_to_markdown
 
 
 def test_strips_script_body_not_just_tag() -> None:

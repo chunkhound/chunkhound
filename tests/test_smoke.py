@@ -363,7 +363,7 @@ sys.exit(asyncio.run(test()))
     async def test_mcp_websearch_stdio_mocked(self):
         """MCP stdio roundtrip for websearch with external calls stubbed out.
 
-        Uses CH_TEST_WEBSEARCH_STUB=1 to swap _search, _fetch_and_save, and
+        Uses CH_TEST_WEBSEARCH_STUB=1 to swap search, fetch_and_save, and
         the _quickresearch subprocess argv for inert replacements, so the
         test exercises JSON-RPC dispatch + tool execution + subprocess stdout
         capture without hitting the network.

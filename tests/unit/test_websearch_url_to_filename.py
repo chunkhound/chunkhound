@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from chunkhound.api.cli.commands.websearch import _url_to_filename
+from chunkhound.utils.websearch_core import _url_to_filename
 
 _HASH_SUFFIX = re.compile(r"_[0-9a-f]{8}$")
 

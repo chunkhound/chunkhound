@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from chunkhound.api.cli.commands import websearch as ws_mod
+from chunkhound.utils import websearch_core as ws_mod
 from chunkhound.mcp_server import tools as tools_mod
 from chunkhound.mcp_server.common import MCPError
 
@@ -105,7 +105,7 @@ def patched(monkeypatch):
         captured["tmpdirs"].append(p)
         return p
 
-    monkeypatch.setattr(ws_mod, "_build_quickresearch_argv_core", _stub_build_argv)
+    monkeypatch.setattr(ws_mod, "build_quickresearch_argv_core", _stub_build_argv)
     monkeypatch.setattr(
         "chunkhound.mcp_server.tools.tempfile.mkdtemp", capture_mkdtemp
     )
@@ -122,7 +122,7 @@ async def test_urlerror_from_search_raises_mcperror(monkeypatch, patched):
     def _raise(*args, **kwargs):
         raise urllib.error.URLError("boom")
 
-    monkeypatch.setattr(ws_mod, "_search", _raise)
+    monkeypatch.setattr(ws_mod, "search", _raise)
 
     with pytest.raises(MCPError) as exc:
         await tools_mod.websearch_impl(
@@ -138,7 +138,7 @@ async def test_urlerror_from_search_raises_mcperror(monkeypatch, patched):
 
 @pytest.mark.asyncio
 async def test_empty_results_raises_mcperror(monkeypatch, patched):
-    monkeypatch.setattr(ws_mod, "_search", _stub_search([]))
+    monkeypatch.setattr(ws_mod, "search", _stub_search([]))
 
     with pytest.raises(MCPError) as exc:
         await tools_mod.websearch_impl(
@@ -154,7 +154,7 @@ async def test_empty_results_raises_mcperror(monkeypatch, patched):
 
 @pytest.mark.asyncio
 async def test_partial_fetch_warnings_render_bullets(monkeypatch, patched):
-    monkeypatch.setattr(ws_mod, "_search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
 
     async def fetch_with_warnings(
         urls, tmpdir, progress_callback=None, warning_callback=None, mapping=None
@@ -163,7 +163,7 @@ async def test_partial_fetch_warnings_render_bullets(monkeypatch, patched):
         warning_callback("Failed to fetch https://a.invalid/: TimeoutError: x")
         warning_callback("Failed to fetch https://b.invalid/: ValueError: y")
 
-    monkeypatch.setattr(ws_mod, "_fetch_and_save", fetch_with_warnings)
+    monkeypatch.setattr(ws_mod, "fetch_and_save", fetch_with_warnings)
 
     fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
     monkeypatch.setattr(
@@ -184,8 +184,8 @@ async def test_partial_fetch_warnings_render_bullets(monkeypatch, patched):
 
 @pytest.mark.asyncio
 async def test_subprocess_nonzero_exit_raises_mcperror(monkeypatch, patched):
-    monkeypatch.setattr(ws_mod, "_search", _stub_search(_default_results()))
-    monkeypatch.setattr(ws_mod, "_fetch_and_save", _stub_fetch_and_save_noop)
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
 
     fake_proc = _FakeProc(
         stdout=b"",
@@ -211,9 +211,9 @@ async def test_subprocess_nonzero_exit_raises_mcperror(monkeypatch, patched):
 
 @pytest.mark.asyncio
 async def test_timeout_raises_mcperror_and_cleans_up(monkeypatch, patched):
-    monkeypatch.setattr(ws_mod, "_search", _stub_search(_default_results()))
-    monkeypatch.setattr(ws_mod, "_fetch_and_save", _stub_fetch_and_save_noop)
-    monkeypatch.setattr(tools_mod, "_websearch_timeout", lambda: 0.05)
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+    monkeypatch.setattr(ws_mod, "websearch_timeout", lambda: 0.05)
 
     fake_proc = _FakeProc(hang=True)
     monkeypatch.setattr(
@@ -240,8 +240,8 @@ async def test_timeout_raises_mcperror_and_cleans_up(monkeypatch, patched):
 async def test_cancellation_kills_subprocess_and_cleans_tempdir(
     monkeypatch, patched
 ):
-    monkeypatch.setattr(ws_mod, "_search", _stub_search(_default_results()))
-    monkeypatch.setattr(ws_mod, "_fetch_and_save", _stub_fetch_and_save_noop)
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
 
     fake_proc = _FakeProc(hang=True)
     monkeypatch.setattr(
@@ -273,7 +273,7 @@ async def test_cancellation_kills_subprocess_and_cleans_tempdir(
 
 @pytest.mark.asyncio
 async def test_answer_rewrites_filenames_to_source_urls(monkeypatch, patched):
-    monkeypatch.setattr(ws_mod, "_search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
 
     async def populate_mapping(
         urls, tmpdir, progress_callback=None, warning_callback=None, mapping=None
@@ -282,7 +282,7 @@ async def test_answer_rewrites_filenames_to_source_urls(monkeypatch, patched):
         mapping["a.invalid_.md"] = "https://a.invalid/"
         mapping["b.invalid_.pdf"] = "https://b.invalid/"
 
-    monkeypatch.setattr(ws_mod, "_fetch_and_save", populate_mapping)
+    monkeypatch.setattr(ws_mod, "fetch_and_save", populate_mapping)
 
     fake_proc = _FakeProc(
         stdout=b"see a.invalid_.md and b.invalid_.pdf for details",
@@ -313,8 +313,8 @@ async def test_limit_clamped_to_range(monkeypatch, patched):
         seen.append(limit)
         return _default_results()
 
-    monkeypatch.setattr(ws_mod, "_search", capturing_search)
-    monkeypatch.setattr(ws_mod, "_fetch_and_save", _stub_fetch_and_save_noop)
+    monkeypatch.setattr(ws_mod, "search", capturing_search)
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
 
     fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
     monkeypatch.setattr(
