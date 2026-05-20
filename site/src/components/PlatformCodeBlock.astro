@@ -28,7 +28,7 @@ const { copyBtnId, ariaLabel = "Copy", dataCopy = "", class: className } = Astro
                 </button>
             ))}
         </div>
-        <button class="copy-btn" id={copyBtnId} aria-label={ariaLabel} data-copy={dataCopy} set:html={COPY_SVG} />
+        <button type="button" class="copy-btn" id={copyBtnId} aria-label={ariaLabel} data-copy={dataCopy} set:html={COPY_SVG} />
     </div>
     <slot />
 </div>
@@ -41,6 +41,7 @@ import '../scripts/copy-handler.js';
     .platform-code-block {
         position: relative;
         background: var(--code-bg);
+        border: var(--border-w-default) solid var(--border-color);
         border-radius: var(--radius-md);
         overflow: hidden;
     }
@@ -49,11 +50,11 @@ import '../scripts/copy-handler.js';
         display: flex;
         align-items: stretch;
         justify-content: space-between;
-        background: rgba(255, 255, 255, 0.05);
+        background: var(--bg-surface);
         border-radius: inherit;
         border-bottom-left-radius: 0;
         border-bottom-right-radius: 0;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        border-bottom: var(--border-w-default) solid var(--border-color);
     }
 
     .platform-tabs {
@@ -66,8 +67,8 @@ import '../scripts/copy-handler.js';
         height: 36px;
         background: transparent;
         border: none;
-        border-bottom: 2px solid transparent;
-        color: rgba(255, 255, 255, 0.4);
+        border-bottom: var(--border-w-strong) solid transparent;
+        color: var(--text-tertiary);
         font-size: var(--text-xs);
         font-weight: 600;
         font-family: inherit;
@@ -82,7 +83,7 @@ import '../scripts/copy-handler.js';
     }
 
     .header-tab:hover {
-        color: rgba(255, 255, 255, 0.65);
+        color: var(--text-secondary);
     }
 
     .copy-btn {
@@ -103,16 +104,64 @@ import '../scripts/copy-handler.js';
 
     .copy-btn:hover {
         color: var(--text-secondary);
-        background: rgba(255, 255, 255, 0.06);
+        background: var(--bg-muted);
     }
 
     .copy-btn.copied {
         color: var(--primary);
     }
 
+    :global([data-theme="light"]) .platform-code-block {
+        border-color: transparent;
+    }
+
+    :global([data-theme="light"]) .code-header {
+        background: color-mix(in srgb, var(--code-text) 5%, var(--code-bg));
+        border-bottom-color: color-mix(in srgb, var(--code-text) 6%, var(--code-bg));
+    }
+
+    :global([data-theme="light"]) .header-tab,
+    :global([data-theme="light"]) .copy-btn {
+        color: var(--code-muted);
+    }
+
+    :global([data-theme="light"]) .header-tab:hover,
+    :global([data-theme="light"]) .copy-btn:hover {
+        color: var(--code-text);
+    }
+
+    :global([data-theme="light"]) .copy-btn:hover {
+        background: color-mix(in srgb, var(--code-text) 6%, transparent);
+    }
+
+    @media (prefers-color-scheme: light) {
+        :global(:root:not([data-theme="dark"])) .platform-code-block {
+            border-color: transparent;
+        }
+
+        :global(:root:not([data-theme="dark"])) .code-header {
+            background: color-mix(in srgb, var(--code-text) 5%, var(--code-bg));
+            border-bottom-color: color-mix(in srgb, var(--code-text) 6%, var(--code-bg));
+        }
+
+        :global(:root:not([data-theme="dark"])) .header-tab,
+        :global(:root:not([data-theme="dark"])) .copy-btn {
+            color: var(--code-muted);
+        }
+
+        :global(:root:not([data-theme="dark"])) .header-tab:hover,
+        :global(:root:not([data-theme="dark"])) .copy-btn:hover {
+            color: var(--code-text);
+        }
+
+        :global(:root:not([data-theme="dark"])) .copy-btn:hover {
+            background: color-mix(in srgb, var(--code-text) 6%, transparent);
+        }
+    }
+
     .copy-btn :global(svg) {
-        width: 16px;
-        height: 16px;
+        width: 18px;
+        height: 18px;
     }
 
     .platform-code-block :global(pre) {
