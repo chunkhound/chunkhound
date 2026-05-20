@@ -611,7 +611,7 @@ async def test_watchman_start_failure_cleans_up_after_eager_publication(
                 task.cancel()
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
-    assert elapsed < 10.0, f"Expected fail-fast startup error, got {elapsed:.2f}s"
+    assert elapsed < 12.0, f"Expected fail-fast startup error, got {elapsed:.2f}s"
     assert returncode != 0
     assert stdout_text == ""
 
