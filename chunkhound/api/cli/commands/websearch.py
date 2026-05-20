@@ -56,7 +56,9 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         formatter.error(
             f"No results found for {args.query!r} — DDG HTML structure may have changed"
         )
-        return
+        # 10 = empty results (distinct from 1=fetch error, 124=timeout, and
+        # the _quickresearch returncode passthrough below).
+        sys.exit(10)
     formatter.progress_indicator(
         f"Found {len(results)} results, fetching content..."
     )

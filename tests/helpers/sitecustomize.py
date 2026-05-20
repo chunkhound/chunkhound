@@ -144,7 +144,10 @@ def _patch_websearch_for_tests() -> None:
                     mapping[name] = url
 
         def _stub_build_argv(query, tmpdir, path_filter, config):
-            return [_sys.executable, "-c", "print('ANSWER')"]
+            # -S skips site init so this sitecustomize isn't re-loaded in the
+            # grandchild — avoids a recursive chunkhound cold-import that
+            # blew past the 30s tools/call budget on Windows.
+            return [_sys.executable, "-S", "-c", "print('ANSWER')"]
 
         ws_core.search = _stub_search  # type: ignore[assignment]
         ws_core.fetch_and_save = _stub_fetch_and_save  # type: ignore[assignment]

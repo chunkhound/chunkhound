@@ -101,7 +101,7 @@ async def test_websearch_command_urlerror_exits_1(monkeypatch, patched) -> None:
 
 
 @pytest.mark.asyncio
-async def test_websearch_command_empty_results_returns_without_exit(
+async def test_websearch_command_empty_results_exits_10(
     monkeypatch, patched
 ) -> None:
     monkeypatch.setattr(ws_mod, "search", _stub_search([]))
@@ -111,9 +111,10 @@ async def test_websearch_command_empty_results_returns_without_exit(
         ws_mod.RichOutputFormatter, "error", lambda self, msg: errors.append(msg)
     )
 
-    # No SystemExit — the command reports an error and returns.
-    await ws_mod.websearch_command(_make_args(query="zero-hits"), config=None)
+    with pytest.raises(SystemExit) as exc:
+        await ws_mod.websearch_command(_make_args(query="zero-hits"), config=None)
 
+    assert exc.value.code == 10
     # Empty results short-circuit before mkdtemp.
     assert patched["tmpdirs"] == []
     # The error must surface the query so the user knows what failed.

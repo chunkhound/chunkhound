@@ -2,7 +2,7 @@
 
 import os
 import sys
-from typing import Any, Literal
+from typing import Any, Literal, TextIO
 
 import rich.box
 from loguru import logger
@@ -34,11 +34,10 @@ class RichOutputFormatter:
         """
         self.verbose = verbose
         self._terminal_compatible = self._check_terminal_compatibility()
-        # Quiet mode redirects the shared Rich Console to stderr, so all
-        # console.print() call sites follow. The non-Rich fallback branches of
-        # section_header/text_block/json_output/box_section/startup_info/
-        # completion_summary/initial_stats_panel still use bare print() and
-        # leak to stdout when self.console is None.
+        # Quiet mode redirects the shared Rich Console and all non-Rich
+        # fallback prints (via _fallback_stream) to stderr, so a child
+        # invoked with stdout=PIPE never sees formatter output bleed into
+        # the captured payload.
         self._quiet_stdout = bool(os.environ.get("CHUNKHOUND_QUICKRESEARCH_QUIET"))
         if self._terminal_compatible:
             self.console = (
@@ -83,6 +82,9 @@ class RichOutputFormatter:
         except Exception:
             return False
 
+    def _fallback_stream(self) -> TextIO:
+        return sys.stderr if self._quiet_stdout else sys.stdout
+
     def _safe_print(self, message: str) -> None:
         """Safely print with Rich or fallback to plain text."""
         if self._terminal_compatible and self.console is not None:
@@ -98,8 +100,7 @@ class RichOutputFormatter:
             plain = Text.from_markup(message).plain
         except Exception:
             plain = message
-        stream = sys.stderr if self._quiet_stdout else sys.stdout
-        print(plain, file=stream)
+        print(plain, file=self._fallback_stream())
 
     def info(self, message: str) -> None:
         """Print an info message."""
@@ -146,7 +147,7 @@ class RichOutputFormatter:
         except Exception:
             # Ultimate fallback - bypass all Rich formatting
             # Note: escape() not needed here since this is typically internal progress messages
-            print(f"[PROGRESS] {message}")
+            print(f"[PROGRESS] {message}", file=self._fallback_stream())
 
     def section_header(self, title: str) -> None:
         """Print a section header with consistent formatting."""
@@ -160,7 +161,7 @@ class RichOutputFormatter:
                 pass
 
         # Fallback to simple header
-        print(f"\n=== {title} ===\n")
+        print(f"\n=== {title} ===\n", file=self._fallback_stream())
 
     def bullet_list(self, items: list[str], indent: int = 2) -> None:
         """Print a clean bullet list."""
@@ -178,7 +179,7 @@ class RichOutputFormatter:
         if self.console is not None:
             self.console.print(syntax)
         else:
-            print(json_str)
+            print(json_str, file=self._fallback_stream())
 
     def box_section(
         self, title: str, content: list[tuple[str, str]], width: int = 50
@@ -199,9 +200,10 @@ class RichOutputFormatter:
         if self.console is not None:
             self.console.print(table)
         else:
-            print(f"\n{title}")
+            stream = self._fallback_stream()
+            print(f"\n{title}", file=stream)
             for key, value in content:
-                print(f"  {key}: {value}")
+                print(f"  {key}: {value}", file=stream)
 
     def table_header(self, headers: list[str], widths: list[int] | None = None) -> None:
         """Print a table header - use Rich Table instead."""
@@ -216,7 +218,7 @@ class RichOutputFormatter:
         if self.console is not None:
             self.console.print(table)
         else:
-            print(" | ".join(headers))
+            print(" | ".join(headers), file=self._fallback_stream())
 
     def text_block(self, text: str, *, title: str | None = None) -> None:
         """Print a raw multi-line text block (no INFO/WARN prefix)."""
@@ -231,9 +233,10 @@ class RichOutputFormatter:
             except Exception:
                 pass
 
+        stream = self._fallback_stream()
         if title:
-            sys.stdout.write(f"\n=== {title} ===\n\n")
-        sys.stdout.write(text.rstrip() + "\n")
+            stream.write(f"\n=== {title} ===\n\n")
+        stream.write(text.rstrip() + "\n")
 
     def startup_info(
         self, version: str, directory: str, database: str, config: dict[str, Any]
@@ -262,14 +265,15 @@ class RichOutputFormatter:
         if self.console is not None:
             self.console.print(panel)
         else:
-            print("ChunkHound Indexing")
-            print(f"Version: {version}")
-            print(f"Directory: {directory}")
-            print(f"Database: {database}")
+            stream = self._fallback_stream()
+            print("ChunkHound Indexing", file=stream)
+            print(f"Version: {version}", file=stream)
+            print(f"Directory: {directory}", file=stream)
+            print(f"Database: {database}", file=stream)
             if hasattr(config, "embedding") and config.embedding:
                 provider = config.embedding.provider
                 model = getattr(config.embedding, "model", "default")
-                print(f"Provider: {provider} ({model})")
+                print(f"Provider: {provider} ({model})", file=stream)
 
     def create_progress_display(self) -> "ProgressManager":
         """Create a modern progress display with multiple bars."""
@@ -389,14 +393,15 @@ class RichOutputFormatter:
         if self.console is not None:
             self.console.print(panel)
         else:
-            print("Processing Complete")
-            print(f"Processed: {stats.get('files_processed', 0)} files")
-            print(f"Skipped: {stats.get('files_skipped', 0)} files")
-            print(f"Errors: {stats.get('files_errors', 0)} files")
-            print(f"Total chunks: {stats.get('chunks_created', 0)}")
+            stream = self._fallback_stream()
+            print("Processing Complete", file=stream)
+            print(f"Processed: {stats.get('files_processed', 0)} files", file=stream)
+            print(f"Skipped: {stats.get('files_skipped', 0)} files", file=stream)
+            print(f"Errors: {stats.get('files_errors', 0)} files", file=stream)
+            print(f"Total chunks: {stats.get('chunks_created', 0)}", file=stream)
             if "embeddings_generated" in stats:
-                print(f"Embeddings: {stats['embeddings_generated']}")
-            print(f"Time: {processing_time:.2f}s")
+                print(f"Embeddings: {stats['embeddings_generated']}", file=stream)
+            print(f"Time: {processing_time:.2f}s", file=stream)
 
         # If we have a list of files skipped due to timeout, display them
         skipped_timeouts = stats.get("skipped_due_to_timeout", [])
@@ -416,7 +421,8 @@ class RichOutputFormatter:
             else:
                 print(
                     f"Skipped Due to Timeout ({len(skipped_timeouts)}):\n  "
-                    + "\n  ".join(str(p) for p in skipped_timeouts)
+                    + "\n  ".join(str(p) for p in skipped_timeouts),
+                    file=self._fallback_stream(),
                 )
 
     def initial_stats_panel(self, stats: dict[str, Any]) -> None:
@@ -435,7 +441,8 @@ class RichOutputFormatter:
             )
         else:
             print(
-                f"Initial stats: {stats.get('files', 0)} files, {stats.get('chunks', 0)} chunks, {stats.get('embeddings', 0)} embeddings"
+                f"Initial stats: {stats.get('files', 0)} files, {stats.get('chunks', 0)} chunks, {stats.get('embeddings', 0)} embeddings",
+                file=self._fallback_stream(),
             )
 
 
