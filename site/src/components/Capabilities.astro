@@ -3,37 +3,44 @@ import Chip from "./Chip.astro";
 
 const capabilities = [
   {
+    icon: "ph-graph",
     title: "Multi-Hop Semantic Search",
     description: "Discovers code through semantic bridges. Three hops find architectural relationships that keyword search misses entirely.",
     tag: "3-hop traversal",
   },
   {
+    icon: "ph-detective",
     title: "Gap Detection & Filling",
     description: "Clusters results, identifies missing concepts via LLM analysis, uses elbow detection to filter noise. Finds what you didn't know to ask for.",
     tag: "Elbow detection",
   },
   {
+    icon: "ph-tree-structure",
     title: "cAST Chunking",
     description: "AST-aware code splitting from Carnegie Mellon research. +4.3 recall on RepoEval, +2.67 pass@1 on SWE-bench vs. naive chunking.",
     tag: "arXiv:2506.15655",
     tagUrl: "https://arxiv.org/abs/2506.15655",
   },
   {
+    icon: "ph-compass",
     title: "Depth Exploration",
     description: "Explores different angles of files already in results. A file with auth logic and session management gets explored for both.",
     tag: "Aspect-based queries",
   },
   {
+    icon: "ph-file-magnifying-glass",
     title: "Code Research",
     description: "One call produces a cited markdown architecture report. Query expansion, gap detection, evidence ledger, map-reduce synthesis.",
     tag: "Cited reports",
   },
   {
+    icon: "ph-intersect-three",
     title: "Unified Semantic + Regex",
     description: "Extracts symbols from semantic results, runs parallel regex searches, reranks everything against the root query. Two paradigms, unified.",
     tag: "Hybrid search",
   },
   {
+    icon: "ph-book-open-text",
     title: "Auto-Documentation",
     description: "Generates a searchable documentation site from your codebase. Five comprehensiveness levels from minimal to exhaustive.",
     tag: "5 levels",
@@ -47,13 +54,17 @@ const capabilities = [
     <h2 class="heading">Seven capabilities, one semantic index</h2>
 
     <div class="grid">
-      {capabilities.map((cap) => (
-        <div class="card">
-          <h3 class="card-title">{cap.title}</h3>
-          <p class="card-desc">{cap.description}</p>
-          <Chip href={cap.tagUrl}>{cap.tag}</Chip>
-        </div>
-      ))}
+      {capabilities.map((cap) => {
+        const Icon = cap.icon;
+        return (
+          <div class="card">
+            <Icon class="card-icon" size="28" weight="duotone" aria-hidden="true" />
+            <h3 class="card-title">{cap.title}</h3>
+            <p class="card-desc">{cap.description}</p>
+            <Chip href={cap.tagUrl}>{cap.tag}</Chip>
+          </div>
+        );
+      })}
     </div>
 
     <blockquote class="cap-quote">
@@ -62,6 +73,16 @@ const capabilities = [
     </blockquote>
   </div>
 </section>
+
+<script>
+  import "@phosphor-icons/webcomponents/PhBookOpenText";
+  import "@phosphor-icons/webcomponents/PhCompass";
+  import "@phosphor-icons/webcomponents/PhDetective";
+  import "@phosphor-icons/webcomponents/PhFileMagnifyingGlass";
+  import "@phosphor-icons/webcomponents/PhGraph";
+  import "@phosphor-icons/webcomponents/PhIntersectThree";
+  import "@phosphor-icons/webcomponents/PhTreeStructure";
+</script>
 
 <style>
   .capabilities {
@@ -115,6 +136,11 @@ const capabilities = [
     justify-self: center;
   }
 
+  .card-icon {
+    color: var(--primary);
+    margin-bottom: var(--space-1);
+  }
+
   .card-title {
     font-size: var(--text-lg);
     line-height: var(--lh-lg);
@@ -148,7 +174,7 @@ const capabilities = [
     line-height: 1;
     font-weight: 700;
     font-style: normal;
-    color: var(--primary);
+    color: var(--code-accent);
     margin-bottom: var(--space-2);
   }
 
