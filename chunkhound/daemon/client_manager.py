@@ -51,6 +51,20 @@ class ClientManager:
         """Return the number of currently connected clients."""
         return len(self._sessions)
 
+    async def close_all(self) -> None:
+        """Close all active client connections immediately.
+
+        Called during daemon shutdown to unblock proxies that are waiting
+        for IPC data rather than leaving them deadlocked until process exit.
+        """
+        for session in list(self._sessions.values()):
+            try:
+                session.writer.close()
+                await session.writer.wait_closed()
+            except Exception:
+                pass
+        self._sessions.clear()
+
     async def poll_pids(self) -> None:
         """Background task: evict clients whose proxy process has died.
 
