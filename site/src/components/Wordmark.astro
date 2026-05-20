@@ -26,9 +26,15 @@ const { size = "sm" } = Astro.props;
         gap: var(--space-2);
     }
 
+    @media (max-width: 420px) {
+        .wordmark-brand.sm {
+            font-size: 16px;
+        }
+    }
+
     .wordmark-brand.lg {
-        font-size: var(--text-4xl);
-        line-height: var(--lh-4xl);
+        font-size: clamp(var(--text-3xl), 11vw, var(--text-4xl));
+        line-height: 1.15;
         /* display: inline-block so only the text string sets the centering width;
            the logo is pulled out of flow via position:absolute */
         display: inline-block;
@@ -71,6 +77,7 @@ const { size = "sm" } = Astro.props;
 
     .wordmark-text {
         position: relative;
+        white-space: nowrap;
     }
 
     .wordmark-dot {

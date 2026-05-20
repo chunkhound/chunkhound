@@ -20,7 +20,7 @@
         <div class="contrast-card">
             <div class="contrast-grid">
                 <div class="col col-blind">
-                    <p class="col-label">Without context</p>
+                    <p class="col-label"><ph-warning-circle size="16" weight="duotone" aria-hidden="true"></ph-warning-circle> Without context</p>
                     <div class="flow-step dim">Attempt 1 — wrong direction</div>
                     <div class="flow-step dim">
                         Attempt 2 — missed existing utility
@@ -35,7 +35,7 @@
                 </div>
                 <div class="col-divider"></div>
                 <div class="col col-grounded">
-                    <p class="col-label">With ChunkHound</p>
+                    <p class="col-label"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle> With ChunkHound</p>
                     <div class="flow-step">
                         Research call — architecture mapped,
                     </div>
@@ -56,6 +56,8 @@
 </section>
 
 <script>
+  import "@phosphor-icons/webcomponents/PhCheckCircle";
+  import "@phosphor-icons/webcomponents/PhWarningCircle";
   import { setupScrollAnimation } from "../scripts/scroll-observer.ts";
   setupScrollAnimation(".token-economics");
 </script>
@@ -124,14 +126,21 @@
     }
 
     .col-label {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
         font-family: "JetBrains Mono", monospace;
         font-size: var(--text-xs);
         line-height: var(--lh-xs);
         font-weight: 600;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: var(--text-tertiary);
+        color: var(--code-muted);
         margin-bottom: var(--space-3);
+    }
+
+    .col-grounded .col-label ph-check-circle {
+        color: var(--code-accent);
     }
 
     .flow-step {
@@ -144,17 +153,17 @@
     }
 
     .flow-step.dim {
-        color: var(--text-muted);
+        color: var(--code-muted);
     }
 
     .flow-step.done-bad {
-        color: var(--text-secondary);
+        color: var(--code-muted);
         font-weight: 600;
         border-bottom: none;
     }
 
     .flow-step.done-good {
-        color: var(--primary);
+        color: var(--code-accent);
         font-weight: 600;
         border-bottom: none;
     }
@@ -308,7 +317,7 @@
             text-shadow: none;
         }
         50% {
-            text-shadow: 0 0 18px var(--primary);
+            text-shadow: 0 0 18px var(--code-accent);
         }
     }
 
@@ -424,7 +433,7 @@
         line-height: 1;
         font-weight: 700;
         font-style: normal;
-        color: var(--primary);
+        color: var(--code-accent);
         margin-bottom: var(--space-2);
     }
 
