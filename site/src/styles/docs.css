@@ -60,7 +60,9 @@
 }
 
 .sidebar-link {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   padding: var(--space-1) var(--space-3);
   font-size: var(--text-sm);
   line-height: var(--lh-sm);
@@ -110,6 +112,7 @@
   color: var(--text-secondary);
 }
 
+.docs-breadcrumb ph-book-open,
 .docs-breadcrumb-sep {
   color: var(--text-tertiary);
 }
@@ -188,6 +191,53 @@
   border-radius: 0;
   font-size: 0.9em;
   color: var(--code-text);
+}
+
+.docs-content .code-block-md {
+  position: relative;
+  margin-bottom: var(--space-5);
+}
+
+.docs-content .code-block-md > pre {
+  margin-bottom: 0;
+}
+
+.docs-content .code-block-md > .copy-btn {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--code-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s;
+}
+
+.docs-content .code-block-md > .copy-btn:hover {
+  color: var(--code-text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.docs-content .code-block-md > .copy-btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.docs-content .code-block-md > .copy-btn.copied {
+  color: var(--code-accent);
+}
+
+.docs-content .code-block-md > .copy-btn svg {
+  width: 18px;
+  height: 18px;
 }
 
 .docs-content blockquote {
@@ -320,6 +370,9 @@
 }
 
 .toc-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-secondary);
@@ -367,24 +420,7 @@
   padding-left: var(--space-4);
 }
 
-/* ── Mobile nav toggle ────────────────────────────────────────────── */
-
-.docs-nav-toggle {
-  display: none;
-  position: fixed;
-  bottom: var(--space-5);
-  right: var(--space-5);
-  z-index: 200;
-  padding: var(--space-2) var(--space-4);
-  background: var(--primary);
-  color: var(--on-primary);
-  border: none;
-  border-radius: var(--radius-full);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  cursor: pointer;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-}
+/* ── Mobile nav scrim ─────────────────────────────────────────────── */
 
 .docs-nav-scrim {
   display: none;
@@ -434,10 +470,14 @@
     left: 0;
     bottom: 0;
     width: 300px;
+    height: 100dvh;
+    max-height: 100dvh;
     z-index: 150;
     background: var(--bg-page);
     border-right: var(--border-w-subtle) solid var(--border-subtle);
     padding: var(--space-5);
+    overflow-y: auto;
+    box-sizing: border-box;
     transform: translateX(-100%);
     transition: transform 0.25s ease;
   }
@@ -446,12 +486,7 @@
     transform: translateX(0);
   }
 
-  .docs-sidebar.open ~ .docs-nav-scrim,
   .docs-nav-scrim.open {
-    display: block;
-  }
-
-  .docs-nav-toggle {
     display: block;
   }
 
