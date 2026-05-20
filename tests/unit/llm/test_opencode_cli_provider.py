@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -263,9 +264,10 @@ class TestOpenCodeCLIProvider:
     async def test_run_cli_command_timeout(self, provider):
         """Test CLI command timeout."""
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
-            mock_process = MagicMock()
-            mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+            mock_process = AsyncMock()
+            mock_process.communicate.side_effect = asyncio.TimeoutError()
             mock_process.wait = AsyncMock()
+            mock_process.kill = MagicMock()
             mock_process.returncode = None
             mock_subprocess.return_value = mock_process
 
@@ -277,6 +279,42 @@ class TestOpenCodeCLIProvider:
             assert "Test prompt" not in msg
             mock_process.kill.assert_called()
             mock_process.wait.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_timeout_ignores_stale_process_lookup_error(
+        self, provider
+    ):
+        """Stale process cleanup must not mask the timeout error."""
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process = AsyncMock()
+            mock_process.communicate.side_effect = asyncio.TimeoutError()
+            mock_process.wait = AsyncMock()
+            mock_process.returncode = None
+            mock_process.kill = MagicMock(side_effect=ProcessLookupError())
+            mock_subprocess.return_value = mock_process
+
+            with pytest.raises(RuntimeError, match="timed out"):
+                await provider._run_cli_command("Test prompt")
+
+            mock_process.wait.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_generic_failure_ignores_stale_process_lookup_error(
+        self, provider
+    ):
+        """Unexpected failures must survive stale process cleanup."""
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process = AsyncMock()
+            mock_process.communicate.side_effect = ValueError("boom")
+            mock_process.wait = AsyncMock()
+            mock_process.returncode = None
+            mock_process.kill = MagicMock(side_effect=ProcessLookupError())
+            mock_subprocess.return_value = mock_process
+
+            with pytest.raises(RuntimeError, match="OpenCode CLI command failed: boom"):
+                await provider._run_cli_command("Test prompt")
+
+            assert mock_process.wait.await_count == provider._max_retries
 
     @pytest.mark.asyncio
     async def test_run_cli_command_failure_redacts_prompt_from_error(self, provider):
@@ -426,8 +464,8 @@ class TestOpenCodeCLIProvider:
             self._assert_json_then_plain(mock_subprocess)
 
     @pytest.mark.asyncio
-    async def test_run_cli_command_json_fallback_with_one_retry(self):
-        """JSON no-text fallback gets one plain-text retry even at max_retries=1."""
+    async def test_run_cli_command_json_fallback_respects_single_attempt_budget(self):
+        """max_retries=1 leaves no plain-text budget after a JSON probe."""
         status_event = json.dumps({"type": "status", "data": "running"})
         with patch.object(
             OpenCodeCLIProvider, "_opencode_available", return_value=True
@@ -442,47 +480,59 @@ class TestOpenCodeCLIProvider:
             mock_first = AsyncMock()
             mock_first.communicate.return_value = (status_event.encode(), b"")
             mock_first.returncode = 0
+            mock_subprocess.return_value = mock_first
 
-            mock_second = AsyncMock()
-            mock_second.communicate.return_value = (b"Success response", b"")
-            mock_second.returncode = 0
+            with pytest.raises(
+                RuntimeError, match="exhausted retry budget before plain-text fallback"
+            ):
+                await provider._run_cli_command("Test prompt")
 
-            mock_subprocess.side_effect = [mock_first, mock_second]
+            assert mock_subprocess.call_count == 1
+            first_args = mock_subprocess.call_args_list[0][0]
+            assert "--format" in first_args
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_json_fallback_preserves_remaining_attempt_budget(self):
+        """JSON fallback should only spend the primary model's remaining attempts."""
+        status_event = json.dumps({"type": "status", "data": "running"})
+        with patch.object(
+            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        ):
+            provider = OpenCodeCLIProvider(
+                model="test-provider/test-model",
+                timeout=30,
+                max_retries=3,
+            )
+
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_json = AsyncMock()
+            mock_json.communicate.return_value = (status_event.encode(), b"")
+            mock_json.returncode = 0
+
+            mock_plain_fail = AsyncMock()
+            mock_plain_fail.communicate.return_value = (b"", b"")
+            mock_plain_fail.returncode = 0
+
+            mock_plain_success = AsyncMock()
+            mock_plain_success.communicate.return_value = (b"Success response", b"")
+            mock_plain_success.returncode = 0
+
+            mock_subprocess.side_effect = [
+                mock_json,
+                mock_plain_fail,
+                mock_plain_success,
+            ]
 
             result = await provider._run_cli_command("Test prompt")
 
             assert result == "Success response"
-            assert mock_subprocess.call_count == 2
-            self._assert_json_then_plain(mock_subprocess)
-
-    @pytest.mark.asyncio
-    async def test_run_cli_command_json_then_plain_both_fail_with_one_retry(self):
-        """max_retries=1: JSON no-text → plain text also empty → RuntimeError."""
-        status_event = json.dumps({"type": "status", "data": "running"})
-        with patch.object(
-            OpenCodeCLIProvider, "_opencode_available", return_value=True
-        ):
-            provider = OpenCodeCLIProvider(
-                model="test-provider/test-model",
-                timeout=30,
-                max_retries=1,
-            )
-
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
-            mock_first = AsyncMock()
-            mock_first.communicate.return_value = (status_event.encode(), b"")
-            mock_first.returncode = 0
-
-            mock_second = AsyncMock()
-            mock_second.communicate.return_value = (b"", b"")
-            mock_second.returncode = 0
-
-            mock_subprocess.side_effect = [mock_first, mock_second]
-
-            with pytest.raises(RuntimeError, match="empty output"):
-                await provider._run_cli_command("Test prompt")
-            assert mock_subprocess.call_count == 2
-            self._assert_json_then_plain(mock_subprocess)
+            assert mock_subprocess.call_count == 3
+            first_args = mock_subprocess.call_args_list[0][0]
+            second_args = mock_subprocess.call_args_list[1][0]
+            third_args = mock_subprocess.call_args_list[2][0]
+            assert "--format" in first_args
+            assert "--format" not in second_args
+            assert "--format" not in third_args
 
     @pytest.mark.asyncio
     async def test_run_cli_command_multiple_text_events(self, provider):
@@ -721,6 +771,34 @@ class TestOpenCodeCLIProvider:
             assert result == "OK"
 
     @pytest.mark.asyncio
+    async def test_run_cli_command_passes_prompt_as_positional_message(self, provider):
+        """OpenCode CLI expects the prompt as the trailing positional arg."""
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process = AsyncMock()
+            mock_process.communicate.return_value = (b"Plain output", b"")
+            mock_process.returncode = 0
+            mock_subprocess.return_value = mock_process
+
+            result = await provider._run_cli_command("Test prompt")
+
+            assert result == "Plain output"
+            assert mock_subprocess.call_args[0][-1] == "Test prompt"
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_detaches_stdin(self, provider):
+        """Non-interactive runs must never inherit the caller's stdin."""
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process = AsyncMock()
+            mock_process.communicate.return_value = (b"Plain output", b"")
+            mock_process.returncode = 0
+            mock_subprocess.return_value = mock_process
+
+            result = await provider._run_cli_command("Test prompt")
+
+            assert result == "Plain output"
+            assert mock_subprocess.call_args.kwargs["stdin"] is subprocess.DEVNULL
+
+    @pytest.mark.asyncio
     async def test_run_cli_command_includes_variant_flag(self, provider):
         """Test that reasoning_effort maps to --variant in the CLI command."""
         with patch.object(
@@ -797,7 +875,7 @@ class TestOpenCodeCLIProvider:
 
     @pytest.mark.asyncio
     async def test_run_cli_command_system_prompt_format(self, provider):
-        """Test that system prompt is concatenated with user prompt."""
+        """Test that system and user prompts are concatenated into argv."""
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (b"", b"")
@@ -807,10 +885,8 @@ class TestOpenCodeCLIProvider:
             with pytest.raises(RuntimeError):
                 await provider._run_cli_command("Test prompt", system="System message")
 
-            call_args = mock_subprocess.call_args[0]
-            # The last positional arg is the combined message
-            message_arg = call_args[-1]
-            assert message_arg == (
+            argv = mock_subprocess.call_args[0]
+            assert argv[-1] == (
                 "System Instructions:\nSystem message\n\nUser Request:\nTest prompt"
             )
 
@@ -908,11 +984,10 @@ class TestOpenCodeCLIProvider:
             )
 
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
-            mock_process_timeout = MagicMock()
-            mock_process_timeout.communicate = AsyncMock(
-                side_effect=asyncio.TimeoutError()
-            )
+            mock_process_timeout = AsyncMock()
+            mock_process_timeout.communicate.side_effect = asyncio.TimeoutError()
             mock_process_timeout.wait = AsyncMock()
+            mock_process_timeout.kill = MagicMock()
             mock_process_timeout.returncode = None
 
             mock_process_fallback = AsyncMock()
@@ -956,3 +1031,120 @@ class TestOpenCodeCLIProvider:
                 await provider._run_cli_command("Test prompt")
 
             assert mock_subprocess.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_fallback_does_not_mutate_provider_model(self):
+        """Fallback attempts must not rewrite the provider's primary model."""
+        fallback_text_event = json.dumps(
+            {"type": "text", "part": {"text": "Fallback response"}}
+        )
+        with patch.object(
+            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        ):
+            provider = OpenCodeCLIProvider(
+                model="test-provider/primary-model",
+                fallback_model="test-provider/fallback-model",
+                timeout=30,
+                max_retries=1,
+            )
+
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process_timeout = AsyncMock()
+            mock_process_timeout.communicate.side_effect = asyncio.TimeoutError()
+            mock_process_timeout.wait = AsyncMock()
+            mock_process_timeout.kill = MagicMock()
+            mock_process_timeout.returncode = None
+
+            mock_process_fallback = AsyncMock()
+            mock_process_fallback.communicate.return_value = (
+                fallback_text_event.encode(),
+                b"",
+            )
+            mock_process_fallback.returncode = 0
+
+            mock_subprocess.side_effect = [mock_process_timeout, mock_process_fallback]
+
+            assert await provider._run_cli_command("Test prompt") == "Fallback response"
+            assert provider.model == "test-provider/primary-model"
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_fallback_error_reports_fallback_model(self):
+        """Fallback failures must report the fallback model in error context."""
+        with patch.object(
+            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        ):
+            provider = OpenCodeCLIProvider(
+                model="test-provider/primary-model",
+                fallback_model="test-provider/fallback-model",
+                timeout=30,
+                max_retries=1,
+            )
+
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process_timeout = AsyncMock()
+            mock_process_timeout.communicate.side_effect = asyncio.TimeoutError()
+            mock_process_timeout.wait = AsyncMock()
+            mock_process_timeout.kill = MagicMock()
+            mock_process_timeout.returncode = None
+
+            mock_process_fallback = AsyncMock()
+            mock_process_fallback.communicate.return_value = (b"", b"fallback exploded")
+            mock_process_fallback.returncode = 1
+
+            mock_subprocess.side_effect = [mock_process_timeout, mock_process_fallback]
+
+            with pytest.raises(RuntimeError, match="fallback exploded") as exc:
+                await provider._run_cli_command("Test prompt")
+
+            msg = str(exc.value)
+            assert "model=test-provider/fallback-model" in msg
+            assert "model=test-provider/primary-model" in msg
+            assert "timed out after 30s" in msg
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_fallback_timeout_does_not_recurse(self):
+        """Fallback that also times out must raise RuntimeError (no infinite loop).
+
+        The ``allow_fallback=False`` guard on the recursive call to
+        ``_run_with_model`` prevents infinite recursion when the fallback
+        model itself exhausts all retries with timeouts.
+        """
+        with patch.object(
+            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        ):
+            provider = OpenCodeCLIProvider(
+                model="test-provider/primary-model",
+                fallback_model="test-provider/fallback-model",
+                timeout=30,
+                max_retries=1,
+            )
+
+        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+            mock_process_timeout = AsyncMock()
+            mock_process_timeout.communicate.side_effect = asyncio.TimeoutError()
+            mock_process_timeout.wait = AsyncMock()
+            mock_process_timeout.kill = MagicMock()
+            mock_process_timeout.returncode = None
+
+            mock_process_fallback = AsyncMock()
+            mock_process_fallback.communicate.side_effect = asyncio.TimeoutError()
+            mock_process_fallback.wait = AsyncMock()
+            mock_process_fallback.kill = MagicMock()
+            mock_process_fallback.returncode = None
+
+            # Primary exhausts retries (max_retries=1), triggers fallback.
+            # Fallback also exhausts retries (max_retries=1), should raise.
+            mock_subprocess.side_effect = [mock_process_timeout, mock_process_fallback]
+
+            with pytest.raises(RuntimeError, match="timed out after 30s") as exc:
+                await provider._run_cli_command("Test prompt")
+
+            msg = str(exc.value)
+            assert "fallback-model" in msg, (
+                f"Fallback model name should appear in compound error: {msg}"
+            )
+            assert "primary-model" in msg, (
+                f"Primary model name should appear in compound error: {msg}"
+            )
+            # Exactly 2 subprocess invocations — no recursion
+            assert mock_subprocess.call_count == 2
