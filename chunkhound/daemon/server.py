@@ -404,6 +404,13 @@ class ChunkHoundDaemon(MCPServerBase):
         Only the daemon that won publication may remove shared artifacts. Race
         losers must not delete the winner's lock, socket path, or registry entry.
         """
+        # Close active client connections immediately so proxies get EOF and
+        # exit rather than deadlocking until the daemon process fully exits.
+        try:
+            await self._client_manager.close_all()
+        except Exception as e:
+            self.debug_log(f"Client close error (non-fatal): {e}")
+
         if self._pid_poll_task is not None and not self._pid_poll_task.done():
             self._pid_poll_task.cancel()
             try:
