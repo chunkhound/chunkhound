@@ -180,7 +180,10 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             except asyncio.TimeoutError as e:
                 # Kill the subprocess if it's still running
                 if process and process.returncode is None:
-                    process.kill()
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                     await process.wait()
 
                 last_error = RuntimeError(
@@ -196,7 +199,10 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                     raise
                 # Kill the subprocess if it's still running on unexpected errors
                 if process and process.returncode is None:
-                    process.kill()
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                     await process.wait()
 
                 last_error = RuntimeError(f"CLI command failed: {e}")

@@ -182,6 +182,40 @@ class TestClaudeCodeCLIProvider:
         assert mock_process.wait.call_count == 3
 
     @pytest.mark.asyncio
+    async def test_complete_timeout_ignores_stale_process_lookup_error(
+        self, provider, mock_subprocess
+    ):
+        """Stale process cleanup must not mask the timeout error."""
+        mock_process = AsyncMock()
+        mock_process.returncode = None
+        mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_process.kill = MagicMock(side_effect=ProcessLookupError())
+        mock_process.wait = AsyncMock()
+        mock_subprocess.return_value = mock_process
+
+        with pytest.raises(RuntimeError, match="CLI command timed out"):
+            await provider.complete("Test prompt", timeout=1)
+
+        assert mock_process.wait.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_complete_generic_failure_ignores_stale_process_lookup_error(
+        self, provider, mock_subprocess
+    ):
+        """Unexpected failures must survive stale process cleanup."""
+        mock_process = AsyncMock()
+        mock_process.returncode = None
+        mock_process.communicate = AsyncMock(side_effect=ValueError("boom"))
+        mock_process.kill = MagicMock(side_effect=ProcessLookupError())
+        mock_process.wait = AsyncMock()
+        mock_subprocess.return_value = mock_process
+
+        with pytest.raises(RuntimeError, match="CLI command failed: boom"):
+            await provider.complete("Test prompt")
+
+        assert mock_process.wait.await_count == 3
+
+    @pytest.mark.asyncio
     async def test_complete_cli_error(self, provider, mock_subprocess):
         """Test handling of CLI errors."""
         mock_process = AsyncMock()
