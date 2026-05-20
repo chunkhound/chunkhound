@@ -31,6 +31,10 @@ class _GitignorePruneState:
     spec: PathSpec | None
 
 
+def _empty_gitignore_prune_state() -> _GitignorePruneState:
+    return _GitignorePruneState(patterns=(), spec=None)
+
+
 class IgnoreEngine:
     def __init__(self, root: Path, compiled_specs: list[tuple[Path, PathSpec]]):
         self.root = root.resolve()
@@ -177,7 +181,10 @@ def _read_transformed_gitignore_patterns(root: Path, dir_path: Path) -> list[str
     except Exception:
         return []
 
-    rel_from_root = dir_path.relative_to(root)
+    try:
+        rel_from_root = dir_path.relative_to(root)
+    except ValueError:
+        return []
     dir_rel = "." if str(rel_from_root) == "." else rel_from_root.as_posix()
 
     out: list[str] = []
@@ -195,11 +202,12 @@ def _extend_gitignore_prune_state(
     parent_state: _GitignorePruneState | None,
 ) -> _GitignorePruneState | None:
     """Build prune state for a directory from inherited + local .gitignore rules."""
-    inherited = () if parent_state is None else parent_state.patterns
+    base_state = parent_state or _empty_gitignore_prune_state()
+    inherited = base_state.patterns
 
     local_patterns = _read_transformed_gitignore_patterns(root, dir_path)
     if not local_patterns:
-        return parent_state
+        return base_state
 
     combined = inherited + tuple(local_patterns)
     return _GitignorePruneState(
@@ -213,12 +221,14 @@ def _detect_repo_roots(
     pre_exclude_spec: PathSpec | None = None,
     *,
     prune_ignored_gitfile_roots: bool = False,
+    workspace_root_only_gitignore: bool = False,
 ) -> list[Path]:
     """Detect Git repository roots under root by looking for .git dir or file.
 
     Prunes excluded subtrees using pre_exclude_spec (e.g., node_modules) and,
     when enabled, prunes directories ignored by the active repo's .gitignore
-    rules while preserving direct child repo boundaries.
+    rules or the workspace-root non-repo overlay while preserving direct child
+    repo boundaries.
     """
     roots: list[Path] = []
     root = root.resolve()
@@ -249,7 +259,11 @@ def _detect_repo_roots(
                     "Worktree ignore pruning: failed to import git_check_ignored: {}",
                     e,
                 )
-        if (root / ".git").is_dir() or (root / ".git").is_file():
+        if (
+            (root / ".git").is_dir()
+            or (root / ".git").is_file()
+            or workspace_root_only_gitignore
+        ):
             gitignore_state_by_dir[root] = _extend_gitignore_prune_state(
                 root,
                 root,
@@ -305,20 +319,27 @@ def _detect_repo_roots(
         # own .gitignore lineage so parent rules do not leak into nested repos.
         if prune_ignored_gitfile_roots:
             for dn in dirnames:
-                child_path = (dpath / dn).resolve()
-                child_is_repo = (child_path / ".git").is_dir() or (
-                    child_path / ".git"
+                child_logical_path = dpath / dn
+                if child_logical_path.is_symlink():
+                    continue
+                child_resolved = child_logical_path.resolve()
+                child_is_repo = (child_resolved / ".git").is_dir() or (
+                    child_resolved / ".git"
                 ).is_file()
                 if child_is_repo:
-                    gitignore_state_by_dir[child_path] = _extend_gitignore_prune_state(
+                    gitignore_state_by_dir[
+                        child_resolved
+                    ] = _extend_gitignore_prune_state(
                         root,
-                        child_path,
+                        child_logical_path,
                         None,
                     )
                 elif current_gitignore_state is not None:
-                    gitignore_state_by_dir[child_path] = _extend_gitignore_prune_state(
+                    gitignore_state_by_dir[
+                        child_resolved
+                    ] = _extend_gitignore_prune_state(
                         root,
-                        child_path,
+                        child_logical_path,
                         current_gitignore_state,
                     )
 
@@ -493,10 +514,22 @@ def build_repo_aware_ignore_engine(
     workspace_root_only_gitignore: bool | None = None,
 ) -> RepoAwareIgnoreEvaluator:
     pre_spec = _compile_gitwildmatch(config_exclude or []) if (config_exclude) else None
+
+    if workspace_root_only_gitignore is not None:
+        prune_workspace_root_only = bool(workspace_root_only_gitignore)
+    else:
+        try:
+            prune_workspace_root_only = os.environ.get(
+                "CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_NONREPO", ""
+            ).strip() not in ("", "0", "false", "no")
+        except Exception:
+            prune_workspace_root_only = False
+
     repo_roots = _detect_repo_roots(
         root,
         pre_spec,
         prune_ignored_gitfile_roots=("gitignore" in (sources or [])),
+        workspace_root_only_gitignore=prune_workspace_root_only,
     )
     if backend == "libgit2":
         eng = _try_build_libgit2_repo_aware(
@@ -511,17 +544,12 @@ def build_repo_aware_ignore_engine(
     #    default to True to honor a root .gitignore for non‑repo trees
     # 3) Legacy ENV override (kept for backward compatibility)
     if workspace_root_only_gitignore is not None:
-        wr_only = bool(workspace_root_only_gitignore)
+        wr_only = prune_workspace_root_only
     else:
         if ("gitignore" in (sources or [])) and (not repo_roots):
             wr_only = True
         else:
-            try:
-                wr_only = os.environ.get(
-                    "CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_NONREPO", ""
-                ).strip() not in ("", "0", "false", "no")
-            except Exception:
-                wr_only = False
+            wr_only = prune_workspace_root_only
     return RepoAwareIgnoreEvaluator(
         root,
         repo_roots,
@@ -601,19 +629,22 @@ def detect_repo_roots(
     config_exclude: Iterable[str] | None = None,
     *,
     prune_ignored_gitfile_roots: bool = False,
+    workspace_root_only_gitignore: bool = False,
 ) -> list[Path]:
     """Public helper to detect repo roots under a workspace root.
 
     Applies pruning using config_exclude (gitwildmatch semantics) to avoid
     descending into heavy trees (e.g., node_modules) while scanning. When
     ``prune_ignored_gitfile_roots`` is enabled, directories ignored by the
-    active repo's .gitignore rules are also pruned during the scan.
+    active repo's .gitignore rules or the workspace-root non-repo overlay are
+    also pruned during the scan.
     """
     pre_spec = _compile_gitwildmatch(config_exclude or []) if config_exclude else None
     return _detect_repo_roots(
         root,
         pre_spec,
         prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+        workspace_root_only_gitignore=workspace_root_only_gitignore,
     )
 
 
