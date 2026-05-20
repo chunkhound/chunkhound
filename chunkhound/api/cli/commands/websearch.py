@@ -78,13 +78,15 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
             mapping=mapping,
         )
         # Invoke _quickresearch as a subprocess rather than calling
-        # quickresearch_command() directly. chunkhound uses a process-global
-        # registry singleton (registry/__init__.py). configure_registry()
-        # mutates it and registers a database provider as a singleton — an
-        # in-process call would race on that shared state and could hand this
+        # quickresearch_command() directly. On the MCP path, chunkhound's
+        # process-global registry singleton (registry/__init__.py) would
+        # race — configure_registry() mutates it and registers a database
+        # provider as a singleton, so an in-process call could hand this
         # command's DB connection to _quickresearch instead of a fresh
-        # :memory: instance. A subprocess gets its own isolated registry and
-        # an independent duckdb.connect(":memory:") call.
+        # :memory: one. The CLI doesn't share the registry concern, but the
+        # subprocess wrapper is still the cleanest way to capture stdout for
+        # path-rewriting and enforce the wall-clock timeout — using the same
+        # path on both surfaces avoids divergence.
         cmd = _build_quickresearch_argv(args, tmpdir, config)
         # QUIET routes the child's progress display to stderr (inherited here, so
         # the user still sees it live) and frees stdout to carry only the answer

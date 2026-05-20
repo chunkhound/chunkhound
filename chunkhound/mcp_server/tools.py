@@ -632,7 +632,7 @@ async def websearch_impl(
         config: Application configuration; falls back to environment. Its
             source file (if any) is forwarded to the subprocess as --config.
         query: Natural-language or keyword query for DuckDuckGo.
-        limit: Number of results to fetch. Clamped to [1, 50]. Default 30.
+        limit: Number of results to fetch. Clamped to [1, 100]. Default 30.
         path_filter: Optional scope restriction forwarded to the research stage.
 
     Returns:
@@ -642,6 +642,7 @@ async def websearch_impl(
     from chunkhound.mcp_server.common import MCPError
     from chunkhound.utils.websearch_core import (
         build_quickresearch_argv_core,
+        clamp_limit,
         fetch_and_save,
         search,
         websearch_timeout,
@@ -651,7 +652,7 @@ async def websearch_impl(
     if config is None:
         config = Config.from_environment()
 
-    limit = max(1, min(limit, 50))
+    limit = clamp_limit(limit)
 
     try:
         results = await asyncio.to_thread(search, query, limit, None)

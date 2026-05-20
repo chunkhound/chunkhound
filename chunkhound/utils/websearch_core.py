@@ -28,6 +28,16 @@ from chunkhound.core.config.config import Config
 
 _MAX_FETCH_CONCURRENCY = 5
 
+WEBSEARCH_LIMIT_MAX = 100
+
+
+def clamp_limit(limit: int) -> int:
+    """Silently clamp result-count limit to [1, WEBSEARCH_LIMIT_MAX].
+
+    Used by MCP (LLM-supplied values); CLI validates via argparse instead.
+    """
+    return max(1, min(limit, WEBSEARCH_LIMIT_MAX))
+
 
 def websearch_timeout() -> float:
     """Overall wall-clock timeout (seconds) for the websearch subprocess.

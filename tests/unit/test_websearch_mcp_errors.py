@@ -336,4 +336,4 @@ async def test_limit_clamped_to_range(monkeypatch, patched):
         limit=999,
     )
 
-    assert seen == [1, 50]
+    assert seen == [1, 100]
