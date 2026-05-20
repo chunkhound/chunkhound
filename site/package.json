@@ -7,7 +7,9 @@
     "build": "astro build",
     "preview": "astro preview"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@phosphor-icons/webcomponents": "^2.1.5"
+  },
   "devDependencies": {
     "astro": "^6.1.5",
     "mermaid": "^11.0.0",
