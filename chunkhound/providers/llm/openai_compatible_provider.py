@@ -120,6 +120,26 @@ class OpenAICompatibleProvider(LLMProvider):
         """Parse and validate a structured response against the JSON schema."""
         return parse_and_validate_structured_json(content, json_schema)
 
+    def _build_chat_completion_kwargs(
+        self,
+        messages: list[dict[str, str]],
+        max_completion_tokens: int,
+        timeout: int,
+        *,
+        response_format: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build chat-completions kwargs for subclasses to extend safely."""
+        max_tokens_param = self._get_max_completion_tokens_param_name()
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            max_tokens_param: max_completion_tokens,
+            "timeout": timeout,
+        }
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        return kwargs
+
     @property
     def name(self) -> str:
         """Provider name."""
@@ -155,13 +175,13 @@ class OpenAICompatibleProvider(LLMProvider):
         request_timeout = timeout if timeout is not None else self._timeout
 
         try:
-            max_tokens_param = self._get_max_completion_tokens_param_name()
             response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                **{max_tokens_param: max_completion_tokens},
-                timeout=request_timeout,
-            )  # type: ignore[call-overload]
+                **self._build_chat_completion_kwargs(
+                    messages,
+                    max_completion_tokens,
+                    request_timeout,
+                )
+            )
 
             self._requests_made += 1
             if response.usage:
@@ -252,7 +272,6 @@ class OpenAICompatibleProvider(LLMProvider):
             Parsed JSON object conforming to schema
         """
         request_timeout = timeout if timeout is not None else self._timeout
-        max_tokens_param = self._get_max_completion_tokens_param_name()
 
         try:
             if self._supports_structured_outputs:
@@ -263,19 +282,20 @@ class OpenAICompatibleProvider(LLMProvider):
                 messages.append({"role": "user", "content": prompt})
 
                 response = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=messages,
-                    **{max_tokens_param: max_completion_tokens},
-                    timeout=request_timeout,
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "structured_response",
-                            "strict": True,
-                            "schema": json_schema,
+                    **self._build_chat_completion_kwargs(
+                        messages,
+                        max_completion_tokens,
+                        request_timeout,
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "structured_response",
+                                "strict": True,
+                                "schema": json_schema,
+                            },
                         },
-                    },
-                )  # type: ignore[call-overload]
+                    )
+                )
             else:
                 logger.debug(
                     f"{self.name}: using prompt-based structured output fallback "
@@ -294,12 +314,13 @@ class OpenAICompatibleProvider(LLMProvider):
                 ]
 
                 response = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=messages,
-                    **{max_tokens_param: max_completion_tokens},
-                    timeout=request_timeout,
-                    response_format={"type": "json_object"},
-                )  # type: ignore[call-overload]
+                    **self._build_chat_completion_kwargs(
+                        messages,
+                        max_completion_tokens,
+                        request_timeout,
+                        response_format={"type": "json_object"},
+                    )
+                )
 
             self._requests_made += 1
             if response.usage:

@@ -123,6 +123,65 @@ def test_opencode_accepts_xhigh_reasoning_effort():
     assert synthesis_config["reasoning_effort"] == "xhigh"
 
 
+def test_grok_accepts_supported_reasoning_effort():
+    cfg = LLMConfig(
+        provider="grok",
+        utility_model="grok-4-1-fast-reasoning",
+        synthesis_model="grok-4-1-fast-reasoning",
+        codex_reasoning_effort="high",
+    )
+
+    utility_config, synthesis_config = cfg.get_provider_configs()
+    assert utility_config["reasoning_effort"] == "high"
+    assert synthesis_config["reasoning_effort"] == "high"
+
+
+def test_grok_rejects_xhigh_reasoning_effort():
+    with pytest.raises(ValueError, match="grok does not support"):
+        LLMConfig(
+            provider="grok",
+            utility_model="grok-4-1-fast-reasoning",
+            synthesis_model="grok-4-1-fast-reasoning",
+            codex_reasoning_effort="xhigh",
+        )
+
+
+def test_grok_role_overrides_reject_xhigh_reasoning_effort():
+    for provider_field in ("utility_provider", "synthesis_provider"):
+        with pytest.raises(ValueError, match="grok does not support"):
+            LLMConfig(
+                provider="opencode-cli",
+                utility_model="opencode/gpt-5-nano",
+                synthesis_model="opencode/gpt-5",
+                codex_reasoning_effort="xhigh",
+                **{provider_field: "grok"},
+            )
+
+
+def test_grok_map_hyde_override_rejects_xhigh_reasoning_effort():
+    with pytest.raises(ValueError, match="grok does not support"):
+        LLMConfig(
+            provider="openai",
+            utility_model="gpt-5-nano",
+            synthesis_model="gpt-5",
+            map_hyde_provider="grok",
+            map_hyde_model="grok-4-1-fast-reasoning",
+            map_hyde_reasoning_effort="xhigh",
+        )
+
+
+def test_grok_autodoc_cleanup_override_rejects_xhigh_reasoning_effort():
+    with pytest.raises(ValueError, match="grok does not support"):
+        LLMConfig(
+            provider="openai",
+            utility_model="gpt-5-nano",
+            synthesis_model="gpt-5",
+            autodoc_cleanup_provider="grok",
+            autodoc_cleanup_model="grok-4-1-fast-reasoning",
+            autodoc_cleanup_reasoning_effort="xhigh",
+        )
+
+
 def test_opencode_cli_model_convenience_field_sets_both_roles():
     """Test that 'model' convenience field works for opencode-cli.
 

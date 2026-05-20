@@ -1,19 +1,23 @@
 """High-value functional tests for GrokLLMProvider (chat completions path)."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from chunkhound.providers.llm.grok_llm_provider import GrokLLMProvider
+import pytest
+
 from chunkhound.interfaces.llm_provider import LLMResponse
+from chunkhound.providers.llm.grok_llm_provider import GrokLLMProvider
 
 
 @pytest.fixture
 def mock_grok_client():
-    with patch("chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI") as mock:
+    with patch(
+        "chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI"
+    ) as mock:
         client = mock.return_value
         client.chat.completions.create = AsyncMock()
         yield client
-        
+
+
 @pytest.fixture
 def provider():
     """Create a GrokLLMProvider instance for testing."""
@@ -48,10 +52,14 @@ class TestGrokLLMProvider:
     @pytest.mark.asyncio
     async def test_configuration_is_respected(self, mock_grok_client):
         """Valuable: config must reach the underlying OpenAI client."""
-        provider = GrokLLMProvider(api_key="gsk-test", model="grok-beta")
+        provider = GrokLLMProvider(
+            api_key="gsk-test",
+            model="grok-beta",
+            reasoning_effort="high",
+        )
         mock_grok_client.chat.completions.create.return_value = AsyncMock(
             choices=[AsyncMock(message=AsyncMock(content="ok"))],
-            usage=AsyncMock(total_tokens=5)
+            usage=AsyncMock(total_tokens=5),
         )
 
         await provider.complete("hi", max_completion_tokens=200)
@@ -59,6 +67,21 @@ class TestGrokLLMProvider:
         call = mock_grok_client.chat.completions.create.call_args[1]
         assert call["model"] == "grok-beta"
         assert call["max_completion_tokens"] == 200
+        assert call["reasoning_effort"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_configuration_omits_reasoning_effort_when_unset(self, mock_grok_client):
+        """None should omit reasoning_effort instead of sending a 'none' string."""
+        provider = GrokLLMProvider(api_key="gsk-test", model="grok-beta")
+        mock_grok_client.chat.completions.create.return_value = AsyncMock(
+            choices=[AsyncMock(message=AsyncMock(content="ok"))],
+            usage=AsyncMock(total_tokens=5),
+        )
+
+        await provider.complete("hi", max_completion_tokens=200)
+
+        call = mock_grok_client.chat.completions.create.call_args[1]
+        assert "reasoning_effort" not in call
 
     @pytest.mark.asyncio
     async def test_errors_propagate(self, mock_grok_client):
@@ -70,6 +93,26 @@ class TestGrokLLMProvider:
             await provider.complete("fail")
 
         assert "LLM completion failed" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_truncation_error_wins_over_empty_response(self, mock_grok_client):
+        """Grok should inherit shared truncation-before-empty behavior."""
+        mock_resp = AsyncMock()
+        mock_resp.choices = [AsyncMock(message=AsyncMock(content="  "))]
+        mock_resp.usage = AsyncMock(
+            prompt_tokens=123,
+            completion_tokens=0,
+            total_tokens=123,
+        )
+        mock_resp.choices[0].finish_reason = "length"
+        mock_grok_client.chat.completions.create.return_value = mock_resp
+
+        provider = GrokLLMProvider(api_key="gsk-test")
+
+        with pytest.raises(RuntimeError, match="token limit exceeded") as exc:
+            await provider.complete("hi")
+
+        assert "empty response" not in str(exc.value)
 
     def test_get_usage_stats(self, provider):
         """Test usage statistics retrieval."""
@@ -103,9 +146,7 @@ class TestGrokLLMProvider:
     def test_base_url_custom(self):
         """Test custom base URL."""
         provider = GrokLLMProvider(
-            api_key="test-key",
-            model="grok-beta",
-            base_url="https://custom.api.x.ai/v1"
+            api_key="test-key", model="grok-beta", base_url="https://custom.api.x.ai/v1"
         )
         assert str(provider._client.base_url) == "https://custom.api.x.ai/v1/"
 
@@ -142,7 +183,7 @@ class TestNativeStructuredOutputPath:
             self._make_mock_response('{"answer": "42"}')
         )
 
-        provider = GrokLLMProvider(api_key="sk-test")
+        provider = GrokLLMProvider(api_key="sk-test", reasoning_effort="medium")
         await provider.complete_structured(
             "What is the answer?",
             json_schema=self.SCHEMA,
@@ -151,6 +192,7 @@ class TestNativeStructuredOutputPath:
         call_kwargs = mock_grok_client.chat.completions.create.call_args[1]
         assert "response_format" in call_kwargs
         assert call_kwargs["response_format"]["type"] == "json_schema"
+        assert call_kwargs["reasoning_effort"] == "medium"
 
     @pytest.mark.asyncio
     async def test_constructor_override_false_via_openai(self, mock_grok_client):
@@ -162,6 +204,7 @@ class TestNativeStructuredOutputPath:
         provider = GrokLLMProvider(
             api_key="sk-test",
             supports_structured_outputs=False,
+            reasoning_effort="low",
         )
         assert provider._supports_structured_outputs is False
         await provider.complete_structured(
@@ -170,7 +213,8 @@ class TestNativeStructuredOutputPath:
         )
 
         call_kwargs = mock_grok_client.chat.completions.create.call_args[1]
-        assert call_kwargs.get("response_format") == {"type": "json_object"}, (
-            f"Expected json_object response_format, got: {call_kwargs.get('response_format')}"
+        response_format = call_kwargs.get("response_format")
+        assert response_format == {"type": "json_object"}, (
+            f"Expected json_object response_format, got: {response_format}"
         )
-
+        assert call_kwargs["reasoning_effort"] == "low"
