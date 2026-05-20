@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://chunkhound.github.io">
+  <a href="https://chunkhound.ai">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="public/wordmark-centered-dark.svg">
       <img src="public/wordmark-centered.svg" alt="ChunkHound" width="400">
@@ -23,7 +23,7 @@ Your AI assistant searches code but doesn't understand it. ChunkHound researches
 ## Features
 
 - **[cAST Algorithm](https://arxiv.org/pdf/2506.15655)** - Research-backed semantic code chunking
-- **[Multi-Hop Semantic Search](https://chunkhound.github.io/under-the-hood/#multi-hop-semantic-search)** - Discovers interconnected code relationships beyond direct matches
+- **Multi-Hop Semantic Search** - Discovers interconnected code relationships beyond direct matches
 - **Semantic search** - Natural language queries like "find authentication code"
 - **Regex search** - Pattern matching without API keys
 - **Local-first** - Your code stays on your machine
@@ -36,10 +36,8 @@ Your AI assistant searches code but doesn't understand it. ChunkHound researches
 
 ## Documentation
 
-**Visit [chunkhound.github.io](https://chunkhound.github.io) for complete guides:**
-- [Quickstart](https://chunkhound.github.io/quickstart/)
-- [Configuration Guide](https://chunkhound.github.io/configuration/)
-- [Architecture Deep Dive](https://chunkhound.github.io/under-the-hood/)
+**Visit [chunkhound.ai](https://chunkhound.ai) for documentation:**
+- [Configuration Guide](https://chunkhound.ai/docs/configuration/)
 
 ## Requirements
 
@@ -79,7 +77,7 @@ uv tool install chunkhound
 chunkhound index
 ```
 
-**For configuration, IDE setup, and advanced usage, see the [documentation](https://chunkhound.github.io).**
+**For configuration, IDE setup, and advanced usage, see the [documentation](https://chunkhound.ai).**
 
 ## Why ChunkHound?
 
