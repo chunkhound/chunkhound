@@ -391,6 +391,15 @@ class PrivateWatchmanSidecar:
         if cleanup_reason is not None:
             self._debug(f"startup cleanup completed: {cleanup_reason}")
 
+        # Fast-path for tests: fail before the expensive binary materialization so
+        # that fake-failure tests complete quickly on any machine.
+        if os.environ.get("CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY") == "1":
+            self.paths.logfile_path.parent.mkdir(parents=True, exist_ok=True)
+            self.paths.logfile_path.touch(exist_ok=True)
+            raise RuntimeError(
+                "Watchman sidecar exited before it became ready (simulated)"
+            )
+
         self._runtime = resolve_packaged_watchman_runtime()
         binary_path = materialize_watchman_binary(
             destination_root=self.paths.runtime_root
@@ -410,12 +419,6 @@ class PrivateWatchmanSidecar:
         )
         if delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
-        if os.environ.get("CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY") == "1":
-            self.paths.logfile_path.parent.mkdir(parents=True, exist_ok=True)
-            self.paths.logfile_path.touch(exist_ok=True)
-            raise RuntimeError(
-                "Watchman sidecar exited before it became ready (simulated)"
-            )
 
         command = [
             *build_watchman_sidecar_command(

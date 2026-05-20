@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -163,13 +164,12 @@ async def test_websearch_registry_isolation():
             )
             contents = search_result.get("content") or []
             assert contents, f"search response missing content: {search_result!r}"
-            payload = json.loads(contents[0]["text"])
-            results = payload.get("results") or []
-            assert results, (
+            search_text = contents[0]["text"]
+            assert "No results found" not in search_text, (
                 f"follow-up search returned no hits — registry may have been "
-                f"polluted by websearch: {payload!r}"
+                f"polluted by websearch: {search_text!r}"
             )
-            paths = [r.get("file_path") or r.get("path") or "" for r in results]
+            paths = re.findall(r'^## `([^`]+)`', search_text, re.MULTILINE)
             assert any(p.endswith("app.py") for p in paths), (
                 f"follow-up search did not return the indexed project file; "
                 f"paths={paths!r}"

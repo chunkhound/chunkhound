@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-05-20
+
+### Breaking Changes
+- **MCP `search` response format changed to markdown** — The `search` tool now returns lean
+  markdown strings instead of JSON objects, with syntax-highlighted code fences, similarity
+  percentages (semantic search), and a pagination footer. MCP clients that parse raw search
+  output as JSON must migrate to the new format.
+
+### Added
+- **`--index-unknown-files` flag** — Files with unrecognized extensions are now indexable as
+  plain text (binary files are still skipped). Enabled via `--index-unknown-files` CLI flag,
+  `indexing.index_unknown_files` config key, or `CHUNKHOUND_INDEXING__INDEX_UNKNOWN_FILES` env var.
+- **Proto, GraphQL, XML, config, and Dockerfile support** — `.proto`, `.graphql`, `.gql`,
+  `.xml`, `.ini`, `.properties`, `.conf`, `.cfg`, and extensionless `Dockerfile`/`Jenkinsfile`
+  files are now indexed by default. `.env` files are explicitly excluded to prevent secret leakage.
+- **`chunkhound.ai` onboarding** — Interactive CLI setup is replaced with guided onboarding at
+  chunkhound.ai; local backend is now configured explicitly rather than through prompts.
+
+### Fixed
+- **MCP startup HNSW crash** — MCP server no longer fails with a `CreateDeltaIndex` assertion
+  on startup against databases missing the unique `(chunk_id, provider, model)` index from v5.0.0.
+  HNSW recreation now runs outside the transaction (issue #280).
+- **WAL validation HNSW crash** — WAL pre-flight validation now uses in-memory+ATTACH, preventing
+  a C++ abort when the WAL contained HNSW operations from a prior session (issue #273).
+- **`--db` nested directory bug** — Passing an explicit file path (e.g. `--db /path/to/chunks.db`)
+  no longer creates a `chunks.db/chunks.db` nested directory; known DB extensions (`.db`,
+  `.duckdb`) are now correctly identified as file paths (issue #215).
+- **Parser install hints** — C# error messages now show the correct PyPI package
+  `tree-sitter-c-sharp` (was `tree-sitter-csharp`); Makefile shows `tree-sitter-make`;
+  SCSS points to `tree-sitter-language-pack` (issue #267).
+
 ## [5.0.0] - 2026-05-05
 
 ### Breaking Changes
@@ -685,7 +716,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...HEAD
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...HEAD
+[5.1.0]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v5.0.0
 [4.0.1]: https://github.com/chunkhound/chunkhound/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/chunkhound/chunkhound/compare/v3.3.1...v4.0.0

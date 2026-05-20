@@ -1309,6 +1309,16 @@ async def test_watchman_translation_errors_increment_pipeline_counter(
         queue = service.watchman_subscription_queue
         assert queue is not None
 
+        # Watchman always sends an initial fresh-instance PDU on subscription.
+        # Wait for it to be processed so it cannot overwrite last_warning after
+        # our malformed event sets it (a timing race on slower CI runners).
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while asyncio.get_running_loop().time() < deadline:
+            h = await service.get_health()
+            if h.get("watchman_loss_of_sync", {}).get("fresh_instance_count", 0) >= 1:
+                break
+            await asyncio.sleep(0.05)
+
         queue.put_nowait(
             {
                 "subscription": "chunkhound-live-indexing",
