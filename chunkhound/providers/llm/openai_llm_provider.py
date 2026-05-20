@@ -195,7 +195,26 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                 response.status
             )  # Responses API uses 'status' instead of 'finish_reason'
 
-            # Validate content is not None or empty
+            # Check for incomplete responses FIRST (fix C2) so token-limit
+            # diagnostics are not masked by a generic empty-content error.
+            if finish_reason == "incomplete":
+                usage_info = ""
+                if response.usage:
+                    usage_info = (
+                        f" (input={response.usage.input_tokens:,}, "
+                        f"output={response.usage.output_tokens:,})"
+                    )
+
+                raise RuntimeError(
+                    f"LLM response incomplete - token limit exceeded{usage_info}. "
+                    "For reasoning models, this indicates the query requires "
+                    "extensive reasoning "
+                    "that exhausted the output budget. Try breaking your query into "
+                    "smaller, "
+                    "more focused questions."
+                )
+
+            # Validate content is not None or empty (reached only if not incomplete)
             if content is None:
                 logger.error(
                     f"OpenAI Responses API returned None content "
@@ -214,24 +233,6 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                 raise RuntimeError(
                     f"LLM returned empty response (status={finish_reason}). "
                     "This may indicate a content filter, API error, or model refusal."
-                )
-
-            # Check for incomplete responses
-            if finish_reason == "incomplete":
-                usage_info = ""
-                if response.usage:
-                    usage_info = (
-                        f" (input={response.usage.input_tokens:,}, "
-                        f"output={response.usage.output_tokens:,})"
-                    )
-
-                raise RuntimeError(
-                    f"LLM response incomplete - token limit exceeded{usage_info}. "
-                    "For reasoning models, this indicates the query requires "
-                    "extensive reasoning "
-                    "that exhausted the output budget. Try breaking your query into "
-                    "smaller, "
-                    "more focused questions."
                 )
 
             # Warn on other unexpected status

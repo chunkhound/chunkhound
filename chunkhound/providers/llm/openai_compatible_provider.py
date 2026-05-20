@@ -174,18 +174,8 @@ class OpenAICompatibleProvider(LLMProvider):
             tokens = response.usage.total_tokens if response.usage else 0
             finish_reason = response.choices[0].finish_reason
 
-            # Validate content
-            if content is None or not content.strip():
-                logger.error(
-                    f"{self.name} returned empty content "
-                    f"(finish_reason={finish_reason}, tokens={tokens})"
-                )
-                raise RuntimeError(
-                    f"LLM returned empty response (finish_reason={finish_reason}). "
-                    "This may indicate a content filter, API error, or model refusal."
-                )
-
-            # Check for truncation
+            # Check for truncation FIRST (fix C2) so token-limit diagnostics
+            # are not masked by a generic empty-content error.
             if finish_reason == "length":
                 usage_info = ""
                 if response.usage:
@@ -199,6 +189,17 @@ class OpenAICompatibleProvider(LLMProvider):
                     f"For reasoning models, this indicates the query requires "
                     f"extensive reasoning that exhausted the output budget. "
                     f"Try breaking your query into smaller, more focused questions."
+                )
+
+            # Validate content (reached only if answer is complete)
+            if content is None or not content.strip():
+                logger.error(
+                    f"{self.name} returned empty content "
+                    f"(finish_reason={finish_reason}, tokens={tokens})"
+                )
+                raise RuntimeError(
+                    f"LLM returned empty response (finish_reason={finish_reason}). "
+                    "This may indicate a content filter, API error, or model refusal."
                 )
 
             # Warn on unexpected finish_reason

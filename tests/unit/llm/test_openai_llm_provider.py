@@ -288,6 +288,51 @@ class TestOpenAILLMProvider:
         mock_openai_client.responses.create.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_chat_completions_truncation_error_wins_over_empty_response(
+        self, mock_openai_client
+    ):
+        """Chat Completions truncation must beat generic empty-response errors."""
+        mock_resp = AsyncMock()
+        mock_resp.choices = [AsyncMock(message=AsyncMock(content="   "))]
+        mock_resp.usage = AsyncMock(
+            prompt_tokens=123,
+            completion_tokens=0,
+            total_tokens=123,
+        )
+        mock_resp.choices[0].finish_reason = "length"
+        mock_openai_client.chat.completions.create.return_value = mock_resp
+
+        provider = OpenAILLMProvider(api_key="sk-test", model="gpt-3.5-turbo")
+
+        with pytest.raises(RuntimeError, match="token limit exceeded") as exc:
+            await provider.complete("Hello")
+
+        assert "empty response" not in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_responses_api_incomplete_error_wins_over_empty_response(
+        self, mock_openai_client
+    ):
+        """Responses API incomplete status must beat generic empty-response errors."""
+        mock_resp = AsyncMock()
+        mock_resp.output = [
+            AsyncMock(
+                type="message",
+                content=[AsyncMock(type="output_text", text="")],
+            )
+        ]
+        mock_resp.usage = AsyncMock(input_tokens=123, output_tokens=0, total_tokens=123)
+        mock_resp.status = "incomplete"
+        mock_openai_client.responses.create.return_value = mock_resp
+
+        provider = OpenAILLMProvider(api_key="sk-test", model="gpt-5")
+
+        with pytest.raises(RuntimeError, match="token limit exceeded") as exc:
+            await provider.complete("Hello")
+
+        assert "empty response" not in str(exc.value)
+
+    @pytest.mark.asyncio
     async def test_chat_completions_structured_path_for_non_responses_model(
         self, mock_openai_client
     ):
