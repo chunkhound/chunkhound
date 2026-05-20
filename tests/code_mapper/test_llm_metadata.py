@@ -222,7 +222,7 @@ def test_map_hyde_same_provider_preserves_explicit_structured_outputs(
     assert hyde_cfg["supports_structured_outputs"] is False
 
 
-def test_map_hyde_same_provider_preserves_inherited_reasoning_effort(
+def test_map_hyde_same_provider_does_not_inherit_synthesis_reasoning_effort(
     tmp_path: Path,
 ) -> None:
     config = Config(
@@ -246,8 +246,8 @@ def test_map_hyde_same_provider_preserves_inherited_reasoning_effort(
     assert map_hyde_provider is not None
     hyde_cfg = manager.seen_configs[0]
     assert hyde_cfg["provider"] == "openai"
-    assert hyde_cfg["reasoning_effort"] == "high"
-    assert llm_meta["map_hyde_reasoning_effort"] == "high"
+    assert "reasoning_effort" not in hyde_cfg
+    assert "map_hyde_reasoning_effort" not in llm_meta
 
 
 def test_map_hyde_config_precedence_and_provider_switch_drop(

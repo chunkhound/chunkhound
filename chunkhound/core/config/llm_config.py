@@ -10,8 +10,7 @@ import argparse
 import os
 from typing import Any, Literal, get_args
 
-from loguru import logger
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import assert_never
 
@@ -21,11 +20,13 @@ from chunkhound.core.config.claude_model_resolution import (
 
 REASONING_EFFORT_PROVIDERS: tuple[str, ...] = (
     "codex-cli",
+    "grok",
     "openai",
     "opencode-cli",
 )
 
 OPENAI_REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
+GROK_REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
 
 NO_KEY_PROVIDERS: tuple[str, ...] = (
     "ollama",
@@ -160,7 +161,7 @@ class LLMConfig(BaseSettings):
         default=None,
         description=(
             "Reasoning effort override for Code Mapper HyDE planning. "
-            "Falls back to synthesis reasoning effort when unset."
+            "Unset means no role-specific effort override."
         ),
     )
 
@@ -184,7 +185,7 @@ class LLMConfig(BaseSettings):
         default=None,
         description=(
             "Reasoning effort override for AutoDoc LLM cleanup. "
-            "Falls back to synthesis reasoning effort when unset."
+            "Unset means no role-specific effort override."
         ),
     )
 
@@ -358,31 +359,37 @@ class LLMConfig(BaseSettings):
         return v
 
     def model_post_init(self, __context: Any) -> None:
-        """Post-initialization hook to handle model field mapping."""
-        # If model is provided, set both utility_model and synthesis_model
+        """Post-initialization hook that runs AFTER field validators.
+
+        This is where we propagate ``self.model`` to role-specific model fields
+        and run cross-field validation. Pydantic v2 guarantees this runs after
+        all ``@field_validator`` and ``@model_validator(mode="before")`` hooks,
+        so ``utility_model``, ``synthesis_model``, and all effort fields are
+        already normalized at this point.
+
+        Moved from a ``@model_validator(mode="after")`` to fix the ordering
+        dependency where the validator ran before model_post_init (M1 fix).
+        """
+        self._propagate_default_models()
+        self._validate_provider_switches_require_model()
+        self._validate_opencode_model_formats()
+        self._validate_reasoning_effort_values()
+
+    def _propagate_default_models(self) -> None:
+        """Propagate ``self.model`` to role-specific fields when unset."""
         if self.model is not None:
             if not self.utility_model:
                 self.utility_model = self.model
             if not self.synthesis_model:
                 self.synthesis_model = self.model
 
-    @model_validator(mode="after")
-    def validate_opencode_cli_model(self) -> "LLMConfig":
-        """Validate provider/model compatibility for role-specific overrides."""
+    def _validate_provider_switches_require_model(self) -> None:
+        """Override providers require an explicit role-specific model."""
         resolved_synthesis_provider = self.synthesis_provider or self.provider
-        resolved_synthesis_model = self.synthesis_model
 
         for role, role_provider, role_model in (
-            (
-                "map_hyde",
-                self.map_hyde_provider,
-                self.map_hyde_model,
-            ),
-            (
-                "autodoc_cleanup",
-                self.autodoc_cleanup_provider,
-                self.autodoc_cleanup_model,
-            ),
+            ("map_hyde", self.map_hyde_provider, self.map_hyde_model),
+            ("autodoc_cleanup", self.autodoc_cleanup_provider, self.autodoc_cleanup_model),
         ):
             if (
                 role_provider is not None
@@ -391,31 +398,31 @@ class LLMConfig(BaseSettings):
             ):
                 raise ValueError(
                     f"{role} provider override requires an explicit {role}_model "
-                    f"when switching providers from {resolved_synthesis_provider!r} "
-                    f"to {role_provider!r}."
+                    f"when switching providers from "
+                    f"{resolved_synthesis_provider!r} to {role_provider!r}."
                 )
 
-        # model_post_init propagates self.model to role-specific fields, but
-        # this model_validator runs *before* model_post_init in Pydantic v2.
-        # Fall back to self.model when the role-specific model is empty so the
-        # convenience ``model="provider/model"`` field works at construction time.
+    def _validate_opencode_model_formats(self) -> None:
+        """OpenCode CLI models must be in ``provider/model`` format."""
+        resolved_synthesis_provider = self.synthesis_provider or self.provider
+
         for role, provider_name, role_model in (
             ("utility", self.utility_provider or self.provider, self.utility_model),
-            ("synthesis", resolved_synthesis_provider, resolved_synthesis_model),
+            ("synthesis", resolved_synthesis_provider, self.synthesis_model),
             (
                 "map_hyde",
                 self.map_hyde_provider or resolved_synthesis_provider,
-                self.map_hyde_model or resolved_synthesis_model,
+                self.map_hyde_model or self.synthesis_model,
             ),
             (
                 "autodoc_cleanup",
                 self.autodoc_cleanup_provider or resolved_synthesis_provider,
-                self.autodoc_cleanup_model or resolved_synthesis_model,
+                self.autodoc_cleanup_model or self.synthesis_model,
             ),
         ):
             if provider_name != "opencode-cli":
                 continue
-            model_name = role_model or self.model or ""
+            model_name = role_model or ""
             if not model_name or "/" not in model_name:
                 raise ValueError(
                     f"opencode-cli requires a model in provider/model format "
@@ -434,34 +441,14 @@ class LLMConfig(BaseSettings):
                     f"after '/'. Got: {model_name!r}"
                 )
 
-        # Fallback chain mirrors runtime resolution in:
-        #   build_llm_metadata_and_map_hyde (code_mapper/llm.py)
-        #   _build_cleanup_provider_configs (api/cli/commands/autodoc_cleanup.py)
-        # Keep these three in sync when changing inheritance logic.
-        for role, provider_name, effort in (
-            (
-                "utility",
-                self.utility_provider or self.provider,
-                self.codex_reasoning_effort_utility or self.codex_reasoning_effort,
-            ),
-            (
-                "synthesis",
-                self.synthesis_provider or self.provider,
-                self.codex_reasoning_effort_synthesis or self.codex_reasoning_effort,
-            ),
-            (
-                "map_hyde",
-                self.map_hyde_provider or resolved_synthesis_provider,
-                self.map_hyde_reasoning_effort,
-            ),
-            (
-                "autodoc_cleanup",
-                self.autodoc_cleanup_provider or resolved_synthesis_provider,
-                self.autodoc_cleanup_reasoning_effort,
-            ),
-        ):
+    def _validate_reasoning_effort_values(self) -> None:
+        """Validate provider-specific reasoning effort values for each role."""
+        for role in ("utility", "synthesis", "map_hyde", "autodoc_cleanup"):
+            # Fresh unpack — different name from the format-validation loop to
+            # avoid mypy cross-contamination of the inferred provider type.
+            resolved_provider, _resolved_model, effort = self._resolve_role_config(role)
             if (
-                provider_name == "openai"
+                resolved_provider == "openai"
                 and effort is not None
                 and effort not in OPENAI_REASONING_EFFORTS
             ):
@@ -469,7 +456,69 @@ class LLMConfig(BaseSettings):
                     f"openai does not support reasoning effort {effort!r} "
                     f"for {role}; use one of {', '.join(OPENAI_REASONING_EFFORTS)}"
                 )
-        return self
+            if (
+                resolved_provider == "grok"
+                and effort is not None
+                and effort not in GROK_REASONING_EFFORTS
+            ):
+                raise ValueError(
+                    f"grok does not support reasoning effort {effort!r} "
+                    f"for {role}; use one of {', '.join(GROK_REASONING_EFFORTS)}"
+                )
+
+    def _resolve_role_config(self, role: str) -> tuple[str, str, str | None]:
+        """Resolve provider, model, and effort for a given role.
+
+        Centralizes the fallback chain so that ``model_post_init``,
+        ``get_provider_configs``, and external consumers stay in sync
+        without manual duplication (fix M2).
+
+        Args:
+            role: One of ``"utility"``, ``"synthesis"``, ``"map_hyde"``,
+                or ``"autodoc_cleanup"``.
+
+        Returns:
+            Tuple of ``(provider, model, reasoning_effort)`` where
+            *reasoning_effort* is ``None`` if unset or the provider does
+            not support it.
+        """
+        resolved_synthesis_provider = self.synthesis_provider or self.provider
+
+        if role == "utility":
+            provider = self.utility_provider or self.provider
+            model = self.utility_model or self._get_default_models_for(provider)[0]
+            effort = self.codex_reasoning_effort_utility or self.codex_reasoning_effort
+        elif role == "synthesis":
+            provider = resolved_synthesis_provider
+            model = self.synthesis_model or self._get_default_models_for(provider)[1]
+            effort = (
+                self.codex_reasoning_effort_synthesis or self.codex_reasoning_effort
+            )
+        elif role == "map_hyde":
+            provider = self.map_hyde_provider or resolved_synthesis_provider
+            model = (
+                self.map_hyde_model
+                or self.synthesis_model
+                or self._get_default_models_for(provider)[1]
+            )
+            # map_hyde does not inherit codex_reasoning_effort (by design)
+            effort = self.map_hyde_reasoning_effort
+        elif role == "autodoc_cleanup":
+            provider = self.autodoc_cleanup_provider or resolved_synthesis_provider
+            model = (
+                self.autodoc_cleanup_model
+                or self.synthesis_model
+                or self._get_default_models_for(provider)[1]
+            )
+            # autodoc_cleanup does not inherit codex_reasoning_effort (by design)
+            effort = self.autodoc_cleanup_reasoning_effort
+        else:
+            raise ValueError(f"Unknown role: {role}")
+
+        if provider not in REASONING_EFFORT_PROVIDERS:
+            effort = None
+
+        return provider, model, effort
 
     @field_validator(
         "codex_reasoning_effort",
@@ -491,6 +540,93 @@ class LLMConfig(BaseSettings):
             return v.strip().lower()
         raise ValueError(f"Expected str or None, got {type(v).__name__}")
 
+    def _get_base_provider_config(self, provider: str) -> dict[str, Any]:
+        """Build the provider config shared by a resolved role."""
+        base_config: dict[str, Any] = {
+            "timeout": self.timeout,
+            "max_retries": self.max_retries,
+        }
+
+        if self.api_key and provider not in NO_KEY_PROVIDERS:
+            base_config["api_key"] = self.api_key.get_secret_value()
+
+        if self.base_url:
+            base_config["base_url"] = self.base_url
+
+        return base_config
+
+    def _apply_anthropic_provider_config(self, target: dict[str, Any]) -> None:
+        """Attach Anthropic-only options to a resolved provider config."""
+        target["thinking_enabled"] = self.anthropic_thinking_enabled
+        target["thinking_budget_tokens"] = self.anthropic_thinking_budget_tokens
+        target["interleaved_thinking"] = self.anthropic_interleaved_thinking
+        if self.anthropic_thinking_mode:
+            target["thinking_mode"] = self.anthropic_thinking_mode
+        if self.anthropic_thinking_display:
+            target["thinking_display"] = self.anthropic_thinking_display
+        if self.anthropic_effort:
+            target["effort"] = self.anthropic_effort
+        target["prompt_caching"] = self.anthropic_prompt_caching
+        if self.anthropic_cache_ttl:
+            target["cache_ttl"] = self.anthropic_cache_ttl
+        if self.anthropic_task_budget_tokens is not None:
+            target["task_budget_tokens"] = self.anthropic_task_budget_tokens
+        if self.anthropic_context_management_enabled:
+            target["context_management_enabled"] = True
+            if self.anthropic_clear_thinking_keep_turns is not None:
+                target["clear_thinking_keep_turns"] = (
+                    self.anthropic_clear_thinking_keep_turns
+                )
+            if self.anthropic_clear_tool_uses_trigger_tokens is not None:
+                target["clear_tool_uses_trigger_tokens"] = (
+                    self.anthropic_clear_tool_uses_trigger_tokens
+                )
+            if self.anthropic_clear_tool_uses_keep is not None:
+                target["clear_tool_uses_keep"] = self.anthropic_clear_tool_uses_keep
+
+    def get_provider_config_for_role(self, role: str) -> dict[str, Any]:
+        """Resolve a single role to the exact provider config used at runtime.
+
+        Centralises role resolution so that consumers (autodoc_cleanup,
+        code_mapper, get_provider_configs) never duplicate the fallback chain.
+
+        Args:
+            role: One of ``"utility"``, ``"synthesis"``, ``"map_hyde"``,
+                or ``"autodoc_cleanup"``.
+
+        Returns:
+            dict with keys ``provider``, ``model``, and optionally
+            ``reasoning_effort``, ``supports_structured_outputs``, and
+            Anthropic-specific keys when ``provider == "anthropic"``.
+
+        Raises:
+            ValueError: If *role* is not one of the four recognised roles.
+        """
+        # Delegate fallback resolution to the centralised helper so every
+        # code path (model_post_init, get_provider_configs, external consumers)
+        # stays in sync without manual duplication (fix M2).
+        provider, model, effort = self._resolve_role_config(role)
+        role_config = self._get_base_provider_config(provider)
+        role_config["provider"] = provider
+        role_config["model"] = model
+
+        resolved_synthesis_provider = self.synthesis_provider or self.provider
+        if self.supports_structured_outputs is not None and (
+            role in {"utility", "synthesis"}
+            or provider == resolved_synthesis_provider
+        ):
+            role_config["supports_structured_outputs"] = (
+                self.supports_structured_outputs
+            )
+
+        if effort:
+            role_config["reasoning_effort"] = effort
+
+        if provider == "anthropic":
+            self._apply_anthropic_provider_config(role_config)
+
+        return role_config
+
     def get_provider_configs(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """
         Get provider-specific configuration dictionaries.
@@ -498,101 +634,8 @@ class LLMConfig(BaseSettings):
         Returns:
             Tuple of (utility_config, synthesis_config)
         """
-        # Resolve providers per-role
-        resolved_utility_provider = self.utility_provider or self.provider
-        resolved_synthesis_provider = self.synthesis_provider or self.provider
-
-        # Get default models from each resolved role provider, not the base provider.
-        utility_default = self._get_default_models_for(resolved_utility_provider)[0]
-        synthesis_default = self._get_default_models_for(resolved_synthesis_provider)[1]
-
-        base_config: dict[str, Any] = {
-            "timeout": self.timeout,
-            "max_retries": self.max_retries,
-        }
-
-        # Add API key if available
-        if self.api_key:
-            base_config["api_key"] = self.api_key.get_secret_value()
-
-        # Add base URL if available
-        if self.base_url:
-            base_config["base_url"] = self.base_url
-
-        # Build utility config
-        utility_config = base_config.copy()
-        utility_config["provider"] = resolved_utility_provider
-        utility_config["model"] = self.utility_model or utility_default
-
-        if self.supports_structured_outputs is not None:
-            utility_config["supports_structured_outputs"] = (
-                self.supports_structured_outputs
-            )
-
-        # Build synthesis config
-        synthesis_config = base_config.copy()
-        synthesis_config["provider"] = resolved_synthesis_provider
-        synthesis_config["model"] = self.synthesis_model or synthesis_default
-
-        if self.supports_structured_outputs is not None:
-            synthesis_config["supports_structured_outputs"] = (
-                self.supports_structured_outputs
-            )
-
-        def _codex_effort_for(role: str) -> str | None:
-            default_effort = self.codex_reasoning_effort
-            if role == "utility":
-                return self.codex_reasoning_effort_utility or default_effort
-            if role == "synthesis":
-                return self.codex_reasoning_effort_synthesis or default_effort
-            return default_effort
-
-        # Add reasoning_effort for providers that support it
-        utility_effort = _codex_effort_for("utility")
-        if resolved_utility_provider in REASONING_EFFORT_PROVIDERS and utility_effort:
-            utility_config["reasoning_effort"] = utility_effort
-
-        synthesis_effort = _codex_effort_for("synthesis")
-        if (
-            resolved_synthesis_provider in REASONING_EFFORT_PROVIDERS
-            and synthesis_effort
-        ):
-            synthesis_config["reasoning_effort"] = synthesis_effort
-
-        def _apply_anthropic(target: dict[str, Any]) -> None:
-            target["thinking_enabled"] = self.anthropic_thinking_enabled
-            target["thinking_budget_tokens"] = self.anthropic_thinking_budget_tokens
-            target["interleaved_thinking"] = self.anthropic_interleaved_thinking
-            if self.anthropic_thinking_mode:
-                target["thinking_mode"] = self.anthropic_thinking_mode
-            if self.anthropic_thinking_display:
-                target["thinking_display"] = self.anthropic_thinking_display
-            if self.anthropic_effort:
-                target["effort"] = self.anthropic_effort
-            target["prompt_caching"] = self.anthropic_prompt_caching
-            if self.anthropic_cache_ttl:
-                target["cache_ttl"] = self.anthropic_cache_ttl
-            if self.anthropic_task_budget_tokens is not None:
-                target["task_budget_tokens"] = self.anthropic_task_budget_tokens
-            if self.anthropic_context_management_enabled:
-                target["context_management_enabled"] = True
-                if self.anthropic_clear_thinking_keep_turns is not None:
-                    target["clear_thinking_keep_turns"] = (
-                        self.anthropic_clear_thinking_keep_turns
-                    )
-                if self.anthropic_clear_tool_uses_trigger_tokens is not None:
-                    target["clear_tool_uses_trigger_tokens"] = (
-                        self.anthropic_clear_tool_uses_trigger_tokens
-                    )
-                if self.anthropic_clear_tool_uses_keep is not None:
-                    target["clear_tool_uses_keep"] = self.anthropic_clear_tool_uses_keep
-
-        if resolved_utility_provider == "anthropic":
-            _apply_anthropic(utility_config)
-
-        if resolved_synthesis_provider == "anthropic":
-            _apply_anthropic(synthesis_config)
-
+        utility_config = self.get_provider_config_for_role("utility")
+        synthesis_config = self.get_provider_config_for_role("synthesis")
         return utility_config, synthesis_config
 
     @staticmethod
@@ -743,7 +786,7 @@ class LLMConfig(BaseSettings):
             help=(
                 "Codex CLI reasoning effort (thinking depth) "
                 "when using codex-cli, opencode-cli, or openai provider "
-                "(openai excludes xhigh)"
+                "(openai and grok exclude xhigh)"
             ),
         )
 
@@ -789,7 +832,7 @@ class LLMConfig(BaseSettings):
             choices=["minimal", "low", "medium", "high", "xhigh"],
             help=(
                 "Override reasoning effort for Code Mapper HyDE planning "
-                "(openai excludes xhigh)"
+                "(openai and grok exclude xhigh)"
             ),
         )
 
@@ -807,7 +850,7 @@ class LLMConfig(BaseSettings):
             choices=["minimal", "low", "medium", "high", "xhigh"],
             help=(
                 "Override reasoning effort for AutoDoc LLM cleanup "
-                "(openai excludes xhigh)"
+                "(openai and grok exclude xhigh)"
             ),
         )
 
@@ -1118,123 +1161,5 @@ class LLMConfig(BaseSettings):
         )
 
 
-def strip_cross_provider_overrides(
-    cfg: dict[str, Any],
-    target_provider: str,
-    role_name: str,
-    *,
-    source_provider: str | None = None,
-) -> None:
-    """Strip provider-specific settings when switching to a different provider.
-
-    **⚠️ MUTATES** *cfg* **in-place.** The sole caller
-    (:py:func:`apply_role_override`) passes a ``.copy()``, but future callers
-    must do the same or risk silently corrupting their source dict.
-
-    Removes keys from *cfg* that are tied to the source provider and may be
-    invalid or misleading for the target provider:
-
-    - ``reasoning_effort`` — stripped unconditionally (provider-specific semantics)
-    - ``supports_structured_outputs`` — stripped unconditionally (capability flag)
-    - ``api_key`` — stripped only when switching to a **no-key provider**
-      (e.g. ``ollama``, ``claude-code-cli``). For keyed providers the global
-      credential works across providers.
-
-    ``base_url`` is preserved across provider switches because ChunkHound
-    exposes a single shared gateway/proxy endpoint knob rather than
-    provider-specific base URLs.
-
-    When ``source_provider == target_provider`` the dict is left untouched
-    (same-provider override preserves inherited settings).
-    """
-    resolved_source = source_provider or cfg.get("provider")
-    if resolved_source == target_provider:
-        return
-
-    for key in (
-        "reasoning_effort",
-        "supports_structured_outputs",
-    ):
-        dropped = cfg.pop(key, None)
-        if dropped is not None:
-            logger.debug(
-                f"{role_name}: dropped inherited {key}={dropped!r} "
-                f"when switching provider {resolved_source!r} -> {target_provider!r}"
-            )
-
-    # Only strip api_key when the target does not use credentials (no-key providers).
-    # For keyed providers the global credential from LLMConfig works across providers.
-    if target_provider in NO_KEY_PROVIDERS:
-        dropped = cfg.pop("api_key", None)
-        if dropped is not None:
-            logger.debug(
-                f"{role_name}: dropped inherited api_key "
-                f"when switching to no-key provider {target_provider!r}"
-            )
 
 
-def apply_role_override(
-    base_cfg: dict[str, Any],
-    *,
-    target_provider: str | None = None,
-    target_model: str | None = None,
-    target_effort: str | None = None,
-    role_name: str,
-) -> dict[str, Any]:
-    """Clone *base_cfg* and safely apply role-specific provider/model/effort overrides.
-
-    When *target_provider* differs from the source provider (from ``base_cfg``),
-    provider-specific settings (``reasoning_effort``,
-    ``supports_structured_outputs``, and ``api_key`` for no-key providers) are
-    stripped to prevent cross-provider leaks, while shared ``base_url`` is
-    preserved. The original dict is not mutated.
-
-    Args:
-        base_cfg: Source configuration dict (will not be mutated).
-        target_provider: Override provider. If None, keeps the source provider.
-        target_model: Override model. If None, keeps the source model only when
-            the provider is unchanged. Provider switches drop the inherited
-            model so callers do not accidentally mix providers and models.
-        target_effort: Override reasoning effort (e.g. "high", "xhigh").
-            If None, keeps the source effort. Only applied when the resolved
-            provider supports ``reasoning_effort``.
-        role_name: Human-readable role name for diagnostic log messages
-            (e.g. ``"map_hyde"``, ``"autodoc_cleanup"``).
-
-    Returns:
-        New config dict with overrides applied.
-    """
-    cfg = base_cfg.copy()
-
-    provider_changed = False
-    if target_provider is not None:
-        source_provider = base_cfg.get("provider")
-        provider_changed = source_provider != target_provider
-        cfg["provider"] = target_provider
-        strip_cross_provider_overrides(
-            cfg,
-            target_provider,
-            role_name,
-            source_provider=source_provider,
-        )
-
-    if target_model is not None:
-        cfg["model"] = target_model
-    elif provider_changed:
-        dropped_model = cfg.pop("model", None)
-        if dropped_model is not None:
-            logger.debug(
-                f"{role_name}: dropped inherited model={dropped_model!r} "
-                f"when switching providers"
-            )
-
-    if target_effort is not None:
-        effective_effort = str(target_effort).strip().lower()
-        resolved_provider = cfg.get("provider")
-        if (
-            resolved_provider is not None
-            and resolved_provider in REASONING_EFFORT_PROVIDERS
-        ):
-            cfg["reasoning_effort"] = effective_effort
-
-    return cfg

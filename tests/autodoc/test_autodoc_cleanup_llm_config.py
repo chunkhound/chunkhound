@@ -141,7 +141,7 @@ def test_cleanup_same_provider_preserves_explicit_structured_outputs() -> None:
     assert synthesis_config["supports_structured_outputs"] is False
 
 
-def test_cleanup_same_provider_preserves_inherited_reasoning_effort() -> None:
+def test_cleanup_same_provider_does_not_inherit_synthesis_reasoning_effort() -> None:
     config = LLMConfig(
         provider="openai",
         synthesis_model="gpt-5",
@@ -155,4 +155,4 @@ def test_cleanup_same_provider_preserves_inherited_reasoning_effort() -> None:
     _, synthesis_config = autodoc_cleanup._build_cleanup_provider_configs(config)
 
     assert synthesis_config["provider"] == "openai"
-    assert synthesis_config["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in synthesis_config

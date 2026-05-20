@@ -5,11 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from chunkhound.core.config.llm_config import (
-    LLMConfig,
-    apply_role_override,
-    strip_cross_provider_overrides,
-)
+from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 from tests.helpers import DummyProc
@@ -624,141 +620,254 @@ def test_map_hyde_and_autodoc_cleanup_do_not_inherit_global_codex_reasoning_effo
     assert "autodoc_cleanup_reasoning_effort" not in synthesis_config
 
 
-def test_apply_role_override_drops_inherited_model_on_provider_switch() -> None:
-    cfg = apply_role_override(
-        {
-            "provider": "openai",
-            "model": "gpt-5",
-            "base_url": "https://gateway.example/v1",
-        },
-        target_provider="deepseek",
-        role_name="secondary_role",
+def test_map_hyde_inherits_synthesis_model_but_not_global_codex_effort():
+    cfg = LLMConfig(
+        provider="openai",
+        utility_model="gpt-5-nano",
+        synthesis_model="gpt-5",
+        codex_reasoning_effort="high",
     )
 
-    assert cfg["provider"] == "deepseek"
-    assert "model" not in cfg
-    assert cfg["base_url"] == "https://gateway.example/v1"
+    role_cfg = cfg.get_provider_config_for_role("map_hyde")
+
+    assert role_cfg["provider"] == "openai"
+    assert role_cfg["model"] == "gpt-5"
+    assert "reasoning_effort" not in role_cfg
 
 
-def test_strip_cross_provider_overrides_drops_inherited_provider_settings() -> None:
-    cfg: dict[str, object] = {
-        "provider": "openai",
-        "api_key": "sk-test",
-        "base_url": "https://api.openai.com/v1",
-        "reasoning_effort": "high",
-        "supports_structured_outputs": False,
-        "model": "gpt-5",
-    }
-
-    strip_cross_provider_overrides(
-        cfg,
-        "anthropic",
-        "secondary_role",
-        source_provider="openai",
+def test_autodoc_cleanup_inherits_synthesis_model_but_not_global_codex_effort():
+    cfg = LLMConfig(
+        provider="openai",
+        utility_model="gpt-5-nano",
+        synthesis_model="gpt-5",
+        codex_reasoning_effort="high",
     )
 
-    assert cfg == {
-        "provider": "openai",
-        "api_key": "sk-test",  # preserved for keyed provider
-        "base_url": "https://api.openai.com/v1",
-        "model": "gpt-5",
-    }
+    role_cfg = cfg.get_provider_config_for_role("autodoc_cleanup")
+
+    assert role_cfg["provider"] == "openai"
+    assert role_cfg["model"] == "gpt-5"
+    assert "reasoning_effort" not in role_cfg
 
 
-def test_strip_cross_provider_overrides_preserves_same_provider_settings() -> None:
-    cfg: dict[str, object] = {
-        "provider": "openai",
-        "api_key": "sk-test",
-        "base_url": "https://api.openai.com/v1",
-        "reasoning_effort": "high",
-        "supports_structured_outputs": False,
-        "model": "gpt-5",
-    }
-
-    strip_cross_provider_overrides(
-        cfg,
-        "openai",
-        "secondary_role",
-        source_provider="openai",
+def test_non_reasoning_providers_drop_global_effort_from_provider_configs():
+    cfg = LLMConfig(
+        provider="claude-code-cli",
+        codex_reasoning_effort="high",
     )
 
-    assert cfg["api_key"] == "sk-test"
-    assert cfg["base_url"] == "https://api.openai.com/v1"
-    assert cfg["reasoning_effort"] == "high"
-    assert cfg["supports_structured_outputs"] is False
+    utility_config, synthesis_config = cfg.get_provider_configs()
+
+    assert utility_config["provider"] == "claude-code-cli"
+    assert synthesis_config["provider"] == "claude-code-cli"
+    assert "reasoning_effort" not in utility_config
+    assert "reasoning_effort" not in synthesis_config
 
 
-def test_strip_cross_provider_overrides_strips_api_key_for_no_key_target() -> None:
-    """api_key must be stripped when switching to a no-key provider."""
-    cfg: dict[str, object] = {
-        "provider": "openai",
-        "api_key": "sk-test",
-        "base_url": "https://api.openai.com/v1",
-        "reasoning_effort": "high",
-        "supports_structured_outputs": False,
-        "model": "gpt-5",
-    }
-
-    strip_cross_provider_overrides(
-        cfg,
-        "ollama",
-        "secondary_role",
-        source_provider="openai",
+def test_get_provider_config_for_role_propagates_structured_outputs_to_secondary_role(
+) -> None:
+    cfg = LLMConfig(
+        provider="deepseek",
+        api_key="sk-test",
+        synthesis_model="deepseek-v4-flash",
+        map_hyde_model="deepseek-v4-flash",
+        supports_structured_outputs=False,
     )
 
-    assert "api_key" not in cfg  # stripped for no-key target
-    assert cfg["base_url"] == "https://api.openai.com/v1"
-    assert "reasoning_effort" not in cfg
-    assert "supports_structured_outputs" not in cfg
-    assert cfg["provider"] == "openai"
-    assert cfg["model"] == "gpt-5"
+    role_cfg = cfg.get_provider_config_for_role("map_hyde")
+
+    assert role_cfg["provider"] == "deepseek"
+    assert role_cfg["model"] == "deepseek-v4-flash"
+    assert role_cfg["supports_structured_outputs"] is False
 
 
-def test_strip_cross_provider_overrides_logs_dropped_keys() -> None:
-    """strip_cross_provider_overrides must log each dropped key at DEBUG level."""
-    from loguru import logger as loguru_logger
-
-    captured: list[str] = []
-
-    sink_id = loguru_logger.add(
-        lambda msg: captured.append(msg),
-        level="DEBUG",
-        format="{message}",
+@pytest.mark.parametrize(
+    ("role", "provider", "model"),
+    [
+        ("map_hyde", "openai", "gpt-5-mini"),
+        ("autodoc_cleanup", "openai", "gpt-5-mini"),
+    ],
+)
+def test_role_config_does_not_propagate_structured_outputs_across_provider_switch(
+    role: str,
+    provider: str,
+    model: str,
+) -> None:
+    cfg = LLMConfig(
+        provider="deepseek",
+        api_key="sk-test",
+        synthesis_model="deepseek-v4-flash",
+        supports_structured_outputs=False,
+        **{f"{role}_provider": provider, f"{role}_model": model},
     )
-    try:
-        cfg: dict[str, object] = {
-            "provider": "openai",
-            "api_key": "sk-test",
-            "base_url": "https://api.openai.com/v1",
-            "reasoning_effort": "high",
-            "supports_structured_outputs": False,
-            "model": "gpt-5",
-        }
 
-        strip_cross_provider_overrides(
-            cfg,
-            "ollama",
-            "test_role",
-            source_provider="openai",
+    role_cfg = cfg.get_provider_config_for_role(role)
+
+    assert role_cfg["provider"] == provider
+    assert role_cfg["model"] == model
+    assert "supports_structured_outputs" not in role_cfg
+
+
+def test_get_provider_config_for_role_utility_propagates_structured_outputs() -> None:
+    """``supports_structured_outputs`` must propagate for the utility role."""
+    cfg = LLMConfig(
+        provider="deepseek",
+        api_key="sk-test",
+        utility_model="deepseek-v4-flash",
+        synthesis_model="deepseek-v4-flash",
+        supports_structured_outputs=False,
+    )
+
+    role_cfg = cfg.get_provider_config_for_role("utility")
+
+    assert role_cfg["provider"] == "deepseek"
+    assert role_cfg["supports_structured_outputs"] is False
+
+
+def test_get_provider_config_for_role_synthesis_propagates_structured_outputs() -> None:
+    """``supports_structured_outputs`` must propagate for the synthesis role."""
+    cfg = LLMConfig(
+        provider="deepseek",
+        api_key="sk-test",
+        utility_model="deepseek-v4-flash",
+        synthesis_model="deepseek-v4-flash",
+        supports_structured_outputs=False,
+    )
+
+    role_cfg = cfg.get_provider_config_for_role("synthesis")
+
+    assert role_cfg["provider"] == "deepseek"
+    assert role_cfg["supports_structured_outputs"] is False
+
+
+def test_get_provider_config_for_role_supports_structured_outputs_none_is_omitted(
+) -> None:
+    """When ``supports_structured_outputs`` is None (default), it must not appear
+    in any role config to avoid leaking provider-agnostic defaults."""
+    cfg = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        utility_model="gpt-5-nano",
+        synthesis_model="gpt-5",
+    )
+
+    for role in ("utility", "synthesis", "map_hyde", "autodoc_cleanup"):
+        role_cfg = cfg.get_provider_config_for_role(role)
+        assert "supports_structured_outputs" not in role_cfg, (
+            f"{role} should not have supports_structured_outputs when unset"
         )
 
-        dropped_names = {"reasoning_effort", "supports_structured_outputs", "api_key"}
-        import re
 
-        logged_names = set()
-        for msg in captured:
-            if "dropped inherited" in msg:
-                # Key name is the first word after "inherited " — stop at "=" or " "
-                m = re.match(r".*dropped inherited (\w+)(?:[= ]|$)", msg)
-                if m:
-                    logged_names.add(m.group(1))
+def test_get_provider_config_for_role_attaches_anthropic_options() -> None:
+    cfg = LLMConfig(
+        provider="openai",
+        utility_model="gpt-5-nano",
+        synthesis_provider="anthropic",
+        synthesis_model="claude-opus-4-7",
+        api_key="sk-test",
+        anthropic_thinking_enabled=True,
+        anthropic_thinking_mode="adaptive",
+        anthropic_thinking_display="summarized",
+        anthropic_effort="xhigh",
+        anthropic_prompt_caching=True,
+        anthropic_cache_ttl="1h",
+        anthropic_task_budget_tokens=20000,
+    )
 
-        assert logged_names == dropped_names, (
-            f"Expected logs for {dropped_names}, got {logged_names}\n"
-            f"Full captured: {captured}"
-        )
-    finally:
-        loguru_logger.remove(sink_id)
+    role_cfg = cfg.get_provider_config_for_role("synthesis")
+
+    assert role_cfg["provider"] == "anthropic"
+    assert role_cfg["model"] == "claude-opus-4-7"
+    assert role_cfg["thinking_enabled"] is True
+    assert role_cfg["thinking_mode"] == "adaptive"
+    assert role_cfg["thinking_display"] == "summarized"
+    assert role_cfg["effort"] == "xhigh"
+    assert role_cfg["prompt_caching"] is True
+    assert role_cfg["cache_ttl"] == "1h"
+    assert role_cfg["task_budget_tokens"] == 20000
+
+
+def test_get_provider_config_for_role_unknown_role_raises() -> None:
+    cfg = LLMConfig(
+        provider="openai",
+        utility_model="gpt-5-nano",
+        synthesis_model="gpt-5",
+    )
+
+    with pytest.raises(ValueError, match="Unknown role"):
+        cfg.get_provider_config_for_role("nope")
+
+
+@pytest.mark.parametrize(
+    ("provider", "kwargs"),
+    [
+        ("ollama", {}),
+        ("claude-code-cli", {}),
+        ("codex-cli", {}),
+        (
+            "opencode-cli",
+            {
+                "utility_model": "openai/gpt-5-nano",
+                "synthesis_model": "openai/gpt-5",
+            },
+        ),
+    ],
+)
+def test_no_key_providers_omit_api_key_in_base_role_configs(
+    provider: str,
+    kwargs: dict[str, str],
+) -> None:
+    cfg = LLMConfig(
+        provider=provider,
+        api_key="sk-test",
+        **kwargs,
+    )
+
+    utility_config, synthesis_config = cfg.get_provider_configs()
+
+    assert utility_config["provider"] == provider
+    assert synthesis_config["provider"] == provider
+    assert "api_key" not in utility_config
+    assert "api_key" not in synthesis_config
+
+
+@pytest.mark.parametrize(
+    ("role", "provider", "model"),
+    [
+        ("synthesis", "codex-cli", "codex"),
+        ("map_hyde", "opencode-cli", "openai/gpt-5-mini"),
+        ("autodoc_cleanup", "claude-code-cli", "claude-haiku-4-5"),
+    ],
+)
+def test_get_provider_config_for_role_strips_api_key_for_no_key_provider_switch(
+    role: str,
+    provider: str,
+    model: str,
+) -> None:
+    role_overrides = (
+        {"synthesis_provider": provider, "synthesis_model": model}
+        if role == "synthesis"
+        else {f"{role}_provider": provider, f"{role}_model": model}
+    )
+    config_kwargs: dict[str, str] = {
+        "provider": "openai",
+        "api_key": "sk-test",
+        "utility_model": "gpt-5-nano",
+        **role_overrides,
+    }
+    if role != "synthesis":
+        config_kwargs["synthesis_model"] = "gpt-5"
+
+    cfg = LLMConfig(**config_kwargs)
+
+    role_cfg = cfg.get_provider_config_for_role(role)
+
+    assert role_cfg["provider"] == provider
+    assert role_cfg["model"] == model
+    assert "api_key" not in role_cfg
+
+
+
 
 
 def test_supports_structured_outputs_not_passed_to_other_providers() -> None:

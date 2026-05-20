@@ -8,10 +8,7 @@ from loguru import logger
 from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
 from chunkhound.autodoc.docsite import CleanupConfig
 from chunkhound.core.config.config import Config
-from chunkhound.core.config.llm_config import (
-    LLMConfig,
-    apply_role_override,
-)
+from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
@@ -25,21 +22,13 @@ def _has_llm_env() -> bool:
 def _build_cleanup_provider_configs(
     llm_config: LLMConfig,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    utility_config, synthesis_config = llm_config.get_provider_configs()
+    """Build utility + autodoc-cleanup provider configs from LLMConfig.
 
-    cleanup_provider = llm_config.autodoc_cleanup_provider
-    cleanup_model = llm_config.autodoc_cleanup_model
-    cleanup_effort = llm_config.autodoc_cleanup_reasoning_effort
-
-    if cleanup_provider or cleanup_model or cleanup_effort:
-        synthesis_config = apply_role_override(
-            synthesis_config,
-            target_provider=cleanup_provider,
-            target_model=cleanup_model,
-            target_effort=cleanup_effort,
-            role_name="autodoc_cleanup",
-        )
-
+    The autodoc cleanup role maps to the synthesis config slot because
+    cleanup replaces synthesis as the document writing phase.
+    """
+    utility_config = llm_config.get_provider_config_for_role("utility")
+    synthesis_config = llm_config.get_provider_config_for_role("autodoc_cleanup")
     return utility_config, synthesis_config
 
 
