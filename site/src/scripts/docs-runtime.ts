@@ -121,6 +121,7 @@ export function initMobileNav(): void {
         "textarea:not([disabled])",
         "[tabindex]:not([tabindex='-1'])",
     ].join(", ");
+    const previousAriaHidden = new WeakMap<HTMLElement, string | null>();
     let open = false;
 
     const getFocusable = (): HTMLElement[] =>
@@ -137,10 +138,16 @@ export function initMobileNav(): void {
         inertTargets.forEach((target) => {
             target.inert = value;
             if (value) {
+                previousAriaHidden.set(target, target.getAttribute("aria-hidden"));
                 target.setAttribute("aria-hidden", "true");
                 return;
             }
-            target.removeAttribute("aria-hidden");
+            const prior = previousAriaHidden.get(target);
+            if (prior === null || prior === undefined) {
+                target.removeAttribute("aria-hidden");
+                return;
+            }
+            target.setAttribute("aria-hidden", prior);
         });
     };
 

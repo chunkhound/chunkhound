@@ -240,6 +240,139 @@ console.log(JSON.stringify({
     assert rendered["afterLink"]["inertAriaHidden"] == [None, None, None, None, None]
 
 
+def test_mobile_nav_preserves_preexisting_aria_hidden_targets() -> None:
+    script = """
+class FakeClassList {
+  constructor(initial = []) {
+    this.items = new Set(initial);
+  }
+  add(value) { this.items.add(value); }
+  remove(value) { this.items.delete(value); }
+  contains(value) { return this.items.has(value); }
+}
+
+class FakeElement {
+  constructor(owner, attrs = {}) {
+    this.ownerDocument = owner;
+    this.attributes = new Map(Object.entries(attrs));
+    this.classList = new FakeClassList();
+    this.listeners = new Map();
+    this.inert = false;
+    this.style = {};
+  }
+  addEventListener(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(fn);
+  }
+  dispatchEvent(event) {
+    for (const fn of this.listeners.get(event.type) || []) fn(event);
+  }
+  click() {
+    this.dispatchEvent({ type: 'click' });
+  }
+  focus() {
+    this.ownerDocument.activeElement = this;
+  }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) {
+    return this.attributes.has(name) ? this.attributes.get(name) : null;
+  }
+  removeAttribute(name) { this.attributes.delete(name); }
+  hasAttribute(name) { return this.attributes.has(name); }
+}
+
+class FakeSidebar extends FakeElement {
+  constructor(owner, input, links) {
+    super(owner);
+    this.input = input;
+    this.links = links;
+  }
+  querySelectorAll(selector) {
+    if (selector === 'a') return this.links;
+    if (selector.includes('a[href]')) return [this.input, ...this.links];
+    return [];
+  }
+}
+
+class FakeMediaQuery {
+  constructor(matches) {
+    this.matches = matches;
+    this.listeners = [];
+  }
+  addEventListener(type, fn) {
+    if (type === 'change') this.listeners.push(fn);
+  }
+}
+
+class FakeDocument {
+  constructor() {
+    this.readyState = 'loading';
+    this.listeners = new Map();
+    this.activeElement = null;
+    this.body = { style: {} };
+  }
+  addEventListener(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(fn);
+  }
+  dispatch(type, event) {
+    for (const fn of this.listeners.get(type) || []) fn(event);
+  }
+  querySelector(selector) {
+    if (selector === '[data-docs-nav-toggle]') return this.toggle;
+    if (selector === '[data-docs-nav-scrim]') return this.scrim;
+    return null;
+  }
+  querySelectorAll(selector) {
+    if (selector === '[data-docs-mobile-inert]') return this.inertTargets;
+    return [];
+  }
+  getElementById(id) {
+    if (id === 'docs-sidebar') return this.sidebar;
+    return null;
+  }
+}
+
+const document = new FakeDocument();
+const mediaQuery = new FakeMediaQuery(true);
+const window = { matchMedia: () => mediaQuery };
+
+globalThis.document = document;
+globalThis.window = window;
+
+const toggle = new FakeElement(document);
+const scrim = new FakeElement(document);
+const filter = new FakeElement(document);
+const link = new FakeElement(document, { href: '/docs/getting-started/' });
+const sidebar = new FakeSidebar(document, filter, [link]);
+const hiddenTarget = new FakeElement(document, { 'aria-hidden': 'true' });
+const visibleTarget = new FakeElement(document);
+
+document.toggle = toggle;
+document.scrim = scrim;
+document.sidebar = sidebar;
+document.inertTargets = [hiddenTarget, visibleTarget];
+
+const { initMobileNav } = await import('./site/src/scripts/docs-runtime.ts');
+initMobileNav();
+toggle.click();
+document.dispatch('keydown', {
+  key: 'Escape',
+  shiftKey: false,
+  preventDefault() {},
+});
+
+console.log(JSON.stringify({
+  hiddenTargetAriaHidden: hiddenTarget.getAttribute('aria-hidden'),
+  visibleTargetAriaHidden: visibleTarget.getAttribute('aria-hidden'),
+}));
+"""
+    rendered = run_tsx_json(script)
+
+    assert rendered["hiddenTargetAriaHidden"] == "true"
+    assert rendered["visibleTargetAriaHidden"] is None
+
+
 def test_mobile_nav_cleans_up_when_viewport_expands_to_desktop() -> None:
     script = """
 class FakeClassList {
