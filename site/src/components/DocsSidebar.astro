@@ -21,8 +21,16 @@ function isActive(href: string): boolean {
 ---
 
 <aside class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
-  <button class="docs-nav-toggle" type="button" data-docs-nav-toggle>Menu</button>
-  <div class="docs-nav-scrim" data-docs-nav-scrim></div>
+  <button
+    class="docs-nav-toggle"
+    type="button"
+    aria-controls="docs-sidebar"
+    aria-expanded="false"
+    data-docs-nav-toggle
+  >
+    Menu
+  </button>
+  <div class="docs-nav-scrim" hidden data-docs-nav-scrim></div>
   <div class="sidebar-inner">
     <label class="sr-only" for="docs-nav-filter">Filter pages</label>
     <input
@@ -36,7 +44,7 @@ function isActive(href: string): boolean {
 
     <div class="sidebar-section" data-sidebar-section>
       <div class="sidebar-section-title">Guides</div>
-      <nav>
+      <nav aria-label="Documentation guides">
         {guides.map((g) => (
           <a
             href={g.href}

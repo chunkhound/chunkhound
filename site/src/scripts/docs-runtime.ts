@@ -101,32 +101,52 @@ function initNavFilter(): void {
     });
 }
 
-function initMobileNav(): void {
-    const toggle = document.querySelector<HTMLElement>("[data-docs-nav-toggle]");
-    const sidebar = document.getElementById("docs-sidebar");
-    const scrim = document.querySelector<HTMLElement>("[data-docs-nav-scrim]");
+export function initMobileNav(doc: Document = document): void {
+    const toggle = doc.querySelector<HTMLElement>("[data-docs-nav-toggle]");
+    const sidebar = doc.getElementById("docs-sidebar");
+    const scrim = doc.querySelector<HTMLElement>("[data-docs-nav-scrim]");
+    const filter = doc.querySelector<HTMLInputElement>("[data-docs-nav-filter]");
     if (!toggle || !sidebar) {
         return;
     }
 
-    const open = () => {
-        sidebar.classList.add("open");
-        scrim?.classList.add("open");
+    const applyState = (isOpen: boolean) => {
+        sidebar.classList.toggle("open", isOpen);
+        scrim?.classList.toggle("open", isOpen);
+        toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+        if (scrim) {
+            scrim.hidden = !isOpen;
+        }
+
+        if (isOpen) {
+            sidebar.setAttribute("role", "dialog");
+            sidebar.setAttribute("aria-modal", "true");
+            sidebar.setAttribute("tabindex", "-1");
+            filter?.focus();
+            return;
+        }
+
+        sidebar.removeAttribute("role");
+        sidebar.removeAttribute("aria-modal");
+        sidebar.removeAttribute("tabindex");
     };
 
     const close = () => {
-        sidebar.classList.remove("open");
-        scrim?.classList.remove("open");
+        applyState(false);
+        toggle.focus();
     };
 
+    applyState(sidebar.classList.contains("open"));
+
     toggle.addEventListener("click", () => {
-        if (sidebar.classList.contains("open")) {
-            close();
-        } else {
-            open();
-        }
+        applyState(!sidebar.classList.contains("open"));
     });
     scrim?.addEventListener("click", close);
+    doc.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && sidebar.classList.contains("open")) {
+            close();
+        }
+    });
 }
 
 async function initMermaid(): Promise<void> {
@@ -178,18 +198,20 @@ function initSearchShortcut(): void {
     });
 }
 
-async function initDocsRuntime(): Promise<void> {
+export async function initDocsRuntime(doc: Document = document): Promise<void> {
     buildTOC();
     initNavFilter();
-    initMobileNav();
+    initMobileNav(doc);
     initSearchShortcut();
     await initMermaid();
 }
 
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => {
-        void initDocsRuntime();
-    });
-} else {
-    void initDocsRuntime();
+if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", () => {
+            void initDocsRuntime(document);
+        });
+    } else {
+        void initDocsRuntime(document);
+    }
 }
