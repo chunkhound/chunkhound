@@ -8,7 +8,8 @@ import subprocess
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-NPM: str = shutil.which("npm") or "npm"
+NODE: str = shutil.which("node") or "node"
+TSX_CLI = ROOT / "site" / "node_modules" / "tsx" / "dist" / "cli.mjs"
 _SUBPROCESS_ENV_ALLOWLIST = (
     "PATH",
     "HOME",
@@ -36,10 +37,10 @@ def sanitized_subprocess_env(**overrides: str) -> dict[str, str]:
 
 
 def run_tsx_raw(script: str, **kwargs) -> subprocess.CompletedProcess:
-    """Write script to a temp .mts file in ROOT and run via npm exec tsx.
+    """Write script to a temp .mts file in ROOT and run via the local tsx CLI.
 
     Returns the raw CompletedProcess. Accepts subprocess.run kwargs except
-    capture_output, text, and cwd (already set). Typical usage: check=False
+    capture_output, cwd, and encoding (already set). Typical usage: check=False
     or env=... to support callers that need non-zero exit handling.
     """
     # Temp file placed in ROOT so relative imports like './site/src/...' resolve.
@@ -51,11 +52,20 @@ def run_tsx_raw(script: str, **kwargs) -> subprocess.CompletedProcess:
         temp_path = pathlib.Path(f.name)
         f.write(script)
     try:
+        env = sanitized_subprocess_env(
+            NO_COLOR="1",
+            PYTHONIOENCODING="utf-8",
+            PYTHONUTF8="1",
+            LANG="C.UTF-8",
+            LC_ALL="C.UTF-8",
+        )
+        env.update(kwargs.pop("env", {}))
         return subprocess.run(
-            [NPM, "exec", "--prefix", "site", "--", "tsx", str(temp_path)],
+            [NODE, str(TSX_CLI), str(temp_path)],
             capture_output=True,
-            text=True,
             cwd=ROOT,
+            encoding="utf-8",
+            env=env,
             **kwargs,
         )
     finally:
