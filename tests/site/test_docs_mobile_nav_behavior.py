@@ -135,15 +135,20 @@ const { initMobileNav } = await import('./site/src/scripts/docs-runtime.ts');
 initMobileNav();
 const initiallyHidden = sidebar.getAttribute('aria-hidden');
 
-toggle.click();
-const afterOpen = {
+const snapshot = () => ({
   expanded: toggle.getAttribute('aria-expanded'),
   label: toggle.getAttribute('aria-label'),
   active: document.activeElement?.name,
   bodyOverflow: document.body.style.overflow || '',
   sidebarHidden: sidebar.getAttribute('aria-hidden'),
+  sidebarOpen: sidebar.classList.contains('open'),
+  scrimOpen: scrim.classList.contains('open'),
   inertTargets: inertTargets.map((target) => target.inert),
-};
+  inertAriaHidden: inertTargets.map((target) => target.getAttribute('aria-hidden')),
+});
+
+toggle.click();
+const afterOpen = snapshot();
 
 lastLink.focus();
 let preventedForward = false;
@@ -168,15 +173,17 @@ document.dispatch('keydown', {
   shiftKey: false,
   preventDefault() {},
 });
+const afterEscape = snapshot();
 
-const afterEscape = {
-  expanded: toggle.getAttribute('aria-expanded'),
-  label: toggle.getAttribute('aria-label'),
-  active: document.activeElement?.name,
-  bodyOverflow: document.body.style.overflow || '',
-  sidebarHidden: sidebar.getAttribute('aria-hidden'),
-  inertTargets: inertTargets.map((target) => target.inert),
-};
+toggle.click();
+lastLink.focus();
+scrim.click();
+const afterScrim = snapshot();
+
+toggle.click();
+lastLink.focus();
+lastLink.click();
+const afterLink = snapshot();
 
 console.log(JSON.stringify({
   initiallyHidden,
@@ -186,6 +193,8 @@ console.log(JSON.stringify({
   preventedBackward,
   afterBackwardTab,
   afterEscape,
+  afterScrim,
+  afterLink,
 }));
 """
     rendered = run_tsx_json(script)
@@ -196,7 +205,10 @@ console.log(JSON.stringify({
     assert rendered["afterOpen"]["active"] == "filter"
     assert rendered["afterOpen"]["bodyOverflow"] == "hidden"
     assert rendered["afterOpen"]["sidebarHidden"] is None
+    assert rendered["afterOpen"]["sidebarOpen"] is True
+    assert rendered["afterOpen"]["scrimOpen"] is True
     assert rendered["afterOpen"]["inertTargets"] == [True, True, True, True, True]
+    assert rendered["afterOpen"]["inertAriaHidden"] == ["true", "true", "true", "true", "true"]
     assert rendered["preventedForward"] is True
     assert rendered["afterForwardTab"] == "filter"
     assert rendered["preventedBackward"] is True
@@ -206,7 +218,26 @@ console.log(JSON.stringify({
     assert rendered["afterEscape"]["active"] == "toggle"
     assert rendered["afterEscape"]["bodyOverflow"] == ""
     assert rendered["afterEscape"]["sidebarHidden"] == "true"
+    assert rendered["afterEscape"]["sidebarOpen"] is False
+    assert rendered["afterEscape"]["scrimOpen"] is False
     assert rendered["afterEscape"]["inertTargets"] == [False, False, False, False, False]
+    assert rendered["afterEscape"]["inertAriaHidden"] == [None, None, None, None, None]
+    assert rendered["afterScrim"]["expanded"] == "false"
+    assert rendered["afterScrim"]["active"] == "toggle"
+    assert rendered["afterScrim"]["bodyOverflow"] == ""
+    assert rendered["afterScrim"]["sidebarHidden"] == "true"
+    assert rendered["afterScrim"]["sidebarOpen"] is False
+    assert rendered["afterScrim"]["scrimOpen"] is False
+    assert rendered["afterScrim"]["inertTargets"] == [False, False, False, False, False]
+    assert rendered["afterScrim"]["inertAriaHidden"] == [None, None, None, None, None]
+    assert rendered["afterLink"]["expanded"] == "false"
+    assert rendered["afterLink"]["active"] == "last-link"
+    assert rendered["afterLink"]["bodyOverflow"] == ""
+    assert rendered["afterLink"]["sidebarHidden"] == "true"
+    assert rendered["afterLink"]["sidebarOpen"] is False
+    assert rendered["afterLink"]["scrimOpen"] is False
+    assert rendered["afterLink"]["inertTargets"] == [False, False, False, False, False]
+    assert rendered["afterLink"]["inertAriaHidden"] == [None, None, None, None, None]
 
 
 def test_mobile_nav_cleans_up_when_viewport_expands_to_desktop() -> None:
@@ -333,6 +364,7 @@ console.log(JSON.stringify({
   sidebarOpen: sidebar.classList.contains('open'),
   sidebarHidden: sidebar.getAttribute('aria-hidden'),
   inertTargets: inertTargets.map((target) => target.inert),
+  inertAriaHidden: inertTargets.map((target) => target.getAttribute('aria-hidden')),
 }));
 """
     rendered = run_tsx_json(script)
@@ -342,3 +374,4 @@ console.log(JSON.stringify({
     assert rendered["sidebarOpen"] is False
     assert rendered["sidebarHidden"] is None
     assert rendered["inertTargets"] == [False, False]
+    assert rendered["inertAriaHidden"] == [None, None]
