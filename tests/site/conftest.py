@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import sys
 import pytest
@@ -11,10 +12,9 @@ def built_site() -> None:
     """Build the Astro site once per test session."""
     if (ROOT / "site" / "dist" / "index.html").exists():
         return  # already built (e.g. downloaded from CI artifact)
-    # Import NPM from tsx_runner to get the platform-correct npm path
-    from tests.site.tsx_runner import NPM
+    npm: str = shutil.which("npm") or "npm"
     result = subprocess.run(
-        [NPM, "run", "build", "--prefix", "site"],
+        [npm, "run", "build", "--prefix", "site"],
         cwd=ROOT,
         capture_output=True,
         text=True,
