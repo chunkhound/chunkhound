@@ -3,9 +3,12 @@
   "type": "module",
   "version": "0.0.1",
   "scripts": {
+    "sync:changelog": "node scripts/sync-changelog.mjs",
+    "predev": "npm run sync:changelog",
     "dev": "astro dev",
-    "prebuild": "node scripts/sync-changelog.mjs",
+    "prebuild": "npm run sync:changelog",
     "build": "astro build",
+    "prepreview": "npm run sync:changelog",
     "preview": "astro preview"
   },
   "dependencies": {

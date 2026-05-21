@@ -4,7 +4,8 @@
  * Reads the root CHANGELOG.md, prepends the Astro frontmatter needed by the
  * site layout, and writes to site/src/pages/docs/changelog.md.
  *
- * This runs as a prebuild script so the site changelog is always in sync.
+ * Package scripts run this before dev/build/preview so served docs do not drift
+ * from the repository changelog.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
