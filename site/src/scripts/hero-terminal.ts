@@ -1,0 +1,226 @@
+interface HeroStepPromptSegment {
+    cls: string;
+    text: string;
+}
+
+type HeroStep =
+    | { type: "blank" }
+    | { type: "output"; text: string; dim?: boolean; cursor?: boolean }
+    | { type: "prompt"; segments: HeroStepPromptSegment[] };
+
+interface HeroTerminalOptions {
+    charDelay?: number;
+    execPause?: number;
+    loopDelay?: number;
+    loop?: boolean;
+    sleep?: (ms: number) => Promise<void>;
+}
+
+const STEPS: HeroStep[] = [
+    {
+        type: "prompt",
+        segments: [{ cls: "cmd", text: "chunkhound index ." }],
+    },
+    {
+        type: "output",
+        text: "Indexed 12,847 files · 33 languages · 2.1M LOC",
+    },
+    { type: "blank" },
+    {
+        type: "prompt",
+        segments: [
+            { cls: "cmd", text: "chunkhound search " },
+            { cls: "str", text: '"how does authentication work"' },
+        ],
+    },
+    {
+        type: "output",
+        text: "Found 42 results via 3-hop semantic traversal",
+        dim: true,
+    },
+    { type: "blank" },
+    {
+        type: "prompt",
+        segments: [
+            { cls: "cmd", text: "chunkhound research " },
+            { cls: "str", text: '"authentication architecture"' },
+        ],
+    },
+    {
+        type: "output",
+        text: "Generated report · 14 files · 6 components · 23 citations",
+        dim: true,
+        cursor: true,
+    },
+];
+
+function defaultSleep(ms: number): Promise<void> {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isCardVisible(element: Element): boolean {
+    if (typeof window === "undefined") {
+        return true;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const viewportHeight = window.innerHeight || 0;
+    const visibleHeight = Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0);
+    return visibleHeight >= rect.height * 0.5;
+}
+
+export function initHeroTerminal(
+    doc: Document = document,
+    options: HeroTerminalOptions = {},
+): void {
+    const container = doc.getElementById("terminal-lines");
+    if (!container) {
+        return;
+    }
+
+    const card = container.closest(".terminal-card") || container;
+    const charDelay = options.charDelay ?? 35;
+    const execPause = options.execPause ?? 250;
+    const loopDelay = options.loopDelay ?? 3000;
+    const loop = options.loop ?? true;
+    const sleep = options.sleep ?? defaultSleep;
+
+    let isVisible = isCardVisible(card);
+    let isRendering = false;
+
+    function clearTerminal(): void {
+        container.innerHTML = "";
+    }
+
+    function shouldAnimate(): boolean {
+        return !doc.hidden && isVisible;
+    }
+
+    async function typeText(span: HTMLSpanElement, text: string): Promise<void> {
+        for (const ch of text) {
+            if (!shouldAnimate()) {
+                return;
+            }
+            span.textContent += ch;
+            await sleep(charDelay);
+        }
+    }
+
+    async function renderOnce(): Promise<void> {
+        clearTerminal();
+
+        for (const step of STEPS) {
+            if (!shouldAnimate()) {
+                clearTerminal();
+                return;
+            }
+
+            if (step.type === "blank") {
+                const line = doc.createElement("div");
+                line.className = "line";
+                line.innerHTML = "&nbsp;";
+                container.appendChild(line);
+                continue;
+            }
+
+            if (step.type === "prompt") {
+                const line = doc.createElement("div");
+                line.className = "line";
+                const prompt = doc.createElement("span");
+                prompt.className = "prompt";
+                prompt.textContent = "$ ";
+                line.appendChild(prompt);
+                container.appendChild(line);
+
+                for (const segment of step.segments) {
+                    const span = doc.createElement("span");
+                    span.className = segment.cls;
+                    line.appendChild(span);
+                    await typeText(span, segment.text);
+                }
+
+                if (!shouldAnimate()) {
+                    clearTerminal();
+                    return;
+                }
+
+                await sleep(execPause);
+                continue;
+            }
+
+            const line = doc.createElement("div");
+            line.className = "line";
+            const span = doc.createElement("span");
+            span.className = step.dim ? "output dim" : "output";
+            span.textContent = step.text;
+            if (step.cursor) {
+                const cursor = doc.createElement("span");
+                cursor.className = "cursor";
+                span.appendChild(cursor);
+            }
+            line.appendChild(span);
+            container.appendChild(line);
+        }
+    }
+
+    function triggerRender(): void {
+        if (!shouldAnimate() || isRendering) {
+            return;
+        }
+
+        isRendering = true;
+        void (async () => {
+            try {
+                do {
+                    await renderOnce();
+                    if (!loop || !shouldAnimate()) {
+                        return;
+                    }
+                    await sleep(loopDelay);
+                } while (shouldAnimate());
+            } finally {
+                isRendering = false;
+                if (loop && shouldAnimate()) {
+                    triggerRender();
+                }
+            }
+        })();
+    }
+
+    const observer = new IntersectionObserver(
+        (entries) => {
+            isVisible = entries[0]?.isIntersecting ?? false;
+            if (!isVisible) {
+                clearTerminal();
+                return;
+            }
+            triggerRender();
+        },
+        { threshold: 0.5 },
+    );
+
+    observer.observe(card);
+
+    doc.addEventListener("visibilitychange", () => {
+        if (doc.hidden) {
+            clearTerminal();
+            return;
+        }
+        triggerRender();
+    });
+
+    window.addEventListener("pagehide", () => {
+        clearTerminal();
+    });
+
+    window.addEventListener("pageshow", () => {
+        isVisible = isCardVisible(card);
+        triggerRender();
+    });
+
+    triggerRender();
+}
+
+if (typeof document !== "undefined") {
+    initHeroTerminal();
+}
