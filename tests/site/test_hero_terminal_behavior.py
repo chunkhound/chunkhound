@@ -311,7 +311,7 @@ console.log(JSON.stringify({
     assert rendered["afterTeardownChildren"] == 0
     assert [line["text"] for line in rendered["beforeTeardown"]] == [
         "$ chunkhound index .",
-        "Indexed 12,847 files · 33 languages · 2.1M LOC",
+        "Indexed 12,847 files · 32 languages · 2.1M LOC",
         "\u00a0",
         '$ chunkhound search "how does authentication work"',
         "Found 42 results via 3-hop semantic traversal",

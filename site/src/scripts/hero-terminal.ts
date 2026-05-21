@@ -20,7 +20,7 @@ const HERO_TERMINAL_STEPS: readonly TerminalStep[] = [
     },
     {
         type: "output",
-        text: "Indexed 12,847 files · 33 languages · 2.1M LOC",
+        text: "Indexed 12,847 files · 32 languages · 2.1M LOC",
     },
     { type: "blank" },
     {
