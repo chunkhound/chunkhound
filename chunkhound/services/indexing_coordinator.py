@@ -1974,15 +1974,19 @@ class IndexingCoordinator(BaseService):
             detect_repo_roots = None  # type: ignore[assignment]
 
         if detect_repo_roots is not None:
+            idx = getattr(getattr(self, "config", None), "indexing", None)
             prune_gitfile_roots = (
-                self.config is not None
-                and "gitignore" in self.config.indexing.resolve_ignore_sources()
+                idx is not None and "gitignore" in idx.resolve_ignore_sources()
+            )
+            workspace_root_only_gitignore = bool(
+                getattr(idx, "workspace_gitignore_nonrepo", False)
             )
             try:
                 precomputed_roots = detect_repo_roots(
                     directory,
                     effective_excludes,
                     prune_ignored_gitfile_roots=prune_gitfile_roots,
+                    workspace_root_only_gitignore=workspace_root_only_gitignore,
                 )
             except Exception as e:
                 logger.debug(
@@ -2248,6 +2252,9 @@ class IndexingCoordinator(BaseService):
                 if _idx is not None
                 else False,
             }
+            workspace_root_only_gitignore = bool(
+                getattr(_idx, "workspace_gitignore_nonrepo", False)
+            ) if _idx is not None else False
             # Provide precomputed repo roots to parallel workers so they can
             # avoid re-detecting per process
             try:
@@ -2255,6 +2262,7 @@ class IndexingCoordinator(BaseService):
                     directory.resolve(),
                     list(cfg_excludes),
                     prune_ignored_gitfile_roots=("gitignore" in (sources or [])),
+                    workspace_root_only_gitignore=workspace_root_only_gitignore,
                 )
                 if roots:
                     engine_args["roots"] = roots
@@ -2299,7 +2307,21 @@ class IndexingCoordinator(BaseService):
                     if indexing_config is not None
                     else []
                 )
-                repo_roots = self._get_or_detect_repo_roots(directory, eff)
+                if indexing_config is not None and callable(
+                    getattr(indexing_config, "resolve_ignore_sources", None)
+                ):
+                    sources = indexing_config.resolve_ignore_sources()
+                else:
+                    sources = ["gitignore"]
+                workspace_root_only_gitignore = bool(
+                    getattr(indexing_config, "workspace_gitignore_nonrepo", False)
+                ) if indexing_config is not None else False
+                repo_roots = self._get_or_detect_repo_roots(
+                    directory,
+                    eff,
+                    prune_ignored_gitfile_roots=("gitignore" in (sources or [])),
+                    workspace_root_only_gitignore=workspace_root_only_gitignore,
+                )
             except Exception:
                 repo_roots = []
             if not repo_roots:
@@ -2540,8 +2562,12 @@ class IndexingCoordinator(BaseService):
             idx = getattr(getattr(self, "config", None), "indexing", None)
             sources = idx.resolve_ignore_sources() if idx is not None else []
             prune_gitfile_roots = "gitignore" in (sources or [])
+            workspace_root_only_gitignore = bool(
+                getattr(idx, "workspace_gitignore_nonrepo", False)
+            )
         except Exception:
             prune_gitfile_roots = False
+            workspace_root_only_gitignore = False
 
         # Detect repo roots under directory (pruned by effective_excludes) with cache reuse
         try:
@@ -2549,6 +2575,7 @@ class IndexingCoordinator(BaseService):
                 directory,
                 effective_excludes,
                 prune_ignored_gitfile_roots=prune_gitfile_roots,
+                workspace_root_only_gitignore=workspace_root_only_gitignore,
             )
         except Exception as e:
             logger.debug(f"Repo root detection failed in git discovery: {e}")
@@ -2763,7 +2790,8 @@ class IndexingCoordinator(BaseService):
         cfg_excludes: list[str] | tuple[str, ...],
         *,
         prune_ignored_gitfile_roots: bool = False,
-    ) -> tuple[str, tuple[str, ...], int]:
+        workspace_root_only_gitignore: bool = False,
+    ) -> tuple[str, tuple[str, ...], int, int]:
         try:
             base = str(root.resolve())
         except Exception:
@@ -2772,7 +2800,12 @@ class IndexingCoordinator(BaseService):
             items = tuple(sorted([str(x) for x in list(cfg_excludes)]))
         except Exception:
             items = tuple()
-        return (base, items, 1 if prune_ignored_gitfile_roots else 0)
+        return (
+            base,
+            items,
+            1 if prune_ignored_gitfile_roots else 0,
+            1 if workspace_root_only_gitignore else 0,
+        )
 
     def _get_or_detect_repo_roots(
         self,
@@ -2780,11 +2813,13 @@ class IndexingCoordinator(BaseService):
         cfg_excludes: list[str] | tuple[str, ...],
         *,
         prune_ignored_gitfile_roots: bool = False,
+        workspace_root_only_gitignore: bool = False,
     ) -> list[Path]:
         key = self._repo_roots_cache_key(
             root,
             cfg_excludes,
             prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+            workspace_root_only_gitignore=workspace_root_only_gitignore,
         )
         cached = self._repo_roots_cache.get(key)
         if cached is not None:
@@ -2796,6 +2831,7 @@ class IndexingCoordinator(BaseService):
                 root,
                 cfg_excludes,  # type: ignore[arg-type]
                 prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+                workspace_root_only_gitignore=workspace_root_only_gitignore,
             )
         except Exception:
             roots = []
