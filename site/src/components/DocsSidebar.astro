@@ -20,7 +20,14 @@ function isActive(href: string): boolean {
 }
 ---
 
-<aside class="docs-sidebar" id="docs-sidebar" aria-label="Documentation navigation" tabindex="-1">
+<aside
+  class="docs-sidebar"
+  id="docs-sidebar"
+  aria-label="Documentation navigation"
+  role="dialog"
+  aria-modal="true"
+  tabindex="-1"
+>
   <div class="sidebar-inner">
     <label class="sr-only" for="docs-nav-filter">Filter pages</label>
     <input

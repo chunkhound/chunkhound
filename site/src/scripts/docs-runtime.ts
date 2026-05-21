@@ -124,6 +124,16 @@ export function initMobileNav(): void {
     const previousAriaHidden = new WeakMap<HTMLElement, string | null>();
     let open = false;
 
+    const syncModalSemantics = (enabled: boolean) => {
+        if (enabled) {
+            sidebar.setAttribute("role", "dialog");
+            sidebar.setAttribute("aria-modal", "true");
+            return;
+        }
+        sidebar.removeAttribute("role");
+        sidebar.removeAttribute("aria-modal");
+    };
+
     const getFocusable = (): HTMLElement[] =>
         Array.from(sidebar.querySelectorAll<HTMLElement>(focusableSelector)).filter(
             (element) => !element.hasAttribute("hidden") && element.getAttribute("aria-hidden") !== "true",
@@ -156,10 +166,12 @@ export function initMobileNav(): void {
         scrim?.classList.remove("open");
         setToggleState(false);
         if (mobileMedia.matches) {
+            syncModalSemantics(true);
             sidebar.setAttribute("aria-hidden", "true");
             sidebar.inert = true;
             return;
         }
+        syncModalSemantics(false);
         sidebar.removeAttribute("aria-hidden");
         sidebar.inert = false;
     };
@@ -169,6 +181,7 @@ export function initMobileNav(): void {
         sidebar.classList.add("open");
         scrim?.classList.add("open");
         setToggleState(true);
+        syncModalSemantics(true);
         sidebar.removeAttribute("aria-hidden");
         sidebar.inert = false;
         setBackgroundInert(true);

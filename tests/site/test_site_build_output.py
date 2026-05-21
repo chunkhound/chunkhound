@@ -171,7 +171,8 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert '<nav class="nav-tabs"' not in homepage
     assert 'data-docs-nav-toggle' in getting_started
     assert 'aria-controls="docs-sidebar"' in getting_started
-    assert 'aria-haspopup="dialog"' not in getting_started
+    assert 'role="dialog"' in getting_started
+    assert 'aria-modal="true"' in getting_started
     assert "cdn.jsdelivr.net" not in getting_started
     assert "cdn.jsdelivr.net" not in configuration
 

@@ -141,6 +141,8 @@ const snapshot = () => ({
   active: document.activeElement?.name,
   bodyOverflow: document.body.style.overflow || '',
   sidebarHidden: sidebar.getAttribute('aria-hidden'),
+  sidebarRole: sidebar.getAttribute('role'),
+  sidebarModal: sidebar.getAttribute('aria-modal'),
   sidebarOpen: sidebar.classList.contains('open'),
   scrimOpen: scrim.classList.contains('open'),
   inertTargets: inertTargets.map((target) => target.inert),
@@ -205,6 +207,8 @@ console.log(JSON.stringify({
     assert rendered["afterOpen"]["active"] == "filter"
     assert rendered["afterOpen"]["bodyOverflow"] == "hidden"
     assert rendered["afterOpen"]["sidebarHidden"] is None
+    assert rendered["afterOpen"]["sidebarRole"] == "dialog"
+    assert rendered["afterOpen"]["sidebarModal"] == "true"
     assert rendered["afterOpen"]["sidebarOpen"] is True
     assert rendered["afterOpen"]["scrimOpen"] is True
     assert rendered["afterOpen"]["inertTargets"] == [True, True, True, True, True]
@@ -218,6 +222,8 @@ console.log(JSON.stringify({
     assert rendered["afterEscape"]["active"] == "toggle"
     assert rendered["afterEscape"]["bodyOverflow"] == ""
     assert rendered["afterEscape"]["sidebarHidden"] == "true"
+    assert rendered["afterEscape"]["sidebarRole"] == "dialog"
+    assert rendered["afterEscape"]["sidebarModal"] == "true"
     assert rendered["afterEscape"]["sidebarOpen"] is False
     assert rendered["afterEscape"]["scrimOpen"] is False
     assert rendered["afterEscape"]["inertTargets"] == [False, False, False, False, False]
@@ -226,6 +232,8 @@ console.log(JSON.stringify({
     assert rendered["afterScrim"]["active"] == "toggle"
     assert rendered["afterScrim"]["bodyOverflow"] == ""
     assert rendered["afterScrim"]["sidebarHidden"] == "true"
+    assert rendered["afterScrim"]["sidebarRole"] == "dialog"
+    assert rendered["afterScrim"]["sidebarModal"] == "true"
     assert rendered["afterScrim"]["sidebarOpen"] is False
     assert rendered["afterScrim"]["scrimOpen"] is False
     assert rendered["afterScrim"]["inertTargets"] == [False, False, False, False, False]
@@ -234,6 +242,8 @@ console.log(JSON.stringify({
     assert rendered["afterLink"]["active"] == "last-link"
     assert rendered["afterLink"]["bodyOverflow"] == ""
     assert rendered["afterLink"]["sidebarHidden"] == "true"
+    assert rendered["afterLink"]["sidebarRole"] == "dialog"
+    assert rendered["afterLink"]["sidebarModal"] == "true"
     assert rendered["afterLink"]["sidebarOpen"] is False
     assert rendered["afterLink"]["scrimOpen"] is False
     assert rendered["afterLink"]["inertTargets"] == [False, False, False, False, False]
@@ -496,6 +506,8 @@ console.log(JSON.stringify({
   bodyOverflow: document.body.style.overflow || '',
   sidebarOpen: sidebar.classList.contains('open'),
   sidebarHidden: sidebar.getAttribute('aria-hidden'),
+  sidebarRole: sidebar.getAttribute('role'),
+  sidebarModal: sidebar.getAttribute('aria-modal'),
   inertTargets: inertTargets.map((target) => target.inert),
   inertAriaHidden: inertTargets.map((target) => target.getAttribute('aria-hidden')),
 }));
@@ -506,5 +518,7 @@ console.log(JSON.stringify({
     assert rendered["bodyOverflow"] == ""
     assert rendered["sidebarOpen"] is False
     assert rendered["sidebarHidden"] is None
+    assert rendered["sidebarRole"] is None
+    assert rendered["sidebarModal"] is None
     assert rendered["inertTargets"] == [False, False]
     assert rendered["inertAriaHidden"] == [None, None]
