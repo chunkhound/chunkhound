@@ -8,57 +8,145 @@ section: "manual"
 
 # Changelog
 
-All notable changes to ChunkHound. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to ChunkHound will be documented in this file.
 
-## Unreleased
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [5.1.0] - 2026-05-20
 
 ### Breaking Changes
-- **HTTP MCP server removed** - ChunkHound now supports stdio transport only for MCP connections
+- **MCP `search` response format changed to markdown** — The `search` tool now returns lean
+  markdown strings instead of JSON objects, with syntax-highlighted code fences, similarity
+  percentages (semantic search), and a pagination footer. MCP clients that parse raw search
+  output as JSON must migrate to the new format.
+
+### Added
+- **`--index-unknown-files` flag** — Files with unrecognized extensions are now indexable as
+  plain text (binary files are still skipped). Enabled via `--index-unknown-files` CLI flag,
+  `indexing.index_unknown_files` config key, or `CHUNKHOUND_INDEXING__INDEX_UNKNOWN_FILES` env var.
+- **Proto, GraphQL, XML, config, and Dockerfile support** — `.proto`, `.graphql`, `.gql`,
+  `.xml`, `.ini`, `.properties`, `.conf`, `.cfg`, and extensionless `Dockerfile`/`Jenkinsfile`
+  files are now indexed by default. `.env` files are explicitly excluded to prevent secret leakage.
+- **`chunkhound.ai` onboarding** — Interactive CLI setup is replaced with guided onboarding at
+  chunkhound.ai; local backend is now configured explicitly rather than through prompts.
+
+### Fixed
+- **MCP startup HNSW crash** — MCP server no longer fails with a `CreateDeltaIndex` assertion
+  on startup against databases missing the unique `(chunk_id, provider, model)` index from v5.0.0.
+  HNSW recreation now runs outside the transaction (issue #280).
+- **WAL validation HNSW crash** — WAL pre-flight validation now uses in-memory+ATTACH, preventing
+  a C++ abort when the WAL contained HNSW operations from a prior session (issue #273).
+- **`--db` nested directory bug** — Passing an explicit file path (e.g. `--db /path/to/chunks.db`)
+  no longer creates a `chunks.db/chunks.db` nested directory; known DB extensions (`.db`,
+  `.duckdb`) are now correctly identified as file paths (issue #215).
+- **Parser install hints** — C# error messages now show the correct PyPI package
+  `tree-sitter-c-sharp` (was `tree-sitter-csharp`); Makefile shows `tree-sitter-make`;
+  SCSS points to `tree-sitter-language-pack` (issue #267).
+
+## [5.0.0] - 2026-05-05
+
+### Breaking Changes
+- **Config precedence reordered** — Local `.chunkhound.json` now takes precedence over
+  environment variables. If you relied on env vars overriding project-level settings,
+  use CLI arguments instead.
+- **`--config` now overrides local `.chunkhound.json`** — Previously, a project-local
+  `.chunkhound.json` took precedence over an explicit `--config` path. Now `--config`
+  wins. If you relied on local `.chunkhound.json` shadowing a shared config file, move
+  that override into CLI arguments.
+- **Missing `--config` / `CHUNKHOUND_CONFIG_FILE` path now raises** — A non-existent
+  config file path used to be silently ignored; it now raises `ValueError` with an
+  actionable message.
+- **`DEFAULT_LLM_TIMEOUT` doubled** — Default LLM request timeout increased from 60 s
+  to 120 s for all providers (was already 120 s for Gemini; now uniform).
+- **HTTP MCP server removed** — ChunkHound now supports stdio transport only for MCP connections
   - `chunkhound mcp http` command removed
   - `--http`, `--port`, `--host` CLI flags removed
   - FastMCP dependency removed
   - Migration: Use `chunkhound mcp` (stdio) instead. All major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
   - Rationale: Simplified codebase, reduced dependencies, focused on primary use case (stdio is the standard for MCP)
-- **Unsupported file types no longer indexed as plain text** - Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (.txt, .log, .cfg, .conf, .ini) are unaffected.
-- **SSL verification for custom endpoints is now explicit** - ChunkHound no longer disables TLS verification automatically for custom OpenAI-compatible endpoints. Use `ssl_verify: false` and, when needed, `rerank_ssl_verify: false` for local or trusted internal endpoints with self-signed certificates.
+- **Unsupported file types no longer indexed as plain text** — Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (.txt, .log, .cfg, .conf, .ini) are unaffected.
+- **Claude Code CLI default model changed** from `claude-sonnet-4-5-20250929` to `claude-haiku-4-5-20251001`. Users who relied on the default model will see different cost/quality characteristics. Set `llm.model`, `llm.utility_model`, or `llm.synthesis_model` explicitly to retain previous behavior.
+- **Anthropic provider upgraded to Claude Opus 4.7/4.6 and Sonnet 4.6**
+  - `anthropic` dependency minimum bumped to `>=0.96.0,<1.0.0`
+  - Default synthesis model changed from `claude-sonnet-4-5-20250929` to `claude-sonnet-4-6`
+  - Default Claude Code CLI model changed to `claude-sonnet-4-6`
+  - Removed module symbols `BETA_EFFORT` and `EFFORT_SUPPORTED_MODELS`. Callers should use the `supports_effort(model)` / `supports_effort_level(model, level)` predicates instead.
+  - `thinking_enabled=True` on the new default now resolves to `thinking_mode="adaptive"` (previously manual), so response `thinking` blocks are shaped as `{type: "adaptive"}` instead of `{type: "enabled", budget_tokens: N}`.
+  - `anthropic_prompt_caching` defaults to `true`. Every Anthropic request now sends a top-level `cache_control: {type: "ephemeral"}`. Cache hits cost 10% of base input; writes cost 25% more (5m TTL) or 100% more (1h TTL). To preserve prior behavior, set `CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING=false` or pass `--llm-anthropic-no-prompt-caching`.
+  - Invalid `thinking_mode` values and sub-20000 `task_budget_tokens` now raise `ValueError` instead of warning-and-coercing.
 
 ### Added
-- **Embedded SQL detection** - SQL code embedded in string literals is now detected and indexed by default across Python, Java, JavaScript, TypeScript, C#, Go, Rust, and PHP. Disable with `--no-detect-embedded-sql` or `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL=false`.
-- OpenAI Responses API support for reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) - enables deep code research with enhanced reasoning capabilities
-- Automatic API routing between Chat Completions and Responses API based on model compatibility - supports 30+ models including all GPT-5, GPT-4.1, GPT-4o, and o-series models
-- Reasoning effort control for deep research LLM operations - configurable levels (none, minimal, low, medium, high) via `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` with per-role overrides for utility and synthesis operations
-- Structured JSON output support for Responses API - maintains schema validation consistency across both Chat Completions and Responses endpoints
+- **Elixir language support** — Full Elixir parsing (32nd language) via tree-sitter-elixir: modules, functions, macros, protocols, structs, specs, and import/alias/require statements.
+- **TwinCAT/Structured Text parser** — IEC 61131-3 Structured Text (`.TcPOU`) files for PLC development are now fully searchable.
+- **HTML, CSS, SCSS, and Jinja parsers** — Full tree-sitter parsing for web languages: HTML (`.html`, `.htm`, `.xhtml`), CSS (`.css`), SCSS/Sass (`.scss`, `.sass`), and Jinja templates (`.jinja`, `.j2`, `.njk`, `.erb`, `.ejs`). SCSS preprocessing handles `#{...}` interpolations for correct AST byte offsets. Import resolution is supported for all four languages.
+- **Grok (xAI) LLM provider** — xAI Grok models are now supported for deep code research via the `code_research` tool.
+- **Matryoshka embeddings** — OpenAI and VoyageAI providers now support Matryoshka truncation for flexible vector dimensions; default OpenAI model upgraded to `text-embedding-3-large`.
+- **`openai_compatible` embedding provider** — Connect any OpenAI-compatible embedding endpoint with configurable SSL verification, auth, and dimension support.
+- **Azure OpenAI embeddings** — Native Azure OpenAI embedding support with `azure_endpoint`, `api_version`, and `azure_deployment` configuration options.
+- **VoyageAI ranking support** — VoyageAI provider now supports reranking for improved search result quality.
+- **Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 support** — Adaptive thinking mode (auto / off / manual / adaptive selector), expanded effort levels (`low`, `medium`, `high`, `xhigh` (Opus 4.7 only), `max` (4.6+)), automatic prompt caching with configurable TTL (`5m` / `1h`), and the task-budgets beta (Opus 4.7 only, advisory cap for agentic loops, min 20000 tokens).
+- **New `LLMConfig` fields** — `anthropic_thinking_mode`, `anthropic_thinking_display`, `anthropic_prompt_caching`, `anthropic_cache_ttl`, `anthropic_task_budget_tokens` (and matching `CHUNKHOUND_LLM_ANTHROPIC_*` env vars and `--llm-anthropic-*` CLI flags). The pre-existing `anthropic_thinking_enabled`, `anthropic_thinking_budget_tokens`, `anthropic_interleaved_thinking`, `anthropic_effort`, `anthropic_context_management_enabled`, and `anthropic_clear_*` fields are now also readable from env and CLI.
+- **Embedded SQL detection** — SQL embedded in string literals is detected and indexed by default across Python, Java, JavaScript, TypeScript, C#, Go, Rust, and PHP. Disable with `--no-detect-embedded-sql` or `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL=false`.
+- **OpenAI Responses API** — Deep code research now supports reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) via the Responses API, with automatic routing based on model compatibility across 30+ models.
+- **Reasoning effort control** — Configurable LLM reasoning effort (`none`/`minimal`/`low`/`medium`/`high`) for deep research via `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` with per-role overrides.
+- **Structured JSON output** — Responses API maintains schema validation consistency across both Chat Completions and Responses endpoints.
+- **Multi-client MCP daemon** — Multiple MCP clients can share a single DuckDB connection via a background daemon, eliminating lock conflicts in multi-session workflows.
+- **`--perf-diagnostics` mode** — `chunkhound index --perf-diagnostics` collects per-batch timing metrics and detects performance regressions via linear regression and z-score analysis, outputting a JSON diagnostics file.
+- **`--path-filter` for research** — `chunkhound research --path-filter <dir>` scopes deep code research to a subdirectory.
+- **PHP config-literal parsing** — PHP files with top-level `return [...]` arrays are now searchable.
+- **Universal config-literal parsing** — Exported configuration objects and arrays in Python, JavaScript, TypeScript, and JSX/TSX are now discoverable through semantic search.
+- **Watchman live-indexing operator docs** — Documents the private `.chunkhound/watchman/` sidecar, fail-fast startup/no-implicit-fallback behavior, `daemon_status` health interpretation, and the rollout/default-switch gate for making Watchman the primary backend.
+- **Dart language support** — `.dart` files are now fully searchable via tree-sitter parsing: classes, functions, methods, constructors, and import/export statements (33rd language).
+- **Lua language support** — `.lua` files are now parsed and indexed via tree-sitter, covering functions, tables, and module patterns.
+- **T-SQL (SQL Server) parser** — SQL Server T-SQL (`.sql`) files are now fully parsed and searchable via tree-sitter.
+- **`chunkhound autodoc` command** — Generates a static Astro documentation site from codebase research, with provenance citations linked to source references and byte-stable output across platforms.
+- **`chunkhound codemap` command** — Maps areas of interest (POIs) in a codebase through deep code research; the `-j` flag enables parallel POI processing with automatic backoff to serial on failure.
+- **Configurable disk storage limit** — `database.max_disk_usage_mb` config option (`--max-disk-usage-gb` CLI flag, `CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB` env var) caps database growth and raises a clear error instead of filling the disk.
+- **Anthropic native structured outputs** — Anthropic provider now uses the `structured-outputs-2025-11-13` beta API for guaranteed schema-compliant JSON via constrained decoding, with type-safe Pydantic model responses and extended thinking compatibility.
+- **Global gitignore support** — ChunkHound now reads the user's global gitignore file (via `git config --global core.excludesFile`) when building the exclusion list during indexing.
 
-### Performance
-- LanceDB table creation now detects embedding dimensions upfront from configured embedding provider, eliminating O(n) table recreation penalty during first embedding insertion - significantly improves indexing performance for large codebases (e.g., 16,000+ chunks no longer require full table migration)
-
-### Fixed
-- Global chunk deduplication now applies to all parsers (YAML, Universal) - prevents duplicate chunk IDs that caused indexing failures with repeated config values
-
-### Removed
-- `CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY` config - optimization now runs once at indexing end
-
-## 4.1.0b1 - 2025-11-15
-
-### Added
-- PHP configuration files with top-level return arrays are now searchable - config patterns like `return ['key' => 'value'];` are automatically indexed
-- Universal config-literal parsing across Python, JavaScript, TypeScript, and JSX/TSX - all exported configuration objects and arrays are now discoverable through semantic search
+### Changed
+- **Watchman default backend** — Watchman is now the default realtime backend on supported native-runtime platforms; `watchdog` and `polling` remain explicit fallback backends.
 
 ### Enhanced
-- Windows compatibility improved with cross-platform temporary directory handling for Claude Code CLI provider
-- JavaScript-family parsers (JavaScript, TypeScript, JSX/TSX) internally streamlined to reduce maintenance overhead while preserving all functionality
-- Version management now supports PEP 440 pre-release formats (beta, release candidate) for clearer update channels
-- Version tagging includes safety checks to prevent accidental releases from uncommitted work
+- **MCP tool routing** — `code_research` and `search` tool descriptions rewritten for improved LLM routing; cross-references between tools are shown or hidden dynamically based on whether an LLM provider is configured.
+- **Daemon overlap guard** — A user-scoped daemon registry is now validated against each project's `daemon.lock` before startup, preventing live parent/child root overlaps (e.g., running daemons for `/workspace` and `/workspace/project` simultaneously). Exact-root reuse across restarts is preserved; sibling roots are allowed.
+- **`ChunkType.IMPORT`** — Import statements across all languages now use a dedicated chunk type instead of falling through to `UNKNOWN`, improving search precision.
+- **Chunk size enforcement** — All parsers now enforce a central size guard before DB persistence; oversized chunks are split automatically, preventing embedding API failures.
+- **Windows compatibility** — Cross-platform temp directory handling for Claude Code CLI provider; `shutil.which` replaces Unix-only `which` for git binary detection.
+- **Version management** — Supports PEP 440 pre-release formats (alpha, beta, RC) with safety checks to prevent accidental releases from uncommitted work.
+- **Multi-client MCP daemon — index lock conflict handling** — `chunkhound index` now detects a running daemon's lock file on DuckDB conflict: a healthy daemon prints an informational message and exits cleanly; an unresponsive daemon prompts the user to kill it and retry.
+- **Python import resolution** — Import statements are now resolved more accurately in Python code research, improving cross-file symbol discovery.
+
+### Performance
+- **LanceDB dimension detection** — Table creation now detects embedding dimensions upfront from the configured provider, eliminating the O(n) table recreation penalty during first embedding insertion for large codebases (e.g. 16,000+ chunks no longer require full table migration).
 
 ### Fixed
-- Code quality improvements addressing linting warnings for cleaner, more maintainable codebase
+- **Cross-repo data loss** — Re-indexing a subdirectory in a shared workspace no longer deletes other repositories' data from the database (fixes #87).
+- **Global gitignore false exclusions** — `~/.gitignore` was incorrectly used as a global excludes fallback, causing all files to be excluded when a dotfiles repo contained broad patterns like `*` (fixes #216).
+- **MCP startup error visibility** — DuckDB lock conflicts and config validation errors now surface as JSON-RPC error responses instead of silently exiting, with a specific hint to kill stale processes on lock conflicts.
+- **Gemini LLM timeout** — All `code_research` calls no longer fail immediately; the 120s timeout was being passed as 120ms to the google-genai SDK.
+- **Gemini LLM initialization** — Gemini provider no longer fails to register when `base_url` is present in config, restoring `code_research` availability.
+- **VoyageAI `api_base`→`base_url`** — voyageai ≥0.3.7 renamed the parameter; ChunkHound now detects the correct key at runtime, preventing Azure ML endpoint rejections.
+- **`tree-sitter-language-pack` 1.0.0 incompatibility** — Pinned to `<1.0.0` to prevent fresh installs from pulling the breaking release that made YAML, MATLAB, Swift, and other language-pack parsers fail at startup.
+- **Global chunk deduplication** — YAML and Universal parsers now participate in chunk deduplication, preventing duplicate chunk IDs that caused indexing failures on repeated config values.
+- **`hdbscan` startup crash under numpy 2.x** — Replaced `hdbscan` package (which uses the numpy 1.x ABI) with `sklearn.cluster.HDBSCAN` (already a dependency), eliminating MCP daemon startup failures on systems running numpy 2.x.
+- **Windows MCP unicode safety** — MCP server stdout on Windows is now reconfigured with `errors='backslashreplace'` to prevent crashes when source files contain non-UTF-8 bytes; applied to both `main()` and `main_sync()` entry points (fixes #225).
+- **HDBSCAN outlier cluster assignment** — Outliers in Phase 2 cluster merging were mapped to incorrect final cluster indices, causing code research results to be grouped with unrelated code. Fixed by threading the cluster-id-to-final-index mapping through the outlier merge step.
+- **Symlink path preservation** — Worktree and repository symlink paths are now stored as their symlink paths during indexing instead of being silently resolved to their targets (fixes #102).
 
-## 4.0.1 - 2025-11-12
+### Removed
+- **`CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY`** — Database optimization now runs once at indexing end; the per-batch frequency config option is removed.
+
+## [4.0.1] - 2025-11-12
 
 ### Fixed
 - Package build configuration now excludes test fixtures from distribution, reducing package size and removing unnecessary test data from published releases
 
-## 4.0.0 - 2025-11-12
+## [4.0.0] - 2025-11-12
 
 ### Added
 - Map-reduce synthesis for dramatically improved research accuracy - clusters related files and synthesizes them separately before combining insights
@@ -138,7 +226,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Lazy imports for MCP-safe stdio operation
 - Proper JSON-RPC handshake reliability
 - Test-mode patches for Codex CLI integration (env-gated, no production impact)
-- Increased startup wait time for Mac CI stability (3s -> 5s)
+- Increased startup wait time for Mac CI stability (3s → 5s)
 - TEI reranking format comprehensive guide in CLAUDE.md
 - Test coverage documentation with refactoring progress
 - README improvements with startup profile CAP notes and exclusions section updates
@@ -193,7 +281,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 ### Security
 - Removed embedded API key from `.chunkhound.json` - use environment variables instead (e.g., `CHUNKHOUND_EMBEDDING__API_KEY`)
 
-## 3.3.1 - 2025-09-25
+## [3.3.1] - 2025-09-25
 
 ### Enhanced
 - Dependency updates to latest stable versions for improved stability and performance
@@ -203,7 +291,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Tree-sitter 0.25.x API compatibility ensuring parsing works with latest language parsers
 - Code formatting and import organization for cleaner, more maintainable codebase
 
-## 3.3.0 - 2025-09-21
+## [3.3.0] - 2025-09-21
 
 ### Added
 - Official Windows support with full CI testing across Windows, macOS, and Ubuntu
@@ -215,12 +303,12 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - File exclude patterns (**/tmp/**) on Linux systems
 - Regex search path resolution across platforms
 
-## 3.2.0 - 2025-08-24
+## [3.2.0] - 2025-08-24
 
 ### Enhanced
 - Semantic search upgraded from two-hop to dynamic multi-hop expansion with intelligent stopping criteria, delivering more comprehensive and contextually relevant results while avoiding search explosion
 
-## 3.1.0 - 2025-08-21
+## [3.1.0] - 2025-08-21
 
 ### Added
 - PDF document parsing and indexing with full text extraction using PyMuPDF integration
@@ -231,7 +319,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 ### Fixed
 - JSON file parsing now extracts specific node content instead of entire file content, improving search precision and reducing noise
 
-## 3.0.1 - 2025-08-21
+## [3.0.1] - 2025-08-21
 
 ### Enhanced
 - Documentation site improved with cross-linking between pages and hero image for better navigation
@@ -243,7 +331,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Test suite stability enhanced with proper background task cleanup and configuration isolation
 - GitHub Actions workflow simplified and made more reliable by removing redundant processes
 
-## 3.0.0 - 2025-08-20
+## [3.0.0] - 2025-08-20
 
 ### Added
 - VoyageAI embedding provider with advanced two-hop semantic search and reranking capabilities
@@ -275,7 +363,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Legacy parsing system replaced with modern cAST algorithm
 - Obsolete configuration documentation and setup files cleaned up
 
-## 2.8.1 - 2025-07-20
+## [2.8.1] - 2025-07-20
 
 ### Enhanced
 - Architecture documentation significantly improved for better LLM comprehension and AI-assisted development workflows
@@ -284,7 +372,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Type annotation syntax errors that could cause import failures in Python 3.10+ environments
 - Enhanced smoke tests now detect forward reference type annotation issues early
 
-## 2.8.0 - 2025-07-20
+## [2.8.0] - 2025-07-20
 
 ### Added
 - MCP HTTP transport support alongside stdio transport for flexible deployment options
@@ -300,13 +388,13 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - MCP server tool discovery enhanced with fallback logic for better error recovery
 - File path resolution improved in DuckDB provider for cross-platform consistency
 
-## 2.7.0 - 2025-07-12
+## [2.7.0] - 2025-07-12
 
 ### Fixed
 - MCP server now uses configured embedding model instead of hardcoded text-embedding-3-small default, ensuring semantic search works with any configured model
 - MCP test environment improvements with comprehensive test data and configuration files
 
-## 2.6.3 - 2025-07-10
+## [2.6.3] - 2025-07-10
 
 ### Fixed
 - Configuration merge precedence now correctly preserves environment variables over JSON config values
@@ -315,18 +403,18 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 ### Removed
 - Removed obsolete Ubuntu 20 Dockerfile as issue was resolved in configuration system
 
-## 2.6.2 - 2025-07-10
+## [2.6.2] - 2025-07-10
 
 ### Fixed
 - MCP server now properly loads embedding provider configuration from target directory
 
-## 2.6.1 - 2025-07-10
+## [2.6.1] - 2025-07-10
 
 ### Fixed
 - MCP server now properly respects CLI-provided project root directory for configuration loading
 - Configuration files (.chunkhound.json) are now correctly loaded when running MCP server from different directories
 
-## 2.6.0 - 2025-07-10
+## [2.6.0] - 2025-07-10
 
 ### Fixed
 - MCP server crashes on Ubuntu and Linux systems when running from different directories by fixing database path resolution and process coordination
@@ -338,18 +426,18 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Docker test infrastructure for MCP server validation to prevent future regressions
 - Improved error messages for debugging MCP server issues with detailed analysis
 
-## 2.5.4 - 2025-07-10
+## [2.5.4] - 2025-07-10
 
 ### Fixed
 - MCP server reliability on Ubuntu and other Linux distributions when running from different directories
 - Database path resolution consistency across all MCP server components
 
-## 2.5.3 - 2025-07-10
+## [2.5.3] - 2025-07-10
 
 ### Fixed
 - MCP server communication reliability improved by removing debug logging that interfered with JSON-RPC protocol
 
-## 2.5.2 - 2025-07-10
+## [2.5.2] - 2025-07-10
 
 ### Added
 - Automatic database optimization during embedding generation to maintain performance with large datasets (every 1000 batches, configurable via `CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY`)
@@ -358,13 +446,13 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - MCP server compatibility on Ubuntu and other strict platforms by preserving virtual environment context in subprocesses
 - OpenAI embedding provider crash on Ubuntu due to async resource creation outside event loop context
 
-## 2.5.1 - 2025-01-09
+## [2.5.1] - 2025-01-09
 
 ### Fixed
 - Project detection now properly respects CHUNKHOUND_PROJECT_ROOT environment variable, ensuring MCP command works correctly when launched from any directory
 - Removed duplicate MCP parser function that could cause confusion
 
-## 2.5.0 - 2025-01-09
+## [2.5.0] - 2025-01-09
 
 ### Enhanced
 - MCP positional path argument now controls complete project scope - database location, config file search, and watch paths are all set to the specified directory instead of just watch paths
@@ -372,18 +460,18 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 ### Fixed
 - MCP launcher import path resolution when running from different directories, eliminating TaskGroup errors on Ubuntu and other strict platforms
 
-## 2.4.4 - 2025-01-09
+## [2.4.4] - 2025-01-09
 
 ### Fixed
 - Ubuntu TaskGroup crash fixed by removing problematic directory change in MCP launcher
 
-## 2.4.3 - 2025-01-09
+## [2.4.3] - 2025-01-09
 
 ### Fixed
 - MCP server now works correctly when launched from any directory, not just the project root
 - Fixed path resolution inconsistencies that caused TaskGroup errors on Ubuntu deployments
 
-## 2.4.2 - 2025-01-09
+## [2.4.2] - 2025-01-09
 
 ### Added
 - MCP command now accepts optional path argument to specify directory for indexing and watching (defaults to current directory)
@@ -396,12 +484,12 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Python parser behavior now consistent between CLI and MCP modes
 - Search operation freezes after file deletion resolved with proper thread safety
 
-## 2.4.1 - 2025-01-09
+## [2.4.1] - 2025-01-09
 
 ### Fixed
 - Package structure consolidated under chunkhound/ directory for improved import reliability and Python packaging best practices
 
-## 2.4.0 - 2025-01-09
+## [2.4.0] - 2025-01-09
 
 ### Fixed
 - LanceDB storage growth issue resolved with automatic database optimization during quiet periods
@@ -411,13 +499,13 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Enhanced database provider architecture with capability detection and activity tracking
 - Modernized configuration system by removing legacy registry config building
 
-## 2.3.1 - 2025-07-09
+## [2.3.1] - 2025-07-09
 
 ### Fixed
 - MCP server communication reliability improved by preventing stderr output from corrupting JSON-RPC messages
 - Enhanced configuration documentation with automatic .chunkhound.json detection examples
 
-## 2.3.0 - 2025-07-08
+## [2.3.0] - 2025-07-08
 
 ### Changed
 - **BREAKING**: Configuration system completely refactored with centralized management and clear precedence hierarchy
@@ -427,7 +515,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 
 ### Added
 - Complete CLI argument coverage for all configuration options
-- Centralized configuration precedence: CLI args -> Config file -> Environment variables -> Defaults
+- Centralized configuration precedence: CLI args → Config file → Environment variables → Defaults
 - Comprehensive migration guide for updating existing configurations
 - Database file gitignore pattern for Lance database files
 
@@ -436,7 +524,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Parser architecture inconsistencies for C, Bash, and Makefile language parsers
 - Configuration auto-detection issues that caused deployment complexity
 
-## 2.2.0 - 2025-01-07
+## [2.2.0] - 2025-01-07
 
 ### Fixed
 - Database freezing during concurrent file operations through proper async/sync boundary handling
@@ -453,19 +541,19 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Support for complete configuration storage including API keys in .chunkhound.json files
 - Consolidated embedding provider creation system for consistent behavior across CLI and config files
 
-## 2.1.4 - 2025-07-03
+## [2.1.4] - 2025-07-03
 
 ### Fixed
 - CLI argument defaults no longer override config file values
 - Updated dependencies via uv.lock
 
-## 2.1.3 - 2025-07-03
+## [2.1.3] - 2025-07-03
 
 ### Changed
 - Consolidated embedding provider creation to use single factory pattern for consistency
 - Reduced embedding provider log verbosity for cleaner output
 
-## 2.1.2 - 2025-07-03
+## [2.1.2] - 2025-07-03
 
 ### Fixed
 - API key configuration loading from .chunkhound.json files
@@ -474,7 +562,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 ### Added
 - Complete configuration examples with API key and security guidance
 
-## 2.1.1 - 2025-07-03
+## [2.1.1] - 2025-07-03
 
 ### Added
 - Centralized version management system for consistent versioning across all components
@@ -488,7 +576,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Version consistency across CLI, MCP server, and package initialization
 - Import statement in package `__init__.py` for better module exposure
 
-## 2.1.0 - 2025-07-02
+## [2.1.0] - 2025-07-02
 
 ### Fixed
 - Database duplication in MCP server by implementing single-threaded executor pattern
@@ -511,7 +599,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Task-local transaction state management
 - Comprehensive executor methods for database operations
 
-## 2.0.0 - 2025-06-26
+## [2.0.0] - 2025-06-26
 
 ### Added
 - 10 new language parsers: Rust, Go, C++, C, Kotlin, Groovy, Bash, TOML, Makefile, Matlab
@@ -544,7 +632,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Windows PyInstaller and MATLAB dependency issues
 - Build workflow reliability across platforms
 
-## 1.2.3 - 2025-06-23
+## [1.2.3] - 2025-06-23
 
 ### Changed
 - Default database location changed to current directory for better persistence
@@ -561,7 +649,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Windows build support with automated testing
 - Enhanced debugging for build processes across platforms
 
-## 1.2.2 - 2024-12-15
+## [1.2.2] - 2024-12-15
 
 ### Added
 - File watching CLI for real-time code monitoring
@@ -573,7 +661,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 ### Fixed
 - Empty symbol validation in Python parser
 
-## 1.2.1 - 2024-11-28
+## [1.2.1] - 2024-11-28
 
 ### Added
 - Ubuntu 20.04 build support
@@ -583,7 +671,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Duplicate chunks after file edits
 - File modification detection race conditions
 
-## 1.2.0 - 2024-11-15
+## [1.2.0] - 2024-11-15
 
 ### Added
 - C# language support
@@ -594,7 +682,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - File deletion handling
 - Database connection issues
 
-## 1.1.0 - 2025-06-12
+## [1.1.0] - 2025-06-12
 
 ### Added
 - Multi-language support: TypeScript, JavaScript, C#, Java, and Markdown
@@ -609,7 +697,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - Version display consistency
 - Cross-platform build issues
 
-## 1.0.1 - 2025-06-11
+## [1.0.1] - 2025-06-11
 
 ### Added
 - Python 3.10+ compatibility
@@ -622,7 +710,7 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - OpenAI model parameter handling
 - Binary compilation issues
 
-## 1.0.0 - 2025-06-10
+## [1.0.0] - 2025-06-10
 
 ### Added
 - Initial release of ChunkHound
@@ -634,4 +722,49 @@ All notable changes to ChunkHound. The format is based on [Keep a Changelog](htt
 - File watching for real-time indexing
 - Regex search capabilities
 
-For more information, visit: [github.com/chunkhound/chunkhound](https://github.com/chunkhound/chunkhound)
+For more information, visit: https://github.com/chunkhound/chunkhound
+
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...HEAD
+[5.1.0]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...v5.1.0
+[5.0.0]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v5.0.0
+[4.0.1]: https://github.com/chunkhound/chunkhound/compare/v4.0.0...v4.0.1
+[4.0.0]: https://github.com/chunkhound/chunkhound/compare/v3.3.1...v4.0.0
+[3.3.1]: https://github.com/chunkhound/chunkhound/compare/v3.3.0...v3.3.1
+[3.3.0]: https://github.com/chunkhound/chunkhound/compare/v3.2.0...v3.3.0
+[3.2.0]: https://github.com/chunkhound/chunkhound/compare/v3.1.0...v3.2.0
+[3.1.0]: https://github.com/chunkhound/chunkhound/compare/v3.0.1...v3.1.0
+[3.0.1]: https://github.com/chunkhound/chunkhound/compare/v3.0.0...v3.0.1
+[3.0.0]: https://github.com/chunkhound/chunkhound/compare/v2.8.1...v3.0.0
+[2.8.1]: https://github.com/chunkhound/chunkhound/compare/v2.8.0...v2.8.1
+[2.8.0]: https://github.com/chunkhound/chunkhound/compare/v2.7.0...v2.8.0
+[2.7.0]: https://github.com/chunkhound/chunkhound/compare/v2.6.3...v2.7.0
+[2.6.3]: https://github.com/chunkhound/chunkhound/compare/v2.6.2...v2.6.3
+[2.6.2]: https://github.com/chunkhound/chunkhound/compare/v2.6.1...v2.6.2
+[2.6.1]: https://github.com/chunkhound/chunkhound/compare/v2.6.0...v2.6.1
+[2.6.0]: https://github.com/chunkhound/chunkhound/compare/v2.5.4...v2.6.0
+[2.5.4]: https://github.com/chunkhound/chunkhound/compare/v2.5.3...v2.5.4
+[2.5.3]: https://github.com/chunkhound/chunkhound/compare/v2.5.2...v2.5.3
+[2.5.2]: https://github.com/chunkhound/chunkhound/compare/v2.5.1...v2.5.2
+[2.5.1]: https://github.com/chunkhound/chunkhound/compare/v2.5.0...v2.5.1
+[2.5.0]: https://github.com/chunkhound/chunkhound/compare/v2.4.4...v2.5.0
+[2.4.4]: https://github.com/chunkhound/chunkhound/compare/v2.4.3...v2.4.4
+[2.4.3]: https://github.com/chunkhound/chunkhound/compare/v2.4.2...v2.4.3
+[2.4.2]: https://github.com/chunkhound/chunkhound/compare/v2.4.1...v2.4.2
+[2.4.1]: https://github.com/chunkhound/chunkhound/compare/v2.4.0...v2.4.1
+[2.4.0]: https://github.com/chunkhound/chunkhound/compare/v2.3.1...v2.4.0
+[2.3.1]: https://github.com/chunkhound/chunkhound/compare/v2.3.0...v2.3.1
+[2.3.0]: https://github.com/chunkhound/chunkhound/compare/v2.2.0...v2.3.0
+[2.2.0]: https://github.com/chunkhound/chunkhound/compare/v2.1.4...v2.2.0
+[2.1.4]: https://github.com/chunkhound/chunkhound/compare/v2.1.3...v2.1.4
+[2.1.3]: https://github.com/chunkhound/chunkhound/compare/v2.1.2...v2.1.3
+[2.1.2]: https://github.com/chunkhound/chunkhound/compare/v2.1.1...v2.1.2
+[2.1.1]: https://github.com/chunkhound/chunkhound/compare/v2.1.0...v2.1.1
+[2.1.0]: https://github.com/chunkhound/chunkhound/compare/v2.0.0...v2.1.0
+[2.0.0]: https://github.com/chunkhound/chunkhound/compare/v1.2.3...v2.0.0
+[1.2.3]: https://github.com/chunkhound/chunkhound/compare/v1.2.2...v1.2.3
+[1.2.2]: https://github.com/chunkhound/chunkhound/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/chunkhound/chunkhound/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/chunkhound/chunkhound/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/chunkhound/chunkhound/compare/v1.0.1...v1.1.0
+[1.0.1]: https://github.com/chunkhound/chunkhound/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/chunkhound/chunkhound/releases/tag/v1.0.0
