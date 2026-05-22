@@ -123,9 +123,25 @@ export function initMobileNav(doc: Document = document): void {
     ].join(", ");
     let open = false;
 
+    const isVisibleForFocus = (element: HTMLElement): boolean => {
+        if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true") {
+            return false;
+        }
+
+        if (element.style.display === "none") {
+            return false;
+        }
+
+        if (typeof element.getClientRects === "function") {
+            return element.getClientRects().length > 0;
+        }
+
+        return true;
+    };
+
     const getFocusable = (): HTMLElement[] =>
         Array.from(sidebar.querySelectorAll<HTMLElement>(focusableSelector)).filter(
-            (element) => !element.hasAttribute("hidden") && element.getAttribute("aria-hidden") !== "true",
+            isVisibleForFocus,
         );
 
     const setToggleState = (expanded: boolean) => {
