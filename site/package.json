@@ -3,6 +3,7 @@
   "type": "module",
   "version": "0.0.1",
   "scripts": {
+    "sync:changelog": "node scripts/sync-changelog.mjs",
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview"
