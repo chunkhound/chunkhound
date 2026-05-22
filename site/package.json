@@ -3,14 +3,19 @@
   "type": "module",
   "version": "0.0.1",
   "scripts": {
+    "generate:og-images": "node scripts/generate-og-images.mjs",
     "sync:changelog": "node scripts/sync-changelog.mjs",
+    "predev": "npm run generate:og-images && npm run sync:changelog",
     "dev": "astro dev",
+    "prebuild": "npm run generate:og-images && npm run sync:changelog",
     "build": "astro build",
+    "prepreview": "npm run generate:og-images && npm run sync:changelog",
     "preview": "astro preview"
   },
   "dependencies": {},
   "devDependencies": {
-    "astro": "^6.1.5",
+    "@resvg/resvg-js": "^2.6.2",
+    "astro": "^6.3.7",
     "mermaid": "^11.0.0",
     "remark-gfm": "^4.0.0",
     "tsx": "^4.8.1"
