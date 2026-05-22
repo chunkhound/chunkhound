@@ -223,3 +223,52 @@ def test_version_helper_contract(scenario: str, expected_version: str | None) ->
     else:
         assert result.returncode != 0
         assert VERSION_RESOLUTION_FAILURE in combined_output
+
+
+def test_built_site_has_og_meta_tags() -> None:
+    """Built homepage includes correct OG and Twitter Card meta tags."""
+    homepage = (DIST / "index.html").read_text(encoding="utf-8")
+
+    assert (
+        '<meta property="og:image" content="/og-image-dark.png">' in homepage
+    )
+    assert '<meta property="og:image:type" content="image/png">' in homepage
+    assert '<meta property="og:image:width" content="1200">' in homepage
+    assert '<meta property="og:image:height" content="630">' in homepage
+    assert '<meta property="og:type" content="website">' in homepage
+    assert (
+        '<meta name="twitter:image" content="/og-image-dark.png">' in homepage
+    )
+    assert (
+        '<meta name="twitter:card" content="summary_large_image">' in homepage
+    )
+
+
+def test_built_site_has_changelog_page() -> None:
+    """Changelog page is built and contains expected version headers."""
+    changelog = (
+        DIST / "docs" / "changelog" / "index.html"
+    ).read_text(encoding="utf-8")
+
+    # Must contain the latest released version
+    assert "5.1.0" in changelog
+    # Must contain at least one major section heading rendered as HTML
+    assert "Breaking Changes" in changelog
+
+
+def test_built_site_has_og_png_assets() -> None:
+    """OG PNG images exist in dist/ with correct 1200x630 dimensions."""
+    for name in ("og-image-dark.png", "og-image-light.png"):
+        png_path = DIST / name
+        assert png_path.exists(), f"{name} missing from dist/"
+        assert (
+            png_path.stat().st_size > 5000
+        ), f"{name} is too small ({png_path.stat().st_size} bytes)"
+
+        with open(png_path, "rb") as f:
+            f.seek(16)  # skip PNG sig + IHDR chunk header
+            data = f.read(8)
+            width = int.from_bytes(data[0:4], "big")
+            height = int.from_bytes(data[4:8], "big")
+        assert width == 1200, f"{name} width is {width}, expected 1200"
+        assert height == 630, f"{name} height is {height}, expected 630"
