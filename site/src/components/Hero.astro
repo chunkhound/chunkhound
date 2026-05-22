@@ -1,6 +1,6 @@
 ---
 import Wordmark from "./Wordmark.astro";
-import { DEMO_CODE_PALETTE } from "../lib/shiki-config.js";
+import { COPY_SVG, DEMO_CODE_PALETTE } from "../lib/shiki-config.js";
 ---
 
 <section class="hero">
@@ -19,27 +19,12 @@ import { DEMO_CODE_PALETTE } from "../lib/shiki-config.js";
             <div class="install-pill">
                 <code class="install-cmd">uv tool install chunkhound</code>
                 <button
+                    type="button"
                     class="copy-btn"
                     onclick="navigator.clipboard.writeText('uv tool install chunkhound')"
                     aria-label="Copy install command"
-                >
-                    <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                    >
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"
-                        ></rect>
-                        <path
-                            d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"
-                        ></path>
-                    </svg>
-                </button>
+                    set:html={COPY_SVG}
+                />
             </div>
             <a
                 href="https://github.com/chunkhound/chunkhound"
@@ -131,7 +116,7 @@ import { DEMO_CODE_PALETTE } from "../lib/shiki-config.js";
         line-height: 1;
         font-weight: 700;
         font-style: normal;
-        color: var(--primary);
+        color: var(--code-accent);
         margin-bottom: var(--space-2);
     }
 
@@ -207,6 +192,7 @@ import { DEMO_CODE_PALETTE } from "../lib/shiki-config.js";
         font-family: "JetBrains Mono", monospace;
         font-size: 14px;
         color: var(--on-primary);
+        white-space: nowrap;
     }
 
     .copy-btn {
@@ -217,11 +203,17 @@ import { DEMO_CODE_PALETTE } from "../lib/shiki-config.js";
         padding: 0;
         display: flex;
         align-items: center;
+        flex-shrink: 0;
         opacity: 0.8;
         transition: opacity 0.2s;
     }
     .copy-btn:hover {
         opacity: 1;
+    }
+
+    .copy-btn :global(svg) {
+        width: 18px;
+        height: 18px;
     }
 
     .github-btn {
@@ -236,8 +228,20 @@ import { DEMO_CODE_PALETTE } from "../lib/shiki-config.js";
         align-items: center;
         gap: var(--space-2);
     }
+
     .github-btn:hover {
         text-decoration: none;
+    }
+
+    @media (max-width: 360px) {
+        .install-pill {
+            gap: var(--space-1);
+            padding: var(--space-2) var(--space-4);
+        }
+
+        .install-cmd {
+            font-size: 12px;
+        }
     }
 
     .github-icon {
@@ -283,9 +287,6 @@ import { DEMO_CODE_PALETTE } from "../lib/shiki-config.js";
         font-family: "JetBrains Mono", monospace;
         font-size: 14px;
         line-height: 1.4;
-        min-height: calc(
-            8 * 1.4em
-        ); /* 8 lines × line-height — prevents layout shift during animation */
     }
 
     /* Terminal content — uses :global() so JS-injected elements match */

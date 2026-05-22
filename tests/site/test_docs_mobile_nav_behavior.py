@@ -3,7 +3,7 @@ from __future__ import annotations
 from tests.site.tsx_runner import run_tsx_json
 
 
-def test_docs_mobile_nav_applies_modal_semantics_only_while_open() -> None:
+def test_mobile_nav_applies_modal_semantics_only_while_open() -> None:
     script = """
 class FakeClassList {
   constructor(initial = []) {
@@ -12,64 +12,17 @@ class FakeClassList {
   add(value) { this.items.add(value); }
   remove(value) { this.items.delete(value); }
   contains(value) { return this.items.has(value); }
-  toggle(value, force) {
-    if (force === undefined) {
-      if (this.items.has(value)) {
-        this.items.delete(value);
-        return false;
-      }
-      this.items.add(value);
-      return true;
-    }
-    if (force) this.items.add(value);
-    else this.items.delete(value);
-    return force;
-  }
 }
 
 class FakeElement {
-  constructor({ id = '', hidden = false } = {}) {
-    this.id = id;
-    this.hidden = hidden;
-    this.attributes = new Map();
+  constructor(name, owner, attrs = {}) {
+    this.name = name;
+    this.ownerDocument = owner;
+    this.attributes = new Map(Object.entries(attrs));
     this.classList = new FakeClassList();
     this.listeners = new Map();
-    this.focusCount = 0;
-  }
-  addEventListener(type, fn) {
-    if (!this.listeners.has(type)) this.listeners.set(type, []);
-    this.listeners.get(type).push(fn);
-  }
-  click() {
-    for (const fn of this.listeners.get('click') || []) fn({ target: this });
-  }
-  focus() { this.focusCount += 1; }
-  setAttribute(name, value) { this.attributes.set(name, String(value)); }
-  getAttribute(name) {
-    return this.attributes.has(name) ? this.attributes.get(name) : null;
-  }
-  removeAttribute(name) { this.attributes.delete(name); }
-  hasAttribute(name) { return this.attributes.has(name); }
-}
-
-class FakeDocument {
-  constructor(toggle, sidebar, scrim, filter) {
-    this.readyState = 'loading';
-    this.toggle = toggle;
-    this.sidebar = sidebar;
-    this.scrim = scrim;
-    this.filter = filter;
-    this.listeners = new Map();
-  }
-  querySelector(selector) {
-    if (selector === '[data-docs-nav-toggle]') return this.toggle;
-    if (selector === '[data-docs-nav-scrim]') return this.scrim;
-    if (selector === '[data-docs-nav-filter]') return this.filter;
-    return null;
-  }
-  getElementById(id) {
-    if (id === 'docs-sidebar') return this.sidebar;
-    return null;
+    this.inert = false;
+    this.style = {};
   }
   addEventListener(type, fn) {
     if (!this.listeners.has(type)) this.listeners.set(type, []);
@@ -78,73 +31,506 @@ class FakeDocument {
   dispatchEvent(event) {
     for (const fn of this.listeners.get(event.type) || []) fn(event);
   }
+  click() {
+    this.dispatchEvent({ type: 'click' });
+  }
+  focus() {
+    this.ownerDocument.activeElement = this;
+  }
+  getClientRects() {
+    return this.style.display === 'none' ? [] : [{}];
+  }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) {
+    return this.attributes.has(name) ? this.attributes.get(name) : null;
+  }
+  removeAttribute(name) { this.attributes.delete(name); }
+  hasAttribute(name) { return this.attributes.has(name); }
 }
 
-const toggle = new FakeElement();
-const sidebar = new FakeElement({ id: 'docs-sidebar' });
-const scrim = new FakeElement({ hidden: true });
-const filter = new FakeElement();
-const document = new FakeDocument(toggle, sidebar, scrim, filter);
+class FakeSidebar extends FakeElement {
+  constructor(owner, input, links) {
+    super('sidebar', owner);
+    this.input = input;
+    this.links = links;
+  }
+  querySelectorAll(selector) {
+    if (selector === 'a') return this.links;
+    if (selector.includes('a[href]')) return [this.input, ...this.links];
+    return [];
+  }
+}
+
+class FakeMediaQuery {
+  constructor(matches) {
+    this.matches = matches;
+    this.listeners = [];
+  }
+  addEventListener(type, fn) {
+    if (type === 'change') this.listeners.push(fn);
+  }
+  setMatches(matches) {
+    this.matches = matches;
+    for (const fn of this.listeners) fn({ matches });
+  }
+}
+
+class FakeDocument {
+  constructor() {
+    this.readyState = 'loading';
+    this.listeners = new Map();
+    this.activeElement = null;
+    this.body = { style: {} };
+  }
+  addEventListener(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(fn);
+  }
+  dispatch(type, event) {
+    for (const fn of this.listeners.get(type) || []) fn(event);
+  }
+  querySelector(selector) {
+    if (selector === '[data-docs-nav-toggle]') return this.toggle;
+    if (selector === '[data-docs-nav-scrim]') return this.scrim;
+    return null;
+  }
+  querySelectorAll(selector) {
+    if (selector === '[data-docs-mobile-inert]') return this.inertTargets;
+    return [];
+  }
+  getElementById(id) {
+    if (id === 'docs-sidebar') return this.sidebar;
+    return null;
+  }
+}
+
+const document = new FakeDocument();
+const mediaQuery = new FakeMediaQuery(true);
+const window = { matchMedia: () => mediaQuery };
 
 globalThis.document = document;
+globalThis.window = window;
+
+const toggle = new FakeElement('toggle', document);
+const scrim = new FakeElement('scrim', document);
+const filter = new FakeElement('filter', document);
+const firstLink = new FakeElement('first-link', document, { href: '/docs/getting-started/' });
+const lastLink = new FakeElement('last-link', document, { href: '/docs/configuration/' });
+const sidebar = new FakeSidebar(document, filter, [firstLink, lastLink]);
+const inertTargets = [
+  new FakeElement('wordmark', document),
+  new FakeElement('tabs', document),
+  new FakeElement('actions', document),
+  new FakeElement('main', document),
+  new FakeElement('toc', document),
+];
+
+document.toggle = toggle;
+document.scrim = scrim;
+document.sidebar = sidebar;
+document.inertTargets = inertTargets;
 
 const { initMobileNav } = await import('./site/src/scripts/docs-runtime.ts');
 initMobileNav(document);
 
 const initial = {
   expanded: toggle.getAttribute('aria-expanded'),
-  scrimHidden: scrim.hidden,
+  label: toggle.getAttribute('aria-label'),
   role: sidebar.getAttribute('role'),
   ariaModal: sidebar.getAttribute('aria-modal'),
   tabindex: sidebar.getAttribute('tabindex'),
+  sidebarHidden: sidebar.getAttribute('aria-hidden'),
 };
 
 toggle.click();
-const opened = {
+const afterOpen = {
   expanded: toggle.getAttribute('aria-expanded'),
-  scrimHidden: scrim.hidden,
+  label: toggle.getAttribute('aria-label'),
   role: sidebar.getAttribute('role'),
   ariaModal: sidebar.getAttribute('aria-modal'),
   tabindex: sidebar.getAttribute('tabindex'),
-  filterFocusCount: filter.focusCount,
-  openClass: sidebar.classList.contains('open'),
+  active: document.activeElement?.name,
+  bodyOverflow: document.body.style.overflow || '',
+  sidebarHidden: sidebar.getAttribute('aria-hidden'),
+  inertTargets: inertTargets.map((target) => target.inert),
 };
 
-document.dispatchEvent({ type: 'keydown', key: 'Escape' });
-const closed = {
+lastLink.focus();
+let preventedForward = false;
+document.dispatch('keydown', {
+  key: 'Tab',
+  shiftKey: false,
+  preventDefault() { preventedForward = true; },
+});
+const afterForwardTab = document.activeElement?.name;
+
+filter.focus();
+let preventedBackward = false;
+document.dispatch('keydown', {
+  key: 'Tab',
+  shiftKey: true,
+  preventDefault() { preventedBackward = true; },
+});
+const afterBackwardTab = document.activeElement?.name;
+
+document.dispatch('keydown', {
+  key: 'Escape',
+  shiftKey: false,
+  preventDefault() {},
+});
+
+const afterEscape = {
   expanded: toggle.getAttribute('aria-expanded'),
-  scrimHidden: scrim.hidden,
+  label: toggle.getAttribute('aria-label'),
   role: sidebar.getAttribute('role'),
   ariaModal: sidebar.getAttribute('aria-modal'),
   tabindex: sidebar.getAttribute('tabindex'),
-  toggleFocusCount: toggle.focusCount,
-  openClass: sidebar.classList.contains('open'),
+  active: document.activeElement?.name,
+  bodyOverflow: document.body.style.overflow || '',
+  sidebarHidden: sidebar.getAttribute('aria-hidden'),
+  inertTargets: inertTargets.map((target) => target.inert),
 };
 
-console.log(JSON.stringify({ initial, opened, closed }));
+console.log(JSON.stringify({
+  initial,
+  afterOpen,
+  preventedForward,
+  afterForwardTab,
+  preventedBackward,
+  afterBackwardTab,
+  afterEscape,
+}));
 """
     rendered = run_tsx_json(script)
 
     assert rendered["initial"] == {
         "expanded": "false",
-        "scrimHidden": True,
+        "label": "Open docs menu",
         "role": None,
         "ariaModal": None,
         "tabindex": None,
+        "sidebarHidden": "true",
     }
-    assert rendered["opened"]["expanded"] == "true"
-    assert rendered["opened"]["scrimHidden"] is False
-    assert rendered["opened"]["role"] == "dialog"
-    assert rendered["opened"]["ariaModal"] == "true"
-    assert rendered["opened"]["tabindex"] == "-1"
-    assert rendered["opened"]["filterFocusCount"] == 1
-    assert rendered["opened"]["openClass"] is True
-    assert rendered["closed"] == {
+    assert rendered["afterOpen"]["expanded"] == "true"
+    assert rendered["afterOpen"]["label"] == "Close docs menu"
+    assert rendered["afterOpen"]["role"] == "dialog"
+    assert rendered["afterOpen"]["ariaModal"] == "true"
+    assert rendered["afterOpen"]["tabindex"] == "-1"
+    assert rendered["afterOpen"]["active"] == "filter"
+    assert rendered["afterOpen"]["bodyOverflow"] == "hidden"
+    assert rendered["afterOpen"]["sidebarHidden"] is None
+    assert rendered["afterOpen"]["inertTargets"] == [True, True, True, True, True]
+    assert rendered["preventedForward"] is True
+    assert rendered["afterForwardTab"] == "filter"
+    assert rendered["preventedBackward"] is True
+    assert rendered["afterBackwardTab"] == "last-link"
+    assert rendered["afterEscape"] == {
         "expanded": "false",
-        "scrimHidden": True,
+        "label": "Open docs menu",
         "role": None,
         "ariaModal": None,
         "tabindex": None,
-        "toggleFocusCount": 1,
-        "openClass": False,
+        "active": "toggle",
+        "bodyOverflow": "",
+        "sidebarHidden": "true",
+        "inertTargets": [False, False, False, False, False],
     }
+
+
+def test_mobile_nav_ignores_filtered_links_in_focus_wrap() -> None:
+    script = """
+class FakeClassList {
+  constructor(initial = []) {
+    this.items = new Set(initial);
+  }
+  add(value) { this.items.add(value); }
+  remove(value) { this.items.delete(value); }
+  contains(value) { return this.items.has(value); }
+}
+
+class FakeElement {
+  constructor(name, owner, attrs = {}) {
+    this.name = name;
+    this.ownerDocument = owner;
+    this.attributes = new Map(Object.entries(attrs));
+    this.classList = new FakeClassList();
+    this.listeners = new Map();
+    this.inert = false;
+    this.style = {};
+  }
+  addEventListener(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(fn);
+  }
+  dispatchEvent(event) {
+    for (const fn of this.listeners.get(event.type) || []) fn(event);
+  }
+  click() {
+    this.dispatchEvent({ type: 'click' });
+  }
+  focus() {
+    this.ownerDocument.activeElement = this;
+  }
+  getClientRects() {
+    return this.style.display === 'none' ? [] : [{}];
+  }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) {
+    return this.attributes.has(name) ? this.attributes.get(name) : null;
+  }
+  removeAttribute(name) { this.attributes.delete(name); }
+  hasAttribute(name) { return this.attributes.has(name); }
+}
+
+class FakeSidebar extends FakeElement {
+  constructor(owner, input, links) {
+    super('sidebar', owner);
+    this.input = input;
+    this.links = links;
+  }
+  querySelectorAll(selector) {
+    if (selector === 'a') return this.links;
+    if (selector.includes('a[href]')) return [this.input, ...this.links];
+    return [];
+  }
+}
+
+class FakeMediaQuery {
+  constructor(matches) {
+    this.matches = matches;
+    this.listeners = [];
+  }
+  addEventListener(type, fn) {
+    if (type === 'change') this.listeners.push(fn);
+  }
+}
+
+class FakeDocument {
+  constructor() {
+    this.readyState = 'loading';
+    this.listeners = new Map();
+    this.activeElement = null;
+    this.body = { style: {} };
+  }
+  addEventListener(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(fn);
+  }
+  dispatch(type, event) {
+    for (const fn of this.listeners.get(type) || []) fn(event);
+  }
+  querySelector(selector) {
+    if (selector === '[data-docs-nav-toggle]') return this.toggle;
+    if (selector === '[data-docs-nav-scrim]') return this.scrim;
+    return null;
+  }
+  querySelectorAll(selector) {
+    if (selector === '[data-docs-mobile-inert]') return [];
+    return [];
+  }
+  getElementById(id) {
+    if (id === 'docs-sidebar') return this.sidebar;
+    return null;
+  }
+}
+
+const document = new FakeDocument();
+const mediaQuery = new FakeMediaQuery(true);
+const window = { matchMedia: () => mediaQuery };
+
+globalThis.document = document;
+globalThis.window = window;
+
+const toggle = new FakeElement('toggle', document);
+const scrim = new FakeElement('scrim', document);
+const filter = new FakeElement('filter', document);
+const visibleLink = new FakeElement('visible-link', document, { href: '/docs/getting-started/' });
+const hiddenLink = new FakeElement('hidden-link', document, { href: '/docs/configuration/' });
+hiddenLink.style.display = 'none';
+const sidebar = new FakeSidebar(document, filter, [visibleLink, hiddenLink]);
+
+document.toggle = toggle;
+document.scrim = scrim;
+document.sidebar = sidebar;
+
+const { initMobileNav } = await import('./site/src/scripts/docs-runtime.ts');
+initMobileNav(document);
+toggle.click();
+
+visibleLink.focus();
+let preventedForward = false;
+document.dispatch('keydown', {
+  key: 'Tab',
+  shiftKey: false,
+  preventDefault() { preventedForward = true; },
+});
+const afterForwardTab = document.activeElement?.name;
+
+filter.focus();
+let preventedBackward = false;
+document.dispatch('keydown', {
+  key: 'Tab',
+  shiftKey: true,
+  preventDefault() { preventedBackward = true; },
+});
+const afterBackwardTab = document.activeElement?.name;
+
+console.log(JSON.stringify({
+  preventedForward,
+  afterForwardTab,
+  preventedBackward,
+  afterBackwardTab,
+}));
+"""
+    rendered = run_tsx_json(script)
+
+    assert rendered == {
+        "preventedForward": True,
+        "afterForwardTab": "filter",
+        "preventedBackward": True,
+        "afterBackwardTab": "visible-link",
+    }
+
+
+def test_mobile_nav_cleans_up_when_viewport_expands_to_desktop() -> None:
+    script = """
+class FakeClassList {
+  constructor(initial = []) {
+    this.items = new Set(initial);
+  }
+  add(value) { this.items.add(value); }
+  remove(value) { this.items.delete(value); }
+  contains(value) { return this.items.has(value); }
+}
+
+class FakeElement {
+  constructor(owner) {
+    this.ownerDocument = owner;
+    this.attributes = new Map();
+    this.classList = new FakeClassList();
+    this.listeners = new Map();
+    this.inert = false;
+    this.style = {};
+  }
+  addEventListener(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(fn);
+  }
+  dispatchEvent(event) {
+    for (const fn of this.listeners.get(event.type) || []) fn(event);
+  }
+  click() {
+    this.dispatchEvent({ type: 'click' });
+  }
+  focus() {
+    this.ownerDocument.activeElement = this;
+  }
+  getClientRects() {
+    return this.style.display === 'none' ? [] : [{}];
+  }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) {
+    return this.attributes.has(name) ? this.attributes.get(name) : null;
+  }
+  removeAttribute(name) { this.attributes.delete(name); }
+  hasAttribute(name) { return this.attributes.has(name); }
+}
+
+class FakeSidebar extends FakeElement {
+  constructor(owner, input, links) {
+    super(owner);
+    this.input = input;
+    this.links = links;
+  }
+  querySelectorAll(selector) {
+    if (selector === 'a') return this.links;
+    if (selector.includes('a[href]')) return [this.input, ...this.links];
+    return [];
+  }
+}
+
+class FakeMediaQuery {
+  constructor(matches) {
+    this.matches = matches;
+    this.listeners = [];
+  }
+  addEventListener(type, fn) {
+    if (type === 'change') this.listeners.push(fn);
+  }
+  setMatches(matches) {
+    this.matches = matches;
+    for (const fn of this.listeners) fn({ matches });
+  }
+}
+
+class FakeDocument {
+  constructor() {
+    this.readyState = 'loading';
+    this.listeners = new Map();
+    this.activeElement = null;
+    this.body = { style: {} };
+  }
+  addEventListener(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(fn);
+  }
+  querySelector(selector) {
+    if (selector === '[data-docs-nav-toggle]') return this.toggle;
+    if (selector === '[data-docs-nav-scrim]') return this.scrim;
+    return null;
+  }
+  querySelectorAll(selector) {
+    if (selector === '[data-docs-mobile-inert]') return this.inertTargets;
+    return [];
+  }
+  getElementById(id) {
+    if (id === 'docs-sidebar') return this.sidebar;
+    return null;
+  }
+}
+
+const document = new FakeDocument();
+const mediaQuery = new FakeMediaQuery(true);
+const window = { matchMedia: () => mediaQuery };
+
+globalThis.document = document;
+globalThis.window = window;
+
+const toggle = new FakeElement(document);
+const scrim = new FakeElement(document);
+const filter = new FakeElement(document);
+const link = new FakeElement(document);
+const sidebar = new FakeSidebar(document, filter, [link]);
+const inertTargets = [new FakeElement(document), new FakeElement(document)];
+
+document.toggle = toggle;
+document.scrim = scrim;
+document.sidebar = sidebar;
+document.inertTargets = inertTargets;
+
+const { initMobileNav } = await import('./site/src/scripts/docs-runtime.ts');
+initMobileNav(document);
+toggle.click();
+mediaQuery.setMatches(false);
+
+console.log(JSON.stringify({
+  expanded: toggle.getAttribute('aria-expanded'),
+  role: sidebar.getAttribute('role'),
+  ariaModal: sidebar.getAttribute('aria-modal'),
+  tabindex: sidebar.getAttribute('tabindex'),
+  bodyOverflow: document.body.style.overflow || '',
+  sidebarOpen: sidebar.classList.contains('open'),
+  sidebarHidden: sidebar.getAttribute('aria-hidden'),
+  inertTargets: inertTargets.map((target) => target.inert),
+}));
+"""
+    rendered = run_tsx_json(script)
+
+    assert rendered["expanded"] == "false"
+    assert rendered["role"] is None
+    assert rendered["ariaModal"] is None
+    assert rendered["tabindex"] is None
+    assert rendered["bodyOverflow"] == ""
+    assert rendered["sidebarOpen"] is False
+    assert rendered["sidebarHidden"] is None
+    assert rendered["inertTargets"] == [False, False]

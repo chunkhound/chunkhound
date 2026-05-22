@@ -58,6 +58,48 @@ function defaultSleep(ms: number): Promise<void> {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function appendStaticStep(parent: HTMLElement, doc: Document, step: HeroStep): void {
+    if (step.type === "blank") {
+        const line = doc.createElement("div");
+        line.className = "line";
+        line.innerHTML = "&nbsp;";
+        parent.appendChild(line);
+        return;
+    }
+
+    if (step.type === "prompt") {
+        const line = doc.createElement("div");
+        line.className = "line";
+        const prompt = doc.createElement("span");
+        prompt.className = "prompt";
+        prompt.textContent = "$ ";
+        line.appendChild(prompt);
+
+        step.segments.forEach((segment) => {
+            const span = doc.createElement("span");
+            span.className = segment.cls;
+            span.textContent = segment.text;
+            line.appendChild(span);
+        });
+
+        parent.appendChild(line);
+        return;
+    }
+
+    const line = doc.createElement("div");
+    line.className = "line";
+    const span = doc.createElement("span");
+    span.className = step.dim ? "output dim" : "output";
+    span.textContent = step.text;
+    if (step.cursor) {
+        const cursor = doc.createElement("span");
+        cursor.className = "cursor";
+        span.appendChild(cursor);
+    }
+    line.appendChild(span);
+    parent.appendChild(line);
+}
+
 function isCardVisible(element: Element): boolean {
     if (typeof window === "undefined") {
         return true;
@@ -87,9 +129,69 @@ export function initHeroTerminal(
 
     let isVisible = isCardVisible(card);
     let isRendering = false;
+    let settledHeightLockPending = false;
+
+    function lockTerminalHeight(): void {
+        const body = doc.body;
+        if (!body || typeof body.appendChild !== "function") {
+            return;
+        }
+
+        const width = container.clientWidth;
+        if (!width || typeof container.cloneNode !== "function") {
+            return;
+        }
+
+        const measure = container.cloneNode(false) as HTMLElement;
+        measure.style.position = "absolute";
+        measure.style.visibility = "hidden";
+        measure.style.pointerEvents = "none";
+        measure.style.inset = "0 auto auto 0";
+        measure.style.width = `${width}px`;
+        measure.style.height = "auto";
+        measure.style.minHeight = "0";
+        measure.setAttribute("aria-hidden", "true");
+        STEPS.forEach((step) => appendStaticStep(measure, doc, step));
+        body.appendChild(measure);
+        const height = Math.ceil(measure.getBoundingClientRect().height);
+        measure.remove();
+        if (height > 0) {
+            container.style.height = `${height}px`;
+        }
+    }
 
     function clearTerminal(): void {
         container.innerHTML = "";
+    }
+
+    function runAfterLayout(callback: () => void): void {
+        if (typeof window.requestAnimationFrame === "function") {
+            window.requestAnimationFrame(() => {
+                callback();
+            });
+            return;
+        }
+
+        window.setTimeout(callback, 0);
+    }
+
+    function scheduleSettledHeightLock(): void {
+        if (settledHeightLockPending) {
+            return;
+        }
+
+        settledHeightLockPending = true;
+        runAfterLayout(() => {
+            settledHeightLockPending = false;
+            lockTerminalHeight();
+        });
+
+        const fonts = (doc as Document & {
+            fonts?: { ready?: Promise<unknown> };
+        }).fonts;
+        void fonts?.ready?.then(() => {
+            lockTerminalHeight();
+        });
     }
 
     function shouldAnimate(): boolean {
@@ -187,6 +289,16 @@ export function initHeroTerminal(
         })();
     }
 
+    lockTerminalHeight();
+    scheduleSettledHeightLock();
+
+    if (typeof ResizeObserver !== "undefined") {
+        const resizeObserver = new ResizeObserver(() => {
+            lockTerminalHeight();
+        });
+        resizeObserver.observe(card);
+    }
+
     const observer = new IntersectionObserver(
         (entries) => {
             isVisible = entries[0]?.isIntersecting ?? false;
@@ -206,16 +318,24 @@ export function initHeroTerminal(
             clearTerminal();
             return;
         }
-        triggerRender();
+
+        scheduleSettledHeightLock();
+        runAfterLayout(() => {
+            triggerRender();
+        });
     });
 
     window.addEventListener("pagehide", () => {
+        isVisible = false;
         clearTerminal();
     });
 
     window.addEventListener("pageshow", () => {
         isVisible = isCardVisible(card);
-        triggerRender();
+        scheduleSettledHeightLock();
+        runAfterLayout(() => {
+            triggerRender();
+        });
     });
 
     triggerRender();

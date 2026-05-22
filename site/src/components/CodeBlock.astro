@@ -12,7 +12,7 @@ const { copyBtnId, ariaLabel = "Copy", dataCopy = "", class: className } = Astro
 ---
 
 <div class:list={["code-block-md", className]}>
-    <button class="copy-btn" id={copyBtnId} aria-label={ariaLabel} data-copy={dataCopy} set:html={COPY_SVG} />
+    <button type="button" class="copy-btn" id={copyBtnId} aria-label={ariaLabel} data-copy={dataCopy} set:html={COPY_SVG} />
     <slot />
 </div>
 
@@ -45,5 +45,5 @@ import '../scripts/copy-handler.js';
 
     .code-block-md .copy-btn:hover { color: var(--text-secondary); background: var(--bg-muted); }
     .code-block-md .copy-btn.copied { color: var(--primary); }
-    .code-block-md .copy-btn :global(svg) { width: 16px; height: 16px; }
+    .code-block-md .copy-btn :global(svg) { width: 18px; height: 18px; }
 </style>

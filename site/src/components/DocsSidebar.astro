@@ -6,11 +6,11 @@ interface Props {
 const { currentPath } = Astro.props;
 
 const guides = [
-  { title: 'Getting Started', href: '/docs/getting-started/' },
-  { title: 'Configuration', href: '/docs/configuration/' },
-  { title: 'CLI Reference', href: '/docs/cli-reference/' },
-  { title: 'Changelog', href: '/docs/changelog/' },
-  { title: 'Contributing', href: '/docs/contributing/' },
+  { icon: 'ph-rocket-launch', title: 'Getting Started', href: '/docs/getting-started/' },
+  { icon: 'ph-sliders-horizontal', title: 'Configuration', href: '/docs/configuration/' },
+  { icon: 'ph-terminal-window', title: 'CLI Reference', href: '/docs/cli-reference/' },
+  { icon: 'ph-clock-counter-clockwise', title: 'Changelog', href: '/docs/changelog/' },
+  { icon: 'ph-git-pull-request', title: 'Contributing', href: '/docs/contributing/' },
 ];
 
 function isActive(href: string): boolean {
@@ -20,17 +20,7 @@ function isActive(href: string): boolean {
 }
 ---
 
-<aside class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
-  <button
-    class="docs-nav-toggle"
-    type="button"
-    aria-controls="docs-sidebar"
-    aria-expanded="false"
-    data-docs-nav-toggle
-  >
-    Menu
-  </button>
-  <div class="docs-nav-scrim" hidden data-docs-nav-scrim></div>
+<aside class="docs-sidebar" id="docs-sidebar" aria-label="Documentation navigation">
   <div class="sidebar-inner">
     <label class="sr-only" for="docs-nav-filter">Filter pages</label>
     <input
@@ -45,16 +35,28 @@ function isActive(href: string): boolean {
     <div class="sidebar-section" data-sidebar-section>
       <div class="sidebar-section-title">Guides</div>
       <nav aria-label="Documentation guides">
-        {guides.map((g) => (
-          <a
-            href={g.href}
-            class:list={['sidebar-link', { active: isActive(g.href) }]}
-            data-sidebar-link
-          >
-            {g.title}
-          </a>
-        ))}
+        {guides.map((g) => {
+          const Icon = g.icon;
+          return (
+            <a
+              href={g.href}
+              class:list={['sidebar-link', { active: isActive(g.href) }]}
+              data-sidebar-link
+            >
+              <Icon size="16" weight="duotone" aria-hidden="true" />
+              <span>{g.title}</span>
+            </a>
+          );
+        })}
       </nav>
     </div>
   </div>
 </aside>
+
+<script>
+  import "@phosphor-icons/webcomponents/PhClockCounterClockwise";
+  import "@phosphor-icons/webcomponents/PhGitPullRequest";
+  import "@phosphor-icons/webcomponents/PhRocketLaunch";
+  import "@phosphor-icons/webcomponents/PhSlidersHorizontal";
+  import "@phosphor-icons/webcomponents/PhTerminalWindow";
+</script>

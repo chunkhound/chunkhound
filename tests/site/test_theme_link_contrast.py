@@ -122,3 +122,19 @@ def test_code_surface_text_meets_aa_contrast_in_both_site_themes() -> None:
 
     for foreground, background in token_pairs:
         assert _contrast_ratio(foreground, background) >= 4.5
+
+
+def test_code_surface_accent_tokens_meet_aa_contrast_in_both_site_themes() -> None:
+    css = GLOBAL_CSS.read_text(encoding="utf-8")
+    dark_tokens = _extract_tokens(_extract_block(css, ":root"))
+    light_tokens = _extract_tokens(_extract_block(css, '[data-theme="light"]'))
+
+    token_pairs = [
+        (dark_tokens["--code-accent"], dark_tokens["--code-bg"]),
+        (light_tokens["--code-accent"], light_tokens["--code-bg"]),
+        (dark_tokens["--code-muted"], dark_tokens["--code-bg"]),
+        (light_tokens["--code-muted"], light_tokens["--code-bg"]),
+    ]
+
+    for foreground, background in token_pairs:
+        assert _contrast_ratio(foreground, background) >= 4.5

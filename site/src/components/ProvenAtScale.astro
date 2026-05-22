@@ -26,28 +26,28 @@
                 <tbody>
                     <tr>
                         <td class="feature-label">Kubernetes cluster</td>
-                        <td class="val-bad">required</td>
-                        <td class="val-good">not needed</td>
+                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>required</span></span></td>
+                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>not needed</span></span></td>
                     </tr>
                     <tr>
                         <td class="feature-label">H100 / GPU server</td>
-                        <td class="val-bad">required</td>
-                        <td class="val-good">not needed</td>
+                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>required</span></span></td>
+                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>not needed</span></span></td>
                     </tr>
                     <tr>
                         <td class="feature-label">Vendor subscription</td>
-                        <td class="val-bad">required</td>
-                        <td class="val-good">MIT licensed</td>
+                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>required</span></span></td>
+                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>MIT licensed</span></span></td>
                     </tr>
                     <tr>
                         <td class="feature-label">Code leaves network</td>
-                        <td class="val-bad">yes</td>
-                        <td class="val-good">never</td>
+                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>yes</span></span></td>
+                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>never</span></span></td>
                     </tr>
                     <tr>
                         <td class="feature-label">Closed, proprietary</td>
-                        <td class="val-bad">yes</td>
-                        <td class="val-good">open source</td>
+                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>yes</span></span></td>
+                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>open source</span></span></td>
                     </tr>
                 </tbody>
             </table>
@@ -61,6 +61,8 @@
 </section>
 
 <script>
+  import "@phosphor-icons/webcomponents/PhCheckCircle";
+  import "@phosphor-icons/webcomponents/PhXCircle";
   import { setupScrollAnimation } from "../scripts/scroll-observer.ts";
   setupScrollAnimation(".proven");
 </script>
@@ -141,7 +143,7 @@
     .col-them,
     .col-us {
         width: 30%;
-        text-align: center;
+        text-align: left;
     }
 
     .compare-table tbody tr {
@@ -162,14 +164,29 @@
 
     .val-bad {
         color: var(--code-text);
-        opacity: 0.4;
-        text-align: center;
     }
 
     .val-good {
-        color: var(--primary);
+        color: var(--code-accent);
         font-weight: 600;
-        text-align: center;
+    }
+
+    .val-bad,
+    .val-good {
+        vertical-align: middle;
+    }
+
+    .value-content {
+        display: inline-grid;
+        grid-template-columns: 16px 1fr;
+        align-items: center;
+        gap: var(--space-2);
+    }
+
+    .value-content ph-x-circle,
+    .value-content ph-check-circle {
+        width: 16px;
+        height: 16px;
     }
 
     @media (max-width: 640px) {
