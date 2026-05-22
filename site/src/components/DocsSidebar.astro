@@ -20,7 +20,7 @@ function isActive(href: string): boolean {
 }
 ---
 
-<aside class="docs-sidebar" id="docs-sidebar" aria-label="Documentation navigation" tabindex="-1">
+<aside class="docs-sidebar" id="docs-sidebar" aria-label="Documentation navigation">
   <div class="sidebar-inner">
     <label class="sr-only" for="docs-nav-filter">Filter pages</label>
     <input
@@ -34,7 +34,7 @@ function isActive(href: string): boolean {
 
     <div class="sidebar-section" data-sidebar-section>
       <div class="sidebar-section-title">Guides</div>
-      <nav>
+      <nav aria-label="Documentation guides">
         {guides.map((g) => {
           const Icon = g.icon;
           return (
@@ -50,7 +50,6 @@ function isActive(href: string): boolean {
         })}
       </nav>
     </div>
-
   </div>
 </aside>
 

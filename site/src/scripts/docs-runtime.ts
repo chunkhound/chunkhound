@@ -101,17 +101,17 @@ function initNavFilter(): void {
     });
 }
 
-export function initMobileNav(): void {
-    const toggle = document.querySelector<HTMLButtonElement>("[data-docs-nav-toggle]");
-    const sidebar = document.getElementById("docs-sidebar");
-    const scrim = document.querySelector<HTMLElement>("[data-docs-nav-scrim]");
-    if (!toggle || !sidebar) {
+export function initMobileNav(doc: Document = document): void {
+    const toggle = doc.querySelector<HTMLButtonElement>("[data-docs-nav-toggle]");
+    const sidebar = doc.getElementById("docs-sidebar");
+    const scrim = doc.querySelector<HTMLElement>("[data-docs-nav-scrim]");
+    if (!toggle || !sidebar || typeof window === "undefined") {
         return;
     }
 
     const mobileMedia = window.matchMedia("(max-width: 900px)");
     const inertTargets = Array.from(
-        document.querySelectorAll<HTMLElement>("[data-docs-mobile-inert]"),
+        doc.querySelectorAll<HTMLElement>("[data-docs-mobile-inert]"),
     );
     const focusableSelector = [
         "a[href]",
@@ -130,7 +130,10 @@ export function initMobileNav(): void {
 
     const setToggleState = (expanded: boolean) => {
         toggle.setAttribute("aria-expanded", String(expanded));
-        toggle.setAttribute("aria-label", expanded ? "Close docs menu" : "Open docs menu");
+        toggle.setAttribute(
+            "aria-label",
+            expanded ? "Close docs menu" : "Open docs menu",
+        );
     };
 
     const setBackgroundInert = (value: boolean) => {
@@ -144,17 +147,42 @@ export function initMobileNav(): void {
         });
     };
 
+    const setModalSemantics = (value: boolean) => {
+        if (value) {
+            sidebar.setAttribute("role", "dialog");
+            sidebar.setAttribute("aria-modal", "true");
+            sidebar.setAttribute("tabindex", "-1");
+            return;
+        }
+        sidebar.removeAttribute("role");
+        sidebar.removeAttribute("aria-modal");
+        sidebar.removeAttribute("tabindex");
+    };
+
     const syncClosedState = () => {
         sidebar.classList.remove("open");
         scrim?.classList.remove("open");
         setToggleState(false);
+        setModalSemantics(false);
+
         if (mobileMedia.matches) {
             sidebar.setAttribute("aria-hidden", "true");
             sidebar.inert = true;
             return;
         }
+
         sidebar.removeAttribute("aria-hidden");
         sidebar.inert = false;
+    };
+
+    const closeDrawer = (restoreFocus = false) => {
+        open = false;
+        setBackgroundInert(false);
+        doc.body.style.overflow = "";
+        syncClosedState();
+        if (restoreFocus) {
+            toggle.focus({ preventScroll: true });
+        }
     };
 
     const openDrawer = () => {
@@ -162,35 +190,31 @@ export function initMobileNav(): void {
         sidebar.classList.add("open");
         scrim?.classList.add("open");
         setToggleState(true);
+        setModalSemantics(true);
         sidebar.removeAttribute("aria-hidden");
         sidebar.inert = false;
         setBackgroundInert(true);
-        document.body.style.overflow = "hidden";
-        getFocusable()[0]?.focus({ preventScroll: true });
-        if (document.activeElement !== toggle && document.activeElement !== sidebar) {
+        doc.body.style.overflow = "hidden";
+
+        const firstFocusable = getFocusable()[0];
+        if (firstFocusable) {
+            firstFocusable.focus({ preventScroll: true });
             return;
         }
-        sidebar.focus({ preventScroll: true });
-    };
 
-    const closeDrawer = (restoreFocus = false) => {
-        open = false;
-        setBackgroundInert(false);
-        document.body.style.overflow = "";
-        syncClosedState();
-        if (restoreFocus) {
-            toggle.focus({ preventScroll: true });
-        }
+        sidebar.focus({ preventScroll: true });
     };
 
     const handleKeydown = (event: KeyboardEvent) => {
         if (!open || !mobileMedia.matches) {
             return;
         }
+
         if (event.key === "Escape") {
             closeDrawer(true);
             return;
         }
+
         if (event.key !== "Tab") {
             return;
         }
@@ -204,12 +228,13 @@ export function initMobileNav(): void {
 
         const first = focusable[0];
         const last = focusable[focusable.length - 1];
-        const active = document.activeElement;
+        const active = doc.activeElement;
         if (event.shiftKey && (active === first || active === sidebar)) {
             event.preventDefault();
             last.focus({ preventScroll: true });
             return;
         }
+
         if (!event.shiftKey && active === last) {
             event.preventDefault();
             first.focus({ preventScroll: true });
@@ -221,27 +246,31 @@ export function initMobileNav(): void {
             closeDrawer(false);
             return;
         }
+
         if (!open) {
             syncClosedState();
         }
     };
 
     syncClosedState();
+
     toggle.addEventListener("click", () => {
         if (!mobileMedia.matches) {
             return;
         }
+
         if (open) {
             closeDrawer(true);
             return;
         }
+
         openDrawer();
     });
     scrim?.addEventListener("click", () => closeDrawer(true));
     sidebar.querySelectorAll<HTMLAnchorElement>("a").forEach((link) => {
         link.addEventListener("click", () => closeDrawer());
     });
-    document.addEventListener("keydown", handleKeydown);
+    doc.addEventListener("keydown", handleKeydown);
     mobileMedia.addEventListener("change", handleViewportChange);
 }
 
@@ -294,18 +323,20 @@ function initSearchShortcut(): void {
     });
 }
 
-async function initDocsRuntime(): Promise<void> {
+export async function initDocsRuntime(doc: Document = document): Promise<void> {
     buildTOC();
     initNavFilter();
-    initMobileNav();
+    initMobileNav(doc);
     initSearchShortcut();
     await initMermaid();
 }
 
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => {
-        void initDocsRuntime();
-    });
-} else {
-    void initDocsRuntime();
+if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", () => {
+            void initDocsRuntime(document);
+        });
+    } else {
+        void initDocsRuntime(document);
+    }
 }

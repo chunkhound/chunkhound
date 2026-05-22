@@ -3,7 +3,7 @@ from __future__ import annotations
 from tests.site.tsx_runner import run_tsx_json
 
 
-def test_mobile_nav_traps_focus_and_restores_modal_state() -> None:
+def test_mobile_nav_applies_modal_semantics_only_while_open() -> None:
     script = """
 class FakeClassList {
   constructor(initial = []) {
@@ -50,10 +50,6 @@ class FakeSidebar extends FakeElement {
     super('sidebar', owner);
     this.input = input;
     this.links = links;
-  }
-  querySelector(selector) {
-    if (selector === 'input, a, button') return this.input;
-    return null;
   }
   querySelectorAll(selector) {
     if (selector === 'a') return this.links;
@@ -132,13 +128,24 @@ document.sidebar = sidebar;
 document.inertTargets = inertTargets;
 
 const { initMobileNav } = await import('./site/src/scripts/docs-runtime.ts');
-initMobileNav();
-const initiallyHidden = sidebar.getAttribute('aria-hidden');
+initMobileNav(document);
+
+const initial = {
+  expanded: toggle.getAttribute('aria-expanded'),
+  label: toggle.getAttribute('aria-label'),
+  role: sidebar.getAttribute('role'),
+  ariaModal: sidebar.getAttribute('aria-modal'),
+  tabindex: sidebar.getAttribute('tabindex'),
+  sidebarHidden: sidebar.getAttribute('aria-hidden'),
+};
 
 toggle.click();
 const afterOpen = {
   expanded: toggle.getAttribute('aria-expanded'),
   label: toggle.getAttribute('aria-label'),
+  role: sidebar.getAttribute('role'),
+  ariaModal: sidebar.getAttribute('aria-modal'),
+  tabindex: sidebar.getAttribute('tabindex'),
   active: document.activeElement?.name,
   bodyOverflow: document.body.style.overflow || '',
   sidebarHidden: sidebar.getAttribute('aria-hidden'),
@@ -172,6 +179,9 @@ document.dispatch('keydown', {
 const afterEscape = {
   expanded: toggle.getAttribute('aria-expanded'),
   label: toggle.getAttribute('aria-label'),
+  role: sidebar.getAttribute('role'),
+  ariaModal: sidebar.getAttribute('aria-modal'),
+  tabindex: sidebar.getAttribute('tabindex'),
   active: document.activeElement?.name,
   bodyOverflow: document.body.style.overflow || '',
   sidebarHidden: sidebar.getAttribute('aria-hidden'),
@@ -179,7 +189,7 @@ const afterEscape = {
 };
 
 console.log(JSON.stringify({
-  initiallyHidden,
+  initial,
   afterOpen,
   preventedForward,
   afterForwardTab,
@@ -190,9 +200,19 @@ console.log(JSON.stringify({
 """
     rendered = run_tsx_json(script)
 
-    assert rendered["initiallyHidden"] == "true"
+    assert rendered["initial"] == {
+        "expanded": "false",
+        "label": "Open docs menu",
+        "role": None,
+        "ariaModal": None,
+        "tabindex": None,
+        "sidebarHidden": "true",
+    }
     assert rendered["afterOpen"]["expanded"] == "true"
     assert rendered["afterOpen"]["label"] == "Close docs menu"
+    assert rendered["afterOpen"]["role"] == "dialog"
+    assert rendered["afterOpen"]["ariaModal"] == "true"
+    assert rendered["afterOpen"]["tabindex"] == "-1"
     assert rendered["afterOpen"]["active"] == "filter"
     assert rendered["afterOpen"]["bodyOverflow"] == "hidden"
     assert rendered["afterOpen"]["sidebarHidden"] is None
@@ -201,12 +221,17 @@ console.log(JSON.stringify({
     assert rendered["afterForwardTab"] == "filter"
     assert rendered["preventedBackward"] is True
     assert rendered["afterBackwardTab"] == "last-link"
-    assert rendered["afterEscape"]["expanded"] == "false"
-    assert rendered["afterEscape"]["label"] == "Open docs menu"
-    assert rendered["afterEscape"]["active"] == "toggle"
-    assert rendered["afterEscape"]["bodyOverflow"] == ""
-    assert rendered["afterEscape"]["sidebarHidden"] == "true"
-    assert rendered["afterEscape"]["inertTargets"] == [False, False, False, False, False]
+    assert rendered["afterEscape"] == {
+        "expanded": "false",
+        "label": "Open docs menu",
+        "role": None,
+        "ariaModal": None,
+        "tabindex": None,
+        "active": "toggle",
+        "bodyOverflow": "",
+        "sidebarHidden": "true",
+        "inertTargets": [False, False, False, False, False],
+    }
 
 
 def test_mobile_nav_cleans_up_when_viewport_expands_to_desktop() -> None:
@@ -323,12 +348,15 @@ document.sidebar = sidebar;
 document.inertTargets = inertTargets;
 
 const { initMobileNav } = await import('./site/src/scripts/docs-runtime.ts');
-initMobileNav();
+initMobileNav(document);
 toggle.click();
 mediaQuery.setMatches(false);
 
 console.log(JSON.stringify({
   expanded: toggle.getAttribute('aria-expanded'),
+  role: sidebar.getAttribute('role'),
+  ariaModal: sidebar.getAttribute('aria-modal'),
+  tabindex: sidebar.getAttribute('tabindex'),
   bodyOverflow: document.body.style.overflow || '',
   sidebarOpen: sidebar.classList.contains('open'),
   sidebarHidden: sidebar.getAttribute('aria-hidden'),
@@ -338,6 +366,9 @@ console.log(JSON.stringify({
     rendered = run_tsx_json(script)
 
     assert rendered["expanded"] == "false"
+    assert rendered["role"] is None
+    assert rendered["ariaModal"] is None
+    assert rendered["tabindex"] is None
     assert rendered["bodyOverflow"] == ""
     assert rendered["sidebarOpen"] is False
     assert rendered["sidebarHidden"] is None
