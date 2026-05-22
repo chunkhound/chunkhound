@@ -129,6 +129,7 @@ export function initHeroTerminal(
 
     let isVisible = isCardVisible(card);
     let isRendering = false;
+    let settledHeightLockPending = false;
 
     function lockTerminalHeight(): void {
         const body = doc.body;
@@ -161,6 +162,36 @@ export function initHeroTerminal(
 
     function clearTerminal(): void {
         container.innerHTML = "";
+    }
+
+    function runAfterLayout(callback: () => void): void {
+        if (typeof window.requestAnimationFrame === "function") {
+            window.requestAnimationFrame(() => {
+                callback();
+            });
+            return;
+        }
+
+        window.setTimeout(callback, 0);
+    }
+
+    function scheduleSettledHeightLock(): void {
+        if (settledHeightLockPending) {
+            return;
+        }
+
+        settledHeightLockPending = true;
+        runAfterLayout(() => {
+            settledHeightLockPending = false;
+            lockTerminalHeight();
+        });
+
+        const fonts = (doc as Document & {
+            fonts?: { ready?: Promise<unknown> };
+        }).fonts;
+        void fonts?.ready?.then(() => {
+            lockTerminalHeight();
+        });
     }
 
     function shouldAnimate(): boolean {
@@ -259,6 +290,7 @@ export function initHeroTerminal(
     }
 
     lockTerminalHeight();
+    scheduleSettledHeightLock();
 
     if (typeof ResizeObserver !== "undefined") {
         const resizeObserver = new ResizeObserver(() => {
@@ -286,16 +318,24 @@ export function initHeroTerminal(
             clearTerminal();
             return;
         }
-        triggerRender();
+
+        scheduleSettledHeightLock();
+        runAfterLayout(() => {
+            triggerRender();
+        });
     });
 
     window.addEventListener("pagehide", () => {
+        isVisible = false;
         clearTerminal();
     });
 
     window.addEventListener("pageshow", () => {
         isVisible = isCardVisible(card);
-        triggerRender();
+        scheduleSettledHeightLock();
+        runAfterLayout(() => {
+            triggerRender();
+        });
     });
 
     triggerRender();
