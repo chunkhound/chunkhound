@@ -49,8 +49,8 @@ export const DEMO_CODE_PALETTE = {
 };
 
 export const COPY_SVG = `
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <rect x="9" y="9" width="10" height="10" rx="2"></rect>
-    <path d="M5 15V7a2 2 0 0 1 2-2h8"></path>
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true">
+    <path d="M216 40v128H88V40Z" opacity="0.2"></path>
+    <path d="M216 32H88a8 8 0 0 0-8 8v40H40a8 8 0 0 0-8 8v128a8 8 0 0 0 8 8h128a8 8 0 0 0 8-8v-40h40a8 8 0 0 0 8-8V40a8 8 0 0 0-8-8Zm-56 176H48V96h112Zm48-48h-32V88a8 8 0 0 0-8-8H96V48h112Z"></path>
   </svg>
 `;

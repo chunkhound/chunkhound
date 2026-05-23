@@ -102,51 +102,192 @@ function initNavFilter(): void {
 }
 
 export function initMobileNav(doc: Document = document): void {
-    const toggle = doc.querySelector<HTMLElement>("[data-docs-nav-toggle]");
+    const toggle = doc.querySelector<HTMLButtonElement>("[data-docs-nav-toggle]");
     const sidebar = doc.getElementById("docs-sidebar");
     const scrim = doc.querySelector<HTMLElement>("[data-docs-nav-scrim]");
-    const filter = doc.querySelector<HTMLInputElement>("[data-docs-nav-filter]");
-    if (!toggle || !sidebar) {
+    if (!toggle || !sidebar || typeof window === "undefined") {
         return;
     }
 
-    const applyState = (isOpen: boolean) => {
-        sidebar.classList.toggle("open", isOpen);
-        scrim?.classList.toggle("open", isOpen);
-        toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
-        if (scrim) {
-            scrim.hidden = !isOpen;
+    const mobileMedia = window.matchMedia("(max-width: 900px)");
+    const inertTargets = Array.from(
+        doc.querySelectorAll<HTMLElement>("[data-docs-mobile-inert]"),
+    );
+    const focusableSelector = [
+        "a[href]",
+        "button:not([disabled])",
+        "input:not([disabled])",
+        "select:not([disabled])",
+        "textarea:not([disabled])",
+        "[tabindex]:not([tabindex='-1'])",
+    ].join(", ");
+    let open = false;
+
+    const isVisibleForFocus = (element: HTMLElement): boolean => {
+        if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true") {
+            return false;
         }
 
-        if (isOpen) {
+        if (element.style.display === "none") {
+            return false;
+        }
+
+        if (typeof element.getClientRects === "function") {
+            return element.getClientRects().length > 0;
+        }
+
+        return true;
+    };
+
+    const getFocusable = (): HTMLElement[] =>
+        Array.from(sidebar.querySelectorAll<HTMLElement>(focusableSelector)).filter(
+            isVisibleForFocus,
+        );
+
+    const setToggleState = (expanded: boolean) => {
+        toggle.setAttribute("aria-expanded", String(expanded));
+        toggle.setAttribute(
+            "aria-label",
+            expanded ? "Close docs menu" : "Open docs menu",
+        );
+    };
+
+    const setBackgroundInert = (value: boolean) => {
+        inertTargets.forEach((target) => {
+            target.inert = value;
+            if (value) {
+                target.setAttribute("aria-hidden", "true");
+                return;
+            }
+            target.removeAttribute("aria-hidden");
+        });
+    };
+
+    const setModalSemantics = (value: boolean) => {
+        if (value) {
             sidebar.setAttribute("role", "dialog");
             sidebar.setAttribute("aria-modal", "true");
             sidebar.setAttribute("tabindex", "-1");
-            filter?.focus();
             return;
         }
-
         sidebar.removeAttribute("role");
         sidebar.removeAttribute("aria-modal");
         sidebar.removeAttribute("tabindex");
     };
 
-    const close = () => {
-        applyState(false);
-        toggle.focus();
+    const syncClosedState = () => {
+        sidebar.classList.remove("open");
+        scrim?.classList.remove("open");
+        setToggleState(false);
+        setModalSemantics(false);
+
+        if (mobileMedia.matches) {
+            sidebar.setAttribute("aria-hidden", "true");
+            sidebar.inert = true;
+            return;
+        }
+
+        sidebar.removeAttribute("aria-hidden");
+        sidebar.inert = false;
     };
 
-    applyState(sidebar.classList.contains("open"));
+    const closeDrawer = (restoreFocus = false) => {
+        open = false;
+        setBackgroundInert(false);
+        doc.body.style.overflow = "";
+        syncClosedState();
+        if (restoreFocus) {
+            toggle.focus({ preventScroll: true });
+        }
+    };
+
+    const openDrawer = () => {
+        open = true;
+        sidebar.classList.add("open");
+        scrim?.classList.add("open");
+        setToggleState(true);
+        setModalSemantics(true);
+        sidebar.removeAttribute("aria-hidden");
+        sidebar.inert = false;
+        setBackgroundInert(true);
+        doc.body.style.overflow = "hidden";
+
+        const firstFocusable = getFocusable()[0];
+        if (firstFocusable) {
+            firstFocusable.focus({ preventScroll: true });
+            return;
+        }
+
+        sidebar.focus({ preventScroll: true });
+    };
+
+    const handleKeydown = (event: KeyboardEvent) => {
+        if (!open || !mobileMedia.matches) {
+            return;
+        }
+
+        if (event.key === "Escape") {
+            closeDrawer(true);
+            return;
+        }
+
+        if (event.key !== "Tab") {
+            return;
+        }
+
+        const focusable = getFocusable();
+        if (!focusable.length) {
+            event.preventDefault();
+            sidebar.focus({ preventScroll: true });
+            return;
+        }
+
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const active = doc.activeElement;
+        if (event.shiftKey && (active === first || active === sidebar)) {
+            event.preventDefault();
+            last.focus({ preventScroll: true });
+            return;
+        }
+
+        if (!event.shiftKey && active === last) {
+            event.preventDefault();
+            first.focus({ preventScroll: true });
+        }
+    };
+
+    const handleViewportChange = () => {
+        if (!mobileMedia.matches) {
+            closeDrawer(false);
+            return;
+        }
+
+        if (!open) {
+            syncClosedState();
+        }
+    };
+
+    syncClosedState();
 
     toggle.addEventListener("click", () => {
-        applyState(!sidebar.classList.contains("open"));
-    });
-    scrim?.addEventListener("click", close);
-    doc.addEventListener("keydown", (event) => {
-        if (event.key === "Escape" && sidebar.classList.contains("open")) {
-            close();
+        if (!mobileMedia.matches) {
+            return;
         }
+
+        if (open) {
+            closeDrawer(true);
+            return;
+        }
+
+        openDrawer();
     });
+    scrim?.addEventListener("click", () => closeDrawer(true));
+    sidebar.querySelectorAll<HTMLAnchorElement>("a").forEach((link) => {
+        link.addEventListener("click", () => closeDrawer());
+    });
+    doc.addEventListener("keydown", handleKeydown);
+    mobileMedia.addEventListener("change", handleViewportChange);
 }
 
 async function initMermaid(): Promise<void> {

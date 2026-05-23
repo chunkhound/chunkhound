@@ -26,6 +26,7 @@ export default defineConfig({
                 tagName: 'button',
                 properties: {
                   class: 'copy-btn',
+                  type: 'button',
                   'aria-label': 'Copy code',
                   'data-copy': rawCode,
                 },

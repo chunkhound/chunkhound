@@ -4,7 +4,7 @@ Agent-executable brand specification. All values are final computed tokens — a
 
 ## Brand Identity
 
-- **Wordmark:** "ChunkHound" in Inter 700, trailing green accent dot (circle, `#a1bc20`)
+- **Wordmark:** "ChunkHound" in Inter 700, trailing cyan accent dot (circle, `#22d3ee`)
 - **Tagline:** "Your entire codebase, deeply understood"
 - **Personality:** Exciting + likeable. Cutting-edge but approachable.
 - **PAD Profile:** Pleasure High, Arousal High, Dominance Medium
@@ -12,21 +12,21 @@ Agent-executable brand specification. All values are final computed tokens — a
 
 ## Color Tokens
 
-### Primary — Electric Chartreuse (Hue 120 OKLCH)
+### Primary — Cyan / Teal
 
 | Shade | Hex |
 |-------|---------|
-| 50 | `#edfec5` |
-| 100 | `#dff3ab` |
-| 200 | `#c9e185` |
-| 300 | `#a9c650` |
-| 400 | `#8dab14` |
-| 500 | `#748d0c` |
-| 600 | `#5d7000` |
-| 700 | `#485800` |
-| 800 | `#374400` |
-| 900 | `#263100` |
-| 950 | `#1e2600` |
+| 50 | `#ecfeff` |
+| 100 | `#cffafe` |
+| 200 | `#a5f3fc` |
+| 300 | `#67e8f9` |
+| 400 | `#22d3ee` |
+| 500 | `#0891b2` |
+| 600 | `#0e7490` |
+| 700 | `#155e75` |
+| 800 | `#164e63` |
+| 900 | `#083344` |
+| 950 | `#06262f` |
 
 ### Neutral — achromatic gray
 
@@ -54,9 +54,11 @@ Agent-executable brand specification. All values are final computed tokens — a
 
 Semantic backgrounds: color at `12%` opacity (light) / `18%` opacity (dark). Semantic borders: color at `20%` opacity.
 
-### Hero Chartreuse
+### Code Surface Accent
 
-`#a1bc20` — Logo, marketing materials, accent dot. NOT for UI text or small elements.
+`--code-accent: #22d3ee` — Cyan accent for dark code panels in both themes. Use instead of `--primary` when content appears on `--code-bg`.
+
+`--code-muted: #9b9b9b` — Muted text for dark code panels. Use instead of page text tokens on `--code-bg`.
 
 ### Light Mode
 
@@ -71,16 +73,18 @@ Semantic backgrounds: color at `12%` opacity (light) / `18%` opacity (dark). Sem
 | `--text-muted` | `#707070` |
 | `--border-color` | `#d3d3d3` (neutral-200) |
 | `--border-subtle` | `#e8e8e8` (neutral-100) |
-| `--primary` | `#8dab14` (primary-400) |
-| `--primary-bright` | `#a9c650` (primary-300) |
-| `--primary-bg` | `#e4f7b0` |
+| `--primary` | `#0e7490` (primary-600) |
+| `--primary-bright` | `#22d3ee` (primary-400) |
+| `--primary-bg` | `#cffafe` (primary-100) |
 | `--on-primary` | `#ffffff` |
-| `--link` | `#5d7000` (primary-600) |
-| `--link-hover` | `#485800` (primary-700) |
-| `--link-visited` | `#374400` (primary-800) |
-| `--link-on-primary-bg` | `#485800` (primary-700) |
+| `--link` | `#0e7490` (primary-600) |
+| `--link-hover` | `#155e75` (primary-700) |
+| `--link-visited` | `#164e63` (primary-800) |
+| `--link-on-primary-bg` | `#155e75` (primary-700) |
 | `--code-bg` | `#2b2b2b` (neutral-900) |
 | `--code-text` | `#d3d3d3` (neutral-200) |
+| `--code-muted` | `#9b9b9b` (neutral-400) |
+| `--code-accent` | `#22d3ee` (primary-400) |
 
 ### Dark Mode
 
@@ -95,28 +99,30 @@ Semantic backgrounds: color at `12%` opacity (light) / `18%` opacity (dark). Sem
 | `--text-muted` | `#777777` |
 | `--border-color` | `#4f4f4f` (neutral-700) |
 | `--border-subtle` | `#3c3c3c` (neutral-800) |
-| `--primary` | `#a9c650` (primary-300) |
-| `--primary-bright` | `#a1bc20` |
-| `--primary-bg` | `#263100` (primary-900) |
-| `--on-primary` | `#1e2600` (primary-950) |
-| `--link` | `#a9c650` (primary-300) |
-| `--link-hover` | `#c9e185` (primary-200) |
-| `--link-visited` | `#dff3ab` (primary-100) |
-| `--link-on-primary-bg` | `#c9e185` (primary-200) |
+| `--primary` | `#22d3ee` (primary-400) |
+| `--primary-bright` | `#0891b2` (primary-500) |
+| `--primary-bg` | `#164e63` (primary-800) |
+| `--on-primary` | `#083344` (primary-900) |
+| `--link` | `#22d3ee` (primary-400) |
+| `--link-hover` | `#a5f3fc` (primary-200) |
+| `--link-visited` | `#cffafe` (primary-100) |
+| `--link-on-primary-bg` | `#a5f3fc` (primary-200) |
 | `--code-bg` | `#212121` (neutral-950) |
 | `--code-text` | `#d3d3d3` (neutral-200) |
+| `--code-muted` | `#9b9b9b` (neutral-400) |
+| `--code-accent` | `#22d3ee` (primary-400) |
 
 ### Code Syntax Highlighting
 
 | Role | Light | Dark |
 |------|-------|------|
-| Keyword / accent | `#5d7000` | `#a1bc20` |
-| String | `#485800` | `#edfec5` |
+| Keyword / accent | `#0e7490` | `#22d3ee` |
+| String | `#155e75` | `#ecfeff` |
 | Comment | `#9b9b9b` | `#666666` |
-| Inline code bg | `#edfec5` | `#263100` |
+| Inline code bg | `#cffafe` | `#164e63` |
 | Inline code text | `--on-primary-bg` (`--text-primary`) | `--on-primary-bg` (`--text-primary`) |
-| Search match bg | `rgba(141,171,20,0.15)` (light) / `rgba(161,188,32,0.2)` (dark) |
-| Search match text | `#5d7000` (light) / `#a1bc20` (dark) |
+| Search match bg | `rgba(14,116,144,0.15)` (light) / `rgba(34,211,238,0.2)` (dark) |
+| Search match text | `#0e7490` (light) / `#22d3ee` (dark) |
 
 ## Typography
 
@@ -310,7 +316,7 @@ font: JetBrains Mono, 0.8em relative to parent
 
 ## Competitive Positioning
 
-ChunkHound occupies hue 120 OKLCH (chartreuse) — an uncontested zone. The blue-purple zone (258-293) is crowded (Continue, Tabnine, Cursor, Copilot). Nearest competitor Augment (148) is 28 away but perceptually distinct (muted emerald vs vivid chartreuse). Next nearest Windsurf at 181 (61 away).
+ChunkHound occupies a cyan/teal position: technical, fast, and readable across dark code surfaces. Preserve contrast over hue purity; use `--code-accent` for dark panels and `--primary` for normal page surfaces.
 
 ## Transitions
 

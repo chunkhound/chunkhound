@@ -12,7 +12,9 @@
     "prepreview": "npm run generate:og-images && npm run sync:changelog",
     "preview": "astro preview"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@phosphor-icons/webcomponents": "^2.1.5"
+  },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
     "astro": "^6.3.7",
