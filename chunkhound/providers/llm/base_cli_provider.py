@@ -11,6 +11,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.utils.json_extraction import parse_and_validate_structured_json
@@ -41,7 +42,7 @@ class BaseCLIProvider(LLMProvider):
         api_key: str | None = None,
         model: str = "default",
         base_url: str | None = None,
-        timeout: int = 60,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
         """Initialize base CLI provider.
@@ -50,7 +51,7 @@ class BaseCLIProvider(LLMProvider):
             api_key: API key (may not be used by CLI providers)
             model: Model name to use
             base_url: Base URL (may not be used by CLI providers)
-            timeout: Request timeout in seconds
+            timeout: Request timeout in seconds (defaults to DEFAULT_LLM_TIMEOUT)
             max_retries: Number of retry attempts for failed requests
         """
         self._model = model
@@ -109,6 +110,11 @@ class BaseCLIProvider(LLMProvider):
         """Model name."""
         return self._model
 
+    @property
+    def timeout(self) -> int:
+        """Request timeout in seconds."""
+        return self._timeout
+
     async def complete(
         self,
         prompt: str,
@@ -162,6 +168,8 @@ class BaseCLIProvider(LLMProvider):
                 finish_reason="stop",  # CLI doesn't provide this
             )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"{self.name} completion failed: {e}")
             raise RuntimeError(f"LLM completion failed: {e}") from e
@@ -235,6 +243,8 @@ class BaseCLIProvider(LLMProvider):
             logger.error(f"Failed to parse structured output as JSON: {e}")
             logger.debug(f"Raw output: {content if 'content' in locals() else 'N/A'}")
             raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"{self.name} structured completion failed: {e}")
             raise RuntimeError(f"LLM structured completion failed: {e}") from e

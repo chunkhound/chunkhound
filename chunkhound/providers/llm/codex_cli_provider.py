@@ -19,12 +19,14 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
-# Static fallback when model discovery fails (no binary, unauthenticated, etc.).
-# Update when new Codex models ship.
-CODEX_FALLBACK_MODEL = "gpt-5.1-codex"
+# Default synthesis-grade reasoning model for Codex CLI.
+# Update here when OpenAI releases a newer synthesis model — this is the single source of truth.
+# Use CHUNKHOUND_CODEX_DEFAULT_MODEL env var to override at runtime.
+CODEX_DEFAULT_SYNTHESIS_MODEL = "gpt-5.1-codex"
 
 
 class CodexCLIProvider(BaseCLIProvider):
@@ -45,7 +47,7 @@ class CodexCLIProvider(BaseCLIProvider):
         api_key: str | None = None,  # Unused (CLI handles auth)
         model: str = "codex",
         base_url: str | None = None,  # Unused
-        timeout: int = 60,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
         reasoning_effort: str | None = None,
     ) -> None:
@@ -107,9 +109,9 @@ class CodexCLIProvider(BaseCLIProvider):
                 "Codex model discovery failed; falling back to "
                 "%r. Check 'codex debug models' or "
                 "set CHUNKHOUND_CODEX_DEFAULT_MODEL.",
-                CODEX_FALLBACK_MODEL,
+                CODEX_DEFAULT_SYNTHESIS_MODEL,
             )
-            return CODEX_FALLBACK_MODEL, "fallback"
+            return CODEX_DEFAULT_SYNTHESIS_MODEL, "fallback"
 
         return model_name, "explicit"
 

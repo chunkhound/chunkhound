@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
+from chunkhound.providers.llm.codex_cli_provider import CODEX_DEFAULT_SYNTHESIS_MODEL
+
 try:
     import tomllib
 except ImportError:

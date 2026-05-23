@@ -2,6 +2,9 @@ from unittest.mock import patch
 
 import pytest
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+from chunkhound.providers.llm.codex_cli_provider import CODEX_DEFAULT_SYNTHESIS_MODEL
+
 
 @pytest.fixture(autouse=True)
 def clear_codex_model_discovery_cache():
@@ -43,7 +46,7 @@ def test_codex_cli_model_resolution_discovery_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chunkhound.providers.llm.codex_cli_provider import (
-        CODEX_FALLBACK_MODEL,
+        CODEX_DEFAULT_SYNTHESIS_MODEL,
         CodexCLIProvider,  # type: ignore[attr-defined]
     )
 
@@ -54,7 +57,7 @@ def test_codex_cli_model_resolution_discovery_failure(
         return_value=None,
     ):
         resolved, source = CodexCLIProvider.describe_model_resolution("codex")
-        assert resolved == CODEX_FALLBACK_MODEL
+        assert resolved == CODEX_DEFAULT_SYNTHESIS_MODEL
         assert source == "fallback"
 
 
@@ -68,6 +71,19 @@ def test_codex_cli_model_resolution_env_override(
     monkeypatch.setenv("CHUNKHOUND_CODEX_DEFAULT_MODEL", "test-env-override-model")
     resolved, source = CodexCLIProvider.describe_model_resolution("codex")
     assert resolved == "test-env-override-model"
+    assert source == "env:CHUNKHOUND_CODEX_DEFAULT_MODEL"
+
+
+def test_codex_cli_model_resolution_env_override_to_gpt52(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chunkhound.providers.llm.codex_cli_provider import (
+        CodexCLIProvider,  # type: ignore[attr-defined]
+    )
+
+    monkeypatch.setenv("CHUNKHOUND_CODEX_DEFAULT_MODEL", "gpt-5.2-codex")
+    resolved, source = CodexCLIProvider.describe_model_resolution("codex")
+    assert resolved == "gpt-5.2-codex"
     assert source == "env:CHUNKHOUND_CODEX_DEFAULT_MODEL"
 
 
@@ -142,3 +158,10 @@ def test_codex_cli_model_discovery_priority_selection(
     monkeypatch.setattr("subprocess.run", fake_run)
 
     assert CodexCLIProvider.get_highest_priority_available_model() == "high"
+
+
+def test_default_timeout():
+    """Default timeout resolves to DEFAULT_LLM_TIMEOUT."""
+    from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+    p = CodexCLIProvider()
+    assert p.timeout == DEFAULT_LLM_TIMEOUT

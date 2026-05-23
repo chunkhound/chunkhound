@@ -21,6 +21,7 @@ from typing import Literal
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 
 VALID_REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
@@ -55,7 +56,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         api_key: str | None = None,
         model: str = "",
         base_url: str | None = None,
-        timeout: int = 60,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
         reasoning_effort: str | None = None,
         fallback_model: str | None = None,

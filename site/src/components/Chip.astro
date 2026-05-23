@@ -1,0 +1,43 @@
+---
+interface Props {
+  href?: string;
+}
+
+const { href } = Astro.props;
+---
+
+{href ? (
+  <a href={href} target="_blank" rel="noopener" class="chip chip-link"><slot /></a>
+) : (
+  <span class="chip"><slot /></span>
+)}
+
+<style>
+  .chip {
+    display: inline-block;
+    align-self: flex-start;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--on-primary-bg);
+    background: var(--primary-bg);
+    padding: 2px 10px;
+    border-radius: var(--radius-full);
+  }
+
+  .chip-link {
+    text-decoration: none;
+    transition: color 0.2s;
+  }
+
+  .chip-link:hover {
+    color: var(--link-on-primary-bg-hover);
+  }
+
+  .chip-link:visited {
+    color: var(--link-on-primary-bg-visited);
+  }
+
+  .chip-link:focus-visible {
+    outline-color: var(--link-on-primary-bg-focus);
+  }
+</style>

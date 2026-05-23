@@ -10,7 +10,7 @@ import argparse
 import os
 from typing import Any, Literal, get_args
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import assert_never
 
@@ -51,16 +51,53 @@ _PROVIDER_CHOICES: list[str] = list(get_args(LLMProviderLiteral))
 
 ReasoningEffortLiteral = Literal["minimal", "low", "medium", "high", "xhigh"]
 
+from ._utils import _parse_env_bool
+
+from chunkhound.core.config.openai_utils import is_official_openai_endpoint
+
+DEFAULT_LLM_TIMEOUT = 120
+OPENAI_COMPATIBLE_LLM_PROVIDERS = {"openai", "grok"}
+BASE_URL_CAPABLE_LLM_PROVIDERS = OPENAI_COMPATIBLE_LLM_PROVIDERS | {"anthropic", "deepseek"}
+
+REMOVED_PROVIDERS: dict[str, str] = {
+    "ollama": (
+        "The 'ollama' provider has been removed. "
+        "Use provider='openai' with base_url pointing to your Ollama "
+        "instance (e.g. http://localhost:11434/v1)."
+    ),
+}
+
+CLI_PROVIDER_CHOICES = (
+    "openai",
+    "claude-code-cli",
+    "codex-cli",
+    "anthropic",
+    "gemini",
+    "grok",
+    "opencode-cli",
+)
+
+
+def _parse_llm_provider_arg(value: str) -> str:
+    """Parse CLI provider arguments with migration hints for removed providers."""
+    normalized = value.strip().lower()
+    if normalized in REMOVED_PROVIDERS:
+        raise argparse.ArgumentTypeError(REMOVED_PROVIDERS[normalized])
+    if normalized not in CLI_PROVIDER_CHOICES:
+        allowed = ", ".join(CLI_PROVIDER_CHOICES)
+        raise argparse.ArgumentTypeError(
+            f"invalid choice: {value!r} (choose from {allowed})"
+        )
+    return normalized
+
 
 class LLMConfig(BaseSettings):
     """
     LLM configuration for ChunkHound deep research.
 
-    Configuration Sources (in order of precedence):
-    1. CLI arguments
-    2. Environment variables (CHUNKHOUND_LLM_*)
-    3. Config files
-    4. Default values
+    Note: At the application level, Config() applies this final precedence order:
+      CLI args > explicit --config file > local .chunkhound.json > env vars > defaults.
+    Within this class, pydantic-settings applies: init kwargs > env vars > defaults.
 
     Environment Variables:
         CHUNKHOUND_LLM_API_KEY=sk-...
@@ -120,7 +157,7 @@ class LLMConfig(BaseSettings):
     codex_reasoning_effort: ReasoningEffortLiteral | None = Field(
         default=None,
         description=(
-            "Default reasoning effort forwarded to codex-cli, openai, "
+            "Default reasoning effort forwarded to codex-cli, grok, openai, "
             "and opencode-cli providers"
         ),
     )
@@ -128,14 +165,14 @@ class LLMConfig(BaseSettings):
         default=None,
         description=(
             "Reasoning effort override for utility-stage operations "
-            "(codex-cli, openai, opencode-cli)"
+            "(codex-cli, grok, openai, opencode-cli)"
         ),
     )
     codex_reasoning_effort_synthesis: ReasoningEffortLiteral | None = Field(
         default=None,
         description=(
             "Reasoning effort override for synthesis-stage operations "
-            "(codex-cli, openai, opencode-cli)"
+            "(codex-cli, grok, openai, opencode-cli)"
         ),
     )
 
@@ -327,12 +364,21 @@ class LLMConfig(BaseSettings):
         default=None,
         description=(
             "Provider-specific base URL: "
-            "OpenAI/Ollama: API endpoint (e.g., http://localhost:11434/v1)"
+            "OpenAI-compatible: API endpoint (e.g., https://api.example.com/v1)"
+        ),
+    )
+    ssl_verify: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for requests sent to the configured base_url. "
+            "Ignored when base_url is unset."
         ),
     )
 
     # Internal settings
-    timeout: int = Field(default=60, description="Internal timeout for LLM calls")
+    timeout: int = Field(
+        default=DEFAULT_LLM_TIMEOUT, description="Internal timeout for LLM calls"
+    )
     max_retries: int = Field(default=3, description="Internal max retries")
     supports_structured_outputs: bool | None = Field(
         default=None,
@@ -342,6 +388,25 @@ class LLMConfig(BaseSettings):
             "response_format (e.g. DeepSeek)"
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_providers(cls, data: Any) -> Any:
+        """Reject removed providers with actionable migration hints."""
+        if not isinstance(data, dict):
+            return data
+        provider_fields = (
+            "provider",
+            "utility_provider",
+            "synthesis_provider",
+            "map_hyde_provider",
+            "autodoc_cleanup_provider",
+        )
+        for field in provider_fields:
+            v = data.get(field)
+            if isinstance(v, str) and v.lower() in REMOVED_PROVIDERS:
+                raise ValueError(f"{REMOVED_PROVIDERS[v.lower()]} (found in '{field}')")
+        return data
 
     @field_validator("base_url")
     def validate_base_url(cls, v: str | None) -> str | None:  # noqa: N805
@@ -444,8 +509,6 @@ class LLMConfig(BaseSettings):
     def _validate_reasoning_effort_values(self) -> None:
         """Validate provider-specific reasoning effort values for each role."""
         for role in ("utility", "synthesis", "map_hyde", "autodoc_cleanup"):
-            # Fresh unpack — different name from the format-validation loop to
-            # avoid mypy cross-contamination of the inferred provider type.
             resolved_provider, _resolved_model, effort = self._resolve_role_config(role)
             if (
                 resolved_provider == "openai"
@@ -540,49 +603,66 @@ class LLMConfig(BaseSettings):
             return v.strip().lower()
         raise ValueError(f"Expected str or None, got {type(v).__name__}")
 
-    def _get_base_provider_config(self, provider: str) -> dict[str, Any]:
-        """Build the provider config shared by a resolved role."""
-        base_config: dict[str, Any] = {
+    def _base_url_for_provider(self, provider: str) -> str | None:
+        """Return the configured base URL only for providers that support it."""
+        if provider in BASE_URL_CAPABLE_LLM_PROVIDERS:
+            return self.base_url
+        return None
+
+    def build_provider_config(
+        self,
+        *,
+        provider: str,
+        model: str,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        """Build a provider config using the current shared config fields."""
+        config: dict[str, Any] = {
+            "provider": provider,
+            "model": model,
             "timeout": self.timeout,
             "max_retries": self.max_retries,
         }
 
         if self.api_key and provider not in NO_KEY_PROVIDERS:
-            base_config["api_key"] = self.api_key.get_secret_value()
+            config["api_key"] = self.api_key.get_secret_value()
 
-        if self.base_url:
-            base_config["base_url"] = self.base_url
+        if base_url := self._base_url_for_provider(provider):
+            config["base_url"] = base_url
+            config["ssl_verify"] = self.ssl_verify
 
-        return base_config
+        if provider in REASONING_EFFORT_PROVIDERS and reasoning_effort:
+            config["reasoning_effort"] = reasoning_effort
 
-    def _apply_anthropic_provider_config(self, target: dict[str, Any]) -> None:
-        """Attach Anthropic-only options to a resolved provider config."""
-        target["thinking_enabled"] = self.anthropic_thinking_enabled
-        target["thinking_budget_tokens"] = self.anthropic_thinking_budget_tokens
-        target["interleaved_thinking"] = self.anthropic_interleaved_thinking
-        if self.anthropic_thinking_mode:
-            target["thinking_mode"] = self.anthropic_thinking_mode
-        if self.anthropic_thinking_display:
-            target["thinking_display"] = self.anthropic_thinking_display
-        if self.anthropic_effort:
-            target["effort"] = self.anthropic_effort
-        target["prompt_caching"] = self.anthropic_prompt_caching
-        if self.anthropic_cache_ttl:
-            target["cache_ttl"] = self.anthropic_cache_ttl
-        if self.anthropic_task_budget_tokens is not None:
-            target["task_budget_tokens"] = self.anthropic_task_budget_tokens
-        if self.anthropic_context_management_enabled:
-            target["context_management_enabled"] = True
-            if self.anthropic_clear_thinking_keep_turns is not None:
-                target["clear_thinking_keep_turns"] = (
-                    self.anthropic_clear_thinking_keep_turns
-                )
-            if self.anthropic_clear_tool_uses_trigger_tokens is not None:
-                target["clear_tool_uses_trigger_tokens"] = (
-                    self.anthropic_clear_tool_uses_trigger_tokens
-                )
-            if self.anthropic_clear_tool_uses_keep is not None:
-                target["clear_tool_uses_keep"] = self.anthropic_clear_tool_uses_keep
+        if provider == "anthropic":
+            config["thinking_enabled"] = self.anthropic_thinking_enabled
+            config["thinking_budget_tokens"] = self.anthropic_thinking_budget_tokens
+            config["interleaved_thinking"] = self.anthropic_interleaved_thinking
+            if self.anthropic_thinking_mode:
+                config["thinking_mode"] = self.anthropic_thinking_mode
+            if self.anthropic_thinking_display:
+                config["thinking_display"] = self.anthropic_thinking_display
+            if self.anthropic_effort:
+                config["effort"] = self.anthropic_effort
+            config["prompt_caching"] = self.anthropic_prompt_caching
+            if self.anthropic_cache_ttl:
+                config["cache_ttl"] = self.anthropic_cache_ttl
+            if self.anthropic_task_budget_tokens is not None:
+                config["task_budget_tokens"] = self.anthropic_task_budget_tokens
+            if self.anthropic_context_management_enabled:
+                config["context_management_enabled"] = True
+                if self.anthropic_clear_thinking_keep_turns is not None:
+                    config["clear_thinking_keep_turns"] = (
+                        self.anthropic_clear_thinking_keep_turns
+                    )
+                if self.anthropic_clear_tool_uses_trigger_tokens is not None:
+                    config["clear_tool_uses_trigger_tokens"] = (
+                        self.anthropic_clear_tool_uses_trigger_tokens
+                    )
+                if self.anthropic_clear_tool_uses_keep is not None:
+                    config["clear_tool_uses_keep"] = self.anthropic_clear_tool_uses_keep
+
+        return config
 
     def get_provider_config_for_role(self, role: str) -> dict[str, Any]:
         """Resolve a single role to the exact provider config used at runtime.
@@ -602,13 +682,12 @@ class LLMConfig(BaseSettings):
         Raises:
             ValueError: If *role* is not one of the four recognised roles.
         """
-        # Delegate fallback resolution to the centralised helper so every
-        # code path (model_post_init, get_provider_configs, external consumers)
-        # stays in sync without manual duplication (fix M2).
         provider, model, effort = self._resolve_role_config(role)
-        role_config = self._get_base_provider_config(provider)
-        role_config["provider"] = provider
-        role_config["model"] = model
+        role_config = self.build_provider_config(
+            provider=provider,
+            model=model,
+            reasoning_effort=effort,
+        )
 
         resolved_synthesis_provider = self.synthesis_provider or self.provider
         if self.supports_structured_outputs is not None and (
@@ -618,12 +697,6 @@ class LLMConfig(BaseSettings):
             role_config["supports_structured_outputs"] = (
                 self.supports_structured_outputs
             )
-
-        if effort:
-            role_config["reasoning_effort"] = effort
-
-        if provider == "anthropic":
-            self._apply_anthropic_provider_config(role_config)
 
         return role_config
 
@@ -656,7 +729,6 @@ class LLMConfig(BaseSettings):
             return ("codex", "codex")
         elif provider == "gemini":
             # Gemini: Use Gemini 3 Pro for both (advanced reasoning)
-            # Alternative models: gemini-2.5-pro (balanced), gemini-2.5-flash (fast)
             return ("gemini-3-pro-preview", "gemini-3-pro-preview")
         elif provider == "anthropic":
             # Anthropic intentionally uses Claude Haiku for both utility and
@@ -666,14 +738,11 @@ class LLMConfig(BaseSettings):
         elif provider == "grok":
             # Grok reasoning models (especially grok-4-1-fast-reasoning)
             # are extremely strong across both roles — no benefit to splitting them.
-            # grok-4-1-fast-reasoning: Advanced reasoning, structured outputs,
-            # tool calling
             return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
         elif provider == "deepseek":
             # deepseek-v4-flash for both roles: it's the current general-purpose model
             # (fast enough for utility, capable enough for synthesis). deepseek-chat is
-            # deprecated and routes here until July 2026. Revisit when DeepSeek releases
-            # a distinct cheaper/faster utility-tier model.
+            # deprecated and routes here until July 2026.
             return ("deepseek-v4-flash", "deepseek-v4-flash")
         elif provider == "opencode-cli":
             # OpenCode CLI: No universal default — model depends on user config.
@@ -698,6 +767,151 @@ class LLMConfig(BaseSettings):
             self._get_default_models_for(resolved_synthesis_provider)[1],
         )
 
+    def _provider_family(self, provider: str) -> str:
+        """Return the compatibility family for a provider."""
+        if provider in OPENAI_COMPATIBLE_LLM_PROVIDERS:
+            return "openai-compatible"
+        return provider
+
+    def _resolved_provider_for_role(self, role: str) -> str:
+        """Resolve the effective provider for a role."""
+        resolved_synth = self.synthesis_provider or self.provider
+        if role == "utility":
+            return self.utility_provider or self.provider
+        if role == "synthesis":
+            return resolved_synth
+        if role == "map_hyde":
+            return self.map_hyde_provider or resolved_synth
+        if role == "autodoc_cleanup":
+            return self.autodoc_cleanup_provider or resolved_synth
+        raise ValueError(f"Unknown LLM role: {role}")
+
+    def _role_uses_synthesis_provider_fallback(self, role: str) -> bool:
+        """Return whether a role falls back to synthesis provider settings."""
+        if role == "map_hyde":
+            return self.map_hyde_provider is None
+        if role == "autodoc_cleanup":
+            return self.autodoc_cleanup_provider is None
+        return False
+
+    def _explicit_model_for_role(self, role: str) -> str | None:
+        """Return the explicit model selection for a role, if any."""
+        if role == "utility":
+            return self.utility_model or self.model or None
+        if role == "synthesis":
+            return self.synthesis_model or self.model or None
+        if role == "map_hyde":
+            return self.map_hyde_model or None
+        if role == "autodoc_cleanup":
+            return self.autodoc_cleanup_model or None
+        raise ValueError(f"Unknown LLM role: {role}")
+
+    def _configured_model_for_role(self, role: str) -> str | None:
+        """Return a user-configured model for a role without injecting defaults."""
+        explicit_model = self._explicit_model_for_role(role)
+        if explicit_model:
+            return explicit_model
+
+        if role in {"utility", "synthesis"}:
+            return None
+
+        if self._role_uses_synthesis_provider_fallback(role):
+            return self._configured_model_for_role("synthesis")
+
+        synthesis_provider = self._resolved_provider_for_role("synthesis")
+        role_provider = self._resolved_provider_for_role(role)
+        if self._provider_family(role_provider) != self._provider_family(
+            synthesis_provider
+        ):
+            return None
+
+        return self._configured_model_for_role("synthesis")
+
+    def resolve_model_for_role(self, role: str) -> str | None:
+        """Resolve the effective model for a role.
+
+        For roles that fall back to synthesis settings, only inherit the synthesis
+        model when the resolved provider stays in the same compatibility family.
+        """
+        explicit_model = self._explicit_model_for_role(role)
+        if explicit_model:
+            return explicit_model
+
+        if role in {"utility", "synthesis"}:
+            provider = self._resolved_provider_for_role(role)
+            defaults = self._get_default_models_for(provider)  # type: ignore[arg-type]
+            return defaults[0] if role == "utility" else defaults[1]
+
+        if self._role_uses_synthesis_provider_fallback(role):
+            return self.resolve_model_for_role("synthesis")
+
+        synthesis_provider = self._resolved_provider_for_role("synthesis")
+        role_provider = self._resolved_provider_for_role(role)
+        if self._provider_family(role_provider) != self._provider_family(
+            synthesis_provider
+        ):
+            return None
+
+        return self.resolve_model_for_role("synthesis")
+
+    def _is_custom_openai_endpoint(self) -> bool:
+        """Return whether this config targets a non-official OpenAI-compatible endpoint."""
+        return not is_official_openai_endpoint(self.base_url)
+
+    def _require_explicit_model_for_custom_openai(
+        self, roles: tuple[str, ...]
+    ) -> list[str]:
+        """Return roles that rely on a custom OpenAI endpoint without valid model selection."""
+        if not self._is_custom_openai_endpoint():
+            return []
+
+        missing_roles: list[str] = []
+        for role in roles:
+            resolved_provider = self._resolved_provider_for_role(role)
+            if resolved_provider not in OPENAI_COMPATIBLE_LLM_PROVIDERS:
+                continue
+            if self._configured_model_for_role(role) is None:
+                missing_roles.append(role)
+
+        return missing_roles
+
+    def _require_explicit_model_for_cross_family_role_overrides(
+        self, roles: tuple[str, ...]
+    ) -> list[str]:
+        """Return secondary roles that override to an incompatible provider family."""
+        missing_roles: list[str] = []
+        synthesis_provider = self._resolved_provider_for_role("synthesis")
+
+        for role in roles:
+            if role in {"utility", "synthesis"}:
+                continue
+            if self._role_uses_synthesis_provider_fallback(role):
+                continue
+
+            role_provider = self._resolved_provider_for_role(role)
+            if self._provider_family(role_provider) == self._provider_family(
+                synthesis_provider
+            ):
+                continue
+            if self._configured_model_for_role(role) is not None:
+                continue
+
+            missing_roles.append(role)
+
+        return missing_roles
+
+    def _provider_requires_api_key(self, provider: str) -> bool:
+        """Return whether a provider requires an API key for the current config.
+
+        The current config model has a single top-level base_url shared by
+        OpenAI-compatible roles. Non-OpenAI-compatible providers ignore it.
+        """
+        if provider in {"claude-code-cli", "codex-cli", "opencode-cli"}:
+            return False
+        if provider in OPENAI_COMPATIBLE_LLM_PROVIDERS:
+            return is_official_openai_endpoint(self._base_url_for_provider(provider))
+        return True
+
     def is_provider_configured(self) -> bool:
         """
         Check if the selected provider is properly configured.
@@ -705,18 +919,41 @@ class LLMConfig(BaseSettings):
         Returns:
             True if provider is properly configured
         """
-        resolved_utility_provider = self.utility_provider or self.provider
-        resolved_synthesis_provider = self.synthesis_provider or self.provider
-        if (
-            resolved_utility_provider in NO_KEY_PROVIDERS
-            and resolved_synthesis_provider in NO_KEY_PROVIDERS
+        return not self.get_missing_config()
+
+    def get_missing_config_for_roles(self, roles: tuple[str, ...]) -> list[str]:
+        """Get missing config for a specific set of roles."""
+        missing: list[str] = []
+
+        if any(
+            self._provider_requires_api_key(self._resolved_provider_for_role(role))
+            for role in roles
         ):
-            # Ollama and Claude Code CLI don't require API key
-            # Claude Code CLI uses subscription-based authentication
-            return True
-        else:
-            # OpenAI and Anthropic require API key
-            return self.api_key is not None
+            if not self.api_key:
+                missing.append("api_key (set CHUNKHOUND_LLM_API_KEY)")
+
+        custom_endpoint_roles = self._require_explicit_model_for_custom_openai(roles)
+        if custom_endpoint_roles:
+            roles_text = ", ".join(custom_endpoint_roles)
+            missing.append(
+                "explicit model selection required for custom OpenAI-compatible "
+                f"endpoint roles: {roles_text}"
+            )
+
+        cross_family_roles = [
+            role
+            for role in self._require_explicit_model_for_cross_family_role_overrides(
+                roles
+            )
+            if role not in custom_endpoint_roles
+        ]
+        if cross_family_roles:
+            roles_text = ", ".join(cross_family_roles)
+            missing.append(
+                f"explicit provider-compatible model required for roles: {roles_text}"
+            )
+
+        return missing
 
     def get_missing_config(self) -> list[str]:
         """
@@ -725,20 +962,18 @@ class LLMConfig(BaseSettings):
         Returns:
             List of missing configuration parameter names
         """
-        resolved_utility = self.utility_provider or self.provider
-        resolved_synthesis = self.synthesis_provider or self.provider
-        missing = []
-        if (
-            resolved_utility not in NO_KEY_PROVIDERS
-            or resolved_synthesis not in NO_KEY_PROVIDERS
-        ) and not self.api_key:
-            missing.append("api_key (set CHUNKHOUND_LLM_API_KEY)")
-
-        return missing
+        return self.get_missing_config_for_roles(
+            ("utility", "synthesis", "map_hyde", "autodoc_cleanup")
+        )
 
     @classmethod
     def add_cli_arguments(cls, parser: argparse.ArgumentParser) -> None:
         """Add LLM-related CLI arguments."""
+        try:
+            boolean_optional_action = argparse.BooleanOptionalAction
+        except AttributeError:  # pragma: no cover - older Python
+            boolean_optional_action = None
+
         parser.add_argument(
             "--llm-utility-model",
             help=(
@@ -761,22 +996,35 @@ class LLMConfig(BaseSettings):
             "--llm-base-url",
             help="Base URL for LLM API (uses env var if not specified)",
         )
+        if boolean_optional_action is not None:
+            parser.add_argument(
+                "--llm-ssl-verify",
+                action=boolean_optional_action,
+                default=None,
+                help=(
+                    "Verify TLS certificates for requests sent to --llm-base-url. "
+                    "Ignored when llm.base_url is unset."
+                ),
+            )
 
         parser.add_argument(
             "--llm-provider",
-            choices=_PROVIDER_CHOICES,
+            type=_parse_llm_provider_arg,
+            metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
             help="Default LLM provider for both roles",
         )
 
         parser.add_argument(
             "--llm-utility-provider",
-            choices=_PROVIDER_CHOICES,
+            type=_parse_llm_provider_arg,
+            metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
             help="Override LLM provider for utility operations",
         )
 
         parser.add_argument(
             "--llm-synthesis-provider",
-            choices=_PROVIDER_CHOICES,
+            type=_parse_llm_provider_arg,
+            metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
             help="Override LLM provider for synthesis operations",
         )
 
@@ -815,11 +1063,9 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-map-hyde-provider",
-            choices=_PROVIDER_CHOICES,
-            help=(
-                "Override provider for Code Mapper HyDE planning "
-                "(falls back to synthesis)"
-            ),
+            type=_parse_llm_provider_arg,
+            metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
+            help="Override provider for Code Mapper HyDE planning (falls back to synthesis)",
         )
         parser.add_argument(
             "--llm-map-hyde-model",
@@ -838,7 +1084,8 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-autodoc-cleanup-provider",
-            choices=_PROVIDER_CHOICES,
+            type=_parse_llm_provider_arg,
+            metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
             help="Override provider for AutoDoc LLM cleanup (falls back to synthesis)",
         )
         parser.add_argument(
@@ -938,6 +1185,9 @@ class LLMConfig(BaseSettings):
             config["api_key"] = api_key
         if base_url := os.getenv("CHUNKHOUND_LLM_BASE_URL"):
             config["base_url"] = base_url
+        if ssl_verify_raw := os.getenv("CHUNKHOUND_LLM_SSL_VERIFY"):
+            if (ssl_verify := _parse_env_bool(ssl_verify_raw)) is not None:
+                config["ssl_verify"] = ssl_verify
         if provider := os.getenv("CHUNKHOUND_LLM_PROVIDER"):
             config["provider"] = provider
         if u_provider := os.getenv("CHUNKHOUND_LLM_UTILITY_PROVIDER"):
@@ -1058,6 +1308,8 @@ class LLMConfig(BaseSettings):
             overrides["api_key"] = args.llm_api_key
         if hasattr(args, "llm_base_url") and args.llm_base_url:
             overrides["base_url"] = args.llm_base_url
+        if hasattr(args, "llm_ssl_verify") and args.llm_ssl_verify is not None:
+            overrides["ssl_verify"] = args.llm_ssl_verify
         if hasattr(args, "llm_provider") and args.llm_provider:
             overrides["provider"] = args.llm_provider
         if hasattr(args, "llm_utility_provider") and args.llm_utility_provider:
@@ -1157,9 +1409,6 @@ class LLMConfig(BaseSettings):
             f"utility_model={utility_display}, "
             f"synthesis_model={synthesis_display}, "
             f"api_key={api_key_display}, "
-            f"base_url={self.base_url})"
+            f"base_url={self.base_url}, "
+            f"ssl_verify={self.ssl_verify})"
         )
-
-
-
-

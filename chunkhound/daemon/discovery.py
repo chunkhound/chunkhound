@@ -150,7 +150,8 @@ def _runtime_dir_identity(runtime_dir: Path) -> str:
 def _runtime_scoped_transport_hash(project_dir: Path, runtime_dir: Path) -> str:
     """Return a stable transport hash scoped to the canonical root and runtime."""
     identity = (
-        f"{_project_dir_identity(project_dir)}|{_runtime_dir_identity(runtime_dir)}"
+        f"{_project_dir_identity(project_dir)}|"
+        f"{_runtime_dir_identity(runtime_dir)}"
     )
     return hashlib.sha256(identity.encode()).hexdigest()
 
@@ -673,7 +674,7 @@ class DaemonDiscovery:
             "last_error": last_error,
         }
 
-    def _format_startup_failure(
+    def format_startup_failure(
         self,
         *,
         prefix: str,
@@ -977,7 +978,7 @@ class DaemonDiscovery:
                     return actual_address
                 if not pid_alive(pid):
                     raise RuntimeError(
-                        self._format_startup_failure(
+                        self.format_startup_failure(
                             prefix=(
                                 "ChunkHound daemon exited before it became reachable "
                                 f"(pid={pid}, address: {actual_address})"
@@ -987,7 +988,7 @@ class DaemonDiscovery:
                 remaining = deadline - time.monotonic()
                 await asyncio.sleep(min(_STARTUP_POLL_INTERVAL, max(remaining, 0.0)))
             raise RuntimeError(
-                self._format_startup_failure(
+                self.format_startup_failure(
                     prefix=(
                         f"ChunkHound daemon (pid={pid}) did not become reachable "
                         f"within {timeout}s (address: {actual_address})"
@@ -1240,7 +1241,7 @@ class DaemonDiscovery:
                             if returncode is not None:
                                 await _terminate_startup_handle(startup)
                                 raise RuntimeError(
-                                    self._format_startup_failure(
+                                    self.format_startup_failure(
                                         prefix=(
                                             "ChunkHound daemon exited before it became "
                                             f"reachable (address: {startup_address})"
@@ -1255,9 +1256,27 @@ class DaemonDiscovery:
                                     lock.get("socket_path", initial_address)
                                 )
                                 actual_pid = lock.get("pid")
-                                if isinstance(
-                                    actual_pid, int
-                                ) and await self._socket_connectable(actual_address):
+                                if (
+                                    isinstance(actual_pid, int)
+                                    and await self._socket_connectable(actual_address)
+                                ):
+                                    # Final checkpoint: daemon may have crashed
+                                    # during the startup barrier (publish happens
+                                    # before barrier in daemon/server.py).
+                                    returncode = startup.process.poll()
+                                    if returncode is not None:
+                                        await _terminate_startup_handle(startup)
+                                        raise RuntimeError(
+                                            self.format_startup_failure(
+                                                prefix=(
+                                                    "ChunkHound daemon crashed after "
+                                                    "publishing lock "
+                                                    f"(address: {startup_address})"
+                                                ),
+                                                log_path=startup.log_path,
+                                                returncode=returncode,
+                                            )
+                                        )
                                     # Authoritative registry publication from
                                     # the proxy. Cross-runtime discovery reads
                                     # only the user-scoped registry dir, so if
@@ -1287,7 +1306,7 @@ class DaemonDiscovery:
 
                         await _terminate_startup_handle(startup)
                         raise RuntimeError(
-                            self._format_startup_failure(
+                            self.format_startup_failure(
                                 prefix=(
                                     f"ChunkHound daemon did not start within "
                                     f"{_STARTUP_TIMEOUT}s (address: {startup_address})"
@@ -1303,7 +1322,7 @@ class DaemonDiscovery:
                 self._release_cross_runtime_startup_lock()
 
         raise RuntimeError(
-            self._format_startup_failure(
+            self.format_startup_failure(
                 prefix=(
                     f"ChunkHound daemon did not become reachable within "
                     f"{_STARTUP_TIMEOUT}s (address: {initial_address})"

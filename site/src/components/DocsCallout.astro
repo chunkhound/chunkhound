@@ -1,0 +1,56 @@
+---
+interface Props {
+    title?: string;
+    variant?: "default" | "success";
+}
+
+const { title, variant = "default" } = Astro.props;
+---
+
+<aside class:list={["docs-callout", `docs-callout-${variant}`]}>
+    {title && <p class="docs-callout-title">{title}</p>}
+    <div class="docs-callout-body">
+        <slot />
+    </div>
+</aside>
+
+<style>
+    .docs-callout {
+        margin: var(--space-5) 0;
+        padding: var(--space-4) var(--space-5);
+        border: var(--border-w-default) solid var(--border-accent);
+        border-radius: var(--radius-xl);
+        background: color-mix(in srgb, var(--primary-bg) 72%, var(--bg-surface));
+    }
+
+    .docs-callout-success {
+        border-color: var(--primary);
+        background: var(--primary-bg);
+    }
+
+    .docs-callout-title {
+        margin: 0 0 var(--space-2);
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .docs-callout-body {
+        color: var(--text-secondary);
+        font-size: var(--text-sm);
+        line-height: 1.6;
+    }
+
+    .docs-callout-body :global(p:last-child),
+    .docs-callout-body :global(ul:last-child),
+    .docs-callout-body :global(ol:last-child) {
+        margin-bottom: 0;
+    }
+
+    @media (max-width: 640px) {
+        .docs-callout {
+            padding: var(--space-4);
+        }
+    }
+</style>

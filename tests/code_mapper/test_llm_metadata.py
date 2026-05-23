@@ -107,10 +107,39 @@ def test_map_hyde_provider_override_drops_inherited_reasoning_effort(
     assert "map_hyde_reasoning_effort" not in llm_meta
 
 
+def test_build_llm_metadata_and_map_hyde_preserves_custom_openai_base_url(
+    tmp_path: Path,
+) -> None:
+    config = Config(
+        target_dir=tmp_path,
+        llm={
+            "provider": "anthropic",
+            "api_key": "test",
+            "synthesis_model": "claude-sonnet-4-5-20250929",
+            "map_hyde_provider": "openai",
+            "map_hyde_model": "llama3.2",
+            "base_url": "http://localhost:11434/v1",
+        },
+    )
+    manager = _FakeLLMManager()
+
+    llm_meta, map_hyde_provider = build_llm_metadata_and_map_hyde(
+        config=config, llm_manager=manager
+    )
+
+    assert map_hyde_provider is not None
+    assert manager.seen_configs[0]["provider"] == "openai"
+    assert manager.seen_configs[0]["model"] == "llama3.2"
+    assert manager.seen_configs[0]["base_url"] == "http://localhost:11434/v1"
+    assert llm_meta["map_hyde_provider"] == "openai"
+    assert llm_meta["map_hyde_model"] == "llama3.2"
+
+
 def test_map_hyde_provider_override_requires_explicit_model_on_provider_switch(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ValueError, match="map_hyde provider override requires"):
+    """Provider switches require an explicit model — even within the same family."""
+    with pytest.raises(ValueError, match="map_hyde provider override requires an explicit map_hyde_model"):
         Config(
             target_dir=tmp_path,
             llm={
@@ -145,6 +174,22 @@ def test_map_hyde_provider_override_drops_effort_for_non_reasoning_effort_provid
     hyde_cfg = manager.seen_configs[0]
     assert hyde_cfg["provider"] == "anthropic"
     assert "reasoning_effort" not in hyde_cfg
+
+
+def test_build_llm_metadata_and_map_hyde_rejects_invalid_cross_family_override(
+    tmp_path: Path,
+) -> None:
+    """Cross-family map_hyde override without model is caught at config validation time."""
+    with pytest.raises(ValueError, match="map_hyde provider override requires an explicit map_hyde_model"):
+        Config(
+            target_dir=tmp_path,
+            llm={
+                "provider": "openai",
+                "api_key": "test",
+                "synthesis_model": "gpt-5",
+                "map_hyde_provider": "anthropic",
+            },
+        )
 
 
 def test_map_hyde_provider_override_drops_inherited_structured_outputs_true(

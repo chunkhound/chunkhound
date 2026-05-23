@@ -43,6 +43,11 @@ def build_llm_metadata_and_map_hyde(
         map_hyde_provider_name or map_hyde_model_name or map_hyde_effort
     )
 
+    if needs_custom_map_hyde and llm_manager is None:
+        raise ValueError(
+            "Custom HyDE provider requested but no LLM manager is available."
+        )
+
     if llm_manager is not None and needs_custom_map_hyde:
         try:
             map_hyde_provider = llm_manager.create_provider_for_config(map_hyde_cfg)
@@ -58,8 +63,10 @@ def build_llm_metadata_and_map_hyde(
                     map_hyde_cfg["reasoning_effort"]
                 )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            logger.debug(f"Code Mapper: failed to create HyDE planning provider: {exc}")
-            map_hyde_provider = None
+            logger.warning(f"Code Mapper: invalid HyDE planning provider: {exc}")
+            raise ValueError(
+                f"Invalid map_hyde configuration: {exc}"
+            ) from exc
 
     if map_hyde_provider is None:
         if provider := map_hyde_cfg.get("provider"):

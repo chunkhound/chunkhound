@@ -61,6 +61,16 @@ class RealtimeServiceContext:
     def polling_task(self) -> Any:
         return self._service._polling_task
 
+    @property
+    def configured_backend_resolution(self) -> str:
+        """Return how the realtime backend was resolved.
+
+        Returns "explicit" when the user configured ``realtime_backend``
+        directly in their config, or "install_default" when ChunkHound
+        resolved a default based on the current platform/wheel.
+        """
+        return str(self._service._configured_backend_resolution)
+
     def debug(self, message: str) -> None:
         self._service._debug(message)
 

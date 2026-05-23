@@ -20,12 +20,14 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 from loguru import logger
 
 from chunkhound.core.config.claude_model_resolution import (
     CLAUDE_HAIKU_SENTINEL,
     resolve_claude_model,
 )
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
@@ -151,7 +153,8 @@ class AnthropicLLMProvider(LLMProvider):
         api_key: str | None = None,
         model: str = CLAUDE_HAIKU_SENTINEL,
         base_url: str | None = None,
-        timeout: int = 60,
+        ssl_verify: bool = True,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
         thinking_enabled: bool = False,
         thinking_budget_tokens: int = 10000,
@@ -184,6 +187,7 @@ class AnthropicLLMProvider(LLMProvider):
                 - claude-sonnet-4-5-20250929: manual thinking, no effort.
                 - claude-haiku-4-5-20251001: manual thinking, no effort.
             base_url: Base URL for Anthropic API (optional for custom endpoints)
+            ssl_verify: Verify TLS certificates for requests sent via base_url
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
             thinking_enabled: Enable extended thinking. Combined with
@@ -326,6 +330,11 @@ class AnthropicLLMProvider(LLMProvider):
         }
         if base_url:
             client_kwargs["base_url"] = base_url
+            if not ssl_verify:
+                client_kwargs["http_client"] = httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout=timeout),
+                    verify=False,
+                )
 
         self._client = AsyncAnthropic(**client_kwargs)
 
@@ -345,6 +354,11 @@ class AnthropicLLMProvider(LLMProvider):
     def model(self) -> str:
         """Model name."""
         return self._model
+
+    @property
+    def timeout(self) -> int:
+        """Request timeout in seconds."""
+        return self._timeout
 
     def _extract_text_from_content(self, content_blocks: list[Any]) -> str:
         """Extract text from content blocks.
@@ -767,6 +781,8 @@ class AnthropicLLMProvider(LLMProvider):
                 finish_reason=response.stop_reason,
             )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Anthropic completion failed: {e}")
             raise RuntimeError(f"LLM completion failed: {e}") from e
@@ -1037,6 +1053,8 @@ class AnthropicLLMProvider(LLMProvider):
 
             return llm_response, tool_uses
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Anthropic tool use completion failed: {e}")
             raise RuntimeError(f"LLM tool use completion failed: {e}") from e
@@ -1218,6 +1236,8 @@ class AnthropicLLMProvider(LLMProvider):
                             message.usage.input_tokens + message.usage.output_tokens
                         )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Anthropic streaming completion failed: {e}")
             raise RuntimeError(f"LLM streaming completion failed: {e}") from e

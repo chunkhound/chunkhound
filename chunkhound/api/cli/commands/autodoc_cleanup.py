@@ -54,7 +54,13 @@ def _resolve_llm_config_for_cleanup(
     if llm_config is None:
         return None
 
-    if not llm_config.is_provider_configured():
+    missing_config = llm_config.get_missing_config_for_roles(
+        ("utility", "synthesis", "autodoc_cleanup")
+    )
+    if missing_config:
+        missing = ", ".join(missing_config)
+        if missing:
+            formatter.warning(f"Skipping LLM cleanup configuration: {missing}")
         return None
 
     return llm_config
@@ -156,8 +162,8 @@ def resolve_cleanup_config_and_llm_manager(
             exit_code=2,
             errors=(
                 "AutoDoc cleanup requires an LLM provider, but none is configured. "
-                "Configure `llm` in your config/environment, or run with --assets-only "
-                "to update UI assets without regenerating topic pages.",
+                "Configure `llm` in your config/environment, or visit "
+                "https://chunkhound.ai to generate a config.",
             ),
         )
 

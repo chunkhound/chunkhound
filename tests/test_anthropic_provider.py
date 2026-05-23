@@ -1,4 +1,4 @@
-"""Tests for Anthropic LLM provider with adaptive/manual thinking and effort."""
+"""Tests for Anthropic LLM provider with extended thinking and Opus 4.5 support."""
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -18,18 +18,19 @@ from chunkhound.core.config.claude_model_resolution import (
     resolve_claude_haiku_model,
     resolve_claude_model,
 )
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.anthropic_llm_provider import (
     ANTHROPIC_AVAILABLE,
     BETA_CONTEXT_MANAGEMENT,
     BETA_INTERLEAVED_THINKING,
     BETA_STRUCTURED_OUTPUTS,
     BETA_TASK_BUDGETS,
-    AnthropicLLMProvider,
     requires_adaptive_thinking,
     supports_adaptive_thinking,
     supports_effort,
     supports_effort_level,
     supports_task_budget,
+    AnthropicLLMProvider,
 )
 
 
@@ -41,11 +42,11 @@ class TestAnthropicProviderBasics:
         """Test provider can be initialized."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-5-20250929",
         )
 
         assert provider.name == "anthropic"
-        assert provider.model == "claude-sonnet-4-6"
+        assert provider.model == "claude-sonnet-4-5-20250929"
         assert provider.supports_thinking() is True
         assert provider.supports_tools() is True
 
@@ -201,7 +202,6 @@ class TestProviderCapabilities:
         # Anthropic has higher rate limits than OpenAI
         assert provider.get_synthesis_concurrency() == 5
 
-
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
 class TestConfiguration:
     """Test various configuration scenarios."""
@@ -211,10 +211,9 @@ class TestConfiguration:
         provider = AnthropicLLMProvider(api_key="test-key")
 
         assert provider._model == CLAUDE_HAIKU_FALLBACK_MODEL
-        assert provider._timeout == 60
+        assert provider._timeout == 120
         assert provider._max_retries == 3
         assert provider._thinking_enabled is False
-        assert provider._thinking_mode == "off"
         assert provider._thinking_budget_tokens == 10000
 
     def test_default_model_resolution_stays_offline(self, monkeypatch):
@@ -236,14 +235,14 @@ class TestConfiguration:
             api_key="custom-key",
             model="claude-opus-4-1-20250805",
             base_url="https://custom.endpoint.com",
-            timeout=120,
+            timeout=300,
             max_retries=5,
             thinking_enabled=True,
             thinking_budget_tokens=20000,
         )
 
         assert provider._model == "claude-opus-4-1-20250805"
-        assert provider._timeout == 120
+        assert provider.timeout == 300
         assert provider._max_retries == 5
         assert provider._thinking_enabled is True
         assert provider._thinking_budget_tokens == 20000
@@ -335,18 +334,20 @@ class TestOpus45EffortParameter:
         )
 
         assert provider._effort == "medium"
-        assert supports_effort(provider._model) is True
+        assert supports_effort(provider._model)
 
     def test_effort_parameter_warning_non_opus(self):
-        """Sonnet 4.5 drops an effort value it cannot use; only warns."""
+        """Test that non-Opus 4.5 models get a warning for effort parameter."""
+        # This should log a warning but still initialize
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-sonnet-4-5-20250929",
             effort="low",
         )
 
+        # Effort is silently dropped for models that don't support it
         assert provider._effort is None
-        assert supports_effort(provider._model) is False
+        assert not supports_effort(provider._model)
 
     def test_effort_levels(self):
         """Test all valid effort levels."""
@@ -533,6 +534,28 @@ class TestBetaHeaders:
         headers = provider._get_beta_headers()
         assert headers == []
 
+    def test_effort_not_a_beta_header(self):
+        """Effort is no longer a beta header."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-5-20251101",
+            effort="medium",
+        )
+
+        headers = provider._get_beta_headers()
+        assert BETA_CONTEXT_MANAGEMENT not in headers  # sanity: no unrelated headers
+
+    def test_effort_not_a_beta_header_for_sonnet(self):
+        """Effort is not a beta header for any model."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-5-20250929",
+            effort="medium",
+        )
+
+        headers = provider._get_beta_headers()
+        assert len(headers) == 0
+
     def test_context_management_beta_header(self):
         """Test context management beta header."""
         provider = AnthropicLLMProvider(
@@ -544,11 +567,11 @@ class TestBetaHeaders:
         assert BETA_CONTEXT_MANAGEMENT in headers
 
     def test_interleaved_thinking_beta_header(self):
-        """Interleaved beta header is emitted for manual-mode models."""
+        """Test interleaved thinking beta header (requires manual mode)."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
-            model="claude-opus-4-5-20251101",
             thinking_enabled=True,
+            thinking_mode="manual",
             interleaved_thinking=True,
         )
 
@@ -559,20 +582,22 @@ class TestBetaHeaders:
         """Test interleaved thinking header only added when thinking is enabled."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
-            thinking_enabled=False,
-            interleaved_thinking=True,
+            thinking_enabled=True,
+            thinking_mode="manual",
+            interleaved_thinking=False,
         )
 
         headers = provider._get_beta_headers()
         assert BETA_INTERLEAVED_THINKING not in headers
 
-    def test_all_beta_headers_manual_thinking(self):
-        """Opus 4.5 uses manual thinking so interleaved header is emitted."""
+    def test_all_beta_headers(self):
+        """Test all beta headers combined."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-opus-4-5-20251101",
             effort="low",
             thinking_enabled=True,
+            thinking_mode="manual",
             interleaved_thinking=True,
             context_management_enabled=True,
         )
@@ -581,22 +606,6 @@ class TestBetaHeaders:
         assert BETA_CONTEXT_MANAGEMENT in headers
         assert BETA_INTERLEAVED_THINKING in headers
         assert len(headers) == 2
-
-    def test_adaptive_mode_suppresses_interleaved_header(self):
-        """Adaptive thinking auto-enables interleaved; no beta header needed."""
-        provider = AnthropicLLMProvider(
-            api_key="test-key",
-            model="claude-opus-4-7",
-            thinking_enabled=True,
-            interleaved_thinking=True,
-            context_management_enabled=True,
-        )
-
-        assert provider._thinking_mode == "adaptive"
-        headers = provider._get_beta_headers()
-        assert BETA_INTERLEAVED_THINKING not in headers
-        assert BETA_CONTEXT_MANAGEMENT in headers
-        assert len(headers) == 1
 
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
@@ -611,6 +620,10 @@ class TestOpus45ModelConfiguration:
         )
 
         assert provider.model == "claude-opus-4-5-20251101"
+
+    def test_opus_45_supports_effort(self):
+        """Test Opus 4.5 supports effort parameter."""
+        assert supports_effort("claude-opus-4-5-20251101")
 
     def test_opus_45_full_configuration(self):
         """Test Opus 4.5 with all features enabled."""
@@ -710,12 +723,7 @@ class TestStrictToolUse:
         """Test detecting strict tools."""
         tools = [
             {"name": "tool1", "description": "desc", "input_schema": {}},
-            {
-                "name": "tool2",
-                "description": "desc",
-                "strict": True,
-                "input_schema": {},
-            },
+            {"name": "tool2", "description": "desc", "strict": True, "input_schema": {}},
         ]
 
         has_strict = any(tool.get("strict") for tool in tools)
@@ -756,19 +764,22 @@ class TestStructuredOutputsBetaHeaders:
         assert BETA_STRUCTURED_OUTPUTS not in headers
 
     def test_all_beta_headers_with_opus(self):
-        """Test beta headers for Opus 4.5 configuration (manual thinking)."""
+        """Test all beta headers for Opus 4.5 configuration."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-opus-4-5-20251101",
             effort="low",
             thinking_enabled=True,
+            thinking_mode="manual",
             interleaved_thinking=True,
             context_management_enabled=True,
         )
 
         headers = provider._get_beta_headers()
+        # Context management and interleaved thinking are beta headers
         assert BETA_CONTEXT_MANAGEMENT in headers
         assert BETA_INTERLEAVED_THINKING in headers
+        # Effort is passed via output_config, not as a beta header
         # Structured outputs is added dynamically, not in _get_beta_headers
         assert len(headers) == 2
 

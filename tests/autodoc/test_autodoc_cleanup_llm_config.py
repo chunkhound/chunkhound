@@ -1,6 +1,8 @@
 import pytest
 
 from chunkhound.api.cli.commands import autodoc_cleanup as autodoc_cleanup
+from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
+from chunkhound.core.config.config import Config
 from chunkhound.core.config.llm_config import LLMConfig
 
 
@@ -44,7 +46,8 @@ def test_cleanup_provider_override_drops_inherited_reasoning_effort() -> None:
 
 
 def test_cleanup_provider_override_requires_explicit_model_on_provider_switch() -> None:
-    with pytest.raises(ValueError, match="autodoc_cleanup provider override requires"):
+    """Provider switches require an explicit model — even within the same family."""
+    with pytest.raises(ValueError, match="autodoc_cleanup provider override requires an explicit autodoc_cleanup_model"):
         LLMConfig(
             provider="openai",
             synthesis_model="gpt-5",
@@ -156,3 +159,64 @@ def test_cleanup_same_provider_does_not_inherit_synthesis_reasoning_effort() -> 
 
     assert synthesis_config["provider"] == "openai"
     assert "reasoning_effort" not in synthesis_config
+
+
+def test_cleanup_accepts_local_openai_compatible_llm_without_api_key(
+    clean_environment,
+    tmp_path,
+) -> None:
+    config = Config(
+        target_dir=tmp_path,
+        llm={
+            "provider": "openai",
+            "model": "llama3.2",
+            "base_url": "http://localhost:11434/v1",
+        }
+    )
+    formatter = RichOutputFormatter()
+
+    resolved = autodoc_cleanup._resolve_llm_config_for_cleanup(
+        config=config,
+        formatter=formatter,
+    )
+
+    assert resolved is not None
+    assert resolved.is_provider_configured() is True
+
+
+def test_cleanup_rejects_custom_openai_compatible_llm_without_explicit_model(
+    clean_environment,
+    tmp_path,
+) -> None:
+    config = Config(
+        target_dir=tmp_path,
+        llm={
+            "provider": "openai",
+            "base_url": "http://localhost:11434/v1",
+        }
+    )
+    formatter = RichOutputFormatter()
+
+    resolved = autodoc_cleanup._resolve_llm_config_for_cleanup(
+        config=config,
+        formatter=formatter,
+    )
+
+    assert resolved is None
+
+
+def test_cleanup_override_preserves_custom_openai_compatible_base_url() -> None:
+    llm_config = LLMConfig(
+        provider="anthropic",
+        synthesis_model="claude-sonnet-4-5-20250929",
+        autodoc_cleanup_provider="openai",
+        autodoc_cleanup_model="llama3.2",
+        base_url="http://localhost:11434/v1",
+        api_key="test-key",
+    )
+
+    _, synthesis = autodoc_cleanup._build_cleanup_provider_configs(llm_config)
+
+    assert synthesis["provider"] == "openai"
+    assert synthesis["model"] == "llama3.2"
+    assert synthesis["base_url"] == "http://localhost:11434/v1"

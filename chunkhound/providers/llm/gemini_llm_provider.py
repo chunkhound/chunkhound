@@ -6,6 +6,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
@@ -35,7 +36,7 @@ class GeminiLLMProvider(LLMProvider):
         api_key: str | None = None,
         model: str = "gemini-3-pro-preview",
         thinking_level: str = "high",
-        timeout: int = 120,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
         """Initialize Gemini LLM provider.
@@ -92,6 +93,11 @@ class GeminiLLMProvider(LLMProvider):
     def model(self) -> str:
         """Model name."""
         return self._model
+
+    @property
+    def timeout(self) -> int:
+        """Request timeout in seconds."""
+        return self._timeout
 
     def _build_generation_config(
         self,
@@ -273,6 +279,8 @@ class GeminiLLMProvider(LLMProvider):
                 finish_reason=finish_reason,
             )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             # Handle API errors with detailed messages
             if GENAI_AVAILABLE and isinstance(e, errors.APIError):
@@ -366,6 +374,8 @@ class GeminiLLMProvider(LLMProvider):
                 logger.debug(f"Content: {content}")
                 raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
 
+        except RuntimeError:
+            raise
         except Exception as e:
             # Handle API errors with detailed messages
             if GENAI_AVAILABLE and isinstance(e, errors.APIError):

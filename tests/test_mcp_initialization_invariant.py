@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import copy
-import os
-import time
+import subprocess
+import sys
+import textwrap
+import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-import chunkhound.mcp_server.base as base_module
-from chunkhound.daemon.server import ChunkHoundDaemon
 from chunkhound.mcp_server.base import MCPServerBase
-from chunkhound.mcp_server.status import derive_daemon_status
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 
 
 class ConcreteMCPServer(MCPServerBase):
@@ -29,31 +26,78 @@ class ConcreteMCPServer(MCPServerBase):
         pass
 
 
-class DaemonModeMCPServer(ConcreteMCPServer):
-    """Concrete base server variant that reports daemon startup mode."""
+class CloseOnlyProvider:
+    """Provider exposing close() for cleanup tests."""
 
-    def _realtime_startup_mode(self) -> str:
-        return "daemon"
+    def __init__(self) -> None:
+        self.is_connected = True
+        self.close_calls = 0
+        self.disconnect_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.is_connected = False
+
+    def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        self.is_connected = False
 
 
-def _collect_startup_breadcrumbs(server: MCPServerBase) -> list[str]:
-    breadcrumbs: list[str] = []
+class DisconnectOnlyProvider:
+    """Provider exposing only disconnect() for cleanup tests."""
 
-    def record(message: str) -> None:
-        breadcrumbs.append(message)
+    def __init__(self) -> None:
+        self.is_connected = True
+        self.disconnect_calls = 0
 
-    server._startup_log = record  # type: ignore[method-assign]
-    server._startup_tracker.set_debug_sink(server._startup_log)
-    return breadcrumbs
+    def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        self.is_connected = False
 
 
-def _prime_completed_daemon_startup(server: MCPServerBase) -> None:
-    server._warm_ready_started_monotonic = time.monotonic()
-    server._start_startup_phase("initialize")
-    server._complete_startup_phase("initialize")
-    server._mark_startup_exposure_ready()
-    server._complete_startup()
-    server._resolve_startup_publish_complete()
+class BlockingCloseProvider:
+    """Provider whose close() blocks until released by the test."""
+
+    def __init__(self) -> None:
+        self.is_connected = True
+        self.close_calls = 0
+        self.close_started = threading.Event()
+        self.close_finished = threading.Event()
+        self.release_close = threading.Event()
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.close_started.set()
+        self.release_close.wait(timeout=1.0)
+        self.is_connected = False
+        self.close_finished.set()
+
+
+class FailingCloseProvider:
+    """Provider whose close() raises immediately."""
+
+    def __init__(self) -> None:
+        self.is_connected = True
+
+    def close(self) -> None:
+        raise RuntimeError("close exploded")
+
+
+class FailingCloseWithDisconnectProvider:
+    """Provider whose close() fails even though disconnect() exists."""
+
+    def __init__(self) -> None:
+        self.is_connected = True
+        self.close_calls = 0
+        self.disconnect_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        raise RuntimeError("close exploded")
+
+    def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        self.is_connected = False
 
 
 class TestNonBlockingInitialization:
@@ -120,57 +164,6 @@ class TestNonBlockingInitialization:
                 assert "chunks_created" in progress
                 assert "scan_started_at" in progress
                 assert "scan_completed_at" in progress
-                assert "realtime" in progress
-                assert "event_queue" in progress["realtime"]
-                assert "resync" in progress["realtime"]
-
-                await server.cleanup()
-
-    @pytest.mark.asyncio
-    async def test_initialize_preserves_logical_watchman_target_path(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Deferred Watchman startup should keep the logical requested root."""
-        logical_root = tmp_path / "logical_workspace"
-        physical_root = tmp_path / "physical_workspace"
-        logical_root.mkdir(parents=True)
-        physical_root.mkdir(parents=True)
-
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = logical_root
-        config.indexing.realtime_backend = "watchman"
-        args = SimpleNamespace(path=str(logical_root))
-
-        original_resolve = base_module.Path.resolve
-
-        def fake_resolve(self: Path, strict: bool = False) -> Path:
-            if self == logical_root:
-                return physical_root
-            return original_resolve(self, strict=strict)
-
-        monkeypatch.setattr(base_module.Path, "resolve", fake_resolve)
-
-        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
-            mock_services = MagicMock()
-            mock_services.provider.is_connected = False
-            mock_create.return_value = mock_services
-
-            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
-                server = ConcreteMCPServer(config=config, args=args)
-                server._deferred_connect_and_start = AsyncMock(return_value=None)
-
-                await server.initialize()
-                deferred_start_task = server._deferred_start_task
-                assert deferred_start_task is not None
-                await deferred_start_task
-
-                assert server._scan_target_path == logical_root.absolute()
-                server._deferred_connect_and_start.assert_awaited_once_with(
-                    logical_root.absolute()
-                )
 
                 await server.cleanup()
 
@@ -205,196 +198,18 @@ class TestNonBlockingInitialization:
                 await server.cleanup()
 
     @pytest.mark.asyncio
-    async def test_realtime_start_failure_updates_scan_progress(self, tmp_path: Path):
-        """Verify realtime startup task failures are surfaced into realtime status."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchdog"
-
-        server = ConcreteMCPServer(config=config)
-        server.realtime_indexing = MagicMock()
-        server.realtime_indexing.monitoring_ready = asyncio.Event()
-        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
-        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
-
-        async def fail_startup() -> None:
-            raise RuntimeError("startup exploded")
-
-        monitoring_task = asyncio.create_task(fail_startup())
-        await server._coordinated_initial_scan(tmp_path, monitoring_task)
-
-        realtime = server._scan_progress["realtime"]
-        assert realtime["service_state"] == "degraded"
-        assert "Realtime startup failed" in realtime["last_error"]
-        server._run_directory_scan.assert_awaited_once()  # type: ignore[attr-defined]
-
-    @pytest.mark.asyncio
-    async def test_watchman_start_failure_skips_initial_scan(self, tmp_path: Path):
-        """Watchman fail-fast startup should not enter the initial scan path."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchman"
-
-        server = ConcreteMCPServer(config=config)
-        server.realtime_indexing = MagicMock()
-        server.realtime_indexing.monitoring_ready = asyncio.Event()
-        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
-        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
-
-        async def fail_startup() -> None:
-            raise RuntimeError("watchman startup exploded")
-
-        monitoring_task = asyncio.create_task(fail_startup())
-        await server._coordinated_initial_scan(tmp_path, monitoring_task)
-
-        realtime = server._scan_progress["realtime"]
-        assert realtime["service_state"] == "degraded"
-        assert "Realtime startup failed" in realtime["last_error"]
-        server._run_directory_scan.assert_not_awaited()  # type: ignore[attr-defined]
-
-    @pytest.mark.asyncio
-    async def test_initial_scan_waits_for_daemon_publish_completion(
-        self, tmp_path: Path
-    ) -> None:
-        """Daemon-mode initial scans must wait until daemon publish completes."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchdog"
-
-        server = DaemonModeMCPServer(config=config)
-        server.realtime_indexing = MagicMock()
-        server.realtime_indexing.monitoring_ready = asyncio.Event()
-        server.realtime_indexing.monitoring_ready.set()
-        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
-        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
-
-        async def never_finishes() -> None:
-            await asyncio.Event().wait()
-
-        monitoring_task = asyncio.create_task(never_finishes())
-        with patch(
-            "chunkhound.mcp_server.base.asyncio.sleep",
-            AsyncMock(return_value=None),
-        ):
-            scan_task = asyncio.create_task(
-                server._coordinated_initial_scan(tmp_path, monitoring_task)
-            )
-            await asyncio.sleep(0)
-            server._run_directory_scan.assert_not_awaited()  # type: ignore[attr-defined]
-
-            server._startup_publish_complete.set()
-            await asyncio.wait_for(scan_task, timeout=1.0)
-
-        server._run_directory_scan.assert_awaited_once_with(  # type: ignore[attr-defined]
-            tmp_path,
-            trigger="initial",
-        )
-        monitoring_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await monitoring_task
-
-    @pytest.mark.asyncio
-    async def test_initial_scan_unblocks_when_daemon_publish_fails(
-        self, tmp_path: Path
-    ) -> None:
-        """Daemon-mode scans should stop waiting once publish failure is recorded."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchdog"
-
-        server = DaemonModeMCPServer(config=config)
-        server.realtime_indexing = MagicMock()
-        server.realtime_indexing.monitoring_ready = asyncio.Event()
-        server.realtime_indexing.monitoring_ready.set()
-        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
-        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
-
-        async def never_finishes() -> None:
-            await asyncio.Event().wait()
-
-        monitoring_task = asyncio.create_task(never_finishes())
-        with patch(
-            "chunkhound.mcp_server.base.asyncio.sleep",
-            AsyncMock(return_value=None),
-        ):
-            scan_task = asyncio.create_task(
-                server._coordinated_initial_scan(tmp_path, monitoring_task)
-            )
-            await asyncio.sleep(0)
-            server._run_directory_scan.assert_not_awaited()  # type: ignore[attr-defined]
-
-            server._set_startup_failure(
-                "Daemon publish failed: bind exploded",
-                phase_name="daemon_publish",
-            )
-            server._resolve_startup_publish_complete()
-            await asyncio.wait_for(scan_task, timeout=1.0)
-
-        startup = server._scan_progress["realtime"]["startup"]
-        assert startup["state"] == "failed"
-        assert startup["phases"]["daemon_publish"]["state"] == "failed"
-        assert startup["last_error"] == "Daemon publish failed: bind exploded"
-        server._run_directory_scan.assert_not_awaited()  # type: ignore[attr-defined]
-        monitoring_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await monitoring_task
-
-    @pytest.mark.asyncio
-    async def test_deferred_start_failure_preserves_configured_backend(
+    async def test_initialize_skips_invalid_custom_endpoint_llm_without_manager(
         self, tmp_path: Path
     ):
-        """Verify pre-service startup failures keep the configured backend in status."""
+        """Invalid custom endpoint LLM config should not create an MCP LLM manager."""
         config = MagicMock()
         config.database.path = str(tmp_path / "test.db")
         config.embedding = None
-        config.llm = None
+        config.llm.get_missing_config_for_roles.return_value = [
+            "explicit model selection required for custom OpenAI-compatible "
+            "endpoint roles: utility, synthesis"
+        ]
         config.target_dir = tmp_path
-        config.indexing.realtime_backend = "polling"
-
-        server = ConcreteMCPServer(config=config)
-        server.services = MagicMock()
-        server.services.provider.is_connected = False
-        server.services.provider.connect.side_effect = RuntimeError("connect exploded")
-
-        await server._deferred_connect_and_start(tmp_path)
-
-        realtime = server._scan_progress["realtime"]
-        assert realtime["configured_backend"] == "polling"
-        assert realtime["service_state"] == "degraded"
-        assert "Deferred connect/start failed" in realtime["last_error"]
-        assert realtime["startup"]["state"] == "failed"
-        assert realtime["startup"]["phases"]["db_connect"]["state"] == "failed"
-        assert realtime["startup"]["phases"]["realtime_start"]["state"] == (
-            "uninitialized"
-        )
-        assert realtime["startup"]["last_error"].startswith(
-            "Deferred connect/start failed:"
-        )
-        assert realtime["startup"]["total_duration_seconds"] is not None
-
-    @pytest.mark.asyncio
-    async def test_watchman_config_seeds_realtime_status_surface(
-        self, tmp_path: Path
-    ) -> None:
-        """Watchman config should pre-seed daemon status with operator fields."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchman"
 
         with patch("chunkhound.mcp_server.base.create_services") as mock_create:
             mock_services = MagicMock()
@@ -402,947 +217,255 @@ class TestNonBlockingInitialization:
             mock_create.return_value = mock_services
 
             with patch("chunkhound.mcp_server.base.EmbeddingManager"):
-                server = ConcreteMCPServer(config=config)
-                await server.initialize()
+                with patch("chunkhound.mcp_server.base.LLMManager") as mock_llm_manager:
+                    server = ConcreteMCPServer(config=config)
+                    await server.initialize()
 
-                realtime = server._scan_progress["realtime"]
-                assert realtime["configured_backend"] == "watchman"
-                assert realtime["live_indexing_state"] == "uninitialized"
-                assert (
-                    realtime["live_indexing_hint"]
-                    == "Live indexing monitoring is not ready yet."
-                )
-                assert realtime["watchman_sidecar_state"] == "uninitialized"
-                assert realtime["watchman_connection_state"] == "uninitialized"
-                assert realtime["watchman_subscription_count"] == 0
-                assert realtime["watchman_subscription_names"] == []
-                assert realtime["watchman_scopes"] == []
-                assert realtime["startup"]["mode"] == "stdio"
-                assert realtime["startup"]["exposure_ready_at"] is None
-                assert realtime["startup"]["phases"]["initialize"]["state"] in {
-                    "running",
-                    "completed",
-                }
-                assert realtime["startup"]["phases"]["watchman_sidecar_start"] == {
-                    "state": "uninitialized",
-                    "started_at": None,
-                    "completed_at": None,
-                    "duration_seconds": None,
-                }
-                assert realtime["pipeline"] == {
-                    "last_source_event_at": None,
-                    "last_source_event_type": None,
-                    "last_source_event_path": None,
-                    "last_accepted_event_at": None,
-                    "last_accepted_event_type": None,
-                    "last_accepted_event_path": None,
-                    "last_processing_started_at": None,
-                    "last_processing_started_path": None,
-                    "last_processing_completed_at": None,
-                    "last_processing_completed_path": None,
-                    "filtered_event_count": 0,
-                    "suppressed_duplicate_count": 0,
-                    "translation_error_count": 0,
-                    "processing_error_count": 0,
-                    "stall_threshold_seconds": 30.0,
-                }
-                assert realtime["event_pressure"] == {
-                    "state": "idle",
-                    "sample_path": None,
-                    "sample_scope": None,
-                    "sample_event_type": None,
-                    "events_in_window": 0,
-                    "coalesced_updates": 0,
-                    "window_seconds": 30.0,
-                    "last_observed_at": None,
-                }
-                assert realtime["watchman_loss_of_sync"] == {
-                    "count": 0,
-                    "fresh_instance_count": 0,
-                    "recrawl_count": 0,
-                    "disconnect_count": 0,
-                    "translation_failure_count": 0,
-                    "subscription_pdu_dropped_count": 0,
-                    "last_reason": None,
-                    "last_at": None,
-                    "last_details": None,
-                }
-                assert realtime["watchman_reconnect"] == {
-                    "state": "idle",
-                    "attempt_count": 0,
-                    "retry_delay_seconds": None,
-                    "last_started_at": None,
-                    "last_completed_at": None,
-                    "last_error": None,
-                    "last_result": None,
-                }
-                await server.cleanup()
+                    mock_llm_manager.assert_not_called()
+                    assert server.llm_manager is None
+
+                    await server.cleanup()
 
     @pytest.mark.asyncio
-    async def test_watchman_startup_barrier_raises_recorded_failure(
+    async def test_initialize_allows_cleanup_only_llm_misconfiguration(
         self, tmp_path: Path
     ) -> None:
-        """Watchman daemon startup should fail fast when startup already degraded."""
+        """Cleanup-only overrides must not block MCP's research-capable LLM roles."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm.get_missing_config_for_roles.return_value = []
+        config.llm.get_provider_configs.return_value = (
+            {"provider": "codex-cli", "model": "codex"},
+            {"provider": "codex-cli", "model": "codex"},
+        )
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_services = MagicMock()
+            mock_services.provider.is_connected = False
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                with patch("chunkhound.mcp_server.base.LLMManager") as mock_llm_manager:
+                    mock_llm_manager.return_value = MagicMock()
+                    server = ConcreteMCPServer(config=config)
+                    await server.initialize()
+
+                    mock_llm_manager.assert_called_once_with(
+                        {"provider": "codex-cli", "model": "codex"},
+                        {"provider": "codex-cli", "model": "codex"},
+                    )
+                    assert server.llm_manager is mock_llm_manager.return_value
+                    config.llm.get_provider_configs.assert_called_once_with()
+
+                    await server.cleanup()
+
+
+class TestCleanup:
+    """Verify cleanup invariants for connected providers."""
+
+    @staticmethod
+    def _make_server(tmp_path: Path, provider: object) -> ConcreteMCPServer:
         config = MagicMock()
         config.database.path = str(tmp_path / "test.db")
         config.embedding = None
         config.llm = None
         config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchman"
 
         server = ConcreteMCPServer(config=config)
-        server._deferred_start_task = asyncio.create_task(asyncio.sleep(0))
-        server._startup_failure_message = "Watchman sidecar startup failed: boom"
-
-        with pytest.raises(RuntimeError, match="Watchman sidecar startup failed: boom"):
-            await server.await_startup_barrier()
-
-        startup = server._scan_progress["realtime"]["startup"]
-        assert startup["state"] == "failed"
-        assert startup["last_error"] == "Watchman sidecar startup failed: boom"
-        assert startup["phases"]["startup_barrier"]["state"] == "failed"
-        assert startup["phases"]["startup_barrier"]["completed_at"] is not None
+        server.services = SimpleNamespace(provider=provider)
+        server._initialized = True
+        return server
 
     @pytest.mark.asyncio
-    async def test_install_default_watchman_startup_barrier_raises_recorded_failure(
+    async def test_cleanup_uses_close_when_available(self, tmp_path: Path) -> None:
+        provider = CloseOnlyProvider()
+        server = self._make_server(tmp_path, provider)
+
+        await server.cleanup()
+
+        assert provider.close_calls == 1
+        assert provider.disconnect_calls == 0
+        assert not server._initialized
+
+    @pytest.mark.asyncio
+    async def test_cleanup_falls_back_to_disconnect(self, tmp_path: Path) -> None:
+        provider = DisconnectOnlyProvider()
+        server = self._make_server(tmp_path, provider)
+
+        await server.cleanup()
+
+        assert provider.disconnect_calls == 1
+        assert not server._initialized
+
+    @pytest.mark.asyncio
+    async def test_cleanup_timeout_keeps_event_loop_responsive(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Unset realtime backend should still fail fast when install default is watchman."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = None
+        provider = BlockingCloseProvider()
+        server = self._make_server(tmp_path, provider)
+        debug_file = tmp_path / "cleanup.log"
+        ticker = asyncio.create_task(asyncio.sleep(0.01))
 
         monkeypatch.setattr(
-            base_module,
-            "default_realtime_backend_for_current_install",
-            lambda: "watchman",
+            "chunkhound.mcp_server.base._DATABASE_CLOSE_TIMEOUT_SECONDS",
+            0.05,
         )
+        monkeypatch.setenv("CHUNKHOUND_DEBUG_FILE", str(debug_file))
 
-        server = ConcreteMCPServer(config=config)
-        server._deferred_start_task = asyncio.create_task(asyncio.sleep(0))
-        server._startup_failure_message = "Watchman sidecar startup failed: boom"
+        started = asyncio.get_running_loop().time()
+        try:
+            await server.cleanup()
+        finally:
+            provider.release_close.set()
+            await asyncio.to_thread(provider.close_finished.wait, 1.0)
+        elapsed = asyncio.get_running_loop().time() - started
 
-        with pytest.raises(RuntimeError, match="Watchman sidecar startup failed: boom"):
-            await server.await_startup_barrier()
-
-        startup = server._scan_progress["realtime"]["startup"]
-        assert startup["state"] == "failed"
-        assert startup["last_error"] == "Watchman sidecar startup failed: boom"
-        assert startup["phases"]["startup_barrier"]["state"] == "failed"
-        assert startup["phases"]["startup_barrier"]["completed_at"] is not None
+        assert provider.close_started.is_set()
+        assert ticker.done()
+        assert elapsed < 0.5
+        assert not server._initialized
+        assert "will continue in the background daemon thread" in debug_file.read_text()
 
     @pytest.mark.asyncio
-    async def test_watchman_startup_barrier_records_deferred_task_cancellation(
+    async def test_cleanup_reuses_in_flight_close_after_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = BlockingCloseProvider()
+        server = self._make_server(tmp_path, provider)
+
+        monkeypatch.setattr(
+            "chunkhound.mcp_server.base._DATABASE_CLOSE_TIMEOUT_SECONDS",
+            0.05,
+        )
+
+        try:
+            await server.cleanup()
+            await server.cleanup()
+        finally:
+            provider.release_close.set()
+            await asyncio.to_thread(provider.close_finished.wait, 1.0)
+
+        assert provider.close_started.is_set()
+        assert provider.close_calls == 1
+        assert not server._initialized
+
+    def test_cleanup_timeout_does_not_hang_asyncio_run_shutdown(
         self, tmp_path: Path
     ) -> None:
-        """Deferred-start cancellation should surface as a recorded startup failure."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchman"
+        script = textwrap.dedent(
+            f"""
+            import asyncio
+            from pathlib import Path
+            from types import SimpleNamespace
 
-        server = ConcreteMCPServer(config=config)
-        server._deferred_start_task = asyncio.create_task(asyncio.sleep(60))
-        server._deferred_start_task.cancel()
+            from chunkhound.mcp_server.base import MCPServerBase
+            import chunkhound.mcp_server.base as base_module
 
-        with pytest.raises(
-            RuntimeError,
-            match="Watchman deferred startup was cancelled before readiness",
-        ):
-            await server.await_startup_barrier()
+            base_module._DATABASE_CLOSE_TIMEOUT_SECONDS = 0.05
 
-        startup = server._scan_progress["realtime"]["startup"]
-        assert startup["state"] == "failed"
-        assert (
-            startup["last_error"]
-            == "Watchman deferred startup was cancelled before readiness"
+            class ConcreteMCPServer(MCPServerBase):
+                def _register_tools(self) -> None:
+                    pass
+
+                async def run(self) -> None:
+                    pass
+
+            class BlockingCloseProvider:
+                def __init__(self) -> None:
+                    self.is_connected = True
+
+                def close(self) -> None:
+                    import time
+                    time.sleep(60)
+
+            async def main() -> None:
+                config = SimpleNamespace(
+                    database=SimpleNamespace(
+                        path=str(Path({str(tmp_path / "test.db")!r}))
+                    ),
+                    embedding=None,
+                    llm=None,
+                    target_dir=Path({str(tmp_path)!r}),
+                )
+                server = ConcreteMCPServer(config=config)
+                server.services = SimpleNamespace(provider=BlockingCloseProvider())
+                server._initialized = True
+                await server.cleanup()
+
+            asyncio.run(main())
+            print("cleanup returned")
+            """
         )
-        assert startup["phases"]["startup_barrier"]["state"] == "failed"
-        assert startup["phases"]["startup_barrier"]["completed_at"] is not None
+
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True,
+            text=True,
+            # Importing chunkhound.mcp_server.base has a cold-start cost of
+            # ~1.6-2.5s (transitive deps like llm_manager, database_factory,
+            # core.config) locally, but on macOS ARM CI runners it can take
+            # 4-5s.  A 5s timeout becomes flaky; 15s provides margin for
+            # import + the 0.05s cleanup timeout + print + cold runner.
+            timeout=15,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert "cleanup returned" in completed.stdout
 
     @pytest.mark.asyncio
-    async def test_daemon_run_records_publish_exposure_ready_timestamp(
-        self, tmp_path: Path
+    async def test_cleanup_ignores_closed_loop_race_when_close_thread_finishes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Daemon-mode startup timing should expose the daemon publish seam."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchdog"
-        args = MagicMock()
-        args.path = str(tmp_path)
+        provider = CloseOnlyProvider()
+        server = self._make_server(tmp_path, provider)
+        loop = asyncio.get_running_loop()
 
-        daemon = ChunkHoundDaemon(
-            config=config,
-            args=args,
-            socket_path="tcp:127.0.0.1:0",
-            project_dir=tmp_path,
+        monkeypatch.setattr(
+            "chunkhound.mcp_server.base._DATABASE_CLOSE_TIMEOUT_SECONDS",
+            0.01,
         )
-        daemon.initialize = AsyncMock()
-        daemon.await_startup_barrier = AsyncMock()
-        daemon.cleanup = AsyncMock()
-        daemon._client_manager.poll_pids = AsyncMock(return_value=None)
-        daemon._discovery.write_lock = MagicMock()
-        daemon._discovery.read_lock = MagicMock(return_value={"pid": os.getpid()})
-        daemon._discovery.write_registry_entry = MagicMock()
+        monkeypatch.setattr(
+            loop,
+            "call_soon_threadsafe",
+            MagicMock(side_effect=RuntimeError("Event loop is closed")),
+        )
 
-        class _FakeServer:
-            async def __aenter__(self):
-                daemon._shutdown_event.set()
-                return self
+        await server.cleanup()
 
-            async def __aexit__(self, exc_type, exc, tb):
-                del exc_type, exc, tb
-                return False
-
-        with patch(
-            "chunkhound.daemon.server.ipc.create_server",
-            AsyncMock(return_value=(_FakeServer(), "tcp:127.0.0.1:7788")),
-        ):
-            await daemon.run()
-
-        startup = daemon._scan_progress["realtime"]["startup"]
-        assert startup["mode"] == "daemon"
-        assert startup["state"] == "completed"
-        assert startup["exposure_ready_at"] is not None
-        assert startup["phases"]["daemon_publish"]["state"] == "completed"
-        assert startup["phases"]["daemon_publish"]["completed_at"] is not None
+        assert provider.close_calls == 1
+        assert not server._initialized
 
     @pytest.mark.asyncio
-    async def test_daemon_run_resolves_publish_barrier_on_publish_failure(
-        self, tmp_path: Path
+    async def test_cleanup_logs_close_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Daemon publish failures should resolve the barrier and keep diagnostics."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchdog"
-        args = MagicMock()
-        args.path = str(tmp_path)
+        provider = FailingCloseProvider()
+        server = self._make_server(tmp_path, provider)
+        debug_file = tmp_path / "cleanup.log"
 
-        daemon = ChunkHoundDaemon(
-            config=config,
-            args=args,
-            socket_path="tcp:127.0.0.1:0",
-            project_dir=tmp_path,
-        )
-        daemon.initialize = AsyncMock()
-        daemon.await_startup_barrier = AsyncMock()
-        daemon.cleanup = AsyncMock()
-        daemon._client_manager.poll_pids = AsyncMock(return_value=None)
-        daemon._discovery.write_lock = MagicMock()
-        daemon._discovery.read_lock = MagicMock(return_value={"pid": os.getpid()})
-        daemon._discovery.write_registry_entry = MagicMock()
+        monkeypatch.setenv("CHUNKHOUND_DEBUG_FILE", str(debug_file))
 
-        with patch(
-            "chunkhound.daemon.server.ipc.create_server",
-            AsyncMock(side_effect=RuntimeError("bind exploded")),
-        ):
-            with pytest.raises(RuntimeError, match="bind exploded"):
-                await daemon.run()
+        await server.cleanup()
 
-        startup = daemon._scan_progress["realtime"]["startup"]
-        realtime = daemon._scan_progress["realtime"]
-        daemon_status = derive_daemon_status(daemon._scan_progress)
-
-        assert daemon._startup_publish_complete.is_set()
-        assert startup["state"] == "failed"
-        assert startup["phases"]["daemon_publish"]["state"] == "failed"
-        assert startup["last_error"] == "Daemon publish failed: bind exploded"
-        assert realtime["service_state"] == "degraded"
-        assert realtime["last_error"] == "Daemon publish failed: bind exploded"
-        assert daemon_status["status"] == "degraded"
+        assert not server._initialized
+        assert "Database close failed: close exploded" in debug_file.read_text()
 
     @pytest.mark.asyncio
-    async def test_daemon_deduplicates_delayed_shutdown_task(
-        self, tmp_path: Path
+    async def test_cleanup_does_not_fallback_to_disconnect_after_close_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Repeated last-client callbacks should not schedule duplicate tasks."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchdog"
-        args = MagicMock()
-        args.path = str(tmp_path)
+        provider = FailingCloseWithDisconnectProvider()
+        server = self._make_server(tmp_path, provider)
+        debug_file = tmp_path / "cleanup.log"
 
-        daemon = ChunkHoundDaemon(
-            config=config,
-            args=args,
-            socket_path="tcp:127.0.0.1:0",
-            project_dir=tmp_path,
-        )
-        daemon._shutdown_delay = 60.0
+        monkeypatch.setenv("CHUNKHOUND_DEBUG_FILE", str(debug_file))
 
-        daemon._on_all_clients_gone()
-        first_task = daemon._delayed_shutdown_task
-        assert first_task is not None
-        daemon._on_all_clients_gone()
-        assert daemon._delayed_shutdown_task is first_task
-        assert not first_task.done()
+        await server.cleanup()
 
-        first_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await first_task
-        assert daemon._delayed_shutdown_task is None
-
-    @pytest.mark.asyncio
-    async def test_daemon_clears_delayed_shutdown_task_after_completion(
-        self, tmp_path: Path
-    ) -> None:
-        """The tracked delayed-shutdown task should clear its slot on completion."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchdog"
-        args = MagicMock()
-        args.path = str(tmp_path)
-
-        daemon = ChunkHoundDaemon(
-            config=config,
-            args=args,
-            socket_path="tcp:127.0.0.1:0",
-            project_dir=tmp_path,
-        )
-        daemon._shutdown_delay = 0.0
-        daemon._client_manager.count = MagicMock(return_value=1)
-
-        daemon._on_all_clients_gone()
-        task = daemon._delayed_shutdown_task
-        assert task is not None
-
-        await task
-        assert daemon._delayed_shutdown_task is None
-        assert daemon._shutdown_event.is_set() is False
-
-    @pytest.mark.asyncio
-    async def test_daemon_graceful_shutdown_cancels_owned_delayed_shutdown_task(
-        self, tmp_path: Path
-    ) -> None:
-        """Graceful shutdown should own and drain the delayed shutdown task."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchdog"
-        args = MagicMock()
-        args.path = str(tmp_path)
-
-        daemon = ChunkHoundDaemon(
-            config=config,
-            args=args,
-            socket_path="tcp:127.0.0.1:0",
-            project_dir=tmp_path,
-        )
-        daemon._shutdown_delay = 60.0
-        daemon.cleanup = AsyncMock()
-
-        daemon._on_all_clients_gone()
-        task = daemon._delayed_shutdown_task
-        assert task is not None
-        assert not task.done()
-
-        await daemon._graceful_shutdown()
-
-        daemon.cleanup.assert_awaited_once()
-        assert task.cancelled()
-        assert daemon._delayed_shutdown_task is None
-
-    def test_daemon_startup_phase_breadcrumbs_emit_to_stderr(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Daemon startup phase breadcrumbs should reach the daemon stderr log path."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchdog"
-        args = MagicMock()
-        args.path = str(tmp_path)
-
-        daemon = ChunkHoundDaemon(
-            config=config,
-            args=args,
-            socket_path="tcp:127.0.0.1:0",
-            project_dir=tmp_path,
-        )
-
-        daemon._start_startup_phase("daemon_publish")
-        daemon._complete_startup_phase("daemon_publish")
-
-        captured = capsys.readouterr()
-        assert "[startup] startup: phase started: daemon_publish" in captured.err
-        assert "[startup] startup: phase completed: daemon_publish" in captured.err
-
-    @pytest.mark.asyncio
-    async def test_run_directory_scan_surfaces_reconciliation_cleanup_failures(
-        self, tmp_path: Path
-    ) -> None:
-        """Later reconciliation cleanup failures should keep queries available."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.include = ["**/*.py"]
-        config.indexing.exclude = []
-        config.indexing.config_file_size_threshold_kb = 20
-
-        server = ConcreteMCPServer(config=config)
-        server._scan_progress["scan_completed_at"] = "2026-03-08T00:00:05"
-        server._scan_progress["files_processed"] = 3
-        server._scan_progress["chunks_created"] = 9
-        server.services = MagicMock()
-        server.services.indexing_coordinator.process_directory = AsyncMock(
-            return_value={
-                "status": "error",
-                "error": (
-                    "Storage reconciliation cleanup failed: "
-                    "database invalidated during orphan cleanup"
-                ),
-            }
-        )
-
-        with pytest.raises(RuntimeError, match="Storage reconciliation cleanup failed"):
-            await server._run_directory_scan(
-                tmp_path,
-                trigger="realtime_resync",
-                reason="realtime_loss_of_sync",
-                no_embeddings=True,
-            )
-
-        assert (
-            "Storage reconciliation cleanup failed"
-            in server._scan_progress["scan_error"]
-        )
-
-        daemon_status = derive_daemon_status(server._scan_progress)
-        assert daemon_status["status"] == "degraded"
-        assert daemon_status["query_ready"] is True
-        assert (
-            "Storage reconciliation cleanup failed"
-            in daemon_status["scan_progress"]["scan_error"]
-        )
-
-    def test_derive_daemon_status_initial_scan_failure_stays_unqueryable(self) -> None:
-        """Initial scan failures should still clear query readiness."""
-        daemon_status = derive_daemon_status(
-            {
-                "files_processed": 0,
-                "chunks_created": 0,
-                "is_scanning": False,
-                "scan_started_at": "2026-03-08T00:00:00",
-                "scan_completed_at": None,
-                "scan_error": "Initial directory scan failed: database unavailable",
-                "realtime": {
-                    "service_state": "running",
-                    "last_error": None,
-                    "resync": {
-                        "needs_resync": False,
-                        "in_progress": False,
-                        "last_reason": None,
-                        "last_error": None,
-                    },
-                    "live_indexing_state": "idle",
-                    "live_indexing_hint": "Live indexing is connected and idle.",
-                },
-            }
-        )
-
-        assert daemon_status["status"] == "degraded"
-        assert daemon_status["query_ready"] is False
-        assert daemon_status["scan_progress"]["scan_error"] == (
-            "Initial directory scan failed: database unavailable"
-        )
-
-    @pytest.mark.asyncio
-    async def test_realtime_resync_uses_no_embedding_scan_and_single_embed_followup(
-        self, tmp_path: Path
-    ) -> None:
-        """Realtime resyncs should rescan without embeddings, then embed once."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.embeddings_disabled = False
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.exclude = ["*.lock", "node_modules/**"]
-
-        server = ConcreteMCPServer(config=config)
-        server._scan_target_path = tmp_path
-        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
-        server.services = MagicMock()
-        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock(
-            return_value={"status": "up_to_date", "generated": 0}
-        )
-
-        result = await server._request_realtime_resync(
-            "realtime_loss_of_sync",
-            {"backend": "watchman", "loss_of_sync_reason": "disconnect"},
-        )
-
-        server._run_directory_scan.assert_awaited_once_with(  # type: ignore[attr-defined]
-            tmp_path,
-            trigger="realtime_resync",
-            reason="realtime_loss_of_sync",
-            no_embeddings=True,
-        )
-        server.services.indexing_coordinator.generate_missing_embeddings.assert_awaited_once_with(
-            exclude_patterns=["*.lock", "node_modules/**"]
-        )
-        assert result == {"status": "up_to_date", "generated": 0}
-
-    @pytest.mark.asyncio
-    async def test_realtime_resync_skips_embed_followup_when_embeddings_disabled(
-        self, tmp_path: Path
-    ) -> None:
-        """Explicit no-embeddings mode should complete resyncs in regex-only mode."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.embeddings_disabled = True
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.exclude = ["*.lock"]
-
-        server = ConcreteMCPServer(config=config)
-        server._scan_target_path = tmp_path
-        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
-        server.services = MagicMock()
-        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock()
-
-        result = await server._request_realtime_resync(
-            "realtime_loss_of_sync",
-            {"backend": "watchman", "loss_of_sync_reason": "fresh_instance"},
-        )
-
-        server._run_directory_scan.assert_awaited_once_with(  # type: ignore[attr-defined]
-            tmp_path,
-            trigger="realtime_resync",
-            reason="realtime_loss_of_sync",
-            no_embeddings=True,
-        )
-        server.services.indexing_coordinator.generate_missing_embeddings.assert_not_awaited()
-        assert result == {
-            "status": "complete",
-            "generated": 0,
-            "message": "Embeddings explicitly disabled",
-        }
-
-    @pytest.mark.asyncio
-    async def test_realtime_resync_embed_error_status_keeps_realtime_degraded(
-        self, tmp_path: Path
-    ) -> None:
-        """Realtime loss-of-sync should stay degraded on embed follow-up error."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.embeddings_disabled = False
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.exclude = ["*.lock"]
-
-        server = ConcreteMCPServer(config=config)
-        server._scan_target_path = tmp_path
-        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
-        server.services = MagicMock()
-        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock(
-            return_value={
-                "status": "error",
-                "error": "embedding backend unavailable",
-                "generated": 0,
-            }
-        )
-
-        service = RealtimeIndexingService(
-            server.services,
-            config,
-            status_callback=server._update_realtime_status,
-            resync_callback=server._request_realtime_resync,
-        )
-
-        await service.request_resync(
-            "realtime_loss_of_sync",
-            {"backend": "watchman", "loss_of_sync_reason": "disconnect"},
-        )
-        await asyncio.sleep(service._RESYNC_DEBOUNCE_SECONDS + 0.1)
-
-        realtime = server._scan_progress["realtime"]
-        assert realtime["service_state"] == "degraded"
-        assert realtime["resync"]["needs_resync"] is True
-        assert realtime["resync"]["performed_count"] == 0
-        assert (
-            realtime["resync"]["last_error"]
-            == "Resync callback reported error status: embedding backend unavailable"
-        )
-        assert (
-            realtime["last_error"]
-            == "Realtime resync failed: Resync callback reported error status: "
-            "embedding backend unavailable"
-        )
-
-    @pytest.mark.asyncio
-    async def test_realtime_resync_disabled_embeddings_clear_stale_state(
-        self, tmp_path: Path
-    ) -> None:
-        """Explicit no-embeddings mode should not leave realtime resync latched."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.embeddings_disabled = True
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.exclude = ["*.lock"]
-
-        server = ConcreteMCPServer(config=config)
-        server._scan_target_path = tmp_path
-        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
-        server.services = MagicMock()
-        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock()
-
-        service = RealtimeIndexingService(
-            server.services,
-            config,
-            status_callback=server._update_realtime_status,
-            resync_callback=server._request_realtime_resync,
-        )
-
-        await service.request_resync(
-            "realtime_loss_of_sync",
-            {"backend": "watchman", "loss_of_sync_reason": "fresh_instance"},
-        )
-        await asyncio.sleep(service._RESYNC_DEBOUNCE_SECONDS + 0.1)
-
-        realtime = server._scan_progress["realtime"]
-        assert realtime["resync"]["needs_resync"] is False
-        assert realtime["resync"]["performed_count"] == 1
-        assert realtime["resync"]["last_error"] is None
-        assert realtime["last_error"] is None
-        server.services.indexing_coordinator.generate_missing_embeddings.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_startup_window_successful_fresh_instance_skips_initial_scan(
-        self, tmp_path: Path
-    ) -> None:
-        """Startup-window fresh-instance recovery should reuse the resync pass."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.embeddings_disabled = False
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchman"
-        config.indexing.exclude = []
-
-        server = DaemonModeMCPServer(config=config)
-        breadcrumbs = _collect_startup_breadcrumbs(server)
-        _prime_completed_daemon_startup(server)
-        server._scan_target_path = tmp_path
-        server.services = MagicMock()
-        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock(
-            return_value={"status": "complete", "generated": 2}
-        )
-        server.realtime_indexing = MagicMock()
-        server.realtime_indexing.monitoring_ready = asyncio.Event()
-        server.realtime_indexing.monitoring_ready.set()
-        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
-
-        async def never_finishes() -> None:
-            await asyncio.Event().wait()
-
-        monitoring_task = asyncio.create_task(never_finishes())
-        with patch(
-            "chunkhound.mcp_server.base.DirectoryIndexingService.process_directory",
-            AsyncMock(
-                return_value=SimpleNamespace(files_processed=3, chunks_created=9)
-            ),
-        ) as mock_process_directory, patch(
-            "chunkhound.mcp_server.base.asyncio.sleep",
-            AsyncMock(return_value=None),
-        ):
-            await server._request_realtime_resync(
-                "realtime_loss_of_sync",
-                {"backend": "watchman", "loss_of_sync_reason": "fresh_instance"},
-            )
-            await asyncio.wait_for(
-                server._coordinated_initial_scan(tmp_path, monitoring_task),
-                timeout=1.0,
-            )
-
-        monitoring_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await monitoring_task
-
-        assert mock_process_directory.await_count == 1
-        assert any(
-            "warm-ready: realtime resync requested "
-            "reason=realtime_loss_of_sync" in message
-            for message in breadcrumbs
-        )
-        assert any(
-            "warm-ready: realtime resync directory scan starting" in message
-            for message in breadcrumbs
-        )
-        assert any(
-            "warm-ready: realtime resync embedding follow-up starting" in message
-            for message in breadcrumbs
-        )
-        assert any(
-            "warm-ready: startup reused successful fresh-instance reconciliation "
-            "and skipped the deferred initial scan" in message
-            for message in breadcrumbs
-        )
-        assert not any(
-            "warm-ready: initial scan completed total=" in message
-            for message in breadcrumbs
-        )
-        assert not any(
-            "warm-ready: startup paid both fresh-instance resync and initial scan "
-            "back-to-back" in message
-            for message in breadcrumbs
-        )
-        assert any(
-            "warm-ready: summary " in message
-            and "blocking_startup=" in message
-            and "fresh_instance_resync=" in message
-            and "warm_ready=" in message
-            and "initial_scan=" not in message
-            for message in breadcrumbs
-        )
-
-    @pytest.mark.asyncio
-    async def test_startup_window_failed_fresh_instance_keeps_initial_scan(
-        self, tmp_path: Path
-    ) -> None:
-        """Failed startup-window fresh-instance recovery must keep the fallback scan."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.embeddings_disabled = False
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchman"
-        config.indexing.exclude = []
-
-        server = DaemonModeMCPServer(config=config)
-        breadcrumbs = _collect_startup_breadcrumbs(server)
-        _prime_completed_daemon_startup(server)
-        server._scan_target_path = tmp_path
-        server.services = MagicMock()
-        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock(
-            return_value={
-                "status": "error",
-                "generated": 0,
-                "error": "embedding backend unavailable",
-            }
-        )
-        server.realtime_indexing = MagicMock()
-        server.realtime_indexing.monitoring_ready = asyncio.Event()
-        server.realtime_indexing.monitoring_ready.set()
-        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
-
-        async def never_finishes() -> None:
-            await asyncio.Event().wait()
-
-        monitoring_task = asyncio.create_task(never_finishes())
-        with patch(
-            "chunkhound.mcp_server.base.DirectoryIndexingService.process_directory",
-            AsyncMock(
-                side_effect=[
-                    SimpleNamespace(files_processed=3, chunks_created=9),
-                    SimpleNamespace(files_processed=4, chunks_created=12),
-                ]
-            ),
-        ) as mock_process_directory, patch(
-            "chunkhound.mcp_server.base.asyncio.sleep",
-            AsyncMock(return_value=None),
-        ):
-            await server._request_realtime_resync(
-                "realtime_loss_of_sync",
-                {"backend": "watchman", "loss_of_sync_reason": "fresh_instance"},
-            )
-            await asyncio.wait_for(
-                server._coordinated_initial_scan(tmp_path, monitoring_task),
-                timeout=1.0,
-            )
-
-        monitoring_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await monitoring_task
-
-        assert mock_process_directory.await_count == 2
-        assert any(
-            "warm-ready: realtime resync requested "
-            "reason=realtime_loss_of_sync" in message
-            for message in breadcrumbs
-        )
-        assert any(
-            "warm-ready: realtime resync directory scan starting" in message
-            for message in breadcrumbs
-        )
-        assert any(
-            "warm-ready: realtime resync embedding follow-up starting" in message
-            for message in breadcrumbs
-        )
-        assert any(
-            "warm-ready: initial scan completed total=" in message
-            for message in breadcrumbs
-        )
-        assert any(
-            "warm-ready: startup paid both fresh-instance resync and initial scan "
-            "back-to-back" in message
-            for message in breadcrumbs
-        )
-        assert not any(
-            "warm-ready: startup reused successful fresh-instance reconciliation "
-            "and skipped the deferred initial scan" in message
-            for message in breadcrumbs
-        )
-        assert any(
-            "warm-ready: summary " in message
-            and "blocking_startup=" in message
-            and "fresh_instance_resync=" in message
-            and "initial_scan=" in message
-            and "warm_ready=" in message
-            for message in breadcrumbs
-        )
-
-    @pytest.mark.asyncio
-    async def test_startup_warm_ready_summary_emits_without_resync(
-        self, tmp_path: Path
-    ) -> None:
-        """Warm-ready summary should still appear when startup skips resync."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchman"
-        config.indexing.exclude = []
-
-        server = DaemonModeMCPServer(config=config)
-        breadcrumbs = _collect_startup_breadcrumbs(server)
-        _prime_completed_daemon_startup(server)
-        server.services = MagicMock()
-        server.realtime_indexing = MagicMock()
-        server.realtime_indexing.monitoring_ready = asyncio.Event()
-        server.realtime_indexing.monitoring_ready.set()
-        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
-
-        async def never_finishes() -> None:
-            await asyncio.Event().wait()
-
-        monitoring_task = asyncio.create_task(never_finishes())
-        with patch(
-            "chunkhound.mcp_server.base.DirectoryIndexingService.process_directory",
-            AsyncMock(
-                return_value=SimpleNamespace(files_processed=5, chunks_created=15)
-            ),
-        ) as mock_process_directory, patch(
-            "chunkhound.mcp_server.base.asyncio.sleep",
-            AsyncMock(return_value=None),
-        ):
-            await asyncio.wait_for(
-                server._coordinated_initial_scan(tmp_path, monitoring_task),
-                timeout=1.0,
-            )
-
-        monitoring_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await monitoring_task
-
-        assert mock_process_directory.await_count == 1
-        assert any(
-            "warm-ready: initial scan coordination monitoring_ready_to_publish="
-            in message
-            for message in breadcrumbs
-        )
-        assert any(
-            "warm-ready: initial scan completed total=" in message
-            for message in breadcrumbs
-        )
-        assert any("warm-ready: summary " in message for message in breadcrumbs)
-        assert not any(
-            "startup paid both fresh-instance resync and initial scan back-to-back"
-            in message
-            for message in breadcrumbs
-        )
-        assert not any(
-            "startup reused successful fresh-instance reconciliation "
-            "and skipped the deferred initial scan" in message
-            for message in breadcrumbs
-        )
-
-    @pytest.mark.asyncio
-    async def test_startup_timing_breadcrumbs_do_not_mutate_public_startup_status(
-        self, tmp_path: Path
-    ) -> None:
-        """Warm-ready breadcrumbs must not change the public startup payload."""
-        config = MagicMock()
-        config.database.path = str(tmp_path / "test.db")
-        config.embedding = None
-        config.embeddings_disabled = False
-        config.llm = None
-        config.target_dir = tmp_path
-        config.indexing.realtime_backend = "watchman"
-        config.indexing.exclude = []
-
-        server = DaemonModeMCPServer(config=config)
-        _collect_startup_breadcrumbs(server)
-        _prime_completed_daemon_startup(server)
-        server._scan_target_path = tmp_path
-        server.services = MagicMock()
-        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock(
-            return_value={"status": "complete", "generated": 1}
-        )
-        server.realtime_indexing = MagicMock()
-        server.realtime_indexing.monitoring_ready = asyncio.Event()
-        server.realtime_indexing.monitoring_ready.set()
-        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
-
-        startup_before = copy.deepcopy(server._scan_progress["realtime"]["startup"])
-
-        async def never_finishes() -> None:
-            await asyncio.Event().wait()
-
-        monitoring_task = asyncio.create_task(never_finishes())
-        with patch(
-            "chunkhound.mcp_server.base.DirectoryIndexingService.process_directory",
-            AsyncMock(
-                side_effect=[
-                    SimpleNamespace(files_processed=2, chunks_created=6),
-                    SimpleNamespace(files_processed=2, chunks_created=6),
-                ]
-            ),
-        ), patch(
-            "chunkhound.mcp_server.base.asyncio.sleep",
-            AsyncMock(return_value=None),
-        ):
-            await server._request_realtime_resync(
-                "realtime_loss_of_sync",
-                {"backend": "watchman", "loss_of_sync_reason": "fresh_instance"},
-            )
-            await asyncio.wait_for(
-                server._coordinated_initial_scan(tmp_path, monitoring_task),
-                timeout=1.0,
-            )
-
-        monitoring_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await monitoring_task
-
-        assert server._scan_progress["realtime"]["startup"] == startup_before
+        assert provider.close_calls == 1
+        assert provider.disconnect_calls == 0
+        assert not server._initialized
+        assert "Database close failed: close exploded" in debug_file.read_text()

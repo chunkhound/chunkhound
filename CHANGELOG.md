@@ -7,11 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-05-20
+
+### Breaking Changes
+- **MCP `search` response format changed to markdown** — The `search` tool now returns lean
+  markdown strings instead of JSON objects, with syntax-highlighted code fences, similarity
+  percentages (semantic search), and a pagination footer. MCP clients that parse raw search
+  output as JSON must migrate to the new format.
+
+### Added
+- **`--index-unknown-files` flag** — Files with unrecognized extensions are now indexable as
+  plain text (binary files are still skipped). Enabled via `--index-unknown-files` CLI flag,
+  `indexing.index_unknown_files` config key, or `CHUNKHOUND_INDEXING__INDEX_UNKNOWN_FILES` env var.
+- **Proto, GraphQL, XML, config, and Dockerfile support** — `.proto`, `.graphql`, `.gql`,
+  `.xml`, `.ini`, `.properties`, `.conf`, `.cfg`, and extensionless `Dockerfile`/`Jenkinsfile`
+  files are now indexed by default. `.env` files are explicitly excluded to prevent secret leakage.
+- **`chunkhound.ai` onboarding** — Interactive CLI setup is replaced with guided onboarding at
+  chunkhound.ai; local backend is now configured explicitly rather than through prompts.
+
+### Fixed
+- **MCP startup HNSW crash** — MCP server no longer fails with a `CreateDeltaIndex` assertion
+  on startup against databases missing the unique `(chunk_id, provider, model)` index from v5.0.0.
+  HNSW recreation now runs outside the transaction (issue #280).
+- **WAL validation HNSW crash** — WAL pre-flight validation now uses in-memory+ATTACH, preventing
+  a C++ abort when the WAL contained HNSW operations from a prior session (issue #273).
+- **`--db` nested directory bug** — Passing an explicit file path (e.g. `--db /path/to/chunks.db`)
+  no longer creates a `chunks.db/chunks.db` nested directory; known DB extensions (`.db`,
+  `.duckdb`) are now correctly identified as file paths (issue #215).
+- **Parser install hints** — C# error messages now show the correct PyPI package
+  `tree-sitter-c-sharp` (was `tree-sitter-csharp`); Makefile shows `tree-sitter-make`;
+  SCSS points to `tree-sitter-language-pack` (issue #267).
+
 ## [5.0.0] - 2026-05-05
 
 ### Breaking Changes
-- **HTTP MCP server removed** — `chunkhound mcp http` command removed along with `--http`, `--port`, and `--host` flags; FastMCP dependency removed. Use `chunkhound mcp` (stdio) instead — all major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
-- **Unsupported file types no longer indexed** — Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (`.txt`, `.log`, `.cfg`, `.conf`, `.ini`) are unaffected.
+- **Config precedence reordered** — Local `.chunkhound.json` now takes precedence over
+  environment variables. If you relied on env vars overriding project-level settings,
+  use CLI arguments instead.
+- **`--config` now overrides local `.chunkhound.json`** — Previously, a project-local
+  `.chunkhound.json` took precedence over an explicit `--config` path. Now `--config`
+  wins. If you relied on local `.chunkhound.json` shadowing a shared config file, move
+  that override into CLI arguments.
+- **Missing `--config` / `CHUNKHOUND_CONFIG_FILE` path now raises** — A non-existent
+  config file path used to be silently ignored; it now raises `ValueError` with an
+  actionable message.
+- **`DEFAULT_LLM_TIMEOUT` doubled** — Default LLM request timeout increased from 60 s
+  to 120 s for all providers (was already 120 s for Gemini; now uniform).
+- **HTTP MCP server removed** — ChunkHound now supports stdio transport only for MCP connections
+  - `chunkhound mcp http` command removed
+  - `--http`, `--port`, `--host` CLI flags removed
+  - FastMCP dependency removed
+  - Migration: Use `chunkhound mcp` (stdio) instead. All major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
+  - Rationale: Simplified codebase, reduced dependencies, focused on primary use case (stdio is the standard for MCP)
+- **Unsupported file types no longer indexed as plain text** — Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (.txt, .log, .cfg, .conf, .ini) are unaffected.
+- **Claude Code CLI default model changed** from `claude-sonnet-4-5-20250929` to `claude-haiku-4-5-20251001`. Users who relied on the default model will see different cost/quality characteristics. Set `llm.model`, `llm.utility_model`, or `llm.synthesis_model` explicitly to retain previous behavior.
 - **Anthropic provider upgraded to Claude Opus 4.7/4.6 and Sonnet 4.6**
   - `anthropic` dependency minimum bumped to `>=0.96.0,<1.0.0`
   - Default Anthropic utility and synthesis models changed to ChunkHound's `claude-haiku` sentinel. This is intentional: current Claude Haiku is capable enough for synthesis, is Anthropic's cheapest available Claude model, and Anthropic does not currently offer a true low-cost utility tier. Users who prefer maximum synthesis quality can override `synthesis_model`.
@@ -667,7 +716,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...HEAD
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...HEAD
+[5.1.0]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v5.0.0
 [4.0.1]: https://github.com/chunkhound/chunkhound/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/chunkhound/chunkhound/compare/v3.3.1...v4.0.0

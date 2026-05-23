@@ -1116,7 +1116,7 @@ def test_format_startup_failure_includes_phase_elapsed_and_error(
         encoding="utf-8",
     )
 
-    message = discovery._format_startup_failure(
+    message = discovery.format_startup_failure(
         prefix="ChunkHound daemon did not become reachable within 30.0s",
         log_path=log_path,
     )
@@ -1151,7 +1151,7 @@ def test_format_startup_failure_parses_prefixed_breadcrumbs_and_keeps_legacy_sup
         encoding="utf-8",
     )
 
-    message = discovery._format_startup_failure(
+    message = discovery.format_startup_failure(
         prefix="ChunkHound daemon did not become reachable within 30.0s",
         log_path=log_path,
     )

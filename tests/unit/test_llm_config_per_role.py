@@ -577,7 +577,7 @@ def test_opencode_cli_model_validator_per_role_override():
 
 def test_opencode_cli_model_validator_map_hyde_provider_requires_explicit_model():
     """Switching map_hyde providers must not inherit the synthesis model."""
-    with pytest.raises(ValueError, match="map_hyde provider override requires"):
+    with pytest.raises(ValueError, match="map_hyde provider override requires an explicit map_hyde_model"):
         LLMConfig(
             provider="openai",
             synthesis_model="gpt-5",
@@ -599,7 +599,7 @@ def test_opencode_cli_model_validator_map_hyde_provider_requires_explicit_model(
 
 def test_opencode_cli_model_validator_autodoc_provider_requires_explicit_model():
     """Switching autodoc_cleanup providers must not inherit the synthesis model."""
-    with pytest.raises(ValueError, match="autodoc_cleanup provider override requires"):
+    with pytest.raises(ValueError, match="autodoc_cleanup provider override requires an explicit autodoc_cleanup_model"):
         LLMConfig(
             provider="openai",
             synthesis_model="gpt-5",
@@ -860,7 +860,7 @@ def test_get_provider_config_for_role_unknown_role_raises() -> None:
 @pytest.mark.parametrize(
     ("provider", "kwargs"),
     [
-        ("ollama", {}),
+        # ("ollama", {}),  # ollama removed — use openai with local base_url
         ("claude-code-cli", {}),
         ("codex-cli", {}),
         (

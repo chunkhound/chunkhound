@@ -23,6 +23,7 @@ from chunkhound.core.config.claude_model_resolution import (
     CLAUDE_SONNET_SENTINEL,
     resolve_claude_cli_model,
 )
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
@@ -35,7 +36,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
         api_key: str | None = None,
         model: str = CLAUDE_HAIKU_SENTINEL,
         base_url: str | None = None,
-        timeout: int = 60,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
         """Initialize Claude Code CLI provider.

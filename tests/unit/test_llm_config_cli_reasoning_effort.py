@@ -27,32 +27,6 @@ def test_cli_accepts_xhigh_reasoning_effort() -> None:
     assert args.llm_codex_reasoning_effort_synthesis == "xhigh"
 
 
-def test_cli_accepts_deepseek_provider_flags() -> None:
-    parser = argparse.ArgumentParser()
-    LLMConfig.add_cli_arguments(parser)
-
-    args = parser.parse_args(
-        [
-            "--llm-provider",
-            "deepseek",
-            "--llm-utility-provider",
-            "deepseek",
-            "--llm-synthesis-provider",
-            "deepseek",
-            "--llm-map-hyde-provider",
-            "deepseek",
-            "--llm-autodoc-cleanup-provider",
-            "deepseek",
-        ]
-    )
-
-    assert args.llm_provider == "deepseek"
-    assert args.llm_utility_provider == "deepseek"
-    assert args.llm_synthesis_provider == "deepseek"
-    assert args.llm_map_hyde_provider == "deepseek"
-    assert args.llm_autodoc_cleanup_provider == "deepseek"
-
-
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -80,3 +54,40 @@ def test_load_from_env_parses_structured_outputs_false(
     config = LLMConfig.load_from_env()
 
     assert config["supports_structured_outputs"] is False
+
+
+def test_cli_provider_ollama_shows_migration_hint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = argparse.ArgumentParser()
+    LLMConfig.add_cli_arguments(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--llm-provider", "ollama"])
+
+    err = capsys.readouterr().err
+    assert "provider='openai'" in err
+    assert "http://localhost:11434/v1" in err
+
+
+def test_cli_per_role_provider_ollama_shows_migration_hint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = argparse.ArgumentParser()
+    LLMConfig.add_cli_arguments(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--llm-utility-provider", "ollama"])
+
+    err = capsys.readouterr().err
+    assert "provider='openai'" in err
+    assert "http://localhost:11434/v1" in err
+
+
+def test_cli_parses_llm_ssl_verify_flags() -> None:
+    parser = argparse.ArgumentParser()
+    LLMConfig.add_cli_arguments(parser)
+
+    args = parser.parse_args(["--no-llm-ssl-verify"])
+
+    assert args.llm_ssl_verify is False

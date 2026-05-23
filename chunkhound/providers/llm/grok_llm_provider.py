@@ -10,6 +10,7 @@ Auth: API key from https://console.x.ai
 
 from typing import Any
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 
 
@@ -24,7 +25,8 @@ class GrokLLMProvider(OpenAICompatibleProvider):
         api_key: str | None = None,
         model: str = "grok-4-1-fast-reasoning",
         base_url: str | None = None,
-        timeout: int = 60,
+        ssl_verify: bool = True,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
         supports_structured_outputs: bool | None = None,
         reasoning_effort: str | None = None,
@@ -35,6 +37,7 @@ class GrokLLMProvider(OpenAICompatibleProvider):
             api_key: xAI API key (passed from config)
             model: Model name (default: "grok-4-1-fast-reasoning")
             base_url: Base URL (defaults to https://api.x.ai/v1)
+            ssl_verify: Whether to verify SSL certificates
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts
             supports_structured_outputs: Override class-level structured
@@ -48,6 +51,7 @@ class GrokLLMProvider(OpenAICompatibleProvider):
             api_key=api_key,
             model=model,
             base_url=base_url,
+            ssl_verify=ssl_verify,
             timeout=timeout,
             max_retries=max_retries,
             supports_structured_outputs=supports_structured_outputs,
