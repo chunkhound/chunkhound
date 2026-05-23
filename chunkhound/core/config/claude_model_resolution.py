@@ -12,6 +12,7 @@ freshest available model itself.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Callable
 from datetime import datetime
@@ -62,13 +63,15 @@ _CLAUDE_SENTINELS: dict[str, ClaudeSentinelConfig] = {
 
 # ── Discovery cache ──────────────────────────────────────────────────────
 #
-# A single dict keyed by sentinel string (a known constant).  The
-# ``api_key`` is used only for the API call and never appears in cache
-# metadata — no credential leakage into key tables.
+# Cache by (sentinel, auth identity) so one account's visible model set
+# cannot bleed into another account within the same process.
+#
+# The auth identity stores only a short digest of the resolved API key, never
+# the raw credential itself.
 #
 # Failed discoveries are intentionally NOT cached so that transient failures
 # (e.g. credentials appearing mid-process) self-heal on the next call.
-_MODEL_CACHE: dict[str, str] = {}
+_MODEL_CACHE: dict[tuple[str, str], str] = {}
 
 
 def clear_claude_cache(sentinel: str | None = None) -> None:
@@ -81,7 +84,8 @@ def clear_claude_cache(sentinel: str | None = None) -> None:
     if sentinel is None:
         _MODEL_CACHE.clear()
     else:
-        _MODEL_CACHE.pop(sentinel, None)
+        for cache_key in [key for key in _MODEL_CACHE if key[0] == sentinel]:
+            _MODEL_CACHE.pop(cache_key, None)
 
 
 # ── Public resolution entry point ────────────────────────────────────────
@@ -109,7 +113,7 @@ def resolve_claude_model(
         api_key: Anthropic API key for the discovery call
             (defaults to ``ANTHROPIC_API_KEY`` env var).
         discover: When ``True``, dynamically discover the newest available
-            model via the Anthropic API (cached per sentinel).
+            model via the Anthropic API (cached per sentinel + auth identity).
             When ``False``, return the pinned fallback directly.
 
     Returns:
@@ -184,16 +188,18 @@ def _discover_latest_model(
     """Discover the newest available model for *sentinel* via the Anthropic API.
 
     The result is cached in ``_MODEL_CACHE`` after the first successful
-    discovery (process lifetime).  Returns ``None`` when the API is
-    unavailable, credentials are missing, or no matching models are found.
+    discovery for that sentinel + auth identity (process lifetime).
+    Returns ``None`` when the API is unavailable, credentials are missing,
+    or no matching models are found.
     """
-    cached = _MODEL_CACHE.get(sentinel)
-    if cached is not None:
-        return cached
-
     resolved_key = api_key or os.getenv("ANTHROPIC_API_KEY")
     if not resolved_key or not resolved_key.startswith("sk-ant-"):
         return None
+
+    cache_key = (sentinel, _cache_identity_for_api_key(resolved_key))
+    cached = _MODEL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     try:
         from anthropic import Anthropic
@@ -208,11 +214,17 @@ def _discover_latest_model(
         if not matches:
             return None
         latest = max(matches, key=_model_sort_key)
-        _MODEL_CACHE[sentinel] = str(latest.id)
-        return _MODEL_CACHE[sentinel]
+        _MODEL_CACHE[cache_key] = str(latest.id)
+        return _MODEL_CACHE[cache_key]
     except Exception as e:  # pragma: no cover - depends on network/credentials
         logger.debug(f"Claude model discovery failed ({sentinel}): {e}")
         return None
+
+
+def _cache_identity_for_api_key(api_key: str) -> str:
+    """Return a stable non-secret cache identity for an Anthropic API key."""
+    digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    return digest[:16]
 
 
 # ── Sorting helper ───────────────────────────────────────────────────────
