@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Anthropic provider upgraded to Claude Opus 4.7/4.6 and Sonnet 4.6**
   - `anthropic` dependency minimum bumped to `>=0.96.0,<1.0.0`
   - Default Anthropic utility and synthesis models changed to ChunkHound's `claude-haiku` sentinel. This is intentional: current Claude Haiku is capable enough for synthesis, is Anthropic's cheapest available Claude model, and Anthropic does not currently offer a true low-cost utility tier. Users who prefer maximum synthesis quality can override `synthesis_model`.
-  - Default Claude Code CLI model changed to the same `claude-haiku` sentinel, resolved offline to ChunkHound's pinned Claude Haiku fallback.
+  - Default Claude Code CLI model changed to the same `claude-haiku` sentinel. ChunkHound still honors its Claude env overrides first; otherwise it preserves the sentinel so Claude Code can resolve the latest matching alias itself.
   - Removed module symbols `BETA_EFFORT` and `EFFORT_SUPPORTED_MODELS`. Callers should use the `supports_effort(model)` / `supports_effort_level(model, level)` predicates instead.
   - `thinking_enabled=True` with `thinking_mode="auto"` resolves to adaptive only for adaptive-capable models such as Opus 4.6/4.7, Sonnet 4.6, and Mythos. The pinned Haiku fallback remains manual-mode thinking.
   - `anthropic_prompt_caching` defaults to `false` because ChunkHound requests rarely reuse prompt prefixes enough to offset Anthropic cache-write costs. To opt in, set `CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING=true` or pass `--llm-anthropic-prompt-caching`.
