@@ -84,6 +84,43 @@ def test_cli_per_role_provider_ollama_shows_migration_hint(
     assert "http://localhost:11434/v1" in err
 
 
+def test_cli_accepts_deepseek_provider_overrides() -> None:
+    parser = argparse.ArgumentParser()
+    LLMConfig.add_cli_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--llm-provider",
+            "deepseek",
+            "--llm-utility-provider",
+            "deepseek",
+            "--llm-synthesis-provider",
+            "deepseek",
+            "--llm-map-hyde-provider",
+            "deepseek",
+            "--llm-autodoc-cleanup-provider",
+            "deepseek",
+        ]
+    )
+
+    assert args.llm_provider == "deepseek"
+    assert args.llm_utility_provider == "deepseek"
+    assert args.llm_synthesis_provider == "deepseek"
+    assert args.llm_map_hyde_provider == "deepseek"
+    assert args.llm_autodoc_cleanup_provider == "deepseek"
+
+
+def test_cli_rejects_unknown_provider_with_valid_choices(capsys: pytest.CaptureFixture[str]) -> None:
+    parser = argparse.ArgumentParser()
+    LLMConfig.add_cli_arguments(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--llm-provider", "unknown"])
+    err = capsys.readouterr().err
+    # deepseek must appear in the argparse choices list
+    assert "deepseek" in err
+
+
 def test_cli_parses_llm_ssl_verify_flags() -> None:
     parser = argparse.ArgumentParser()
     LLMConfig.add_cli_arguments(parser)

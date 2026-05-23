@@ -647,6 +647,42 @@ class TestDeepSeekProviderDefaults:
         _, synthesis_cfg = cfg.get_provider_configs()
         assert synthesis_cfg["supports_structured_outputs"] is False
 
+    def test_custom_endpoint_without_model_reports_missing_explicit_model(self):
+        cfg = LLMConfig(
+            provider="deepseek",
+            base_url="http://localhost:11434/v1",
+        )
+
+        missing = cfg.get_missing_config()
+
+        assert any(
+            error.startswith(
+                "explicit model selection required for custom OpenAI-compatible "
+                "endpoint roles:"
+            )
+            for error in missing
+        )
+        assert "api_key (set CHUNKHOUND_LLM_API_KEY)" not in missing
+
+    def test_custom_endpoint_with_model_does_not_require_api_key(self):
+        cfg = LLMConfig(
+            provider="deepseek",
+            model="deepseek-r1",
+            base_url="http://localhost:11434/v1",
+        )
+
+        assert cfg.get_missing_config() == []
+
+    def test_official_endpoint_still_requires_api_key(self):
+        cfg = LLMConfig(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+        )
+
+        missing = cfg.get_missing_config()
+
+        assert "api_key (set CHUNKHOUND_LLM_API_KEY)" in missing
+
 
 def test_map_hyde_and_autodoc_cleanup_do_not_inherit_global_codex_reasoning_effort():
     """map_hyde and autodoc_cleanup don't inherit global codex_reasoning_effort.

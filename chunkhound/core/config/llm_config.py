@@ -56,8 +56,8 @@ from ._utils import _parse_env_bool
 from chunkhound.core.config.openai_utils import is_official_openai_endpoint
 
 DEFAULT_LLM_TIMEOUT = 120
-OPENAI_COMPATIBLE_LLM_PROVIDERS = {"openai", "grok"}
-BASE_URL_CAPABLE_LLM_PROVIDERS = OPENAI_COMPATIBLE_LLM_PROVIDERS | {"anthropic", "deepseek"}
+OPENAI_COMPATIBLE_LLM_PROVIDERS = {"openai", "grok", "deepseek"}
+BASE_URL_CAPABLE_LLM_PROVIDERS = OPENAI_COMPATIBLE_LLM_PROVIDERS | {"anthropic"}
 
 REMOVED_PROVIDERS: dict[str, str] = {
     "ollama": (
@@ -71,6 +71,7 @@ CLI_PROVIDER_CHOICES = (
     "openai",
     "claude-code-cli",
     "codex-cli",
+    "deepseek",
     "anthropic",
     "gemini",
     "grok",
