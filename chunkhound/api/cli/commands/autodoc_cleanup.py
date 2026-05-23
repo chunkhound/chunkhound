@@ -22,31 +22,13 @@ def _has_llm_env() -> bool:
 def _build_cleanup_provider_configs(
     llm_config: LLMConfig,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    utility_config, synthesis_config = llm_config.get_provider_configs()
+    """Build utility + autodoc-cleanup provider configs from LLMConfig.
 
-    cleanup_provider = (
-        llm_config.autodoc_cleanup_provider
-        if llm_config.autodoc_cleanup_provider
-        else str(synthesis_config["provider"])
-    )
-    cleanup_model = (
-        llm_config.autodoc_cleanup_model
-        if llm_config.autodoc_cleanup_model
-        else llm_config.resolve_model_for_role("autodoc_cleanup")
-    )
-    cleanup_effort = llm_config.autodoc_cleanup_reasoning_effort
-    if cleanup_model is None:
-        raise ValueError(
-            "AutoDoc cleanup provider requires an explicit provider-compatible model."
-        )
-    synthesis_config = llm_config.build_provider_config(
-        provider=cleanup_provider,
-        model=str(cleanup_model),
-        reasoning_effort=(
-            cleanup_effort if cleanup_effort else synthesis_config.get("reasoning_effort")
-        ),
-    )
-
+    The autodoc cleanup role maps to the synthesis config slot because
+    cleanup replaces synthesis as the document writing phase.
+    """
+    utility_config = llm_config.get_provider_config_for_role("utility")
+    synthesis_config = llm_config.get_provider_config_for_role("autodoc_cleanup")
     return utility_config, synthesis_config
 
 

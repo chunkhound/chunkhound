@@ -65,6 +65,7 @@ TEST SUMMARY
 
 ## Notes
 
+- ChunkHound intentionally defaults both Anthropic utility and synthesis roles to the `claude-haiku` sentinel. Haiku is capable enough for synthesis, is Anthropic's cheapest available Claude model, and Anthropic does not currently offer a true low-cost utility tier.
 - Extended thinking has two modes:
   - Adaptive (Claude Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos). No budget_tokens needed. Auto-enables interleaved thinking.
   - Manual (Opus 4.5 and older Claude 4 models). Requires thinking.budget_tokens of at least 1024.

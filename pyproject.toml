@@ -40,6 +40,7 @@ classifiers = [
 dependencies = [
     "duckdb>=1.4.0,<1.5.3.dev0",
     "openai>=1.0.0",
+    "jsonschema>=4.0.0",
     "packaging>=21.0",
     "aiohttp>=3.12.15",
     "rapidyaml>=0.10.0",
@@ -241,4 +242,5 @@ dev = [
     "pytest-xdist>=3.8.0",
     "ruff>=0.11.12",
     "types-psutil>=7.0.0.20250601",
+    "types-jsonschema>=4.0.0",
 ]

@@ -47,7 +47,7 @@ def test_create_provider_keeps_provider_default_model_when_omitted():
     manager._providers = LLMManager._providers
 
     provider = manager._create_provider({"provider": "opencode-cli"})  # type: ignore[attr-defined]
-    assert provider.model == "opencode/grok-code"
+    assert provider.model == ""  # opencode-cli has no default — user must specify model
 
 
 def test_create_provider_passes_base_url_to_anthropic_provider():

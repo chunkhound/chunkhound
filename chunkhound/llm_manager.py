@@ -8,14 +8,17 @@ from chunkhound.core.config.llm_config import (
     BASE_URL_CAPABLE_LLM_PROVIDERS,
     DEFAULT_LLM_TIMEOUT,
     OPENAI_COMPATIBLE_LLM_PROVIDERS,
+    REASONING_EFFORT_PROVIDERS,
 )
 from chunkhound.core.config.openai_utils import is_official_openai_endpoint
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+from chunkhound.providers.llm.deepseek_llm_provider import DeepSeekLLMProvider
 from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
 from chunkhound.providers.llm.grok_llm_provider import GrokLLMProvider
+from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
 from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
 
@@ -34,6 +37,7 @@ class LLMManager:
         "anthropic": AnthropicLLMProvider,
         "claude-code-cli": ClaudeCodeCLIProvider,
         "codex-cli": CodexCLIProvider,
+        "deepseek": DeepSeekLLMProvider,
         "gemini": GeminiLLMProvider,
         "grok": GrokLLMProvider,
         "opencode-cli": OpenCodeCLIProvider,
@@ -108,8 +112,15 @@ class LLMManager:
                 provider_kwargs["base_url"] = config.get("base_url")
                 provider_kwargs["ssl_verify"] = config.get("ssl_verify", True)
 
-            # Pass reasoning_effort to OpenAI and Codex providers
-            if provider_name in ("openai", "codex-cli"):
+            # Allow OpenAI-compatible providers without native structured
+            # outputs to opt out (e.g. DeepSeek — use prompt-based fallback)
+            if issubclass(provider_class, OpenAICompatibleProvider):
+                sso = config.get("supports_structured_outputs")
+                if sso is not None:
+                    provider_kwargs["supports_structured_outputs"] = sso
+
+            # Pass reasoning_effort to providers that support it
+            if provider_name in REASONING_EFFORT_PROVIDERS:
                 effort = config.get("reasoning_effort")
                 if effort:
                     provider_kwargs["reasoning_effort"] = effort
@@ -133,9 +144,10 @@ class LLMManager:
                 if effort := config.get("effort"):
                     provider_kwargs["effort"] = effort
 
-                # Prompt caching (automatic, ephemeral)
+                # Prompt caching is opt-in; cache writes cost extra and
+                # ChunkHound requests rarely reuse prefixes enough to benefit.
                 provider_kwargs["prompt_caching"] = config.get(
-                    "prompt_caching", True
+                    "prompt_caching", False
                 )
                 if cache_ttl := config.get("cache_ttl"):
                     provider_kwargs["cache_ttl"] = cache_ttl
@@ -185,7 +197,8 @@ class LLMManager:
         """Initialize the synthesis LLM provider."""
         self._synthesis_provider = self._create_provider(self._synthesis_config)
         logger.info(
-            f"Initialized synthesis LLM provider: {self._synthesis_config.get('provider')} "
+            f"Initialized synthesis LLM provider: "
+            f"{self._synthesis_config.get('provider')} "
             f"with model: {self._synthesis_provider.model}"
         )
 

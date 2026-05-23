@@ -4,7 +4,8 @@ Enumerate files using `git ls-files` for speed and exact ignore semantics,
 then apply ChunkHound include/exclude filters.
 
 Design notes:
-- We shell once per repo root (tracked + untracked non-ignored via --others --exclude-standard).
+- We shell once per repo root (tracked + untracked non-ignored via
+  --others --exclude-standard).
 - We NUL-delimit (-z) to avoid issues with spaces and special chars.
 - For non-repo directories, callers should fall back to the Python traversal.
 """
@@ -15,12 +16,12 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
+from loguru import logger
+
 from chunkhound.utils.file_patterns import (
     should_exclude_path,
     should_include_file,
 )
-from loguru import logger
-
 from chunkhound.utils.git_safe import GitCommandError, run_git
 
 
@@ -33,6 +34,7 @@ def build_git_pathspecs(
       - file extensions (e.g., **/*.py)
       - exact basenames (e.g., **/Makefile)
     Complex patterns (character classes, alternations, etc.) are ignored.
+    Callers must only use the result when the include set has no complex patterns.
     """
     # Import summarizer lazily to avoid cycles
     from chunkhound.utils.file_patterns import (
@@ -66,7 +68,7 @@ def build_git_pathspecs(
 def _run_git_ls_files(
     repo_root: Path, pathspecs: list[str] | None = None
 ) -> tuple[list[str], int, int]:
-    """Return repo-relative paths from git ls-files (tracked + untracked non-ignored)."""
+    """Return repo-relative tracked and untracked non-ignored paths."""
     repo_root = repo_root.resolve()
     # Tracked files
     tracked = []
@@ -101,7 +103,9 @@ def _run_git_ls_files(
         res = run_git(args, cwd=repo_root, timeout_s=None)
         if res.returncode != 0:
             logger.debug(
-                f"git ls-files others failed (rc={res.returncode}): {res.stderr.strip()}"
+                "git ls-files others failed (rc={}): {}",
+                res.returncode,
+                res.stderr.strip(),
             )
             others = []
         else:
@@ -155,11 +159,22 @@ def list_repo_files_via_git(
         except Exception:
             pushdown = True
 
-    # Subtree restriction is included via rel_prefix. Build additional :(glob) pathspecs from includes.
+    # Subtree restriction is included via rel_prefix. Build additional :(glob)
+    # pathspecs from includes.
     pathspecs: list[str] | None = None
+    capped = False
     if pushdown:
         try:
-            specs = build_git_pathspecs(rel_prefix, include_patterns)
+            from chunkhound.utils.file_patterns import (  # type: ignore
+                _summarize_include_patterns,
+            )
+
+            _exts, _names, has_complex = _summarize_include_patterns(
+                list(include_patterns)
+            )
+            specs = (
+                [] if has_complex else build_git_pathspecs(rel_prefix, include_patterns)
+            )
             # Apply CAP to avoid excessive number of :(glob) specs
             cap_env = os.environ.get("CHUNKHOUND_INDEXING__GIT_PATHSPEC_CAP", "")
             try:
@@ -168,13 +183,13 @@ def list_repo_files_via_git(
                     cap = 128
             except Exception:
                 cap = 128
-            capped = False
             if specs and len(specs) > cap:
                 # Fallback to subtree-only restriction to guarantee correctness
                 pathspecs = [rel_prefix] if rel_prefix else None
                 capped = True
             else:
-                # If we produced any specs, use them; otherwise fall back to plain subtree pathspec
+                # If we produced any specs, use them; otherwise fall back to
+                # plain subtree pathspec.
                 if specs:
                     pathspecs = specs
                 elif rel_prefix:
@@ -198,14 +213,16 @@ def list_repo_files_via_git(
     norm_includes = list(include_patterns)
     out: list[Path] = []
     pcache: dict[str, object] = {}
-    # Evaluate includes/excludes relative to filter_root (CH root) when provided; otherwise start_dir
+    # Evaluate includes/excludes relative to filter_root when provided;
+    # otherwise start_dir.
     # Don't resolve symlinks for filter base - use logical path for worktree support
     base_for_filters = filter_root or start_dir
 
     for rel in rel_paths:
         # Don't resolve symlinks - use logical path for worktree support
         abs_path = repo_root / rel
-        # Filter to files that still exist as files (follows symlink for existence check only)
+        # Filter to files that still exist as files (follows symlink for
+        # existence check only).
         try:
             if not abs_path.is_file():
                 continue
@@ -230,11 +247,8 @@ def list_repo_files_via_git(
         "git_pushdown": bool(pushdown),
     }
     # Optionally surface whether CAP fallback was applied (best-effort)
-    try:
-        if "capped" in locals() and capped:
-            stats["git_pathspecs_capped"] = True
-    except Exception:
-        pass
+    if capped:
+        stats["git_pathspecs_capped"] = True
     return out, stats
 
 

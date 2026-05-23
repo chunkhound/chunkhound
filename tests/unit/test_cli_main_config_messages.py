@@ -258,7 +258,7 @@ def test_create_validated_config_research_ignores_cleanup_only_override_requirem
         llm_map_hyde_model=None,
         llm_map_hyde_reasoning_effort=None,
         llm_autodoc_cleanup_provider="anthropic",
-        llm_autodoc_cleanup_model=None,
+        llm_autodoc_cleanup_model="claude-haiku",
         llm_autodoc_cleanup_reasoning_effort=None,
     )
 
