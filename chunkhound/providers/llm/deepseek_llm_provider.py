@@ -35,8 +35,10 @@ class DeepSeekLLMProvider(OpenAICompatibleProvider):
         """Initialize DeepSeek LLM provider.
 
         Args:
-            api_key: DeepSeek API key. When None, AsyncOpenAI client falls back to
-                OPENAI_API_KEY.
+            api_key: DeepSeek API key. When None, the OpenAI SDK still receives
+                the placeholder value ``"not-required"`` for DeepSeek/custom
+                endpoints; ``OPENAI_API_KEY`` fallback only applies on
+                official OpenAI endpoints.
             model: Model name (default: "deepseek-v4-flash")
             base_url: Base URL (defaults to https://api.deepseek.com)
             timeout: Request timeout in seconds
