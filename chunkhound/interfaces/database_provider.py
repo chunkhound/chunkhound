@@ -232,6 +232,7 @@ class DatabaseProvider(Protocol):
         offset: int = 0,
         threshold: float | None = None,
         path_filter: str | None = None,
+        metadata_filters: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform semantic vector search.
 
@@ -243,6 +244,7 @@ class DatabaseProvider(Protocol):
             offset: Starting position for pagination
             threshold: Optional similarity threshold
             path_filter: Optional relative path to limit search scope (e.g., 'src/', 'tests/')
+            metadata_filters: Optional exact metadata filters such as doc_type/status
 
         Returns:
             Tuple of (results, pagination_metadata)

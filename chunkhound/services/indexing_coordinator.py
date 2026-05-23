@@ -1769,6 +1769,7 @@ class IndexingCoordinator(BaseService):
                         language=chunk.get("language"),
                         constants=constants,
                         rule_target=rule_target,
+                        doc_metadata=metadata,
                     )
                     valid_chunk_data.append((chunk_id, chunk, text))
                 else:

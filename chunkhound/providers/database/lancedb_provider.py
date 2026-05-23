@@ -1727,6 +1727,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         offset: int = 0,
         threshold: float | None = None,
         path_filter: str | None = None,
+        metadata_filters: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Executor method for search_semantic - runs in DB thread."""
         if self._chunks_table is None:

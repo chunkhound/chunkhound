@@ -2916,6 +2916,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         offset: int = 0,
         threshold: float | None = None,
         path_filter: str | None = None,
+        metadata_filters: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform semantic vector search using HNSW index with multi-dimension support.
 
@@ -2932,6 +2933,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             offset,
             threshold,
             path_filter,
+            metadata_filters,
         )
 
     def _executor_search_semantic(
@@ -2945,6 +2947,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         offset: int,
         threshold: float | None,
         path_filter: str | None,
+        metadata_filters: dict[str, str] | None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Executor method for search_semantic - runs in DB thread."""
         try:
@@ -2998,11 +3001,28 @@ class DuckDBProvider(SerialDatabaseProvider):
                 params.append(query_embedding)
                 params.append(threshold)
 
+            metadata_filter_sql: list[str] = []
+            metadata_filter_params: list[str] = []
+            for key, value in (metadata_filters or {}).items():
+                if not value:
+                    continue
+                safe_key = key if key.startswith("doc_") else f"doc_{key}"
+                if safe_key not in {"doc_type", "doc_status", "doc_owner"}:
+                    continue
+                metadata_filter_sql.append(
+                    f"json_extract_string(c.metadata, '$.{safe_key}') = ?"
+                )
+                metadata_filter_params.append(value)
+
             if path_like is not None:
                 query += " AND f.path LIKE ? ESCAPE '\\'"
                 # Use substring match so callers can pass repo-relative paths
                 # even when the database base_directory is higher (e.g., monorepo root).
                 params.append(path_like)
+
+            for clause, value in zip(metadata_filter_sql, metadata_filter_params):
+                query += f" AND {clause}"
+                params.append(value)
 
             # Get total count for pagination
             # Build count query separately to avoid string replacement issues
@@ -3024,6 +3044,10 @@ class DuckDBProvider(SerialDatabaseProvider):
                 count_query += " AND f.path LIKE ? ESCAPE '\\'"
                 # Substring match for consistency with main query
                 count_params.append(path_like)
+
+            for clause, value in zip(metadata_filter_sql, metadata_filter_params):
+                count_query += f" AND {clause}"
+                count_params.append(value)
 
             total_count = conn.execute(count_query, count_params).fetchone()[0]
 

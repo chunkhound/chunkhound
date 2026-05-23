@@ -78,6 +78,21 @@ def add_search_subparser(subparsers: Any) -> argparse.ArgumentParser:
         type=str,
         help="Optional path filter (e.g., 'src/', 'tests/')",
     )
+    search_parser.add_argument(
+        "--doc-type",
+        type=str,
+        help="Optional Markdown frontmatter type filter for semantic doc search",
+    )
+    search_parser.add_argument(
+        "--status",
+        type=str,
+        help="Optional Markdown frontmatter status filter for semantic doc search",
+    )
+    search_parser.add_argument(
+        "--owner",
+        type=str,
+        help="Optional Markdown frontmatter owner filter for semantic doc search",
+    )
 
     # Add common arguments
     add_common_arguments(search_parser)

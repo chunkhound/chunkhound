@@ -92,6 +92,9 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
                 page_size=args.page_size,
                 offset=args.offset,
                 path=args.path_filter,
+                doc_type=args.doc_type,
+                status=args.status,
+                owner=args.owner,
             )
             result_dict = cast(dict[str, Any], result)
         else:
@@ -128,6 +131,16 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
                 model=model_name,
                 path_filter=args.path_filter,
                 force_strategy=force_strategy,
+                metadata_filters={
+                    key: value
+                    for key, value in {
+                        "type": args.doc_type,
+                        "status": args.status,
+                        "owner": args.owner,
+                    }.items()
+                    if value
+                }
+                or None,
             )
             result_dict = {"results": results, "pagination": pagination}
 

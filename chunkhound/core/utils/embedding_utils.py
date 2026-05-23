@@ -10,6 +10,7 @@ def format_chunk_for_embedding(
     language: str | None = None,
     constants: list[dict[str, str]] | None = None,
     rule_target: str | None = None,
+    doc_metadata: dict | None = None,
 ) -> str:
     """Prepend path, language, and constants metadata to chunk content for embedding.
 
@@ -41,7 +42,7 @@ def format_chunk_for_embedding(
         >>> format_chunk_for_embedding("def foo(): pass")
         'def foo(): pass'
     """
-    if not file_path and not language and not constants and not rule_target:
+    if not file_path and not language and not constants and not rule_target and not doc_metadata:
         return code
 
     if file_path and language:
@@ -67,4 +68,27 @@ def format_chunk_for_embedding(
             const_str += f", +{len(constants) - MAX_CONSTANTS_IN_HEADER} more"
         header += f" [{const_str}]"
 
+    doc_lines = []
+    if doc_metadata:
+        for key in ("doc_title", "doc_type", "doc_status", "doc_owner", "doc_summary"):
+            value = doc_metadata.get(key)
+            if isinstance(value, str) and value:
+                doc_lines.append(f"{key.removeprefix('doc_')}: {value}")
+        tags = doc_metadata.get("doc_tags")
+        if isinstance(tags, list) and tags:
+            doc_lines.append("tags: " + ", ".join(str(tag) for tag in tags[:12]))
+        heading_path = doc_metadata.get("heading_path")
+        if isinstance(heading_path, list) and heading_path:
+            doc_lines.append("heading_path: " + " > ".join(str(item) for item in heading_path))
+        relationships = []
+        for key in doc_metadata.get("relationship_keys") or []:
+            value = doc_metadata.get(key)
+            if isinstance(value, list):
+                relationships.append(f"{key}: {', '.join(str(item) for item in value[:8])}")
+            elif isinstance(value, str) and value:
+                relationships.append(f"{key}: {value}")
+        doc_lines.extend(relationships[:8])
+
+    if doc_lines:
+        return f"{header}\n" + "\n".join(doc_lines) + f"\n\n{code}"
     return f"{header}\n{code}"

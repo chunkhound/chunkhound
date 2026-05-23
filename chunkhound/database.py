@@ -226,6 +226,7 @@ class Database:
         offset: int = 0,
         threshold: float | None = None,
         path_filter: str | None = None,
+        metadata_filters: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform semantic similarity search.
 
@@ -239,6 +240,7 @@ class Database:
             offset=offset,
             threshold=threshold,
             path_filter=path_filter,
+            metadata_filters=metadata_filters,
         )
 
     def search_regex(

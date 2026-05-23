@@ -235,6 +235,7 @@ class SerialDatabaseProvider(ABC):
         offset: int = 0,
         threshold: float | None = None,
         path_filter: str | None = None,
+        metadata_filters: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform semantic vector search if supported."""
         if not hasattr(self, "_executor_search_semantic"):
@@ -249,6 +250,7 @@ class SerialDatabaseProvider(ABC):
             offset,
             threshold,
             path_filter,
+            metadata_filters,
         )
 
     def search_regex(
