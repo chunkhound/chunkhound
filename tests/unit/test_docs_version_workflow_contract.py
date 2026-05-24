@@ -139,9 +139,13 @@ def _load_workflow(path: str) -> dict[str, Any]:
         return cast(dict[str, Any], yaml.safe_load(handle))
 
 
-def _job_steps(path: str, job_name: str) -> list[dict[str, Any]]:
+def _job(path: str, job_name: str) -> dict[str, Any]:
     workflow = _load_workflow(path)
-    return cast(list[dict[str, Any]], workflow["jobs"][job_name]["steps"])
+    return cast(dict[str, Any], workflow["jobs"][job_name])
+
+
+def _job_steps(path: str, job_name: str) -> list[dict[str, Any]]:
+    return cast(list[dict[str, Any]], _job(path, job_name)["steps"])
 
 
 def _find_step_index(
@@ -412,24 +416,19 @@ class TestDocsVersionWorkflowContract:
     def test_docs_build_jobs_checkout_with_full_history(
         self, path: str, job_name: str
     ) -> None:
-        steps = _job_steps(path, job_name)
-        _assert_checkout_uses_full_history(steps)
+        _assert_checkout_uses_full_history(_job_steps(path, job_name))
 
     @pytest.mark.parametrize(
-        ("path", "job_name", "consumer_description", "consumer_predicate"),
+        ("job_name", "consumer_description", "consumer_predicate"),
         [
             (
-                ".github/workflows/smoke-tests.yml",
                 "site-build",
                 "site build step",
                 lambda step: step.get("run") == "npm run build --prefix site",
             ),
             (
-                ".github/workflows/smoke-tests.yml",
                 "tests",
                 "retry-backed test runner step",
-                # This contract protects the real test runner, not the collect-only
-                # check, so workflow refactors do not accidentally weaken it.
                 lambda step: step.get("id") == "tests"
                 and str(step.get("uses", "")).startswith("nick-fields/retry@"),
             ),
@@ -443,12 +442,11 @@ class TestDocsVersionWorkflowContract:
     )
     def test_docs_version_is_resolved_before_consumer_steps(
         self,
-        path: str,
         job_name: str,
         consumer_description: str,
         consumer_predicate: Callable[[dict], bool],
     ) -> None:
-        steps = _job_steps(path, job_name)
+        steps = _job_steps(".github/workflows/smoke-tests.yml", job_name)
         resolve_index = _find_step_index(
             steps,
             "shared docs version resolver step",
@@ -460,14 +458,105 @@ class TestDocsVersionWorkflowContract:
 
         assert resolve_index < consumer_index
 
-    @pytest.mark.parametrize(
-        "path",
-        [
-            ".github/workflows/smoke-tests.yml",
-            ".github/workflows/deploy.yml",
-        ],
-    )
-    def test_workflows_do_not_inline_docs_version_resolution(self, path: str) -> None:
-        contents = (ROOT / path).read_text(encoding="utf-8")
+    def test_workflows_do_not_inline_docs_version_resolution(self) -> None:
+        contents = (ROOT / ".github/workflows/smoke-tests.yml").read_text(
+            encoding="utf-8"
+        )
 
         assert INLINE_RESOLVE_SNIPPET not in contents
+
+    def test_site_build_uploads_site_dist_artifact_after_nojekyll(self) -> None:
+        steps = _job_steps(".github/workflows/smoke-tests.yml", "site-build")
+        nojekyll_index = _find_step_index(
+            steps,
+            ".nojekyll creation step",
+            lambda step: step.get("run") == "touch site/dist/.nojekyll",
+        )
+        upload_index = _find_step_index(
+            steps,
+            "site artifact upload step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/upload-artifact@"
+            ),
+        )
+        upload_step = steps[upload_index]
+
+        assert nojekyll_index < upload_index
+        assert upload_step["with"]["name"] == "site-dist"
+        assert upload_step["with"]["path"] == "site/dist/"
+
+    def test_tests_job_downloads_site_dist_and_uses_existing_build(self) -> None:
+        job = _job(".github/workflows/smoke-tests.yml", "tests")
+        steps = cast(list[dict[str, Any]], job["steps"])
+        download_index = _find_step_index(
+            steps,
+            "site artifact download step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/download-artifact@"
+            ),
+        )
+        download_step = steps[download_index]
+        tests_index = _find_step_index(
+            steps,
+            "retry-backed test runner step",
+            lambda step: step.get("id") == "tests"
+            and str(step.get("uses", "")).startswith("nick-fields/retry@"),
+        )
+        tests_step = steps[tests_index]
+
+        assert job["needs"] == "site-build"
+        assert download_step["with"]["name"] == "site-dist"
+        assert download_step["with"]["path"] == "site/dist"
+        assert tests_step["env"]["CHUNKHOUND_USE_EXISTING_SITE_DIST"] == "1"
+
+    def test_tests_job_matrix_uses_pytest_timeout_minutes_consistently(self) -> None:
+        matrix = cast(
+            list[dict[str, Any]],
+            _job(".github/workflows/smoke-tests.yml", "tests")["strategy"]["matrix"][
+                "include"
+            ],
+        )
+
+        assert all("pytest_timeout_minutes" in entry for entry in matrix)
+        assert all("retry_timeout_minutes" not in entry for entry in matrix)
+
+    def test_pages_artifact_job_contract(self) -> None:
+        job = _job(".github/workflows/smoke-tests.yml", "pages-artifact")
+        steps = cast(list[dict[str, Any]], job["steps"])
+        download_index = _find_step_index(
+            steps,
+            "tested site artifact download step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/download-artifact@"
+            ),
+        )
+        upload_index = _find_step_index(
+            steps,
+            "pages artifact upload step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/upload-pages-artifact@"
+            ),
+        )
+        download_step = steps[download_index]
+        upload_step = steps[upload_index]
+        permissions = cast(dict[str, Any], job.get("permissions", {}))
+
+        assert job["needs"] == ["site-build", "tests"]
+        assert "github.event_name == 'workflow_dispatch'" in job["if"]
+        assert "github.event_name == 'push'" in job["if"]
+        assert "github.ref == 'refs/heads/main'" in job["if"]
+        assert download_step["with"]["name"] == "site-dist"
+        assert download_step["with"]["path"] == "site/dist"
+        assert upload_step["with"]["path"] == "site/dist/"
+        assert permissions["contents"] == "read"
+
+    def test_deploy_job_contract(self) -> None:
+        job = _job(".github/workflows/smoke-tests.yml", "deploy")
+        permissions = cast(dict[str, Any], job.get("permissions", {}))
+
+        assert job["needs"] == "pages-artifact"
+        assert "github.event_name == 'workflow_dispatch'" in job["if"]
+        assert "github.event_name == 'push'" in job["if"]
+        assert "github.ref == 'refs/heads/main'" in job["if"]
+        assert permissions["pages"] == "write"
+        assert permissions["id-token"] == "write"

@@ -1,21 +1,32 @@
+import os
 import subprocess
 import sys
-import pytest
 from pathlib import Path
 
+import pytest
+
+from tests.site.tsx_runner import NPM, sanitized_subprocess_env
+
 ROOT = Path(__file__).resolve().parents[2]
+DIST = ROOT / "site" / "dist"
+DIST_INDEX = DIST / "index.html"
 
 
 @pytest.fixture(scope="session", autouse=True)
 def built_site() -> None:
-    """Build the Astro site once per test session."""
-    if (ROOT / "site" / "dist" / "index.html").exists():
-        return  # already built (e.g. downloaded from CI artifact)
-    # Import NPM from tsx_runner to get the platform-correct npm path
-    from tests.site.tsx_runner import NPM
+    """Reuse an existing built site, or build once for the test session."""
+    if os.environ.get("CHUNKHOUND_USE_EXISTING_SITE_DIST") == "1":
+        if not DIST.exists():
+            raise AssertionError(f"Expected prebuilt site artifact at {DIST}")
+        return
+
+    if DIST_INDEX.exists():
+        return
+
     result = subprocess.run(
         [NPM, "run", "build", "--prefix", "site"],
         cwd=ROOT,
+        env=sanitized_subprocess_env(),
         capture_output=True,
         text=True,
     )
