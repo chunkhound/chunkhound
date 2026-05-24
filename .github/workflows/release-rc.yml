@@ -81,8 +81,53 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+  build-native-wheel:
+    needs: validate-tag
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build native wheel
+        run: |
+          pip install maturin
+          maturin build --release --out dist/
+
+      - name: Upload native wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-rc-dist-native-${{ matrix.os }}
+          path: dist/*.whl
+          if-no-files-found: error
+
   publish-rc:
-    needs: [build-sdist, build-runtime-wheels]
+    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
     runs-on: ubuntu-latest
     environment: pypi
     timeout-minutes: 15
