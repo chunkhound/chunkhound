@@ -19,6 +19,7 @@ def test_tool_registry_populated():
         "search",
         "daemon_status",
         "code_research",
+        "websearch",
     ]
     for tool_name in expected_tools:
         assert tool_name in TOOL_REGISTRY, f"Tool '{tool_name}' should be in registry"
@@ -125,6 +126,58 @@ def test_capability_flags():
     assert TOOL_REGISTRY["code_research"].requires_embeddings
     assert TOOL_REGISTRY["code_research"].requires_llm
     assert TOOL_REGISTRY["code_research"].requires_reranker
+
+    # websearch: research stage needs the same three capabilities
+    assert TOOL_REGISTRY["websearch"].requires_embeddings
+    assert TOOL_REGISTRY["websearch"].requires_llm
+    assert TOOL_REGISTRY["websearch"].requires_reranker
+
+
+def test_websearch_schema():
+    """Verify websearch has correct schema from decorator."""
+    tool = TOOL_REGISTRY["websearch"]
+
+    assert len(tool.description) > 100, (
+        "websearch should have comprehensive description"
+    )
+
+    props = tool.parameters["properties"]
+    assert "query" in props, "websearch should have 'query' parameter"
+    assert "limit" in props, "websearch should have 'limit' parameter"
+    assert "path_filter" in props, "websearch should have 'path_filter' parameter"
+
+    # limit default matches spec §4.2
+    assert props["limit"].get("default") == 30
+
+    required = tool.parameters.get("required", [])
+    assert "query" in required, "'query' should be required for websearch"
+    assert "limit" not in required, "'limit' should not be required (has default)"
+    assert "path_filter" not in required, (
+        "'path_filter' should not be required (optional)"
+    )
+
+
+def test_websearch_hidden_without_capabilities():
+    """Verify websearch is filtered out when providers are missing.
+
+    Calls _build_filtered_tool_dicts directly against a minimal stub — it only
+    reads embedding_manager/llm_manager off self and delegates the reranker
+    check to has_reranker_support, which already tolerates None. Avoids the
+    full StdioMCPServer construction path (logger shaping, asyncio.Event,
+    tool registration), which would silently absorb a MagicMock config and
+    mask future initializer changes.
+    """
+    from types import SimpleNamespace
+
+    from chunkhound.mcp_server.base import MCPServerBase
+
+    stub = SimpleNamespace(embedding_manager=None, llm_manager=None)
+    tool_dicts = MCPServerBase._build_filtered_tool_dicts(stub)  # type: ignore[arg-type]
+    tool_names = [d["name"] for d in tool_dicts]
+
+    assert "websearch" not in tool_names, (
+        f"websearch should be hidden without capabilities, got {tool_names}"
+    )
 
 
 @pytest.mark.asyncio

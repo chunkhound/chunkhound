@@ -6,12 +6,18 @@ registry that the stdio server uses for tool definitions.
 The registry pattern ensures consistent tool metadata and behavior.
 """
 
+import asyncio
 import inspect
 import json
+import os
 import re
+import shutil
+import tempfile
 import types
+import urllib.error
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, TypedDict, Union, cast, get_args, get_origin
 
 try:
@@ -442,6 +448,8 @@ USE FOR:
 OUTPUT: {status, query_ready, scan_progress}
 NOTE: Query readiness is derived from scan state on this branch."""
 
+WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, build a transient in-memory index over the fetched pages, and run deep research to produce a cited answer. Use when the question requires external documentation, library references, or up-to-date web content — not for searching the local codebase (use `code_research` for that). High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
+
 
 # =============================================================================
 # Tool Implementations
@@ -618,6 +626,117 @@ async def deep_research_impl(
     )
 
     return await research_service.deep_research(query)
+
+
+@register_tool(
+    description=WEBSEARCH_DESCRIPTION,
+    requires_embeddings=True,
+    requires_llm=True,
+    requires_reranker=True,
+    name="websearch",
+)
+async def websearch_impl(
+    embedding_manager: EmbeddingManager,
+    llm_manager: LLMManager | None,
+    config: Config | None,
+    query: str,
+    limit: int = 30,
+    path_filter: str | None = None,
+) -> str:
+    """Search the web, fetch results, and run deep research over them.
+
+    Args:
+        embedding_manager: Present solely for capability gating
+            (requires_embeddings=True); signature-inspected by register_tool.
+            Unused in the body — the research stage runs in a subprocess.
+        llm_manager: Present solely for capability gating (requires_llm=True);
+            signature-inspected by register_tool. Unused in the body.
+        config: Application configuration; falls back to environment. Its
+            source file (if any) is forwarded to the subprocess as --config.
+        query: Natural-language or keyword query for DuckDuckGo.
+        limit: Number of results to fetch. Clamped to [1, 100]. Default 30.
+        path_filter: Optional scope restriction forwarded to the research stage.
+
+    Returns:
+        Markdown: research answer (with tmpdir paths rewritten to source URLs)
+        + optional fetch-warning block.
+    """
+    from chunkhound.mcp_server.common import MCPError
+    from chunkhound.utils.websearch_core import (
+        build_quickresearch_argv_core,
+        clamp_limit,
+        fetch_and_save,
+        search,
+        websearch_timeout,
+    )
+    from chunkhound.utils.websearch_postprocess import replace_paths_with_urls
+
+    if config is None:
+        config = Config.from_environment()
+
+    limit = clamp_limit(limit)
+
+    try:
+        results = await asyncio.to_thread(search, query, limit, None)
+    except urllib.error.URLError as e:
+        raise MCPError(f"Web search failed: {e.reason}") from e
+    if not results:
+        raise MCPError(f"No results found for {query!r}")
+
+    warnings: list[str] = []
+    mapping: dict[str, str] = {}
+    tmpdir = Path(tempfile.mkdtemp(prefix="chunkhound_websearch_mcp_"))
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        await fetch_and_save(
+            [url for _, url, _ in results],
+            tmpdir,
+            progress_callback=None,
+            warning_callback=warnings.append,
+            mapping=mapping,
+        )
+
+        cmd = build_quickresearch_argv_core(query, tmpdir, path_filter, config)
+        # Scrub CHUNKHOUND_MCP_MODE so the child's RichOutputFormatter.error()
+        # is not silenced — we rely on its stderr output to populate the
+        # MCPError tail on subprocess failure.
+        env = {k: v for k, v in os.environ.items() if k != "CHUNKHOUND_MCP_MODE"}
+        env["CHUNKHOUND_QUICKRESEARCH_QUIET"] = "1"
+        env["CHUNKHOUND_NO_PROMPTS"] = "1"
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        timeout_s = websearch_timeout()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_s
+            )
+        except asyncio.TimeoutError:
+            raise MCPError(
+                f"websearch timed out after {timeout_s:.0f}s"
+            ) from None
+        if proc.returncode != 0:
+            raise MCPError(
+                f"Research subprocess failed (exit {proc.returncode}): "
+                f"{stderr.decode(errors='replace').strip()[-2000:]}"
+            )
+        answer = stdout.decode(errors="replace")
+    finally:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    answer = replace_paths_with_urls(answer, mapping).rstrip()
+    warn_block = (
+        "\n\n> **Fetch warnings:**\n"
+        + "\n".join(f"> - {w}" for w in warnings)
+    ) if warnings else ""
+    return f"{answer}{warn_block}"
 
 
 # =============================================================================

@@ -98,9 +98,13 @@ dependencies = [
     "tree-sitter-html>=0.23.2",
     "tree-sitter-css>=0.25.0",
     "lark>=1.1.0",
+    "markdownify>=1.0",
 ]
 
 [project.optional-dependencies]
+browser = [
+    "playwright>=1.48.0",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
