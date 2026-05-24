@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from loguru import logger
 
 from chunkhound.core.config.config import Config
@@ -39,8 +37,7 @@ def build_llm_metadata_and_map_hyde(
     map_hyde_provider_name = getattr(llm, "map_hyde_provider", None)
     map_hyde_model_name = getattr(llm, "map_hyde_model", None)
     map_hyde_effort = getattr(llm, "map_hyde_reasoning_effort", None)
-
-    _utility_cfg, synth_cfg = llm.get_provider_configs()
+    map_hyde_cfg = llm.get_provider_config_for_role("map_hyde")
 
     needs_custom_map_hyde = bool(
         map_hyde_provider_name or map_hyde_model_name or map_hyde_effort
@@ -53,31 +50,6 @@ def build_llm_metadata_and_map_hyde(
 
     if llm_manager is not None and needs_custom_map_hyde:
         try:
-            map_hyde_provider_name = (
-                map_hyde_provider_name
-                if map_hyde_provider_name
-                else str(synth_cfg["provider"])
-            )
-            map_hyde_model = (
-                map_hyde_model_name
-                if map_hyde_model_name
-                else llm.resolve_model_for_role("map_hyde")
-            )
-            map_hyde_reasoning_effort = (
-                str(map_hyde_effort).strip().lower()
-                if map_hyde_effort
-                else synth_cfg.get("reasoning_effort")
-            )
-            if map_hyde_model is None:
-                raise ValueError(
-                    "Custom HyDE provider requires an explicit provider-compatible model."
-                )
-            map_hyde_cfg: dict[str, Any] = llm.build_provider_config(
-                provider=map_hyde_provider_name,
-                model=str(map_hyde_model),
-                reasoning_effort=map_hyde_reasoning_effort,
-            )
-
             map_hyde_provider = llm_manager.create_provider_for_config(map_hyde_cfg)
 
             llm_meta["map_hyde_provider"] = str(
@@ -96,15 +68,12 @@ def build_llm_metadata_and_map_hyde(
                 f"Invalid map_hyde configuration: {exc}"
             ) from exc
 
-    if map_hyde_provider is None and not needs_custom_map_hyde:
-        synth_provider = synth_cfg.get("provider")
-        synth_model = synth_cfg.get("model")
-        if synth_provider:
-            llm_meta["map_hyde_provider"] = str(synth_provider)
-        if synth_model:
-            llm_meta["map_hyde_model"] = str(synth_model)
-        effort = synth_cfg.get("reasoning_effort")
-        if effort:
+    if map_hyde_provider is None:
+        if provider := map_hyde_cfg.get("provider"):
+            llm_meta["map_hyde_provider"] = str(provider)
+        if model := map_hyde_cfg.get("model"):
+            llm_meta["map_hyde_model"] = str(model)
+        if effort := map_hyde_cfg.get("reasoning_effort"):
             llm_meta["map_hyde_reasoning_effort"] = str(effort)
 
     return llm_meta, map_hyde_provider

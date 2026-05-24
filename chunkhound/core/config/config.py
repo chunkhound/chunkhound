@@ -40,6 +40,10 @@ class Config(BaseModel):
     target_dir: Path | None = Field(default=None, exclude=True)
     # Private field to track if embeddings were explicitly disabled
     embeddings_disabled: bool = Field(default=False, exclude=True)
+    # Private field to store the auto-discovered local .chunkhound.json path
+    local_config_file: Path | None = Field(default=None, exclude=True)
+    # Private field to store the explicit --config path (absolute) when provided
+    config_file: Path | None = Field(default=None, exclude=True)
 
     def __init__(self, args: Any | None = None, **kwargs: Any) -> None:
         """Universal configuration initialization that handles all contexts.
@@ -73,6 +77,7 @@ class Config(BaseModel):
             # Get config file from --config if present
             if hasattr(args, "config") and args.config:
                 config_file = Path(args.config)
+                config_data["config_file"] = config_file.resolve()
 
             # For most commands, args.path represents the project root used for config
             # discovery. For map, args.path is a documentation scope and must
@@ -111,6 +116,7 @@ class Config(BaseModel):
         if target_dir and target_dir.exists():
             local_config_path = target_dir / ".chunkhound.json"
             if local_config_path.exists() and local_config_path != config_file:
+                config_data["local_config_file"] = local_config_path
                 try:
                     with open(local_config_path) as f:
                         local_config = json.load(f)
@@ -326,8 +332,11 @@ class Config(BaseModel):
                 f"Missing required configuration: {item}" for item in missing_config
             )
 
+        # websearch only spawns _quickresearch as a subprocess, but we validate
+        # LLM/embedding config in the parent so misconfiguration fails fast
+        # before fetching DDG results and writing tempfiles.
         requires_llm = (
-            command == "research"
+            command in ("research", "websearch", "_quickresearch")
             or (command == "map" and not getattr(args, "overview_only", False))
             or (command == "autodoc" and not getattr(args, "assets_only", False))
         )
@@ -352,8 +361,8 @@ class Config(BaseModel):
                         for item in llm_missing
                     )
 
-        # Validate embedding provider requirements for index command
-        if command == "index":
+        # Validate embedding provider requirements for commands that index code
+        if command in ("index", "websearch", "_quickresearch"):
             # Skip embedding validation if embeddings were explicitly disabled
             if not self.embeddings_disabled:
                 if self.embedding is None:

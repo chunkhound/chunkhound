@@ -8,6 +8,7 @@ from loguru import logger
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.interfaces.llm_provider import LLMResponse
 from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
+from chunkhound.utils.json_extraction import build_schema_system_instruction
 
 
 class OpenAILLMProvider(OpenAICompatibleProvider):
@@ -68,6 +69,7 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
         timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
         reasoning_effort: str | None = None,
+        supports_structured_outputs: bool | None = None,
     ):
         """Initialize OpenAI LLM provider.
 
@@ -80,6 +82,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             max_retries: Number of retry attempts for failed requests
             reasoning_effort: Reasoning effort for reasoning models
                 (none, minimal, low, medium, high)
+            supports_structured_outputs: Override class-level structured
+                output support flag
         """
         super().__init__(
             api_key=api_key,
@@ -88,6 +92,7 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             ssl_verify=ssl_verify,
             timeout=timeout,
             max_retries=max_retries,
+            supports_structured_outputs=supports_structured_outputs,
         )
         self._reasoning_effort = reasoning_effort
 
@@ -194,7 +199,26 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                 response.status
             )  # Responses API uses 'status' instead of 'finish_reason'
 
-            # Validate content is not None or empty
+            # Check for incomplete responses FIRST (fix C2) so token-limit
+            # diagnostics are not masked by a generic empty-content error.
+            if finish_reason == "incomplete":
+                usage_info = ""
+                if response.usage:
+                    usage_info = (
+                        f" (input={response.usage.input_tokens:,}, "
+                        f"output={response.usage.output_tokens:,})"
+                    )
+
+                raise RuntimeError(
+                    f"LLM response incomplete - token limit exceeded{usage_info}. "
+                    "For reasoning models, this indicates the query requires "
+                    "extensive reasoning "
+                    "that exhausted the output budget. Try breaking your query into "
+                    "smaller, "
+                    "more focused questions."
+                )
+
+            # Validate content is not None or empty (reached only if not incomplete)
             if content is None:
                 logger.error(
                     f"OpenAI Responses API returned None content "
@@ -213,24 +237,6 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                 raise RuntimeError(
                     f"LLM returned empty response (status={finish_reason}). "
                     "This may indicate a content filter, API error, or model refusal."
-                )
-
-            # Check for incomplete responses
-            if finish_reason == "incomplete":
-                usage_info = ""
-                if response.usage:
-                    usage_info = (
-                        f" (input={response.usage.input_tokens:,}, "
-                        f"output={response.usage.output_tokens:,})"
-                    )
-
-                raise RuntimeError(
-                    f"LLM response incomplete - token limit exceeded{usage_info}. "
-                    "For reasoning models, this indicates the query requires "
-                    "extensive reasoning "
-                    "that exhausted the output budget. Try breaking your query into "
-                    "smaller, "
-                    "more focused questions."
                 )
 
             # Warn on other unexpected status
@@ -292,6 +298,10 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
     ) -> dict[str, Any]:
         """Generate structured JSON using Responses API.
 
+        Uses native ``text.format`` with ``json_schema`` when
+        ``_supports_structured_outputs`` is ``True``. Otherwise falls back
+        to prompt-based schema injection while keeping Responses API routing.
+
         Args:
             prompt: The user prompt
             json_schema: JSON Schema definition for structured output
@@ -310,19 +320,29 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             "input": prompt,
             "max_output_tokens": max_completion_tokens,
             "timeout": request_timeout,
-            # Responses API uses text.format for structured outputs
-            "text": {
+        }
+
+        if self._supports_structured_outputs:
+            # Responses API uses text.format for native structured outputs.
+            request_params["text"] = {
                 "format": {
                     "type": "json_schema",
                     "name": "structured_response",
                     "strict": True,
                     "schema": json_schema,
                 }
-            },
-        }
+            }
+        else:
+            schema_instruction = build_schema_system_instruction(json_schema)
+            if system:
+                effective_system = f"{system}\n\n{schema_instruction}"
+            else:
+                effective_system = schema_instruction
 
-        # Add system instructions if provided
-        if system:
+            request_params["instructions"] = effective_system
+
+        # Add system instructions if provided (native path)
+        if self._supports_structured_outputs and system:
             request_params["instructions"] = system
 
         # Add reasoning configuration if specified
@@ -351,18 +371,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             content = "\n".join(content_parts) if content_parts else None
             finish_reason = response.status
 
-            # Validate content
-            if content is None or not content.strip():
-                logger.error(
-                    f"Responses API structured completion returned empty content "
-                    f"(status={finish_reason})"
-                )
-                raise RuntimeError(
-                    f"LLM structured completion returned empty response "
-                    f"(status={finish_reason})"
-                )
-
-            # Check for incomplete responses
+            # Check for incomplete responses before empty-content validation so
+            # token-limit diagnostics are not masked by a generic empty error.
             if finish_reason == "incomplete":
                 usage_info = ""
                 if response.usage:
@@ -375,8 +385,19 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                     f"exceeded{usage_info}"
                 )
 
+            # Validate content
+            if content is None or not content.strip():
+                logger.error(
+                    f"Responses API structured output returned empty content "
+                    f"(status={finish_reason})"
+                )
+                raise RuntimeError(
+                    f"LLM structured output returned empty response "
+                    f"(status={finish_reason})"
+                )
+
             # Parse JSON
-            parsed = json.loads(content)
+            parsed = self._parse_structured_response(content, json_schema)
             return parsed
 
         except json.JSONDecodeError as e:

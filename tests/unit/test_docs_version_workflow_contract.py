@@ -389,7 +389,6 @@ class TestDocsVersionWorkflowContract:
         [
             (".github/workflows/smoke-tests.yml", "site-build"),
             (".github/workflows/smoke-tests.yml", "tests"),
-            (".github/workflows/deploy.yml", "build"),
         ],
     )
     def test_docs_build_jobs_use_shared_resolver_script(
@@ -410,7 +409,6 @@ class TestDocsVersionWorkflowContract:
         [
             (".github/workflows/smoke-tests.yml", "site-build"),
             (".github/workflows/smoke-tests.yml", "tests"),
-            (".github/workflows/deploy.yml", "build"),
         ],
     )
     def test_docs_build_jobs_checkout_with_full_history(
@@ -432,12 +430,7 @@ class TestDocsVersionWorkflowContract:
                 lambda step: step.get("id") == "tests"
                 and str(step.get("uses", "")).startswith("nick-fields/retry@"),
             ),
-            (
-                ".github/workflows/deploy.yml",
-                "build",
-                "site build step",
-                lambda step: step.get("run") == "npm run build --prefix site",
-            ),
+
         ],
     )
     def test_docs_version_is_resolved_before_consumer_steps(

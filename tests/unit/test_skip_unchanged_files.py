@@ -1,5 +1,4 @@
 import asyncio
-import os
 import sys
 import types
 from pathlib import Path
@@ -7,14 +6,14 @@ from pathlib import Path
 import pytest
 
 
-def _install_parser_stubs():
+def _install_parser_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Install lightweight stubs to avoid importing heavy tree-sitter modules in tests."""
     # Stub for chunkhound.parsers.universal_parser
     up = types.ModuleType("chunkhound.parsers.universal_parser")
     class _UniversalParser:  # pragma: no cover - only to satisfy type hints
         pass
     up.UniversalParser = _UniversalParser
-    sys.modules["chunkhound.parsers.universal_parser"] = up
+    monkeypatch.setitem(sys.modules, "chunkhound.parsers.universal_parser", up)
 
     # Stub for chunkhound.parsers.parser_factory
     pf = types.ModuleType("chunkhound.parsers.parser_factory")
@@ -24,7 +23,7 @@ def _install_parser_stubs():
                 return []
         return _DummyParser()
     pf.create_parser_for_language = create_parser_for_language
-    sys.modules["chunkhound.parsers.parser_factory"] = pf
+    monkeypatch.setitem(sys.modules, "chunkhound.parsers.parser_factory", pf)
 
 
 class _FakeDB:
@@ -70,7 +69,7 @@ class _Cfg:
 def test_process_directory_skips_unchanged_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CHUNKHOUND_DEBUG_SKIP", "1")
     # Install parser stubs before importing the coordinator to avoid heavy deps
-    _install_parser_stubs()
+    _install_parser_stubs(monkeypatch)
 
     # Import after stubbing
     from chunkhound.core.models.file import File
