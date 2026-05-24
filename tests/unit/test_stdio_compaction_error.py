@@ -1,11 +1,26 @@
 """Test that CompactionError produces a structured retry-hint response."""
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_mcp_mode_env():
+    """StdioMCPServer(MCPServerBase).__init__ sets CHUNKHOUND_MCP_MODE=1.
+    Restore the original value after each test so subprocess-based tests in
+    other modules don't inherit the flag.
+    """
+    prev = os.environ.get("CHUNKHOUND_MCP_MODE")
+    yield
+    if prev is None:
+        os.environ.pop("CHUNKHOUND_MCP_MODE", None)
+    else:
+        os.environ["CHUNKHOUND_MCP_MODE"] = prev
 
 from chunkhound.core.exceptions import CompactionError
 from chunkhound.mcp_server.common import compaction_error_response

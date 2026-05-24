@@ -3,11 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_mcp_mode_env():
+    """ConcreteMCPServer(MCPServerBase).__init__ sets CHUNKHOUND_MCP_MODE=1.
+    Restore the original value after each test so subprocess-based tests in
+    other modules don't inherit the flag.
+    """
+    prev = os.environ.get("CHUNKHOUND_MCP_MODE")
+    yield
+    if prev is None:
+        os.environ.pop("CHUNKHOUND_MCP_MODE", None)
+    else:
+        os.environ["CHUNKHOUND_MCP_MODE"] = prev
 
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.exceptions import CompactionError

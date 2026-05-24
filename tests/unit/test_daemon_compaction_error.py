@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,6 +12,20 @@ import pytest
 
 from chunkhound.daemon.server import ChunkHoundDaemon
 from chunkhound.services.compaction_service import CompactionService
+
+
+@pytest.fixture(autouse=True)
+def _restore_mcp_mode_env():
+    """ChunkHoundDaemon.__init__ sets CHUNKHOUND_MCP_MODE=1 unconditionally.
+    Restore the original value after each test so subprocess-based tests in
+    other modules don't inherit the flag.
+    """
+    prev = os.environ.get("CHUNKHOUND_MCP_MODE")
+    yield
+    if prev is None:
+        os.environ.pop("CHUNKHOUND_MCP_MODE", None)
+    else:
+        os.environ["CHUNKHOUND_MCP_MODE"] = prev
 
 
 def _make_indexing_config(force_reindex: bool = False) -> SimpleNamespace:
