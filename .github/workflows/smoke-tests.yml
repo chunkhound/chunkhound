@@ -80,6 +80,29 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --locked
+
+      - name: Install Rust stable toolchain
+        if: hashFiles('Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        if: hashFiles('Cargo.toml') != ''
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build Rust extension (maturin build)
+        if: hashFiles('Cargo.toml') != ''
+        run: |
+          pip install maturin
+          maturin build --out target/wheels/
+          python3 scripts/install_native.py
+
       - name: Test collection check
         run: uv run pytest tests/ --collect-only -q --tb=no
 

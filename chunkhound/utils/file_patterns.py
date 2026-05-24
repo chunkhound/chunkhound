@@ -19,6 +19,13 @@ from re import Pattern
 
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 
+try:
+    from chunkhound_native import scan_files as _rust_scan_files
+    _RUST_AVAILABLE = True
+except ImportError:
+    _RUST_AVAILABLE = False
+
+_USE_RUST = os.environ.get("CHUNKHOUND_USE_RUST", "0") == "1"
 
 @lru_cache(maxsize=4096)
 def _compile_pattern_global(pattern: str) -> Pattern[str]:
@@ -433,6 +440,22 @@ def walk_directory_tree(
     Returns:
         Tuple of (list of file paths found, updated gitignore_patterns dict)
     """
+    # Fast Rust path: ignore crate handles gitignore + exclude_patterns natively
+    if _USE_RUST and _RUST_AVAILABLE:
+        _exts, _, _has_complex = _summarize_include_patterns(patterns)
+        if not _has_complex and _exts:
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
+            _SKIP = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
+            _raw = _rust_scan_files(
+                str(start_path),
+                [ext.lstrip(".") for ext in _exts],
+                skip_dirs=list(_SKIP),
+                exclude_patterns=list(exclude_patterns) if exclude_patterns else None,
+            )
+            _log.debug("[RUST_SCANNER] scan_files root=%s exts=%s files=%d", start_path, sorted(_exts), len(_raw))
+            return [Path(p) for p in _raw], {}
+
     files = []
     gitignore_patterns: dict[Path, list[str]] = parent_gitignores.copy()
     pattern_cache: dict[str, Pattern[str]] = {}  # Local pattern cache
