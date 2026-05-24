@@ -1,5 +1,6 @@
 """Extract chunkhound_native from the maturin wheel into the active venv."""
 import sys
+import sysconfig
 import zipfile
 import pathlib
 
@@ -7,7 +8,7 @@ wheels = sorted(pathlib.Path("target/wheels").glob("chunkhound*.whl"))
 if not wheels:
     sys.exit("No wheel found in target/wheels/ — run 'maturin build --out target/wheels/' first")
 
-site = pathlib.Path(".venv/lib") / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+site = pathlib.Path(sysconfig.get_path("purelib"))
 if not site.exists():
     sys.exit(f"site-packages not found at {site}")
 
