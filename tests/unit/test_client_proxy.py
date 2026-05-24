@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -379,3 +380,150 @@ async def test_run_wraps_registration_write_failures(
     discovery.format_startup_failure.assert_called_once()
     assert writer.closed
     assert writer.wait_closed_called
+
+
+# ---------------------------------------------------------------------------
+# Orphan watchdog
+# ---------------------------------------------------------------------------
+
+
+def test_client_proxy_captures_initial_parent_pid_on_unix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    getppid = Mock(return_value=2000)
+    monkeypatch.setattr(client_proxy_module.os, "getppid", getppid)
+
+    proxy = ClientProxy(tmp_path / "repo", SimpleNamespace())
+
+    assert proxy._initial_ppid == 2000
+    getppid.assert_called_once_with()
+
+
+def test_is_orphaned_detects_pid_1_reparent_on_unix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(client_proxy_module.os, "getppid", Mock(side_effect=[2000, 1]))
+    proxy = ClientProxy(tmp_path / "repo", SimpleNamespace())
+
+    assert proxy._is_orphaned() is True
+
+
+def test_is_orphaned_detects_non_pid_1_parent_change_on_unix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        client_proxy_module.os,
+        "getppid",
+        Mock(side_effect=[2000, 3000]),
+    )
+    proxy = ClientProxy(tmp_path / "repo", SimpleNamespace())
+
+    assert proxy._is_orphaned() is True
+
+
+def test_is_orphaned_ignores_live_parent_on_unix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        client_proxy_module.os,
+        "getppid",
+        Mock(side_effect=[2000, 2000]),
+    )
+    proxy = ClientProxy(tmp_path / "repo", SimpleNamespace())
+
+    assert proxy._is_orphaned() is False
+
+
+@pytest.mark.asyncio
+async def test_orphan_watchdog_triggers_shutdown_when_orphaned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When _is_orphaned returns True, the watchdog triggers clean shutdown."""
+    proxy, discovery, writer = _make_proxy(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        client_proxy_module.ClientProxy, "_ORPHAN_POLL_INTERVAL", 0.0
+    )
+    monkeypatch.setattr(proxy, "_is_orphaned", lambda: True)
+
+    stdin_cancelled = asyncio.Event()
+
+    async def blocked_stdin(_writer: asyncio.StreamWriter) -> None:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            stdin_cancelled.set()
+            raise
+
+    async def blocked_stdout(_reader: asyncio.StreamReader) -> _SocketForwardResult:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            raise
+
+    proxy._forward_stdin_to_socket = blocked_stdin
+    proxy._forward_socket_to_stdout = blocked_stdout
+
+    stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    await proxy.run()
+
+    assert stdin_cancelled.is_set()
+    assert "Parent process died" in stderr.getvalue()
+    assert writer.closed
+    assert writer.wait_closed_called
+
+
+@pytest.mark.asyncio
+async def test_orphan_watchdog_canceled_on_clean_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Watchdog is cancelled when stdin closes first (normal operation)."""
+    proxy, _, writer = _make_proxy(tmp_path, monkeypatch)
+    monkeypatch.setattr(proxy, "_is_orphaned", lambda: False)
+
+    watchdog_cancelled = asyncio.Event()
+
+    async def cancellable_watchdog() -> None:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            watchdog_cancelled.set()
+            raise
+
+    proxy._orphan_watchdog = cancellable_watchdog
+    proxy._forward_stdin_to_socket = AsyncMock()
+    proxy._forward_socket_to_stdout = AsyncMock(
+        return_value=_SocketForwardResult(message_count=1)
+    )
+
+    await proxy.run()
+
+    assert watchdog_cancelled.is_set()
+    assert writer.closed
+    assert writer.wait_closed_called
+
+
+def test_is_orphaned_returns_false_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_is_orphaned returns False on Windows regardless of PPID."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    getppid = Mock(return_value=1)
+    monkeypatch.setattr(client_proxy_module.os, "getppid", getppid)
+
+    proxy = ClientProxy(Path("."), SimpleNamespace())
+
+    assert proxy._initial_ppid is None
+    assert proxy._is_orphaned() is False
+    getppid.assert_not_called()
