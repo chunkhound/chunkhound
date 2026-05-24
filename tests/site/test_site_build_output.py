@@ -121,6 +121,9 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     configuration = (DIST / "docs" / "configuration" / "index.html").read_text(
         encoding="utf-8"
     )
+    docs_home = (DIST / "docs" / "getting-started" / "index.html").read_text(
+        encoding="utf-8"
+    )
     assert "macOS/Linux" in homepage
     assert "PowerShell" in homepage
     assert re.search(
@@ -169,6 +172,11 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
         in configuration
     )
     assert '<nav class="nav-tabs"' not in homepage
+    sidebar_tag = re.search(r'<aside class="docs-sidebar"[^>]*>', docs_home)
+    assert sidebar_tag is not None
+    assert 'role="dialog"' not in sidebar_tag.group(0)
+    assert 'aria-modal="true"' not in sidebar_tag.group(0)
+    assert 'tabindex="-1"' not in sidebar_tag.group(0)
     assert "cdn.jsdelivr.net" not in getting_started
     assert "cdn.jsdelivr.net" not in configuration
 

@@ -13,25 +13,35 @@
 
     <div class="lens-row">
       <div class="lens-card">
+        <ph-magnifying-glass class="lens-icon" size="26" weight="duotone" aria-hidden="true"></ph-magnifying-glass>
         <span class="lens-name">Search</span>
         <span class="lens-desc">Find code semantically</span>
       </div>
       <div class="lens-card">
+        <ph-binoculars class="lens-icon" size="26" weight="duotone" aria-hidden="true"></ph-binoculars>
         <span class="lens-name">Research</span>
         <span class="lens-desc">Understand architecture</span>
       </div>
       <div class="lens-card">
+        <ph-book-open-text class="lens-icon" size="26" weight="duotone" aria-hidden="true"></ph-book-open-text>
         <span class="lens-name">Autodoc</span>
         <span class="lens-desc">Generate documentation</span>
       </div>
     </div>
     <div class="hub">
       <div class="hub-line"></div>
-      <div class="hub-node">One semantic index</div>
+      <div class="hub-node"><ph-database size="18" weight="duotone" aria-hidden="true"></ph-database> One semantic index</div>
       <div class="hub-line"></div>
     </div>
   </div>
 </section>
+
+<script>
+  import "@phosphor-icons/webcomponents/PhBinoculars";
+  import "@phosphor-icons/webcomponents/PhBookOpenText";
+  import "@phosphor-icons/webcomponents/PhDatabase";
+  import "@phosphor-icons/webcomponents/PhMagnifyingGlass";
+</script>
 
 <style>
   .core-insight {
@@ -103,8 +113,15 @@
     padding: var(--space-4) var(--space-5);
     display: flex;
     flex-direction: column;
+    align-items: center;
     gap: var(--space-1);
     min-width: 160px;
+    text-align: center;
+  }
+
+  .lens-icon {
+    color: var(--primary);
+    margin-bottom: var(--space-1);
   }
 
   .lens-name {
@@ -132,6 +149,9 @@
   }
 
   .hub-node {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
     background: var(--primary-bg);
     color: var(--on-primary-bg);
     border: var(--border-w-default) solid var(--primary);

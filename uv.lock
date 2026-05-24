@@ -392,6 +392,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "google-genai" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "lancedb" },
     { name = "lark" },
     { name = "loguru" },
@@ -483,6 +484,7 @@ dev = [
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
     { name = "ruff" },
+    { name = "types-jsonschema" },
     { name = "types-psutil" },
 ]
 
@@ -494,6 +496,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.4.0,<1.5.3.dev0" },
     { name = "google-genai", specifier = ">=1.51.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jsonschema", specifier = ">=4.0.0" },
     { name = "lancedb", specifier = ">=0.25.3" },
     { name = "lark", specifier = ">=1.1.0" },
     { name = "loguru", specifier = ">=0.6.0" },
@@ -574,6 +577,7 @@ dev = [
     { name = "pytest-timeout", specifier = ">=2.1.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff", specifier = ">=0.11.12" },
+    { name = "types-jsonschema", specifier = ">=4.0.0" },
     { name = "types-psutil", specifier = ">=7.0.0.20250601" },
 ]
 
@@ -3742,6 +3746,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ef/e9/ff3c11097e37d4d899155c8fbdf7531063b6d15ee252b2e01ce0063f0218/tree_sitter_zig-1.1.2-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:d8f463c370cdd71025b8d40f90e21e8fc25c7394eb64ebd53b1e566d712a3a68", size = 81383, upload-time = "2024-12-22T01:27:34.532Z" },
     { url = "https://files.pythonhosted.org/packages/ab/5c/f5fb2ce355bbd381e647b04e8b2078a4043e663b6df6145d87550d3c3fe5/tree_sitter_zig-1.1.2-cp39-abi3-win_amd64.whl", hash = "sha256:7b94f00a0e69231ac4ebf0aa763734b9b5637e0ff13634ebfe6d13fadece71e9", size = 65105, upload-time = "2024-12-22T01:27:37.21Z" },
     { url = "https://files.pythonhosted.org/packages/34/8d/c0a481cc7bba9d39c533dd3098463854b5d3c4e6134496d9d83cd1331e51/tree_sitter_zig-1.1.2-cp39-abi3-win_arm64.whl", hash = "sha256:88152ebeaeca1431a6fc943a8b391fee6f6a8058f17435015135157735061ddf", size = 63219, upload-time = "2024-12-22T01:27:38.348Z" },
+]
+
+[[package]]
+name = "types-jsonschema"
+version = "4.26.0.20260408"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "referencing" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9f/4c/2ef5483ef81e7b6e1b901eb2994fd280cb19860134a20ff99e72748f3ccb/types_jsonschema-4.26.0.20260408.tar.gz", hash = "sha256:82b75a976ed1507c473b8dee2d4841bd65926758c6d672bb93d08bf5e16f1b3f", size = 16553, upload-time = "2026-04-08T04:36:00.543Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/12/3c/724ad6ecaea06e8c6c8a8c9949a0979e6a2149b8aec4fe160135c64dd5ac/types_jsonschema-4.26.0.20260408-py3-none-any.whl", hash = "sha256:1ab0058c2612b0b81fc4e3c88ec3f9ad9b0af3fd31a176030d78b6d6cefb6e7b", size = 16081, upload-time = "2026-04-08T04:35:59.678Z" },
 ]
 
 [[package]]
