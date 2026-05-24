@@ -1,6 +1,6 @@
 """Tests for Anthropic LLM provider with extended thinking and Opus 4.5 support."""
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -1398,15 +1398,15 @@ class TestClaudeHaikuModelResolution:
                 return [
                     SimpleNamespace(
                         id="claude-sonnet-4-6",
-                        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+                        created_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
                     ),
                     SimpleNamespace(
                         id="claude-haiku-4-5-20251001",
-                        created_at=datetime(2025, 10, 1, tzinfo=UTC),
+                        created_at=datetime(2025, 10, 1, tzinfo=timezone.utc),
                     ),
                     SimpleNamespace(
                         id="claude-haiku-4-6-20260101",
-                        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
                     ),
                 ]
 
@@ -1443,15 +1443,15 @@ class TestClaudeHaikuModelResolution:
         return [
             SimpleNamespace(
                 id="claude-haiku-4-6-20260101",
-                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             ),
             SimpleNamespace(
                 id="claude-sonnet-4-6-20260217",
-                created_at=datetime(2026, 2, 17, tzinfo=UTC),
+                created_at=datetime(2026, 2, 17, tzinfo=timezone.utc),
             ),
             SimpleNamespace(
                 id="claude-opus-4-7-20260416",
-                created_at=datetime(2026, 4, 16, tzinfo=UTC),
+                created_at=datetime(2026, 4, 16, tzinfo=timezone.utc),
             ),
         ]
 
@@ -1485,15 +1485,15 @@ class TestClaudeHaikuModelResolution:
                 return [
                     SimpleNamespace(
                         id=f"claude-haiku-4-6-20260101-{suffix}",
-                        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
                     ),
                     SimpleNamespace(
                         id=f"claude-sonnet-4-6-20260217-{suffix}",
-                        created_at=datetime(2026, 2, 17, tzinfo=UTC),
+                        created_at=datetime(2026, 2, 17, tzinfo=timezone.utc),
                     ),
                     SimpleNamespace(
                         id=f"claude-opus-4-7-20260416-{suffix}",
-                        created_at=datetime(2026, 4, 16, tzinfo=UTC),
+                        created_at=datetime(2026, 4, 16, tzinfo=timezone.utc),
                     ),
                 ]
 

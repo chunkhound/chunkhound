@@ -102,12 +102,19 @@ def build_forwarded_argv(
         if val is None:
             continue
         flag = action.option_strings[0]
-        # store_true/store_false: only forward when flipped from the declared default.
-        if action.const is True:
-            if val and val != action.default:
+        if isinstance(action, argparse.BooleanOptionalAction):
+            if val == action.default:
+                continue
+            if val:
                 forwarded.append(flag)
-        elif action.const is False:
-            if not val and val != action.default:
+            else:
+                no_flag = next(
+                    s for s in action.option_strings if s.startswith("--no-")
+                )
+                forwarded.append(no_flag)
+        elif action.const is True or action.const is False:
+            # store_true / store_false: forward only when flipped from the default.
+            if val != action.default:
                 forwarded.append(flag)
         elif isinstance(val, list):
             if val != action.default:
@@ -115,6 +122,8 @@ def build_forwarded_argv(
                     forwarded.extend([flag, str(item)])
         else:
             if val != action.default:
+                # Resolve Paths so the child process gets an absolute path
+                # independent of the parent's CWD (subprocess may differ).
                 resolved = val.resolve() if isinstance(val, Path) else val
                 forwarded.extend([flag, str(resolved)])
     return forwarded
