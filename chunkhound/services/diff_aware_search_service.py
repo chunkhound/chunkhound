@@ -134,16 +134,9 @@ class DiffAwareSearchService:
         if not self._diff_chunks or self._norm_matrix is None:
             logger.warning(
                 "DiffAwareSearchService: diff mode requested but no diff chunks "
-                "available; falling back to original search service."
+                "available; returning empty results."
             )
-            result: tuple[list[dict[str, Any]], dict[str, Any]] = await self._original.search_semantic(
-                query=query,
-                page_size=page_size,
-                offset=offset,
-                threshold=threshold,
-                path_filter=path_filter,
-            )
-            return result
+            return [], {"total": 0, "page_size": page_size, "offset": offset}
 
         # 1. Embed the query
         embed_result = await self._embedding_manager.embed_texts([query])

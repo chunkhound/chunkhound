@@ -38,6 +38,9 @@ MAX_ALLOWED_TOKENS = 25000
 
 # Diff chunk cap: prevent OOM when commit_range spans thousands of changed files
 MAX_DIFF_CHUNKS = 500
+# Per-chunk char cap: JSON/HTML diffs are ~1:1 chars-to-tokens; 10k chars stays
+# safely under the 16384-token limit of the smallest supported embedding model.
+MAX_DIFF_CHUNK_CHARS = 10_000
 
 
 def _summarize_subprocess_stderr(stderr: bytes) -> str:
@@ -519,6 +522,42 @@ def _resolve_commit_range(
     return commit_range
 
 
+async def _inject_diff_service(
+    services: DatabaseServices,
+    effective_commit_range: str,
+    vector_source: str,
+    embedding_manager: Any,
+) -> DatabaseServices:
+    from loguru import logger as _log
+
+    from chunkhound.core.git_diff import parse_diff_to_chunks, run_git_diff
+    from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
+    from chunkhound.utils.project_detection import find_project_root
+
+    raw_diff = await run_git_diff(effective_commit_range, cwd=find_project_root(None))
+    diff_chunks = parse_diff_to_chunks(raw_diff, max_chunk_chars=MAX_DIFF_CHUNK_CHARS)
+    if len(diff_chunks) > MAX_DIFF_CHUNKS:
+        _log.warning(
+            "diff range produced {} chunks; capping at {} to avoid OOM",
+            len(diff_chunks),
+            MAX_DIFF_CHUNKS,
+        )
+        diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
+    diff_embeddings: list[list[float]] = []
+    if diff_chunks and embedding_manager is not None:
+        emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])
+        diff_embeddings = emb_result.embeddings
+    vs = vector_source if vector_source in ("diff", "db", "both") else "both"
+    diff_service = DiffAwareSearchService(
+        original=services.search_service,
+        diff_chunks=diff_chunks,
+        diff_embeddings=diff_embeddings,
+        vector_source=vs,
+        embedding_manager=embedding_manager,
+    )
+    return services._replace(search_service=diff_service)
+
+
 @register_tool(
     description=SEARCH_DESCRIPTION,
     requires_embeddings=False,
@@ -571,34 +610,7 @@ async def search_impl(
     effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
 
     if effective_commit_range is not None and type == "semantic":
-        from chunkhound.core.git_diff import run_git_diff, parse_diff_to_chunks
-        from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
-        from chunkhound.utils.project_detection import find_project_root
-        from loguru import logger as _log
-
-        raw_diff = await run_git_diff(effective_commit_range, cwd=find_project_root(None))
-        diff_chunks = parse_diff_to_chunks(raw_diff)
-        if len(diff_chunks) > MAX_DIFF_CHUNKS:
-            _log.warning(
-                "diff range produced {} chunks; capping at {} to avoid OOM",
-                len(diff_chunks),
-                MAX_DIFF_CHUNKS,
-            )
-            diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
-        diff_embeddings: list[list[float]] = []
-        if diff_chunks and embedding_manager is not None:
-            emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])
-            diff_embeddings = emb_result.embeddings
-
-        vs = vector_source if vector_source in ("diff", "db", "both") else "both"
-        diff_service = DiffAwareSearchService(
-            original=services.search_service,
-            diff_chunks=diff_chunks,
-            diff_embeddings=diff_embeddings,
-            vector_source=vs,
-            embedding_manager=embedding_manager,
-        )
-        services = services._replace(search_service=diff_service)  # type: ignore[arg-type]
+        services = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
 
     if type == "semantic":
         # Validate embedding manager for semantic search
@@ -723,34 +735,7 @@ async def deep_research_impl(
     effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
 
     if effective_commit_range is not None:
-        from chunkhound.core.git_diff import run_git_diff, parse_diff_to_chunks
-        from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
-        from chunkhound.utils.project_detection import find_project_root
-        from loguru import logger as _log
-
-        raw_diff = await run_git_diff(effective_commit_range, cwd=find_project_root(None))
-        diff_chunks = parse_diff_to_chunks(raw_diff)
-        if len(diff_chunks) > MAX_DIFF_CHUNKS:
-            _log.warning(
-                "diff range produced {} chunks; capping at {} to avoid OOM",
-                len(diff_chunks),
-                MAX_DIFF_CHUNKS,
-            )
-            diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
-        diff_embeddings: list[list[float]] = []
-        if diff_chunks:
-            emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])
-            diff_embeddings = emb_result.embeddings
-
-        vs = vector_source if vector_source in ("diff", "db", "both") else "both"
-        diff_service = DiffAwareSearchService(
-            original=services.search_service,
-            diff_chunks=diff_chunks,
-            diff_embeddings=diff_embeddings,
-            vector_source=vs,
-            embedding_manager=embedding_manager,
-        )
-        services = services._replace(search_service=diff_service)  # type: ignore[arg-type]
+        services = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
 
     # Create default config from environment if not provided
     if config is None:

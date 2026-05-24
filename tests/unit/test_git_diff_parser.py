@@ -137,3 +137,59 @@ def test_multi_hunk_end_lines() -> None:
 def test_dev_null_path_chunk_skipped() -> None:
     chunks = parse_diff_to_chunks(DEV_NULL_DIFF)
     assert len(chunks) == 0
+
+
+def test_oversized_hunk_splits_into_parts() -> None:
+    # Build a hunk whose lines total > 10_000 chars (default max_chunk_chars).
+    big_lines = [f"+line_{i:05d}\n" for i in range(1000)]  # ~12k chars
+    big_body = "".join(big_lines)
+    diff = (
+        "diff --git a/big.json b/big.json\n"
+        "index abc..def 100644\n"
+        "--- a/big.json\n"
+        "+++ b/big.json\n"
+        f"@@ -0,0 +1,1000 @@ root\n"
+        + big_body
+    )
+    chunks = parse_diff_to_chunks(diff)
+    assert len(chunks) > 1, "oversized hunk must produce multiple chunks"
+    for c in chunks:
+        assert len(c.code) <= 10_000
+    assert all("(part" in c.symbol for c in chunks)
+
+
+def test_oversized_hunk_custom_max() -> None:
+    lines = [f"+x\n"] * 50  # 50 × 3 chars = 150 chars
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,0 +1,50 @@ fn\n"
+        + "".join(lines)
+    )
+    chunks = parse_diff_to_chunks(diff, max_chunk_chars=40)
+    assert len(chunks) > 1
+    for c in chunks:
+        assert len(c.code) <= 40
+
+
+def test_small_hunk_not_split() -> None:
+    chunks = parse_diff_to_chunks(SINGLE_HUNK_DIFF)
+    assert len(chunks) == 1
+    assert "(part" not in chunks[0].symbol
+
+
+def test_single_overlong_line_split() -> None:
+    # SVG/minified JS: one line longer than max_chunk_chars
+    long_line = "+" + "x" * 25_000 + "\n"
+    diff = (
+        "diff --git a/icon.svg b/icon.svg\n"
+        "--- a/icon.svg\n"
+        "+++ b/icon.svg\n"
+        "@@ -0,0 +1,1 @@\n"
+        + long_line
+    )
+    chunks = parse_diff_to_chunks(diff, max_chunk_chars=10_000)
+    assert len(chunks) > 1
+    for c in chunks:
+        assert len(c.code) <= 10_000

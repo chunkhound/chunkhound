@@ -121,37 +121,6 @@ async def _start_proxy_process(
     )
 
 
-async def _read_process_stream(
-    stream: asyncio.StreamReader | None,
-) -> bytes:
-    """Drain a subprocess stream when it exists."""
-    if stream is None:
-        return b""
-    return await stream.read()
-
-
-async def _close_process_stdin(proc: asyncio.subprocess.Process) -> None:
-    """Close subprocess stdin without letting broken pipes hide the real failure."""
-    if proc.stdin is None or proc.stdin.is_closing():
-        return
-    proc.stdin.close()
-    try:
-        await proc.stdin.wait_closed()
-    except Exception:
-        pass
-
-
-async def _force_stop_process(proc: asyncio.subprocess.Process) -> None:
-    """Ensure a subprocess is gone before a test leaves cleanup scope."""
-    if proc.returncode is not None:
-        return
-    try:
-        proc.kill()
-    except ProcessLookupError:
-        return
-    await asyncio.wait_for(proc.wait(), timeout=5.0)
-
-
 async def _start_proxy(
     project_dir: Path,
     *,
@@ -643,93 +612,6 @@ async def test_watchman_start_failure_cleans_up_after_eager_publication(
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
     assert elapsed < 12.0, f"Expected fail-fast startup error, got {elapsed:.2f}s"
-    assert returncode != 0
-    assert stdout_text == ""
-
-    cleaned_up = await wait_for_daemon_full_cleanup(project_dir, timeout=20.0)
-    assert cleaned_up, "Daemon state was not fully cleaned up after startup failure"
-
-    lock_path = DaemonDiscovery(project_dir).get_lock_path()
-    assert not lock_path.exists(), (
-        "Daemon lock should not remain published on watchman failure"
-    )
-    assert not await wait_for_daemon_start(project_dir, timeout=3.0)
-
-    daemon_log_path = project_dir / ".chunkhound" / "daemon.log"
-    assert daemon_log_path.exists()
-    daemon_log_text = daemon_log_path.read_text(encoding="utf-8", errors="replace")
-    assert "Watchman sidecar startup failed" in daemon_log_text
-    # The daemon publishes lock/socket before running the Watchman startup barrier
-    # (eager publication), but a very fast Watchman failure can still resolve at
-    # either the discovery layer or the IPC/proxy layer before polling observes
-    # the published lock. Startup-ordering coverage lives in
-    # tests/test_daemon_startup_order.py; this smoke test only asserts the
-    # caller-visible failure and cleanup contract.
-    expected_surfaces = (
-        "closed the IPC connection before serving any MCP traffic",
-        "exited before it became reachable",
-        "crashed after publishing lock",
-    )
-    assert any(message in stderr_text for message in expected_surfaces), stderr_text
-    assert "Watchman sidecar startup failed" in stderr_text
-    assert "Recent daemon log output" in stderr_text
-
-
-@pytest.mark.asyncio
-@pytest.mark.requires_native_watchman
-async def test_watchman_start_failure_cleans_up_after_eager_publication(
-    pre_indexed_project_dir: Path,
-) -> None:
-    """Explicit Watchman startup failure should fail fast and leave no daemon state.
-
-    The daemon publishes its socket/lock before the Watchman startup barrier runs,
-    so this test covers the eager-publication race directly. Even in that window,
-    the proxy must still surface a caller-visible startup failure instead of
-    silently exiting on EOF.
-    """
-    project_dir = pre_indexed_project_dir
-    config_path = project_dir / ".chunkhound.json"
-    config = json.loads(config_path.read_text())
-    config.setdefault("indexing", {})["realtime_backend"] = "watchman"
-    config_path.write_text(json.dumps(config))
-
-    proc = await _start_proxy_process(
-        project_dir,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        capture_stderr=True,
-        extra_env={"CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY": "1"},
-    )
-    stdout_task = asyncio.create_task(_read_process_stream(proc.stdout))
-    stderr_task = asyncio.create_task(_read_process_stream(proc.stderr))
-    start_time = time.monotonic()
-    try:
-        try:
-            returncode = await asyncio.wait_for(proc.wait(), timeout=15.0)
-        except asyncio.TimeoutError:
-            elapsed = time.monotonic() - start_time
-            await _close_process_stdin(proc)
-            await _force_stop_process(proc)
-            stdout_text = (await asyncio.wait_for(stdout_task, timeout=5.0)).decode()
-            stderr_text = (await asyncio.wait_for(stderr_task, timeout=5.0)).decode()
-            pytest.fail(
-                "Proxy did not exit while stdin remained open after "
-                f"{elapsed:.2f}s\nstdout:\n{stdout_text}\nstderr:\n{stderr_text}"
-            )
-        elapsed = time.monotonic() - start_time
-        stdout_text = (await asyncio.wait_for(stdout_task, timeout=5.0)).decode()
-        stderr_text = (await asyncio.wait_for(stderr_task, timeout=5.0)).decode()
-    finally:
-        await _close_process_stdin(proc)
-        await _force_stop_process(proc)
-        for task in (stdout_task, stderr_task):
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-
-    # Windows process startup is slower; give it additional headroom
-    fail_fast_threshold = 20.0 if sys.platform == "win32" else 10.0
-    assert elapsed < fail_fast_threshold, f"Expected fail-fast startup error, got {elapsed:.2f}s"
     assert returncode != 0
     assert stdout_text == ""
 

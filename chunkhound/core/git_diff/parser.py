@@ -1,14 +1,21 @@
 import re
 from pathlib import Path
 
+from loguru import logger
+
 from chunkhound.core.models.chunk import Chunk
-from chunkhound.core.types.common import ChunkType, Language
-from chunkhound.core.types.common import FileId, FilePath, LineNumber
+from chunkhound.core.types.common import (
+    ChunkType,
+    FileId,
+    FilePath,
+    Language,
+    LineNumber,
+)
 
 _HUNK_HEADER = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@(.*)')
 
 
-def parse_diff_to_chunks(raw_diff: str) -> list[Chunk]:
+def parse_diff_to_chunks(raw_diff: str, max_chunk_chars: int = 10_000) -> list[Chunk]:
     chunks: list[Chunk] = []
 
     current_file: str | None = None
@@ -24,19 +31,62 @@ def parse_diff_to_chunks(raw_diff: str) -> list[Chunk]:
             in_hunk = False
             return
         try:
-            chunk = Chunk(
-                symbol=symbol,
-                start_line=LineNumber(max(1, hunk_start)),
-                end_line=LineNumber(max(hunk_start, hunk_end)),
-                code="".join(hunk_lines),
-                chunk_type=ChunkType.BLOCK,
-                file_id=FileId(0),
-                language=Language.GIT_DIFF,
-                file_path=FilePath(current_file),
+            code = "".join(hunk_lines)
+            if len(code) <= max_chunk_chars:
+                chunks.append(Chunk(
+                    symbol=symbol,
+                    start_line=LineNumber(max(1, hunk_start)),
+                    end_line=LineNumber(max(hunk_start, hunk_end)),
+                    code=code,
+                    chunk_type=ChunkType.BLOCK,
+                    file_id=FileId(0),
+                    language=Language.GIT_DIFF,
+                    file_path=FilePath(current_file),
+                ))
+            else:
+                # Split large hunks at line boundaries to avoid token limit errors.
+                # JSON/HTML diffs can be nearly 1:1 chars-to-tokens, so 10k chars is
+                # the safe upper bound for a 16384-token embedding model.
+                parts: list[str] = []
+                current_part: list[str] = []
+                current_len = 0
+                for ln in hunk_lines:
+                    if len(ln) > max_chunk_chars:
+                        # Single line exceeds limit (e.g. minified SVG/JS): flush
+                        # current part, then split the line at char boundaries.
+                        if current_part:
+                            parts.append("".join(current_part))
+                            current_part = []
+                            current_len = 0
+                        for i in range(0, len(ln), max_chunk_chars):
+                            parts.append(ln[i:i + max_chunk_chars])
+                        continue
+                    if current_len + len(ln) > max_chunk_chars and current_part:
+                        parts.append("".join(current_part))
+                        current_part = []
+                        current_len = 0
+                    current_part.append(ln)
+                    current_len += len(ln)
+                if current_part:
+                    parts.append("".join(current_part))
+                for n, part in enumerate(parts, 1):
+                    part_symbol = f"{symbol} (part {n})" if len(parts) > 1 else symbol
+                    chunks.append(Chunk(
+                        symbol=part_symbol,
+                        start_line=LineNumber(max(1, hunk_start)),
+                        end_line=LineNumber(max(hunk_start, hunk_end)),
+                        code=part,
+                        chunk_type=ChunkType.BLOCK,
+                        file_id=FileId(0),
+                        language=Language.GIT_DIFF,
+                        file_path=FilePath(current_file),
+                    ))
+        except Exception as exc:
+            logger.warning(
+                "parse_diff_to_chunks: skipping malformed hunk in {!r}: {}",
+                current_file,
+                exc,
             )
-            chunks.append(chunk)
-        except Exception:
-            pass
         in_hunk = False
 
     for line in raw_diff.splitlines(keepends=True):

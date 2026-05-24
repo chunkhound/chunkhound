@@ -135,17 +135,17 @@ async def test_diff_mode_returns_diff_results_not_original():
 
 
 @pytest.mark.asyncio
-async def test_diff_mode_empty_chunks_falls_back_to_original():
-    """diff mode with empty diff_chunks falls back to original service."""
-    db_results = [{"file_path": "b.py", "content": "y", "score": 0.5}]
-    original = make_original(semantic_results=db_results)
+async def test_diff_mode_empty_chunks_returns_empty():
+    """diff mode with empty diff_chunks returns empty results, not DB fallback."""
+    original = make_original(semantic_results=[{"file_path": "b.py", "content": "y", "score": 0.5}])
     manager = make_embedding_manager([])
 
     svc = DiffAwareSearchService(original, [], [], "diff", manager)
-    results, _ = await svc.search_semantic("query")
+    results, pagination = await svc.search_semantic("query")
 
-    original.search_semantic.assert_called_once()
-    assert results == db_results
+    original.search_semantic.assert_not_called()
+    assert results == []
+    assert pagination["total"] == 0
 
 
 # ---------------------------------------------------------------------------

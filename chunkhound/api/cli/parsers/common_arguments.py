@@ -144,7 +144,11 @@ def add_git_diff_arguments(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         dest="commit_hash",
-        help="Single commit hash — from that commit to HEAD.",
+        help=(
+            "Single commit hash — searches all changes from that commit to HEAD "
+            "(<hash>..HEAD). To search only that commit's diff, use "
+            "--commit-range <hash>^..<hash>."
+        ),
     )
     diff_group.add_argument(
         "--last-n",

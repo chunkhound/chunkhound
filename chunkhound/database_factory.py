@@ -22,7 +22,7 @@ Any changes to this factory must be tested across all execution paths:
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.registry import configure_registry, get_registry
@@ -30,6 +30,7 @@ from chunkhound.registry import configure_registry, get_registry
 if TYPE_CHECKING:
     from chunkhound.database import Database
     from chunkhound.interfaces.database_provider import DatabaseProvider
+    from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
     from chunkhound.services.search_service import SearchService
@@ -40,7 +41,7 @@ class DatabaseServices(NamedTuple):
 
     provider: "DatabaseProvider"
     indexing_coordinator: "IndexingCoordinator"
-    search_service: "SearchService"
+    search_service: "SearchService | DiffAwareSearchService"
     embedding_service: "EmbeddingService"
 
 
@@ -165,7 +166,7 @@ def create_database_with_dependencies(
         db_path=db_path,
         embedding_manager=embedding_manager,
         indexing_coordinator=services.indexing_coordinator,
-        search_service=services.search_service,
+        search_service=cast("SearchService", services.search_service),
         embedding_service=services.embedding_service,
         provider=services.provider,
     )
