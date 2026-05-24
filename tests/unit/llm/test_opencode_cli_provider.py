@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -499,7 +498,9 @@ class TestOpenCodeCLIProvider:
             assert "--format" in first_args
 
     @pytest.mark.asyncio
-    async def test_run_cli_command_json_fallback_preserves_remaining_attempt_budget(self):
+    async def test_run_cli_command_json_fallback_preserves_remaining_attempt_budget(
+        self,
+    ):
         """JSON fallback should only spend the primary model's remaining attempts."""
         status_event = json.dumps({"type": "status", "data": "running"})
         with patch.object(
@@ -778,8 +779,11 @@ class TestOpenCodeCLIProvider:
             assert result == "OK"
 
     @pytest.mark.asyncio
-    async def test_run_cli_command_passes_prompt_as_positional_message(self, provider):
-        """OpenCode CLI expects the prompt as the trailing positional arg."""
+    async def test_run_cli_command_passes_prompt_via_stdin(
+        self, provider, monkeypatch: pytest.MonkeyPatch
+    ):
+        """OpenCode CLI reads the prompt from stdin to avoid ARG_MAX limits."""
+        monkeypatch.setenv("CHUNKHOUND_OPENCODE_JSON", "0")
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (b"Plain output", b"")
@@ -789,11 +793,14 @@ class TestOpenCodeCLIProvider:
             result = await provider._run_cli_command("Test prompt")
 
             assert result == "Plain output"
-            assert mock_subprocess.call_args[0][-1] == "Test prompt"
+            mock_process.communicate.assert_called_once_with(input=b"Test prompt")
 
     @pytest.mark.asyncio
-    async def test_run_cli_command_detaches_stdin(self, provider):
-        """Non-interactive runs must never inherit the caller's stdin."""
+    async def test_run_cli_command_pipes_stdin(
+        self, provider, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Non-interactive runs pipe the prompt via stdin instead of argv."""
+        monkeypatch.setenv("CHUNKHOUND_OPENCODE_JSON", "0")
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (b"Plain output", b"")
@@ -803,7 +810,9 @@ class TestOpenCodeCLIProvider:
             result = await provider._run_cli_command("Test prompt")
 
             assert result == "Plain output"
-            assert mock_subprocess.call_args.kwargs["stdin"] is subprocess.DEVNULL
+            assert mock_subprocess.call_args.kwargs["stdin"] is asyncio.subprocess.PIPE
+            assert "Test prompt" not in mock_subprocess.call_args.args
+            mock_process.communicate.assert_called_once_with(input=b"Test prompt")
 
     @pytest.mark.asyncio
     async def test_run_cli_command_includes_variant_flag(self, provider):
@@ -881,21 +890,23 @@ class TestOpenCodeCLIProvider:
             assert result == "OK"
 
     @pytest.mark.asyncio
-    async def test_run_cli_command_system_prompt_format(self, provider):
-        """Test that system and user prompts are concatenated into argv."""
+    async def test_run_cli_command_system_prompt_format(
+        self, provider, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Test that system and user prompts are concatenated and sent via stdin."""
+        monkeypatch.setenv("CHUNKHOUND_OPENCODE_JSON", "0")
         with patch("asyncio.create_subprocess_exec") as mock_subprocess:
             mock_process = AsyncMock()
-            mock_process.communicate.return_value = (b"", b"")
-            mock_process.returncode = 1
+            mock_process.communicate.return_value = (b"OK", b"")
+            mock_process.returncode = 0
             mock_subprocess.return_value = mock_process
 
-            with pytest.raises(RuntimeError):
-                await provider._run_cli_command("Test prompt", system="System message")
+            await provider._run_cli_command("Test prompt", system="System message")
 
-            argv = mock_subprocess.call_args[0]
-            assert argv[-1] == (
-                "System Instructions:\nSystem message\n\nUser Request:\nTest prompt"
+            expected_prompt = (
+                b"System Instructions:\nSystem message\n\nUser Request:\nTest prompt"
             )
+            mock_process.communicate.assert_called_once_with(input=expected_prompt)
 
     def test_format_json_flag_unsupported_markers(self, provider):
         """Test predicate recognizes all unsupported-flag marker strings."""
