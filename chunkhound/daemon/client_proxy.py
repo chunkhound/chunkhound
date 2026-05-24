@@ -124,14 +124,14 @@ class ClientProxy:
         if sys.platform == "win32":
             return False
         current_ppid = os.getppid()
-        return current_ppid == 1 or current_ppid != self._initial_ppid
+        return current_ppid != self._initial_ppid
 
     async def _orphan_watchdog(self) -> None:
         """Poll parent PID; signal shutdown when orphaned.
 
-        Completes cleanly when the parent dies — the caller's asyncio.wait
-        (FIRST_COMPLETED) will then cancel stdin/stdout forwarding and
-        trigger normal cleanup.
+        Sets the shutdown event and completes cleanly when the parent dies —
+        the caller's asyncio.wait (FIRST_COMPLETED) will then cancel
+        stdin/stdout forwarding and trigger normal cleanup.
         """
         while True:
             await asyncio.sleep(self._ORPHAN_POLL_INTERVAL)
@@ -166,9 +166,10 @@ class ClientProxy:
             stdin_task = asyncio.create_task(self._forward_stdin_to_socket(writer))
             stdout_task = asyncio.create_task(self._forward_socket_to_stdout(reader))
             watchdog_task = asyncio.create_task(self._orphan_watchdog())
+            shutdown_task = asyncio.create_task(self._shutdown_event.wait())
 
-            done, pending = await asyncio.wait(
-                {stdin_task, stdout_task, watchdog_task},
+            _, pending = await asyncio.wait(
+                {stdin_task, stdout_task, watchdog_task, shutdown_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
 

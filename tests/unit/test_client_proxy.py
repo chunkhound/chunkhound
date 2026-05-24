@@ -442,6 +442,21 @@ def test_is_orphaned_ignores_live_parent_on_unix(
     assert proxy._is_orphaned() is False
 
 
+def test_is_orphaned_allows_pid_1_when_initial_parent_was_pid_1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        client_proxy_module.os,
+        "getppid",
+        Mock(side_effect=[1, 1]),
+    )
+    proxy = ClientProxy(tmp_path / "repo", SimpleNamespace())
+
+    assert proxy._is_orphaned() is False
+
+
 @pytest.mark.asyncio
 async def test_orphan_watchdog_triggers_shutdown_when_orphaned(
     tmp_path: Path,
@@ -479,6 +494,53 @@ async def test_orphan_watchdog_triggers_shutdown_when_orphaned(
 
     assert stdin_cancelled.is_set()
     assert "Parent process died" in stderr.getvalue()
+    assert writer.closed
+    assert writer.wait_closed_called
+
+
+@pytest.mark.asyncio
+async def test_run_observes_shutdown_event_when_watchdog_signals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run exits when the watchdog sets the shutdown event."""
+    proxy, _, writer = _make_proxy(tmp_path, monkeypatch)
+
+    stdin_cancelled = asyncio.Event()
+    stdout_cancelled = asyncio.Event()
+    watchdog_cancelled = asyncio.Event()
+
+    async def blocked_stdin(_writer: asyncio.StreamWriter) -> None:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            stdin_cancelled.set()
+            raise
+
+    async def blocked_stdout(_reader: asyncio.StreamReader) -> _SocketForwardResult:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            stdout_cancelled.set()
+            raise
+
+    async def event_only_watchdog() -> None:
+        proxy._shutdown_event.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            watchdog_cancelled.set()
+            raise
+
+    proxy._orphan_watchdog = event_only_watchdog
+    proxy._forward_stdin_to_socket = blocked_stdin
+    proxy._forward_socket_to_stdout = blocked_stdout
+
+    await asyncio.wait_for(proxy.run(), timeout=1.0)
+
+    assert stdin_cancelled.is_set()
+    assert stdout_cancelled.is_set()
+    assert watchdog_cancelled.is_set()
     assert writer.closed
     assert writer.wait_closed_called
 
