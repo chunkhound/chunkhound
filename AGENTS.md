@@ -110,3 +110,13 @@ PyPI trusted publisher required for `release-rc.yml`:
 - Smoke tests are mandatory guardrails
 - Run `uv run mypy chunkhound` during reviews to catch Optional/type boundary issues
 - All code patterns should be self-documenting
+
+## TESTING_PHILOSOPHY
+- Test external constraints, critical invariants, and user-facing contracts.
+- Do NOT write tests for adapters, private helpers, mock behavior, or internal plumbing unless the test is the narrowest way to protect a real external contract.
+- If a refactor could change the implementation without changing user-visible behavior, the test is probably too internal and should not exist.
+- Prefer contract names like `test_cli_overrides_env` over implementation names like `test_extract_cli_overrides_calls_helper`.
+- Use real business logic with fakes only at true external boundaries (network, filesystem, subprocess, third-party APIs).
+- For provider integrations, test our contract with the provider: supported/unsupported feature gating, request validity constraints, explicit failures, and stable user-visible semantics. Do NOT test SDK mechanics or mirror every internal request-shaping helper.
+- Before adding a test, ask: "Would a user, caller, CI contract, or external system notice if this broke?" If not, do not add the test.
+- Prefer one higher-value contract test over many narrow implementation tests.
