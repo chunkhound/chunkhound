@@ -522,12 +522,18 @@ def _resolve_commit_range(
     return commit_range
 
 
+_EMBED_TIMEOUT_SECONDS = 120  # same as provider-level default in .chunkhound.json
+
+
 async def _inject_diff_service(
     services: DatabaseServices,
     effective_commit_range: str,
     vector_source: str,
     embedding_manager: Any,
 ) -> DatabaseServices:
+    # Local imports avoid circular dependency: tools → git_diff → (nothing in tools)
+    import asyncio as _asyncio
+
     from loguru import logger as _log
 
     from chunkhound.core.git_diff import parse_diff_to_chunks, run_git_diff
@@ -545,7 +551,17 @@ async def _inject_diff_service(
         diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
     diff_embeddings: list[list[float]] = []
     if diff_chunks and embedding_manager is not None:
-        emb_result = await embedding_manager.embed_texts([c.code for c in diff_chunks])
+        try:
+            emb_result = await _asyncio.wait_for(
+                embedding_manager.embed_texts([c.code for c in diff_chunks]),
+                timeout=_EMBED_TIMEOUT_SECONDS,
+            )
+        except _asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Embedding {len(diff_chunks)} diff chunks timed out after "
+                f"{_EMBED_TIMEOUT_SECONDS}s. Use a smaller commit range or "
+                "set vector_source='db' to skip diff embedding."
+            )
         diff_embeddings = emb_result.embeddings
     vs = vector_source if vector_source in ("diff", "db", "both") else "both"
     diff_service = DiffAwareSearchService(
