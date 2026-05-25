@@ -388,6 +388,7 @@ class TestDocsVersionWorkflowContract:
         ("path", "job_name"),
         [
             (".github/workflows/smoke-tests.yml", "site-build"),
+            (".github/workflows/smoke-tests.yml", "site-build-validation"),
             (".github/workflows/smoke-tests.yml", "tests"),
         ],
     )
@@ -408,6 +409,7 @@ class TestDocsVersionWorkflowContract:
         ("path", "job_name"),
         [
             (".github/workflows/smoke-tests.yml", "site-build"),
+            (".github/workflows/smoke-tests.yml", "site-build-validation"),
             (".github/workflows/smoke-tests.yml", "tests"),
         ],
     )
@@ -425,12 +427,16 @@ class TestDocsVersionWorkflowContract:
                 lambda step: step.get("run") == "npm run build --prefix site",
             ),
             (
+                "site-build-validation",
+                "site build step",
+                lambda step: step.get("run") == "npm run build --prefix site",
+            ),
+            (
                 "tests",
                 "retry-backed test runner step",
                 lambda step: step.get("id") == "tests"
                 and str(step.get("uses", "")).startswith("nick-fields/retry@"),
             ),
-
         ],
     )
     def test_docs_version_is_resolved_before_consumer_steps(
@@ -513,6 +519,18 @@ class TestDocsVersionWorkflowContract:
         assert all("pytest_timeout_minutes" in entry for entry in matrix)
         assert all("retry_timeout_minutes" not in entry for entry in matrix)
 
+    def test_site_build_validation_job_contract(self) -> None:
+        job = _job(".github/workflows/smoke-tests.yml", "site-build-validation")
+        steps = cast(list[dict[str, Any]], job["steps"])
+        matrix = cast(dict[str, Any], job["strategy"]["matrix"])
+
+        assert matrix["os"] == ["ubuntu-latest", "macos-latest", "windows-latest"]
+        assert job["runs-on"] == "${{ matrix.os }}"
+        assert not any(
+            str(step.get("uses", "")).startswith("actions/upload-artifact@")
+            for step in steps
+        )
+
     def test_pages_artifact_job_contract(self) -> None:
         job = _job(".github/workflows/smoke-tests.yml", "pages-artifact")
         steps = cast(list[dict[str, Any]], job["steps"])
@@ -534,7 +552,12 @@ class TestDocsVersionWorkflowContract:
         upload_step = steps[upload_index]
         permissions = cast(dict[str, Any], job.get("permissions", {}))
 
-        assert job["needs"] == ["site-build", "tests"]
+        assert job["needs"] == [
+            "site-build",
+            "tests",
+            "site-build-validation",
+            "watchman-rollout-gate",
+        ]
         assert "github.event_name == 'workflow_dispatch'" in job["if"]
         assert "github.event_name == 'push'" in job["if"]
         assert "github.ref == 'refs/heads/main'" in job["if"]
