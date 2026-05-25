@@ -4201,7 +4201,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # 1. Export from original database (opens its own read-only connection)
             logger.info("Exporting database for compaction...")
-            self._export_database_for_compaction(db_path, export_dir)
+            hnsw_indexes = self._export_database_for_compaction(db_path, export_dir)
 
             if cancel_check and cancel_check():
                 self._restore_connection_after_compaction()
@@ -4209,7 +4209,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # 2. Import into fresh database (connects to new file)
             logger.info("Importing into compacted database...")
-            self._import_database_for_compaction(export_dir, new_db_path)
+            self._import_database_for_compaction(export_dir, new_db_path, hnsw_indexes=hnsw_indexes)
 
             if cancel_check and cancel_check():
                 # Clean up the compacted DB since we won't swap
@@ -4408,8 +4408,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Escape single quotes by doubling (DuckDB SQL literal convention).
         return path_str.replace("'", "''")
 
-    def _export_database_for_compaction(self, db_path: Path, export_dir: Path) -> None:
-        """Export database to Parquet files for compaction."""
+    def _export_database_for_compaction(
+        self, db_path: Path, export_dir: Path
+    ) -> list[dict[str, Any]]:
+        """Export database to Parquet files for compaction.
+
+        Returns HNSW index snapshot captured before EXPORT so the caller can
+        recreate the indexes after IMPORT DATABASE on the compacted file.
+        """
         # Clean up any leftover export directory
         if export_dir.exists():
             shutil.rmtree(export_dir)
@@ -4419,15 +4425,24 @@ class DuckDBProvider(SerialDatabaseProvider):
         conn = duckdb.connect(str(db_path), read_only=True)
         try:
             conn.execute("LOAD vss")
+            hnsw_indexes = self._capture_hnsw_indexes_from_conn(conn)
             safe_path = self._sql_literal_path(export_dir)
             conn.execute(f"EXPORT DATABASE '{safe_path}' (FORMAT PARQUET)")
+            return hnsw_indexes
         finally:
             conn.close()
 
     def _import_database_for_compaction(
-        self, export_dir: Path, new_db_path: Path
+        self,
+        export_dir: Path,
+        new_db_path: Path,
+        hnsw_indexes: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Import Parquet files into fresh database."""
+        """Import Parquet files into fresh database.
+
+        If hnsw_indexes is provided, recreates them after IMPORT DATABASE and
+        before CHECKPOINT so they are persisted in the compacted file.
+        """
         if new_db_path.exists():
             new_db_path.unlink()
 
@@ -4439,6 +4454,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._enable_hnsw_persistence_on_conn(conn)
             safe_path = self._sql_literal_path(export_dir)
             conn.execute(f"IMPORT DATABASE '{safe_path}'")
+            if hnsw_indexes:
+                self._recreate_hnsw_indexes_in_conn(conn, hnsw_indexes)
             # CRITICAL: Checkpoint to persist imported data before closing
             # Without this, the imported data may not be written to disk
             conn.execute("CHECKPOINT")
