@@ -271,7 +271,7 @@ async def test_deep_research_no_commit_range_skips_injection(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_deep_research_commit_hash_expands_to_range(monkeypatch):
-    """commit_hash='abc123' results in effective_commit_range='abc123..HEAD'."""
+    """commit_hash='abc123' results in effective_commit_range='abc123^..abc123'."""
     from chunkhound.mcp_server.tools import deep_research_impl
 
     original_search = _make_original_search_service()
@@ -311,8 +311,8 @@ async def test_deep_research_commit_hash_expands_to_range(monkeypatch):
         )
 
     assert result == {"answer": "hash-test"}
-    assert captured_range == ["abc123..HEAD"], (
-        f"Expected 'abc123..HEAD', got {captured_range}"
+    assert captured_range == ["abc123^..abc123"], (
+        f"Expected 'abc123^..abc123', got {captured_range}"
     )
     assert isinstance(captured_search_service[0], DiffAwareSearchService)
 

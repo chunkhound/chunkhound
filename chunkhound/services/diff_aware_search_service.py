@@ -70,8 +70,8 @@ class DiffAwareSearchService:
     Supports three ``vector_source`` modes:
 
     - ``"db"``   — pure passthrough to the original SearchService.
-    - ``"diff"`` — search only the in-memory diff chunks; falls back to the
-                   original service when diff_chunks is empty.
+    - ``"diff"`` — search only the in-memory diff chunks; returns empty results
+                   (with a warning) when diff_chunks is empty.
     - ``"both"`` — run diff search and DB search concurrently, merge by score.
     """
 
@@ -133,8 +133,9 @@ class DiffAwareSearchService:
         """Perform cosine-similarity search over in-memory diff chunks."""
         if not self._diff_chunks or self._norm_matrix is None:
             logger.warning(
-                "DiffAwareSearchService: diff mode requested but no diff chunks "
-                "available; returning empty results."
+                "DiffAwareSearchService: no diff chunks available (vector_source=%r); "
+                "returning empty results.",
+                self._vector_source,
             )
             return [], {"total": 0, "page_size": page_size, "offset": offset}
 
@@ -187,7 +188,7 @@ class DiffAwareSearchService:
             "page_size": page_size,
             "has_more": has_more,
             "next_offset": offset + page_size if has_more else None,
-            "total": N,
+            "total": total_after_filter,
         }
         return results, pagination
 

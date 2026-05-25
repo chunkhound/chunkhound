@@ -91,7 +91,7 @@ chunkhound search "API changes" --commit-range v2.0..HEAD
 # Deep research over recent changes
 chunkhound research "what changed in the auth module?" --last-n 50
 ```
-> `--vector-source` controls scope: `both` (default, merges diff + DB), `diff` (changed code only), `db` (ignore diff).
+> `--vector-source` controls scope: `diff` (default, changed code only), `both` (merges diff + DB), `db` (ignore diff).
 
 **For configuration, IDE setup, and advanced usage, see the [documentation](https://chunkhound.ai).**
 

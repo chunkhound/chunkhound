@@ -144,11 +144,7 @@ def add_git_diff_arguments(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         dest="commit_hash",
-        help=(
-            "Single commit hash — searches all changes from that commit to HEAD "
-            "(<hash>..HEAD). To search only that commit's diff, use "
-            "--commit-range <hash>^..<hash>."
-        ),
+        help="Single commit hash — searches only that commit's diff (<hash>^..<hash>).",
     )
     diff_group.add_argument(
         "--last-n",
@@ -160,7 +156,7 @@ def add_git_diff_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--vector-source",
         choices=["diff", "db", "both"],
-        default="both",
+        default="diff",
         dest="vector_source",
-        help="Search scope when commit input given: 'both' (default), 'diff', or 'db'.",
+        help="Search scope when commit input given: 'diff' (default), 'both', or 'db'.",
     )
