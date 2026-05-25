@@ -4456,3 +4456,52 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "HNSW persistence flag not available. "
                 "Vector indexes will rebuild on first query after compaction."
             )
+
+    def _capture_hnsw_indexes_from_conn(self, conn: Any) -> list[dict[str, Any]]:
+        """Snapshot HNSW index definitions from an open DB connection.
+
+        Called on the read-only export connection before EXPORT DATABASE so
+        that index metadata survives the Parquet round-trip.  Returns an empty
+        list (and logs a warning) on any failure so compaction still proceeds —
+        indexes will just rebuild on the next reindex pass.
+        """
+        try:
+            rows = conn.execute("""
+                SELECT index_name, table_name, sql
+                FROM duckdb_indexes()
+                WHERE table_name LIKE 'embeddings_%'
+            """).fetchall()
+        except Exception as e:
+            logger.warning(f"HNSW snapshot query failed, indexes will rebuild post-compaction: {e}")
+            return []
+
+        indexes: list[dict[str, Any]] = []
+        for index_name, table_name, create_sql in rows:
+            if not self._is_hnsw_index_definition(index_name, create_sql):
+                continue
+            try:
+                dims = int(table_name[11:])
+            except ValueError:
+                logger.warning(f"Cannot parse dims from HNSW index {index_name} on {table_name}, skipping")
+                continue
+            provider: str | None = None
+            model: str | None = None
+            if index_name.startswith("hnsw_"):
+                provider, model = self._extract_custom_hnsw_identity(index_name)
+            elif index_name.startswith("idx_hnsw_"):
+                provider = "generic"
+                model = "generic"
+            indexes.append({
+                "index_name": index_name,
+                "table_name": table_name,
+                "provider": provider,
+                "model": model,
+                "dims": dims,
+                "metric": self._extract_hnsw_metric(create_sql),
+            })
+
+        if indexes:
+            logger.info(f"Captured {len(indexes)} HNSW index snapshot(s) before compaction export")
+        else:
+            logger.debug("No HNSW indexes found to snapshot before compaction export")
+        return indexes
