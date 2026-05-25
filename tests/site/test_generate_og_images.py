@@ -91,11 +91,14 @@ def test_invalid_svg_errors() -> None:
 
 
 def test_package_scripts_generate_og_images_for_all_serve_lifecycle_commands() -> None:
-    """Dev/build/preview all generate PNGs before serving or building."""
+    """Dev/build/preview all run the shared site preparation step first."""
     package_json = json.loads((ROOT / "site" / "package.json").read_text(encoding="utf-8"))
     scripts = package_json["scripts"]
 
     assert scripts["generate:og-images"] == "node scripts/generate-og-images.mjs"
-    assert scripts["predev"] == "npm run generate:og-images && npm run sync:changelog"
-    assert scripts["prebuild"] == "npm run generate:og-images && npm run sync:changelog"
-    assert scripts["prepreview"] == "npm run generate:og-images && npm run sync:changelog"
+    assert "prepare:site" in scripts
+    assert "generate:og-images" in scripts["prepare:site"]
+    assert "sync:changelog" in scripts["prepare:site"]
+    assert scripts["predev"] == "npm run prepare:site"
+    assert scripts["prebuild"] == "npm run prepare:site"
+    assert scripts["prepreview"] == "npm run prepare:site"

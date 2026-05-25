@@ -5,11 +5,12 @@
   "scripts": {
     "generate:og-images": "node scripts/generate-og-images.mjs",
     "sync:changelog": "node scripts/sync-changelog.mjs",
-    "predev": "npm run generate:og-images && npm run sync:changelog",
+    "prepare:site": "npm run generate:og-images && npm run sync:changelog",
+    "predev": "npm run prepare:site",
     "dev": "astro dev",
-    "prebuild": "npm run generate:og-images && npm run sync:changelog",
+    "prebuild": "npm run prepare:site",
     "build": "astro build",
-    "prepreview": "npm run generate:og-images && npm run sync:changelog",
+    "prepreview": "npm run prepare:site",
     "preview": "astro preview"
   },
   "dependencies": {
