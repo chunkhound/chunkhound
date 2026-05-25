@@ -33,12 +33,12 @@ from chunkhound.core.utils import normalize_path_for_lookup
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.providers.database.duckdb.chunk_repository import DuckDBChunkRepository
 from chunkhound.providers.database.duckdb.connection_manager import (
+    _COMPACTING_PATHS,
+    _COMPACTING_PATHS_LOCK,
     PHASE_1,
     PHASE_2,
     PHASE_PRE_SWAP,
     DuckDBConnectionManager,
-    _COMPACTING_PATHS,
-    _COMPACTING_PATHS_LOCK,
     get_compaction_lock_path,
 )
 from chunkhound.providers.database.duckdb.embedding_repository import (
@@ -138,9 +138,7 @@ def _read_indexed_root_sidecar(sidecar: Path) -> str:
             f"Indexed-root sidecar {sidecar} is not valid JSON: {error}"
         ) from error
     if not isinstance(data, dict):
-        raise RuntimeError(
-            f"Indexed-root sidecar {sidecar} must be a JSON object"
-        )
+        raise RuntimeError(f"Indexed-root sidecar {sidecar} must be a JSON object")
     version = data.get("version")
     if version != _INDEXED_ROOT_SIDECAR_VERSION:
         raise RuntimeError(
@@ -592,9 +590,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         if self._executor_index_exists(conn, table_name, index_name):
             return
 
-        conn.execute(
-            f"CREATE INDEX {index_name} ON {table_name}(provider, model)"
-        )
+        conn.execute(f"CREATE INDEX {index_name} ON {table_name}(provider, model)")
 
     def _executor_create_embedding_unique_index(
         self, conn: Any, table_name: str, dims: int
@@ -672,22 +668,19 @@ class DuckDBProvider(SerialDatabaseProvider):
                 conn.execute("SET preserve_insertion_order = false")
 
             for index_info in existing_indexes:
-                self._executor_drop_vector_index_by_name(
-                    conn, index_info["index_name"]
-                )
+                self._executor_drop_vector_index_by_name(conn, index_info["index_name"])
 
             result = mutation_func()
 
-            # Commit data changes before recreating HNSW indexes. DuckDB VSS HNSW indexes
-            # do not support CreateDeltaIndex, so committing a transaction that contains an
-            # HNSW CREATE triggers a BoundIndex::CreateDeltaIndex assertion failure.
+            # Commit data changes before recreating HNSW indexes.
+            # DuckDB VSS HNSW indexes do not support CreateDeltaIndex,
+            # so committing a transaction that contains an HNSW CREATE
+            # triggers a BoundIndex::CreateDeltaIndex assertion failure.
             if transactional:
                 self._executor_commit_transaction(conn, state, False)
 
             for index_info in existing_indexes:
-                self._executor_recreate_vector_index_from_info(
-                    conn, state, index_info
-                )
+                self._executor_recreate_vector_index_from_info(conn, state, index_info)
 
             self._executor_maybe_checkpoint(conn, state, True)
             return result
@@ -697,7 +690,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                     self._executor_rollback_transaction(conn, state)
                 except Exception as rollback_error:
                     raise RuntimeError(
-                        f"{mutation_label} failed: {e}; rollback failed: {rollback_error}"
+                        f"{mutation_label} failed: {e}; "
+                        f"rollback failed: {rollback_error}"
                     ) from rollback_error
             else:
                 restore_failures: list[str] = []
@@ -761,7 +755,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         table_name = f"embeddings_{dims}"
 
         if self._executor_table_exists(conn, state, table_name):
-            self._executor_ensure_embedding_upsert_contract(conn, state, table_name, dims)
+            self._executor_ensure_embedding_upsert_contract(
+                conn, state, table_name, dims
+            )
             return table_name
 
         logger.info(f"Creating embedding table for {dims} dimensions: {table_name}")
@@ -884,8 +880,10 @@ class DuckDBProvider(SerialDatabaseProvider):
                 t_main = float(m.get("main_insert_s", 0.0))
                 if files or rows:
                     logger.info(
-                        "DuckDB chunks bulk metrics: files={} rows={} batches={} "
-                        "t_temp={:.2f}s t_temp_clear={:.2f}s t_temp_insert={:.2f}s t_main_insert={:.2f}s",
+                        "DuckDB chunks bulk metrics: "
+                        "files=%d rows=%d batches=%d "
+                        "t_temp=%.2fs t_temp_clear=%.2fs "
+                        "t_temp_insert=%.2fs t_main_insert=%.2fs",
                         files,
                         rows,
                         batches,
@@ -908,8 +906,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Executor method for optimize_tables - runs in DB thread."""
         try:
             # Checkpoint for WAL durability and space reclamation
-            # NOTE: HNSW compact (PRAGMA hnsw_compact_index) was removed here because the
-            # DuckDB VSS extension segfaults when compacting after bulk deletions on Linux.
+            # NOTE: HNSW compact (PRAGMA hnsw_compact_index) was removed here
+            # because the DuckDB VSS extension segfaults when compacting after
+            # bulk deletions on Linux.
             # The DuckDB HNSW index is being replaced entirely by PR #146
             # (https://github.com/chunkhound/chunkhound/pull/146).
             logger.debug("Running CHECKPOINT for optimization...")
@@ -934,7 +933,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             accounted_blocks, orphaned_blocks, block_size, free_ratio,
             row_waste_ratio, effective_waste, _raw_fragmentation_ratio
         """
-        return self._execute_in_db_thread_sync("get_storage_stats")
+        return cast(
+            dict[str, Any], self._execute_in_db_thread_sync("get_storage_stats")
+        )
 
     def _executor_get_storage_stats(
         self, conn: Any, state: dict[str, Any]
@@ -1030,7 +1031,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
                 if col:
                     storage = conn.execute(
-                        f"""
+                        """
                         SELECT COALESCE(SUM(count), 0)
                         FROM pragma_storage_info(?)
                         WHERE column_name = ?
@@ -1263,9 +1264,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         try:
             # Check if 'size' and 'signature' columns exist and drop them
             columns_info = conn.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'chunks' 
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'chunks'
                 AND column_name IN ('size', 'signature')
             """).fetchall()
 
@@ -1797,7 +1798,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             return
 
         try:
-            metric = self._normalize_hnsw_metric(str(index_info.get("metric", "cosine")))
+            metric = self._normalize_hnsw_metric(
+                str(index_info.get("metric", "cosine"))
+            )
         except ValueError as error:
             logger.warning(
                 "Skipping HNSW index restore for "
@@ -1997,12 +2000,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
         chunk_rows = self._executor_fetch_rows_as_dicts(
             conn,
-            """
+            f"""
             SELECT *
             FROM chunks
             WHERE file_id IN ({placeholders})
             ORDER BY id
-            """.format(placeholders=placeholders),
+            """,
             unique_file_ids,
         )
         chunk_ids = [int(row["id"]) for row in chunk_rows]
@@ -2104,9 +2107,10 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             result = mutation_func()
 
-            # Commit data changes before recreating HNSW indexes. DuckDB VSS HNSW indexes
-            # do not support CreateDeltaIndex, so committing a transaction that contains an
-            # HNSW CREATE triggers a BoundIndex::CreateDeltaIndex assertion failure.
+            # Commit data changes before recreating HNSW indexes.
+            # DuckDB VSS HNSW indexes do not support CreateDeltaIndex,
+            # so committing a transaction that contains an HNSW CREATE
+            # triggers a BoundIndex::CreateDeltaIndex assertion failure.
             if transactional:
                 self._executor_commit_transaction(conn, state, False)
 
@@ -3098,7 +3102,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Use parameterized placeholders for chunk IDs
             placeholders = ", ".join(["?" for _ in chunk_ids])
             query = f"""
-                SELECT DISTINCT chunk_id 
+                SELECT DISTINCT chunk_id
                 FROM {table_name}
                 WHERE chunk_id IN ({placeholders})
                 AND provider = ? AND model = ?
@@ -3639,7 +3643,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                         break
                 else:
                     # Debug what's actually in this table for this chunk
-                    all_for_chunk = conn.execute(
+                    conn.execute(
                         f"""
                         SELECT provider, model, chunk_id
                         FROM {table}
@@ -3675,7 +3679,6 @@ class DuckDBProvider(SerialDatabaseProvider):
             embedding_type = f"FLOAT[{dims}]"
 
             # Use the embedding to find similar chunks
-            similarity_metric = "cosine"  # Default for semantic search
             threshold_condition = (
                 f"AND distance <= {threshold}" if threshold is not None else ""
             )
@@ -3809,7 +3812,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # Query for similar chunks using the provided embedding
             query = f"""
-                SELECT 
+                SELECT
                     c.id as chunk_id,
                     c.symbol as name,
                     c.code as content,
@@ -4034,9 +4037,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._execute_in_db_thread_sync("execute_query", query, params),
         )
 
-    def list_file_paths_under_directory(
-        self, directory_prefix: str
-    ) -> list[str]:
+    def list_file_paths_under_directory(self, directory_prefix: str) -> list[str]:
         escaped_prefix = escape_like_pattern(directory_prefix)
         rows = self.execute_query(
             "SELECT path FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'",
@@ -4109,7 +4110,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         whether compaction is warranted before calling this method.
 
         Args:
-            cancel_check: Optional callable returning True if compaction should be cancelled.
+            cancel_check: Optional callable returning True if compaction
+                should be cancelled.
 
         Returns:
             True if compaction was performed, False if cancelled.
@@ -4162,10 +4164,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         try:
             # Atomic lock acquisition (matches daemon PID lock pattern)
             try:
-                # Pre-register in process-wide set BEFORE creating the lock file so any
-                # concurrent same-process connect() that sees the file also sees the path
-                # as live. lock_acquired tracks the on-disk file; path_registered tracks
-                # the in-memory registry — they are cleaned up independently in finally.
+                # Pre-register in process-wide set BEFORE creating the lock file so
+                # any concurrent same-process connect() that sees the file also sees
+                # the path as live. lock_acquired tracks the on-disk file;
+                # path_registered tracks the in-memory registry — they are cleaned
+                # up independently in finally.
                 with _COMPACTING_PATHS_LOCK:
                     _COMPACTING_PATHS.add(str(db_path))
                 path_registered = True
@@ -4209,7 +4212,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # 2. Import into fresh database (connects to new file)
             logger.info("Importing into compacted database...")
-            self._import_database_for_compaction(export_dir, new_db_path, hnsw_indexes=hnsw_indexes)
+            self._import_database_for_compaction(
+                export_dir, new_db_path, hnsw_indexes=hnsw_indexes
+            )
 
             if cancel_check and cancel_check():
                 # Clean up the compacted DB since we won't swap
@@ -4265,7 +4270,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             try:
                 old_db_path.unlink(missing_ok=True)
             except OSError as exc:
-                # Compaction succeeded and new DB is connected — cleanup failure is non-fatal.
+                # Compaction succeeded and new DB is connected —
+                # cleanup failure is non-fatal.
                 # Recovery on next startup will handle the stale file.
                 logger.warning(
                     "Could not remove old database after compaction: %s", exc
@@ -4316,12 +4322,14 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Always clean up export directory and lock file
             if export_dir.exists():
                 shutil.rmtree(export_dir, ignore_errors=True)
-            # Cleanup order: unlink the on-disk lock first, then discard from _COMPACTING_PATHS.
-            # Discard is gated on lock_acquired (not path_registered alone) so Provider B
-            # (which failed at lock acquisition with lock_acquired=False) cannot remove Provider A's
-            # valid registry entry. Since _COMPACTING_PATHS is a set and both A and B register the
-            # same path string, A's discard implicitly covers B's registration — no stale entry
-            # persists past A's completion.
+            # Cleanup order: unlink the on-disk lock first, then discard from
+            # _COMPACTING_PATHS. Discard is gated on lock_acquired (not
+            # path_registered alone) so Provider B (which failed at lock
+            # acquisition with lock_acquired=False) cannot remove Provider A's
+            # valid registry entry. Since _COMPACTING_PATHS is a set and both
+            # A and B register the same path string, A's discard implicitly
+            # covers B's registration — no stale entry persists past A's
+            # completion.
             if lock_acquired:
                 lock_file.unlink(missing_ok=True)
             if flag_set:
@@ -4489,7 +4497,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 WHERE table_name LIKE 'embeddings_%'
             """).fetchall()
         except Exception as e:
-            logger.warning(f"HNSW snapshot query failed, indexes will rebuild post-compaction: {e}")
+            logger.warning(
+                f"HNSW snapshot query failed, indexes will rebuild post-compaction: {e}"
+            )
             return []
 
         indexes: list[dict[str, Any]] = []
@@ -4499,7 +4509,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             try:
                 dims = int(table_name[11:])
             except ValueError:
-                logger.warning(f"Cannot parse dims from HNSW index {index_name} on {table_name}, skipping")
+                logger.warning(
+                    "Cannot parse dims from HNSW index %s on %s, skipping",
+                    index_name,
+                    table_name,
+                )
                 continue
             provider: str | None = None
             model: str | None = None
@@ -4508,17 +4522,22 @@ class DuckDBProvider(SerialDatabaseProvider):
             elif index_name.startswith("idx_hnsw_"):
                 provider = "generic"
                 model = "generic"
-            indexes.append({
-                "index_name": index_name,
-                "table_name": table_name,
-                "provider": provider,
-                "model": model,
-                "dims": dims,
-                "metric": self._extract_hnsw_metric(create_sql),
-            })
+            indexes.append(
+                {
+                    "index_name": index_name,
+                    "table_name": table_name,
+                    "provider": provider,
+                    "model": model,
+                    "dims": dims,
+                    "metric": self._extract_hnsw_metric(create_sql),
+                }
+            )
 
         if indexes:
-            logger.info(f"Captured {len(indexes)} HNSW index snapshot(s) before compaction export")
+            logger.info(
+                "Captured %d HNSW index snapshot(s) before compaction export",
+                len(indexes),
+            )
         else:
             logger.debug("No HNSW indexes found to snapshot before compaction export")
         return indexes
@@ -4537,17 +4556,23 @@ class DuckDBProvider(SerialDatabaseProvider):
         if not hnsw_indexes:
             return
 
-        logger.info(f"Recreating {len(hnsw_indexes)} HNSW index(es) in compacted database...")
+        logger.info(
+            f"Recreating {len(hnsw_indexes)} HNSW index(es) in compacted database..."
+        )
         succeeded = 0
         for idx in hnsw_indexes:
             index_name = str(idx["index_name"])
             table_name = str(idx["table_name"])
 
             if not self._is_safe_duckdb_identifier(index_name):
-                logger.warning(f"Skipping HNSW recreation for unsafe index name {index_name!r}")
+                logger.warning(
+                    f"Skipping HNSW recreation for unsafe index name {index_name!r}"
+                )
                 continue
             if not self._is_safe_duckdb_identifier(table_name):
-                logger.warning(f"Skipping HNSW recreation for unsafe table name {table_name!r}")
+                logger.warning(
+                    f"Skipping HNSW recreation for unsafe table name {table_name!r}"
+                )
                 continue
 
             try:
@@ -4557,16 +4582,27 @@ class DuckDBProvider(SerialDatabaseProvider):
                 continue
 
             try:
+                quoted_idx = self._quote_duckdb_identifier(index_name)
+                quoted_tbl = self._quote_duckdb_identifier(table_name)
                 conn.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {self._quote_duckdb_identifier(index_name)}
-                    ON {self._quote_duckdb_identifier(table_name)}
+                    CREATE INDEX IF NOT EXISTS {quoted_idx}
+                    ON {quoted_tbl}
                     USING HNSW (embedding)
                     WITH (metric = '{metric}')
                 """)
-                logger.info(f"Recreated HNSW index {index_name!r} on {table_name!r} (metric={metric})")
+                logger.info(
+                    "Recreated HNSW index %r on %r (metric=%s)",
+                    index_name,
+                    table_name,
+                    metric,
+                )
                 succeeded += 1
             except Exception as e:
                 logger.error(f"Failed to recreate HNSW index {index_name!r}: {e}")
 
         conn.commit()
-        logger.info(f"HNSW recreation complete: {succeeded}/{len(hnsw_indexes)} index(es) restored")
+        logger.info(
+            "HNSW recreation complete: %d/%d index(es) restored",
+            succeeded,
+            len(hnsw_indexes),
+        )
