@@ -63,14 +63,7 @@ def test_sync_prepends_frontmatter() -> None:
         assert output_file.exists(), f"Output not written to {output_file}"
         output_text = output_file.read_text(encoding="utf-8")
 
-        assert output_text.startswith(
-            EXPECTED_FRONTMATTER_START
-        ), f"Missing or incorrect frontmatter. Got start: {output_text[:200]}"
-
-        # Original content preserved after frontmatter
-        assert "## [5.1.0] - 2026-05-20" in output_text
-        assert "New feature" in output_text
-        assert "[5.1.0]:" in output_text
+        assert output_text == EXPECTED_FRONTMATTER_START + CHANGELOG_CONTENT
 
 
 def test_sync_missing_source_errors() -> None:

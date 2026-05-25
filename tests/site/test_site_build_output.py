@@ -11,9 +11,7 @@ from tests.site.tsx_runner import run_tsx_raw, sanitized_subprocess_env
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
 VERSION_FILE = ROOT / "chunkhound" / "_version.py"
-VERSION_RESOLUTION_FAILURE = (
-    "Unable to resolve ChunkHound version for docs build"
-)
+VERSION_RESOLUTION_FAILURE = "Unable to resolve ChunkHound version for docs build"
 
 
 def _clean_dev_suffix(version: str) -> str:
@@ -73,6 +71,29 @@ def _write_version_file(repo_dir: Path, version: str) -> Path:
         encoding="utf-8",
     )
     return version_file
+
+
+def _expected_changelog_markers(
+    changelog_path: Path = ROOT / "CHANGELOG.md",
+) -> tuple[str, str]:
+    version = None
+    section = None
+
+    for line in changelog_path.read_text(encoding="utf-8").splitlines():
+        if version is None:
+            match = re.match(r"## \[([^\]]+)\] - ", line)
+            if match:
+                version = match.group(1)
+            continue
+
+        match = re.match(r"### (.+)", line)
+        if match:
+            section = match.group(1)
+            break
+
+    assert version is not None, "Missing released version heading in CHANGELOG.md"
+    assert section is not None, "Missing section heading in CHANGELOG.md"
+    return version, section
 
 
 def _run_version_helper(
@@ -164,8 +185,7 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert "chunkhound autodoc --assets-only --out-dir docs-site/" in cli_reference
     assert "chunkhound autodoc --out-dir site/" not in cli_reference
     assert (
-        "Complete reference for all ChunkHound CLI commands and flags."
-        in cli_reference
+        "Complete reference for all ChunkHound CLI commands and flags." in cli_reference
     )
     assert (
         "Configure embedding providers, database backends, and indexing behavior."
@@ -229,31 +249,22 @@ def test_built_site_has_og_meta_tags() -> None:
     """Built homepage includes correct OG and Twitter Card meta tags."""
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
 
-    assert (
-        '<meta property="og:image" content="/og-image-dark.png">' in homepage
-    )
+    assert '<meta property="og:image" content="/og-image-dark.png">' in homepage
     assert '<meta property="og:image:type" content="image/png">' in homepage
     assert '<meta property="og:image:width" content="1200">' in homepage
     assert '<meta property="og:image:height" content="630">' in homepage
     assert '<meta property="og:type" content="website">' in homepage
-    assert (
-        '<meta name="twitter:image" content="/og-image-dark.png">' in homepage
-    )
-    assert (
-        '<meta name="twitter:card" content="summary_large_image">' in homepage
-    )
+    assert '<meta name="twitter:image" content="/og-image-dark.png">' in homepage
+    assert '<meta name="twitter:card" content="summary_large_image">' in homepage
 
 
 def test_built_site_has_changelog_page() -> None:
-    """Changelog page is built and contains expected version headers."""
-    changelog = (
-        DIST / "docs" / "changelog" / "index.html"
-    ).read_text(encoding="utf-8")
+    """Changelog page is built from the current root changelog content."""
+    changelog = (DIST / "docs" / "changelog" / "index.html").read_text(encoding="utf-8")
+    version, section = _expected_changelog_markers()
 
-    # Must contain the latest released version
-    assert "5.1.0" in changelog
-    # Must contain at least one major section heading rendered as HTML
-    assert "Breaking Changes" in changelog
+    assert version in changelog
+    assert section in changelog
 
 
 def test_built_site_has_og_png_assets() -> None:
@@ -261,9 +272,9 @@ def test_built_site_has_og_png_assets() -> None:
     for name in ("og-image-dark.png", "og-image-light.png"):
         png_path = DIST / name
         assert png_path.exists(), f"{name} missing from dist/"
-        assert (
-            png_path.stat().st_size > 5000
-        ), f"{name} is too small ({png_path.stat().st_size} bytes)"
+        assert png_path.stat().st_size > 5000, (
+            f"{name} is too small ({png_path.stat().st_size} bytes)"
+        )
 
         with open(png_path, "rb") as f:
             f.seek(16)  # skip PNG sig + IHDR chunk header
