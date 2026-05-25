@@ -9,20 +9,21 @@ from tests.site.tsx_runner import NPM, sanitized_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
-DIST_INDEX = DIST / "index.html"
 
 
 @pytest.fixture(scope="session", autouse=True)
 def built_site() -> None:
-    """Reuse an existing built site, or build once for the test session."""
+    """Build the site once per test session. Set CHUNKHOUND_USE_EXISTING_SITE_DIST=1 to skip and reuse an existing dist."""
     if os.environ.get("CHUNKHOUND_USE_EXISTING_SITE_DIST") == "1":
         if not DIST.exists():
-            raise AssertionError(f"Expected prebuilt site artifact at {DIST}")
+            raise RuntimeError(
+                f"Expected prebuilt site at {DIST}. "
+                f"Run 'npm run build --prefix site' first, or unset CHUNKHOUND_USE_EXISTING_SITE_DIST."
+            )
+        print(f"Reusing existing site dist at {DIST}")
         return
 
-    if DIST_INDEX.exists():
-        return
-
+    print(f"Building site for tests... ({DIST})")
     result = subprocess.run(
         [NPM, "run", "build", "--prefix", "site"],
         cwd=ROOT,
@@ -31,6 +32,9 @@ def built_site() -> None:
         text=True,
     )
     if result.returncode != 0:
+        sys.stderr.write("=== Site build failed ===\n")
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         result.check_returncode()
+    if not (DIST / "index.html").exists():
+        raise RuntimeError(f"Build succeeded but {DIST / 'index.html'} was not produced")
