@@ -4505,3 +4505,51 @@ class DuckDBProvider(SerialDatabaseProvider):
         else:
             logger.debug("No HNSW indexes found to snapshot before compaction export")
         return indexes
+
+    def _recreate_hnsw_indexes_in_conn(
+        self, conn: Any, hnsw_indexes: list[dict[str, Any]]
+    ) -> None:
+        """Recreate HNSW indexes in a connection after IMPORT DATABASE.
+
+        Called on the import connection before CHECKPOINT so indexes are
+        persisted in the compacted file.  Individual index failures are logged
+        and skipped — a partially-rebuilt set is better than aborting compaction.
+
+        Tables must already exist (guaranteed by IMPORT DATABASE having run).
+        """
+        if not hnsw_indexes:
+            return
+
+        logger.info(f"Recreating {len(hnsw_indexes)} HNSW index(es) in compacted database...")
+        succeeded = 0
+        for idx in hnsw_indexes:
+            index_name = str(idx["index_name"])
+            table_name = str(idx["table_name"])
+
+            if not self._is_safe_duckdb_identifier(index_name):
+                logger.warning(f"Skipping HNSW recreation for unsafe index name {index_name!r}")
+                continue
+            if not self._is_safe_duckdb_identifier(table_name):
+                logger.warning(f"Skipping HNSW recreation for unsafe table name {table_name!r}")
+                continue
+
+            try:
+                metric = self._normalize_hnsw_metric(str(idx.get("metric", "cosine")))
+            except ValueError as e:
+                logger.warning(f"Skipping {index_name!r}: {e}")
+                continue
+
+            try:
+                conn.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {self._quote_duckdb_identifier(index_name)}
+                    ON {self._quote_duckdb_identifier(table_name)}
+                    USING HNSW (embedding)
+                    WITH (metric = '{metric}')
+                """)
+                logger.info(f"Recreated HNSW index {index_name!r} on {table_name!r} (metric={metric})")
+                succeeded += 1
+            except Exception as e:
+                logger.error(f"Failed to recreate HNSW index {index_name!r}: {e}")
+
+        conn.commit()
+        logger.info(f"HNSW recreation complete: {succeeded}/{len(hnsw_indexes)} index(es) restored")
