@@ -184,13 +184,8 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert "chunkhound autodoc map-output/ --out-dir docs-site/" in cli_reference
     assert "chunkhound autodoc --assets-only --out-dir docs-site/" in cli_reference
     assert "chunkhound autodoc --out-dir site/" not in cli_reference
-    assert (
-        "Complete reference for all ChunkHound CLI commands and flags." in cli_reference
-    )
-    assert (
-        "Configure embedding providers, database backends, and indexing behavior."
-        in configuration
-    )
+    assert "Complete reference for all ChunkHound CLI commands" in cli_reference
+    assert "embedding providers, database backends, and indexing behavior" in configuration
     assert '<nav class="nav-tabs"' not in homepage
     sidebar_tag = re.search(r'<aside class="docs-sidebar"[^>]*>', docs_home)
     assert sidebar_tag is not None

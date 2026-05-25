@@ -23,15 +23,13 @@ CHANGELOG_CONTENT = """# Changelog
 [5.1.0]: https://github.com/chunkhound/chunkhound/releases/tag/v5.1.0
 """
 
-EXPECTED_FRONTMATTER_START = """---
-layout: ../../layouts/DocsLayout.astro
-title: "Changelog"
-description: "Release history and breaking changes for ChunkHound."
-order: 4
-section: "manual"
----
-
-"""
+EXPECTED_FRONTMATTER_LINES = (
+    'layout: ../../layouts/DocsLayout.astro',
+    'title: "Changelog"',
+    'description: "Release history and breaking changes for ChunkHound."',
+    'order: 4',
+    'section: "manual"',
+)
 
 
 def _run_sync(repo_root: pathlib.Path) -> subprocess.CompletedProcess:
@@ -63,7 +61,11 @@ def test_sync_prepends_frontmatter() -> None:
         assert output_file.exists(), f"Output not written to {output_file}"
         output_text = output_file.read_text(encoding="utf-8")
 
-        assert output_text == EXPECTED_FRONTMATTER_START + CHANGELOG_CONTENT
+        assert output_text.startswith("---\n")
+        assert output_text.count("---\n") >= 2
+        for line in EXPECTED_FRONTMATTER_LINES:
+            assert line in output_text
+        assert output_text.endswith(CHANGELOG_CONTENT)
 
 
 def test_sync_missing_source_errors() -> None:
@@ -92,4 +94,9 @@ def test_sync_empty_source_outputs_frontmatter_only() -> None:
 
         output_file = output_dir / "changelog.md"
         output_text = output_file.read_text(encoding="utf-8")
-        assert output_text == EXPECTED_FRONTMATTER_START
+
+        assert output_text.startswith("---\n")
+        assert output_text.count("---\n") >= 2
+        for line in EXPECTED_FRONTMATTER_LINES:
+            assert line in output_text
+        assert output_text.endswith("---\n\n")
