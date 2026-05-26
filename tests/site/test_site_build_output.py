@@ -132,6 +132,21 @@ def _extract_astro_code_block_after_marker(html: str, marker: str) -> str:
     return html[pre_index : end_index + len("</pre>")]
 
 
+def _meta_tag_content(html: str, attr_name: str, attr_value: str) -> str | None:
+    """Extract content from the first <meta> tag matching attr_name=attr_value.
+
+    Only handles double-quoted attributes (sufficient for Astro HTML output).
+    Returns the first match if multiple tags share the same identifier.
+    """
+    for match in re.finditer(r"<meta\s+[^>]*>", html):
+        attributes = dict(
+            re.findall(r'([^\s=/>]+)\s*=\s*"([^"]*)"', match.group(0))
+        )
+        if attributes.get(attr_name) == attr_value:
+            return attributes.get("content")
+    return None
+
+
 def test_site_build_outputs_platform_aware_onboarding() -> None:
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
     getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(
@@ -245,13 +260,31 @@ def test_built_site_has_og_meta_tags() -> None:
     """Built homepage includes correct OG and Twitter Card meta tags."""
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
 
-    assert '<meta property="og:image" content="https://chunkhound.ai/og-image-dark.png">' in homepage
-    assert '<meta property="og:image:type" content="image/png">' in homepage
-    assert '<meta property="og:image:width" content="1200">' in homepage
-    assert '<meta property="og:image:height" content="630">' in homepage
-    assert '<meta property="og:type" content="website">' in homepage
-    assert '<meta name="twitter:image" content="https://chunkhound.ai/og-image-dark.png">' in homepage
-    assert '<meta name="twitter:card" content="summary_large_image">' in homepage
+    # Meta tag checks must ignore serializer attribute order.
+    og_image = _meta_tag_content(homepage, "property", "og:image")
+    assert og_image is not None, "Missing og:image meta tag"
+    assert og_image.startswith("https://"), (
+        f"OG image URL should be absolute: {og_image}"
+    )
+    assert og_image.endswith("/og-image-dark.png")
+
+    for prop, expected in [
+        ("og:image:type", "image/png"),
+        ("og:image:width", "1200"),
+        ("og:image:height", "630"),
+        ("og:type", "website"),
+    ]:
+        content = _meta_tag_content(homepage, "property", prop)
+        assert content is not None, f"Missing meta tag: {prop}"
+        assert content == expected
+
+    tw_image = _meta_tag_content(homepage, "name", "twitter:image")
+    assert tw_image is not None, "Missing twitter:image meta tag"
+    assert tw_image.endswith("/og-image-dark.png")
+
+    tw_card = _meta_tag_content(homepage, "name", "twitter:card")
+    assert tw_card is not None, "Missing twitter:card meta tag"
+    assert tw_card == "summary_large_image"
 
 
 def test_built_site_has_changelog_page() -> None:
