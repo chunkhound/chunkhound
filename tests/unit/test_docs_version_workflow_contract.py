@@ -387,9 +387,9 @@ class TestDocsVersionWorkflowContract:
     @pytest.mark.parametrize(
         ("path", "job_name"),
         [
-            (".github/workflows/smoke-tests.yml", "site-build"),
-            (".github/workflows/smoke-tests.yml", "site-build-validation"),
-            (".github/workflows/smoke-tests.yml", "tests"),
+            (".github/workflows/ci.yml", "site-build"),
+            (".github/workflows/ci.yml", "site-build-validation"),
+            (".github/workflows/ci.yml", "tests"),
         ],
     )
     def test_docs_build_jobs_use_shared_resolver_script(
@@ -408,9 +408,9 @@ class TestDocsVersionWorkflowContract:
     @pytest.mark.parametrize(
         ("path", "job_name"),
         [
-            (".github/workflows/smoke-tests.yml", "site-build"),
-            (".github/workflows/smoke-tests.yml", "site-build-validation"),
-            (".github/workflows/smoke-tests.yml", "tests"),
+            (".github/workflows/ci.yml", "site-build"),
+            (".github/workflows/ci.yml", "site-build-validation"),
+            (".github/workflows/ci.yml", "tests"),
         ],
     )
     def test_docs_build_jobs_checkout_with_full_history(
@@ -445,7 +445,7 @@ class TestDocsVersionWorkflowContract:
         consumer_description: str,
         consumer_predicate: Callable[[dict], bool],
     ) -> None:
-        steps = _job_steps(".github/workflows/smoke-tests.yml", job_name)
+        steps = _job_steps(".github/workflows/ci.yml", job_name)
         resolve_index = _find_step_index(
             steps,
             "shared docs version resolver step",
@@ -458,14 +458,14 @@ class TestDocsVersionWorkflowContract:
         assert resolve_index < consumer_index
 
     def test_workflows_do_not_inline_docs_version_resolution(self) -> None:
-        contents = (ROOT / ".github/workflows/smoke-tests.yml").read_text(
+        contents = (ROOT / ".github/workflows/ci.yml").read_text(
             encoding="utf-8"
         )
 
         assert INLINE_RESOLVE_SNIPPET not in contents
 
     def test_site_build_uploads_site_dist_artifact_after_nojekyll(self) -> None:
-        steps = _job_steps(".github/workflows/smoke-tests.yml", "site-build")
+        steps = _job_steps(".github/workflows/ci.yml", "site-build")
         nojekyll_index = _find_step_index(
             steps,
             ".nojekyll creation step",
@@ -485,7 +485,7 @@ class TestDocsVersionWorkflowContract:
         assert upload_step["with"]["path"] == "site/dist/"
 
     def test_tests_job_downloads_site_dist_and_uses_existing_build(self) -> None:
-        job = _job(".github/workflows/smoke-tests.yml", "tests")
+        job = _job(".github/workflows/ci.yml", "tests")
         steps = cast(list[dict[str, Any]], job["steps"])
         download_index = _find_step_index(
             steps,
@@ -511,7 +511,7 @@ class TestDocsVersionWorkflowContract:
     def test_tests_job_matrix_uses_pytest_timeout_minutes_consistently(self) -> None:
         matrix = cast(
             list[dict[str, Any]],
-            _job(".github/workflows/smoke-tests.yml", "tests")["strategy"]["matrix"][
+            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"][
                 "include"
             ],
         )
@@ -520,7 +520,7 @@ class TestDocsVersionWorkflowContract:
         assert all("retry_timeout_minutes" not in entry for entry in matrix)
 
     def test_site_build_validation_job_contract(self) -> None:
-        job = _job(".github/workflows/smoke-tests.yml", "site-build-validation")
+        job = _job(".github/workflows/ci.yml", "site-build-validation")
         steps = cast(list[dict[str, Any]], job["steps"])
         matrix = cast(dict[str, Any], job["strategy"]["matrix"])
 
@@ -532,7 +532,7 @@ class TestDocsVersionWorkflowContract:
         )
 
     def test_pages_artifact_job_contract(self) -> None:
-        job = _job(".github/workflows/smoke-tests.yml", "pages-artifact")
+        job = _job(".github/workflows/ci.yml", "pages-artifact")
         steps = cast(list[dict[str, Any]], job["steps"])
         download_index = _find_step_index(
             steps,
@@ -565,13 +565,13 @@ class TestDocsVersionWorkflowContract:
         assert permissions["contents"] == "read"
 
     def test_deploy_job_contract(self) -> None:
-        job = _job(".github/workflows/smoke-tests.yml", "deploy")
+        job = _job(".github/workflows/ci.yml", "deploy")
         permissions = cast(dict[str, Any], job.get("permissions", {}))
         concurrency = cast(dict[str, Any], job.get("concurrency", {}))
 
         assert job["needs"] == "pages-artifact"
         assert job["if"] == "github.ref == 'refs/heads/main'"
-        assert concurrency["group"] == "pages"
+        assert concurrency["group"] == "ch-test-deploy"
         assert concurrency["cancel-in-progress"] is False
         assert permissions["pages"] == "write"
         assert permissions["id-token"] == "write"
