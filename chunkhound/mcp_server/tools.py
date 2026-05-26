@@ -864,6 +864,10 @@ async def execute_tool(
                     md = format_search_results_markdown([result_copy], pagination, search_type)
             return md
 
+    # String return types (e.g., websearch) pass through directly as markdown
+    if isinstance(result, str):
+        return result
+
     # Convert result to dict if it's not already
     if hasattr(result, "__dict__"):
         return dict(result)
