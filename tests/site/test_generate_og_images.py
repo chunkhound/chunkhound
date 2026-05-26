@@ -90,8 +90,8 @@ def test_invalid_svg_errors() -> None:
         assert "Failed to render" in result.stderr
 
 
-def test_package_scripts_generate_og_images_for_all_serve_lifecycle_commands() -> None:
-    """Dev/build/preview all run the shared site preparation step first."""
+def test_package_scripts_keep_prepare_site_only_for_dev_and_build() -> None:
+    """Dev/build keep the shared prepare step while preview remains opt-in."""
     package_json = json.loads((ROOT / "site" / "package.json").read_text(encoding="utf-8"))
     scripts = package_json["scripts"]
 
@@ -101,4 +101,5 @@ def test_package_scripts_generate_og_images_for_all_serve_lifecycle_commands() -
     assert "sync:changelog" in scripts["prepare:site"]
     assert scripts["predev"] == "npm run prepare:site"
     assert scripts["prebuild"] == "npm run prepare:site"
-    assert scripts["prepreview"] == "npm run prepare:site"
+    assert scripts["preview"] == "astro preview"
+    assert "prepreview" not in scripts

@@ -4,8 +4,8 @@
  * Reads the root CHANGELOG.md, prepends the Astro frontmatter needed by the
  * site layout, and writes to site/src/pages/docs/changelog.md.
  *
- * Package scripts run this before dev/build/preview so served docs do not drift
- * from the repository changelog.
+ * Package scripts run this during site preparation so dev/build outputs do not
+ * drift from the repository changelog.
  *
  * Env override: CHUNKHOUND_ROOT — set to repo root for hermetic testing.
  */

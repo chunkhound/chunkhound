@@ -10,7 +10,6 @@
     "dev": "astro dev",
     "prebuild": "npm run prepare:site",
     "build": "astro build",
-    "prepreview": "npm run prepare:site",
     "preview": "astro preview"
   },
   "dependencies": {
