@@ -10,6 +10,7 @@ import pathlib
 import subprocess
 import tempfile
 
+from tests.site.png_helpers import png_dimensions
 from tests.site.tsx_runner import ROOT, NPM, sanitized_subprocess_env
 
 GENERATE_SCRIPT = ROOT / "site" / "scripts" / "generate-og-images.mjs"
@@ -34,18 +35,6 @@ def _run_generate(public_dir: pathlib.Path) -> subprocess.CompletedProcess:
     )
 
 
-def _png_dimensions(png_path: pathlib.Path) -> tuple[int, int]:
-    """Read PNG IHDR chunk to extract width and height."""
-    with open(png_path, "rb") as f:
-        # PNG signature is 8 bytes, IHDR chunk starts at byte 16
-        # IHDR structure: 4 bytes length, 4 bytes "IHDR", 4 bytes width, 4 bytes height
-        f.seek(16)
-        data = f.read(8)
-        width = int.from_bytes(data[0:4], "big")
-        height = int.from_bytes(data[4:8], "big")
-    return (width, height)
-
-
 def test_generates_both_pngs_from_svgs() -> None:
     """Both dark and light SVGs produce valid 1200px-wide PNGs."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -61,7 +50,7 @@ def test_generates_both_pngs_from_svgs() -> None:
             assert png_path.exists(), f"{name} was not generated"
             assert png_path.stat().st_size > 50, f"{name} is too small to be a valid PNG"
 
-            w, h = _png_dimensions(png_path)
+            w, h = png_dimensions(png_path)
             assert w == 1200, f"{name} width is {w}, expected 1200"
             assert h == 630, f"{name} height is {h}, expected 630"
 

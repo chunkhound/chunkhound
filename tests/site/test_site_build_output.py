@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.site.png_helpers import png_dimensions
 from tests.site.tsx_runner import run_tsx_raw, sanitized_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -271,10 +272,6 @@ def test_built_site_has_og_png_assets() -> None:
             f"{name} is too small ({png_path.stat().st_size} bytes)"
         )
 
-        with open(png_path, "rb") as f:
-            f.seek(16)  # skip PNG sig + IHDR chunk header
-            data = f.read(8)
-            width = int.from_bytes(data[0:4], "big")
-            height = int.from_bytes(data[4:8], "big")
+        width, height = png_dimensions(png_path)
         assert width == 1200, f"{name} width is {width}, expected 1200"
         assert height == 630, f"{name} height is {height}, expected 630"
