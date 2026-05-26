@@ -244,12 +244,12 @@ def test_built_site_has_og_meta_tags() -> None:
     """Built homepage includes correct OG and Twitter Card meta tags."""
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
 
-    assert '<meta property="og:image" content="/og-image-dark.png">' in homepage
+    assert '<meta property="og:image" content="https://chunkhound.ai/og-image-dark.png">' in homepage
     assert '<meta property="og:image:type" content="image/png">' in homepage
     assert '<meta property="og:image:width" content="1200">' in homepage
     assert '<meta property="og:image:height" content="630">' in homepage
     assert '<meta property="og:type" content="website">' in homepage
-    assert '<meta name="twitter:image" content="/og-image-dark.png">' in homepage
+    assert '<meta name="twitter:image" content="https://chunkhound.ai/og-image-dark.png">' in homepage
     assert '<meta name="twitter:card" content="summary_large_image">' in homepage
 
 
