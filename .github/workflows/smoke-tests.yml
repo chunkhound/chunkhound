@@ -1,0 +1,319 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  site-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # docs/site version resolution requires tags
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Resolve docs version
+        run: bash scripts/resolve_docs_version.sh
+      - run: npm ci --prefix site
+      - run: npm run build --prefix site
+      - name: Create .nojekyll sentinel
+        run: touch site/dist/.nojekyll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-dist
+          path: site/dist/
+
+  site-build-validation:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # docs/site version resolution requires tags
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Resolve docs version
+        run: bash scripts/resolve_docs_version.sh
+      - run: npm ci --prefix site
+      - run: npm run build --prefix site
+
+  tests:
+    needs: site-build
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.12"]
+        include:
+          - os: ubuntu-latest
+            job_timeout_minutes: 30
+            pytest_timeout_minutes: 13
+            pytest_timeout_seconds: 300
+          - os: macos-latest
+            job_timeout_minutes: 30
+            pytest_timeout_minutes: 13
+            pytest_timeout_seconds: 300
+          # Windows CI polling monitor occasionally misses second file write within
+          # 45s window — retry individual flaky tests before failing the run.
+          - os: windows-latest
+            job_timeout_minutes: 60
+            pytest_timeout_minutes: 20
+            pytest_timeout_seconds: 600
+            pytest_extra_args: "--reruns 2 --reruns-delay 5 --only-rerun AssertionError"
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # docs/site version resolution requires tags
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Resolve docs version
+        run: bash scripts/resolve_docs_version.sh
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci --prefix site
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Download built site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site-dist
+          path: site/dist
+
+      - name: Test collection check
+        run: uv run pytest tests/ --collect-only -q --tb=no
+
+      - name: Run tests
+        id: tests
+        env:
+          CHUNKHOUND_USE_EXISTING_SITE_DIST: "1"
+        # Two retry layers serving different failure modes:
+        # - nick-fields/retry: restarts the whole pytest process on CI-level failures
+        #   (e.g. OOM, runner hiccup).
+        # - --reruns (pytest-rerunfailures): retries individual flaky tests within a
+        #   process, used on Windows where the file-monitor can miss writes transiently.
+        # timeout_minutes * max_attempts must stay below the job-level timeout.
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08  # v3
+        with:
+          timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}
+          max_attempts: 2
+          command: uv run pytest tests/ -v --junit-xml=test-results.xml ${{ matrix.pytest_extra_args || '' }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
+          path: test-results.xml
+          if-no-files-found: ignore
+
+      - name: Check flaky annotations
+        if: failure() && steps.tests.outcome == 'failure'
+        run: uv run python scripts/check_flaky_annotations.py test-results.xml
+
+  pages-artifact:
+    needs: [site-build, tests, site-build-validation, watchman-rollout-gate]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download tested site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site-dist
+          path: site/dist
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/dist/
+
+  deploy:
+    needs: pages-artifact
+    if: github.ref == 'refs/heads/main'
+    concurrency:
+      group: ch-test-deploy
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
+
+  watchman-runtime-validation:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12"]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CHUNKHOUND_RUN_WATCHMAN_RUNTIME_VALIDATION: "1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # docs/site version resolution and hatch-vcs both require tags
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Prepare Linux mount-aware Watchman fixture
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo mkdir -p /workspaces
+          if ! mountpoint -q /workspaces; then
+            sudo mount -t tmpfs -o size=256m tmpfs /workspaces
+          fi
+          sudo mkdir -p /workspaces/chunkhound_workspace
+          if ! mountpoint -q /workspaces/chunkhound_workspace; then
+            sudo mount -t tmpfs -o size=256m tmpfs /workspaces/chunkhound_workspace
+          fi
+          sudo chown -R "$(id -u):$(id -g)" /workspaces
+          {
+            echo "CHUNKHOUND_TEST_WATCHMAN_MOUNT_PARENT=/workspaces"
+            echo "CHUNKHOUND_TEST_WATCHMAN_MOUNT_CHILD=/workspaces/chunkhound_workspace"
+          } >> "$GITHUB_ENV"
+
+      - name: Run Watchman runtime validation tests
+        run: >
+          uv run pytest
+          tests/
+          -m requires_native_watchman
+          -q
+
+      - name: Build wheel artifacts
+        env:
+          CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME: "1"
+        run: uv build --wheel --clear
+
+      - name: Verify Watchman runtime wheel artifacts
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [[ ${#wheels[@]} -eq 0 ]]; then
+            echo "No wheel produced in dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_runtime_resources.py "${wheels[@]}"
+
+      - name: Verify installed-wheel Watchman live mutation e2e
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [[ ${#wheels[@]} -eq 0 ]]; then
+            echo "No wheel produced in dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_live_indexing_e2e.py "${wheels[@]}"
+
+      - name: Upload Watchman wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: watchman-wheel-${{ matrix.os }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  watchman-rollout-gate:
+    needs: watchman-runtime-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CHUNKHOUND_RUN_WATCHMAN_RUNTIME_VALIDATION: "1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Download staged Watchman wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: watchman-wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify full supported Watchman wheel matrix
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [[ ${#wheels[@]} -eq 0 ]]; then
+            echo "No wheel artifacts downloaded into dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_runtime_resources.py --require-supported-matrix "${wheels[@]}"
+
+      - name: Verify source/editable Watchman fallback contract
+        run: >-
+          uv run python scripts/verify_watchman_live_indexing_e2e.py
+          --verify-source-fallback
+          --source-root .
