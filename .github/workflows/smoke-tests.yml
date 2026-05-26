@@ -5,12 +5,13 @@ on:
     branches: [main]
   pull_request:
   merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.ref == 'refs/heads/main' && 'pages' || github.run_id }}
+  group: ${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -170,7 +171,7 @@ jobs:
     needs: pages-artifact
     if: github.ref == 'refs/heads/main'
     concurrency:
-      group: pages
+      group: ch-test-deploy
       cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
