@@ -569,10 +569,13 @@ class TestDocsVersionWorkflowContract:
     def test_deploy_job_contract(self) -> None:
         job = _job(".github/workflows/smoke-tests.yml", "deploy")
         permissions = cast(dict[str, Any], job.get("permissions", {}))
+        concurrency = cast(dict[str, Any], job.get("concurrency", {}))
 
         assert job["needs"] == "pages-artifact"
         assert "github.event_name == 'workflow_dispatch'" in job["if"]
         assert "github.event_name == 'push'" in job["if"]
         assert "github.ref == 'refs/heads/main'" in job["if"]
+        assert concurrency["group"] == "pages"
+        assert concurrency["cancel-in-progress"] is False
         assert permissions["pages"] == "write"
         assert permissions["id-token"] == "write"
