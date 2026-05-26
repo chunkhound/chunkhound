@@ -8,7 +8,6 @@ The registry pattern ensures consistent tool metadata and behavior.
 
 import asyncio
 import inspect
-import json
 import os
 import re
 import shutil
@@ -720,9 +719,23 @@ async def websearch_impl(
                 f"websearch timed out after {timeout_s:.0f}s"
             ) from None
         if proc.returncode != 0:
+            stderr_text = stderr.decode(errors="replace").strip()
+            # Strip traceback frames — only the last error line is meaningful.
+            lines = [line.rstrip() for line in stderr_text.split("\n")]
+            clean = [
+                line
+                for line in lines
+                if not (
+                    line.startswith("Traceback")
+                    or line.startswith("  File")
+                    or line.startswith("    ")
+                )
+            ]
+            tail = "\n".join(clean)[-500:]
+            if not tail:
+                tail = stderr_text[-200:]
             raise MCPError(
-                f"Research subprocess failed (exit {proc.returncode}): "
-                f"{stderr.decode(errors='replace').strip()[-2000:]}"
+                f"Research subprocess failed (exit {proc.returncode}): {tail}"
             )
         answer = stdout.decode(errors="replace")
     finally:

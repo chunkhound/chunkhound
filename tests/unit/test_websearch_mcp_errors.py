@@ -16,9 +16,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from chunkhound.utils import websearch_core as ws_mod
 from chunkhound.mcp_server import tools as tools_mod
 from chunkhound.mcp_server.common import MCPError
+from chunkhound.utils import websearch_core as ws_mod
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -207,6 +207,42 @@ async def test_subprocess_nonzero_exit_raises_mcperror(monkeypatch, patched):
     msg = str(exc.value)
     assert "Research subprocess failed (exit 2)" in msg
     assert "bad config traceback line-N" in msg
+
+
+@pytest.mark.asyncio
+async def test_subprocess_nonzero_exit_strips_traceback_frames(
+    monkeypatch, patched
+):
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    fake_proc = _FakeProc(
+        stdout=b"",
+        stderr=(
+            b"Traceback (most recent call last):\n"
+            b"  File '/tmp/x.py', line 1, in <module>\n"
+            b"    raise RuntimeError('boom')\n"
+            b"RuntimeError: boom"
+        ),
+        returncode=2,
+    )
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    with pytest.raises(MCPError) as exc:
+        await tools_mod.websearch_impl(
+            embedding_manager=None,
+            llm_manager=None,
+            config=None,
+            query="bad-traceback",
+        )
+
+    msg = str(exc.value)
+    assert "Research subprocess failed (exit 2)" in msg
+    assert "RuntimeError: boom" in msg
+    assert "Traceback" not in msg
+    assert "  File '/tmp/x.py'" not in msg
 
 
 @pytest.mark.asyncio
