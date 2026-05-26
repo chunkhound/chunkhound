@@ -716,6 +716,7 @@ async def test_score_derivative_termination(indexed_codebase):
 
                 if max_drop >= 0.15:
                     termination_detected = True
+                # Relaxed from 0.5: real providers may stop after initial rerank with lower min scores
                 if curr_round['min_score'] < 0.3:
                     termination_detected = True
 
