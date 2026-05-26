@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+- **DeepSeek and Grok require explicit model** — The baked-in default models
+  (`deepseek-v4-flash`, `grok-4-1-fast-reasoning`) have been removed. Users
+  must now set `llm.model` (or per-role model override) explicitly for these
+  providers.
+
+### Changed
+- **DeepSeek/Grok refactored to data-driven registry** — Per-provider
+  subclasses replaced with a unified `OpenAICompatibleSpec` registry.
+  Adding a new OpenAI-compatible provider is now a data entry + a few
+  type annotations instead of a full subclass. Net: -527 lines.
+
+### Fixed
+- **MCP websearch traceback pollution** — Error output from research
+  subprocesses strips internal Python traceback frames, keeping only the
+  last meaningful error line.
+- **MCP string return passthrough** — Tools returning raw strings (e.g.
+  websearch results) now pass through as markdown instead of being wrapped
+  in JSON objects.
+
 ## [5.1.0] - 2026-05-20
 
 ### Breaking Changes

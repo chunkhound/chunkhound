@@ -54,10 +54,18 @@ ReasoningEffortLiteral = Literal["minimal", "low", "medium", "high", "xhigh"]
 from ._utils import _parse_env_bool
 
 from chunkhound.core.config.openai_utils import is_official_openai_endpoint
+from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
 
 DEFAULT_LLM_TIMEOUT = 120
-OPENAI_COMPATIBLE_LLM_PROVIDERS = {"openai", "grok", "deepseek"}
-BASE_URL_CAPABLE_LLM_PROVIDERS = OPENAI_COMPATIBLE_LLM_PROVIDERS | {"anthropic"}
+# "openai" uses OpenAILLMProvider (special class with Responses API), not the
+# generic OpenAICompatibleProvider path.  It is included here because it speaks
+# the same Chat Completions protocol — used for config-level validation.
+OPENAI_COMPATIBLE_LLM_PROVIDERS: set[str] = (
+    {"openai"} | set(OPENAI_COMPATIBLE_PROVIDERS.keys())
+)
+BASE_URL_CAPABLE_LLM_PROVIDERS: set[str] = (
+    OPENAI_COMPATIBLE_LLM_PROVIDERS | {"anthropic"}
+)
 
 REMOVED_PROVIDERS: dict[str, str] = {
     "ollama": (
@@ -618,6 +626,15 @@ class LLMConfig(BaseSettings):
         reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """Build a provider config using the current shared config fields."""
+        # Registry providers (deepseek, grok) require an explicit model —
+        # fail at config consumption time (not during config construction)
+        # so that introspection methods like ``get_missing_config`` still work.
+        if provider in OPENAI_COMPATIBLE_PROVIDERS and not model:
+            raise ValueError(
+                f"Model is required for '{provider}'."
+                " Set `llm.model` (or per-role model override) in your configuration."
+            )
+
         config: dict[str, Any] = {
             "provider": provider,
             "model": model,
@@ -715,6 +732,10 @@ class LLMConfig(BaseSettings):
     @staticmethod
     def _get_default_models_for(provider: LLMProviderLiteral) -> tuple[str, str]:
         """Get default utility and synthesis model names for a provider."""
+        # Registry providers: no baked-in model — user must set llm.model explicitly
+        if provider in OPENAI_COMPATIBLE_PROVIDERS:
+            return ("", "")
+
         # Provider-specific smart defaults
         if provider == "openai":
             return ("gpt-5-nano", "gpt-5")
@@ -736,15 +757,6 @@ class LLMConfig(BaseSettings):
             # synthesis. Haiku is capable enough for synthesis and is Anthropic's
             # cheapest Claude model; Anthropic has no true low-cost utility tier.
             return (CLAUDE_HAIKU_SENTINEL, CLAUDE_HAIKU_SENTINEL)
-        elif provider == "grok":
-            # Grok reasoning models (especially grok-4-1-fast-reasoning)
-            # are extremely strong across both roles — no benefit to splitting them.
-            return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
-        elif provider == "deepseek":
-            # deepseek-v4-flash for both roles: it's the current general-purpose model
-            # (fast enough for utility, capable enough for synthesis). deepseek-chat is
-            # deprecated and routes here until July 2026.
-            return ("deepseek-v4-flash", "deepseek-v4-flash")
         elif provider == "opencode-cli":
             # OpenCode CLI: No universal default — model depends on user config.
             # User must set model in provider/model format.
@@ -876,6 +888,21 @@ class LLMConfig(BaseSettings):
 
         return missing_roles
 
+    def _require_explicit_model_for_registry_providers(
+        self, roles: tuple[str, ...]
+    ) -> list[str]:
+        """Return roles that use a registry provider without an explicit model."""
+        missing_roles: list[str] = []
+        for role in roles:
+            resolved_provider = self._resolved_provider_for_role(role)
+            if resolved_provider not in OPENAI_COMPATIBLE_PROVIDERS:
+                continue
+            if self._configured_model_for_role(role) is not None:
+                continue
+            missing_roles.append(role)
+
+        return missing_roles
+
     def _require_explicit_model_for_cross_family_role_overrides(
         self, roles: tuple[str, ...]
     ) -> list[str]:
@@ -933,7 +960,20 @@ class LLMConfig(BaseSettings):
             if not self.api_key:
                 missing.append("api_key (set CHUNKHOUND_LLM_API_KEY)")
 
-        custom_endpoint_roles = self._require_explicit_model_for_custom_openai(roles)
+        registry_provider_roles = self._require_explicit_model_for_registry_providers(
+            roles
+        )
+        if registry_provider_roles:
+            roles_text = ", ".join(registry_provider_roles)
+            missing.append(
+                f"explicit model selection required for registry provider roles: {roles_text}"
+            )
+
+        custom_endpoint_roles = [
+            role
+            for role in self._require_explicit_model_for_custom_openai(roles)
+            if role not in registry_provider_roles
+        ]
         if custom_endpoint_roles:
             roles_text = ", ".join(custom_endpoint_roles)
             missing.append(

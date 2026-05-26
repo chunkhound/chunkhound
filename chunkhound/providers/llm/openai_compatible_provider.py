@@ -3,9 +3,9 @@
 Provides common functionality for providers that use OpenAI-compatible APIs
 (Chat Completions API with JSON Schema structured outputs).
 
-Subclasses must implement:
-- _get_provider_name(): Return the provider name
-- _get_default_base_url(): Return the default base URL
+Directly instantiable via constructor kwargs (provider_name, default_base_url, etc.).
+Subclass overrides of _get_provider_name() / _get_default_base_url() are optional
+(both return sensible defaults).
 """
 
 import asyncio
@@ -57,6 +57,12 @@ class OpenAICompatibleProvider(LLMProvider):
         timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
         supports_structured_outputs: bool | None = None,
+        *,
+        provider_name: str | None = None,
+        default_base_url: str | None = None,
+        max_tokens_param_name: str = "max_completion_tokens",
+        reasoning_effort: str | None = None,
+        synthesis_concurrency: int = 3,
     ):
         """Initialize OpenAI-compatible provider.
 
@@ -72,6 +78,16 @@ class OpenAICompatibleProvider(LLMProvider):
             max_retries: Number of retry attempts for failed requests
             supports_structured_outputs: Override class-level flag.
                 When explicitly set, takes precedence over the class default.
+            provider_name: Provider identifier. When set, ``name`` returns this
+                instead of calling ``_get_provider_name()``.
+            default_base_url: Fallback base URL when ``base_url`` is None.
+                Applied before ``_get_default_base_url()``.
+            max_tokens_param_name: API parameter name for output token limit.
+                Use ``"max_tokens"`` for APIs that don't support
+                ``"max_completion_tokens"`` (e.g. DeepSeek).
+            reasoning_effort: Reasoning effort for compatible providers
+                (e.g. Grok). Omitted from API calls when None.
+            synthesis_concurrency: Recommended parallel synthesis operations count.
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -84,9 +100,13 @@ class OpenAICompatibleProvider(LLMProvider):
         if supports_structured_outputs is not None:
             self._supports_structured_outputs = supports_structured_outputs
         self._ssl_verify = ssl_verify
+        self._provider_name = provider_name
+        self._max_tokens_param_name = max_tokens_param_name
+        self._reasoning_effort = reasoning_effort
+        self._synthesis_concurrency = synthesis_concurrency
 
-        # Use provided base_url or subclass default
-        effective_base_url = base_url or self._get_default_base_url()
+        # Use provided base_url, or default_base_url, or subclass override
+        effective_base_url = base_url or default_base_url or self._get_default_base_url()
 
         # Initialize OpenAI-compatible client
         api_key_value = api_key
@@ -117,21 +137,22 @@ class OpenAICompatibleProvider(LLMProvider):
     def _get_default_base_url(self) -> str | None:
         """Get the default base URL for this provider.
 
-        Subclasses must implement this to provide their API endpoint.
+        Subclasses can override this to provide their API endpoint.
         Returns None to allow AsyncOpenAI to fall back to environment variables.
         """
-        raise NotImplementedError("Subclasses must implement _get_default_base_url")
+        return None
 
     def _get_provider_name(self) -> str:
         """Get the provider name for this implementation.
 
-        Subclasses must implement this to return their name.
+        Subclasses can override this.  The base returns a generic identifier;
+        use the ``provider_name`` constructor parameter to set a specific name.
         """
-        raise NotImplementedError("Subclasses must implement _get_provider_name")
+        return "openai-compatible"
 
     def _get_max_completion_tokens_param_name(self) -> str:
         """Get the output-token parameter name for chat completions requests."""
-        return "max_completion_tokens"
+        return self._max_tokens_param_name
 
     def _parse_structured_response(
         self, content: str, json_schema: dict[str, Any]
@@ -157,11 +178,15 @@ class OpenAICompatibleProvider(LLMProvider):
         }
         if response_format is not None:
             kwargs["response_format"] = response_format
+        if self._reasoning_effort:
+            kwargs["reasoning_effort"] = self._reasoning_effort
         return kwargs
 
     @property
     def name(self) -> str:
         """Provider name."""
+        if self._provider_name is not None:
+            return self._provider_name
         return self._get_provider_name()
 
     @property
@@ -444,6 +469,7 @@ class OpenAICompatibleProvider(LLMProvider):
         """Get recommended concurrency for parallel synthesis operations.
 
         Returns:
-            3 for OpenAI-compatible providers (conservative default)
+            Provider-specific concurrency (default 3, overridable via
+            ``_synthesis_concurrency`` instance attribute set by the factory).
         """
-        return 3
+        return self._synthesis_concurrency
