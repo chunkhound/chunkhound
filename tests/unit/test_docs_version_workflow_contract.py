@@ -558,9 +558,7 @@ class TestDocsVersionWorkflowContract:
             "site-build-validation",
             "watchman-rollout-gate",
         ]
-        assert "github.event_name == 'workflow_dispatch'" in job["if"]
-        assert "github.event_name == 'push'" in job["if"]
-        assert "github.ref == 'refs/heads/main'" in job["if"]
+        assert job["if"] == "github.ref == 'refs/heads/main'"
         assert download_step["with"]["name"] == "site-dist"
         assert download_step["with"]["path"] == "site/dist"
         assert upload_step["with"]["path"] == "site/dist/"
@@ -572,9 +570,7 @@ class TestDocsVersionWorkflowContract:
         concurrency = cast(dict[str, Any], job.get("concurrency", {}))
 
         assert job["needs"] == "pages-artifact"
-        assert "github.event_name == 'workflow_dispatch'" in job["if"]
-        assert "github.event_name == 'push'" in job["if"]
-        assert "github.ref == 'refs/heads/main'" in job["if"]
+        assert job["if"] == "github.ref == 'refs/heads/main'"
         assert concurrency["group"] == "pages"
         assert concurrency["cancel-in-progress"] is False
         assert permissions["pages"] == "write"
