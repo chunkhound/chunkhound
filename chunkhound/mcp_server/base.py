@@ -1255,6 +1255,23 @@ class MCPServerBase(ABC):
                     "inputSchema": tool_params,
                 }
             )
+
+        filtered_count = len(TOOL_REGISTRY) - len(tools)
+        if filtered_count > 0:
+            has_llm = self.llm_manager is not None
+            has_emb = (
+                self.embedding_manager is not None
+                and bool(self.embedding_manager.list_providers())
+            )
+            has_reranker = has_reranker_support(self.embedding_manager)
+            if debug_log := getattr(self, "debug_log", None):
+                debug_log(
+                    f"{filtered_count} tool(s) hidden due to missing capabilities "
+                    f"(llm={'yes' if has_llm else 'no'}, "
+                    f"embeddings={'yes' if has_emb else 'no'}, "
+                    f"reranker={'yes' if has_reranker else 'no'})"
+                )
+
         return tools
 
     @abstractmethod
