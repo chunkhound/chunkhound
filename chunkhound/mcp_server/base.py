@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
+from loguru import logger
+
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices, create_services
@@ -381,12 +383,14 @@ class MCPServerBase(ABC):
                         )
                 except ValueError as e:
                     # API key or configuration issue - expected for search-only usage
-                    self.debug_log(f"Embedding provider setup skipped: {e}")
+                    msg = f"Embedding provider setup skipped: {e}"
+                    logger.warning(msg)
+                    self.debug_log(msg)
                 except Exception as e:
                     # Unexpected error - log but continue
-                    self.debug_log(
-                        f"Unexpected error setting up embedding provider: {e}"
-                    )
+                    msg = f"Unexpected error setting up embedding provider: {e}"
+                    logger.error(msg)
+                    self.debug_log(msg)
 
                 # Initialize LLM manager with dual providers
                 # (optional - continue if it fails)
@@ -406,10 +410,14 @@ class MCPServerBase(ABC):
                         )
                 except ValueError as e:
                     # API key or configuration issue - expected if LLM not needed
-                    self.debug_log(f"LLM provider setup skipped: {e}")
+                    msg = f"LLM provider setup skipped: {e}"
+                    logger.warning(msg)
+                    self.debug_log(msg)
                 except Exception as e:
                     # Unexpected error - log but continue
-                    self.debug_log(f"Unexpected error setting up LLM provider: {e}")
+                    msg = f"Unexpected error setting up LLM provider: {e}"
+                    logger.error(msg)
+                    self.debug_log(msg)
 
                 # Create services using unified factory (lazy connect for fast init)
                 self.services = create_services(
