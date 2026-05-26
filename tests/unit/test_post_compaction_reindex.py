@@ -68,6 +68,7 @@ class RemovalReplayState:
         self.deferred_directories: set[str] = set()
         self.replay_attempts: list[str] = []
         self.deleted: set[str] = set()
+        self.failed_files: set[str] = set()
         self.fail_path = fail_path
         self.fail_with = fail_with
         self._failed_once = False
@@ -140,6 +141,7 @@ async def test_clears_compaction_deferrals_before_reindex(
     class RealtimeStub:
         def __init__(self) -> None:
             self.deferred_files = {"stale.py"}
+            self.failed_files: set[str] = set()
 
         async def drain_compaction_deferred_directories(self) -> set[str]:
             return set()
@@ -488,6 +490,7 @@ async def test_ensure_services_retries_partial_deferred_removal_replay(
             self.deferred_directories: set[str] = set()
             self.replay_attempts: list[str] = []
             self.deleted: set[str] = set()
+            self.failed_files: set[str] = set()
             self.fail_b_once = True
 
         async def drain_compaction_deferred_directories(self) -> set[str]:

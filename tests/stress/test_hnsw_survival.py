@@ -353,6 +353,7 @@ class TestLargeScaleIndexSurvival:
         assert "idx_hnsw_256" in idx_names
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not _vss_available(), reason="VSS extension not available")
 class TestMCPBackgroundCompaction:
     """Scenario: CompactionService compact_blocking/compact_background runs correctly.

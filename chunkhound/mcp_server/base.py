@@ -1248,6 +1248,9 @@ class MCPServerBase(ABC):
                 f"Post-compaction reindex complete: {stats.files_processed} files, "
                 f"{stats.chunks_created} chunks"
             )
+            # Force-reindex just reprocessed every file — clear stale failure state
+            # so monitoring no longer reports phantom failures from pre-compaction runs.
+            self.realtime_indexing.failed_files.clear()
             self._mark_background_compaction_success()
 
         except Exception as e:

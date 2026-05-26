@@ -75,8 +75,8 @@ class DatabaseConfig(BaseModel):
         description="Minimum reclaimable space in MB to trigger compaction",
     )
 
-    @field_validator("path")
-    def validate_path(cls, v: Path | None) -> Path | None:
+    @field_validator("path", mode="before")
+    def validate_path(cls, v: Any) -> Path | None:
         """Convert string paths to Path objects."""
         if v is not None and not isinstance(v, Path):
             return Path(v)
@@ -170,7 +170,7 @@ class DatabaseConfig(BaseModel):
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load database config from environment variables."""
-        config = {}
+        config: dict[str, Any] = {}
         # Support both new and legacy env var names
         if db_path := (
             os.getenv("CHUNKHOUND_DATABASE__PATH") or os.getenv("CHUNKHOUND_DB_PATH")
@@ -203,11 +203,9 @@ class DatabaseConfig(BaseModel):
                 config["compaction_enabled"] = False
             else:
                 logger.warning(
-                    "Unrecognized CHUNKHOUND_DATABASE__COMPACTION_ENABLED value: {!r}; "
-                    "defaulting to True (enabled)",
+                    "Ignoring unrecognized CHUNKHOUND_DATABASE__COMPACTION_ENABLED value: {!r}",
                     compaction_enabled,
                 )
-                config["compaction_enabled"] = True
         if compaction_threshold := os.getenv(
             "CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD"
         ):

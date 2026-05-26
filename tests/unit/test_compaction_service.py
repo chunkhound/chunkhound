@@ -914,10 +914,10 @@ class TestDuckDBProviderOptimize:
         # Get size before compaction
         size_before = db_path.stat().st_size
 
-        # Verify there are free blocks to reclaim
+        # Verify there is reclaimable row waste (primary compaction signal)
         stats = provider.get_storage_stats()
-        free_blocks = stats.get("free_blocks", 0)
-        assert free_blocks > 0, "Test setup failed: no free blocks to reclaim"
+        row_waste = stats.get("row_waste_ratio", 0.0)
+        assert row_waste > 0, "Test setup failed: no reclaimable row waste detected"
 
         # Run compaction
         result = provider.optimize()

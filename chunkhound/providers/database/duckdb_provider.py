@@ -1701,7 +1701,15 @@ class DuckDBProvider(SerialDatabaseProvider):
     def _extract_custom_hnsw_identity(
         self, index_name: str
     ) -> tuple[str | None, str | None]:
-        """Best-effort provider/model extraction from custom HNSW index names."""
+        """Best-effort provider/model extraction from custom HNSW index names.
+
+        Format: hnsw_{provider}_{model}_{dims}_{metric}
+        Both provider and model are underscore-sanitized so splitting on the
+        last underscore of the provider_model segment is ambiguous for compound
+        model names (e.g. text_embedding_3_large).  The returned values are
+        metadata-only and are never used for SQL generation; index recreation
+        relies on index_name and table_name verbatim.
+        """
         if not index_name.startswith("hnsw_"):
             return None, None
 
@@ -1790,12 +1798,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         dims = int(index_info["dims"])
         self._executor_ensure_embedding_table_exists(conn, state, dims)
         index_name = str(index_info["index_name"])
-        if not self._is_safe_duckdb_identifier(index_name):
-            logger.warning(
-                "Skipping HNSW index restore for unsafe identifier "
-                f"{index_name!r} on {table_name}"
-            )
-            return
 
         try:
             metric = self._normalize_hnsw_metric(
@@ -4563,17 +4565,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         for idx in hnsw_indexes:
             index_name = str(idx["index_name"])
             table_name = str(idx["table_name"])
-
-            if not self._is_safe_duckdb_identifier(index_name):
-                logger.warning(
-                    f"Skipping HNSW recreation for unsafe index name {index_name!r}"
-                )
-                continue
-            if not self._is_safe_duckdb_identifier(table_name):
-                logger.warning(
-                    f"Skipping HNSW recreation for unsafe table name {table_name!r}"
-                )
-                continue
 
             try:
                 metric = self._normalize_hnsw_metric(str(idx.get("metric", "cosine")))

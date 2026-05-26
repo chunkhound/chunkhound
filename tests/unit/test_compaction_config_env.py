@@ -46,15 +46,15 @@ class TestCompactionEnvConfig:
         assert config["compaction_enabled"] is False
 
     @pytest.mark.parametrize("value", ["on", "enabled", "anything"])
-    def test_compaction_enabled_unrecognized_warns_and_defaults_true(
+    def test_compaction_enabled_unrecognized_warns_and_skips(
         self, monkeypatch: pytest.MonkeyPatch, loguru_warnings: list[str], value: str
     ) -> None:
         monkeypatch.setenv(
             "CHUNKHOUND_DATABASE__COMPACTION_ENABLED", value
         )
         config = DatabaseConfig.load_from_env()
-        assert config["compaction_enabled"] is True
-        assert any("Unrecognized" in msg for msg in loguru_warnings)
+        assert "compaction_enabled" not in config
+        assert any("Ignoring" in msg for msg in loguru_warnings)
 
     def test_compaction_threshold_valid(
         self, monkeypatch: pytest.MonkeyPatch

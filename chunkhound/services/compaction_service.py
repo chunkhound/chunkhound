@@ -31,10 +31,10 @@ def estimate_reclaimable_bytes(stats: dict[str, Any]) -> int:
     free_blocks = stats.get("free_blocks", 0)
     used_blocks = stats.get("used_blocks", 0)
     row_waste = stats.get("row_waste_ratio", 0.0)
-    return max(
+    return int(max(
         free_blocks * block_size,
         int(row_waste * used_blocks * block_size),
-    )
+    ))
 
 
 class CompactionService:
