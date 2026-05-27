@@ -39,6 +39,7 @@ def _fnmatch_to_gitignore(pattern: str) -> str:
         p = p[:-3] + "/"
     return p
 
+
 @lru_cache(maxsize=4096)
 def _compile_pattern_global(pattern: str) -> Pattern[str]:
     return re.compile(translate(pattern))

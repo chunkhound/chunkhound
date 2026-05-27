@@ -75,8 +75,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python 3.12  # build interpreter only — abi3 wheel runs on Python 3.10+
-        uses: actions/setup-python@v5
+      - name: Install uv  # provides Python 3.12 build interpreter — abi3 wheel runs on Python 3.10+
+        uses: astral-sh/setup-uv@v3
         with:
           python-version: "3.12"
 
@@ -95,8 +95,8 @@ jobs:
 
       - name: Build native wheel
         run: |
-          pip install maturin
-          maturin build --release --out dist/
+          uv pip install maturin
+          uv run maturin build --release --out dist/
 
       - name: Upload native wheel artifact
         uses: actions/upload-artifact@v4
