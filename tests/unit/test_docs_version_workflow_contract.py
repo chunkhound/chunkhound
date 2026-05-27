@@ -564,14 +564,22 @@ class TestDocsVersionWorkflowContract:
         assert upload_step["with"]["path"] == "site/dist/"
         assert permissions["contents"] == "read"
 
+    def test_workflow_concurrency_contract(self) -> None:
+        workflow = _load_workflow(".github/workflows/ci.yml")
+        concurrency = cast(dict[str, Any], workflow.get("concurrency", {}))
+
+        assert concurrency["group"] == (
+            "${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}"
+        )
+        assert concurrency["cancel-in-progress"] is False
+
     def test_deploy_job_contract(self) -> None:
         job = _job(".github/workflows/ci.yml", "deploy")
         permissions = cast(dict[str, Any], job.get("permissions", {}))
-        concurrency = cast(dict[str, Any], job.get("concurrency", {}))
 
         assert job["needs"] == "pages-artifact"
         assert job["if"] == "github.ref == 'refs/heads/main'"
-        assert concurrency["group"] == "ch-test-deploy"
-        assert concurrency["cancel-in-progress"] is False
+        assert "concurrency" not in job
+        assert permissions["contents"] == "read"
         assert permissions["pages"] == "write"
         assert permissions["id-token"] == "write"
