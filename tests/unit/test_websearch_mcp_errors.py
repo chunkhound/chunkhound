@@ -246,6 +246,60 @@ async def test_subprocess_nonzero_exit_strips_traceback_frames(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stderr_bytes, expected_substrings, unexpected_substrings",
+    [
+        pytest.param(
+            b"Traceback (most recent call last):\n  File '/x.py', line 1\n    raise SystemExit(1)\n",
+            ["SystemExit"],
+            ["Traceback", "File '/x.py'"],
+            id="all-traceback-no-error-line",
+        ),
+        pytest.param(
+            b"Command not found: foobar\n",
+            ["Command not found"],
+            [],
+            id="plain-error-no-traceback",
+        ),
+        pytest.param(
+            b"",
+            ["exit 2"],
+            [],
+            id="empty-stderr",
+        ),
+    ],
+)
+async def test_subprocess_nonzero_exit_strips_traceback_variants(
+    monkeypatch, patched, stderr_bytes, expected_substrings, unexpected_substrings
+):
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    fake_proc = _FakeProc(
+        stdout=b"",
+        stderr=stderr_bytes,
+        returncode=2,
+    )
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    with pytest.raises(MCPError) as exc:
+        await tools_mod.websearch_impl(
+            embedding_manager=None,
+            llm_manager=None,
+            config=None,
+            query="edge-case",
+        )
+
+    msg = str(exc.value)
+    for expected in expected_substrings:
+        assert expected in msg, f"Expected {expected!r} in {msg!r}"
+    for unexpected in unexpected_substrings:
+        assert unexpected not in msg, f"Expected {unexpected!r} NOT in {msg!r}"
+
+
+@pytest.mark.asyncio
 async def test_timeout_raises_mcperror_and_cleans_up(monkeypatch, patched):
     monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
     monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)

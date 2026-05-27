@@ -733,6 +733,14 @@ async def websearch_impl(
             ]
             tail = "\n".join(clean)[-500:]
             if not tail:
+                # Tracebacks sometimes end at an indented ``raise`` line with no
+                # final exception summary. Surface that summary without frames.
+                for line in reversed(lines):
+                    stripped = line.strip()
+                    if stripped.startswith("raise "):
+                        tail = stripped.removeprefix("raise ")[-500:]
+                        break
+            if not tail:
                 tail = stderr_text[-200:]
             raise MCPError(
                 f"Research subprocess failed (exit {proc.returncode}): {tail}"
