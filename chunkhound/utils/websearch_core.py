@@ -174,20 +174,39 @@ def _html_to_markdown(html_text: str) -> str:
     ).convert(html_text)
 
 
-def _fetch_url(url: str) -> tuple[str, str | bytes]:
+def _normalize_ct(raw: str | None) -> str:
+    """Parse the bare MIME type out of a Content-Type header.
+
+    Returns ``"text/html"`` when the header is missing. ``urllib``'s
+    ``get_content_type()`` synthesizes ``"text/plain"`` for header-less
+    responses, which would reject real HTML served by misconfigured
+    servers; defaulting to ``text/html`` here matches the browser path,
+    which has always rendered header-less responses as HTML.
+    """
+    if not raw:
+        return "text/html"
+    return raw.split(";", 1)[0].strip().lower()
+
+
+def _decode_pdf_or_fallback_html(body: bytes, charset: str) -> tuple[str, str | bytes]:
+    """Handle a body whose Content-Type claimed application/pdf.
+
+    Some endpoints (paywalls, error pages, auth walls) return HTML under an
+    application/pdf Content-Type. Trust the magic bytes, not the header.
+    """
+    if body.startswith(b"%PDF-"):
+        return ".pdf", body
+    return ".md", _html_to_markdown(body.decode(charset, errors="replace"))
+
+
+def _fetch_url(url: str) -> tuple[str, bytes, str]:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
-        ct = resp.headers.get_content_type() or ""
-        raw = resp.read()
-        if ct == "application/pdf":
-            return ".pdf", raw
-        if ct == "text/html" or not ct:
-            charset = resp.headers.get_content_charset() or "utf-8"
-            return ".md", _html_to_markdown(raw.decode(charset, errors="replace"))
-        raise ValueError(f"Unsupported content-type: {ct!r}")
+        ct = _normalize_ct(resp.headers.get("Content-Type"))
+        return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
 
 
-async def _fetch_page(context: BrowserContext, url: str) -> tuple[str, str | bytes]:
+async def _fetch_page(context: BrowserContext, url: str) -> tuple[str, bytes, str]:
     """Fetch a single URL.
 
     HTML is fetched through Chrome's network stack. PDFs go through
@@ -203,7 +222,7 @@ async def _fetch_page(context: BrowserContext, url: str) -> tuple[str, str | byt
         if response is None:
             raise ValueError("Navigation failed: no response")
 
-        ct = response.headers.get("content-type", "").split(";")[0].strip()
+        ct = _normalize_ct(response.headers.get("content-type"))
 
         if ct == "application/pdf":
             await page.close()
@@ -211,20 +230,15 @@ async def _fetch_page(context: BrowserContext, url: str) -> tuple[str, str | byt
             try:
                 if not direct.ok:
                     raise ValueError(f"PDF fetch failed: HTTP {direct.status}")
-                direct_ct = direct.headers.get("content-type", "").split(";")[0].strip()
-                if direct_ct != "application/pdf":
-                    raise ValueError(
-                        f"Expected application/pdf, got {direct_ct!r}"
-                    )
-                return ".pdf", await direct.body()
+                return "application/pdf", await direct.body(), "utf-8"
             finally:
                 await direct.dispose()
 
-        if ct and ct != "text/html":
+        if ct != "text/html":
             raise ValueError(f"Unsupported content-type: {ct!r}")
 
         await page.wait_for_load_state("load")
-        return ".md", _html_to_markdown(await page.content())
+        return ct, (await page.content()).encode("utf-8"), "utf-8"
     finally:
         if not page.is_closed():
             await page.close()
@@ -244,9 +258,22 @@ async def _fetch_one(
             progress_callback(f"Fetching {url}...")
         try:
             if context is not None:
-                ext, content = await _fetch_page(context, url)
+                ct, body, charset = await _fetch_page(context, url)
             else:
-                ext, content = await asyncio.to_thread(_fetch_url, url)
+                ct, body, charset = await asyncio.to_thread(_fetch_url, url)
+            if ct == "application/pdf":
+                ext, content = _decode_pdf_or_fallback_html(body, charset)
+            elif ct == "text/html":
+                ext, content = ".md", _html_to_markdown(
+                    body.decode(charset, errors="replace")
+                )
+            else:
+                raise ValueError(f"Unsupported content-type: {ct!r}")
+            # Auth walls and error pages often render to whitespace-only
+            # markdown; surface that as a fetch failure rather than writing
+            # an empty file that consumes a result slot.
+            if not content.strip():
+                raise ValueError(f"{ct!r} body rendered empty ({len(body)} bytes)")
             path = tmpdir / (_url_to_filename(url) + ext)
             if isinstance(content, bytes):
                 path.write_bytes(content)
