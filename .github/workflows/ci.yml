@@ -170,9 +170,6 @@ jobs:
   deploy:
     needs: pages-artifact
     if: github.ref == 'refs/heads/main'
-    concurrency:
-      group: ch-test-deploy
-      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
