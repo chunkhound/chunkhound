@@ -50,7 +50,7 @@ def test_rollout_gate_workflow_runs_single_aggregate_fallback_proof() -> None:
         Path(__file__).resolve().parents[1]
         / ".github"
         / "workflows"
-        / "smoke-tests.yml"
+        / "ci.yml"
     )
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     jobs = workflow["jobs"]

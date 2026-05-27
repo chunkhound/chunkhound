@@ -36,10 +36,13 @@ class _SocketForwardResult:
 class ClientProxy:
     """Bridge between Claude's stdio and the ChunkHound daemon IPC socket."""
 
+    _ORPHAN_POLL_INTERVAL = 5.0
+
     def __init__(self, project_dir: Path, args: Any) -> None:
         self._project_dir = project_dir.resolve()
         self._args = args
         self._discovery = DaemonDiscovery(self._project_dir)
+        self._initial_ppid = None if sys.platform == "win32" else os.getppid()
 
     async def _connect_or_startup_failure(
         self, address: str
@@ -111,6 +114,35 @@ class ClientProxy:
         if not isinstance(ack, dict) or ack.get("type") != "registered":
             raise RuntimeError(f"Unexpected registration response from daemon: {ack}")
 
+    def _is_orphaned(self) -> bool:
+        """Return True if the original parent process no longer owns this proxy.
+
+        On Unix, an orphaned process may be reparented to PID 1 (init/launchd)
+        or to a child subreaper. Treat any parent PID change from startup as
+        orphaning. On Windows, the existing pipe-close detection is sufficient.
+        """
+        if sys.platform == "win32":
+            return False
+        current_ppid = os.getppid()
+        return current_ppid != self._initial_ppid
+
+    async def _orphan_watchdog(self) -> None:
+        """Poll parent PID; signal shutdown when orphaned.
+
+        Sets the shutdown event and completes cleanly when the parent dies —
+        the caller's asyncio.wait (FIRST_COMPLETED) will then cancel
+        stdin/stdout forwarding and trigger normal cleanup.
+        """
+        while True:
+            await asyncio.sleep(self._ORPHAN_POLL_INTERVAL)
+            if self._is_orphaned():
+                print(
+                    "Parent process died — shutting down orphaned proxy",
+                    file=sys.stderr,
+                )
+                self._shutdown_event.set()
+                return
+
     async def run(self) -> None:
         """Connect to the daemon and relay messages until stdin closes."""
         address = await self._discovery.find_or_start_daemon(self._args)
@@ -124,16 +156,21 @@ class ClientProxy:
         try:
             await self._register_with_daemon(reader, writer)
 
-            # Bidirectional forwarding
-            # Use wait() with FIRST_COMPLETED so when stdin closes, we immediately
-            # close the socket connection rather than waiting for both tasks.
+            # Bidirectional forwarding with orphan watchdog
+            # Use wait() with FIRST_COMPLETED so when stdin closes or the parent
+            # dies, we immediately close the socket connection rather than waiting
+            # for both tasks.
             # This is critical on Windows where proc.terminate() may not cleanly
             # close stdin, leaving the stdin reader blocked.
+            self._shutdown_event = asyncio.Event()
             stdin_task = asyncio.create_task(self._forward_stdin_to_socket(writer))
             stdout_task = asyncio.create_task(self._forward_socket_to_stdout(reader))
+            watchdog_task = asyncio.create_task(self._orphan_watchdog())
+            shutdown_task = asyncio.create_task(self._shutdown_event.wait())
 
-            done, pending = await asyncio.wait(
-                {stdin_task, stdout_task}, return_when=asyncio.FIRST_COMPLETED
+            _, pending = await asyncio.wait(
+                {stdin_task, stdout_task, watchdog_task, shutdown_task},
+                return_when=asyncio.FIRST_COMPLETED,
             )
 
             for task in pending:

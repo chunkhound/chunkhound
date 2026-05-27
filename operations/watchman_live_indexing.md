@@ -284,7 +284,7 @@ During an incident, confirm that:
 The Linux and Windows native Watchman rollout is gated on all of the following:
 
 1. The `watchman-runtime-validation` job in
-   `.github/workflows/smoke-tests.yml` is green on `ubuntu-latest` and
+   `.github/workflows/ci.yml` is green on `ubuntu-latest` and
    `windows-latest`.
    - Each host-native lane builds its own wheel, proves host-native runtime
      resources, and proves installed-wheel live indexing for that host.

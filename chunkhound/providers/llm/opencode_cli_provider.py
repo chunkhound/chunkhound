@@ -297,14 +297,16 @@ class OpenCodeCLIProvider(BaseCLIProvider):
             "OpenCode CLI command failed after retries"
         )
 
-    def _build_cmd(self, model: str, use_json: bool, message: str) -> list[str]:
-        """Build the opencode run command list (extracted for testability)."""
+    def _build_cmd(self, model: str, use_json: bool) -> list[str]:
+        """Build the opencode run command list without the prompt.
+
+        The prompt is sent via stdin to avoid ARG_MAX limits on large inputs.
+        """
         cmd = ["opencode", "run", "--model", model]
         if use_json:
             cmd.extend(["--format", "json"])
         if self._reasoning_effort:
             cmd.extend(["--variant", self._reasoning_effort])
-        cmd.append(message)
         return cmd
 
     def _ndjson_parse_stdout(self, stdout: bytes) -> tuple[list[str], str | None]:
@@ -427,12 +429,12 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         readable while the per-attempt subprocess/parse/exception handling
         lives in one focused method.
         """
-        cmd = self._build_cmd(model, use_json, message)
+        cmd = self._build_cmd(model, use_json)
         process = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=os.environ.copy(),
@@ -440,7 +442,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
             )
 
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
+                process.communicate(input=message.encode("utf-8")),
                 timeout=request_timeout,
             )
             stderr_msg = (
@@ -462,7 +464,8 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                 if json_result.action == "retry_plain":
                     return _PhaseResult(action="retry_plain", attempts_used=1)
                 if json_result.action == "failure":
-                    if json_result.error_message is None:  # defensive — should never happen
+                    # Defensive guard — should never happen.
+                    if json_result.error_message is None:
                         raise RuntimeError(
                             "_parse_json_output returned failure without error_message"
                         )

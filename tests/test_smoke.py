@@ -385,6 +385,97 @@ sys.exit(asyncio.run(test()))
                     pass
 
 
+    @pytest.mark.asyncio
+    async def test_mcp_websearch_stdio_mocked(self):
+        """MCP stdio roundtrip for websearch with external calls stubbed out.
+
+        Uses CH_TEST_WEBSEARCH_STUB=1 to swap search, fetch_and_save, and
+        the _quickresearch subprocess argv for inert replacements, so the
+        test exercises JSON-RPC dispatch + tool execution + subprocess stdout
+        capture without hitting the network.
+        """
+        import json
+
+        with windows_safe_tempdir() as temp_path:
+            (temp_path / "test.py").write_text("def hello(): return 'world'")
+
+            config_path = temp_path / ".chunkhound.json"
+            db_path = temp_path / ".chunkhound" / "test.db"
+            db_path.parent.mkdir(exist_ok=True)
+            config = {
+                "database": {"path": str(db_path), "provider": "duckdb"},
+                "indexing": {"include": ["*.py"]},
+            }
+            config_path.write_text(json.dumps(config))
+
+            helpers_dir = Path("tests/helpers").resolve()
+            mcp_env = get_safe_subprocess_env(os.environ)
+            mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
+            mcp_env["CH_TEST_WEBSEARCH_STUB"] = "1"
+            mcp_env["PYTHONPATH"] = (
+                f"{helpers_dir}{os.pathsep}{mcp_env.get('PYTHONPATH', '')}"
+            )
+
+            proc = await create_subprocess_exec_safe(
+                "uv",
+                "run",
+                "chunkhound",
+                "mcp",
+                "--no-daemon",
+                "--no-embeddings",
+                str(temp_path),
+                cwd=str(temp_path),
+                env=mcp_env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            client = SubprocessJsonRpcClient(proc)
+            await client.start()
+
+            try:
+                init_timeout = max(10.0, get_fs_event_timeout())
+                init = await client.send_request(
+                    "initialize",
+                    {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "smoke", "version": "1.0"},
+                    },
+                    timeout=init_timeout,
+                )
+                assert init["serverInfo"]["name"] == "ChunkHound Code Search"
+
+                await client.send_notification("notifications/initialized")
+
+                tools_result = await client.send_request("tools/list", timeout=10.0)
+                tool_names = [t["name"] for t in tools_result.get("tools", [])]
+                assert "websearch" in tool_names, (
+                    f"websearch missing from tools/list: {tool_names}"
+                )
+
+                call = await client.send_request(
+                    "tools/call",
+                    {
+                        "name": "websearch",
+                        "arguments": {"query": "smoke", "limit": 3},
+                    },
+                    timeout=30.0,
+                )
+                contents = call.get("content") or []
+                full_text = "\n".join(
+                    c.get("text", "") for c in contents if isinstance(c, dict)
+                )
+                assert "ANSWER" in full_text, (
+                    f"missing stubbed ANSWER in response: {full_text!r}"
+                )
+
+            except asyncio.TimeoutError:
+                pytest.fail("MCP websearch stdio roundtrip timed out")
+            finally:
+                await client.close()
+
 
 class TestParserLoading:
     """Test that all parsers can be loaded and created."""
