@@ -133,12 +133,11 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build Rust extension (maturin build)
+      - name: Build Rust extension (maturin develop)
         if: hashFiles('Cargo.toml') != ''
         run: |
           uv pip install maturin
-          uv run maturin build --out target/wheels/
-          uv run python scripts/install_native.py
+          uv run maturin develop
 
       - name: Test collection check
         run: uv run pytest tests/ --collect-only -q --tb=no

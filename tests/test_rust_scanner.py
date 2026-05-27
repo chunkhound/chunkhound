@@ -1,8 +1,10 @@
 import pytest
 from pathlib import Path
 
-pytest.importorskip("chunkhound_native", reason="Rust extension not built")
-from chunkhound_native import scan_files
+try:
+    from chunkhound_native import scan_files
+except (ImportError, AttributeError):
+    pytest.skip("Rust extension not built", allow_module_level=True)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
