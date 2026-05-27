@@ -190,14 +190,14 @@ def _fetch_url(url: str) -> tuple[str, str | bytes]:
 async def _fetch_page(context: BrowserContext, url: str) -> tuple[str, str | bytes]:
     """Fetch a single URL.
 
-    HTML is fetched through Chromium's network stack. PDFs go through
-    Playwright's APIRequestContext because headless Chromium cannot reliably
+    HTML is fetched through Chrome's network stack. PDFs go through
+    Playwright's APIRequestContext because headless Chrome cannot reliably
     expose PDF bytes to page.content()/response.body() — see Playwright #6342
     and scrapy-playwright #243.
     """
     page = await context.new_page()
     try:
-        # commit resolves once response headers are parsed — before Chromium
+        # commit resolves once response headers are parsed — before Chrome
         # hands a PDF to its viewer or starts rendering HTML.
         response = await page.goto(url, timeout=30000, wait_until="commit")
         if response is None:
@@ -280,29 +280,38 @@ async def fetch_and_save(
         await asyncio.gather(*tasks)
 
     try:
+        from playwright.async_api import Error as PlaywrightError
         from playwright.async_api import async_playwright
     except ImportError:
         await _run(None)
         return
 
     async with async_playwright() as pw:
-        exe = pw.chromium.executable_path
-        if not (exe and Path(exe).exists()):
-            if warning_callback:
-                warning_callback(
-                    "Chromium not installed — run: playwright install chromium."
-                    " Falling back to urllib."
-                )
-            await _run(None)
-            return
+        # channel="chrome" drives the system-installed Google Chrome instead
+        # of Playwright's bundled Chromium. The `chunkhound[browser]` extra
+        # only installs the Playwright Python package; users must also have
+        # Google Chrome installed system-wide — otherwise launch() fails and
+        # we fall through to the urllib path below.
+        #
         # New headless mode is required for the PDF path: legacy --headless
         # hands PDFs to an internal viewer and never exposes the response to
         # _fetch_page. --headless=new keeps the navigation visible so we can
         # branch on content-type at commit time.
-        browser = await pw.chromium.launch(
-            args=["--headless=new"],
-            ignore_default_args=["--headless"],
-        )
+        try:
+            browser = await pw.chromium.launch(
+                channel="chrome",
+                args=["--headless=new"],
+                ignore_default_args=["--headless"],
+            )
+        except PlaywrightError as e:
+            if warning_callback:
+                warning_callback(
+                    f"Browser launch failed: {e}. Falling back to urllib."
+                    " (If Google Chrome is not installed, install it to"
+                    " enable rich page fetches.)"
+                )
+            await _run(None)
+            return
         try:
             context = await browser.new_context()
             try:
