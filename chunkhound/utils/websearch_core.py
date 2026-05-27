@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from playwright.async_api import BrowserContext, Request, Route
+    from playwright.async_api import BrowserContext
 
 from chunkhound.core.config.config import Config
 
@@ -188,73 +188,46 @@ def _fetch_url(url: str) -> tuple[str, str | bytes]:
 
 
 async def _fetch_page(context: BrowserContext, url: str) -> tuple[str, str | bytes]:
-    """Fetch a single URL using an existing Playwright browser context."""
+    """Fetch a single URL.
+
+    HTML is fetched through Chromium's network stack. PDFs go through
+    Playwright's APIRequestContext because headless Chromium cannot reliably
+    expose PDF bytes to page.content()/response.body() — see Playwright #6342
+    and scrapy-playwright #243.
+    """
     page = await context.new_page()
     try:
-        pdf_body: bytes | None = None
-        fetch_error: Exception | None = None
+        # commit resolves once response headers are parsed — before Chromium
+        # hands a PDF to its viewer or starts rendering HTML.
+        response = await page.goto(url, timeout=30000, wait_until="commit")
+        if response is None:
+            raise ValueError("Navigation failed: no response")
 
-        async def handle(route: Route, request: Request) -> None:
-            nonlocal pdf_body, fetch_error
-            if request.resource_type != "document":
-                await route.continue_()
-                return
-            try:
-                resp = await route.fetch()
-            except Exception as e:
-                fetch_error = e
-                await route.abort()
-                return
-            ct = resp.headers.get("content-type", "").split(";")[0].strip()
-            if ct == "application/pdf":
-                pdf_body = await resp.body()
-                await resp.dispose()
-                # Fulfill with empty HTML so page.goto completes without error
-                await route.fulfill(body=b"", content_type="text/html")
-            else:
-                try:
-                    await route.fulfill(response=resp)
-                finally:
-                    await resp.dispose()
+        ct = response.headers.get("content-type", "").split(";")[0].strip()
 
-        await page.route("**/*", handle)
-        try:
-            response = await page.goto(url, timeout=30000)
-        except Exception:
-            if fetch_error is not None:
-                raise fetch_error
-            raise
-        if fetch_error is not None:
-            raise fetch_error
-
-        if pdf_body is not None:
-            if pdf_body[:4] == b"%PDF":
-                return ".pdf", pdf_body
-            # Chromium's PDF viewer can consume the response before the route
-            # handler receives the full body — re-fetch directly to bypass it.
+        if ct == "application/pdf":
+            await page.close()
             direct = await context.request.get(url)
             try:
                 if not direct.ok:
-                    raise ValueError(
-                        f"PDF fallback fetch failed: HTTP {direct.status}"
-                    )
+                    raise ValueError(f"PDF fetch failed: HTTP {direct.status}")
                 direct_ct = direct.headers.get("content-type", "").split(";")[0].strip()
                 if direct_ct != "application/pdf":
                     raise ValueError(
-                        f"PDF magic bytes missing and direct fetch returned {direct_ct!r}"
+                        f"Expected application/pdf, got {direct_ct!r}"
                     )
                 return ".pdf", await direct.body()
             finally:
                 await direct.dispose()
 
-        if response is None:
-            raise ValueError("Navigation failed: no response")
-        ct = response.headers.get("content-type", "").split(";")[0].strip()
         if ct and ct != "text/html":
             raise ValueError(f"Unsupported content-type: {ct!r}")
+
+        await page.wait_for_load_state("load")
         return ".md", _html_to_markdown(await page.content())
     finally:
-        await page.close()
+        if not page.is_closed():
+            await page.close()
 
 
 async def _fetch_one(
@@ -322,7 +295,14 @@ async def fetch_and_save(
                 )
             await _run(None)
             return
-        browser = await pw.chromium.launch()
+        # New headless mode is required for the PDF path: legacy --headless
+        # hands PDFs to an internal viewer and never exposes the response to
+        # _fetch_page. --headless=new keeps the navigation visible so we can
+        # branch on content-type at commit time.
+        browser = await pw.chromium.launch(
+            args=["--headless=new"],
+            ignore_default_args=["--headless"],
+        )
         try:
             context = await browser.new_context()
             try:
