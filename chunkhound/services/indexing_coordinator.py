@@ -1710,9 +1710,22 @@ class IndexingCoordinator(BaseService):
             # Use EmbeddingService for embedding generation
             from .embedding_service import EmbeddingService
 
+            embedding_batch_size = 1000
+            max_concurrent_batches = None
+            if self.config and self.config.embedding:
+                embedding_batch_size = self.config.embedding.batch_size
+                max_concurrent_batches = self.config.embedding.max_concurrent_batches
+
+            db_batch_size = 5000
+            if self.config and self.config.indexing:
+                db_batch_size = self.config.indexing.db_batch_size
+
             embedding_service = EmbeddingService(
                 database_provider=self._db,
                 embedding_provider=self._embedding_provider,
+                embedding_batch_size=embedding_batch_size,
+                db_batch_size=db_batch_size,
+                max_concurrent_batches=max_concurrent_batches,
                 progress=self.progress,
                 metrics_collector=metrics_collector,
             )
