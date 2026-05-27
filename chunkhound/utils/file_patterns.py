@@ -10,6 +10,7 @@
 # - Early pattern matching avoids expensive directory traversal of excluded subtrees
 """
 
+import logging
 import os
 import re
 from fnmatch import fnmatch, translate
@@ -26,6 +27,17 @@ except ImportError:
     _RUST_AVAILABLE = False
 
 _USE_RUST = os.environ.get("CHUNKHOUND_USE_RUST", "0") == "1"
+_log = logging.getLogger(__name__)
+
+HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
+
+
+def _fnmatch_to_gitignore(pattern: str) -> str:
+    """Convert a fnmatch-style glob to a gitignore-compatible pattern."""
+    p = re.sub(r"^\*\*/", "", pattern)
+    if p.endswith("/**"):
+        p = p[:-3] + "/"
+    return p
 
 @lru_cache(maxsize=4096)
 def _compile_pattern_global(pattern: str) -> Pattern[str]:
@@ -444,17 +456,19 @@ def walk_directory_tree(
     if _USE_RUST and _RUST_AVAILABLE:
         _exts, _, _has_complex = _summarize_include_patterns(patterns)
         if not _has_complex and _exts:
-            import logging as _logging
-            _log = _logging.getLogger(__name__)
-            _SKIP = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
+            _gitignore_excludes = (
+                [_fnmatch_to_gitignore(p) for p in exclude_patterns]
+                if exclude_patterns
+                else None
+            )
             _raw = _rust_scan_files(
                 str(start_path),
                 [ext.lstrip(".") for ext in _exts],
-                skip_dirs=list(_SKIP),
-                exclude_patterns=list(exclude_patterns) if exclude_patterns else None,
+                skip_dirs=list(HEAVY_DIRS),
+                exclude_patterns=_gitignore_excludes,
             )
             _log.debug("[RUST_SCANNER] scan_files root=%s exts=%s files=%d", start_path, sorted(_exts), len(_raw))
-            return [Path(p) for p in _raw], {}
+            return [Path(p) for p in _raw], parent_gitignores.copy()
 
     files = []
     gitignore_patterns: dict[Path, list[str]] = parent_gitignores.copy()
@@ -473,7 +487,6 @@ def walk_directory_tree(
         patterns
     )
     include_prefixes = _extract_include_prefixes(patterns)
-    HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
 
     for dirpath, dirnames, filenames in walk_iter:
         current_dir = Path(dirpath)

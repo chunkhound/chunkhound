@@ -112,22 +112,34 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Download staged distribution artifacts
+      - name: Download main distribution artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: release-dist-*
+          pattern: release-dist-{sdist,ubuntu-latest,windows-latest}
           path: dist
           merge-multiple: true
 
-      - name: Publish to PyPI
+      - name: Download native wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-dist-native-*
+          path: dist-native
+          merge-multiple: true
+
+      - name: Publish chunkhound to PyPI
         id: publish
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-        # No token needed — OIDC Trusted Publishing configured on PyPI project
+
+      - name: Publish chunkhound-native to PyPI
+        id: publish-native
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-native
 
       - name: Cleanup on failure (delete release and tag)
-        if: failure() && steps.publish.outcome == 'failure'
+        if: failure() && (steps.publish.outcome == 'failure' || steps.publish-native.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

@@ -15,7 +15,7 @@ if not site.exists():
 with zipfile.ZipFile(wheels[-1]) as z:
     installed = []
     for name in z.namelist():
-        if name.startswith("chunkhound_native/"):
+        if name.startswith("chunkhound_native") and (name.endswith(".so") or name.endswith(".pyd")):
             dest = site / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(z.read(name))

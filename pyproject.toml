@@ -102,6 +102,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+native = [
+    "chunkhound-native",
+]
 browser = [
     "playwright>=1.48.0",
 ]
