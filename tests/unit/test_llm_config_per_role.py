@@ -213,6 +213,34 @@ def test_registry_provider_without_model_is_not_configured():
 
 
 
+def test_registry_provider_utility_override_with_model():
+    """Per-role utility override to a registry provider with explicit model."""
+    cfg = LLMConfig(
+        provider="openai",
+        utility_provider="deepseek",
+        utility_model="deepseek-v4-flash",
+        api_key=SecretStr("sk-test"),
+    )
+    missing = cfg.get_missing_config()
+    # utility_model is set, so no registry provider role errors
+    assert not any("registry provider role" in m for m in missing), (
+        f"Expected no registry provider role errors, got {missing}"
+    )
+
+
+def test_registry_provider_utility_override_without_model():
+    """Per-role utility override to registry provider without model is caught."""
+    cfg = LLMConfig(
+        provider="openai",
+        utility_provider="deepseek",
+        api_key=SecretStr("sk-test"),
+    )
+    assert cfg.is_provider_configured() is False
+    assert cfg.get_missing_config() == [
+        "explicit model selection required for registry provider roles: utility"
+    ]
+
+
 def test_deepseek_does_not_forward_structured_outputs_override_by_default():
     cfg = LLMConfig(
         provider="deepseek",
