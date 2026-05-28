@@ -312,6 +312,9 @@ async def test_json_filtering_in_directory_processing(tmp_path, real_components)
     assert eslint_file is not None, "ESLint config should be indexed"
     assert python_file is not None, "Python file should be indexed"
     
-    # Should NOT be indexed
-    assert cache_file is None, "Large JSON should not be indexed (>20KB)"
+    # Large JSON: recorded in DB as a skip record (content_hash=None) but not chunked.
+    # This is intentional — skipped files are persisted to avoid re-scanning on each run.
+    assert cache_file is not None, "Large JSON should have a skip record in DB (>20KB)"
+    assert cache_file["content_hash"] is None, "Large JSON skip record must have no content_hash"
+    # Excluded-by-pattern files are never processed at all, so no DB record is created.
     assert lock_file is None, "Lock file should not be indexed (excluded pattern)"
