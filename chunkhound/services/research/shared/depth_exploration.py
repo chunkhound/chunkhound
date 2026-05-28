@@ -309,7 +309,7 @@ class DepthExplorationService:
     async def _generate_exploration_queries(
         self,
         root_query: str,
-        file_chunks: list[dict],
+        fragments: list[dict],
         file_path: str,
         constants_context: str = "",
     ) -> list[str]:
@@ -319,7 +319,7 @@ class DepthExplorationService:
 
         Args:
             root_query: Original research query
-            file_chunks: Chunks found in this file
+            fragments: Chunks found in this file
             file_path: Path to the file
             constants_context: Constants ledger context for LLM prompts
 
@@ -337,15 +337,15 @@ class DepthExplorationService:
 
         # Extract imports for file context (header injection)
         imports_context = ""
-        if self._import_context_service and file_chunks:
-            first_chunk = file_chunks[0]
+        if self._import_context_service and fragments:
+            first_chunk = fragments[0]
             content = get_chunk_text(first_chunk)
             imports = self._import_context_service.get_file_imports(file_path, content)
             if imports:
                 imports_context = "IMPORTS:\n" + "\n".join(imports) + "\n\n"
 
         # Build chunk summary using shared builder
-        chunk_context = builder.build_chunk_summary(file_chunks, max_chunks=5)
+        chunk_context = builder.build_chunk_summary(fragments, max_chunks=5)
 
         # JSON schema for structured output
         schema = {
@@ -370,22 +370,22 @@ class DepthExplorationService:
         # Exploration query generation prompt
         prompt = f"""RESEARCH QUERY: {root_query}
 {constants_section}
-FILE: {file_path}
-{imports_context}CHUNKS FOUND ({len(file_chunks)} total):
+SOURCE: {file_path}
+{imports_context}FRAGMENTS FOUND ({len(fragments)} total):
 {chunk_context}
 
-Generate {num_queries} specific queries to explore DIFFERENT ASPECTS of this file
+Generate {num_queries} specific queries to explore DIFFERENT ASPECTS of this source
 that would help answer the ROOT QUERY.
 
 Focus on:
-1. Component interactions and data flow not yet covered
-2. Implementation patterns or algorithms in this file
-3. How this file relates to other parts of the system
+1. Component interactions and information flow not yet covered
+2. Implementation patterns or mechanisms in this source
+3. How this source relates to other sources in the body of knowledge
 
 IMPORTANT:
-- Target aspects WITHIN THIS FILE, not external dependencies
+- Target aspects WITHIN THIS SOURCE, not external references
 - Each query should explore a different angle
-- Queries should be specific enough to find new chunks
+- Queries should be specific enough to find new fragments
 - {CONSTANTS_INSTRUCTION_SHORT}
 
 Output JSON with queries array."""

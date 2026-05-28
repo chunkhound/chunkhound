@@ -2,7 +2,7 @@
 
 Provides:
 1. EvidenceLedger - Unified collection of constants and facts
-2. FactExtractor - LLM-based fact extraction from code clusters
+2. FactExtractor - LLM-based fact extraction from source clusters
 3. extract_facts_with_clustering - Clustered extraction with reusable clusters
 4. Data models and prompt templates
 """
