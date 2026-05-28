@@ -8,7 +8,7 @@ wheels = sorted(pathlib.Path("target/wheels").glob("chunkhound*.whl"))
 if not wheels:
     sys.exit("No wheel found in target/wheels/ — run 'maturin build --out target/wheels/' first")
 
-site = pathlib.Path(sysconfig.get_path("purelib"))
+site = pathlib.Path(sysconfig.get_path("platlib"))
 if not site.exists():
     sys.exit(f"site-packages not found at {site}")
 

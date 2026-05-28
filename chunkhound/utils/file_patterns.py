@@ -455,8 +455,14 @@ def walk_directory_tree(
     """
     # Fast Rust path: ignore crate handles gitignore + exclude_patterns natively
     if _USE_RUST and _RUST_AVAILABLE:
-        _exts, _, _has_complex = _summarize_include_patterns(patterns)
-        if not _has_complex and _exts:
+        _exts, _names, _has_complex = _summarize_include_patterns(patterns)
+        if (
+            not _has_complex
+            and _exts
+            and not _names          # exact-filename includes (e.g. Makefile) not handled by Rust
+            and ignore_engine is None   # Rust path doesn't support ignore_engine
+            and max_files is None       # Rust path doesn't support max_files cap
+        ):
             _gitignore_excludes = (
                 [_fnmatch_to_gitignore(p) for p in exclude_patterns]
                 if exclude_patterns

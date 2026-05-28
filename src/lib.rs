@@ -32,7 +32,14 @@ fn scan_files(
         } else {
             let mut b = GitignoreBuilder::new(root);
             for p in &pats {
-                let _ = b.add_line(None, p);
+                // Gitignore anchors patterns without a path separator to the root dir;
+                // prepend **/ to restore the recursive fnmatch-style semantics.
+                let line = if p.contains('/') {
+                    p.clone()
+                } else {
+                    format!("**/{p}")
+                };
+                let _ = b.add_line(None, &line);
             }
             b.build().ok()
         }
