@@ -160,6 +160,24 @@ class StdioMCPServer(MCPServerBase):
             tool_name: str, arguments: dict[str, Any]
         ) -> list[types.TextContent]:
             """Universal tool handler that routes to the unified handler."""
+            token = None
+            session = None
+            try:
+                ctx = self.server.request_context
+                token = ctx.meta.progressToken if ctx.meta else None
+                session = ctx.session
+            except LookupError:
+                pass
+
+            async def emit(progress: int, total: int | None, message: str) -> None:
+                if token is not None and session is not None:
+                    await session.send_progress_notification(
+                        progress_token=token,
+                        progress=progress,
+                        total=total,
+                        message=message,
+                    )
+
             return await handle_tool_call(
                 tool_name=tool_name,
                 arguments=arguments,
@@ -170,6 +188,7 @@ class StdioMCPServer(MCPServerBase):
                 scan_progress=self._scan_progress,
                 llm_manager=self.llm_manager,
                 config=self.config,
+                progress_reporter=emit,
             )
 
         self._register_list_tools()
@@ -274,7 +293,7 @@ class StdioMCPServer(MCPServerBase):
                     "jsonrpc": "2.0",
                     "id": request_id,  # Match client's request ID per JSON-RPC spec
                     "result": {
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": "2025-06-18",
                         "serverInfo": {
                             "name": "ChunkHound Code Search",
                             "version": __version__,
