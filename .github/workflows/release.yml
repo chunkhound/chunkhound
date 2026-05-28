@@ -121,18 +121,38 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Publish chunkhound to PyPI
+        id: publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+      - name: Cleanup on failure (delete release and tag)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "${{ github.event.release.tag_name }}" \
+            --cleanup-tag \
+            --yes \
+            --repo "${{ github.repository }}"
+
+  publish-native:
+    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    runs-on: ubuntu-latest
+    # Separate environment so this job gets an OIDC token scoped to the
+    # chunkhound-native PyPI project (each PyPI project needs its own
+    # trusted-publisher entry referencing this environment name).
+    environment: pypi-native
+    timeout-minutes: 15
+
+    steps:
       - name: Download native wheel artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: release-dist-native-*
           path: dist-native
           merge-multiple: true
-
-      - name: Publish chunkhound to PyPI
-        id: publish
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
 
       - name: Publish chunkhound-native to PyPI
         id: publish-native
@@ -141,7 +161,7 @@ jobs:
           packages-dir: dist-native
 
       - name: Cleanup on failure (delete release and tag)
-        if: failure() && (steps.publish.outcome == 'failure' || steps.publish-native.outcome == 'failure')
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

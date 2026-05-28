@@ -34,9 +34,17 @@ HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"
 
 def _fnmatch_to_gitignore(pattern: str) -> str:
     """Convert a fnmatch-style glob to a gitignore-compatible pattern."""
-    p = re.sub(r"^\*\*/", "", pattern)
+    p = pattern
     if p.endswith("/**"):
         p = p[:-3] + "/"
+    if p.startswith("**/"):
+        rest = p[3:]
+        # Only drop the '**/' prefix when the remainder has no embedded slash.
+        # gitignore treats patterns containing '/' (excluding a trailing slash) as
+        # root-anchored; keeping '**/' ensures multi-segment paths like
+        # '.yarn/cache/' match at any depth rather than only at the repo root.
+        if "/" not in rest.rstrip("/"):
+            p = rest
     return p
 
 
