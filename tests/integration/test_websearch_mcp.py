@@ -1,11 +1,10 @@
 """Registry-isolation integration test for the websearch MCP tool.
 
-Spec reference: `specs/websearch_mcp_tool.md` §9.4 — after `websearch` runs, a
-follow-up `search` call on the same stdio session must still serve the
-originally indexed project (no pollution from the transient web-content
-index). The happy-path roundtrip is already covered by the lighter
-`test_mcp_websearch_stdio_mocked` smoke test; this file focuses solely on
-isolation.
+Invariant: after `websearch` runs, a follow-up `search` call on the same
+stdio session must still serve the originally indexed project (no pollution
+from the transient web-content index). The happy-path roundtrip is already
+covered by the lighter `test_mcp_websearch_stdio_mocked` smoke test; this
+file focuses solely on isolation.
 
 With `CH_TEST_WEBSEARCH_STUB=1` the research subprocess is replaced by a
 one-liner (`python -c "print('ANSWER')"`), so the check verifies the

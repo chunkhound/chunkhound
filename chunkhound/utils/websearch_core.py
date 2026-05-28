@@ -381,7 +381,6 @@ def search(
 def build_quickresearch_argv_core(
     query: str,
     tmpdir: Path,
-    path_filter: str | None,
     config: Config,
 ) -> list[str]:
     """Build argv to invoke _quickresearch as a subprocess.
@@ -397,8 +396,6 @@ def build_quickresearch_argv_core(
         query,
         str(tmpdir),
     ]
-    if path_filter is not None:
-        cmd.extend(["--path-filter", path_filter])
     source = config.config_file or config.local_config_file
     if source is not None:
         cmd.extend(["--config", str(Path(source).resolve())])

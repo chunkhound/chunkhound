@@ -1,8 +1,9 @@
 """Error-path tests for the websearch MCP tool.
 
 Directly invokes ``websearch_impl`` in-process, stubbing the lazy-imported
-CLI helpers and ``asyncio.create_subprocess_exec`` so the matrix in
-``specs/websearch_mcp_tool.md`` §6 can be asserted without hitting the network
+CLI helpers and ``asyncio.create_subprocess_exec`` so the error matrix
+(URLError, empty results, partial-fetch warnings, subprocess non-zero exit,
+timeout, cancellation cleanup) can be asserted without hitting the network
 or spawning real subprocesses.
 """
 
@@ -81,7 +82,7 @@ async def _stub_fetch_and_save_noop(
     return None
 
 
-def _stub_build_argv(query, tmpdir, path_filter, config):
+def _stub_build_argv(query, tmpdir, config):
     # Argv content is irrelevant — subprocess is patched out.
     return ["/bin/true"]
 
