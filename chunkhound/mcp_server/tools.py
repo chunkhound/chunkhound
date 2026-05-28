@@ -540,7 +540,12 @@ async def _inject_diff_service(
     from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
     from chunkhound.utils.project_detection import find_project_root
 
-    raw_diff = await run_git_diff(effective_commit_range, cwd=find_project_root(None))
+    try:
+        _cwd = find_project_root(None)
+    except SystemExit:
+        # MCP context: CWD may not have project markers; git will find the repo root itself
+        _cwd = Path.cwd()
+    raw_diff = await run_git_diff(effective_commit_range, cwd=_cwd)
     diff_chunks = parse_diff_to_chunks(raw_diff, max_chunk_chars=MAX_DIFF_CHUNK_CHARS)
     if len(diff_chunks) > MAX_DIFF_CHUNKS:
         _log.warning(

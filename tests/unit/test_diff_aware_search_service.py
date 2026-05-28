@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from chunkhound.core.models.chunk import Chunk
-from chunkhound.core.types.common import ChunkId, ChunkType, FileId, Language, LineNumber
+from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
 from chunkhound.embeddings import LocalEmbeddingResult
 from chunkhound.services.diff_aware_search_service import (
     DiffAwareSearchService,

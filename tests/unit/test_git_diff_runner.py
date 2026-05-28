@@ -42,7 +42,11 @@ async def test_nonzero_returncode(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_timeout(tmp_path: Path) -> None:
+async def test_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import chunkhound.core.git_diff.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_GIT_DIFF_TIMEOUT_SECONDS", 0.01)
+
     class SlowProcess:
         returncode = None
 

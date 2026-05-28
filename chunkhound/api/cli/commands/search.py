@@ -106,7 +106,7 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
                 commit_range=getattr(args, "commit_range", None),
                 commit_hash=getattr(args, "commit_hash", None),
                 last_n_commits=getattr(args, "last_n_commits", None),
-                vector_source=getattr(args, "vector_source", "both"),
+                vector_source=getattr(args, "vector_source", "diff"),
             )
             result_dict = cast(dict[str, Any], result)
         else:

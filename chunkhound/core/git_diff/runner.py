@@ -2,7 +2,9 @@ import asyncio
 import re
 from pathlib import Path
 
-_SAFE_REF = re.compile(r'^[a-zA-Z0-9_.^~/:@{}\-]+$')
+_SAFE_REF = re.compile(r'^[a-zA-Z0-9_.^~/:@{}\-]+\Z')
+
+_GIT_DIFF_TIMEOUT_SECONDS = 30
 
 
 async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
@@ -15,10 +17,15 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=_GIT_DIFF_TIMEOUT_SECONDS
+        )
     except asyncio.TimeoutError:
         proc.kill()
-        raise TimeoutError(f"git diff timed out after 30s for range {commit_range!r}")
+        raise TimeoutError(
+            f"git diff timed out after {_GIT_DIFF_TIMEOUT_SECONDS}s"
+            f" for range {commit_range!r}"
+        )
     if proc.returncode != 0:
         raise ValueError(f"git diff failed: {stderr.decode('utf-8', errors='replace').strip()}")
     return stdout.decode("utf-8", errors="replace")

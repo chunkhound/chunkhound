@@ -131,7 +131,7 @@ def _make_services(search_service: Any) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_deep_research_injects_diff_service_on_commit_range(monkeypatch):
+async def test_deep_research_injects_diff_service_on_commit_range():
     """DiffAwareSearchService is injected when commit_range is supplied."""
     from chunkhound.mcp_server.tools import deep_research_impl
 
@@ -182,7 +182,7 @@ async def test_deep_research_injects_diff_service_on_commit_range(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_deep_research_diff_mode_does_not_call_original_search_semantic(monkeypatch):
+async def test_deep_research_diff_mode_does_not_call_original_search_semantic():
     """In vector_source='diff' mode, original.search_semantic is NOT called."""
     from chunkhound.mcp_server.tools import deep_research_impl
 
@@ -232,7 +232,7 @@ async def test_deep_research_diff_mode_does_not_call_original_search_semantic(mo
 
 
 @pytest.mark.asyncio
-async def test_deep_research_no_commit_range_skips_injection(monkeypatch):
+async def test_deep_research_no_commit_range_skips_injection():
     """Without commit params, the original search_service is passed unchanged."""
     from chunkhound.mcp_server.tools import deep_research_impl
 
@@ -270,7 +270,7 @@ async def test_deep_research_no_commit_range_skips_injection(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_deep_research_commit_hash_expands_to_range(monkeypatch):
+async def test_deep_research_commit_hash_expands_to_range():
     """commit_hash='abc123' results in effective_commit_range='abc123^..abc123'."""
     from chunkhound.mcp_server.tools import deep_research_impl
 
@@ -318,7 +318,7 @@ async def test_deep_research_commit_hash_expands_to_range(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_deep_research_last_n_commits_expands_correctly(monkeypatch):
+async def test_deep_research_last_n_commits_expands_correctly():
     """last_n_commits=5 results in effective_commit_range='HEAD~5..HEAD'."""
     from chunkhound.mcp_server.tools import deep_research_impl
 
@@ -366,7 +366,7 @@ async def test_deep_research_last_n_commits_expands_correctly(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_deep_research_mutual_exclusion_raises(monkeypatch):
+async def test_deep_research_mutual_exclusion_raises():
     """Providing both commit_range and last_n_commits raises ValueError."""
     from chunkhound.mcp_server.tools import deep_research_impl
 
