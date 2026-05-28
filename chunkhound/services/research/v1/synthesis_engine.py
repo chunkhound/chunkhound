@@ -378,11 +378,11 @@ class SynthesisEngine:
             else:
                 file_content = content
 
-            code_sections.append(
+            source_sections.append(
                 f"### {file_path}\n{'=' * 80}\n{file_content}\n{'=' * 80}"
             )
 
-        code_context = "\n\n".join(code_sections)
+        source_context = "\n\n".join(source_sections)
 
         # Build file reference map for numbered citations (cluster-specific)
         cluster_files = cluster.files_content
