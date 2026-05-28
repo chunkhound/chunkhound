@@ -1385,6 +1385,152 @@ class TestFactExtractor:
         fact = list(ledger.facts.values())[0]
         assert fact.confidence == ConfidenceLevel.UNCERTAIN
 
+    @pytest.mark.asyncio
+    async def test_extract_parses_location_line_range_format(self, mock_llm_provider):
+        """Facts with location like \"Lines 45-52\" parse start_line/end_line."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Service uses retry logic",
+    "source": "search.py",
+    "location": "Lines 45-52",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "class SearchService: pass"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 45
+        assert fact.end_line == 52
+
+    @pytest.mark.asyncio
+    async def test_extract_parses_location_bare_line_range(self, mock_llm_provider):
+        """Facts with bare location like \"45-52\" parse start_line/end_line."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Service uses retry logic",
+    "source": "search.py",
+    "location": "45-52",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "class SearchService: pass"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 45
+        assert fact.end_line == 52
+
+    @pytest.mark.asyncio
+    async def test_extract_parses_location_bare_single_line(self, mock_llm_provider):
+        """Facts with bare single line location like \"45\" set end_line = start_line."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Service uses retry logic",
+    "source": "search.py",
+    "location": "45",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "class SearchService: pass"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 45
+        assert fact.end_line == 45
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("location", ["45 to 52", "45 TO 52", "45 To 52"])
+    async def test_extract_parses_location_with_to_separator(
+        self, mock_llm_provider, location
+    ):
+        """Bare line ranges parse regardless of the separator case."""
+        mock_response = MagicMock()
+        mock_response.content = f"""[
+  {{
+    "statement": "Service uses retry logic",
+    "source": "search.py",
+    "location": "{location}",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }}
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "class SearchService: pass"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 45
+        assert fact.end_line == 52
+
+    @pytest.mark.asyncio
+    async def test_extract_falls_back_to_section_when_location_unparseable(
+        self, mock_llm_provider
+    ):
+        """Non-numeric location falls back to source_section."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Service uses retry logic",
+    "source": "search.py",
+    "location": "Section: Configuration",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "class SearchService: pass"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 0
+        assert fact.end_line == 0
+        assert fact.source_section == "Section: Configuration"
+
 
 # =============================================================================
 # EntityLink and FactConflict Tests

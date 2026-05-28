@@ -35,6 +35,12 @@ _LOCATION_LINE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Parse bare line ranges like "45-52" or "45" (no prefix)
+_BARE_LINE_RANGE_PATTERN = re.compile(
+    r"^(\d+)(?:\s*(?:-|to)\s*(\d+))?$",
+    re.IGNORECASE,
+)
+
 
 def _extract_json_array(response: str) -> list[dict]:
     """Extract JSON array from LLM response.
@@ -190,6 +196,10 @@ class FactExtractor:
             if line_match:
                 start_line = int(line_match.group(1))
                 end_line = int(line_match.group(2) or line_match.group(1))
+            elif bare_match := _BARE_LINE_RANGE_PATTERN.match(location_raw):
+                # Fallback for bare line ranges like "45-52" or "45"
+                start_line = int(bare_match.group(1))
+                end_line = int(bare_match.group(2) or bare_match.group(1))
             else:
                 source_section = location_raw
         else:
