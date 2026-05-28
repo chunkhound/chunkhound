@@ -399,7 +399,10 @@ class SynthesisEngine:
         cluster_proportion = (
             cluster.total_tokens / total_input_tokens if total_input_tokens > 0 else 1.0
         )
-        cluster_output_tokens = max(5000, int(total_input_tokens * cluster_proportion))
+        cluster_output_tokens = max(
+            5000,
+            int(synthesis_budgets["output_tokens"] * cluster_proportion),
+        )
         # Cap cluster target to half of TARGET_OUTPUT_TOKENS (clusters combine in reduce)
         cluster_target = min(cluster_output_tokens, TARGET_OUTPUT_TOKENS // 2)
 
