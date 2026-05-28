@@ -52,6 +52,7 @@ from chunkhound.providers.database.serial_database_provider import (
 from chunkhound.providers.database.serial_executor import (
     _executor_local,
     reset_thread_local_state,
+    track_operation,
 )
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
@@ -4075,6 +4076,40 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Executor method for begin_transaction - runs in DB thread."""
         conn.execute("BEGIN TRANSACTION")
         state["transaction_active"] = True
+
+    def _executor_maybe_checkpoint(
+        self, conn: Any, state: dict[str, Any], force: bool
+    ) -> None:
+        """Executor method for _maybe_checkpoint - runs in DB thread."""
+        if self._connection_manager.is_memory_db:
+            return
+
+        # Defer checkpoint if we're in a transaction
+        if state.get("transaction_active", False):
+            state["deferred_checkpoint"] = True
+            if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                logger.debug("Deferring checkpoint until transaction completes")
+            return
+
+        current_time = time.time()
+        time_since_checkpoint = current_time - state.get(
+            "last_checkpoint_time", current_time
+        )
+
+        # Checkpoint if forced or 60 seconds elapsed
+        should_checkpoint = force or time_since_checkpoint >= 60
+
+        if should_checkpoint:
+            try:
+                conn.execute("CHECKPOINT")
+                state["last_checkpoint_time"] = current_time
+                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                    logger.debug(
+                        f"Checkpoint completed (time: {time_since_checkpoint:.1f}s)"
+                    )
+            except Exception as e:
+                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                    logger.warning(f"Checkpoint failed: {e}")
 
     def _executor_commit_transaction(
         self, conn: Any, state: dict[str, Any], force_checkpoint: bool

@@ -20,6 +20,8 @@ from chunkhound.services.realtime_indexing_service import (
 )
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
+    is_ci,
+    is_windows,
     realtime_backend_for_tests,
     stabilize_polling_monitor,
 )

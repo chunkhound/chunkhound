@@ -17,21 +17,18 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions import CompactionError
+from chunkhound.mcp_server.base import MCPServerBase
 from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.tools import execute_tool, search_impl
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
-from tests.test_utils import (
-    build_embedding_config_from_dict,
-    create_embedding_manager_for_tests,
-    get_api_key_for_tests,
-    get_embedding_config_for_tests,
-)
 from tests.utils.realtime_test_helpers import (
     remove_file_from_index,
     write_and_index_file,
 )
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
+    is_ci,
+    is_windows,
     realtime_backend_for_tests,
 )
 

@@ -74,8 +74,21 @@ def get_thread_local_state() -> dict[str, Any]:
         _executor_local.state = {
             "transaction_active": False,
             "last_activity_time": time.time(),  # Track last database activity
+            "operations_since_checkpoint": 0,
+            "last_checkpoint_time": time.time(),
         }
     return _executor_local.state
+
+
+def track_operation(state: dict[str, Any]) -> None:
+    """Track a database operation for checkpoint management.
+
+    This function should ONLY be called from within the executor thread.
+
+    Args:
+        state: Thread-local state dictionary
+    """
+    state["operations_since_checkpoint"] += 1
 
 
 def reset_thread_local_state() -> None:
@@ -89,6 +102,8 @@ def reset_thread_local_state() -> None:
         _executor_local.state.update({
             "transaction_active": False,
             "last_activity_time": time.time(),
+            "operations_since_checkpoint": 0,
+            "last_checkpoint_time": time.time(),
         })
 
 
