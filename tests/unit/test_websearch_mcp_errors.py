@@ -243,6 +243,7 @@ async def test_subprocess_nonzero_exit_strips_traceback_frames(
     assert "RuntimeError: boom" in msg
     assert "Traceback" not in msg
     assert "  File '/tmp/x.py'" not in msg
+    assert "raise RuntimeError('boom')" not in msg
 
 
 @pytest.mark.asyncio
@@ -251,8 +252,8 @@ async def test_subprocess_nonzero_exit_strips_traceback_frames(
     [
         pytest.param(
             b"Traceback (most recent call last):\n  File '/x.py', line 1\n    raise SystemExit(1)\n",
-            ["SystemExit"],
-            ["Traceback", "File '/x.py'"],
+            ["SystemExit(1)"],
+            ["Traceback", "File '/x.py'", "raise SystemExit(1)"],
             id="all-traceback-no-error-line",
         ),
         pytest.param(
@@ -297,6 +298,37 @@ async def test_subprocess_nonzero_exit_strips_traceback_variants(
         assert expected in msg, f"Expected {expected!r} in {msg!r}"
     for unexpected in unexpected_substrings:
         assert unexpected not in msg, f"Expected {unexpected!r} NOT in {msg!r}"
+
+
+@pytest.mark.asyncio
+async def test_subprocess_stderr_truncates_long_output(monkeypatch, patched):
+    """Subprocess stderr >500 chars truncates in the MCPError message."""
+    long_stderr = b"xYz info line\n" * 60  # ~1020 chars
+
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    fake_proc = _FakeProc(
+        stdout=b"",
+        stderr=long_stderr,
+        returncode=2,
+    )
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    with pytest.raises(MCPError) as exc:
+        await tools_mod.websearch_impl(
+            embedding_manager=None,
+            llm_manager=None,
+            config=None,
+            query="long-stderr",
+        )
+
+    msg = str(exc.value)
+    assert len(msg) <= 600  # "Research subprocess failed (exit 2): " prefix + truncated content
+    # Verify content preserved (not blank)
+    assert "xYz" in msg
 
 
 @pytest.mark.asyncio

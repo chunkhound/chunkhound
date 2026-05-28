@@ -37,6 +37,38 @@ MIN_RESPONSE_TOKENS = 1000
 MAX_ALLOWED_TOKENS = 25000
 
 
+def _summarize_subprocess_stderr(stderr: bytes) -> str:
+    """Return the user-visible stderr summary for MCP subprocess failures."""
+    stderr_text = stderr.decode(errors="replace").strip()
+    lines = [line.rstrip() for line in stderr_text.split("\n")]
+    in_traceback = False
+    raise_summary: str | None = None
+    clean: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if line.startswith("Traceback") or line.startswith("  File"):
+            in_traceback = True
+            continue
+        if in_traceback and line.startswith("    "):
+            if stripped.startswith("raise ") and raise_summary is None:
+                raise_summary = stripped.removeprefix("raise ")
+            continue
+        # Reset traceback mode when encountering a non-traceback line
+        # (e.g. the error type after the traceback like "ValueError: ...").
+        # Without this reset, any indented diagnostics that follow the
+        # traceback would be silently consumed.
+        in_traceback = False
+        clean.append(line)
+
+    if clean:
+        return "\n".join(clean)[-500:]
+    if raise_summary:
+        return raise_summary[-500:]
+    return stderr_text[-200:]
+
+
 # =============================================================================
 # Schema Generation Infrastructure
 # =============================================================================
@@ -719,29 +751,7 @@ async def websearch_impl(
                 f"websearch timed out after {timeout_s:.0f}s"
             ) from None
         if proc.returncode != 0:
-            stderr_text = stderr.decode(errors="replace").strip()
-            # Strip traceback frames — only the last error line is meaningful.
-            lines = [line.rstrip() for line in stderr_text.split("\n")]
-            clean = [
-                line
-                for line in lines
-                if not (
-                    line.startswith("Traceback")
-                    or line.startswith("  File")
-                    or line.startswith("    ")
-                )
-            ]
-            tail = "\n".join(clean)[-500:]
-            if not tail:
-                # Tracebacks sometimes end at an indented ``raise`` line with no
-                # final exception summary. Surface that summary without frames.
-                for line in reversed(lines):
-                    stripped = line.strip()
-                    if stripped.startswith("raise "):
-                        tail = stripped.removeprefix("raise ")[-500:]
-                        break
-            if not tail:
-                tail = stderr_text[-200:]
+            tail = _summarize_subprocess_stderr(stderr)
             raise MCPError(
                 f"Research subprocess failed (exit {proc.returncode}): {tail}"
             )
