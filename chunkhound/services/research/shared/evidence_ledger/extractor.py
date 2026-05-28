@@ -1,4 +1,4 @@
-"""Fact Extractor: LLM-based extraction of atomic facts from code.
+"""Fact Extractor: LLM-based extraction of atomic facts from source material.
 
 Extracts structured facts from cluster chunks using LLM calls,
 then aggregates them into a unified EvidenceLedger.
@@ -28,6 +28,12 @@ MAX_STATEMENT_CHARS = 100
 
 # Pattern to extract JSON from LLM response (may be wrapped in ```json ... ```)
 _JSON_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
+
+# Parse location strings like "lines 45-52", "lines 45", "L45-L52", or "L45"
+_LOCATION_LINE_PATTERN = re.compile(
+    r"(?:lines?\s*|(?<!\w)L\s*)(\d+)(?:\s*(?:-|to)\s*(?:L)?(\d+))?",
+    re.IGNORECASE,
+)
 
 
 def _extract_json_array(response: str) -> list[dict]:
@@ -99,19 +105,135 @@ class FactExtractor:
         """
         self._llm = llm_provider
 
-    def _format_code_context(self, cluster_content: dict[str, str]) -> str:
-        """Format cluster files for LLM prompt.
+    def _format_source_context(self, cluster_content: dict[str, str]) -> str:
+        """Format cluster sources for LLM prompt.
 
         Args:
             cluster_content: Mapping of file_path -> content
 
         Returns:
-            Formatted string with all files
+            Formatted string with all sources
         """
         parts = []
         for file_path, content in sorted(cluster_content.items()):
             parts.append(f"### {file_path}\n```\n{content}\n```")
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _parse_fact_item(
+        item: dict,
+        cluster_content: dict[str, str],
+    ) -> tuple[
+        str,  # statement
+        str,  # file_path
+        int,  # start_line
+        int,  # end_line
+        str | None,  # url
+        str | None,  # source_section
+        str,  # category
+        ConfidenceLevel,  # confidence
+        tuple[str, ...],  # entities
+        str,  # fact_id
+    ] | None:
+        """Parse a single fact item from the LLM response.
+
+        Handles both new-style (source + location) and old-style
+        (file_path + start_line + end_line) formats. Returns None
+        for items that should be skipped (empty statement, no source).
+
+        Args:
+            item: Raw fact dict from LLM response
+            cluster_content: Mapping of file_path -> content for scope resolution
+
+        Returns:
+            Tuple of parsed fields, or None if item should be skipped
+        """
+        # Validate required fields
+        statement = item.get("statement", "").strip()
+        if not statement:
+            logger.debug(f"Skipping fact with empty statement: {item}")
+            return None
+
+        # Truncate statement if needed (defense in depth)
+        if len(statement) > MAX_STATEMENT_CHARS:
+            statement = statement[: MAX_STATEMENT_CHARS - 3] + "..."
+
+        # Parse source: accept both new-style (source + location)
+        # and old-style (file_path + start_line + end_line)
+        source = item.get("source", "").strip() or item.get(
+            "file_path", ""
+        ).strip()
+        location_raw = item.get("location", "").strip()
+        url = item.get("url", "").strip() or None
+
+        # Keep prompt and parser aligned: URL provenance lives in `url`.
+        # If compatibility prompts put the URL in `source`, normalize it.
+        normalized_source_url = False
+        if not url and source.lower().startswith(("http://", "https://")):
+            logger.debug(f"Normalizing source URL into url field: {source[:80]}")
+            url = source
+            normalized_source_url = True
+
+        if not source and not url:
+            logger.debug(
+                f"Skipping fact with no source or URL: {item}"
+            )
+            return None
+
+        # Parse location into line numbers or section
+        start_line = 0
+        end_line = 0
+        source_section: str | None = None
+
+        if location_raw:
+            line_match = _LOCATION_LINE_PATTERN.search(location_raw)
+            if line_match:
+                start_line = int(line_match.group(1))
+                end_line = int(line_match.group(2) or line_match.group(1))
+            else:
+                source_section = location_raw
+        else:
+            # Fall back to old-style line numbers
+            logger.debug(
+                f"No location parsed — using old-style line numbers for "
+                f"fact: {item.get('statement', '')[:50]}"
+            )
+            start_line = int(item.get("start_line", 1))
+            end_line = int(item.get("end_line", start_line))
+
+        file_path = source
+        if normalized_source_url and source not in cluster_content:
+            # Keep cluster-scoped fact lookup tied to the source key used
+            # for this extraction when the cluster contains a single source.
+            if len(cluster_content) == 1:
+                file_path = next(iter(cluster_content))
+
+        category = item.get("category", "general").strip()
+        confidence = _parse_confidence(item.get("confidence", "uncertain"))
+        entities = tuple(
+            e.strip() for e in item.get("entities", []) if e.strip()
+        )
+
+        fact_id = FactEntry.generate_id(
+            statement,
+            primary_source=(url or source),
+            start_line=start_line,
+            end_line=end_line,
+            section=source_section,
+        )
+
+        return (
+            statement,
+            file_path,
+            start_line,
+            end_line,
+            url,
+            source_section,
+            category,
+            confidence,
+            entities,
+            fact_id,
+        )
 
     async def extract_from_cluster(
         self,
@@ -136,10 +258,10 @@ class FactExtractor:
         if not cluster_content:
             return ledger
 
-        code_context = self._format_code_context(cluster_content)
+        source_context = self._format_source_context(cluster_content)
         system = FACT_EXTRACTION_SYSTEM.format(max_facts=max_facts)
         prompt = FACT_EXTRACTION_USER.format(
-            root_query=root_query, code_context=code_context
+            root_query=root_query, source_context=source_context
         )
 
         try:
@@ -156,29 +278,22 @@ class FactExtractor:
 
         for item in facts_data:
             try:
-                # Validate required fields
-                statement = item.get("statement", "").strip()
-                file_path = item.get("file_path", "").strip()
-
-                if not statement or not file_path:
-                    logger.debug(f"Skipping fact with missing required fields: {item}")
+                parsed = self._parse_fact_item(item, cluster_content)
+                if parsed is None:
                     continue
 
-                # Truncate statement if needed (defense in depth)
-                if len(statement) > MAX_STATEMENT_CHARS:
-                    statement = statement[: MAX_STATEMENT_CHARS - 3] + "..."
-
-                start_line = int(item.get("start_line", 1))
-                end_line = int(item.get("end_line", start_line))
-                category = item.get("category", "general").strip()
-                confidence = _parse_confidence(item.get("confidence", "uncertain"))
-                entities = tuple(
-                    e.strip() for e in item.get("entities", []) if e.strip()
-                )
-
-                fact_id = FactEntry.generate_id(
-                    statement, file_path, start_line, end_line
-                )
+                (
+                    statement,
+                    file_path,
+                    start_line,
+                    end_line,
+                    url,
+                    source_section,
+                    category,
+                    confidence,
+                    entities,
+                    fact_id,
+                ) = parsed
 
                 fact = FactEntry(
                     fact_id=fact_id,
@@ -186,6 +301,8 @@ class FactExtractor:
                     file_path=file_path,
                     start_line=start_line,
                     end_line=end_line,
+                    url=url,
+                    source_section=source_section,
                     category=category,
                     confidence=confidence,
                     entities=entities,
@@ -194,15 +311,15 @@ class FactExtractor:
 
                 ledger.add_fact(fact)
 
-            except (KeyError, TypeError, ValueError, AttributeError) as e:
+            except (KeyError, TypeError, ValueError) as e:
                 # Belt-and-suspenders: _extract_json_array already filters
                 # non-dicts, but callers may supply raw parsed JSON directly.
-                logger.debug(f"Skipping malformed fact entry: {e}")
+                logger.warning(f"Skipping malformed fact entry: {e}")
                 continue
 
         logger.info(
             f"Extracted {ledger.facts_count} facts from cluster {cluster_id} "
-            f"({len(cluster_content)} files)"
+            f"({len(cluster_content)} sources)"
         )
 
         return ledger
