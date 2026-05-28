@@ -763,17 +763,17 @@ class OpenAIEmbeddingProvider:
                         )
                         if header_val is not None:
                             try:
-                                retry_after = float(header_val)
+                                retry_after = min(float(header_val), 120.0)
                             except (ValueError, TypeError):
                                 pass
                     if retry_after is None:
-                        match = re.search(
+                        m = re.search(
                             r"try again in (\d+(?:\.\d+)?)\s*seconds?",
                             str(rate_error),
                             re.IGNORECASE,
                         )
-                        if match:
-                            retry_after = float(match.group(1))
+                        if m:
+                            retry_after = min(float(m.group(1)), 120.0)
                     if retry_after is None:
                         retry_after = min(
                             self._retry_delay * (2**attempt), 120.0
