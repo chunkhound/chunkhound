@@ -16,6 +16,8 @@ if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
 
 from .tools import TOOL_REGISTRY, ProgressReporter, execute_tool
 
+MCP_PROTOCOL_VERSION = "2025-06-18"
+
 if TYPE_CHECKING:
     from chunkhound.database_factory import DatabaseServices
     from chunkhound.embeddings import EmbeddingManager

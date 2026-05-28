@@ -8,7 +8,6 @@ The registry pattern ensures consistent tool metadata and behavior.
 
 import asyncio
 import inspect
-import json
 import os
 import re
 import shutil
@@ -67,6 +66,7 @@ ProgressReporter = Callable[[int, int | None, str], Awaitable[None]]
 async def _emit(
     reporter: ProgressReporter | None, progress: int, total: int | None, message: str
 ) -> None:
+    """Call reporter if set; no-op otherwise."""
     if reporter is not None:
         await reporter(progress, total, message)
 

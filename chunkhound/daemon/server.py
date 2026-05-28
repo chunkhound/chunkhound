@@ -21,7 +21,7 @@ from typing import Any
 
 from chunkhound.core.config.config import Config
 from chunkhound.mcp_server.base import MCPServerBase
-from chunkhound.mcp_server.common import handle_tool_call
+from chunkhound.mcp_server.common import MCP_PROTOCOL_VERSION, handle_tool_call
 from chunkhound.version import __version__
 
 from . import ipc
@@ -345,7 +345,7 @@ class ChunkHoundDaemon(MCPServerBase):
             "jsonrpc": "2.0",
             "id": msg.get("id"),
             "result": {
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "serverInfo": {
                     "name": "ChunkHound Code Search",
                     "version": __version__,
@@ -374,6 +374,8 @@ class ChunkHoundDaemon(MCPServerBase):
         tool_name: str = params.get("name", "")
         arguments: dict[str, Any] = params.get("arguments", {})
 
+        # progress_reporter intentionally omitted: the daemon transport uses its
+        # own raw JSON-RPC loop and does not yet implement progress token tracking.
         text_contents = await handle_tool_call(
             tool_name=tool_name,
             arguments=arguments,
