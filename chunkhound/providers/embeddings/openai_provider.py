@@ -3,6 +3,8 @@
 import asyncio
 import heapq
 import math
+import random
+import re
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -749,11 +751,41 @@ class OpenAIEmbeddingProvider:
                     and hasattr(openai, "RateLimitError")
                     and isinstance(rate_error, openai.RateLimitError)
                 ):
-                    logger.warning(
-                        f"Rate limit exceeded, retrying in {self._retry_delay * (attempt + 1)} seconds"
-                    )
+                    retry_after: float | None = None
+                    if (
+                        hasattr(rate_error, "response")
+                        and rate_error.response is not None
+                    ):
+                        header_val = rate_error.response.headers.get(
+                            "retry-after"
+                        ) or rate_error.response.headers.get(
+                            "x-ratelimit-reset-requests"
+                        )
+                        if header_val is not None:
+                            try:
+                                retry_after = float(header_val)
+                            except (ValueError, TypeError):
+                                pass
+                    if retry_after is None:
+                        match = re.search(
+                            r"try again in (\d+(?:\.\d+)?)\s*seconds?",
+                            str(rate_error),
+                            re.IGNORECASE,
+                        )
+                        if match:
+                            retry_after = float(match.group(1))
+                    if retry_after is None:
+                        retry_after = min(
+                            self._retry_delay * (2**attempt), 120.0
+                        )
+                    jitter = random.uniform(0, min(retry_after * 0.1, 5.0))
+                    total_delay = retry_after + jitter
                     if attempt < self._retry_attempts - 1:
-                        await asyncio.sleep(self._retry_delay * (attempt + 1))
+                        logger.warning(
+                            f"Rate limit exceeded, retrying in {total_delay:.1f}s"
+                            f" (attempt {attempt + 1}/{self._retry_attempts})"
+                        )
+                        await asyncio.sleep(total_delay)
                         continue
                     else:
                         raise
