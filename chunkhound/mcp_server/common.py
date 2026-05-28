@@ -8,15 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any, TypeVar
-
-ProgressReporter = Callable[[int, int | None, str], Awaitable[None]]
 
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
     import mcp.types as types  # noqa: F401
 
-from .tools import TOOL_REGISTRY, execute_tool
+from .tools import TOOL_REGISTRY, ProgressReporter, execute_tool
 
 if TYPE_CHECKING:
     from chunkhound.database_factory import DatabaseServices

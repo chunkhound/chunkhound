@@ -193,6 +193,7 @@ def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
             "llm_manager",
             "scan_progress",
             "progress",
+            "progress_reporter",
             "config",
         ):
             continue
