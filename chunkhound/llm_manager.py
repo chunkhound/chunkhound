@@ -117,6 +117,12 @@ class LLMManager:
                 provider_kwargs["base_url"] = config.get("base_url")
                 provider_kwargs["ssl_verify"] = config.get("ssl_verify", True)
 
+            # Forward supports_structured_outputs for OpenAI-compatible providers
+            if issubclass(provider_class, OpenAICompatibleProvider):
+                sso = config.get("supports_structured_outputs")
+                if sso is not None:
+                    provider_kwargs["supports_structured_outputs"] = sso
+
             # Pass reasoning_effort to providers that support it
             if provider_name in REASONING_EFFORT_PROVIDERS:
                 effort = config.get("reasoning_effort")

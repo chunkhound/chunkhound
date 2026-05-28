@@ -134,6 +134,12 @@ class OpenAICompatibleProvider(LLMProvider):
         self._prompt_tokens = 0
         self._completion_tokens = 0
 
+    @property
+    def base_url(self) -> str | None:
+        """Resolved API base URL for this provider, or None if unset."""
+        url = self._client.base_url
+        return str(url) if url else None
+
     def _get_default_base_url(self) -> str | None:
         """Get the default base URL for this provider.
 

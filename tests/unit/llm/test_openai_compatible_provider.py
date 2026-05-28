@@ -1,20 +1,14 @@
-"""Contract tests for the OpenAI-compatible provider pipeline.
+"""Contract tests for the OpenAI-family provider pipeline.
 
-All OpenAI-compatible providers (openai, deepseek, grok) share the same
-``OpenAICompatibleProvider`` class.  They differ only in spec data stored
-in ``OPENAI_COMPATIBLE_PROVIDERS`` (base URL, default model, feature flags).
+Registry-backed providers (for example deepseek and grok) are created as
+``OpenAICompatibleProvider`` instances. The built-in ``openai`` route is the
+explicit exception: ``LLMManager`` must dispatch it to ``OpenAILLMProvider`` so
+OpenAI-only behavior stays covered.
 
 This file tests two things:
-1.  The **factory contract**: config → registry → correctly configured
-    ``OpenAICompatibleProvider`` instance.
-2.  The **behavioral contract** of ``OpenAICompatibleProvider`` itself.
-
-Every OpenAI-compatible provider is exercised through parametrized spec
-entries.  Adding a new provider = one dict in ``SPECS`` + one dict in the
-production registry.  No per-provider subclass or per-provider test file.
-
-Per-provider subclass tests are an anti-pattern — they all test the same
-base class with different constructor defaults.
+1.  The **factory contract**: config → provider routing → correctly configured
+    provider instance.
+2.  The **behavioral contract** shared by ``OpenAICompatibleProvider`` paths.
 """
 
 from __future__ import annotations
@@ -24,14 +18,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from chunkhound.llm_manager import LLMManager
-from chunkhound.providers.llm.openai_compatible_provider import (
-    OpenAICompatibleProvider,
-)
+from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
+from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
 
 # =============================================================================
-# Spec data — kept in sync with OPENAI_COMPATIBLE_PROVIDERS in production.
+# Spec data — kept in sync with production routing.
 # Each entry is a subset of the config dict that would come from LLMConfig.
-# Only registry-based providers (deepseek, grok) are included.
 # =============================================================================
 
 SPECS = [
@@ -42,6 +34,11 @@ SPECS = [
             "expected_name": "deepseek",
             "expected_base_url": "https://api.deepseek.com",
             "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'deepseek'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
         },
         id="deepseek",
     ),
@@ -52,8 +49,28 @@ SPECS = [
             "expected_name": "grok",
             "expected_base_url": "https://api.x.ai/v1",
             "expected_sso": True,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'grok'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
         },
         id="grok",
+    ),
+    pytest.param(
+        {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "expected_name": "openai",
+            "expected_base_url": None,
+            "expected_sso": True,
+            "expected_class": OpenAILLMProvider,
+            "expected_missing_model_error": (
+                "Custom OpenAI-compatible LLM endpoints require an explicit model. "
+                "Set `llm.model` (or the per-role model override) when using `llm.base_url`."
+            ),
+        },
+        id="openai",
     ),
 
 ]
@@ -92,12 +109,12 @@ class TestFactoryPipeline:
     """Config dict → registry lookup → provider instance with correct fields."""
 
     @pytest.mark.parametrize("spec", SPECS)
-    def test_creates_openai_compatible_provider(self, spec, mock_openai):
-        """Returns the right class with the right name and model."""
+    def test_creates_expected_provider_class(self, spec, mock_openai):
+        """Factory routing returns the expected concrete provider class."""
         manager = _bare_manager()
         provider = manager._create_provider(spec)
 
-        assert isinstance(provider, OpenAICompatibleProvider)
+        assert isinstance(provider, spec["expected_class"])
         assert provider.name == spec["expected_name"]
         assert provider.model == spec["model"]
 
@@ -109,7 +126,7 @@ class TestFactoryPipeline:
 
         expected = spec["expected_base_url"]
         if expected is not None:
-            assert str(provider._client.base_url).rstrip("/") == expected.rstrip("/")
+            assert str(provider.base_url).rstrip("/") == expected.rstrip("/")
 
     @pytest.mark.parametrize("spec", SPECS)
     def test_explicit_base_url_overrides_spec(self, spec, mock_openai):
@@ -118,7 +135,7 @@ class TestFactoryPipeline:
         manager = _bare_manager()
         provider = manager._create_provider(cfg)
 
-        assert str(provider._client.base_url).rstrip("/") == "http://localhost:11434/v1"
+        assert str(provider.base_url).rstrip("/") == "http://localhost:11434/v1"
 
     @pytest.mark.parametrize("spec", SPECS)
     def test_explicit_model_overrides_spec(self, spec, mock_openai):
@@ -161,7 +178,7 @@ class TestFactoryPipeline:
         with pytest.raises(ValueError) as exc:
             manager = _bare_manager()
             manager._create_provider(cfg)
-        assert "Model is required" in str(exc.value)
+        assert str(exc.value) == spec["expected_missing_model_error"]
 
     @pytest.mark.parametrize("spec", SPECS)
     def test_timeout_default_applied(self, spec, mock_openai):
@@ -187,7 +204,7 @@ class TestFactoryPipeline:
         """Synthesis concurrency matches the spec value."""
         manager = _bare_manager()
         provider = manager._create_provider(spec)
-        expected = {"deepseek": 10, "grok": 5}[spec["provider"]]
+        expected = {"deepseek": 10, "grok": 5, "openai": 3}[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected
 
 
