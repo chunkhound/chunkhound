@@ -991,6 +991,25 @@ class IndexingCoordinator(BaseService):
                 # Track skip reason in stats for single-file case
                 if "skip_reason" not in stats:
                     stats["skip_reason"] = result.error
+                # Record in DB so change detection bypasses this file on next run
+                try:
+                    rel = self._get_relative_path(result.file_path).as_posix()
+                    p = Path(result.file_path)
+                    await self._db.record_skipped_file_async(
+                        rel,
+                        p.name,
+                        p.suffix,
+                        result.file_size,
+                        result.file_mtime,
+                        result.language.value if result.language else None,
+                        getattr(result, "content_hash", None),
+                        result.error or "skipped",
+                    )
+                    stats.setdefault("skipped_paths", []).append(
+                        (str(result.file_path), result.error)
+                    )
+                except Exception:
+                    pass  # best-effort; next run will re-evaluate
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
                     if cumulative_counters is not None:
@@ -1396,6 +1415,7 @@ class IndexingCoordinator(BaseService):
             agg_errors: list[dict[str, Any]] = []
             agg_skipped = 0
             agg_skipped_timeout: list[str] = []
+            agg_skipped_paths: list[tuple[str, str]] = []
 
             store_progress_counters = {
                 "chunks": 0,
@@ -1411,7 +1431,8 @@ class IndexingCoordinator(BaseService):
                     agg_total_chunks, \
                     agg_errors, \
                     agg_skipped, \
-                    agg_skipped_timeout
+                    agg_skipped_timeout, \
+                    agg_skipped_paths
                 # Update skip counters from parse results
                 for r in batch:
                     if r.status == "skipped":
@@ -1427,6 +1448,7 @@ class IndexingCoordinator(BaseService):
                 agg_total_files += stats_part.get("total_files", 0)
                 agg_total_chunks += stats_part.get("total_chunks", 0)
                 agg_errors.extend(stats_part.get("errors", []))
+                agg_skipped_paths.extend(stats_part.get("skipped_paths", []))
 
             # Parse files (streaming progress as batches complete and store concurrently)
             # Pass files_to_process directly - preserves hash for each file
@@ -1498,6 +1520,20 @@ class IndexingCoordinator(BaseService):
             skipped_due_to_timeout = agg_skipped_timeout
             # Split parse-time skips into timeout vs other (filtered/unsupported/config)
             skipped_filtered = max(0, skipped_total - len(skipped_due_to_timeout))
+
+            # Report newly-skipped files so users can add ignore patterns
+            if agg_skipped_paths:
+                reason_counts: dict[str, int] = {}
+                for _, reason in agg_skipped_paths:
+                    reason_counts[reason or "unknown"] = reason_counts.get(reason or "unknown", 0) + 1
+                breakdown = ", ".join(f"{r}: {c}" for r, c in sorted(reason_counts.items()))
+                logger.info(
+                    f"Skipped {len(agg_skipped_paths)} file(s) during parsing ({breakdown}). "
+                    f"These are now recorded in the DB and won't be re-scanned unless their content changes. "
+                    f"Add paths to .gitignore or set ignore patterns to exclude them permanently."
+                )
+                for path, reason in agg_skipped_paths:
+                    logger.debug(f"Skipped file: {path} (reason: {reason})")
 
             total_files = stats["total_files"]
             total_chunks = stats["total_chunks"]
