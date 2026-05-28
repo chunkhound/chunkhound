@@ -3,8 +3,9 @@
 Each entry describes what's stable about a provider's API protocol.
 Model names are NEVER baked in — they come from user configuration.
 
-Lives in ``core/config/`` (not ``providers/llm/``) to avoid circular
-dependency — both ``llm_config.py`` and ``llm_manager.py`` import here.
+Lives in ``core/config/`` (not ``providers/llm/``) as it defines
+config-domain data (API spec entries) — both ``llm_config.py``
+and ``llm_manager.py`` import here.
 
 To add a new OpenAI-compatible provider you must also touch:
   - ``LLMProviderLiteral`` in ``llm_config.py``
