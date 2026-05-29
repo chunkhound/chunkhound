@@ -271,8 +271,9 @@ class TestOpenCodeCLIProvider:
     async def test_run_single_attempt_timeout_uses_killpg(self, provider):
         """Timeout cleanup kills the captured process group, not just the parent."""
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg") as mock_killpg,
+            patch("os.killpg", create=True) as mock_killpg,
         ):
             mock_process = AsyncMock()
             mock_process.pid = 4321
@@ -305,8 +306,9 @@ class TestOpenCodeCLIProvider:
     ):
         """Cleanup uses the PGID captured at spawn rather than a later PID lookup."""
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg") as mock_killpg,
+            patch("os.killpg", create=True) as mock_killpg,
             patch("os.getpgid", side_effect=AssertionError("late PGID lookup")),
         ):
             mock_process = AsyncMock()
@@ -343,8 +345,9 @@ class TestOpenCodeCLIProvider:
     ):
         """SIGKILL is still attempted for descendants after the parent exits."""
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg") as mock_killpg,
+            patch("os.killpg", create=True) as mock_killpg,
         ):
             mock_process = AsyncMock()
             mock_process.pid = 4321
@@ -377,8 +380,9 @@ class TestOpenCodeCLIProvider:
     async def test_run_single_attempt_cancelled_cleans_up(self, provider):
         """Cancelled tasks propagate only after process-group cleanup runs."""
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg") as mock_killpg,
+            patch("os.killpg", create=True) as mock_killpg,
         ):
             mock_process = AsyncMock()
             mock_process.pid = 4321
@@ -404,8 +408,9 @@ class TestOpenCodeCLIProvider:
     async def test_run_single_attempt_exception_cleans_up(self, provider):
         """Unexpected subprocess-body exceptions trigger process-tree cleanup."""
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg") as mock_killpg,
+            patch("os.killpg", create=True) as mock_killpg,
         ):
             mock_process = AsyncMock()
             mock_process.pid = 4321
@@ -435,7 +440,8 @@ class TestOpenCodeCLIProvider:
             patch("sys.platform", "win32"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
             patch("subprocess.run") as mock_run,
-            patch("os.killpg") as mock_killpg,
+            patch("subprocess.CREATE_NEW_PROCESS_GROUP", 0x00000200, create=True),
+            patch("os.killpg", create=True) as mock_killpg,
         ):
             mock_process = AsyncMock()
             mock_process.pid = 2468
@@ -453,6 +459,8 @@ class TestOpenCodeCLIProvider:
             )
 
             assert result.action == "timeout"
+            assert "start_new_session" not in mock_subprocess.call_args.kwargs
+            assert mock_subprocess.call_args.kwargs["creationflags"] == 0x00000200
             mock_run.assert_called_once_with(
                 ["taskkill", "/T", "/PID", "2468", "/F"],
                 check=False,
@@ -464,8 +472,9 @@ class TestOpenCodeCLIProvider:
     async def test_run_cli_command_timeout(self, provider):
         """Test CLI command timeout."""
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg") as mock_killpg,
+            patch("os.killpg", create=True) as mock_killpg,
         ):
             mock_process = AsyncMock()
             mock_process.pid = 4321
@@ -492,8 +501,9 @@ class TestOpenCodeCLIProvider:
     ):
         """Stale process cleanup must not mask the timeout error."""
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg", side_effect=ProcessLookupError()),
+            patch("os.killpg", side_effect=ProcessLookupError(), create=True),
         ):
             mock_process = AsyncMock()
             mock_process.pid = 4321
@@ -515,8 +525,9 @@ class TestOpenCodeCLIProvider:
     ):
         """Unexpected failures must survive stale process cleanup."""
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg", side_effect=ProcessLookupError()),
+            patch("os.killpg", side_effect=ProcessLookupError(), create=True),
         ):
             mock_process = AsyncMock()
             mock_process.pid = 4321
@@ -1212,8 +1223,9 @@ class TestOpenCodeCLIProvider:
             )
 
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg"),
+            patch("os.killpg", create=True),
         ):
             mock_process_timeout = AsyncMock()
             mock_process_timeout.pid = 4321
@@ -1281,8 +1293,9 @@ class TestOpenCodeCLIProvider:
             )
 
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg"),
+            patch("os.killpg", create=True),
         ):
             mock_process_timeout = AsyncMock()
             mock_process_timeout.pid = 4321
@@ -1317,8 +1330,9 @@ class TestOpenCodeCLIProvider:
             )
 
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg"),
+            patch("os.killpg", create=True),
         ):
             mock_process_timeout = AsyncMock()
             mock_process_timeout.pid = 4321
@@ -1360,8 +1374,9 @@ class TestOpenCodeCLIProvider:
             )
 
         with (
+            patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("os.killpg"),
+            patch("os.killpg", create=True),
         ):
             mock_process_timeout = AsyncMock()
             mock_process_timeout.pid = 4321

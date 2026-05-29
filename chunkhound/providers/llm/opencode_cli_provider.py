@@ -476,15 +476,29 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         process_pgid: int | None = None
         cleanup_required = False
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=os.environ.copy(),
-                cwd=tempfile.gettempdir(),
-                start_new_session=True,
-            )
+            if sys.platform == "win32":
+                create_new_process_group = getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+                )
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=os.environ.copy(),
+                    cwd=tempfile.gettempdir(),
+                    creationflags=create_new_process_group,
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=os.environ.copy(),
+                    cwd=tempfile.gettempdir(),
+                    start_new_session=True,
+                )
             cleanup_required = True
             if sys.platform != "win32":
                 process_pgid = process.pid
