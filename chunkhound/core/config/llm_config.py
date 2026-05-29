@@ -822,7 +822,12 @@ class LLMConfig(BaseSettings):
         return False
 
     def _explicit_model_for_role(self, role: str) -> str | None:
-        """Return the explicit model selection for a role, if any."""
+        """Return the explicit model selection for a role, if any.
+
+        Primary roles (utility/synthesis) fall back to ``self.model``.
+        Secondary roles do not — they inherit via synthesis rather than
+        the global model field.
+        """
         if role == "utility":
             return self.utility_model or self.model or None
         if role == "synthesis":
@@ -855,31 +860,22 @@ class LLMConfig(BaseSettings):
         return self._configured_model_for_role("synthesis")
 
     def resolve_model_for_role(self, role: str) -> str | None:
-        """Resolve the effective model for a role.
+        """Resolve the effective model for a role, injecting provider defaults.
 
-        For roles that fall back to synthesis settings, only inherit the synthesis
-        model when the resolved provider stays in the same compatibility family.
+        Delegates the family-aware cross-role fallback to
+        ``_configured_model_for_role`` and only adds provider-specific
+        defaults (``_get_default_models_for``) for primary roles.
         """
-        explicit_model = self._explicit_model_for_role(role)
-        if explicit_model:
-            return explicit_model
+        configured = self._configured_model_for_role(role)
+        if configured is not None:
+            return configured
 
         if role in {"utility", "synthesis"}:
             provider = self._resolved_provider_for_role(role)
             defaults = self._get_default_models_for(provider)  # type: ignore[arg-type]
             return defaults[0] if role == "utility" else defaults[1]
 
-        if self._role_uses_synthesis_provider_fallback(role):
-            return self.resolve_model_for_role("synthesis")
-
-        synthesis_provider = self._resolved_provider_for_role("synthesis")
-        role_provider = self._resolved_provider_for_role(role)
-        if self._provider_family(role_provider) != self._provider_family(
-            synthesis_provider
-        ):
-            return None
-
-        return self.resolve_model_for_role("synthesis")
+        return None
 
     def _is_custom_openai_endpoint(self) -> bool:
         """Return whether this config targets a non-official OpenAI-compatible endpoint."""
