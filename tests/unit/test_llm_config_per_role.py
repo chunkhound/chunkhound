@@ -792,30 +792,52 @@ def test_get_provider_config_for_role_propagates_structured_outputs_to_secondary
 
 
 @pytest.mark.parametrize(
-    ("role", "provider", "model"),
+    ("role", "provider", "model", "synth_provider"),
     [
-        ("map_hyde", "openai", "gpt-5-mini"),
-        ("autodoc_cleanup", "openai", "gpt-5-mini"),
+        ("map_hyde", "anthropic", "claude-opus-4-7", "deepseek"),
+        ("autodoc_cleanup", "claude-code-cli", "claude-haiku-4-5", "deepseek"),
     ],
 )
 def test_role_config_does_not_propagate_structured_outputs_across_provider_switch(
     role: str,
     provider: str,
     model: str,
+    synth_provider: str,
 ) -> None:
-    cfg = LLMConfig(
-        provider="deepseek",
-        api_key="sk-test",
-        synthesis_model="deepseek-v4-flash",
-        supports_structured_outputs=False,
-        **{f"{role}_provider": provider, f"{role}_model": model},
-    )
+    """Cross-family secondary role override does not inherit supports_structured_outputs."""
+    kwargs: dict[str, object] = {
+        "provider": synth_provider,
+        "api_key": "sk-test",
+        "synthesis_model": "deepseek-v4-flash",
+        "supports_structured_outputs": False,
+    }
+    kwargs[f"{role}_provider"] = provider
+    kwargs[f"{role}_model"] = model
+    cfg = LLMConfig(**kwargs)  # type: ignore[arg-type]
 
     role_cfg = cfg.get_provider_config_for_role(role)
 
     assert role_cfg["provider"] == provider
     assert role_cfg["model"] == model
     assert "supports_structured_outputs" not in role_cfg
+
+
+def test_role_config_propagates_structured_outputs_across_same_family_switch() -> None:
+    """Same-family secondary role override inherits supports_structured_outputs."""
+    cfg = LLMConfig(
+        provider="deepseek",
+        api_key="sk-test",
+        synthesis_model="deepseek-v4-flash",
+        map_hyde_provider="openai",
+        map_hyde_model="gpt-5-mini",
+        supports_structured_outputs=False,
+    )
+
+    role_cfg = cfg.get_provider_config_for_role("map_hyde")
+
+    assert role_cfg["provider"] == "openai"
+    assert role_cfg["model"] == "gpt-5-mini"
+    assert role_cfg["supports_structured_outputs"] is False
 
 
 def test_get_provider_config_for_role_utility_propagates_structured_outputs() -> None:
@@ -978,6 +1000,27 @@ def test_get_provider_config_for_role_strips_api_key_for_no_key_provider_switch(
 
 
 
+
+
+def test_provider_family_grouping() -> None:
+    """Verify _provider_family groups OpenAI-compatible providers together."""
+    cfg = LLMConfig(
+        provider="openai",
+        utility_model="gpt-5-nano",
+        synthesis_model="gpt-5",
+    )
+
+    # All OpenAI-compatible providers are same family
+    assert cfg._provider_family("deepseek") == cfg._provider_family("grok")
+    assert cfg._provider_family("deepseek") == cfg._provider_family("openai")
+
+    # Non-OpenAI providers are their own family
+    assert cfg._provider_family("anthropic") == "anthropic"
+    assert cfg._provider_family("claude-code-cli") == "claude-code-cli"
+    assert cfg._provider_family("codex-cli") == "codex-cli"
+
+    # OpenAI-compatible != non-OpenAI
+    assert cfg._provider_family("openai") != cfg._provider_family("anthropic")
 
 
 def test_supports_structured_outputs_not_passed_to_other_providers() -> None:

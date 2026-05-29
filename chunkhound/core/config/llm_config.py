@@ -716,10 +716,14 @@ class LLMConfig(BaseSettings):
             reasoning_effort=effort,
         )
 
-        resolved_synthesis_provider = self.synthesis_provider or self.provider
+        # Propagate supports_structured_outputs to primary roles unconditionally
+        # and to secondary roles when their resolved provider is in the same
+        # compatibility family as the synthesis provider. Cross-family secondary
+        # overrides do not inherit capability flags.
         if self.supports_structured_outputs is not None and (
             role in {"utility", "synthesis"}
-            or provider == resolved_synthesis_provider
+            or self._provider_family(provider)
+            == self._provider_family(self.synthesis_provider or self.provider)
         ):
             role_config["supports_structured_outputs"] = (
                 self.supports_structured_outputs
