@@ -21,6 +21,12 @@ def test_default_timeout():
 class TestOpenCodeCLIProvider:
     """Test cases for OpenCode CLI provider."""
 
+    @pytest.fixture(autouse=True)
+    def posix_signal_constants(self):
+        """Make POSIX-only signal constants available for mocked Unix tests."""
+        with patch("signal.SIGKILL", 9, create=True):
+            yield
+
     @pytest.fixture
     def provider(self):
         """Create a provider with a dummy model."""
@@ -309,7 +315,11 @@ class TestOpenCodeCLIProvider:
             patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
             patch("os.killpg", create=True) as mock_killpg,
-            patch("os.getpgid", side_effect=AssertionError("late PGID lookup")),
+            patch(
+                "os.getpgid",
+                side_effect=AssertionError("late PGID lookup"),
+                create=True,
+            ),
         ):
             mock_process = AsyncMock()
             mock_process.pid = 4321
