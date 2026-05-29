@@ -458,16 +458,25 @@ class LLMConfig(BaseSettings):
                 self.synthesis_model = self.model
 
     def _validate_provider_switches_require_model(self) -> None:
-        """Override providers require an explicit role-specific model."""
+        """Override providers require an explicit role-specific model.
+
+        Same-family provider switches are allowed (model inherited from
+        synthesis). Cross-family switches require an explicit model.
+        """
         resolved_synthesis_provider = self.synthesis_provider or self.provider
 
         for role, role_provider, role_model in (
             ("map_hyde", self.map_hyde_provider, self.map_hyde_model),
-            ("autodoc_cleanup", self.autodoc_cleanup_provider, self.autodoc_cleanup_model),
+            (
+                "autodoc_cleanup",
+                self.autodoc_cleanup_provider,
+                self.autodoc_cleanup_model,
+            ),
         ):
             if (
                 role_provider is not None
-                and role_provider != resolved_synthesis_provider
+                and self._provider_family(role_provider)
+                != self._provider_family(resolved_synthesis_provider)
                 and not role_model
             ):
                 raise ValueError(
@@ -781,7 +790,12 @@ class LLMConfig(BaseSettings):
         )
 
     def _provider_family(self, provider: str) -> str:
-        """Return the compatibility family for a provider."""
+        """Return the compatibility family for a provider.
+
+        Providers in the same family can share model inheritance and
+        capability flags (e.g., supports_structured_outputs) without
+        requiring explicit role-specific overrides.
+        """
         if provider in OPENAI_COMPATIBLE_LLM_PROVIDERS:
             return "openai-compatible"
         return provider
@@ -903,31 +917,6 @@ class LLMConfig(BaseSettings):
 
         return missing_roles
 
-    def _require_explicit_model_for_cross_family_role_overrides(
-        self, roles: tuple[str, ...]
-    ) -> list[str]:
-        """Return secondary roles that override to an incompatible provider family."""
-        missing_roles: list[str] = []
-        synthesis_provider = self._resolved_provider_for_role("synthesis")
-
-        for role in roles:
-            if role in {"utility", "synthesis"}:
-                continue
-            if self._role_uses_synthesis_provider_fallback(role):
-                continue
-
-            role_provider = self._resolved_provider_for_role(role)
-            if self._provider_family(role_provider) == self._provider_family(
-                synthesis_provider
-            ):
-                continue
-            if self._configured_model_for_role(role) is not None:
-                continue
-
-            missing_roles.append(role)
-
-        return missing_roles
-
     def _provider_requires_api_key(self, provider: str) -> bool:
         """Return whether a provider requires an API key for the current config.
 
@@ -979,19 +968,6 @@ class LLMConfig(BaseSettings):
             missing.append(
                 "explicit model selection required for custom OpenAI-compatible "
                 f"endpoint roles: {roles_text}"
-            )
-
-        cross_family_roles = [
-            role
-            for role in self._require_explicit_model_for_cross_family_role_overrides(
-                roles
-            )
-            if role not in custom_endpoint_roles
-        ]
-        if cross_family_roles:
-            roles_text = ", ".join(cross_family_roles)
-            missing.append(
-                f"explicit provider-compatible model required for roles: {roles_text}"
             )
 
         return missing
