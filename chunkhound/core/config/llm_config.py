@@ -460,8 +460,9 @@ class LLMConfig(BaseSettings):
     def _validate_provider_switches_require_model(self) -> None:
         """Override providers require an explicit role-specific model.
 
-        Same-family provider switches are allowed (model inherited from
-        synthesis). Cross-family switches require an explicit model.
+        Any provider override — even within the same family — requires
+        an explicit model so that the role does not accidentally inherit
+        a model designed for a different provider.
         """
         resolved_synthesis_provider = self.synthesis_provider or self.provider
 
@@ -475,8 +476,7 @@ class LLMConfig(BaseSettings):
         ):
             if (
                 role_provider is not None
-                and self._provider_family(role_provider)
-                != self._provider_family(resolved_synthesis_provider)
+                and role_provider != resolved_synthesis_provider
                 and not role_model
             ):
                 raise ValueError(
@@ -717,13 +717,13 @@ class LLMConfig(BaseSettings):
         )
 
         # Propagate supports_structured_outputs to primary roles unconditionally
-        # and to secondary roles when their resolved provider is in the same
-        # compatibility family as the synthesis provider. Cross-family secondary
-        # overrides do not inherit capability flags.
+        # and to secondary roles only when their resolved provider matches
+        # the synthesis provider. Explicit overrides to a different provider
+        # do not inherit capability flags — the provider uses its own
+        # registry default (e.g. False for DeepSeek).
         if self.supports_structured_outputs is not None and (
             role in {"utility", "synthesis"}
-            or self._provider_family(provider)
-            == self._provider_family(self.synthesis_provider or self.provider)
+            or self._provider_family(provider) == self._provider_family(self.synthesis_provider or self.provider)
         ):
             role_config["supports_structured_outputs"] = (
                 self.supports_structured_outputs
@@ -803,7 +803,7 @@ class LLMConfig(BaseSettings):
         capability flags (e.g., supports_structured_outputs) without
         requiring explicit role-specific overrides.
         """
-        if provider in OPENAI_COMPATIBLE_LLM_PROVIDERS:
+        if provider in OPENAI_COMPATIBLE_PROVIDERS:
             return "openai-compatible"
         return provider
 
