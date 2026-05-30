@@ -236,9 +236,23 @@ class VueTemplateMapping(BaseMapping):
 
         # Handle bare directives (no = sign)
         if "=" not in directive_attr_text:
+            bare = directive_attr_text
+            # Normalize bare v-slot/# and v-else the same way valued forms are normalized
+            if bare.startswith("v-slot:"):
+                directive = "v-slot"
+                argument = bare[7:]
+            elif bare.startswith("#"):
+                directive = "v-slot"
+                argument = bare[1:]
+            elif bare == "v-else":
+                directive = "v-else"
+                argument = ""
+            else:
+                directive = bare
+                argument = ""
             return {
-                "directive": directive_attr_text,
-                "argument": "",
+                "directive": directive,
+                "argument": argument,
                 "value": "",
             }
 
@@ -254,18 +268,18 @@ class VueTemplateMapping(BaseMapping):
         # Handle v-on: and @ syntax
         if directive_part.startswith("@") or directive_part.startswith("v-on:"):
             if directive_part.startswith("@"):
-                argument = directive_part[1:]  # Remove @
+                argument = directive_part[1:].split(".")[0]  # Remove @ and any .modifiers
                 directive = "@"
             else:
-                argument = directive_part[5:]  # Remove v-on:
+                argument = directive_part[5:].split(".")[0]  # Remove v-on: and any .modifiers
                 directive = "v-on"
         # Handle v-bind: and : syntax
         elif directive_part.startswith(":") or directive_part.startswith("v-bind:"):
             if directive_part.startswith(":"):
-                argument = directive_part[1:]  # Remove :
+                argument = directive_part[1:].split(".")[0]  # Remove : and any .modifiers
                 directive = ":"
             else:
-                argument = directive_part[7:]  # Remove v-bind:
+                argument = directive_part[7:].split(".")[0]  # Remove v-bind: and any .modifiers
                 directive = "v-bind"
         # Handle v-slot: and # syntax
         elif directive_part.startswith("v-slot:") or directive_part.startswith("#"):

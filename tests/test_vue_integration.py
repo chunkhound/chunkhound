@@ -400,6 +400,10 @@ function handleVOn() {}
         )
         assert refs_found or len(template_chunks) > 0
 
+        # Minimal tight assertion for modifier handling (prevents regression of .prevent leaking into name)
+        event_names = [c.metadata.get("event_name") for c in chunks if c.metadata and c.metadata.get("directive_type") == "event_handler"]
+        assert all(en and "." not in en for en in event_names if en), f"event_name must be clean (no modifiers like 'click.prevent'): {event_names}"
+
     def test_property_bindings(self, parser):
         """Test :prop and v-bind: property binding extraction."""
         content = """
@@ -438,6 +442,14 @@ const componentName = ref('div')
 
         # Should have found property bindings
         assert len(binding_chunks) > 0
+
+        # Minimal tight assertion for modifier on property binding (e.g. :class.active in other tests)
+        # At least one property binding must have a clean property_name (no embedded dot)
+        clean_prop = any(
+            c.metadata.get("property_name") and "." not in c.metadata.get("property_name", "")
+            for c in binding_chunks
+        )
+        assert clean_prop, "Property binding names should not contain modifiers (e.g. no 'class.active')"
 
     def test_v_model_directives(self, parser):
         """Test v-model two-way binding extraction including modifiers."""
@@ -481,6 +493,13 @@ const selected = ref('a')
             # script_references should be present if model_binding is set
             if chunk.metadata.get('model_binding'):
                 assert 'script_references' in chunk.metadata
+
+        # Minimal tight assertion for v-model modifiers (the .trim / .number cases in the content)
+        trim_or_number = any(
+            c.metadata.get("directive_type") == "v-model" and c.metadata.get("model_binding")
+            for c in vmodel_chunks
+        )
+        assert trim_or_number, "v-model with modifiers should still produce directive_type + model_binding"
 
     def test_component_usage(self, parser):
         """Test component usage detection (PascalCase)."""
@@ -593,6 +612,11 @@ function closeModal() {
             if c.metadata and c.metadata.get('vue_section') == 'template'
         ]
         assert len(template_chunks) > 0
+
+        # Minimal tight assertion for bare named slots (v-slot:header and #footer without =)
+        slot_chunks = [c for c in template_chunks if c.metadata and c.metadata.get("directive_type") == "slot"]
+        has_named_slot = any(c.metadata.get("slot_name") in ("header", "default", "footer") for c in slot_chunks)
+        assert has_named_slot, "Bare v-slot:header / #footer / #default must produce directive_type=slot + slot_name"
 
 
 class TestCrossReferenceLinking:
