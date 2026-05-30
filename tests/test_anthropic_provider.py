@@ -1277,6 +1277,13 @@ class TestLLMConfigEnvLoading:
 class TestLLMConfigDefaults:
     """Pin default model selection."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_env(self, clean_environment):
+        # Default resolution must not depend on the developer's ambient
+        # CHUNKHOUND_* / provider-key env. clean_environment (conftest) strips
+        # it so this class behaves identically locally and in CI.
+        yield
+
     def test_anthropic_prompt_caching_default_disabled(self):
         from chunkhound.core.config.llm_config import LLMConfig
 
