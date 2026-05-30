@@ -763,8 +763,11 @@ class LLMConfig(BaseSettings):
             # Codex CLI: nominal label; require explicit model if desired
             return ("codex", "codex")
         elif provider == "gemini":
-            # Gemini: Use Gemini 3 Pro for both (advanced reasoning)
-            return ("gemini-3-pro-preview", "gemini-3-pro-preview")
+            # Gemini: model from env var; fallback to stable production default.
+            # The provider is model-agnostic so this string is purely a default
+            # that can be overridden at config or env level.
+            model = os.environ.get("CHUNKHOUND_GEMINI_MODEL", "gemini-2.5-pro")
+            return (model, model)
         elif provider == "anthropic":
             # Anthropic intentionally uses Claude Haiku for both utility and
             # synthesis. Haiku is capable enough for synthesis and is Anthropic's

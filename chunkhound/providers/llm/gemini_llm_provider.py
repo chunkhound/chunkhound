@@ -24,18 +24,20 @@ except ImportError:
 
 
 class GeminiLLMProvider(LLMProvider):
-    """Google Gemini LLM provider using official Google Gen AI SDK.
+    """Google Gemini LLM provider.
 
-    Supported models:
-    - Gemini 3: gemini-3-pro-preview (most advanced, reasoning-optimized)
-    - Gemini 2.5: gemini-2.5-pro (balanced capability/speed), gemini-2.5-flash (fast)
+    Model-agnostic — the model name is passed to the SDK without interpretation.
+    Configure thinking explicitly via ``thinking_level`` (Gemini 3+ series) or
+    ``thinking_budget`` (Gemini 2.5+ series). When neither is set, no thinking
+    parameters are sent and the SDK/model applies its own defaults.
     """
 
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "gemini-3-pro-preview",
-        thinking_level: str = "high",
+        model: str = "",
+        thinking_level: str | None = None,
+        thinking_budget: int | None = None,
         timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
@@ -43,12 +45,11 @@ class GeminiLLMProvider(LLMProvider):
 
         Args:
             api_key: Google AI API key (get from https://aistudio.google.com/apikey)
-            model: Model name to use
-                - "gemini-3-pro-preview": Latest, most capable (default)
-                - "gemini-2.5-pro": Balanced performance
-                - "gemini-2.5-flash": Fast, cost-effective
-            thinking_level: Reasoning depth ("low", "high"). Default "high" for deep research.
-                Note: Gemini 3 uses thinking_level; 2.5 series uses thinking_budget.
+            model: Model name to use (passed through to SDK without interpretation)
+            thinking_level: Thinking depth for Gemini 3+ series ("low", "medium", "high").
+                When set, forwarded as ``thinking_level`` to the SDK.
+            thinking_budget: Fixed thinking token budget for Gemini 2.5+ series.
+                When set, forwarded as ``ThinkingConfig(thinking_budget=...)`` to the SDK.
             timeout: Request timeout in seconds (Gemini reasoning can be slow)
             max_retries: Number of retry attempts for failed requests
         """
@@ -65,6 +66,7 @@ class GeminiLLMProvider(LLMProvider):
         self._api_key = api_key
         self._model = model
         self._thinking_level = thinking_level
+        self._thinking_budget = thinking_budget
         self._timeout = timeout
         self._max_retries = max_retries
 
@@ -124,18 +126,17 @@ class GeminiLLMProvider(LLMProvider):
         if system_instruction:
             config_kwargs["system_instruction"] = system_instruction
 
-        # Add thinking configuration based on model
-        if "gemini-3" in self._model:
-            # Gemini 3 uses thinking_level
-            if self._thinking_level != "high":
-                config_kwargs["thinking_level"] = self._thinking_level
-        elif "gemini-2.5" in self._model:
-            # Gemini 2.5 uses thinking_budget (convert level to budget)
-            if self._thinking_level == "low":
-                config_kwargs["thinking_config"] = types.ThinkingConfig(
-                    thinking_budget=0
-                )
-            # Default/high: let model decide thinking budget
+        # Forward thinking params via ThinkingConfig — no model name detection.
+        # The SDK's GenerateContentConfig does not accept thinking_level or
+        # thinking_budget directly; they must be wrapped in a ThinkingConfig.
+        # When neither is set, nothing is sent and the model uses its defaults.
+        if self._thinking_level is not None or self._thinking_budget is not None:
+            tc_kwargs: dict[str, Any] = {}
+            if self._thinking_level is not None:
+                tc_kwargs["thinking_level"] = self._thinking_level
+            if self._thinking_budget is not None:
+                tc_kwargs["thinking_budget"] = self._thinking_budget
+            config_kwargs["thinking_config"] = types.ThinkingConfig(**tc_kwargs)
 
         # Add structured output config if schema provided
         if json_schema:
@@ -221,6 +222,33 @@ class GeminiLLMProvider(LLMProvider):
 
             self._requests_made += 1
 
+            # Extract finish reason FIRST (before content check) so that
+            # truncation/blocked errors win over empty-content errors.
+            finish_reason = "STOP"
+            if response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                if hasattr(candidate, "finish_reason"):
+                    finish_reason = str(candidate.finish_reason)
+
+            # Validate finish reason — these must beat empty-content errors
+            if finish_reason in ("MAX_TOKENS", "FINISHREASON_MAX_TOKENS"):
+                raise RuntimeError(
+                    f"Gemini response truncated - token limit exceeded. "
+                    f"The output budget was set to {max_completion_tokens:,} tokens. "
+                    f"Try breaking your query into smaller, more focused questions."
+                )
+
+            if finish_reason in (
+                "SAFETY",
+                "FINISHREASON_SAFETY",
+                "RECITATION",
+                "FINISHREASON_RECITATION",
+            ):
+                raise RuntimeError(
+                    f"Gemini response blocked ({finish_reason}). "
+                    "Try rephrasing your query or adjusting the prompt."
+                )
+
             # Extract response content
             content = response.text
             if not content or not content.strip():
@@ -243,34 +271,6 @@ class GeminiLLMProvider(LLMProvider):
                 self._tokens_used += total_tokens
             else:
                 total_tokens = 0
-
-            # Extract finish reason
-            finish_reason = "STOP"
-            if response.candidates and len(response.candidates) > 0:
-                candidate = response.candidates[0]
-                if hasattr(candidate, "finish_reason"):
-                    finish_reason = str(candidate.finish_reason)
-
-            # Validate finish reason
-            if finish_reason in ("MAX_TOKENS", "FINISHREASON_MAX_TOKENS"):
-                raise RuntimeError(
-                    f"Gemini response truncated - token limit exceeded. "
-                    f"The output budget was set to {max_completion_tokens:,} tokens. "
-                    f"For reasoning models like Gemini 3, this may indicate extensive internal "
-                    f"reasoning that exhausted the output budget. "
-                    f"Try breaking your query into smaller, more focused questions."
-                )
-
-            if finish_reason in (
-                "SAFETY",
-                "FINISHREASON_SAFETY",
-                "RECITATION",
-                "FINISHREASON_RECITATION",
-            ):
-                raise RuntimeError(
-                    f"Gemini response blocked ({finish_reason}). "
-                    "Try rephrasing your query or adjusting the prompt."
-                )
 
             return LLMResponse(
                 content=content,
@@ -330,6 +330,22 @@ class GeminiLLMProvider(LLMProvider):
 
             self._requests_made += 1
 
+            # Extract finish reason FIRST (before content check) so that
+            # truncation errors win over empty-content errors.
+            finish_reason = "STOP"
+            if response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                if hasattr(candidate, "finish_reason"):
+                    finish_reason = str(candidate.finish_reason)
+
+            # Validate finish reason — must beat empty-content errors
+            if finish_reason in ("MAX_TOKENS", "FINISHREASON_MAX_TOKENS"):
+                raise RuntimeError(
+                    "Gemini structured completion truncated - token limit exceeded. "
+                    "This indicates insufficient max_completion_tokens for the structured output. "
+                    "Consider increasing the token limit or reducing input context."
+                )
+
             # Extract response content
             content = response.text
             if not content or not content.strip():
@@ -349,21 +365,6 @@ class GeminiLLMProvider(LLMProvider):
                 self._prompt_tokens += prompt_tokens
                 self._completion_tokens += completion_tokens
                 self._tokens_used += total_tokens
-
-            # Extract finish reason
-            finish_reason = "STOP"
-            if response.candidates and len(response.candidates) > 0:
-                candidate = response.candidates[0]
-                if hasattr(candidate, "finish_reason"):
-                    finish_reason = str(candidate.finish_reason)
-
-            # Validate finish reason
-            if finish_reason in ("MAX_TOKENS", "FINISHREASON_MAX_TOKENS"):
-                raise RuntimeError(
-                    "Gemini structured completion truncated - token limit exceeded. "
-                    "This indicates insufficient max_completion_tokens for the structured output. "
-                    "Consider increasing the token limit or reducing input context."
-                )
 
             # Parse JSON response
             try:
@@ -412,6 +413,7 @@ class GeminiLLMProvider(LLMProvider):
                 "provider": "gemini",
                 "model": self._model,
                 "thinking_level": self._thinking_level,
+                "thinking_budget": self._thinking_budget,
                 "test_response": response.content[:50],
             }
         except Exception as e:
