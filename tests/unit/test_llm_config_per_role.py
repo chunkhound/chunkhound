@@ -828,15 +828,15 @@ def test_role_config_propagates_structured_outputs_across_same_family_switch() -
         provider="deepseek",
         api_key="sk-test",
         synthesis_model="deepseek-v4-flash",
-        map_hyde_provider="openai",
-        map_hyde_model="gpt-5-mini",
+        map_hyde_provider="grok",
+        map_hyde_model="grok-3",
         supports_structured_outputs=False,
     )
 
     role_cfg = cfg.get_provider_config_for_role("map_hyde")
 
-    assert role_cfg["provider"] == "openai"
-    assert role_cfg["model"] == "gpt-5-mini"
+    assert role_cfg["provider"] == "grok"
+    assert role_cfg["model"] == "grok-3"
     assert role_cfg["supports_structured_outputs"] is False
 
 
@@ -1003,23 +1003,25 @@ def test_get_provider_config_for_role_strips_api_key_for_no_key_provider_switch(
 
 
 def test_provider_family_grouping() -> None:
-    """Verify _provider_family groups OpenAI-compatible providers together."""
+    """Verify _provider_family groups registry-based OpenAI-compatible providers together."""
     cfg = LLMConfig(
         provider="openai",
         utility_model="gpt-5-nano",
         synthesis_model="gpt-5",
     )
 
-    # All OpenAI-compatible providers are same family
+    # Registry-based OpenAI-compatible providers are same family
     assert cfg._provider_family("deepseek") == cfg._provider_family("grok")
-    assert cfg._provider_family("deepseek") == cfg._provider_family("openai")
+
+    # Native "openai" is its own family, distinct from registry-based compat
+    assert cfg._provider_family("deepseek") != cfg._provider_family("openai")
 
     # Non-OpenAI providers are their own family
     assert cfg._provider_family("anthropic") == "anthropic"
     assert cfg._provider_family("claude-code-cli") == "claude-code-cli"
     assert cfg._provider_family("codex-cli") == "codex-cli"
 
-    # OpenAI-compatible != non-OpenAI
+    # Native openai != non-OpenAI
     assert cfg._provider_family("openai") != cfg._provider_family("anthropic")
 
 
