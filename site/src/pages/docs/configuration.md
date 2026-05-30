@@ -176,12 +176,23 @@ When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound
 
 ### Anthropic-specific Options
 
+These apply when the active provider (or a role provider) is `anthropic`. Each option also has a matching `CHUNKHOUND_LLM_ANTHROPIC_<OPTION>` environment variable (single underscore, uppercased).
+
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `anthropic_thinking_enabled` | `boolean` | `false` | Enable extended thinking |
-| `anthropic_thinking_budget_tokens` | `number` | `10000` | Token budget for thinking (min 1024) |
-| `anthropic_interleaved_thinking` | `boolean` | `false` | Interleaved thinking for tool use (Claude 4+) |
-| `anthropic_effort` | `string` | `null` | Effort parameter: `low`, `medium`, `high`, `xhigh`, `max` (higher levels are model-gated; see provider docs) |
+| `anthropic_thinking_enabled` | `boolean` | `false` | Enable extended thinking. |
+| `anthropic_thinking_mode` | `string` | `null` | `auto` (default when unset), `off`, `manual`, or `adaptive`. `auto` selects adaptive on Opus 4.6+/Sonnet 4.6 and manual on older models. |
+| `anthropic_thinking_budget_tokens` | `number` | `10000` | Manual-mode thinking budget (min 1024). Ignored in adaptive mode (Opus 4.6+). |
+| `anthropic_thinking_display` | `string` | `null` | Adaptive-mode thinking text: `summarized` or `omitted`. Opus 4.7/4.8 omit by default. |
+| `anthropic_interleaved_thinking` | `boolean` | `false` | Manual-mode interleaved thinking between tool calls. Auto-enabled in adaptive mode. |
+| `anthropic_effort` | `string` | `null` | Token-usage effort: `low`, `medium`, `high`, `xhigh`, `max`. `xhigh` is Opus 4.7/4.8 only; `max` is Opus 4.6+. Unsupported levels are dropped with a warning. |
+| `anthropic_task_budget_tokens` | `number` | `null` | Advisory agentic-loop token budget (beta). Opus 4.7/4.8 only; minimum 20000. |
+| `anthropic_prompt_caching` | `boolean` | `false` | Send `cache_control` so the Messages API can cache prompt prefixes. |
+| `anthropic_cache_ttl` | `string` | `null` | Prompt-cache TTL such as `1h`. `null` uses the API default of 5 minutes. |
+| `anthropic_context_management_enabled` | `boolean` | `false` | Automatic clearing of tool results and thinking blocks (beta). |
+| `anthropic_clear_thinking_keep_turns` | `number` | `null` | Thinking turns to keep when context management clears them. `null` keeps all. |
+| `anthropic_clear_tool_uses_trigger_tokens` | `number` | `null` | Input-token threshold that triggers tool-result clearing. |
+| `anthropic_clear_tool_uses_keep` | `number` | `null` | Number of recent tool-use pairs to keep after clearing. |
 
 ## Research Configuration
 
