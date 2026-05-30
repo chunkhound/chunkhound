@@ -283,9 +283,9 @@ class LLMConfig(BaseSettings):
         default=None,
         description=(
             "Control token usage vs thoroughness tradeoff. Supported on "
-            "Opus 4.5, Opus 4.6, Opus 4.7, Sonnet 4.6, and Mythos. "
+            "Opus 4.5, Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6, and Mythos. "
             "low/medium/high on all supported models; max on 4.6+; "
-            "xhigh is Opus 4.7 only. high is the API default; Sonnet 4.6 "
+            "xhigh on Opus 4.7/4.8. high is the API default; Sonnet 4.6 "
             "recommends medium."
         ),
     )

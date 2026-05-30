@@ -181,7 +181,7 @@ When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound
 | `anthropic_thinking_enabled` | `boolean` | `false` | Enable extended thinking |
 | `anthropic_thinking_budget_tokens` | `number` | `10000` | Token budget for thinking (min 1024) |
 | `anthropic_interleaved_thinking` | `boolean` | `false` | Interleaved thinking for tool use (Claude 4+) |
-| `anthropic_effort` | `string` | `null` | Effort parameter: `low`, `medium`, `high` |
+| `anthropic_effort` | `string` | `null` | Effort parameter: `low`, `medium`, `high`, `xhigh`, `max` (higher levels are model-gated; see provider docs) |
 
 ## Research Configuration
 

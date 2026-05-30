@@ -53,27 +53,31 @@ _EFFORT_FAMILY_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-5",
     "claude-opus-4-6",
     "claude-opus-4-7",
+    "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-mythos-preview",
 )
 _MAX_EFFORT_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-6",
     "claude-opus-4-7",
+    "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-mythos-preview",
 )
-_XHIGH_EFFORT_PREFIXES: tuple[str, ...] = ("claude-opus-4-7",)
+_XHIGH_EFFORT_PREFIXES: tuple[str, ...] = ("claude-opus-4-7", "claude-opus-4-8")
 _ADAPTIVE_THINKING_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-6",
     "claude-opus-4-7",
+    "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-mythos-preview",
 )
 _ADAPTIVE_ONLY_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-7",
+    "claude-opus-4-8",
     "claude-mythos-preview",
 )
-_TASK_BUDGET_PREFIXES: tuple[str, ...] = ("claude-opus-4-7",)
+_TASK_BUDGET_PREFIXES: tuple[str, ...] = ("claude-opus-4-7", "claude-opus-4-8")
 
 
 def _matches_family(model: str, prefixes: tuple[str, ...]) -> bool:
@@ -122,18 +126,18 @@ class AnthropicLLMProvider(LLMProvider):
     """Anthropic LLM provider using Claude models.
 
     Supports adaptive/manual extended thinking, tool use, effort control, and
-    automatic context management across Opus 4.5/4.6/4.7 and Sonnet 4.5/4.6.
+    automatic context management across Opus 4.5/4.6/4.7/4.8 and Sonnet 4.5/4.6.
 
     Thinking modes:
-        - Adaptive (Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos): Claude decides
-          when to think. Interleaved thinking is auto-enabled. Opus 4.7 rejects
-          manual mode.
+        - Adaptive (Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos): Claude
+          decides when to think. Interleaved thinking is auto-enabled. Opus
+          4.7/4.8 reject manual mode.
         - Manual (Opus 4.5 and older): fixed thinking_budget_tokens.
         - Off: omit thinking.
 
     Effort parameter:
-        - Supported on Opus 4.5, Opus 4.6, Opus 4.7, Sonnet 4.6, Mythos.
-        - Levels: low, medium, high (default), max (4.6+), xhigh (Opus 4.7 only).
+        - Supported on Opus 4.5, Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6, Mythos.
+        - Levels: low, medium, high (default), max (4.6+), xhigh (Opus 4.7/4.8).
         - Affects all tokens: text, tool calls, and thinking.
 
     Interleaved thinking:
@@ -179,6 +183,8 @@ class AnthropicLLMProvider(LLMProvider):
                 because Haiku is Anthropic's cheapest capable Claude model.
                 Pass an explicit synthesis model for maximum quality.
                 Supported families:
+                - claude-opus-4-8: adaptive thinking only. Effort levels
+                  low/medium/high/xhigh/max. xhigh recommended for coding.
                 - claude-opus-4-7: adaptive thinking only. Effort levels
                   low/medium/high/xhigh/max. xhigh recommended for coding.
                 - claude-opus-4-6: adaptive thinking. Effort low/medium/high/max.
@@ -198,7 +204,7 @@ class AnthropicLLMProvider(LLMProvider):
             interleaved_thinking: Enable thinking between tool calls in manual
                 mode. Auto-enabled for adaptive mode regardless of this flag.
             effort: Token usage level - "low", "medium", "high", "xhigh"
-                (Opus 4.7 only), or "max" (4.6+ only).
+                (Opus 4.7/4.8), or "max" (4.6+ only).
             context_management_enabled: Enable automatic context management
             clear_thinking_keep_turns: Number of thinking turns to preserve (None=all)
             clear_tool_uses_trigger_tokens: Token threshold to trigger tool clearing
@@ -206,8 +212,8 @@ class AnthropicLLMProvider(LLMProvider):
             thinking_mode: Explicit thinking mode: "adaptive", "manual", "off",
                 or "auto" / None for automatic selection based on model.
             thinking_display: "summarized" (default on 4.6) or "omitted"
-                (default on Opus 4.7 / Mythos). Controls whether thinking text
-                is returned in the response.
+                (default on Opus 4.7/4.8 / Mythos). Controls whether thinking
+                text is returned in the response.
             prompt_caching: When True, sends cache_control={"type": "ephemeral"}
                 so the Messages API can cache prompt prefixes. Disabled by
                 default because ChunkHound requests rarely reuse prefixes enough
@@ -216,7 +222,7 @@ class AnthropicLLMProvider(LLMProvider):
                 writes but is useful when the same prefix is reused less
                 often than every 5 minutes.
             task_budget_tokens: Total token budget across a full agentic loop
-                (beta, Opus 4.7 only). Advisory cap visible to the
+                (beta, Opus 4.7/4.8). Advisory cap visible to the
                 model; min 20000. Leave None for open-ended quality work.
         """
         if not ANTHROPIC_AVAILABLE:
@@ -581,7 +587,7 @@ class AnthropicLLMProvider(LLMProvider):
 
         Effort is applied only when the model supports it. task_budget is
         applied only when task_budget_tokens was accepted in __init__ (which
-        requires an Opus 4.7-family model).
+        requires an Opus 4.7/4.8-family model).
 
         Args:
             json_schema: Optional JSON schema for structured outputs.
