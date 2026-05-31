@@ -224,11 +224,15 @@ class GeminiLLMProvider(LLMProvider):
 
             # Extract finish reason FIRST (before content check) so that
             # truncation/blocked errors win over empty-content errors.
+            # Use .value to extract the raw string from the str+enum subclass.
             finish_reason = "STOP"
             if response.candidates and len(response.candidates) > 0:
                 candidate = response.candidates[0]
-                if hasattr(candidate, "finish_reason"):
-                    finish_reason = str(candidate.finish_reason)
+                fr = candidate.finish_reason
+                if fr is not None and hasattr(fr, "value"):
+                    finish_reason = fr.value
+                elif fr is not None:
+                    finish_reason = str(fr)
 
             # Validate finish reason — these must beat empty-content errors
             if finish_reason in ("MAX_TOKENS", "FINISHREASON_MAX_TOKENS"):
@@ -331,12 +335,16 @@ class GeminiLLMProvider(LLMProvider):
             self._requests_made += 1
 
             # Extract finish reason FIRST (before content check) so that
-            # truncation errors win over empty-content errors.
+            # truncation/blocked errors win over empty-content errors.
+            # Use .value to extract the raw string from the str+enum subclass.
             finish_reason = "STOP"
             if response.candidates and len(response.candidates) > 0:
                 candidate = response.candidates[0]
-                if hasattr(candidate, "finish_reason"):
-                    finish_reason = str(candidate.finish_reason)
+                fr = candidate.finish_reason
+                if fr is not None and hasattr(fr, "value"):
+                    finish_reason = fr.value
+                elif fr is not None:
+                    finish_reason = str(fr)
 
             # Validate finish reason — must beat empty-content errors
             if finish_reason in ("MAX_TOKENS", "FINISHREASON_MAX_TOKENS"):
@@ -344,6 +352,17 @@ class GeminiLLMProvider(LLMProvider):
                     "Gemini structured completion truncated - token limit exceeded. "
                     "This indicates insufficient max_completion_tokens for the structured output. "
                     "Consider increasing the token limit or reducing input context."
+                )
+
+            if finish_reason in (
+                "SAFETY",
+                "FINISHREASON_SAFETY",
+                "RECITATION",
+                "FINISHREASON_RECITATION",
+            ):
+                raise RuntimeError(
+                    f"Gemini structured completion blocked ({finish_reason}). "
+                    "Try rephrasing your query or adjusting the prompt."
                 )
 
             # Extract response content
