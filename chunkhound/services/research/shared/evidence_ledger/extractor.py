@@ -175,9 +175,10 @@ class FactExtractor:
         # Keep prompt and parser aligned: URL provenance lives in `url`.
         # If compatibility prompts put the URL in `source`, normalize it.
         normalized_source_url = False
-        if not url and source.lower().startswith(("http://", "https://")):
-            logger.debug(f"Normalizing source URL into url field: {source[:80]}")
-            url = source
+        if source.lower().startswith(("http://", "https://")):
+            if not url:
+                logger.debug(f"Normalizing source URL into url field: {source[:80]}")
+                url = source
             normalized_source_url = True
 
         if not source and not url:
