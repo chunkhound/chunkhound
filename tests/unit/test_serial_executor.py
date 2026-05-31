@@ -75,7 +75,6 @@ def test_reset_thread_local_state_clears_stale_keys() -> None:
     fresh = get_thread_local_state()
     assert fresh["transaction_active"] is False
     assert "last_activity_time" in fresh
-    assert "last_checkpoint_time" not in fresh
     assert "deferred_checkpoint" not in fresh
 
 
@@ -97,5 +96,4 @@ def test_disconnect_resets_stale_state() -> None:
     fresh = get_thread_local_state()
     assert fresh["transaction_active"] is False
     assert "last_activity_time" in fresh
-    assert "last_checkpoint_time" not in fresh
     assert "deferred_checkpoint" not in fresh

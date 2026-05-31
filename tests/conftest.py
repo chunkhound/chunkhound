@@ -5,6 +5,7 @@ import pytest
 from loguru import logger
 
 from chunkhound.watchman_runtime.loader import is_packaged_watchman_runtime_available
+from tests.utils.windows_compat import get_configured_watcher_mode
 
 logger.remove()
 

@@ -179,7 +179,7 @@ class TestRealtimeFailures:
         assert await service.wait_for_file_indexed(test_file, timeout=10.0)
 
         # Check if file was processed multiple times (race condition)
-        file_record = services.provider.get_file_by_path(str(initial_file))
+        file_record = services.provider.get_file_by_path(str(test_file))
         if file_record:
             chunks = services.provider.get_chunks_by_file_id(file_record["id"])
 
