@@ -3,6 +3,7 @@
 import asyncio
 import json
 import signal
+import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -445,11 +446,11 @@ class TestOpenCodeCLIProvider:
 
     @pytest.mark.asyncio
     async def test_run_single_attempt_windows_uses_taskkill(self, provider):
-        """Windows cleanup routes to taskkill /T instead of Unix killpg."""
+        """Windows cleanup routes to taskkill /T without blocking the event loop."""
         with (
             patch("sys.platform", "win32"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("subprocess.run") as mock_run,
+            patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
             patch("subprocess.CREATE_NEW_PROCESS_GROUP", 0x00000200, create=True),
             patch("os.killpg", create=True) as mock_killpg,
         ):
@@ -471,7 +472,8 @@ class TestOpenCodeCLIProvider:
             assert result.action == "timeout"
             assert "start_new_session" not in mock_subprocess.call_args.kwargs
             assert mock_subprocess.call_args.kwargs["creationflags"] == 0x00000200
-            mock_run.assert_called_once_with(
+            mock_to_thread.assert_awaited_once_with(
+                subprocess.run,
                 ["taskkill", "/T", "/PID", "2468", "/F"],
                 check=False,
                 timeout=10,
@@ -530,6 +532,30 @@ class TestOpenCodeCLIProvider:
             mock_process.kill.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_run_cli_command_timeout_ignores_killpg_permission_error(
+        self, provider
+    ):
+        """Permission-denied process groups must not mask timeout errors."""
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", side_effect=PermissionError(), create=True),
+        ):
+            mock_process = AsyncMock()
+            mock_process.pid = 4321
+            mock_process.communicate.side_effect = asyncio.TimeoutError()
+            mock_process.wait = AsyncMock()
+            mock_process.returncode = None
+            mock_process.kill = MagicMock()
+            mock_subprocess.return_value = mock_process
+
+            with pytest.raises(RuntimeError, match="timed out"):
+                await provider._run_cli_command("Test prompt")
+
+            mock_process.wait.assert_awaited()
+            mock_process.kill.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_run_cli_command_generic_failure_ignores_stale_process_lookup_error(
         self, provider
     ):
@@ -550,7 +576,7 @@ class TestOpenCodeCLIProvider:
             with pytest.raises(RuntimeError, match="OpenCode CLI command failed: boom"):
                 await provider._run_cli_command("Test prompt")
 
-            assert mock_process.wait.await_count == provider._max_retries * 2
+            mock_process.wait.assert_awaited()
             mock_process.kill.assert_not_called()
 
     @pytest.mark.asyncio

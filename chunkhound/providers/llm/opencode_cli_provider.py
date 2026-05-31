@@ -423,7 +423,8 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         """Terminate an opencode subprocess and its descendants."""
         if sys.platform == "win32":
             try:
-                subprocess.run(
+                await asyncio.to_thread(
+                    subprocess.run,
                     ["taskkill", "/T", "/PID", str(process.pid), "/F"],
                     check=False,
                     timeout=10,
@@ -439,7 +440,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         process_group_id = pgid if pgid is not None else process.pid
         try:
             os.killpg(process_group_id, signal.SIGTERM)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
 
         try:
@@ -449,7 +450,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
 
         try:
             os.killpg(process_group_id, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
 
         try:
@@ -473,7 +474,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         """
         cmd = self._build_cmd(model, use_json)
         process = None
-        process_pgid: int | None = None
+        captured_process_pid: int | None = None
         cleanup_required = False
         try:
             if sys.platform == "win32":
@@ -501,7 +502,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                 )
             cleanup_required = True
             if sys.platform != "win32":
-                process_pgid = process.pid
+                captured_process_pid = process.pid
 
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(input=message.encode("utf-8")),
@@ -600,7 +601,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
 
         finally:
             if cleanup_required and process is not None:
-                await self._kill_process_tree(process, pgid=process_pgid)
+                await self._kill_process_tree(process, pgid=captured_process_pid)
 
     async def _try_phase(
         self,
