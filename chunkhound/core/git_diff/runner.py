@@ -8,7 +8,12 @@ _GIT_DIFF_TIMEOUT_SECONDS = 30
 
 
 async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
-    if not _SAFE_REF.match(commit_range) or "../" in commit_range or commit_range.startswith(".."):
+    if (
+        not _SAFE_REF.match(commit_range)
+        or "../" in commit_range
+        or commit_range.startswith("..")
+        or commit_range.startswith("-")
+    ):
         raise ValueError(f"Unsafe git ref rejected: {commit_range!r}")
     proc = await asyncio.create_subprocess_exec(
         "git", "diff", commit_range,

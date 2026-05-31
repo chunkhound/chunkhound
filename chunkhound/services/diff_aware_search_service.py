@@ -151,8 +151,6 @@ class DiffAwareSearchService:
         # 2. Cosine similarities (matrix is already row-normalised)
         scores: np.ndarray = self._norm_matrix @ q_vec  # shape (N,)
 
-        N = len(self._diff_chunks)
-
         # 3. Sort indices by score descending
         sorted_indices = np.argsort(scores)[::-1].tolist()
 
@@ -239,7 +237,9 @@ class DiffAwareSearchService:
         # Diff chunks are in-memory — fetch all of them (no cost).
         # DB fetch uses offset+page_size as a lower bound; multiply for headroom.
         diff_fetch = len(self._diff_chunks) if self._diff_chunks else (offset + page_size)
-        db_fetch = max(offset + page_size, page_size * 3)
+        # Fetch a generous window from DB so merged pagination metadata stays accurate
+        # at deeper offsets. 500 matches MAX_DIFF_CHUNKS to keep both sources balanced.
+        db_fetch = max(offset + page_size, page_size * 20, 500)
         diff_task = asyncio.create_task(
             self._search_diff(
                 query=query,

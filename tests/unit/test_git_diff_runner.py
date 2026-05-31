@@ -74,3 +74,11 @@ async def test_empty_diff(tmp_path: Path) -> None:
 async def test_unsafe_ref_rejected() -> None:
     with pytest.raises(ValueError, match="Unsafe git ref rejected"):
         await run_git_diff("--output=/tmp/x", Path("/tmp"))
+
+
+@pytest.mark.asyncio
+async def test_option_injection_rejected() -> None:
+    """--cached and other git options must be rejected even though they pass the char regex."""
+    for bad_ref in ("--cached", "--staged", "-p", "--no-index"):
+        with pytest.raises(ValueError, match="Unsafe git ref rejected"):
+            await run_git_diff(bad_ref, Path("/tmp"))

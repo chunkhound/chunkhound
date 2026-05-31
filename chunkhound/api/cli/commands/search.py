@@ -111,7 +111,10 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
             result_dict = cast(dict[str, Any], result)
         else:
             # CLI-specific: When force_strategy is set for semantic search,
-            # call the service directly to pass the force_strategy parameter
+            # call the service directly to pass the force_strategy parameter.
+            # NOTE: this path bypasses search_impl, so diff injection (_inject_diff_service)
+            # is skipped. The guard above (line 83) blocks --force-strategy with commit
+            # params to prevent silent no-diff behaviour. Tracked for follow-up.
             if not embedding_manager or not embedding_manager.list_providers():
                 raise Exception(
                     "No embedding providers available. "

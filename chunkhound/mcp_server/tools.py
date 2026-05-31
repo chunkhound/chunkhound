@@ -568,12 +568,13 @@ async def _inject_diff_service(
                 "set vector_source='db' to skip diff embedding."
             )
         diff_embeddings = emb_result.embeddings
-    vs = vector_source if vector_source in ("diff", "db", "both") else "both"
+    if vector_source not in ("diff", "db", "both"):
+        raise ValueError(f"Invalid vector_source: {vector_source!r}. Must be 'diff', 'db', or 'both'.")
     diff_service = DiffAwareSearchService(
         original=services.search_service,
         diff_chunks=diff_chunks,
         diff_embeddings=diff_embeddings,
-        vector_source=vs,
+        vector_source=vector_source,
         embedding_manager=embedding_manager,
     )
     return services._replace(search_service=diff_service)

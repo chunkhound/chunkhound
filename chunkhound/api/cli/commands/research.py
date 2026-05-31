@@ -74,7 +74,7 @@ async def run_research(
     commit_range: str | None = None,
     commit_hash: str | None = None,
     last_n_commits: int | None = None,
-    vector_source: str = "both",
+    vector_source: str = "diff",
 ) -> None:
     """Run deep_research_impl with TreeProgressDisplay and print result."""
     progress_output = (
