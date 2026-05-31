@@ -216,6 +216,8 @@ def _code_mapper_autorun_llm_prereqs(effective: Config) -> tuple[list[str], list
     if not effective.llm.is_provider_configured():
         missing.append("llm")
         details.append("- LLM provider is not fully configured.")
+        for item in effective.llm.get_missing_config():
+            details.append(f"- Missing LLM configuration: {item}.")
 
     return missing, details
 

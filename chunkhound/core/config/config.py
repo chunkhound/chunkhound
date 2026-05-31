@@ -2,12 +2,13 @@
 
 This module provides a unified configuration system with clear precedence:
 1. CLI arguments (highest priority)
-2. Local .chunkhound.json in target directory (if present)
-3. Config file (via --config path)
+2. Explicit config file (via --config path or CHUNKHOUND_CONFIG_FILE)
+3. Local .chunkhound.json in target directory
 4. Environment variables
 5. Default values (lowest priority)
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -39,15 +40,20 @@ class Config(BaseModel):
     target_dir: Path | None = Field(default=None, exclude=True)
     # Private field to track if embeddings were explicitly disabled
     embeddings_disabled: bool = Field(default=False, exclude=True)
+    # Private field to store the auto-discovered local .chunkhound.json path
+    local_config_file: Path | None = Field(default=None, exclude=True)
+    # Private field to store the explicit --config path (absolute) when provided
+    config_file: Path | None = Field(default=None, exclude=True)
 
     def __init__(self, args: Any | None = None, **kwargs: Any) -> None:
         """Universal configuration initialization that handles all contexts.
 
         Automatically applies correct precedence order:
         1. CLI arguments (highest priority)
-        2. Environment variables
-        3. Config file (via --config path, env var, or local .chunkhound.json)
-        4. Default values (lowest priority)
+        2. Explicit config file (via --config path or CHUNKHOUND_CONFIG_FILE)
+        3. Local .chunkhound.json in target directory
+        4. Environment variables
+        5. Default values (lowest priority)
 
         Args:
             args: Optional argparse.Namespace from command line parsing
@@ -71,6 +77,7 @@ class Config(BaseModel):
             # Get config file from --config if present
             if hasattr(args, "config") and args.config:
                 config_file = Path(args.config)
+                config_data["config_file"] = config_file.resolve()
 
             # For most commands, args.path represents the project root used for config
             # discovery. For map, args.path is a documentation scope and must
@@ -101,81 +108,53 @@ class Config(BaseModel):
                 None if is_map else (getattr(args, "path", None) if args else None)
             )
 
-        # 2. Load config file if found
-        if config_file and config_file.exists():
-            import json
+        # 2. Load environment variables
+        env_vars = self._load_env_vars()
+        self._deep_merge(config_data, env_vars)
 
-            try:
-                with open(config_file) as f:
-                    file_config = json.load(f)
-                    self._deep_merge(config_data, file_config)
-                    # Mark exclude list as user-supplied when present in file
-                    try:
-                        idx = config_data.get("indexing") or {}
-                        exc = idx.get("exclude") if isinstance(idx, dict) else None
-                        if isinstance(exc, list):
-                            idx["exclude_user_supplied"] = True
-                            config_data["indexing"] = idx
-                    except Exception:
-                        pass
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"Invalid JSON in config file {config_file}: {e}. "
-                    "Please check the file format and try again."
-                )
-
-        # 3. Check for local .chunkhound.json in target directory
+        # 3. Check for local .chunkhound.json in target directory (overrides env vars)
         if target_dir and target_dir.exists():
             local_config_path = target_dir / ".chunkhound.json"
             if local_config_path.exists() and local_config_path != config_file:
-                import json
-
+                config_data["local_config_file"] = local_config_path
                 try:
                     with open(local_config_path) as f:
                         local_config = json.load(f)
                         self._deep_merge(config_data, local_config)
-                        # Mark exclude list as user-supplied when present in local file
-                        try:
-                            idx = config_data.get("indexing") or {}
-                            exc = idx.get("exclude") if isinstance(idx, dict) else None
-                            if isinstance(exc, list):
-                                idx["exclude_user_supplied"] = True
-                                config_data["indexing"] = idx
-                        except Exception:
-                            pass
+                        self._mark_exclude_user_supplied(config_data)
                 except json.JSONDecodeError as e:
                     raise ValueError(
                         f"Invalid JSON in config file {local_config_path}: {e}. "
                         "Please check the file format and try again."
                     )
 
-        # 4. Load environment variables (override config files)
-        env_vars = self._load_env_vars()
-        self._deep_merge(config_data, env_vars)
+        # 4. Load explicit config file last so it wins over auto-discovered local config
+        if config_file and not config_file.exists():
+            raise ValueError(
+                f"Config file not found: {config_file}. "
+                "Check the path or visit https://chunkhound.ai to generate a config."
+            )
+        if config_file:
+            try:
+                with open(config_file) as f:
+                    file_config = json.load(f)
+                    self._deep_merge(config_data, file_config)
+                    self._mark_exclude_user_supplied(config_data)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Invalid JSON in config file {config_file}: {e}. "
+                    "Please check the file format and try again."
+                )
 
         # 5. Apply CLI arguments (highest precedence)
         if args:
             cli_overrides = self._extract_cli_overrides(args)
-            # If CLI provided an explicit exclude list, mark it as user-supplied
-            try:
-                idx = cli_overrides.get("indexing") or {}
-                if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
-                    idx["exclude_user_supplied"] = True
-                    cli_overrides["indexing"] = idx
-            except Exception:
-                pass
+            self._mark_exclude_user_supplied(cli_overrides)
             self._deep_merge(config_data, cli_overrides)
 
         # 6. Apply any direct kwargs (for testing)
         if kwargs:
-            # If direct kwargs include an explicit exclude list, mark it as user-supplied
-            try:
-                idx = kwargs.get("indexing") or {}
-                if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
-                    idx["exclude_user_supplied"] = True
-                    kwargs["indexing"] = idx
-            except Exception:
-                pass
+            self._mark_exclude_user_supplied(kwargs)
             self._deep_merge(config_data, kwargs)
 
         # Special handling for EmbeddingConfig
@@ -198,6 +177,13 @@ class Config(BaseModel):
 
         # Initialize the model
         super().__init__(**config_data)
+
+    @staticmethod
+    def _mark_exclude_user_supplied(data: dict[str, Any]) -> None:
+        """Mark exclude list as user-supplied when present in indexing config."""
+        idx = data.get("indexing")
+        if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
+            idx["exclude_user_supplied"] = True
 
     def _load_env_vars(self) -> dict[str, Any]:
         """Load configuration from environment variables.
@@ -327,7 +313,7 @@ class Config(BaseModel):
         """
         return cls(args=None)
 
-    def validate_for_command(self, command: str) -> list[str]:
+    def validate_for_command(self, command: str, args: Any | None = None) -> list[str]:
         """
         Validate configuration for a specific command.
 
@@ -346,8 +332,37 @@ class Config(BaseModel):
                 f"Missing required configuration: {item}" for item in missing_config
             )
 
-        # Validate embedding provider requirements for index command
-        if command == "index":
+        # websearch only spawns _quickresearch as a subprocess, but we validate
+        # LLM/embedding config in the parent so misconfiguration fails fast
+        # before fetching DDG results and writing tempfiles.
+        requires_llm = (
+            command in ("research", "websearch", "_quickresearch")
+            or (command == "map" and not getattr(args, "overview_only", False))
+            or (command == "autodoc" and not getattr(args, "assets_only", False))
+        )
+        if requires_llm:
+            if self.llm is None:
+                errors.append("No LLM provider configured")
+            else:
+                llm_roles = ["utility", "synthesis"]
+                if command == "map" and (
+                    self.llm.map_hyde_provider
+                    or self.llm.map_hyde_model
+                    or self.llm.map_hyde_reasoning_effort
+                ):
+                    llm_roles.append("map_hyde")
+                if command == "autodoc":
+                    llm_roles.append("autodoc_cleanup")
+
+                llm_missing = self.llm.get_missing_config_for_roles(tuple(llm_roles))
+                if llm_missing:
+                    errors.extend(
+                        f"Missing required configuration: llm.{item}"
+                        for item in llm_missing
+                    )
+
+        # Validate embedding provider requirements for commands that index code
+        if command in ("index", "websearch", "_quickresearch"):
             # Skip embedding validation if embeddings were explicitly disabled
             if not self.embeddings_disabled:
                 if self.embedding is None:

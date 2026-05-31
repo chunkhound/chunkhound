@@ -17,6 +17,13 @@ import tempfile
 
 from loguru import logger
 
+from chunkhound.core.config.claude_model_resolution import (
+    CLAUDE_HAIKU_SENTINEL,
+    CLAUDE_OPUS_SENTINEL,
+    CLAUDE_SONNET_SENTINEL,
+    resolve_claude_cli_model,
+)
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
@@ -27,41 +34,58 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "claude-sonnet-4-6",
+        model: str = CLAUDE_HAIKU_SENTINEL,
         base_url: str | None = None,
-        timeout: int = 60,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
         """Initialize Claude Code CLI provider.
 
+        The CLI natively resolves aliases (``haiku``, ``sonnet``, ``opus``)
+        to the latest available model. ChunkHound still honors its own
+        ``CHUNKHOUND_CLAUDE_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL`` overrides
+        before passing anything to the CLI. Without a ChunkHound override,
+        sentinels are mapped to bare aliases so the CLI can stay fresh.
+        Explicit full names (e.g. ``claude-sonnet-4-5-20250929``) pass
+        through unchanged.
+
         Args:
             api_key: Not used (subscription-based authentication)
-            model: Model name to use (e.g., "claude-sonnet-4-6", "claude-opus-4-7")
+            model: Model sentinel or full name.
+                Sentinels: ``claude-haiku``, ``claude-sonnet``, ``claude-opus``
+                Full names: ``claude-sonnet-4-5-20250929`` (pinned to version)
             base_url: Not used (CLI uses default endpoints)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
         """
         super().__init__(api_key, model, base_url, timeout, max_retries)
+        self._model = resolve_claude_cli_model(model)
 
     def _get_provider_name(self) -> str:
         """Get the provider name."""
         return "claude-code-cli"
 
     def _map_model_to_cli_arg(self, model: str) -> str:
-        """Map full model name to CLI model argument.
+        """Map ChunkHound sentinel to CLI bare alias.
 
-        The Claude Code CLI accepts full model names directly
-        (e.g., "claude-sonnet-4-5-20250929"). Short names like "sonnet-4-5"
-        are NOT accepted and result in exit code 1.
+        The Claude Code CLI accepts bare aliases (``haiku``, ``sonnet``,
+        ``opus``) and full model names (``claude-sonnet-4-5-20250929``).
+        ChunkHound's sentinels are ``claude-``-prefixed; strip that prefix
+        for the CLI.  Partial names like ``sonnet-4-5`` are **not** accepted
+        by the CLI (only bare aliases or full dated names).
 
         Args:
-            model: Full model name (e.g., "claude-sonnet-4-5-20250929")
+            model: Model sentinel or full name.
 
         Returns:
-            CLI model argument (same as input - full model name)
+            CLI-compatible ``--model`` argument.
         """
-        # Pass through model name as-is - CLI requires full names
-        return model
+        sentinel_to_cli = {
+            CLAUDE_HAIKU_SENTINEL: "haiku",
+            CLAUDE_SONNET_SENTINEL: "sonnet",
+            CLAUDE_OPUS_SENTINEL: "opus",
+        }
+        return sentinel_to_cli.get(model.strip().lower(), model)
 
     async def _run_cli_command(
         self,
@@ -88,7 +112,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
         model_arg = self._map_model_to_cli_arg(self._model)
         cmd = ["claude", "--print", "--model", model_arg, "--output-format", "text"]
 
-        # Disable all tools for vanilla LLM behavior (more future-proof than --disallowedTools)
+        # Disable all tools for vanilla LLM behavior.
         cmd.extend(["--tools", ""])
 
         # Prevent MCP server loading for clean LLM access
@@ -157,7 +181,10 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             except asyncio.TimeoutError as e:
                 # Kill the subprocess if it's still running
                 if process and process.returncode is None:
-                    process.kill()
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                     await process.wait()
 
                 last_error = RuntimeError(
@@ -169,9 +196,14 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 raise last_error from e
 
             except Exception as e:
+                if isinstance(e, RuntimeError):
+                    raise
                 # Kill the subprocess if it's still running on unexpected errors
                 if process and process.returncode is None:
-                    process.kill()
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                     await process.wait()
 
                 last_error = RuntimeError(f"CLI command failed: {e}")

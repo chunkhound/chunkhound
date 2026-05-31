@@ -50,7 +50,7 @@ def test_rollout_gate_workflow_runs_single_aggregate_fallback_proof() -> None:
         Path(__file__).resolve().parents[1]
         / ".github"
         / "workflows"
-        / "smoke-tests.yml"
+        / "ci.yml"
     )
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     jobs = workflow["jobs"]
@@ -137,6 +137,7 @@ async def test_wait_for_ready_requires_nested_watchman_health(monkeypatch) -> No
             "status": "ready",
             "scan_progress": {
                 "realtime": {
+                    "watchman_sidecar_state": "running",
                     "watchman_connection_state": "connected",
                     "watchman_subscription_count": 1,
                     "watchman_subscription_names": ["chunkhound-live-indexing"],
@@ -195,6 +196,43 @@ async def test_wait_for_ready_requires_nested_watchman_health(monkeypatch) -> No
             "relative_root": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_ready_accepts_only_polling_fallback_mode(
+    monkeypatch,
+) -> None:
+    response = {
+        "status": "ready",
+        "scan_progress": {
+            "realtime": {
+                "watchman_sidecar_state": "stopped",
+                "effective_backend": "polling",
+            }
+        },
+    }
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def send_request(
+            self, method: str, params: dict[str, object], timeout: float
+        ) -> dict[str, object]:
+            del method, params, timeout
+            self.calls += 1
+            return {"content": [{"type": "text", "text": json.dumps(response)}]}
+
+    async def fake_sleep(_delay: float) -> None:
+        raise AssertionError("Polling fallback mode should return immediately")
+
+    monkeypatch.setattr(live_verifier.asyncio, "sleep", fake_sleep)
+
+    client = FakeClient()
+    status = await live_verifier._wait_for_ready(client)
+
+    assert client.calls == 1
+    assert status["scan_progress"]["realtime"]["effective_backend"] == "polling"
 
 
 def test_source_tree_copy_ignore_excludes_transient_repo_state() -> None:
@@ -853,6 +891,150 @@ async def test_verify_wheel_uses_clean_room_runtime_env(
         runtime_dir / "daemon-user-registry"
     )
     assert cleanup_roots == [work_root, work_root]
+
+
+@pytest.mark.asyncio
+async def test_verify_wheel_proves_live_searchability_in_polling_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wheel_path = tmp_path / "chunkhound.whl"
+    wheel_path.write_text("wheel", encoding="utf-8")
+    work_root = tmp_path / "fallback-work-root"
+    wrote_live_file = False
+    search_queries: list[str] = []
+
+    monkeypatch.setattr(
+        live_verifier.tempfile,
+        "mkdtemp",
+        lambda prefix: str(work_root),
+    )
+
+    def fake_run(
+        args: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> SimpleNamespace:
+        del check, capture_output, text, env, cwd
+        if args[:2] == ["uv", "venv"]:
+            venv_dir = Path(args[2])
+            bin_dir = venv_dir / ("Scripts" if os.name == "nt" else "bin")
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            exe_name = "chunkhound.exe" if os.name == "nt" else "chunkhound"
+            python_name = "python.exe" if os.name == "nt" else "python"
+            (bin_dir / exe_name).write_text("", encoding="utf-8")
+            (bin_dir / python_name).write_text("", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[:3] == ["uv", "pip", "install"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    class FakePipe:
+        async def read(self) -> bytes:
+            return b""
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stderr = FakePipe()
+
+    class FakeClient:
+        def __init__(self, process: object) -> None:
+            del process
+            self.requests = 0
+
+        async def start(self) -> None:
+            return None
+
+        async def send_request(
+            self, method: str, params: dict[str, object] | None = None, timeout: float = 5.0
+        ) -> dict[str, object]:
+            del method, params, timeout
+            self.requests += 1
+            return {}
+
+        async def send_notification(
+            self, method: str, params: dict[str, object] | None = None
+        ) -> None:
+            del method, params
+
+        async def close(self) -> None:
+            return None
+
+    async def fake_create_subprocess_exec_safe(
+        *args: str,
+        stdin: object = None,
+        stdout: object = None,
+        stderr: object = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> FakeProcess:
+        del args, stdin, stdout, stderr, env, cwd
+        return FakeProcess()
+
+    ready_status = {
+        "scan_progress": {
+            "realtime": {
+                "watchman_sidecar_state": "stopped",
+                "effective_backend": "polling",
+            }
+        }
+    }
+
+    async def fake_wait_for_ready(client: object) -> dict[str, object]:
+        del client
+        return ready_status
+
+    async def fake_wait_for_search_hit(client: object, query: str) -> None:
+        del client
+        search_queries.append(query)
+        return None
+
+    def fake_parse_tool_json(_result: object) -> dict[str, object]:
+        return ready_status
+
+    def fake_write_project(project_dir: Path) -> tuple[Path, str]:
+        live_file = project_dir / "pkg" / "live.py"
+        return live_file, "fallback_live_symbol"
+
+    monkeypatch.setattr(live_verifier.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        live_verifier,
+        "_create_subprocess_exec_safe",
+        fake_create_subprocess_exec_safe,
+    )
+    monkeypatch.setattr(live_verifier, "SubprocessJsonRpcClient", FakeClient)
+    monkeypatch.setattr(live_verifier, "_wait_for_ready", fake_wait_for_ready)
+    monkeypatch.setattr(live_verifier, "_wait_for_search_hit", fake_wait_for_search_hit)
+    monkeypatch.setattr(live_verifier, "_parse_tool_json", fake_parse_tool_json)
+    monkeypatch.setattr(live_verifier, "_write_project", fake_write_project)
+    monkeypatch.setattr(
+        live_verifier,
+        "_terminate_processes_using_root",
+        lambda root: None,
+    )
+    monkeypatch.setattr(
+        live_verifier,
+        "_remove_tree_with_retries",
+        lambda root: None,
+    )
+
+    original_write_text = Path.write_text
+
+    def recording_write_text(self: Path, data: str, *args: object, **kwargs: object) -> int:
+        nonlocal wrote_live_file
+        if self.name == "live.py" and "fallback_live_symbol" in data:
+            wrote_live_file = True
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", recording_write_text)
+
+    await live_verifier._verify_wheel(wheel_path)
+
+    assert wrote_live_file
+    assert search_queries == ["fallback_live_symbol"]
 
 
 def test_mcp_env_prefers_installed_venv_and_clears_repo_python_state(

@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from .test_utils import get_api_key_for_tests
+from tests.helpers.embedding_config import get_api_key_for_tests
 
 
 def services_available(auto_start_rerank: bool = True) -> bool:
@@ -147,7 +147,7 @@ def get_reranking_providers() -> list[tuple[str, type, dict[str, Any]]]:
                 {
                     "api_key": "dummy-key",
                     "base_url": "http://localhost:11434/v1",
-                    "model": "nomic-embed-text",
+                    "model": "qwen3-embedding",
                     "rerank_model": "test-model",
                     "rerank_url": "http://localhost:8001/rerank",
                     "batch_size": 100,

@@ -26,6 +26,10 @@ class _FixedCleanupProvider(LLMProvider):
     def model(self) -> str:
         return self._model
 
+    @property
+    def timeout(self) -> int:
+        return 0
+
     async def complete(  # pragma: no cover
         self,
         prompt: str,

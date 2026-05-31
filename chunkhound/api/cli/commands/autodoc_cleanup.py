@@ -22,29 +22,13 @@ def _has_llm_env() -> bool:
 def _build_cleanup_provider_configs(
     llm_config: LLMConfig,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    utility_config, synthesis_config = llm_config.get_provider_configs()
+    """Build utility + autodoc-cleanup provider configs from LLMConfig.
 
-    cleanup_provider = llm_config.autodoc_cleanup_provider
-    cleanup_model = llm_config.autodoc_cleanup_model
-    cleanup_effort = llm_config.autodoc_cleanup_reasoning_effort
-
-    if cleanup_provider:
-        synthesis_config = synthesis_config.copy()
-        synthesis_config["provider"] = cleanup_provider
-
-    if cleanup_model:
-        synthesis_config = synthesis_config.copy()
-        synthesis_config["model"] = cleanup_model
-
-    provider = synthesis_config.get("provider")
-    if (
-        cleanup_effort
-        and isinstance(provider, str)
-        and provider in ("codex-cli", "openai")
-    ):
-        synthesis_config = synthesis_config.copy()
-        synthesis_config["reasoning_effort"] = cleanup_effort
-
+    The autodoc cleanup role maps to the synthesis config slot because
+    cleanup replaces synthesis as the document writing phase.
+    """
+    utility_config = llm_config.get_provider_config_for_role("utility")
+    synthesis_config = llm_config.get_provider_config_for_role("autodoc_cleanup")
     return utility_config, synthesis_config
 
 
@@ -70,7 +54,13 @@ def _resolve_llm_config_for_cleanup(
     if llm_config is None:
         return None
 
-    if not llm_config.is_provider_configured():
+    missing_config = llm_config.get_missing_config_for_roles(
+        ("utility", "synthesis", "autodoc_cleanup")
+    )
+    if missing_config:
+        missing = ", ".join(missing_config)
+        if missing:
+            formatter.warning(f"Skipping LLM cleanup configuration: {missing}")
         return None
 
     return llm_config
@@ -172,8 +162,8 @@ def resolve_cleanup_config_and_llm_manager(
             exit_code=2,
             errors=(
                 "AutoDoc cleanup requires an LLM provider, but none is configured. "
-                "Configure `llm` in your config/environment, or run with --assets-only "
-                "to update UI assets without regenerating topic pages.",
+                "Configure `llm` in your config/environment, or visit "
+                "https://chunkhound.ai to generate a config.",
             ),
         )
 

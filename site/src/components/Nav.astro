@@ -1,0 +1,264 @@
+---
+import Wordmark from "./Wordmark.astro";
+
+interface Props {
+  currentPath: string;
+  docsMenu?: boolean;
+}
+
+const { currentPath, docsMenu = false } = Astro.props;
+
+const tabs = [
+  { label: "Docs", href: "/docs/getting-started/", activePrefix: "/docs/" },
+];
+---
+
+<nav class:list={["nav", { "has-docs-menu": docsMenu }]}>
+  <div class="nav-inner">
+    {docsMenu && (
+      <button
+        class="docs-nav-toggle"
+        type="button"
+        aria-label="Open docs menu"
+        aria-haspopup="dialog"
+        aria-controls="docs-sidebar"
+        aria-expanded="false"
+        data-docs-nav-toggle
+      >
+        <ph-list size="20" weight="bold" aria-hidden="true"></ph-list>
+      </button>
+    )}
+    <a href="/" class="nav-wordmark" data-docs-mobile-inert>
+      <Wordmark size="sm" />
+    </a>
+
+    <div class="nav-tabs" aria-label="Sections" data-docs-mobile-inert>
+      {tabs.map((tab) => (
+        <a
+          href={tab.href}
+          class:list={["nav-tab", { active: currentPath.startsWith(tab.activePrefix ?? tab.href) }]}
+          aria-current={currentPath.startsWith(tab.activePrefix ?? tab.href) ? "page" : undefined}
+        >
+          {tab.label}
+        </a>
+      ))}
+    </div>
+
+    <div class="nav-actions" data-docs-mobile-inert>
+      <a
+        href="https://github.com/chunkhound/chunkhound"
+        class="nav-github-link"
+        aria-label="GitHub"
+      >
+        <ph-github-logo size="18" weight="duotone" aria-hidden="true"></ph-github-logo>
+      </a>
+
+      <button
+        class="theme-toggle"
+        onclick="toggleTheme()"
+        aria-label="Toggle theme"
+      >
+        <ph-sun class="icon-sun" size="16" weight="duotone" aria-hidden="true"></ph-sun>
+        <ph-moon class="icon-moon" size="16" weight="duotone" aria-hidden="true"></ph-moon>
+        <ph-monitor class="icon-system" size="16" weight="duotone" aria-hidden="true"></ph-monitor>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<script>
+  import "@phosphor-icons/webcomponents/PhGithubLogo";
+  import "@phosphor-icons/webcomponents/PhList";
+  import "@phosphor-icons/webcomponents/PhMonitor";
+  import "@phosphor-icons/webcomponents/PhMoon";
+  import "@phosphor-icons/webcomponents/PhSun";
+</script>
+
+<style>
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    height: var(--target-xl);
+    background: color-mix(in srgb, var(--bg-page) 85%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: var(--border-w-subtle) solid var(--border-subtle);
+  }
+
+  .nav-inner {
+    max-width: 1440px;
+    margin: 0 auto;
+    padding: 0 var(--space-6);
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+  }
+
+  .nav-wordmark {
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .nav-wordmark:hover {
+    text-decoration: none;
+  }
+
+  .docs-nav-toggle {
+    display: none;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    background: none;
+    color: var(--text-secondary);
+    border: none;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .docs-nav-toggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-muted);
+  }
+
+  .docs-nav-toggle ph-list {
+    display: block;
+  }
+
+  /* ── Section tabs ─────────────────────────────────────────────── */
+
+  .nav-tabs {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    gap: var(--space-4);
+  }
+
+  .nav-tab {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    min-width: 32px;
+    padding: 0 var(--space-1);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-bottom: var(--border-w-accent) solid transparent;
+    transition: color 0.2s, border-color 0.2s;
+  }
+
+  .nav-tab:hover {
+    color: var(--text-primary);
+    text-decoration: none;
+  }
+
+  .nav-tab.active {
+    color: var(--text-primary);
+    border-bottom-color: var(--primary);
+  }
+
+  /* ── Right actions ────────────────────────────────────────────── */
+
+  .nav-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-left: auto;
+  }
+
+  .theme-toggle {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: var(--radius-md);
+    transition: color 0.2s, background-color 0.2s;
+  }
+
+  .theme-toggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-muted);
+  }
+
+  .icon-sun,
+  .icon-moon,
+  .icon-system {
+    display: none;
+  }
+
+  :global([data-theme-setting="light"]) .icon-sun {
+    display: block;
+  }
+  :global([data-theme-setting="dark"]) .icon-moon {
+    display: block;
+  }
+  :global([data-theme-setting="system"]) .icon-system {
+    display: block;
+  }
+
+  .nav-github-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    transition: color 0.2s;
+  }
+
+  .nav-github-link:hover {
+    color: var(--text-primary);
+  }
+
+  .nav-github-link ph-github-logo {
+    display: block;
+  }
+
+  /* ── Mobile (<=900px) ─────────────────────────────────────────── */
+
+  @media (max-width: 900px) {
+    .nav-inner {
+      padding: 0 var(--space-4);
+      gap: var(--space-3);
+    }
+
+    .nav-tabs,
+    .nav-actions {
+      gap: var(--space-2);
+    }
+
+    .has-docs-menu .docs-nav-toggle {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .has-docs-menu .nav-tabs {
+      display: none;
+    }
+  }
+
+  @media (max-width: 360px) {
+    .nav-inner {
+      padding: 0 var(--space-3);
+      gap: var(--space-2);
+    }
+
+    .nav-actions {
+      gap: var(--space-1);
+    }
+  }
+</style>

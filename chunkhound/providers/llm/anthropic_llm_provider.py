@@ -5,9 +5,14 @@ Supports Claude 4.5, 4.6, 4.7, and Mythos generation models:
 - Manual extended thinking with configurable budget_tokens (Opus 4.5 and older)
 - Interleaved thinking for tool use (auto-enabled in adaptive mode)
 - Effort parameter for token usage vs thoroughness tradeoff
-- Automatic prompt caching
+- Opt-in prompt caching
 - Task budgets for agentic loops (Opus 4.7 beta)
 - Context management for automatic tool result and thinking block clearing
+
+The default model is ChunkHound's ``claude-haiku`` sentinel for both utility and
+synthesis. This is intentional: current Claude Haiku is capable enough for
+synthesis, is Anthropic's cheapest available Claude model, and Anthropic does
+not currently offer a true low-cost utility tier.
 """
 
 import asyncio
@@ -15,8 +20,14 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 from loguru import logger
 
+from chunkhound.core.config.claude_model_resolution import (
+    CLAUDE_HAIKU_SENTINEL,
+    resolve_claude_model,
+)
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
@@ -42,27 +53,31 @@ _EFFORT_FAMILY_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-5",
     "claude-opus-4-6",
     "claude-opus-4-7",
+    "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-mythos-preview",
 )
 _MAX_EFFORT_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-6",
     "claude-opus-4-7",
+    "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-mythos-preview",
 )
-_XHIGH_EFFORT_PREFIXES: tuple[str, ...] = ("claude-opus-4-7",)
+_XHIGH_EFFORT_PREFIXES: tuple[str, ...] = ("claude-opus-4-7", "claude-opus-4-8")
 _ADAPTIVE_THINKING_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-6",
     "claude-opus-4-7",
+    "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-mythos-preview",
 )
 _ADAPTIVE_ONLY_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-7",
+    "claude-opus-4-8",
     "claude-mythos-preview",
 )
-_TASK_BUDGET_PREFIXES: tuple[str, ...] = ("claude-opus-4-7",)
+_TASK_BUDGET_PREFIXES: tuple[str, ...] = ("claude-opus-4-7", "claude-opus-4-8")
 
 
 def _matches_family(model: str, prefixes: tuple[str, ...]) -> bool:
@@ -111,18 +126,18 @@ class AnthropicLLMProvider(LLMProvider):
     """Anthropic LLM provider using Claude models.
 
     Supports adaptive/manual extended thinking, tool use, effort control, and
-    automatic context management across Opus 4.5/4.6/4.7 and Sonnet 4.5/4.6.
+    automatic context management across Opus 4.5/4.6/4.7/4.8 and Sonnet 4.5/4.6.
 
     Thinking modes:
-        - Adaptive (Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos): Claude decides
-          when to think. Interleaved thinking is auto-enabled. Opus 4.7 rejects
-          manual mode.
+        - Adaptive (Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos): Claude
+          decides when to think. Interleaved thinking is auto-enabled. Opus
+          4.7/4.8 reject manual mode.
         - Manual (Opus 4.5 and older): fixed thinking_budget_tokens.
         - Off: omit thinking.
 
     Effort parameter:
-        - Supported on Opus 4.5, Opus 4.6, Opus 4.7, Sonnet 4.6, Mythos.
-        - Levels: low, medium, high (default), max (4.6+), xhigh (Opus 4.7 only).
+        - Supported on Opus 4.5, Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6, Mythos.
+        - Levels: low, medium, high (default), max (4.6+), xhigh (Opus 4.7/4.8).
         - Affects all tokens: text, tool calls, and thinking.
 
     Interleaved thinking:
@@ -140,9 +155,10 @@ class AnthropicLLMProvider(LLMProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "claude-sonnet-4-6",
+        model: str = CLAUDE_HAIKU_SENTINEL,
         base_url: str | None = None,
-        timeout: int = 60,
+        ssl_verify: bool = True,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
         thinking_enabled: bool = False,
         thinking_budget_tokens: int = 10000,
@@ -154,7 +170,7 @@ class AnthropicLLMProvider(LLMProvider):
         clear_tool_uses_keep: int | None = None,
         thinking_mode: str | None = None,
         thinking_display: str | None = None,
-        prompt_caching: bool = True,
+        prompt_caching: bool = False,
         cache_ttl: str | None = None,
         task_budget_tokens: int | None = None,
     ):
@@ -162,7 +178,13 @@ class AnthropicLLMProvider(LLMProvider):
 
         Args:
             api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
-            model: Model name to use. Supported families:
+            model: Model name to use. Defaults to ChunkHound's Claude Haiku
+                sentinel, intentionally used for both utility and synthesis
+                because Haiku is Anthropic's cheapest capable Claude model.
+                Pass an explicit synthesis model for maximum quality.
+                Supported families:
+                - claude-opus-4-8: adaptive thinking only. Effort levels
+                  low/medium/high/xhigh/max. xhigh recommended for coding.
                 - claude-opus-4-7: adaptive thinking only. Effort levels
                   low/medium/high/xhigh/max. xhigh recommended for coding.
                 - claude-opus-4-6: adaptive thinking. Effort low/medium/high/max.
@@ -171,6 +193,7 @@ class AnthropicLLMProvider(LLMProvider):
                 - claude-sonnet-4-5-20250929: manual thinking, no effort.
                 - claude-haiku-4-5-20251001: manual thinking, no effort.
             base_url: Base URL for Anthropic API (optional for custom endpoints)
+            ssl_verify: Verify TLS certificates for requests sent via base_url
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
             thinking_enabled: Enable extended thinking. Combined with
@@ -181,7 +204,7 @@ class AnthropicLLMProvider(LLMProvider):
             interleaved_thinking: Enable thinking between tool calls in manual
                 mode. Auto-enabled for adaptive mode regardless of this flag.
             effort: Token usage level - "low", "medium", "high", "xhigh"
-                (Opus 4.7 only), or "max" (4.6+ only).
+                (Opus 4.7/4.8), or "max" (4.6+ only).
             context_management_enabled: Enable automatic context management
             clear_thinking_keep_turns: Number of thinking turns to preserve (None=all)
             clear_tool_uses_trigger_tokens: Token threshold to trigger tool clearing
@@ -189,32 +212,32 @@ class AnthropicLLMProvider(LLMProvider):
             thinking_mode: Explicit thinking mode: "adaptive", "manual", "off",
                 or "auto" / None for automatic selection based on model.
             thinking_display: "summarized" (default on 4.6) or "omitted"
-                (default on Opus 4.7 / Mythos). Controls whether thinking text
-                is returned in the response.
-            prompt_caching: When True (default), sends a top-level
-                cache_control={"type": "ephemeral"} so the Messages API caches
-                the system prompt + message prefix automatically. Cache hits
-                cost 10% of base input, writes cost 25% more for 5m TTL.
+                (default on Opus 4.7/4.8 / Mythos). Controls whether thinking
+                text is returned in the response.
+            prompt_caching: When True, sends cache_control={"type": "ephemeral"}
+                so the Messages API can cache prompt prefixes. Disabled by
+                default because ChunkHound requests rarely reuse prefixes enough
+                to offset cache-write costs.
             cache_ttl: Cache TTL. None uses API default (5m). "1h" costs 2x
                 writes but is useful when the same prefix is reused less
                 often than every 5 minutes.
             task_budget_tokens: Total token budget across a full agentic loop
-                (beta, Opus 4.7 only). Advisory cap visible to the
+                (beta, Opus 4.7/4.8). Advisory cap visible to the
                 model; min 20000. Leave None for open-ended quality work.
         """
         if not ANTHROPIC_AVAILABLE:
             raise ImportError("Anthropic package not available")
 
-        self._model = model
+        self._model = resolve_claude_model(model, api_key)
         self._timeout = timeout
         self._max_retries = max_retries
         self._thinking_budget_tokens = max(1024, thinking_budget_tokens)
         self._interleaved_thinking = interleaved_thinking
         self._prompt_caching = prompt_caching
         self._cache_ttl = cache_ttl
-        if task_budget_tokens is not None and not supports_task_budget(model):
+        if task_budget_tokens is not None and not supports_task_budget(self._model):
             logger.warning(
-                f"Model {model} does not support task_budget; ignoring "
+                f"Model {self._model} does not support task_budget; ignoring "
                 f"task_budget_tokens={task_budget_tokens}"
             )
             task_budget_tokens = None
@@ -237,31 +260,35 @@ class AnthropicLLMProvider(LLMProvider):
 
         if requested_mode in ("manual", "adaptive") and not thinking_enabled:
             raise ValueError(
-                f"thinking_enabled=False conflicts with thinking_mode={requested_mode!r}. "
+                "thinking_enabled=False conflicts with "
+                f"thinking_mode={requested_mode!r}. "
                 "Pass thinking_enabled=True, or use thinking_mode='off' to disable."
             )
 
         if requested_mode == "off" and thinking_enabled:
             logger.debug(
-                "thinking_mode='off' overrides thinking_enabled=True; thinking disabled."
+                "thinking_mode='off' overrides thinking_enabled=True; "
+                "thinking disabled."
             )
 
         if requested_mode == "off" or not thinking_enabled:
             resolved_mode = "off"
         elif requested_mode == "auto":
             resolved_mode = (
-                "adaptive" if supports_adaptive_thinking(model) else "manual"
+                "adaptive" if supports_adaptive_thinking(self._model) else "manual"
             )
-        elif requested_mode == "manual" and requires_adaptive_thinking(model):
+        elif requested_mode == "manual" and requires_adaptive_thinking(self._model):
             logger.warning(
-                f"Model {model} requires adaptive thinking; falling back to "
+                f"Model {self._model} requires adaptive thinking; falling back to "
                 "adaptive (thinking_budget_tokens is ignored in adaptive mode; "
                 "thinking can consume up to max_tokens)"
             )
             resolved_mode = "adaptive"
-        elif requested_mode == "adaptive" and not supports_adaptive_thinking(model):
+        elif requested_mode == "adaptive" and not supports_adaptive_thinking(
+            self._model
+        ):
             logger.warning(
-                f"Model {model} does not support adaptive thinking; "
+                f"Model {self._model} does not support adaptive thinking; "
                 "falling back to manual"
             )
             resolved_mode = "manual"
@@ -281,15 +308,15 @@ class AnthropicLLMProvider(LLMProvider):
 
         if effort is not None:
             effort = effort.strip().lower()
-            if not supports_effort(model):
+            if not supports_effort(self._model):
                 logger.warning(
-                    f"Model {model} does not accept the effort parameter; "
+                    f"Model {self._model} does not accept the effort parameter; "
                     f"ignoring effort={effort!r}"
                 )
                 effort = None
-            elif not supports_effort_level(model, effort):
+            elif not supports_effort_level(self._model, effort):
                 logger.warning(
-                    f"Effort level {effort!r} is not supported on {model}; "
+                    f"Effort level {effort!r} is not supported on {self._model}; "
                     "dropping it (request would otherwise be rejected by the API)"
                 )
                 effort = None
@@ -309,6 +336,11 @@ class AnthropicLLMProvider(LLMProvider):
         }
         if base_url:
             client_kwargs["base_url"] = base_url
+            if not ssl_verify:
+                client_kwargs["http_client"] = httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout=timeout),
+                    verify=False,
+                )
 
         self._client = AsyncAnthropic(**client_kwargs)
 
@@ -328,6 +360,11 @@ class AnthropicLLMProvider(LLMProvider):
     def model(self) -> str:
         """Model name."""
         return self._model
+
+    @property
+    def timeout(self) -> int:
+        """Request timeout in seconds."""
+        return self._timeout
 
     def _extract_text_from_content(self, content_blocks: list[Any]) -> str:
         """Extract text from content blocks.
@@ -550,7 +587,7 @@ class AnthropicLLMProvider(LLMProvider):
 
         Effort is applied only when the model supports it. task_budget is
         applied only when task_budget_tokens was accepted in __init__ (which
-        requires an Opus 4.7-family model).
+        requires an Opus 4.7/4.8-family model).
 
         Args:
             json_schema: Optional JSON schema for structured outputs.
@@ -571,7 +608,7 @@ class AnthropicLLMProvider(LLMProvider):
         return cfg or None
 
     def _build_cache_control(self) -> dict[str, Any] | None:
-        """Build the top-level cache_control for automatic prompt caching."""
+        """Build the top-level cache_control for opt-in prompt caching."""
         if not self._prompt_caching:
             return None
         cc: dict[str, Any] = {"type": "ephemeral"}
@@ -690,10 +727,12 @@ class AnthropicLLMProvider(LLMProvider):
             content_blocks = response.content
             if not content_blocks:
                 logger.error(
-                    f"Anthropic returned no content blocks (stop_reason={response.stop_reason})"
+                    "Anthropic returned no content blocks "
+                    f"(stop_reason={response.stop_reason})"
                 )
                 raise RuntimeError(
-                    f"LLM returned empty response (stop_reason={response.stop_reason}). "
+                    "LLM returned empty response "
+                    f"(stop_reason={response.stop_reason}). "
                     "This may indicate a content filter, API error, or model refusal."
                 )
 
@@ -702,10 +741,12 @@ class AnthropicLLMProvider(LLMProvider):
 
             if not content.strip():
                 logger.warning(
-                    f"Anthropic returned empty text content (stop_reason={response.stop_reason})"
+                    "Anthropic returned empty text content "
+                    f"(stop_reason={response.stop_reason})"
                 )
                 raise RuntimeError(
-                    f"LLM returned empty text content (stop_reason={response.stop_reason}). "
+                    "LLM returned empty text content "
+                    f"(stop_reason={response.stop_reason}). "
                     "This may indicate a content filter, API error, or model refusal."
                 )
 
@@ -720,10 +761,12 @@ class AnthropicLLMProvider(LLMProvider):
 
                 raise RuntimeError(
                     f"LLM response truncated - token limit exceeded{usage_info}. "
-                    f"For reasoning models (Claude Opus, Sonnet), this indicates the query requires "
-                    f"extensive reasoning that exhausted the output budget. "
-                    f"The output budget is fixed at {max_completion_tokens:,} tokens. "
-                    f"Try breaking your query into smaller, more focused questions."
+                    "For reasoning models (Claude Opus, Sonnet), this indicates "
+                    "the query requires extensive reasoning that exhausted the "
+                    "output budget. "
+                    f"The output budget is fixed at {max_completion_tokens:,} "
+                    "tokens. Try breaking your query into smaller, more "
+                    "focused questions."
                 )
 
             # Warn on unexpected stop reasons
@@ -744,6 +787,8 @@ class AnthropicLLMProvider(LLMProvider):
                 finish_reason=response.stop_reason,
             )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Anthropic completion failed: {e}")
             raise RuntimeError(f"LLM completion failed: {e}") from e
@@ -847,7 +892,8 @@ class AnthropicLLMProvider(LLMProvider):
                         f"output={response.usage.output_tokens:,})"
                     )
                 raise RuntimeError(
-                    f"Structured output truncated - increase max_completion_tokens{usage_info}"
+                    "Structured output truncated - increase "
+                    f"max_completion_tokens{usage_info}"
                 )
 
             # Extract text content from response
@@ -1013,6 +1059,8 @@ class AnthropicLLMProvider(LLMProvider):
 
             return llm_response, tool_uses
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Anthropic tool use completion failed: {e}")
             raise RuntimeError(f"LLM tool use completion failed: {e}") from e
@@ -1151,7 +1199,7 @@ class AnthropicLLMProvider(LLMProvider):
                 request_kwargs, thinking_active=thinking_active
             )
 
-            # Create streaming response - use beta endpoint when beta features are enabled
+            # Use beta endpoint when beta features are enabled.
             beta_headers = request_kwargs.pop("betas", None)
             if beta_headers:
                 stream = await self._client.beta.messages.create(
@@ -1194,6 +1242,8 @@ class AnthropicLLMProvider(LLMProvider):
                             message.usage.input_tokens + message.usage.output_tokens
                         )
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Anthropic streaming completion failed: {e}")
             raise RuntimeError(f"LLM streaming completion failed: {e}") from e

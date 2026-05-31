@@ -62,6 +62,14 @@ class IndexingConfig(BaseModel):
         description="Detect and index SQL embedded in string literals",
     )
 
+    index_unknown_files: bool = Field(
+        default=False,
+        description=(
+            "Index files with unrecognized extensions as plain text. "
+            "Binary files (containing null bytes) are still skipped."
+        ),
+    )
+
     # File parsing safety
     per_file_timeout_seconds: float = Field(
         default=3.0,
@@ -378,6 +386,16 @@ class IndexingConfig(BaseModel):
             action="store_true",
             help="Disable detection of SQL code embedded in string literals",
         )
+        parser.add_argument(
+            "--index-unknown-files",
+            action="store_true",
+            default=False,
+            dest="index_unknown_files",
+            help=(
+                "Index files with unrecognized extensions as plain text "
+                "(binary files are still skipped)"
+            ),
+        )
 
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
@@ -466,6 +484,9 @@ class IndexingConfig(BaseModel):
         if sql_detect := os.getenv("CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL"):
             config["detect_embedded_sql"] = sql_detect.lower() in ("true", "1", "yes")
 
+        if index_unknown := os.getenv("CHUNKHOUND_INDEXING__INDEX_UNKNOWN_FILES"):
+            config["index_unknown_files"] = index_unknown.lower() in ("true", "1", "yes")
+
         return config
 
     @model_validator(mode="before")
@@ -502,6 +523,17 @@ class IndexingConfig(BaseModel):
             # Be permissive; validation will catch true errors later
             pass
         return data
+
+    @model_validator(mode="after")
+    def _inject_wildcard_for_unknown_files(self) -> "IndexingConfig":
+        """Append **/* to include patterns when index_unknown_files is enabled.
+
+        This ensures files with unrecognised extensions are discovered during
+        the directory scan. Existing exclude patterns still apply.
+        """
+        if self.index_unknown_files and "**/*" not in self.include:
+            self.include = list(self.include) + ["**/*"]
+        return self
 
     # Convenience helper for callers to interpret ignore source selection
     def resolve_ignore_sources(self) -> list[str]:
@@ -613,6 +645,9 @@ class IndexingConfig(BaseModel):
 
         if hasattr(args, "no_detect_embedded_sql") and args.no_detect_embedded_sql:
             overrides["detect_embedded_sql"] = False
+
+        if hasattr(args, "index_unknown_files") and args.index_unknown_files:
+            overrides["index_unknown_files"] = True
 
         return overrides
 

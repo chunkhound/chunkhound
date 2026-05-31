@@ -7,26 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Added
+- **Claude Opus 4.8 support**: the Anthropic provider now gives Opus 4.8 full Opus 4.7 capability parity: adaptive-only extended thinking (an explicit `manual` request auto-resolves to adaptive), effort levels `low`/`medium`/`high`/`xhigh`/`max`, and the task-budgets beta. The pinned `claude-opus` offline fallback was bumped to `claude-opus-4-8`. Fixes a `400 "thinking.type.enabled is not supported for this model"` error when targeting `claude-opus-4-8` with thinking enabled.
 
+### Changed
 - **Vue template metadata schema for v-model directives** — The shape of metadata produced for `v-model` (and `v-model:arg`) directives has changed:
   - Old: `model_modifier` (string)
   - New: `modifiers` (list of strings) + `model_argument` (optional string for `v-model:foo` style bindings)
 
   The previous `model_modifier` field was already semantically incorrect on many real cases (it was derived from the tree-sitter `directive_argument` node and could not properly distinguish arguments from modifiers or represent multiple modifiers). The new fields are more correct and consistent with how `parse_vue_directive` works. This is a breaking change for any code or LLM prompts that directly inspected `chunk.metadata["model_modifier"]` on Vue chunks. Most other Vue directive metadata keys (`event_name`, `property_name`, `slot_name`, etc.) are unchanged in meaning.
 
+## [5.1.0] - 2026-05-20
+
+### Breaking Changes
+- **MCP `search` response format changed to markdown** — The `search` tool now returns lean
+  markdown strings instead of JSON objects, with syntax-highlighted code fences, similarity
+  percentages (semantic search), and a pagination footer. MCP clients that parse raw search
+  output as JSON must migrate to the new format.
+
+### Added
+- **`--index-unknown-files` flag** — Files with unrecognized extensions are now indexable as
+  plain text (binary files are still skipped). Enabled via `--index-unknown-files` CLI flag,
+  `indexing.index_unknown_files` config key, or `CHUNKHOUND_INDEXING__INDEX_UNKNOWN_FILES` env var.
+- **Proto, GraphQL, XML, config, and Dockerfile support** — `.proto`, `.graphql`, `.gql`,
+  `.xml`, `.ini`, `.properties`, `.conf`, `.cfg`, and extensionless `Dockerfile`/`Jenkinsfile`
+  files are now indexed by default. `.env` files are explicitly excluded to prevent secret leakage.
+- **`chunkhound.ai` onboarding** — Interactive CLI setup is replaced with guided onboarding at
+  chunkhound.ai; local backend is now configured explicitly rather than through prompts.
+
+### Fixed
+- **MCP startup HNSW crash** — MCP server no longer fails with a `CreateDeltaIndex` assertion
+  on startup against databases missing the unique `(chunk_id, provider, model)` index from v5.0.0.
+  HNSW recreation now runs outside the transaction (issue #280).
+- **WAL validation HNSW crash** — WAL pre-flight validation now uses in-memory+ATTACH, preventing
+  a C++ abort when the WAL contained HNSW operations from a prior session (issue #273).
+- **`--db` nested directory bug** — Passing an explicit file path (e.g. `--db /path/to/chunks.db`)
+  no longer creates a `chunks.db/chunks.db` nested directory; known DB extensions (`.db`,
+  `.duckdb`) are now correctly identified as file paths (issue #215).
+- **Parser install hints** — C# error messages now show the correct PyPI package
+  `tree-sitter-c-sharp` (was `tree-sitter-csharp`); Makefile shows `tree-sitter-make`;
+  SCSS points to `tree-sitter-language-pack` (issue #267).
+
 ## [5.0.0] - 2026-05-05
 
 ### Breaking Changes
-- **HTTP MCP server removed** — `chunkhound mcp http` command removed along with `--http`, `--port`, and `--host` flags; FastMCP dependency removed. Use `chunkhound mcp` (stdio) instead — all major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
-- **Unsupported file types no longer indexed** — Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (`.txt`, `.log`, `.cfg`, `.conf`, `.ini`) are unaffected.
+- **Config precedence reordered** — Local `.chunkhound.json` now takes precedence over
+  environment variables. If you relied on env vars overriding project-level settings,
+  use CLI arguments instead.
+- **`--config` now overrides local `.chunkhound.json`** — Previously, a project-local
+  `.chunkhound.json` took precedence over an explicit `--config` path. Now `--config`
+  wins. If you relied on local `.chunkhound.json` shadowing a shared config file, move
+  that override into CLI arguments.
+- **Missing `--config` / `CHUNKHOUND_CONFIG_FILE` path now raises** — A non-existent
+  config file path used to be silently ignored; it now raises `ValueError` with an
+  actionable message.
+- **`DEFAULT_LLM_TIMEOUT` doubled** — Default LLM request timeout increased from 60 s
+  to 120 s for all providers (was already 120 s for Gemini; now uniform).
+- **HTTP MCP server removed** — ChunkHound now supports stdio transport only for MCP connections
+  - `chunkhound mcp http` command removed
+  - `--http`, `--port`, `--host` CLI flags removed
+  - FastMCP dependency removed
+  - Migration: Use `chunkhound mcp` (stdio) instead. All major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
+  - Rationale: Simplified codebase, reduced dependencies, focused on primary use case (stdio is the standard for MCP)
+- **Unsupported file types no longer indexed as plain text** — Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (.txt, .log, .cfg, .conf, .ini) are unaffected.
+- **Claude Code CLI default model changed** from `claude-sonnet-4-5-20250929` to `claude-haiku-4-5-20251001`. Users who relied on the default model will see different cost/quality characteristics. Set `llm.model`, `llm.utility_model`, or `llm.synthesis_model` explicitly to retain previous behavior.
 - **Anthropic provider upgraded to Claude Opus 4.7/4.6 and Sonnet 4.6**
   - `anthropic` dependency minimum bumped to `>=0.96.0,<1.0.0`
-  - Default synthesis model changed from `claude-sonnet-4-5-20250929` to `claude-sonnet-4-6`
-  - Default Claude Code CLI model changed to `claude-sonnet-4-6`
+  - Default Anthropic utility and synthesis models changed to ChunkHound's `claude-haiku` sentinel. This is intentional: current Claude Haiku is capable enough for synthesis, is Anthropic's cheapest available Claude model, and Anthropic does not currently offer a true low-cost utility tier. Users who prefer maximum synthesis quality can override `synthesis_model`.
+  - Default Claude Code CLI model changed to the same `claude-haiku` sentinel. ChunkHound still honors its Claude env overrides first; otherwise it preserves the sentinel so Claude Code can resolve the latest matching alias itself.
   - Removed module symbols `BETA_EFFORT` and `EFFORT_SUPPORTED_MODELS`. Callers should use the `supports_effort(model)` / `supports_effort_level(model, level)` predicates instead.
-  - `thinking_enabled=True` on the new default now resolves to `thinking_mode="adaptive"` (previously manual), so response `thinking` blocks are shaped as `{type: "adaptive"}` instead of `{type: "enabled", budget_tokens: N}`.
-  - `anthropic_prompt_caching` defaults to `true`. Every Anthropic request now sends a top-level `cache_control: {type: "ephemeral"}`. Cache hits cost 10% of base input; writes cost 25% more (5m TTL) or 100% more (1h TTL). To preserve prior behavior, set `CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING=false` or pass `--llm-anthropic-no-prompt-caching`.
+  - `thinking_enabled=True` with `thinking_mode="auto"` resolves to adaptive only for adaptive-capable models such as Opus 4.6/4.7, Sonnet 4.6, and Mythos. The pinned Haiku fallback remains manual-mode thinking.
+  - `anthropic_prompt_caching` defaults to `false` because ChunkHound requests rarely reuse prompt prefixes enough to offset Anthropic cache-write costs. To opt in, set `CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING=true` or pass `--llm-anthropic-prompt-caching`.
   - Invalid `thinking_mode` values and sub-20000 `task_budget_tokens` now raise `ValueError` instead of warning-and-coercing.
 
 ### Added
@@ -38,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`openai_compatible` embedding provider** — Connect any OpenAI-compatible embedding endpoint with configurable SSL verification, auth, and dimension support.
 - **Azure OpenAI embeddings** — Native Azure OpenAI embedding support with `azure_endpoint`, `api_version`, and `azure_deployment` configuration options.
 - **VoyageAI ranking support** — VoyageAI provider now supports reranking for improved search result quality.
-- **Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 support** — Adaptive thinking mode (auto / off / manual / adaptive selector), expanded effort levels (`low`, `medium`, `high`, `xhigh` (Opus 4.7 only), `max` (4.6+)), automatic prompt caching with configurable TTL (`5m` / `1h`), and the task-budgets beta (Opus 4.7 only, advisory cap for agentic loops, min 20000 tokens).
+- **Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 support** — Adaptive thinking mode (auto / off / manual / adaptive selector), expanded effort levels (`low`, `medium`, `high`, `xhigh` (Opus 4.7 only), `max` (4.6+)), opt-in prompt caching with configurable TTL (`5m` / `1h`), and the task-budgets beta (Opus 4.7 only, advisory cap for agentic loops, min 20000 tokens).
 - **New `LLMConfig` fields** — `anthropic_thinking_mode`, `anthropic_thinking_display`, `anthropic_prompt_caching`, `anthropic_cache_ttl`, `anthropic_task_budget_tokens` (and matching `CHUNKHOUND_LLM_ANTHROPIC_*` env vars and `--llm-anthropic-*` CLI flags). The pre-existing `anthropic_thinking_enabled`, `anthropic_thinking_budget_tokens`, `anthropic_interleaved_thinking`, `anthropic_effort`, `anthropic_context_management_enabled`, and `anthropic_clear_*` fields are now also readable from env and CLI.
 - **Embedded SQL detection** — SQL embedded in string literals is detected and indexed by default across Python, Java, JavaScript, TypeScript, C#, Go, Rust, and PHP. Disable with `--no-detect-embedded-sql` or `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL=false`.
 - **OpenAI Responses API** — Deep code research now supports reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) via the Responses API, with automatic routing based on model compatibility across 30+ models.
@@ -675,7 +726,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...HEAD
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...HEAD
+[5.1.0]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v5.0.0
 [4.0.1]: https://github.com/chunkhound/chunkhound/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/chunkhound/chunkhound/compare/v3.3.1...v4.0.0

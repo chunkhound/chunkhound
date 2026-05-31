@@ -100,8 +100,8 @@ PyPI trusted publisher required for `release-rc.yml`:
 - **Preferred: pass project directory as positional arg** — `chunkhound search "query" /path/to/project` — this reads `.chunkhound.json` and resolves the DB correctly
 - **For MCP:** `chunkhound mcp --db /path/to/project/.chunkhound` (the path from `.chunkhound.json`'s `database.path`)
 - **`--db` with wrong subpath silently returns 0 results** — no error, just empty. Always verify with a regex search first.
+- `--db` accepts either a directory (uses `.../chunks.db` internally) or an explicit file path (`.db` / `.duckdb` extension returned as-is)
 - Default DB path: `.chunkhound/db/chunks.db` (directory structure, not flat file)
-- When using `--db` flag, pass the **directory** path (e.g. `--db .chunkhound/db`), not the full file path — passing `--db .../chunks.db` creates a nested `chunks.db/chunks.db` directory
 - Old-style flat `.chunkhound` files (pre-v4) block directory creation — move aside before re-indexing
 - Project-local `.chunkhound.json` with relative `"path": ".chunkhound"` resolves to CWD, not the project dir — use `--db` with absolute paths when indexing remote projects
 - `--config` does NOT override a project-local `.chunkhound.json` for DB path — always use explicit `--db` when the target project has its own config
@@ -110,3 +110,13 @@ PyPI trusted publisher required for `release-rc.yml`:
 - Smoke tests are mandatory guardrails
 - Run `uv run mypy chunkhound` during reviews to catch Optional/type boundary issues
 - All code patterns should be self-documenting
+
+## TESTING_PHILOSOPHY
+- Test external constraints, critical invariants, and user-facing contracts.
+- Do NOT write tests for adapters, private helpers, mock behavior, or internal plumbing unless the test is the narrowest way to protect a real external contract.
+- If a refactor could change the implementation without changing user-visible behavior, the test is probably too internal and should not exist.
+- Prefer contract names like `test_cli_overrides_env` over implementation names like `test_extract_cli_overrides_calls_helper`.
+- Use real business logic with fakes only at true external boundaries (network, filesystem, subprocess, third-party APIs).
+- For provider integrations, test our contract with the provider: supported/unsupported feature gating, request validity constraints, explicit failures, and stable user-visible semantics. Do NOT test SDK mechanics or mirror every internal request-shaping helper.
+- Before adding a test, ask: "Would a user, caller, CI contract, or external system notice if this broke?" If not, do not add the test.
+- Prefer one higher-value contract test over many narrow implementation tests.

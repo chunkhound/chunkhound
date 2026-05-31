@@ -1,19 +1,36 @@
-"""Tests for Anthropic LLM provider with adaptive/manual thinking and effort."""
+"""Tests for Anthropic LLM provider with extended thinking and Opus 4.5 support."""
+
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
+from chunkhound.core.config.claude_model_resolution import (
+    CLAUDE_HAIKU_DEFAULT_SENTINEL,
+    CLAUDE_HAIKU_FALLBACK_MODEL,
+    CLAUDE_HAIKU_SENTINEL,
+    CLAUDE_OPUS_FALLBACK,
+    CLAUDE_OPUS_SENTINEL,
+    CLAUDE_SONNET_FALLBACK,
+    CLAUDE_SONNET_SENTINEL,
+    clear_claude_cache,
+    clear_haiku_cache,
+    resolve_claude_haiku_model,
+    resolve_claude_model,
+)
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.anthropic_llm_provider import (
     ANTHROPIC_AVAILABLE,
     BETA_CONTEXT_MANAGEMENT,
     BETA_INTERLEAVED_THINKING,
     BETA_STRUCTURED_OUTPUTS,
     BETA_TASK_BUDGETS,
-    AnthropicLLMProvider,
     requires_adaptive_thinking,
     supports_adaptive_thinking,
     supports_effort,
     supports_effort_level,
     supports_task_budget,
+    AnthropicLLMProvider,
 )
 
 
@@ -25,11 +42,11 @@ class TestAnthropicProviderBasics:
         """Test provider can be initialized."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-5-20250929",
         )
 
         assert provider.name == "anthropic"
-        assert provider.model == "claude-sonnet-4-6"
+        assert provider.model == "claude-sonnet-4-5-20250929"
         assert provider.supports_thinking() is True
         assert provider.supports_tools() is True
 
@@ -185,7 +202,6 @@ class TestProviderCapabilities:
         # Anthropic has higher rate limits than OpenAI
         assert provider.get_synthesis_concurrency() == 5
 
-
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
 class TestConfiguration:
     """Test various configuration scenarios."""
@@ -194,12 +210,24 @@ class TestConfiguration:
         """Test default configuration values."""
         provider = AnthropicLLMProvider(api_key="test-key")
 
-        assert provider._model == "claude-sonnet-4-6"
-        assert provider._timeout == 60
+        assert provider._model == CLAUDE_HAIKU_FALLBACK_MODEL
+        assert provider._timeout == 120
         assert provider._max_retries == 3
         assert provider._thinking_enabled is False
-        assert provider._thinking_mode == "off"
         assert provider._thinking_budget_tokens == 10000
+
+    def test_default_model_resolution_stays_offline(self, monkeypatch):
+        """Provider construction must not perform network discovery."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "chunkhound.core.config.claude_model_resolution."
+            "get_latest_available_haiku_model",
+            lambda api_key=None: pytest.fail("discovery should not run"),
+        )
+
+        provider = AnthropicLLMProvider(api_key="sk-ant-test")
+        assert provider.model == CLAUDE_HAIKU_FALLBACK_MODEL
 
     def test_custom_configuration(self):
         """Test custom configuration values."""
@@ -207,14 +235,14 @@ class TestConfiguration:
             api_key="custom-key",
             model="claude-opus-4-1-20250805",
             base_url="https://custom.endpoint.com",
-            timeout=120,
+            timeout=300,
             max_retries=5,
             thinking_enabled=True,
             thinking_budget_tokens=20000,
         )
 
         assert provider._model == "claude-opus-4-1-20250805"
-        assert provider._timeout == 120
+        assert provider.timeout == 300
         assert provider._max_retries == 5
         assert provider._thinking_enabled is True
         assert provider._thinking_budget_tokens == 20000
@@ -306,18 +334,20 @@ class TestOpus45EffortParameter:
         )
 
         assert provider._effort == "medium"
-        assert supports_effort(provider._model) is True
+        assert supports_effort(provider._model)
 
     def test_effort_parameter_warning_non_opus(self):
-        """Sonnet 4.5 drops an effort value it cannot use; only warns."""
+        """Test that non-Opus 4.5 models get a warning for effort parameter."""
+        # This should log a warning but still initialize
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-sonnet-4-5-20250929",
             effort="low",
         )
 
+        # Effort is silently dropped for models that don't support it
         assert provider._effort is None
-        assert supports_effort(provider._model) is False
+        assert not supports_effort(provider._model)
 
     def test_effort_levels(self):
         """Test all valid effort levels."""
@@ -467,7 +497,7 @@ class TestContextManagement:
         assert result["edits"][0]["keep"] == "all"
 
     def test_build_context_management_thinking_active_override(self):
-        """Test thinking_active=False skips clear_thinking even when thinking_enabled=True.
+        """Test inactive thinking skips clear_thinking edits.
 
         This allows context management to be correctly configured for requests
         where thinking is explicitly disabled - clear_thinking_20251015 should not
@@ -504,6 +534,28 @@ class TestBetaHeaders:
         headers = provider._get_beta_headers()
         assert headers == []
 
+    def test_effort_not_a_beta_header(self):
+        """Effort is no longer a beta header."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-5-20251101",
+            effort="medium",
+        )
+
+        headers = provider._get_beta_headers()
+        assert BETA_CONTEXT_MANAGEMENT not in headers  # sanity: no unrelated headers
+
+    def test_effort_not_a_beta_header_for_sonnet(self):
+        """Effort is not a beta header for any model."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-5-20250929",
+            effort="medium",
+        )
+
+        headers = provider._get_beta_headers()
+        assert len(headers) == 0
+
     def test_context_management_beta_header(self):
         """Test context management beta header."""
         provider = AnthropicLLMProvider(
@@ -515,11 +567,11 @@ class TestBetaHeaders:
         assert BETA_CONTEXT_MANAGEMENT in headers
 
     def test_interleaved_thinking_beta_header(self):
-        """Interleaved beta header is emitted for manual-mode models."""
+        """Test interleaved thinking beta header (requires manual mode)."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
-            model="claude-opus-4-5-20251101",
             thinking_enabled=True,
+            thinking_mode="manual",
             interleaved_thinking=True,
         )
 
@@ -530,20 +582,22 @@ class TestBetaHeaders:
         """Test interleaved thinking header only added when thinking is enabled."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
-            thinking_enabled=False,
-            interleaved_thinking=True,
+            thinking_enabled=True,
+            thinking_mode="manual",
+            interleaved_thinking=False,
         )
 
         headers = provider._get_beta_headers()
         assert BETA_INTERLEAVED_THINKING not in headers
 
-    def test_all_beta_headers_manual_thinking(self):
-        """Opus 4.5 uses manual thinking so interleaved header is emitted."""
+    def test_all_beta_headers(self):
+        """Test all beta headers combined."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-opus-4-5-20251101",
             effort="low",
             thinking_enabled=True,
+            thinking_mode="manual",
             interleaved_thinking=True,
             context_management_enabled=True,
         )
@@ -552,22 +606,6 @@ class TestBetaHeaders:
         assert BETA_CONTEXT_MANAGEMENT in headers
         assert BETA_INTERLEAVED_THINKING in headers
         assert len(headers) == 2
-
-    def test_adaptive_mode_suppresses_interleaved_header(self):
-        """Adaptive thinking auto-enables interleaved; no beta header needed."""
-        provider = AnthropicLLMProvider(
-            api_key="test-key",
-            model="claude-opus-4-7",
-            thinking_enabled=True,
-            interleaved_thinking=True,
-            context_management_enabled=True,
-        )
-
-        assert provider._thinking_mode == "adaptive"
-        headers = provider._get_beta_headers()
-        assert BETA_INTERLEAVED_THINKING not in headers
-        assert BETA_CONTEXT_MANAGEMENT in headers
-        assert len(headers) == 1
 
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
@@ -582,6 +620,10 @@ class TestOpus45ModelConfiguration:
         )
 
         assert provider.model == "claude-opus-4-5-20251101"
+
+    def test_opus_45_supports_effort(self):
+        """Test Opus 4.5 supports effort parameter."""
+        assert supports_effort("claude-opus-4-5-20251101")
 
     def test_opus_45_full_configuration(self):
         """Test Opus 4.5 with all features enabled."""
@@ -681,12 +723,7 @@ class TestStrictToolUse:
         """Test detecting strict tools."""
         tools = [
             {"name": "tool1", "description": "desc", "input_schema": {}},
-            {
-                "name": "tool2",
-                "description": "desc",
-                "strict": True,
-                "input_schema": {},
-            },
+            {"name": "tool2", "description": "desc", "strict": True, "input_schema": {}},
         ]
 
         has_strict = any(tool.get("strict") for tool in tools)
@@ -727,19 +764,22 @@ class TestStructuredOutputsBetaHeaders:
         assert BETA_STRUCTURED_OUTPUTS not in headers
 
     def test_all_beta_headers_with_opus(self):
-        """Test beta headers for Opus 4.5 configuration (manual thinking)."""
+        """Test all beta headers for Opus 4.5 configuration."""
         provider = AnthropicLLMProvider(
             api_key="test-key",
             model="claude-opus-4-5-20251101",
             effort="low",
             thinking_enabled=True,
+            thinking_mode="manual",
             interleaved_thinking=True,
             context_management_enabled=True,
         )
 
         headers = provider._get_beta_headers()
+        # Context management and interleaved thinking are beta headers
         assert BETA_CONTEXT_MANAGEMENT in headers
         assert BETA_INTERLEAVED_THINKING in headers
+        # Effort is passed via output_config, not as a beta header
         # Structured outputs is added dynamically, not in _get_beta_headers
         assert len(headers) == 2
 
@@ -938,14 +978,22 @@ class TestEffortLevels:
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
 class TestPromptCaching:
-    """Automatic prompt caching via top-level cache_control."""
+    """Opt-in prompt caching via top-level cache_control."""
 
-    def test_default_cache_control_ephemeral(self):
+    def test_cache_disabled_by_default(self):
         provider = AnthropicLLMProvider(api_key="test-key")
+        assert provider._build_cache_control() is None
+
+    def test_cache_control_ephemeral_when_enabled(self):
+        provider = AnthropicLLMProvider(api_key="test-key", prompt_caching=True)
         assert provider._build_cache_control() == {"type": "ephemeral"}
 
     def test_cache_control_with_ttl(self):
-        provider = AnthropicLLMProvider(api_key="test-key", cache_ttl="1h")
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            prompt_caching=True,
+            cache_ttl="1h",
+        )
         assert provider._build_cache_control() == {
             "type": "ephemeral",
             "ttl": "1h",
@@ -1229,15 +1277,486 @@ class TestLLMConfigEnvLoading:
 class TestLLMConfigDefaults:
     """Pin default model selection."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_env(self, clean_environment):
+        # Default resolution must not depend on the developer's ambient
+        # CHUNKHOUND_* / provider-key env. clean_environment (conftest) strips
+        # it so this class behaves identically locally and in CI.
+        yield
+
+    def test_anthropic_prompt_caching_default_disabled(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(provider="anthropic")
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["prompt_caching"] is False
+        assert synthesis_config["prompt_caching"] is False
+
     def test_anthropic_default_models(self):
         from chunkhound.core.config.llm_config import LLMConfig
 
         cfg = LLMConfig(provider="anthropic")
         assert cfg.get_default_models() == (
-            "claude-haiku-4-5-20251001",
-            "claude-sonnet-4-6",
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
         )
 
+    def test_claude_code_default_models(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(provider="claude-code-cli")
+        assert cfg.get_default_models() == (
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+        )
+
+    def test_claude_role_overrides_use_haiku_defaults(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(
+            provider="openai",
+            utility_provider="anthropic",
+            synthesis_provider="claude-code-cli",
+        )
+        assert cfg.get_default_models() == (
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+        )
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["provider"] == "anthropic"
+        assert utility_config["model"] == CLAUDE_HAIKU_DEFAULT_SENTINEL
+        assert synthesis_config["provider"] == "claude-code-cli"
+        assert synthesis_config["model"] == CLAUDE_HAIKU_DEFAULT_SENTINEL
+
+    def test_openai_role_overrides_use_openai_defaults(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(
+            provider="anthropic",
+            utility_provider="openai",
+            synthesis_provider="openai",
+        )
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["provider"] == "openai"
+        assert utility_config["model"] == "gpt-5-nano"
+        assert synthesis_config["provider"] == "openai"
+        assert synthesis_config["model"] == "gpt-5"
+
+    def test_explicit_role_models_override_provider_defaults(self):
+        from chunkhound.core.config.llm_config import LLMConfig
+
+        cfg = LLMConfig(
+            provider="openai",
+            utility_provider="anthropic",
+            utility_model="claude-sonnet-4-6",
+            synthesis_provider="claude-code-cli",
+            synthesis_model="claude-opus-4-7",
+        )
+        utility_config, synthesis_config = cfg.get_provider_configs()
+        assert utility_config["model"] == "claude-sonnet-4-6"
+        assert synthesis_config["model"] == "claude-opus-4-7"
+
+
+class TestClaudeHaikuModelResolution:
+    """Pin latest-Haiku default model selection."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_claude_cache(self):
+        clear_claude_cache()
+        yield
+        clear_claude_cache()
+
+    def test_explicit_model_passes_through(self):
+        assert resolve_claude_haiku_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
+
+    def test_env_override_wins(self, monkeypatch):
+        monkeypatch.setenv(
+            "CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL",
+            "claude-haiku-4-6-20260101",
+        )
+        assert resolve_claude_haiku_model(CLAUDE_HAIKU_DEFAULT_SENTINEL) == (
+            "claude-haiku-4-6-20260101"
+        )
+
+    def test_no_api_key_uses_fallback(self, monkeypatch):
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        assert resolve_claude_haiku_model(CLAUDE_HAIKU_DEFAULT_SENTINEL) == (
+            CLAUDE_HAIKU_FALLBACK_MODEL
+        )
+
+    def test_discovery_can_be_disabled(self, monkeypatch):
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "chunkhound.core.config.claude_model_resolution."
+            "get_latest_available_haiku_model",
+            lambda api_key=None: pytest.fail("discovery should not run"),
+        )
+
+        assert resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            discover=False,
+        ) == CLAUDE_HAIKU_FALLBACK_MODEL
+
+    def test_model_discovery_picks_newest_haiku(self, monkeypatch):
+        class FakeModels:
+            def list(self, **kwargs):
+                return [
+                    SimpleNamespace(
+                        id="claude-sonnet-4-6",
+                        created_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+                    ),
+                    SimpleNamespace(
+                        id="claude-haiku-4-5-20251001",
+                        created_at=datetime(2025, 10, 1, tzinfo=timezone.utc),
+                    ),
+                    SimpleNamespace(
+                        id="claude-haiku-4-6-20260101",
+                        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    ),
+                ]
+
+        class FakeAnthropic:
+            def __init__(self, **kwargs):
+                self.models = FakeModels()
+
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+        assert resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            "sk-ant-test",
+        ) == "claude-haiku-4-6-20260101"
+
+    def test_model_discovery_failure_uses_fallback(self, monkeypatch):
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+
+        class FakeAnthropic:
+            def __init__(self, **kwargs):
+                raise RuntimeError("network unavailable")
+
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+        assert resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL,
+            "sk-ant-test",
+        ) == CLAUDE_HAIKU_FALLBACK_MODEL
+
+    @staticmethod
+    def _all_fake_models():
+        """Return mock models for all three tiers."""
+        return [
+            SimpleNamespace(
+                id="claude-haiku-4-6-20260101",
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+            SimpleNamespace(
+                id="claude-sonnet-4-6-20260217",
+                created_at=datetime(2026, 2, 17, tzinfo=timezone.utc),
+            ),
+            SimpleNamespace(
+                id="claude-opus-4-7-20260416",
+                created_at=datetime(2026, 4, 16, tzinfo=timezone.utc),
+            ),
+        ]
+
+    def _make_counting_anthropic(self, monkeypatch):
+        """Create a CountingAnthropic mock that tracks API calls."""
+        import anthropic
+
+        class _FakeModels:
+            def list(self, **kwargs):
+                return TestClaudeHaikuModelResolution._all_fake_models()
+
+        class CountingAnthropic:
+            def __init__(self, **kwargs):
+                CountingAnthropic.call_count += 1
+                self.models = _FakeModels()
+
+        CountingAnthropic.call_count = 0
+        monkeypatch.setattr(anthropic, "Anthropic", CountingAnthropic)
+        return CountingAnthropic
+
+    def _make_api_key_sensitive_anthropic(self, monkeypatch):
+        """Create a mock whose visible models differ per API key."""
+        import anthropic
+
+        class _FakeModels:
+            def __init__(self, api_key: str):
+                self._api_key = api_key
+
+            def list(self, **kwargs):
+                suffix = "A" if self._api_key.endswith("test") else "B"
+                return [
+                    SimpleNamespace(
+                        id=f"claude-haiku-4-6-20260101-{suffix}",
+                        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    ),
+                    SimpleNamespace(
+                        id=f"claude-sonnet-4-6-20260217-{suffix}",
+                        created_at=datetime(2026, 2, 17, tzinfo=timezone.utc),
+                    ),
+                    SimpleNamespace(
+                        id=f"claude-opus-4-7-20260416-{suffix}",
+                        created_at=datetime(2026, 4, 16, tzinfo=timezone.utc),
+                    ),
+                ]
+
+        class CountingAnthropic:
+            call_count = 0
+
+            def __init__(self, **kwargs):
+                CountingAnthropic.call_count += 1
+                self.models = _FakeModels(kwargs["api_key"])
+
+        monkeypatch.setattr(anthropic, "Anthropic", CountingAnthropic)
+        return CountingAnthropic
+
+    def test_same_api_key_returns_cached_result(self, monkeypatch):
+        """Same API key must get a cache hit — no redundant discovery calls."""
+        counter = self._make_counting_anthropic(monkeypatch)
+
+        result1 = resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL, "sk-ant-test"
+        )
+        result2 = resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL, "sk-ant-test"
+        )
+        assert result1 == result2
+        assert counter.call_count == 1  # Cache hit on second call
+
+    def test_model_discovery_cache_isolated_by_api_key(self, monkeypatch):
+        """Different Anthropic accounts must not share discovered model caches."""
+        counter = self._make_api_key_sensitive_anthropic(monkeypatch)
+
+        result1 = resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL, "sk-ant-test"
+        )
+        assert result1 == "claude-haiku-4-6-20260101-A"
+        assert counter.call_count == 1
+
+        result2 = resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL, "sk-ant-different-key"
+        )
+        assert result2 == "claude-haiku-4-6-20260101-B"
+        assert counter.call_count == 2
+
+    def test_clear_haiku_cache_resets_state(self, monkeypatch):
+        """clear_haiku_cache() causes re-discovery on next call."""
+        counter = self._make_counting_anthropic(monkeypatch)
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL", raising=False)
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL", raising=False)
+
+        # Populate cache
+        resolve_claude_haiku_model(CLAUDE_HAIKU_DEFAULT_SENTINEL, "sk-ant-test")
+        assert counter.call_count == 1
+
+        # Clear and re-discover — must hit API again
+        clear_haiku_cache()
+        result = resolve_claude_haiku_model(
+            CLAUDE_HAIKU_DEFAULT_SENTINEL, "sk-ant-test"
+        )
+        assert result == "claude-haiku-4-6-20260101"
+        assert counter.call_count == 2  # Re-discovered after clear
+
+    def test_model_discovery_cache_isolated_by_env_api_key(self, monkeypatch):
+        """Env-derived Anthropic accounts must not share discovered model caches."""
+        counter = self._make_api_key_sensitive_anthropic(monkeypatch)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+        result1 = resolve_claude_haiku_model(CLAUDE_HAIKU_DEFAULT_SENTINEL)
+        assert result1 == "claude-haiku-4-6-20260101-A"
+        assert counter.call_count == 1
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-different-key")
+        result2 = resolve_claude_haiku_model(CLAUDE_HAIKU_DEFAULT_SENTINEL)
+        assert result2 == "claude-haiku-4-6-20260101-B"
+        assert counter.call_count == 2
+
+    # ── Sonnet / Opus sentinel tests ─────────────────────────────────────
+
+    def test_sonnet_sentinel_passes_through_explicit_name(self):
+        """Explicit sonnet model name passes through unchanged."""
+        assert resolve_claude_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
+
+    def test_opus_sentinel_passes_through_explicit_name(self):
+        """Explicit opus model name passes through unchanged."""
+        assert resolve_claude_model("claude-opus-4-7") == "claude-opus-4-7"
+
+    def test_sonnet_env_override_wins(self, monkeypatch):
+        """Sonnet sentinel honors the ChunkHound env override."""
+        monkeypatch.setenv(
+            "CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL",
+            "claude-sonnet-4-6-20260217",
+        )
+        assert resolve_claude_model(CLAUDE_SONNET_SENTINEL) == (
+            "claude-sonnet-4-6-20260217"
+        )
+
+    def test_opus_env_override_wins(self, monkeypatch):
+        """Opus sentinel honors the ChunkHound env override."""
+        monkeypatch.setenv(
+            "CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL",
+            "claude-opus-4-7-20260416",
+        )
+        assert resolve_claude_model(CLAUDE_OPUS_SENTINEL) == (
+            "claude-opus-4-7-20260416"
+        )
+
+    def test_sonnet_discovery_can_be_disabled(self, monkeypatch):
+        """Sonnet sentinel returns the pinned fallback when discovery is off."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "chunkhound.core.config.claude_model_resolution._discover_latest_model",
+            lambda *args, **kwargs: pytest.fail("discovery should not run"),
+        )
+
+        assert resolve_claude_model(CLAUDE_SONNET_SENTINEL, discover=False) == (
+            CLAUDE_SONNET_FALLBACK
+        )
+
+    def test_opus_discovery_can_be_disabled(self, monkeypatch):
+        """Opus sentinel returns the pinned fallback when discovery is off."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "chunkhound.core.config.claude_model_resolution._discover_latest_model",
+            lambda *args, **kwargs: pytest.fail("discovery should not run"),
+        )
+
+        assert resolve_claude_model(CLAUDE_OPUS_SENTINEL, discover=False) == (
+            CLAUDE_OPUS_FALLBACK
+        )
+
+    def test_sonnet_sentinel_discovery_cached_independently(
+        self, monkeypatch
+    ):
+        """Sonnet cache entry is independent of Haiku."""
+        counter = self._make_api_key_sensitive_anthropic(monkeypatch)
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL", raising=False)
+
+        result1 = resolve_claude_model(
+            CLAUDE_SONNET_SENTINEL, "sk-ant-test", discover=True
+        )
+        assert result1 == "claude-sonnet-4-6-20260217-A"
+        assert counter.call_count == 1
+
+        result2 = resolve_claude_model(
+            CLAUDE_SONNET_SENTINEL, "sk-ant-different", discover=True
+        )
+        assert result2 == "claude-sonnet-4-6-20260217-B"
+        assert counter.call_count == 2
+
+    def test_opus_sentinel_discovery_cached_independently(
+        self, monkeypatch
+    ):
+        """Opus cache entry is independent of Haiku and Sonnet."""
+        counter = self._make_api_key_sensitive_anthropic(monkeypatch)
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL", raising=False)
+
+        result1 = resolve_claude_model(
+            CLAUDE_OPUS_SENTINEL, "sk-ant-test", discover=True
+        )
+        assert result1 == "claude-opus-4-7-20260416-A"
+        assert counter.call_count == 1
+
+        result2 = resolve_claude_model(
+            CLAUDE_OPUS_SENTINEL, "sk-ant-different", discover=True
+        )
+        assert result2 == "claude-opus-4-7-20260416-B"
+        assert counter.call_count == 2
+
+    def test_sentinels_have_independent_cache_entries(
+        self, monkeypatch
+    ):
+        """Each sentinel has its own cache entry; discovering one does not
+        populate another."""
+        counter = self._make_counting_anthropic(monkeypatch)
+        for env in (
+            "CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL",
+            "CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL",
+            "CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL",
+        ):
+            monkeypatch.delenv(env, raising=False)
+
+        # Discover Haiku first
+        resolve_claude_model(CLAUDE_HAIKU_SENTINEL, "sk-ant-test", discover=True)
+        assert counter.call_count == 1
+
+        # Discover Sonnet — must make a new API call
+        resolve_claude_model(CLAUDE_SONNET_SENTINEL, "sk-ant-test", discover=True)
+        assert counter.call_count == 2
+
+        # Discover Opus — must make another API call
+        resolve_claude_model(CLAUDE_OPUS_SENTINEL, "sk-ant-test", discover=True)
+        assert counter.call_count == 3
+
+    def test_sonnet_sentinel_no_api_key_uses_fallback(self, monkeypatch):
+        """Sonnet sentinel without API key returns fallback."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        result = resolve_claude_model(CLAUDE_SONNET_SENTINEL, discover=True)
+        assert result == CLAUDE_SONNET_FALLBACK
+
+    def test_opus_sentinel_no_api_key_uses_fallback(self, monkeypatch):
+        """Opus sentinel without API key returns fallback."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        result = resolve_claude_model(CLAUDE_OPUS_SENTINEL, discover=True)
+        assert result == CLAUDE_OPUS_FALLBACK
+
+    def test_clear_claude_cache_clears_all(self, monkeypatch):
+        """clear_claude_cache() clears cache for all sentinels."""
+        counter = self._make_counting_anthropic(monkeypatch)
+        for env in (
+            "CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL",
+            "CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL",
+            "CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL",
+        ):
+            monkeypatch.delenv(env, raising=False)
+
+        # Populate all three caches
+        for sentinel in (
+            CLAUDE_HAIKU_SENTINEL,
+            CLAUDE_SONNET_SENTINEL,
+            CLAUDE_OPUS_SENTINEL,
+        ):
+            resolve_claude_model(sentinel, "sk-ant-test", discover=True)
+        assert counter.call_count == 3
+
+        # Clear all and re-discover one — must hit API again
+        clear_claude_cache()
+        resolve_claude_model(CLAUDE_HAIKU_SENTINEL, "sk-ant-test", discover=True)
+        assert counter.call_count == 4  # Re-discovered after full clear
+
+    def test_clear_claude_cache_for_sentinel_clears_all_api_key_identities(
+        self, monkeypatch
+    ):
+        """Sentinel clear must remove cached discoveries for every account identity."""
+        counter = self._make_api_key_sensitive_anthropic(monkeypatch)
+        for env in (
+            "CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL",
+            "CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL",
+            "CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL",
+        ):
+            monkeypatch.delenv(env, raising=False)
+
+        resolve_claude_model(CLAUDE_HAIKU_SENTINEL, "sk-ant-test", discover=True)
+        resolve_claude_model(
+            CLAUDE_HAIKU_SENTINEL, "sk-ant-different-key", discover=True
+        )
+        assert counter.call_count == 2
+
+        clear_claude_cache(CLAUDE_HAIKU_SENTINEL)
+        result = resolve_claude_model(
+            CLAUDE_HAIKU_SENTINEL, "sk-ant-test", discover=True
+        )
+        assert result == "claude-haiku-4-6-20260101-A"
+        assert counter.call_count == 3
 
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
@@ -1249,6 +1768,251 @@ class TestRequestShape:
     stays intact and that prompt_caching / effort / thinking flow into the
     correct API parameters.
     """
+
+    @staticmethod
+    def _text_response():
+        from unittest.mock import MagicMock
+
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = "ok"
+        response = MagicMock()
+        response.content = [text_block]
+        response.stop_reason = "end_turn"
+        response.usage = MagicMock(input_tokens=10, output_tokens=5)
+        return response
+
+    @staticmethod
+    async def _stream_events():
+        yield SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            ),
+        )
+        yield SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(text="ok"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_complete_applies_sdk_096_request_fields(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            thinking_enabled=True,
+            thinking_mode="adaptive",
+            thinking_display="summarized",
+            effort="medium",
+            prompt_caching=True,
+            cache_ttl="1h",
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+
+        response = await provider.complete(
+            "hello",
+            system="sys",
+            max_completion_tokens=1234,
+            timeout=12,
+        )
+
+        assert response.content == "ok"
+        assert provider._client.beta.messages.create.call_args is None
+        kwargs = provider._client.messages.create.call_args.kwargs
+        assert kwargs["model"] == "claude-sonnet-4-6"
+        assert kwargs["messages"] == [{"role": "user", "content": "hello"}]
+        assert kwargs["system"] == "sys"
+        assert kwargs["max_tokens"] == 1234
+        assert kwargs["timeout"] == 12
+        assert kwargs["thinking"] == {
+            "type": "adaptive",
+            "display": "summarized",
+        }
+        assert kwargs["output_config"] == {"effort": "medium"}
+        assert kwargs["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+        assert "betas" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_opus_48_emits_adaptive_thinking_and_xhigh_effort(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-8",
+            thinking_enabled=True,
+            effort="xhigh",
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+
+        await provider.complete("hello")
+
+        # Plain adaptive request: no beta features, so the standard endpoint.
+        assert provider._client.beta.messages.create.call_args is None
+        kwargs = provider._client.messages.create.call_args.kwargs
+        assert kwargs["model"] == "claude-opus-4-8"
+        # Opus 4.8 is adaptive-only; auto thinking must go out as adaptive.
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        # xhigh is a 4.7/4.8-only effort level and must reach output_config.
+        assert kwargs["output_config"] == {"effort": "xhigh"}
+
+    @pytest.mark.asyncio
+    async def test_opus_48_manual_thinking_falls_back_to_adaptive(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-8",
+            thinking_enabled=True,
+            thinking_mode="manual",
+            thinking_budget_tokens=8000,
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+
+        await provider.complete("hello")
+
+        # Opus 4.8 rejects thinking.type=enabled, so a manual/budgeted request
+        # must go out as adaptive (no budget_tokens), not the enabled shape.
+        kwargs = provider._client.messages.create.call_args.kwargs
+        assert kwargs["thinking"] == {"type": "adaptive"}
+
+    @pytest.mark.asyncio
+    async def test_complete_with_tools_routes_strict_tools_to_beta(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            thinking_enabled=True,
+            thinking_mode="adaptive",
+            prompt_caching=True,
+            effort="medium",
+        )
+        response = self._text_response()
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(return_value=response)
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(return_value=response)
+
+        tool = {
+            "name": "lookup",
+            "description": "Lookup data",
+            "input_schema": {"type": "object", "properties": {}},
+            "strict": True,
+        }
+        llm_response, tool_uses = await provider.complete_with_tools(
+            "hello",
+            [tool],
+            system="sys",
+            tool_choice={"type": "auto"},
+        )
+
+        assert llm_response.content == "ok"
+        assert tool_uses == []
+        assert provider._client.messages.create.call_args is None
+        kwargs = provider._client.beta.messages.create.call_args.kwargs
+        assert kwargs["betas"] == [BETA_STRUCTURED_OUTPUTS]
+        assert kwargs["tools"] == [tool]
+        assert kwargs["tool_choice"] == {"type": "auto"}
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        assert kwargs["output_config"] == {"effort": "medium"}
+        assert kwargs["cache_control"] == {"type": "ephemeral"}
+
+    @pytest.mark.asyncio
+    async def test_complete_with_tools_suppresses_thinking_for_forced_tool(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            thinking_enabled=True,
+            thinking_mode="adaptive",
+            context_management_enabled=True,
+        )
+        response = self._text_response()
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(return_value=response)
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(return_value=response)
+
+        tool = {
+            "name": "lookup",
+            "description": "Lookup data",
+            "input_schema": {"type": "object", "properties": {}},
+        }
+        await provider.complete_with_tools(
+            "hello",
+            [tool],
+            tool_choice={"type": "tool", "name": "lookup"},
+        )
+
+        kwargs = provider._client.beta.messages.create.call_args.kwargs
+        assert kwargs["betas"] == [BETA_CONTEXT_MANAGEMENT]
+        assert "thinking" not in kwargs
+        assert kwargs["context_management"] == {
+            "edits": [{"type": "clear_tool_uses_20250919"}],
+        }
+
+    @pytest.mark.asyncio
+    async def test_complete_streaming_applies_request_fields_and_beta_routing(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-sonnet-4-6",
+            context_management_enabled=True,
+            effort="medium",
+            prompt_caching=True,
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._stream_events(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._stream_events(),
+        )
+
+        chunks = [chunk async for chunk in provider.complete_streaming("hello")]
+
+        assert chunks == ["ok"]
+        assert provider._client.messages.create.call_args is None
+        kwargs = provider._client.beta.messages.create.call_args.kwargs
+        assert kwargs["betas"] == [BETA_CONTEXT_MANAGEMENT]
+        assert kwargs["stream"] is True
+        assert kwargs["output_config"] == {"effort": "medium"}
+        assert kwargs["cache_control"] == {"type": "ephemeral"}
+        assert kwargs["context_management"] == {
+            "edits": [{"type": "clear_tool_uses_20250919"}],
+        }
 
     @pytest.mark.asyncio
     async def test_complete_structured_uses_output_config_format(self):
@@ -1281,9 +2045,9 @@ class TestRequestShape:
         }
         await provider.complete_structured("hello", schema)
 
-        # Prompt caching is on by default, output_config now carries both
-        # effort and the JSON schema. Structured outputs is GA, so the call
-        # should go to the standard endpoint with no beta headers.
+        # Prompt caching is off by default. output_config carries both effort
+        # and the JSON schema. Structured outputs is GA, so the call should go
+        # to the standard endpoint with no beta headers.
         std_called = provider._client.messages.create.call_args
         beta_called = provider._client.beta.messages.create.call_args
         assert std_called is not None, (
@@ -1296,7 +2060,7 @@ class TestRequestShape:
             "effort": "medium",
             "format": {"type": "json_schema", "schema": schema},
         }
-        assert kwargs["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in kwargs
         assert "output_format" not in kwargs
         assert "betas" not in kwargs
 

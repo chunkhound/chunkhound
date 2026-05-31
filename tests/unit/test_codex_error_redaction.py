@@ -1,25 +1,10 @@
 import asyncio
-import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-
-class _DummyProc:
-    def __init__(self, rc: int = 1, out: bytes = b"", err: bytes = b"") -> None:
-        self.returncode = rc
-        self._out = out
-        self._err = err
-        self.stdin = None
-
-    async def communicate(self):  # pragma: no cover - exercised indirectly
-        return self._out, self._err
-
-    def kill(self) -> None:  # pragma: no cover - trivial
-        return None
-
-    async def wait(self) -> None:  # pragma: no cover - trivial
-        return None
+from tests.helpers import DummyProc
 
 
 @pytest.mark.asyncio
@@ -54,14 +39,19 @@ async def test_codex_error_redaction(monkeypatch, tmp_path: Path):
     )
 
     async def _fake_create_subprocess_exec(*args, **kwargs):  # noqa: ANN001
-        return _DummyProc(rc=2, out=b"", err=secret)
+        return DummyProc(rc=2, out=b"", err=secret)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
 
-    prov = CodexCLIProvider(model="codex", max_retries=1)
+    with patch.object(
+        CodexCLIProvider,
+        "get_highest_priority_available_model",
+        return_value="test-discovered-model",
+    ):
+        prov = CodexCLIProvider(model="codex", max_retries=1)
 
-    with pytest.raises(RuntimeError) as ei:
-        await prov._run_exec("ping", cwd=None, max_tokens=32, timeout=10, model="codex")  # type: ignore[attr-defined]
+        with pytest.raises(RuntimeError) as ei:
+            await prov._run_exec("ping", cwd=None, max_tokens=32, timeout=10, model="codex")  # type: ignore[attr-defined]
 
     msg = str(ei.value)
     # Secret substrings should be redacted
@@ -71,5 +61,5 @@ async def test_codex_error_redaction(monkeypatch, tmp_path: Path):
     assert "[REDACTED]" in msg
     # Overlay should be cleaned
     assert not overlay_dir.exists(), "overlay CODEX_HOME should be removed after error"
-    # "codex" alias should resolve to the default Codex model
-    assert requested_model.get("value") == "gpt-5.1-codex"
+    # "codex" alias should resolve to the mocked discovered model
+    assert requested_model.get("value") == "test-discovered-model"

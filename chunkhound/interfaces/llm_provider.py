@@ -103,6 +103,12 @@ class LLMProvider(ABC):
         """Model identifier."""
         ...
 
+    @property
+    @abstractmethod
+    def timeout(self) -> int:
+        """Request timeout in seconds."""
+        ...
+
     @abstractmethod
     async def complete(
         self,
@@ -122,6 +128,9 @@ class LLMProvider(ABC):
 
         Returns:
             LLMResponse with content and metadata
+
+        Raises:
+            RuntimeError: If the API call fails for any reason.
         """
         ...
 
@@ -131,24 +140,27 @@ class LLMProvider(ABC):
         json_schema: dict[str, Any],
         system: str | None = None,
         max_completion_tokens: int = 4096,
+        timeout: int | None = None,
     ) -> dict[str, Any]:
         """
-        Generate a structured JSON completion conforming to the given schema.
+        Generate a structured JSON completion for the given schema.
 
-        Uses native structured outputs with constrained decoding for guaranteed
-        valid, parseable output.
+        Implementations may use native constrained decoding or a fallback that
+        injects the schema into the prompt and validates the parsed response.
 
         Args:
             prompt: User prompt
             json_schema: JSON Schema definition for structured output
             system: Optional system message
             max_completion_tokens: Maximum completion tokens to generate
+            timeout: Optional timeout in seconds for the request
 
         Returns:
-            Parsed JSON object conforming to schema
+            Parsed JSON object accepted by the provider's structured-output path
 
         Raises:
             NotImplementedError: If provider doesn't support structured outputs
+            RuntimeError: If the API call fails for any reason.
         """
         raise NotImplementedError(
             f"{self.name} provider does not support structured outputs"
@@ -165,7 +177,8 @@ class LLMProvider(ABC):
         Generate a typed structured completion using a Pydantic model.
 
         This is the recommended way to use structured outputs - provides type
-        safety, IDE autocomplete, and automatic schema generation.
+        safety, IDE autocomplete, automatic schema generation, and final
+        Pydantic validation.
 
         Automatically normalizes the schema by adding 'additionalProperties: false'
         to all object types, as required by Anthropic's structured outputs API.
@@ -260,7 +273,8 @@ class LLMProvider(ABC):
 
         Returns:
             Number of concurrent synthesis tasks this provider can handle.
-            Used for map-reduce synthesis to execute cluster summaries in parallel.
-            Default implementations return provider-specific values based on rate limits.
+            Used for map-reduce synthesis to execute cluster summaries in
+            parallel. Default implementations return provider-specific values
+            based on rate limits.
         """
         return 3  # Conservative default

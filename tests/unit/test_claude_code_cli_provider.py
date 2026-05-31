@@ -2,11 +2,16 @@
 
 import asyncio
 import json
-import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from chunkhound.core.config.claude_model_resolution import (
+    CLAUDE_HAIKU_SENTINEL,
+    CLAUDE_OPUS_SENTINEL,
+    CLAUDE_SONNET_SENTINEL,
+)
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.interfaces.llm_provider import LLMResponse
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 
@@ -39,24 +44,90 @@ class TestClaudeCodeCLIProvider:
         """Test that model name is stored correctly."""
         assert provider.model == "claude-sonnet-4-5-20250929"
 
-    def test_model_mapping(self, provider):
-        """Test model name to CLI argument mapping."""
-        # CLI accepts full model names directly - no mapping needed
-        assert (
-            provider._map_model_to_cli_arg("claude-sonnet-4-5-20250929")
-            == "claude-sonnet-4-5-20250929"
-        )
-        assert (
-            provider._map_model_to_cli_arg("claude-3-5-sonnet-20241022")
-            == "claude-3-5-sonnet-20241022"
-        )
-        assert (
-            provider._map_model_to_cli_arg("claude-3-5-haiku-20241022")
-            == "claude-3-5-haiku-20241022"
+    def test_default_model_is_haiku(self, monkeypatch):
+        """Test that Claude CLI defaults to the shared Haiku sentinel."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        provider = ClaudeCodeCLIProvider()
+        assert provider.model == CLAUDE_HAIKU_SENTINEL
+
+    def test_default_model_stores_sentinel_when_no_chunkhound_override(
+        self, monkeypatch
+    ):
+        """Without a ChunkHound override, the CLI sentinel stays unresolved."""
+        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(
+            "chunkhound.core.config.claude_model_resolution."
+            "get_latest_available_haiku_model",
+            lambda api_key=None: pytest.fail("discovery should not run"),
         )
 
-        # Any model name is passed through as-is
-        assert provider._map_model_to_cli_arg("custom-model") == "custom-model"
+        provider = ClaudeCodeCLIProvider()
+        assert provider.model == CLAUDE_HAIKU_SENTINEL
+
+    def test_chunkhound_env_override_resolves_before_cli(self, monkeypatch):
+        """ChunkHound Claude overrides still pin the CLI model."""
+        monkeypatch.setenv(
+            "CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL",
+            "claude-sonnet-4-6-20260217",
+        )
+
+        provider = ClaudeCodeCLIProvider(model=CLAUDE_SONNET_SENTINEL)
+
+        assert provider.model == "claude-sonnet-4-6-20260217"
+
+    @pytest.mark.asyncio
+    async def test_complete_uses_cli_alias_for_sentinel(
+        self, mock_subprocess
+    ):
+        """Sentinels reach the subprocess as bare Claude CLI aliases."""
+        provider = ClaudeCodeCLIProvider(model=CLAUDE_SONNET_SENTINEL)
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"Test response", b"")
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("Test prompt")
+
+        cmd = mock_subprocess.call_args.args
+        assert cmd[cmd.index("--model") + 1] == "sonnet"
+
+    @pytest.mark.asyncio
+    async def test_complete_uses_chunkhound_env_override_model(
+        self, mock_subprocess, monkeypatch
+    ):
+        """ChunkHound Claude overrides must reach the CLI unchanged."""
+        monkeypatch.setenv(
+            "CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL",
+            "claude-opus-4-7-20260416",
+        )
+        provider = ClaudeCodeCLIProvider(model=CLAUDE_OPUS_SENTINEL)
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"Test response", b"")
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("Test prompt")
+
+        cmd = mock_subprocess.call_args.args
+        assert cmd[cmd.index("--model") + 1] == "claude-opus-4-7-20260416"
+
+    @pytest.mark.asyncio
+    async def test_complete_uses_explicit_full_model_name(
+        self, mock_subprocess
+    ):
+        """Explicit Claude model names must reach the CLI unchanged."""
+        provider = ClaudeCodeCLIProvider(model="claude-sonnet-4-5-20250929")
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"Test response", b"")
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("Test prompt")
+
+        cmd = mock_subprocess.call_args.args
+        assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-5-20250929"
 
     @pytest.mark.asyncio
     async def test_complete_success(self, provider, mock_subprocess):
@@ -110,6 +181,40 @@ class TestClaudeCodeCLIProvider:
         # Verify process was killed and waited for (3 times due to retries)
         assert mock_process.kill.call_count == 3  # max_retries = 3
         assert mock_process.wait.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_complete_timeout_ignores_stale_process_lookup_error(
+        self, provider, mock_subprocess
+    ):
+        """Stale process cleanup must not mask the timeout error."""
+        mock_process = AsyncMock()
+        mock_process.returncode = None
+        mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_process.kill = MagicMock(side_effect=ProcessLookupError())
+        mock_process.wait = AsyncMock()
+        mock_subprocess.return_value = mock_process
+
+        with pytest.raises(RuntimeError, match="CLI command timed out"):
+            await provider.complete("Test prompt", timeout=1)
+
+        assert mock_process.wait.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_complete_generic_failure_ignores_stale_process_lookup_error(
+        self, provider, mock_subprocess
+    ):
+        """Unexpected failures must survive stale process cleanup."""
+        mock_process = AsyncMock()
+        mock_process.returncode = None
+        mock_process.communicate = AsyncMock(side_effect=ValueError("boom"))
+        mock_process.kill = MagicMock(side_effect=ProcessLookupError())
+        mock_process.wait = AsyncMock()
+        mock_subprocess.return_value = mock_process
+
+        with pytest.raises(RuntimeError, match="CLI command failed: boom"):
+            await provider.complete("Test prompt")
+
+        assert mock_process.wait.await_count == 3
 
     @pytest.mark.asyncio
     async def test_complete_cli_error(self, provider, mock_subprocess):
@@ -201,7 +306,65 @@ class TestClaudeCodeCLIProvider:
             "required": ["result", "data"],
         }
 
-        with pytest.raises(RuntimeError, match="Missing required fields"):
+        with pytest.raises(RuntimeError, match="schema validation failed"):
+            await provider.complete_structured("Test prompt", schema)
+
+    @pytest.mark.asyncio
+    async def test_complete_structured_rejects_additional_properties(
+        self, provider, mock_subprocess
+    ):
+        """Test full JSON Schema validation in CLI fallback mode."""
+        json_response = {"result": "success", "extra": True}
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (
+            json.dumps(json_response).encode("utf-8"),
+            b"",
+        )
+        mock_subprocess.return_value = mock_process
+
+        schema = {
+            "type": "object",
+            "properties": {"result": {"type": "string"}},
+            "required": ["result"],
+            "additionalProperties": False,
+        }
+
+        with pytest.raises(RuntimeError, match="schema validation failed"):
+            await provider.complete_structured("Test prompt", schema)
+
+    @pytest.mark.asyncio
+    async def test_complete_structured_rejects_nested_schema_violation(
+        self, provider, mock_subprocess
+    ):
+        """Nested array/object constraints must be enforced."""
+        json_response = {"items": [{"label": 7}]}
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (
+            json.dumps(json_response).encode("utf-8"),
+            b"",
+        )
+        mock_subprocess.return_value = mock_process
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"label": {"type": "string"}},
+                        "required": ["label"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+
+        with pytest.raises(RuntimeError, match="schema validation failed"):
             await provider.complete_structured("Test prompt", schema)
 
     @pytest.mark.asyncio
@@ -315,8 +478,17 @@ class TestClaudeCodeCLIProvider:
         # Should have tried max_retries (3) times
         assert mock_subprocess.call_count == 3
 
+    def test_default_timeout(self):
+        """Test that default timeout (no explicit param) resolves to 120."""
+        p = ClaudeCodeCLIProvider()
+        assert p.timeout == DEFAULT_LLM_TIMEOUT
+
     @pytest.mark.asyncio
-    async def test_timeout_with_already_terminated_process(self, provider, mock_subprocess):
+    async def test_timeout_with_already_terminated_process(
+        self,
+        provider,
+        mock_subprocess,
+    ):
         """Test that process is not killed if already terminated."""
         # Mock process that terminates before we can kill it
         mock_process = AsyncMock()

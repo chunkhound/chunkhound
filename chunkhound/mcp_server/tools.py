@@ -6,11 +6,18 @@ registry that the stdio server uses for tool definitions.
 The registry pattern ensures consistent tool metadata and behavior.
 """
 
+import asyncio
 import inspect
 import json
+import os
+import re
+import shutil
+import tempfile
 import types
+import urllib.error
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, TypedDict, Union, cast, get_args, get_origin
 
 try:
@@ -301,58 +308,81 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 3
 
 
-def limit_response_size(
-    response_data: SearchResponse, max_tokens: int = MAX_RESPONSE_TOKENS
-) -> SearchResponse:
-    """Limit response size to fit within token limits by reducing results."""
-    if not response_data.get("results"):
-        return response_data
+_BACKTICK_RUN_RE = re.compile(r"`+")
 
-    # Start with full response and iteratively reduce until under limit
-    limited_results = response_data["results"][:]
 
-    while limited_results:
-        # Create test response with current results
-        test_response = {
-            "results": limited_results,
-            "pagination": response_data["pagination"],
-        }
+def format_search_results_markdown(
+    results: list[dict[str, Any]],
+    pagination: dict[str, Any],
+    search_type: str,
+) -> str:
+    """Render search results as lean markdown for MCP responses.
 
-        # Estimate token count
-        response_text = json.dumps(test_response, default=str)
-        token_count = estimate_tokens(response_text)
+    Drops chunk_id, chunk_type, language, metadata, file_extension,
+    line_count, code_preview, is_truncated, similarity_percentage.
+    Retains file_path, line range, symbol/name, content, and (for semantic
+    search) similarity percentage. Appends a pagination footer.
+    """
+    if not results:
+        return "No results found."
 
-        if token_count <= max_tokens:
-            # Update pagination to reflect actual returned results
-            actual_count = len(limited_results)
-            updated_pagination = response_data["pagination"].copy()
-            updated_pagination["page_size"] = actual_count
-            updated_pagination["has_more"] = updated_pagination.get(
-                "has_more", False
-            ) or actual_count < len(response_data["results"])
-            if actual_count < len(response_data["results"]):
-                updated_pagination["next_offset"] = (
-                    updated_pagination.get("offset", 0) + actual_count
-                )
+    blocks: list[str] = []
+    for result in results:
+        file_path: str = result.get("file_path") or "unknown"
+        start_line: int | None = result.get("start_line")
+        end_line: int | None = result.get("end_line")
+        content: str = result.get("content") or ""
+        symbol: str | None = result.get("symbol") or result.get("name")
+        similarity: float | None = result.get("similarity")
 
-            return {"results": limited_results, "pagination": updated_pagination}
+        lang = result.get("language") or ""
+        lang_hint = "" if lang == "unknown" else lang
 
-        # Remove results from the end to reduce size
-        # Remove in chunks for efficiency
-        reduction_size = max(1, len(limited_results) // 4)
-        limited_results = limited_results[:-reduction_size]
+        # Heading: ## `path` L10–L20 — Symbol (92%)
+        parts: list[str] = [f"## `{file_path}`"]
+        if start_line is not None:
+            line_range = (
+                f"L{start_line}–L{end_line}"
+                if end_line is not None and end_line != start_line
+                else f"L{start_line}"
+            )
+            parts.append(line_range)
+        if symbol:
+            parts.append(f"— {symbol}")
+        if search_type == "semantic" and similarity is not None:
+            pct = int(round(similarity * 100))
+            parts.append(f"({pct}%)")
 
-    # If even empty results exceed token limit, return minimal response
-    return {
-        "results": [],
-        "pagination": {
-            "offset": response_data["pagination"].get("offset", 0),
-            "page_size": 0,
-            "has_more": len(response_data["results"]) > 0,
-            "total": response_data["pagination"].get("total", 0),
-            "next_offset": None,
-        },
-    }
+        heading = " ".join(parts)
+        # Use a fence longer than any backtick run in the content (CommonMark §6.1).
+        max_run = max((len(m.group()) for m in _BACKTICK_RUN_RE.finditer(content)), default=0)
+        fence = "`" * max(3, max_run + 1)
+        block = f"{heading}\n\n{fence}{lang_hint}\n{content}\n{fence}"
+        blocks.append(block)
+
+    body = "\n\n---\n\n".join(blocks)
+
+    # Pagination footer
+    offset: int = pagination.get("offset", 0)
+    total: int | None = pagination.get("total")
+    has_more: bool = pagination.get("has_more", False)
+    next_offset: int | None = pagination.get("next_offset")
+    page_size: int = pagination.get("page_size", len(results))
+
+    start_num = offset + 1
+    end_num = offset + len(results)
+
+    if total is not None and page_size:
+        total_pages = max(1, -(-total // page_size))
+        current_page = (offset // page_size) + 1
+        footer = f"Page {current_page} of {total_pages} (results {start_num}–{end_num} of {total})"
+    else:
+        footer = f"Results {start_num}–{end_num}"
+
+    if has_more and next_offset is not None:
+        footer += f" | next_offset={next_offset}"
+
+    return f"{body}\n\n---\n{footer}"
 
 
 # =============================================================================
@@ -372,7 +402,7 @@ DECISION GUIDE:
 - Concept or behavior → semantic
 - Cross-file architecture question → call code_research first
 
-OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
+OUTPUT: Markdown blocks — file path, line range, symbol name, code block, pagination footer."""
 
 SEARCH_DESCRIPTION_NO_RESEARCH = """Pinpoint specific code locations — find exact symbols, patterns, or concepts in the indexed codebase. Returns structurally-parsed code chunks (functions, classes) — large definitions may span multiple results.
 
@@ -386,7 +416,7 @@ DECISION GUIDE:
 - Known symbol or pattern → regex
 - Concept or behavior → semantic
 
-OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
+OUTPUT: Markdown blocks — file path, line range, symbol name, code block, pagination footer."""
 
 CODE_RESEARCH_DESCRIPTION = """Start here for any coding task. Call code_research first to understand the relevant code area before writing or modifying code.
 
@@ -417,6 +447,8 @@ USE FOR:
 
 OUTPUT: {status, query_ready, scan_progress}
 NOTE: Query readiness is derived from scan state on this branch."""
+
+WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, build a transient in-memory index over the fetched pages, and run deep research to produce a cited answer. Use when the question requires external documentation, library references, or up-to-date web content — not for searching the local codebase (use `code_research` for that). High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
 
 
 # =============================================================================
@@ -503,11 +535,9 @@ async def search_impl(
     # Convert file paths to native platform format
     native_results = _convert_paths_to_native(results)
 
-    # Apply response size limiting
-    response = cast(
+    return cast(
         SearchResponse, {"results": native_results, "pagination": pagination}
     )
-    return limit_response_size(response)
 
 
 @register_tool(
@@ -598,6 +628,117 @@ async def deep_research_impl(
     return await research_service.deep_research(query)
 
 
+@register_tool(
+    description=WEBSEARCH_DESCRIPTION,
+    requires_embeddings=True,
+    requires_llm=True,
+    requires_reranker=True,
+    name="websearch",
+)
+async def websearch_impl(
+    embedding_manager: EmbeddingManager,
+    llm_manager: LLMManager | None,
+    config: Config | None,
+    query: str,
+    limit: int = 30,
+    path_filter: str | None = None,
+) -> str:
+    """Search the web, fetch results, and run deep research over them.
+
+    Args:
+        embedding_manager: Present solely for capability gating
+            (requires_embeddings=True); signature-inspected by register_tool.
+            Unused in the body — the research stage runs in a subprocess.
+        llm_manager: Present solely for capability gating (requires_llm=True);
+            signature-inspected by register_tool. Unused in the body.
+        config: Application configuration; falls back to environment. Its
+            source file (if any) is forwarded to the subprocess as --config.
+        query: Natural-language or keyword query for DuckDuckGo.
+        limit: Number of results to fetch. Clamped to [1, 100]. Default 30.
+        path_filter: Optional scope restriction forwarded to the research stage.
+
+    Returns:
+        Markdown: research answer (with tmpdir paths rewritten to source URLs)
+        + optional fetch-warning block.
+    """
+    from chunkhound.mcp_server.common import MCPError
+    from chunkhound.utils.websearch_core import (
+        build_quickresearch_argv_core,
+        clamp_limit,
+        fetch_and_save,
+        search,
+        websearch_timeout,
+    )
+    from chunkhound.utils.websearch_postprocess import replace_paths_with_urls
+
+    if config is None:
+        config = Config.from_environment()
+
+    limit = clamp_limit(limit)
+
+    try:
+        results = await asyncio.to_thread(search, query, limit, None)
+    except urllib.error.URLError as e:
+        raise MCPError(f"Web search failed: {e.reason}") from e
+    if not results:
+        raise MCPError(f"No results found for {query!r}")
+
+    warnings: list[str] = []
+    mapping: dict[str, str] = {}
+    tmpdir = Path(tempfile.mkdtemp(prefix="chunkhound_websearch_mcp_"))
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        await fetch_and_save(
+            [url for _, url, _ in results],
+            tmpdir,
+            progress_callback=None,
+            warning_callback=warnings.append,
+            mapping=mapping,
+        )
+
+        cmd = build_quickresearch_argv_core(query, tmpdir, path_filter, config)
+        # Scrub CHUNKHOUND_MCP_MODE so the child's RichOutputFormatter.error()
+        # is not silenced — we rely on its stderr output to populate the
+        # MCPError tail on subprocess failure.
+        env = {k: v for k, v in os.environ.items() if k != "CHUNKHOUND_MCP_MODE"}
+        env["CHUNKHOUND_QUICKRESEARCH_QUIET"] = "1"
+        env["CHUNKHOUND_NO_PROMPTS"] = "1"
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        timeout_s = websearch_timeout()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_s
+            )
+        except asyncio.TimeoutError:
+            raise MCPError(
+                f"websearch timed out after {timeout_s:.0f}s"
+            ) from None
+        if proc.returncode != 0:
+            raise MCPError(
+                f"Research subprocess failed (exit {proc.returncode}): "
+                f"{stderr.decode(errors='replace').strip()[-2000:]}"
+            )
+        answer = stdout.decode(errors="replace")
+    finally:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    answer = replace_paths_with_urls(answer, mapping).rstrip()
+    warn_block = (
+        "\n\n> **Fetch warnings:**\n"
+        + "\n".join(f"> - {w}" for w in warnings)
+    ) if warnings else ""
+    return f"{answer}{warn_block}"
+
+
 # =============================================================================
 # Tool Execution
 # =============================================================================
@@ -674,6 +815,41 @@ async def execute_tool(
             )
             answer = result.get("answer", fallback)
             return str(answer)
+
+    # search tool renders dict → lean markdown for MCP, with markdown-based token limiting
+    if tool_name == "search":
+        if isinstance(result, dict):
+            search_type = arguments.get("type", "regex")
+            results_list = list(result.get("results", []))
+            pagination = dict(result.get("pagination", {}))
+            md = format_search_results_markdown(results_list, pagination, search_type)
+            # Keep at least 1 result; preserve original page_size so the footer's
+            # total-page count stays calibrated to the requested page size.
+            while len(results_list) > 1 and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
+                trim = max(1, len(results_list) // 4)
+                results_list = results_list[:-trim]
+                pagination = {
+                    **pagination,
+                    "has_more": True,
+                    "next_offset": pagination.get("offset", 0) + len(results_list),
+                }
+                md = format_search_results_markdown(results_list, pagination, search_type)
+            # If the single remaining result still exceeds the limit, truncate its content.
+            if results_list and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
+                result_copy = dict(results_list[0])
+                content = result_copy.get("content") or ""
+                # Start conservatively. Dynamic fence length (backtick-heavy content adds
+                # two fence lines of max_run+1 backticks each) means the 300-char reserve
+                # can be wildly insufficient; re-render and shrink until the actual output fits.
+                max_content_chars = max(0, MAX_RESPONSE_TOKENS * 3 - 300)
+                result_copy["content"] = content[:max_content_chars]
+                md = format_search_results_markdown([result_copy], pagination, search_type)
+                while estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0:
+                    excess_chars = (estimate_tokens(md) - MAX_RESPONSE_TOKENS) * 3
+                    max_content_chars = max(0, max_content_chars - excess_chars - 1)
+                    result_copy["content"] = content[:max_content_chars]
+                    md = format_search_results_markdown([result_copy], pagination, search_type)
+            return md
 
     # Convert result to dict if it's not already
     if hasattr(result, "__dict__"):

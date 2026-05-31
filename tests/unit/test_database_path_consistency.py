@@ -106,3 +106,33 @@ def test_lancedb_path_transformation_matches_provider(tmp_path):
     # DatabaseConfig should return the same result
     assert db_path == legacy_transform
     assert db_path == test_db_path / "lancedb.lancedb"
+
+
+def test_get_db_path_explicit_db_file_path_not_nested(tmp_path):
+    """--db /path/chunks.db must NOT create a nested chunks.db/chunks.db dir (issue #215)."""
+    explicit_path = tmp_path / "mydb" / "chunks.db"
+    config = DatabaseConfig(path=explicit_path, provider="duckdb")
+    result = config.get_db_path()
+
+    assert result == explicit_path
+    assert result.parent.is_dir()
+    assert not result.exists()  # parent dir created, file itself not yet
+
+
+def test_get_db_path_explicit_duckdb_extension(tmp_path):
+    """--db /path/custom.duckdb must return the path directly (issue #215)."""
+    explicit_path = tmp_path / "store" / "custom.duckdb"
+    config = DatabaseConfig(path=explicit_path, provider="duckdb")
+    result = config.get_db_path()
+
+    assert result == explicit_path
+    assert result.parent.is_dir()
+
+
+def test_get_db_path_versioned_dir_not_treated_as_file(tmp_path):
+    """--db /data/v2.1 (directory intent) must still append /chunks.db."""
+    versioned_dir = tmp_path / "v2.1"
+    config = DatabaseConfig(path=versioned_dir, provider="duckdb")
+    result = config.get_db_path()
+
+    assert result == versioned_dir / "chunks.db"

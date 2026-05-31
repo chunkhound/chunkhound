@@ -222,22 +222,59 @@ def process_file_batch(
             )
             t0 = perf_counter()
             if language == Language.UNKNOWN:
-                results.append(
-                    ParsedFileResult(
-                        file_path=file_path,
-                        chunks=[],
-                        language=language,
-                        file_size=file_stat.st_size,
-                        file_mtime=file_stat.st_mtime,
-                        status="skipped",
-                        error="Unknown file type",
+                if not config_dict.get("index_unknown_files"):
+                    results.append(
+                        ParsedFileResult(
+                            file_path=file_path,
+                            chunks=[],
+                            language=language,
+                            file_size=file_stat.st_size,
+                            file_mtime=file_stat.st_mtime,
+                            status="skipped",
+                            error="Unknown file type",
+                        )
                     )
-                )
-                _dbg_log(
-                    f"END   file={file_path} status=skipped reason=unknown_type dur_ms={(perf_counter() - t0) * 1000:.1f}"
-                )
-                logger.debug("Skipping file with unknown type: {}", file_path)
-                continue
+                    _dbg_log(
+                        f"END   file={file_path} status=skipped reason=unknown_type dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                    )
+                    logger.debug("Skipping file with unknown type: {}", file_path)
+                    continue
+                # Binary guard: read first 8 KB and check for null bytes
+                try:
+                    with open(file_path, "rb") as _fh:
+                        _sample = _fh.read(8192)
+                    if b"\x00" in _sample:
+                        results.append(
+                            ParsedFileResult(
+                                file_path=file_path,
+                                chunks=[],
+                                language=language,
+                                file_size=file_stat.st_size,
+                                file_mtime=file_stat.st_mtime,
+                                status="skipped",
+                                error="binary_file",
+                            )
+                        )
+                        _dbg_log(
+                            f"END   file={file_path} status=skipped reason=binary_file dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                        )
+                        logger.debug("Skipping binary file: {}", file_path)
+                        continue
+                except OSError as _e:
+                    results.append(
+                        ParsedFileResult(
+                            file_path=file_path,
+                            chunks=[],
+                            language=language,
+                            file_size=file_stat.st_size,
+                            file_mtime=file_stat.st_mtime,
+                            status="error",
+                            error=str(_e),
+                        )
+                    )
+                    continue
+                language = Language.TEXT
+                logger.debug("Indexing unknown file as text: {}", file_path)
 
             # Skip large config/data files (config files are typically < 20KB)
             if language.is_structured_config_language:

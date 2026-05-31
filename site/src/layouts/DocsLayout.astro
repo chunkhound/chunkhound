@@ -1,0 +1,47 @@
+---
+import type { MarkdownLayoutProps } from 'astro';
+import Base from './Base.astro';
+import Nav from '../components/Nav.astro';
+import DocsSidebar from '../components/DocsSidebar.astro';
+import '../styles/docs.css';
+
+type MarkdownProps = MarkdownLayoutProps<{ title?: string; description?: string }>;
+type DirectProps = { title?: string; description?: string };
+type Props = MarkdownProps | DirectProps;
+
+const title = 'frontmatter' in Astro.props ? Astro.props.frontmatter.title : Astro.props.title;
+const description = 'frontmatter' in Astro.props ? Astro.props.frontmatter.description : Astro.props.description;
+const pageTitle = title ? `${title} — ChunkHound Docs` : 'ChunkHound Docs';
+---
+
+<Base title={pageTitle} description={description}>
+  <Nav currentPath={Astro.url.pathname} docsMenu />
+  <div class="docs-shell">
+    <DocsSidebar currentPath={Astro.url.pathname} />
+    <div class="docs-nav-scrim" data-docs-nav-scrim></div>
+    <main class="docs-main" data-docs-mobile-inert>
+      {title && (
+        <nav class="docs-breadcrumb" aria-label="Breadcrumb">
+          <ph-book-open size="14" weight="duotone" aria-hidden="true"></ph-book-open>
+          <a href="/docs/getting-started/">Guides</a>
+          <ph-caret-right class="docs-breadcrumb-sep" size="12" weight="bold" aria-hidden="true"></ph-caret-right>
+          <span aria-current="page">{title}</span>
+        </nav>
+      )}
+      <article class="docs-content">
+        <slot />
+      </article>
+    </main>
+    <aside class="docs-toc" aria-label="On this page" data-docs-mobile-inert>
+      <div class="toc-title"><ph-list-bullets size="16" weight="duotone" aria-hidden="true"></ph-list-bullets> On this page</div>
+      <nav class="toc-list" data-toc></nav>
+    </aside>
+  </div>
+
+  <script>
+  import "@phosphor-icons/webcomponents/PhBookOpen";
+  import "@phosphor-icons/webcomponents/PhCaretRight";
+  import "@phosphor-icons/webcomponents/PhListBullets";
+  import '../scripts/docs-runtime.ts';
+  </script>
+</Base>

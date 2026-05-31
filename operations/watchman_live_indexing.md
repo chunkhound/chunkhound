@@ -62,24 +62,75 @@ The regular daemon log remains `<project>/.chunkhound/daemon.log`.
 
 ## Startup and failure behavior
 
-- `backend=watchman` is fail-fast. ChunkHound must start the private sidecar and
-  complete the Watchman session/subscription startup before the daemon is
-  considered ready.
-- There is no implicit fallback from failed Watchman startup to `watchdog` or
-  `polling`.
-- A Watchman startup failure should stop daemon publication before the
-  runtime-scoped daemon lock and authoritative daemon transport address are
-  published.
-- Proxy startup errors include recent daemon-log context; inspect both
-  `.chunkhound/daemon.log` and `.chunkhound/watchman/watchman.log`.
+### Publish-then-barrier ordering
 
-Common operator expectation:
+The daemon follows a **publish-then-barrier** startup sequence:
 
-- Healthy startup: the daemon comes up, `daemon_status` reports Watchman as the
-  configured/effective backend, and the Watchman sidecar/session fields move to
-  running/connected.
-- Failed startup: the proxy exits with a Watchman startup error, the daemon does
-  not stay reachable, and there is no silent backend downgrade.
+1. `initialize()` sets up services and spawns the deferred background work
+   (DB connect + realtime monitoring start). Returns fast — `tools/list` can
+   respond immediately.
+2. **Daemon publish**: IPC socket bind, auth token generation, lock file write,
+   and registry entry. After this step, proxy clients can discover and connect
+   to the daemon even though realtime monitoring is not yet ready.
+3. `tools/list` uses a **5-second timeout** when waiting for
+   `_initialization_complete` (`asyncio.wait_for(..., timeout=5.0)`). If
+   initialization hasn't finished within 5 seconds, `tools/list` still returns
+   available tools — it never blocks the client indefinitely.
+4. **Startup barrier** (`await_startup_barrier()`): blocks until the Watchman
+   sidecar and session are ready, or raises `RuntimeError` on failure.
+
+This means the daemon is **connectable** well before realtime indexing is
+ready. Proxy clients see `tools/list` return tools immediately, while the
+Watchman sidecar starts in the background.
+
+### Watchman fallback gating
+
+The fallback behavior depends on **how Watchman was selected as the backend**:
+
+| Resolution type | Sidecar failure behavior |
+|----------------|------------------------|
+| **Explicit** (`realtime_backend=watchman` in config) | **Fail-fast** — raises `RuntimeError`. The daemon still follows publish-then-barrier ordering, but barrier failure triggers shutdown cleanup that removes the published lock/socket before the failed daemon can linger. |
+| **Install default** (no explicit backend config; Watchman is the platform default) | **Graceful fallback** to polling. The daemon publishes its lock/socket first, then the barrier falls back. `effective_backend` reports `"polling"`; the daemon stays reachable and operational. |
+
+Key behavioural differences:
+
+- **Explicit Watchman**: fail-fast with no fallback. If the sidecar fails to
+  start, `await_startup_barrier()` raises `RuntimeError`. The daemon's
+  `run()` catches this in its `finally` block and runs
+  `_graceful_shutdown()`, which removes the lock file and socket.
+- **Install-default Watchman**: graceful degradation. If the sidecar fails
+  to start, the adapter falls back to `polling` mode. The
+  `_coordinated_initial_scan()` still runs, the daemon stays reachable,
+  and `scan_progress.realtime.effective_backend` reflects the degraded
+  state as `"polling"`.
+
+### Startup barrier failure handling
+
+When `await_startup_barrier()` raises `RuntimeError`, every error path:
+
+1. Persists the failure via `_set_startup_failure()` and
+   `_record_realtime_failure()`
+2. Updates the startup tracker with the failed phase
+3. Raises `RuntimeError(message)` with a descriptive message
+
+The daemon's `run()` method does NOT catch `RuntimeError` from the barrier —
+it lets the exception propagate to the `finally` block, which runs
+`_graceful_shutdown()` to remove the lock file and socket. This ensures
+that a failed daemon never leaves a stale lock file on disk.
+
+Proxy startup errors include recent daemon-log context; inspect both
+`.chunkhound/daemon.log` and `.chunkhound/watchman/watchman.log`.
+
+Common operator expectations:
+
+- **Explicit Watchman, healthy**: daemon comes up, `daemon_status` shows
+  Watchman as configured/effective backend, sidecar/session fields move
+  to running/connected.
+- **Explicit Watchman, failed**: proxy exits with a Watchman startup error,
+  the daemon does not stay reachable, no silent backend downgrade.
+- **Install-default Watchman, healthy**: same as explicit healthy.
+- **Install-default Watchman, sidecar failure**: daemon stays reachable
+  with `effective_backend="polling"`; indexing works without Watchman.
 
 ## Health checks via `daemon_status`
 
@@ -233,7 +284,7 @@ During an incident, confirm that:
 The Linux and Windows native Watchman rollout is gated on all of the following:
 
 1. The `watchman-runtime-validation` job in
-   `.github/workflows/smoke-tests.yml` is green on `ubuntu-latest` and
+   `.github/workflows/ci.yml` is green on `ubuntu-latest` and
    `windows-latest`.
    - Each host-native lane builds its own wheel, proves host-native runtime
      resources, and proves installed-wheel live indexing for that host.

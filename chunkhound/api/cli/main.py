@@ -5,7 +5,6 @@ import asyncio
 import logging as _pylogging
 import multiprocessing
 import sys
-from pathlib import Path
 
 from loguru import logger
 
@@ -62,9 +61,11 @@ def create_parser() -> argparse.ArgumentParser:
     from .parsers.code_mapper_parser import add_map_subparser
     from .parsers.daemon_parser import add_daemon_subparser
     from .parsers.mcp_parser import add_mcp_subparser
+    from .parsers.quickresearch_parser import add_quickresearch_subparser
     from .parsers.research_parser import add_research_subparser
     from .parsers.run_parser import add_run_subparser
     from .parsers.search_parser import add_search_subparser
+    from .parsers.websearch_parser import add_websearch_subparser
 
     parser = create_main_parser()
     subparsers = setup_subparsers(parser)
@@ -73,12 +74,14 @@ def create_parser() -> argparse.ArgumentParser:
     add_run_subparser(subparsers)
     add_mcp_subparser(subparsers)
     add_search_subparser(subparsers)
+    add_websearch_subparser(subparsers)
     add_research_subparser(subparsers)
     add_autodoc_subparser(subparsers)
     add_map_subparser(subparsers)
     # Diagnose command retired; functionality lives under: index --check-ignores
     add_calibrate_subparser(subparsers)
-    # Internal daemon command (hidden from help)
+    # Internal commands (hidden from help)
+    add_quickresearch_subparser(subparsers)
     add_daemon_subparser(subparsers)
 
     return parser
@@ -97,7 +100,7 @@ async def async_main() -> None:
     setup_logging(getattr(args, "verbose", False))
 
     # Validate args and create config
-    # Special-case: index subtools (--simulate, --check-ignores) never require embeddings
+    # Special-case: index subtools (--simulate, --check-ignores) skip embeddings
     if args.command == "index" and (
         getattr(args, "simulate", False) or getattr(args, "check_ignores", False)
     ):
@@ -113,43 +116,47 @@ async def async_main() -> None:
     config, validation_errors = create_validated_config(args, args.command)
 
     if validation_errors:
-        # Check if we can offer interactive setup wizard for index command
-        if args.command in [None, "index"]:
-            from .setup_wizard import _should_run_setup_wizard, run_setup_wizard
-
-            if _should_run_setup_wizard(validation_errors):
-                wizard_config = await run_setup_wizard(Path(args.path), args)
-
-                if wizard_config:
-                    # Re-validate with new config
-                    config, validation_errors = create_validated_config(
-                        args, args.command
-                    )
-                else:
-                    # Wizard was run but returned None (user cancelled save)
-                    # Exit gracefully without showing original validation errors
-                    logger.info("Setup cancelled by user")
-                    sys.exit(0)
-
-        # If we still have errors after wizard (or wizard was skipped/cancelled)
-        if validation_errors:
-            # Check if this is an embedding-related error
-            embedding_error = any(
-                "embedding provider" in str(e).lower() for e in validation_errors
+        should_show_web_banner = sys.stderr.isatty()
+        logger.error("Configuration error — see details below.")
+        if should_show_web_banner:
+            print(
+                "\nConfiguration required. "
+                "Generate a config with the web configurator:\n"
+                "  https://chunkhound.ai\n"
+                "Or create .chunkhound.json manually.\n"
+                "Offline docs: https://chunkhound.ai/docs/configuration/\n",
+                file=sys.stderr,
             )
 
-            # Log all errors to stderr
-            for error in validation_errors:
-                logger.error(f"Error: {error}")
+        # Check if this is an embedding-related error
+        embedding_error = any(
+            "embedding provider" in str(e).lower() for e in validation_errors
+        )
 
-            # If embedding error and not in interactive mode, show helpful messages to stdout
-            if embedding_error and args.command in [None, "index"]:
-                # Use print() for stdout output to match test expectations
-                print("To fix this, you can:")
-                print("  1. Create a .chunkhound.json config file with embeddings")
-                print("  2. Use --no-embeddings to skip embeddings")
+        # Log all errors to stderr
+        for error in validation_errors:
+            logger.error(f"Error: {error}")
 
-            sys.exit(1)
+        # Always emit the core hint so non-interactive environments see it.
+        print(
+            "Hint: Create a .chunkhound.json config file"
+            " — docs: https://chunkhound.ai/docs/configuration/",
+            file=sys.stderr,
+        )
+
+        # Show detailed steps only for interactive terminals.
+        if should_show_web_banner:
+            print("To fix this, you can:", file=sys.stderr)
+            print("  1. Generate a config at https://chunkhound.ai", file=sys.stderr)
+            print("  2. Create a .chunkhound.json file manually", file=sys.stderr)
+            print(
+                "  3. Read the config docs at https://chunkhound.ai/docs/configuration/",
+                file=sys.stderr,
+            )
+            if embedding_error and args.command == "index":
+                print("  4. Use --no-embeddings to skip embeddings", file=sys.stderr)
+
+        sys.exit(1)
 
     try:
         if args.command == "index":
@@ -172,6 +179,14 @@ async def async_main() -> None:
             from .commands.research import research_command
 
             await research_command(args, config)
+        elif args.command == "_quickresearch":
+            from .commands.quickresearch import quickresearch_command
+
+            await quickresearch_command(args, config)
+        elif args.command == "websearch":
+            from .commands.websearch import websearch_command
+
+            await websearch_command(args, config)
         elif args.command == "map":
             # Dynamic import to avoid early chunkhound module loading
             from .commands.code_mapper import code_mapper_command
