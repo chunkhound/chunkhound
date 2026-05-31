@@ -1034,10 +1034,13 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         On success: path discarded from _compaction_deferred_files and _removals.
         On CompactionError: path stays deferred, error re-raised.
         On generic error: path moves to failed_files, error re-raised.
+
+        Calls delete_file_completely_async directly (not remove_file) so that
+        CompactionError propagates to the caller instead of being swallowed.
         """
         normalized = normalize_file_path(path)
         try:
-            await self.remove_file(Path(path))
+            await self.services.provider.delete_file_completely_async(str(normalized))
         except CompactionError:
             async with self._file_condition:
                 self._compaction_deferred_files.add(normalized)

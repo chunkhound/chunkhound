@@ -1470,6 +1470,10 @@ class RealtimePipelineMixin:
                         logger.debug(
                             f"Skipping {file_path} — file gone but deferred for removal"
                         )
+                        # Notify waiters so they can re-evaluate the condition
+                        # (e.g., checking file_queue.empty() after this item was dequeued).
+                        async with self._file_condition:
+                            self._file_condition.notify_all()
                         continue
                     # If DB is suspended, this file-not-found may be a race between
                     # the compaction window and a delete event — defer rather than fail.
