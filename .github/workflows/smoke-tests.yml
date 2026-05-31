@@ -165,6 +165,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # The watchman gate uses a stable 3.11 environment only for its wheel verification scripts.
+      # Real 3.11 + 3.14 coverage lives in the preceding "tests" job matrix. This gate
+      # just needs one reliable Python after the wheels have been built.
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:

@@ -188,9 +188,6 @@ class TestVueParserTemplateDirectives:
         assert "script_references" in plain_vmodel[0].metadata
         assert "message" in plain_vmodel[0].metadata["script_references"]
 
-        # Minimal regression guard: v-model chunks (including any .trim in fixture) must exist with proper type
-        assert len(vmodel_chunks) >= 1
-
     def test_parse_component_usage(self):
         """Test extraction of component usage (PascalCase tags)."""
         if not self.fixture_path.exists():

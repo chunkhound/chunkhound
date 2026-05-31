@@ -282,6 +282,8 @@ class VueTemplateMapping(BaseMapping):
                 argument = directive_part[7:].split(".")[0]  # Remove v-bind: and any .modifiers
                 directive = "v-bind"
         # Handle v-slot: and # syntax
+        # Note: Unlike @ / : / v-on / v-bind, we do not strip .modifiers here.
+        # Named slots almost never use modifiers; this keeps the minimal change small.
         elif directive_part.startswith("v-slot:") or directive_part.startswith("#"):
             if directive_part.startswith("v-slot:"):
                 argument = directive_part[7:]  # Remove v-slot:

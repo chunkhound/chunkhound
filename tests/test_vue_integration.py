@@ -412,6 +412,8 @@ function handleVOn() {}
     <img :src="imageUrl" :alt="imageAlt" />
     <a :href="linkUrl" :title="linkTitle">Link</a>
     <div :class="dynamicClass" :style="dynamicStyle" />
+    <!-- dotted modifier cases to exercise the .split logic -->
+    <div :class.active="isActive" :foo.bar="baz" />
     <component v-bind:is="componentName" />
   </div>
 </template>
@@ -424,6 +426,8 @@ const linkTitle = ref('Title')
 const dynamicClass = ref('active')
 const dynamicStyle = ref({ color: 'red' })
 const componentName = ref('div')
+const isActive = ref(true)
+const baz = ref(1)
 </script>
 """
         chunks = parser.parse_content(content)
@@ -443,13 +447,11 @@ const componentName = ref('div')
         # Should have found property bindings
         assert len(binding_chunks) > 0
 
-        # Minimal tight assertion for modifier on property binding (e.g. :class.active in other tests)
-        # At least one property binding must have a clean property_name (no embedded dot)
-        clean_prop = any(
-            c.metadata.get("property_name") and "." not in c.metadata.get("property_name", "")
-            for c in binding_chunks
-        )
-        assert clean_prop, "Property binding names should not contain modifiers (e.g. no 'class.active')"
+        # Assert that modifier stripping works: we have dotted cases in input, and all extracted property_names are clean (no dots)
+        dotted_inputs = [c for c in binding_chunks if c.metadata.get("property_name") in ("class", "foo")]
+        assert len(dotted_inputs) >= 1, "Expected :class.active and :foo.bar to produce clean property_name entries"
+        assert all("." not in (c.metadata.get("property_name") or "") for c in binding_chunks), \
+            "No property_name should contain a modifier suffix after stripping"
 
     def test_v_model_directives(self, parser):
         """Test v-model two-way binding extraction including modifiers."""
@@ -494,12 +496,12 @@ const selected = ref('a')
             if chunk.metadata.get('model_binding'):
                 assert 'script_references' in chunk.metadata
 
-        # Minimal tight assertion for v-model modifiers (the .trim / .number cases in the content)
-        trim_or_number = any(
-            c.metadata.get("directive_type") == "v-model" and c.metadata.get("model_binding")
-            for c in vmodel_chunks
-        )
-        assert trim_or_number, "v-model with modifiers should still produce directive_type + model_binding"
+        # - We already assert plain v-model works (above).
+        # - Modified v-model cases (.trim, .number) may or may not produce separate chunks
+        #   depending on chunk splitting, but if any v-model chunk exists its model_binding
+        #   must be clean (no embedded dots from bad parsing).
+        polluted = [c for c in vmodel_chunks if "." in (c.metadata.get("model_binding") or "")]
+        assert not polluted, f"v-model model_binding should not contain modifier suffixes: {polluted}"
 
     def test_component_usage(self, parser):
         """Test component usage detection (PascalCase)."""
