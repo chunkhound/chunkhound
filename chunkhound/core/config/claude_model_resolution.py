@@ -39,7 +39,7 @@ CLAUDE_OPUS_SENTINEL = "claude-opus"
 
 CLAUDE_HAIKU_FALLBACK = "claude-haiku-4-5-20251001"
 CLAUDE_SONNET_FALLBACK = "claude-sonnet-4-6"
-CLAUDE_OPUS_FALLBACK = "claude-opus-4-7"
+CLAUDE_OPUS_FALLBACK = "claude-opus-4-8"
 
 # ── Sentinel config lookup table ─────────────────────────────────────────
 

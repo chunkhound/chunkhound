@@ -67,9 +67,9 @@ TEST SUMMARY
 
 - ChunkHound intentionally defaults both Anthropic utility and synthesis roles to the `claude-haiku` sentinel. Haiku is capable enough for synthesis, is Anthropic's cheapest available Claude model, and Anthropic does not currently offer a true low-cost utility tier.
 - Extended thinking has two modes:
-  - Adaptive (Claude Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos). No budget_tokens needed. Auto-enables interleaved thinking.
+  - Adaptive (Claude Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos). No budget_tokens needed. Auto-enables interleaved thinking.
   - Manual (Opus 4.5 and older Claude 4 models). Requires thinking.budget_tokens of at least 1024.
-- Opus 4.7 accepts only adaptive thinking; manual is rejected with a 400 error.
-- The effort parameter (low/medium/high/xhigh/max) is supported on Opus 4.5/4.6/4.7, Sonnet 4.6, and Mythos. xhigh is Opus 4.7 only; max is 4.6 and later.
+- Opus 4.7 and 4.8 accept only adaptive thinking; manual is rejected with a 400 error.
+- The effort parameter (low/medium/high/xhigh/max) is supported on Opus 4.5/4.6/4.7/4.8, Sonnet 4.6, and Mythos. xhigh is Opus 4.7/4.8; max is 4.6 and later.
 - Thinking blocks are processed but not included in text output by default.
 - Token usage includes full thinking tokens (not just summary) for billing.
