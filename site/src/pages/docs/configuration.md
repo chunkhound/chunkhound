@@ -156,7 +156,7 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | Anthropic | `anthropic` | `CHUNKHOUND_LLM_API_KEY` | `claude-haiku-4-5-20251001` | `claude-sonnet-4-5-20250929` | Direct API access |
 | OpenAI | `openai` | `CHUNKHOUND_LLM_API_KEY` | `gpt-5-nano` | `gpt-5` | Direct API access |
 | Gemini | `gemini` | `CHUNKHOUND_LLM_API_KEY` | Configurable via `CHUNKHOUND_GEMINI_MODEL` env var (default: `gemini-2.5-pro`) | Configurable via `CHUNKHOUND_GEMINI_MODEL` env var (default: `gemini-2.5-pro`) | Google Gemini API |
-| Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | `grok-4-1-fast-reasoning` | `grok-4-1-fast-reasoning` | xAI API |
+| Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | xAI API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
