@@ -322,9 +322,11 @@ class FactExtractor:
 
                 ledger.add_fact(fact)
 
-            except (KeyError, TypeError, ValueError) as e:
+            except (KeyError, TypeError, ValueError, AttributeError) as e:
                 # Belt-and-suspenders: _extract_json_array already filters
                 # non-dicts, but callers may supply raw parsed JSON directly.
+                # AttributeError guards against null/number values from LLM JSON
+                # where .strip() on None/int would be called.
                 logger.warning(f"Skipping malformed fact entry: {e}")
                 continue
 
