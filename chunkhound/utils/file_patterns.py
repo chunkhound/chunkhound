@@ -493,6 +493,35 @@ def walk_directory_tree(
                 "[RUST_SCANNER] scan_files root=%s exts=%s names=%s files=%d",
                 start_path, sorted(_exts), sorted(_names), len(_raw),
             )
+            # Rust's native gitignore can exclude nested git repos that appear in the
+            # parent .gitignore. Detect such repos via the ignore engine's repo_roots
+            # and re-scan each from its own root (parent gitignore won't apply there).
+            if ignore_engine is not None and hasattr(ignore_engine, "repo_roots"):
+                _raw = list(_raw)
+                _raw_set: set[str] = set(_raw)
+                _start_str = str(start_path.resolve())
+                for _nr in getattr(ignore_engine, "repo_roots", []):
+                    _nr_str = str(_nr)  # already resolved by RepoAwareIgnoreEngine
+                    if _nr_str == _start_str:
+                        continue
+                    if not _nr_str.startswith(_start_str + os.sep):
+                        continue
+                    if not any(p.startswith(_nr_str + os.sep) for p in _raw):
+                        _extra = _rust_scan_files(
+                            _nr_str,
+                            [ext.lstrip(".") for ext in _exts],
+                            skip_dirs=list(HEAVY_DIRS),
+                            exclude_patterns=_gitignore_excludes,
+                            exact_names=list(_names) if _names else None,
+                        )
+                        _log.debug(
+                            "[RUST_SCANNER] nested-repo boundary re-scan: root=%s files=%d",
+                            _nr_str, len(_extra),
+                        )
+                        for _p in _extra:
+                            if _p not in _raw_set:
+                                _raw_set.add(_p)
+                                _raw.append(_p)
             results = [Path(p) for p in _raw]
             # ignore_engine is applied as a file-level post-filter only — it does not
             # prune directory subtrees the way the Python path does. The ignore crate's
