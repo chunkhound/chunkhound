@@ -12,6 +12,11 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 from loguru import logger
 
+# Upper bound on DB results fetched in "both" mode.  10_000 exceeds any realistic
+# HNSW top-K corpus so total/has_more in the merged result set are exact rather
+# than heuristic for all practical corpora.
+_MAX_BOTH_DB_FETCH = 10_000
+
 
 @runtime_checkable
 class SearchServiceProtocol(Protocol):
@@ -235,11 +240,11 @@ class DiffAwareSearchService:
 
         # vector_source == "both"
         # Diff chunks are in-memory — fetch all of them (no cost).
-        # DB fetch uses offset+page_size as a lower bound; multiply for headroom.
         diff_fetch = len(self._diff_chunks) if self._diff_chunks else (offset + page_size)
-        # Fetch a generous window from DB so merged pagination metadata stays accurate
-        # at deeper offsets. 500 matches MAX_DIFF_CHUNKS to keep both sources balanced.
-        db_fetch = max(offset + page_size, page_size * 20, 500)
+        # Fetch all DB results so merged total/has_more are exact, not heuristic.
+        # 10_000 exceeds any realistic HNSW top-K result set; for corpora larger
+        # than this, pagination metadata beyond offset 10_000 is a lower bound.
+        db_fetch = _MAX_BOTH_DB_FETCH
         diff_task = asyncio.create_task(
             self._search_diff(
                 query=query,

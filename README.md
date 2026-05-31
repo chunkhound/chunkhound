@@ -82,7 +82,7 @@ chunkhound index
 # Last N commits
 chunkhound search "authentication changes" --last-n 20
 
-# From a specific commit to HEAD
+# Changes introduced by that commit (diff against its parent; root commits use empty tree)
 chunkhound search "database migration" --commit-hash abc1234
 
 # Custom git range

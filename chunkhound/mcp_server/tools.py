@@ -525,6 +525,39 @@ def _resolve_commit_range(
 _EMBED_TIMEOUT_SECONDS = 120  # same as provider-level default in .chunkhound.json
 
 
+def _git_cwd_from_services(services: DatabaseServices) -> Path:
+    """Derive git repo root from the indexed DB path, not from process cwd.
+
+    In MCP / ``--db`` flows the process cwd may point to an unrelated directory.
+    Walking up from the DB file's location via ``git rev-parse --show-toplevel``
+    gives the correct repo root for the indexed project.  Falls back to
+    project-marker detection then cwd only when the git lookup fails.
+    """
+    import subprocess as _subprocess
+
+    try:
+        db_path = Path(services.provider.db_path)
+        start = db_path if db_path.is_dir() else db_path.parent
+        r = _subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if r.returncode == 0:
+            return Path(r.stdout.strip())
+    except Exception:
+        pass
+
+    # Fallback: project markers, then bare cwd
+    from chunkhound.utils.project_detection import find_project_root
+
+    try:
+        return find_project_root(None)
+    except SystemExit:
+        return Path.cwd()
+
+
 async def _inject_diff_service(
     services: DatabaseServices,
     effective_commit_range: str,
@@ -538,13 +571,8 @@ async def _inject_diff_service(
 
     from chunkhound.core.git_diff import parse_diff_to_chunks, run_git_diff
     from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
-    from chunkhound.utils.project_detection import find_project_root
 
-    try:
-        _cwd = find_project_root(None)
-    except SystemExit:
-        # MCP context: CWD may not have project markers; git will find the repo root itself
-        _cwd = Path.cwd()
+    _cwd = _git_cwd_from_services(services)
     raw_diff = await run_git_diff(effective_commit_range, cwd=_cwd)
     diff_chunks = parse_diff_to_chunks(raw_diff, max_chunk_chars=MAX_DIFF_CHUNK_CHARS)
     if len(diff_chunks) > MAX_DIFF_CHUNKS:
