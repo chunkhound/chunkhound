@@ -1800,6 +1800,17 @@ class DuckDBProvider(SerialDatabaseProvider):
         self._executor_ensure_embedding_table_exists(conn, state, dims)
         index_name = str(index_info["index_name"])
 
+        # Reject structurally unsafe names. Double-quoting (via _quote_duckdb_identifier)
+        # prevents SQL injection, but names with control characters or path separators
+        # could still misbehave in some DuckDB VSS code paths.
+        for _name, _label in ((index_name, "index"), (table_name, "table")):
+            if not self._is_safe_duckdb_identifier(_name):
+                logger.warning(
+                    f"Skipping HNSW index restore: unsafe identifier {_name!r} "
+                    f"(label={_label}). Expected pattern: [A-Za-z_][A-Za-z0-9_]*"
+                )
+                return
+
         try:
             metric = self._normalize_hnsw_metric(
                 str(index_info.get("metric", "cosine"))
