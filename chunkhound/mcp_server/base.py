@@ -91,6 +91,8 @@ class MCPServerBase(ABC):
         # _initialized as an idempotency signal. See cleanup() docstring.
         self._cleanup_done = False
         self._compaction_retry_lock = asyncio.Lock()
+        # Guards concurrent post-compaction recovery attempts in ensure_services()
+        self._recovery_event: asyncio.Event | None = None
 
         # Background tasks
         self._deferred_start_task: asyncio.Task | None = None
@@ -119,6 +121,13 @@ class MCPServerBase(ABC):
                 config,
                 startup_mode=self._realtime_startup_mode(),
             ),
+            "background_compaction": {
+                "phase": "idle",
+                "in_progress": False,
+                "pending_recovery": False,
+                "retry_attempted": False,
+                "last_error": None,
+            },
         }
 
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
@@ -1109,6 +1118,110 @@ class MCPServerBase(ABC):
         self._provider_close_future = future
         return future
 
+    # ------------------------------------------------------------------
+    # Background compaction state helpers
+    # ------------------------------------------------------------------
+
+    def _background_compaction_status(self) -> dict[str, Any]:
+        """Return the mutable background-compaction status sub-dict."""
+        return self._scan_progress["background_compaction"]
+
+    def _mark_background_compaction_started(self) -> None:
+        """Record that background compaction has begun."""
+        self._background_compaction_status().update(
+            {
+                "phase": "compacting",
+                "in_progress": True,
+                "pending_recovery": False,
+                "retry_attempted": False,
+                "last_error": None,
+            }
+        )
+
+    def _mark_background_compaction_success(self) -> None:
+        """Record that background compaction (and post-reindex) completed cleanly."""
+        self._background_compaction_status().update(
+            {
+                "phase": "idle",
+                "in_progress": False,
+                "pending_recovery": False,
+                "retry_attempted": False,
+                "last_error": None,
+            }
+        )
+        if self._compaction_service is not None:
+            self._compaction_service.clear_last_error()
+
+    def _mark_background_compaction_failure(
+        self,
+        exc: Exception,
+        *,
+        pending_recovery: bool,
+        retry_attempted: bool,
+    ) -> None:
+        """Record that background compaction or post-reindex failed."""
+        self._background_compaction_status().update(
+            {
+                "phase": "failed",
+                "in_progress": False,
+                "pending_recovery": pending_recovery,
+                "retry_attempted": retry_attempted,
+                "last_error": str(exc),
+            }
+        )
+
+    def _mark_post_compaction_reindex_running(self) -> None:
+        """Mark that post-compaction reindex is actively running."""
+        self._background_compaction_status()["in_progress"] = True
+
+    def _refresh_background_compaction_status(self) -> None:
+        """Sync stored status with live CompactionService state.
+
+        Only updates compacting/idle transition — does not clear failure state.
+        """
+        s = self._background_compaction_status()
+        if self._compaction_service is None:
+            if s["phase"] == "compacting":
+                s.update({"phase": "idle", "in_progress": False})
+            return
+        if self._compaction_service.is_compacting:
+            s.update({"phase": "compacting", "in_progress": True})
+        elif s["phase"] == "compacting":
+            s.update({"phase": "idle", "in_progress": False})
+
+    def get_background_compaction_status(self) -> dict[str, Any]:
+        """Return a snapshot of background compaction status reflecting live state."""
+        self._refresh_background_compaction_status()
+        return dict(self._background_compaction_status())
+
+    async def _attempt_post_compaction_recovery(self) -> None:
+        """Retry post-compaction reindex once; concurrent callers share one attempt.
+
+        Exceptions from the retry are swallowed here — the except block inside
+        ``_post_compaction_reindex`` updates the status dict, and the caller
+        (``ensure_services``) inspects ``pending_recovery`` afterwards and
+        raises ``CompactionError`` if recovery did not succeed.
+        """
+        if self._recovery_event is not None:
+            # Another concurrent ensure_services() is already running recovery.
+            # Wait for it to finish rather than starting a second attempt.
+            await self._recovery_event.wait()
+            return
+        status = self._background_compaction_status()
+        if status["retry_attempted"]:
+            # Already retried once in a previous call — don't retry again.
+            return
+        event = asyncio.Event()
+        self._recovery_event = event
+        status["retry_attempted"] = True
+        try:
+            await self._post_compaction_reindex(is_recovery_retry=True)
+        except Exception:
+            pass  # state updated by _post_compaction_reindex's except handler
+        finally:
+            self._recovery_event = None
+            event.set()
+
     async def _trigger_background_compaction(self) -> None:
         """Trigger background compaction if warranted.
 
@@ -1308,6 +1421,29 @@ class MCPServerBase(ABC):
                 always=True,
             )
             raise
+
+    async def _cleanup_non_provider_resources(self) -> None:
+        """Cancel background tasks and stop realtime indexing before DB close.
+
+        Called by ``cleanup()`` once the compaction service has been stopped,
+        immediately before the DB connection is closed.
+        """
+        for task_attr, label in [
+            ("_deferred_start_task", "deferred realtime startup task"),
+            ("_realtime_start_task", "realtime start task"),
+            ("_scan_task", "background scan task"),
+        ]:
+            task: asyncio.Task | None = getattr(self, task_attr, None)
+            if task is not None and not task.done():
+                self.debug_log(f"Cancelling {label}")
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        if self.realtime_indexing:
+            self.debug_log("Stopping real-time indexing service")
+            await self.realtime_indexing.stop()
 
     async def cleanup(self) -> None:
         """Clean up resources and start at most one provider close attempt.

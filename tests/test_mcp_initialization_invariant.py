@@ -31,6 +31,16 @@ class ConcreteMCPServer(MCPServerBase):
         pass
 
 
+class MinimalSerialProvider(SerialDatabaseProvider):
+    """Concrete stub of SerialDatabaseProvider for terminal-state unit tests."""
+
+    def _create_connection(self):  # type: ignore[override]
+        return None
+
+    def _get_schema_sql(self) -> list[str] | None:
+        return None
+
+
 class CloseOnlyProvider:
     """Provider exposing close() for cleanup tests."""
 
