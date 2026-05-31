@@ -145,7 +145,7 @@ jobs:
     # entry referencing this environment name). Depends on publish so the main
     # package is confirmed live before attempting the native publish — avoids
     # deleting a successfully-published release if only the native wheel fails.
-    environment: pypi
+    environment: pypi-native
     timeout-minutes: 15
 
     steps:

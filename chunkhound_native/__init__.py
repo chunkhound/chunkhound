@@ -1,1 +1,1 @@
-from .chunkhound_native import *
+from .chunkhound_native import scan_files

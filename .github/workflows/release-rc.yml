@@ -153,7 +153,7 @@ jobs:
     # Separate environment so this job carries an OIDC token scoped to the
     # chunkhound-native PyPI project (each project needs its own trusted-publisher
     # entry referencing this environment name).
-    environment: pypi
+    environment: pypi-native
     timeout-minutes: 15
 
     steps:
