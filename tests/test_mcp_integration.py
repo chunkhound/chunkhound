@@ -18,6 +18,7 @@ import pytest
 from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions import CompactionError
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.services.compaction_service import CompactionService
 from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.tools import execute_tool, search_impl
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
@@ -38,6 +39,11 @@ from tests.helpers.embedding_config import (
     build_embedding_config_from_dict,
     create_embedding_manager_for_tests,
 )
+
+
+def _tool_results(result: "dict | str") -> list:
+    """Extract 'results' list from execute_tool output (returns str on error)."""
+    return (result if isinstance(result, dict) else {}).get("results", [])
 
 
 class _TestMCPServer(MCPServerBase):
@@ -226,7 +232,7 @@ def unique_mcp_test_function():
     @pytest.mark.asyncio
     async def test_mcp_regex_search_finds_modified_files(self, mcp_setup):
         """Test that MCP regex search returns modified file content."""
-        services, _, watch_dir, _, _ = mcp_setup
+        services, realtime_service, watch_dir, _, _ = mcp_setup
 
         # Create initial file
         test_file = watch_dir / "modify_test.py"
@@ -352,7 +358,7 @@ def delete_test_unique_function():
     @pytest.mark.asyncio
     async def test_file_modification_detection_comprehensive(self, mcp_setup):
         """Comprehensive test to reproduce file modification detection issues."""
-        services, _, watch_dir, _, _ = mcp_setup
+        services, realtime_service, watch_dir, _, _ = mcp_setup
 
         # Create initial file
         test_file = watch_dir / "comprehensive_modify_test.py"
@@ -710,7 +716,7 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(after.get("results", [])) > 0, (
+        assert len(_tool_results(after)) > 0, (
             "Modified content must be searchable after post-compaction reindex"
         )
 
@@ -725,7 +731,7 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(old.get("results", [])) == 0, (
+        assert len(_tool_results(old)) == 0, (
             "Old content must be replaced by reindex"
         )
 
@@ -750,7 +756,7 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(before.get("results", [])) > 0, (
+        assert len(_tool_results(before)) > 0, (
             "Test precondition: deleted symbol must be searchable before "
             "compaction replay"
         )
@@ -833,7 +839,7 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(after.get("results", [])) == 0, (
+        assert len(_tool_results(after)) == 0, (
             "Deferred delete replay must remove stale searchable content"
         )
         assert normalized not in realtime_service._compaction_deferred_files
@@ -872,7 +878,7 @@ class NewlyAddedClass:
                     "offset": 0,
                 },
             )
-            assert len(results.get("results", [])) == expected, reason
+            assert len(_tool_results(results)) == expected, reason
 
         await assert_search_count(
             deleted_symbol,
@@ -1064,7 +1070,7 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(stale_new.get("results", [])) == 0, (
+        assert len(_tool_results(stale_new)) == 0, (
             "Search must remain stale before recovery retry runs"
         )
 
@@ -1079,7 +1085,7 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(stale_old.get("results", [])) > 0, (
+        assert len(_tool_results(stale_old)) > 0, (
             "Old content must remain searchable before recovery retry runs"
         )
 
@@ -1103,7 +1109,7 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(recovered_new.get("results", [])) > 0, (
+        assert len(_tool_results(recovered_new)) > 0, (
             "Recovery retry must make new content searchable"
         )
 
@@ -1118,7 +1124,7 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(recovered_old.get("results", [])) == 0, (
+        assert len(_tool_results(recovered_old)) == 0, (
             "Recovery retry must remove stale old content from search results"
         )
 
@@ -1148,7 +1154,7 @@ class NewlyAddedClass:
                     "offset": 0,
                 },
             )
-            assert len(before.get("results", [])) > 0
+            assert len(_tool_results(before)) > 0
 
         normalized_paths = {
             key: normalize_file_path(path) for key, (path, _) in files.items()
@@ -1213,7 +1219,7 @@ class NewlyAddedClass:
                     "offset": 0,
                 },
             )
-            assert len(a_after_failure.get("results", [])) == 0, (
+            assert len(_tool_results(a_after_failure)) == 0, (
                 "Successful replay before failure must remove file a from search"
             )
 
@@ -1229,7 +1235,7 @@ class NewlyAddedClass:
                         "offset": 0,
                     },
                 )
-                assert len(still_searchable.get("results", [])) > 0, (
+                assert len(_tool_results(still_searchable)) > 0, (
                     f"File {key} must remain searchable before recovery"
                 )
 
@@ -1250,7 +1256,7 @@ class NewlyAddedClass:
                     "offset": 0,
                 },
             )
-            assert len(after.get("results", [])) == 0
+            assert len(_tool_results(after)) == 0
 
         assert realtime_service._compaction_deferred_files == set()
         assert realtime_service._compaction_deferred_removals == set()
@@ -1283,7 +1289,7 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(before.get("results", [])) > 0, (
+        assert len(_tool_results(before)) > 0, (
             "Content should exist before compaction"
         )
 
@@ -1302,6 +1308,6 @@ class NewlyAddedClass:
                 "offset": 0,
             },
         )
-        assert len(after.get("results", [])) > 0, (
+        assert len(_tool_results(after)) > 0, (
             "Search results must be preserved after compaction"
         )
