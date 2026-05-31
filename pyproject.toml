@@ -81,7 +81,12 @@ dependencies = [
     "lancedb>=0.25.3",
     "pandas>=2.3.0",
     "pylance>=0.31.0",
-    "pyarrow>=23.0.0",
+    # pyarrow<24.0.0 due to Windows CI Access Violation (fatal exception)
+    # when importing pyarrow.dataset via lancedb (see win-3.14-CI.txt).
+    # This crash occurs on GitHub Windows runners (both 3.12 and 3.14)
+    # with pyarrow 24.x + lancedb 0.25.x due to native DLL conflicts.
+    # PyArrow 23.x is the last known stable range with LanceDB on Windows CI.
+    "pyarrow>=23.0.0,<24.0.0",
     "voyageai>=0.2.0",
     "httpx>=0.28.1",
     "pymupdf>=1.27.0",
