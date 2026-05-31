@@ -20,6 +20,7 @@ from watchdog.observers import Observer  # re-exported for test monkeypatching
 from watchdog.observers.api import BaseObserver
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions.core import CompactionError
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.services.realtime_path_filter import (
     RealtimePathFilter,
@@ -961,3 +962,106 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._indexed_files.discard(normalized)
         self._removed_files.discard(normalized)
         self.failed_files.discard(normalized)
+
+    # ------------------------------------------------------------------
+    # Compaction deferral API
+    # Called by MCPServerBase._post_compaction_reindex after compaction
+    # completes to replay work that was blocked during the compaction window.
+    # ------------------------------------------------------------------
+
+    async def drain_compaction_deferred_directories(self) -> set[str]:
+        """Snapshot and clear deferred directory cleanups.
+
+        Returns the set of directories deferred during compaction.
+        Caller is responsible for restoring on failure via
+        restore_compaction_deferred_directories().
+        """
+        async with self._file_condition:
+            snapshot = set(self._compaction_deferred_directories)
+            self._compaction_deferred_directories.clear()
+            return snapshot
+
+    async def restore_compaction_deferred_directories(self, paths: set[str]) -> None:
+        """Restore deferred directories on partial failure."""
+        async with self._file_condition:
+            self._compaction_deferred_directories.update(paths)
+
+    async def replay_compaction_deferred_directory(self, path: str) -> None:
+        """Replay a deferred directory cleanup.
+
+        On success: path is discarded from _compaction_deferred_directories.
+        On CompactionError: path stays in _compaction_deferred_directories, error re-raised.
+        On generic error: path stays in _compaction_deferred_directories, error re-raised.
+        """
+        try:
+            await self._cleanup_deleted_directory(path)
+        except Exception:
+            # Keep in deferred set on any failure — caller decides whether to
+            # treat CompactionError as retryable or generic as terminal.
+            async with self._file_condition:
+                self._compaction_deferred_directories.add(path)
+            raise
+        async with self._file_condition:
+            self._compaction_deferred_directories.discard(path)
+
+    async def drain_compaction_deferred_file_work(self) -> tuple[set[str], set[str]]:
+        """Snapshot and clear deferred file work atomically.
+
+        Returns (deferred_files, deferred_removals). Both sets are cleared.
+        Caller is responsible for restoring on failure via the restore_* methods.
+        """
+        async with self._file_condition:
+            files_snapshot = set(self._compaction_deferred_files)
+            removals_snapshot = set(self._compaction_deferred_removals)
+            self._compaction_deferred_files.clear()
+            self._compaction_deferred_removals.clear()
+            return files_snapshot, removals_snapshot
+
+    async def restore_compaction_deferred_files(self, paths: set[str]) -> None:
+        """Restore files to deferred set on partial failure."""
+        async with self._file_condition:
+            self._compaction_deferred_files.update(paths)
+
+    async def restore_compaction_deferred_removals(self, paths: set[str]) -> None:
+        """Restore removals to deferred sets on partial failure."""
+        async with self._file_condition:
+            self._compaction_deferred_removals.update(paths)
+            self._compaction_deferred_files.update(paths)
+
+    async def replay_compaction_deferred_removal(self, path: str) -> None:
+        """Replay a deferred file removal.
+
+        On success: path discarded from _compaction_deferred_files and _removals.
+        On CompactionError: path stays deferred, error re-raised.
+        On generic error: path moves to failed_files, error re-raised.
+        """
+        normalized = normalize_file_path(path)
+        try:
+            await self.remove_file(Path(path))
+        except CompactionError:
+            async with self._file_condition:
+                self._compaction_deferred_files.add(normalized)
+                self._compaction_deferred_removals.add(normalized)
+            raise
+        except Exception:
+            async with self._file_condition:
+                self._compaction_deferred_files.discard(normalized)
+                self._compaction_deferred_removals.discard(normalized)
+                self.failed_files.add(normalized)
+                self._file_condition.notify_all()
+            raise
+        async with self._file_condition:
+            self._compaction_deferred_files.discard(normalized)
+            self._compaction_deferred_removals.discard(normalized)
+
+    async def clear_compaction_deferred_files(self) -> None:
+        """Clear all compaction-deferred tracking sets without touching failed_files.
+
+        Called by post-compaction reindex when starting fresh — removes the
+        deferred state written during the compaction window.
+        """
+        async with self._file_condition:
+            self._compaction_deferred_files.clear()
+            self._compaction_deferred_removals.clear()
+            self._compaction_deferred_directories.clear()
+            self._file_condition.notify_all()
