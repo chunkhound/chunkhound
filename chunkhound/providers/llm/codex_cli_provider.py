@@ -244,13 +244,25 @@ class CodexCLIProvider(BaseCLIProvider):
                 # Best-effort copy; skip unreadable items
                 pass
 
-    def _build_overlay_home(self, model_override: str | None = None) -> str:
+    def _build_overlay_home(
+        self,
+        model_override: str | None = None,
+        *,
+        write_model_to_config: bool = True,
+    ) -> str:
         """Create an overlay CODEX_HOME inheriting auth but overriding config.
 
         - Copies the base CODEX_HOME (if it exists) to a temp dir
         - Replaces config.toml with a minimal one (no MCP, no history persistence)
         - Sets fast model defaults (best effort)
         - Copies only a minimal subset by default to reduce exposure
+
+        Args:
+            model_override: Model name to use (or None to use resolved default).
+            write_model_to_config: If False, omit the ``model = "..."`` line from
+                config.toml.  Used when the model was auto-discovered (provider
+                default) so Codex CLI uses its own selection rather than a pinned
+                value.
         """
         overlay = Path(tempfile.mkdtemp(prefix="chunkhound-codex-overlay-"))
         base = self._get_base_codex_home()
@@ -266,7 +278,7 @@ class CodexCLIProvider(BaseCLIProvider):
             config_path = overlay / "config.toml"
             # Many Codex builds expect top-level `model` keys (not a [model] table).
             cfg_lines: list[str] = []
-            if model_name:
+            if model_name and write_model_to_config:
                 cfg_lines.append(f'model = "{model_name}"')
             cfg_lines.extend(
                 [
@@ -382,9 +394,12 @@ class CodexCLIProvider(BaseCLIProvider):
         extra_args: list[str] = []
 
         env = os.environ.copy()
-        effective_model = (
-            self._resolve_model_name(model) if model else self._get_resolved_model()
-        )
+        # Resolve model with source tracking so we know whether to pin it in
+        # config.toml (only for explicit / env overrides, not for "discovered"
+        # or "fallback" which let the Codex CLI pick its own default).
+        _requested = model or self._model
+        effective_model, _model_source = self.describe_model_resolution(_requested)
+        _write_model_to_config = _model_source not in ("discovered", "fallback")
         keep_overlay = os.getenv("CHUNKHOUND_CODEX_KEEP_OVERLAY", "0") == "1"
 
         # Optional verbose diagnostics for large prompts / transport issues.
@@ -425,7 +440,9 @@ class CodexCLIProvider(BaseCLIProvider):
             if s.strip()
         ]
 
-        overlay_home = self._build_overlay_home(effective_model)
+        overlay_home = self._build_overlay_home(
+            effective_model, write_model_to_config=_write_model_to_config
+        )
         env["CODEX_HOME"] = overlay_home
         config_file_path = str(Path(overlay_home) / "config.toml")
 

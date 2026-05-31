@@ -882,9 +882,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 if files or rows:
                     logger.info(
                         "DuckDB chunks bulk metrics: "
-                        "files=%d rows=%d batches=%d "
-                        "t_temp=%.2fs t_temp_clear=%.2fs "
-                        "t_temp_insert=%.2fs t_main_insert=%.2fs",
+                        "files={} rows={} batches={} "
+                        "t_temp={:.2f}s t_temp_clear={:.2f}s "
+                        "t_temp_insert={:.2f}s t_main_insert={:.2f}s",
                         files,
                         rows,
                         batches,

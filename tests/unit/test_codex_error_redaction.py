@@ -24,7 +24,7 @@ async def test_codex_error_redaction(monkeypatch, tmp_path: Path):
     overlay_dir.mkdir(parents=True, exist_ok=True)
     requested_model = {}
 
-    def _fake_overlay_home(self, model_override=None):
+    def _fake_overlay_home(self, model_override=None, **kwargs):
         requested_model["value"] = model_override
         return str(overlay_dir)
 

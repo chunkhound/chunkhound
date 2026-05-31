@@ -151,7 +151,7 @@ async def test_codex_config_only_mode_omits_model_for_provider_default(monkeypat
             cfg = Path(cfg_path)
             if cfg.exists():
                 captured["config_text"] = cfg.read_text()
-        return _DummyProc(rc=0, out=b"OK", err=b"")
+        return DummyProc(rc=0, out=b"OK", err=b"")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
 

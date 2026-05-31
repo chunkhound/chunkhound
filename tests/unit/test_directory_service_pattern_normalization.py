@@ -40,7 +40,7 @@ async def test_patterns_not_double_prefixed(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_process_directory_reports_discovery_phase_first(tmp_path: Path) -> None:
-    coord = _CaptureCoordinator()
+    coord = CaptureCoordinator()
     messages: list[str] = []
     svc = DirectoryIndexingService(
         indexing_coordinator=coord,
