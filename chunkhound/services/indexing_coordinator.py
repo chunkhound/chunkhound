@@ -1009,7 +1009,10 @@ class IndexingCoordinator(BaseService):
                         (str(result.file_path), result.error)
                     )
                 except Exception:
-                    pass  # best-effort; next run will re-evaluate
+                    logger.warning(
+                        "Failed to record skipped file in DB; next run will re-evaluate",
+                        exc_info=True,
+                    )
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
                     if cumulative_counters is not None:
