@@ -509,7 +509,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=21.0" },
     { name = "pandas", specifier = ">=2.3.0" },
     { name = "pathspec", specifier = ">=0.12.1" },
-    { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.48.0" },
+    { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.49.0" },
     { name = "psutil", specifier = ">=5.8.0" },
     { name = "pydantic", specifier = ">=2.11.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },

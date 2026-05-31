@@ -1,13 +1,18 @@
-name: Tests
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
   merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   site-build:
@@ -33,6 +38,27 @@ jobs:
           name: site-dist
           path: site/dist/
 
+  site-build-validation:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # docs/site version resolution requires tags
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Resolve docs version
+        run: bash scripts/resolve_docs_version.sh
+      - run: npm ci --prefix site
+      - run: npm run build --prefix site
+
   tests:
     needs: site-build
     strategy:
@@ -42,20 +68,19 @@ jobs:
         include:
           - os: ubuntu-latest
             job_timeout_minutes: 30
-            retry_timeout_minutes: 13
+            pytest_timeout_minutes: 13
             pytest_timeout_seconds: 300
           - os: macos-latest
             job_timeout_minutes: 30
-            retry_timeout_minutes: 13
+            pytest_timeout_minutes: 13
             pytest_timeout_seconds: 300
           # Windows CI polling monitor occasionally misses second file write within
           # 45s window — retry individual flaky tests before failing the run.
           - os: windows-latest
             job_timeout_minutes: 60
-            retry_timeout_minutes: 26
+            pytest_timeout_minutes: 20
             pytest_timeout_seconds: 600
             pytest_extra_args: "--reruns 2 --reruns-delay 5 --only-rerun AssertionError"
-            pytest_timeout_minutes: 20
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
@@ -86,11 +111,20 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --locked
+
+      - name: Download built site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site-dist
+          path: site/dist
+
       - name: Test collection check
         run: uv run pytest tests/ --collect-only -q --tb=no
 
       - name: Run tests
         id: tests
+        env:
+          CHUNKHOUND_USE_EXISTING_SITE_DIST: "1"
         # Two retry layers serving different failure modes:
         # - nick-fields/retry: restarts the whole pytest process on CI-level failures
         #   (e.g. OOM, runner hiccup).
@@ -114,6 +148,39 @@ jobs:
       - name: Check flaky annotations
         if: failure() && steps.tests.outcome == 'failure'
         run: uv run python scripts/check_flaky_annotations.py test-results.xml
+
+  pages-artifact:
+    needs: [site-build, tests, site-build-validation, watchman-rollout-gate]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download tested site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site-dist
+          path: site/dist
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/dist/
+
+  deploy:
+    needs: pages-artifact
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
 
   watchman-runtime-validation:
     strategy:

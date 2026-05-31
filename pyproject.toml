@@ -103,7 +103,7 @@ dependencies = [
 
 [project.optional-dependencies]
 browser = [
-    "playwright>=1.48.0",
+    "playwright>=1.49.0",
 ]
 dev = [
     "pytest>=7.4.0",

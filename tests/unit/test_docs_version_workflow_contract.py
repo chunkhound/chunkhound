@@ -139,9 +139,13 @@ def _load_workflow(path: str) -> dict[str, Any]:
         return cast(dict[str, Any], yaml.safe_load(handle))
 
 
-def _job_steps(path: str, job_name: str) -> list[dict[str, Any]]:
+def _job(path: str, job_name: str) -> dict[str, Any]:
     workflow = _load_workflow(path)
-    return cast(list[dict[str, Any]], workflow["jobs"][job_name]["steps"])
+    return cast(dict[str, Any], workflow["jobs"][job_name])
+
+
+def _job_steps(path: str, job_name: str) -> list[dict[str, Any]]:
+    return cast(list[dict[str, Any]], _job(path, job_name)["steps"])
 
 
 def _find_step_index(
@@ -383,9 +387,9 @@ class TestDocsVersionWorkflowContract:
     @pytest.mark.parametrize(
         ("path", "job_name"),
         [
-            (".github/workflows/smoke-tests.yml", "site-build"),
-            (".github/workflows/smoke-tests.yml", "tests"),
-            (".github/workflows/deploy.yml", "deploy"),
+            (".github/workflows/ci.yml", "site-build"),
+            (".github/workflows/ci.yml", "site-build-validation"),
+            (".github/workflows/ci.yml", "tests"),
         ],
     )
     def test_docs_build_jobs_use_shared_resolver_script(
@@ -404,51 +408,44 @@ class TestDocsVersionWorkflowContract:
     @pytest.mark.parametrize(
         ("path", "job_name"),
         [
-            (".github/workflows/smoke-tests.yml", "site-build"),
-            (".github/workflows/smoke-tests.yml", "tests"),
-            (".github/workflows/deploy.yml", "deploy"),
+            (".github/workflows/ci.yml", "site-build"),
+            (".github/workflows/ci.yml", "site-build-validation"),
+            (".github/workflows/ci.yml", "tests"),
         ],
     )
     def test_docs_build_jobs_checkout_with_full_history(
         self, path: str, job_name: str
     ) -> None:
-        steps = _job_steps(path, job_name)
-        _assert_checkout_uses_full_history(steps)
+        _assert_checkout_uses_full_history(_job_steps(path, job_name))
 
     @pytest.mark.parametrize(
-        ("path", "job_name", "consumer_description", "consumer_predicate"),
+        ("job_name", "consumer_description", "consumer_predicate"),
         [
             (
-                ".github/workflows/smoke-tests.yml",
                 "site-build",
                 "site build step",
                 lambda step: step.get("run") == "npm run build --prefix site",
             ),
             (
-                ".github/workflows/smoke-tests.yml",
-                "tests",
-                "retry-backed test runner step",
-                # This contract protects the real test runner, not the collect-only
-                # check, so workflow refactors do not accidentally weaken it.
-                lambda step: step.get("id") == "tests"
-                and str(step.get("uses", "")).startswith("nick-fields/retry@"),
-            ),
-            (
-                ".github/workflows/deploy.yml",
-                "deploy",
+                "site-build-validation",
                 "site build step",
                 lambda step: step.get("run") == "npm run build --prefix site",
+            ),
+            (
+                "tests",
+                "retry-backed test runner step",
+                lambda step: step.get("id") == "tests"
+                and str(step.get("uses", "")).startswith("nick-fields/retry@"),
             ),
         ],
     )
     def test_docs_version_is_resolved_before_consumer_steps(
         self,
-        path: str,
         job_name: str,
         consumer_description: str,
         consumer_predicate: Callable[[dict], bool],
     ) -> None:
-        steps = _job_steps(path, job_name)
+        steps = _job_steps(".github/workflows/ci.yml", job_name)
         resolve_index = _find_step_index(
             steps,
             "shared docs version resolver step",
@@ -460,21 +457,36 @@ class TestDocsVersionWorkflowContract:
 
         assert resolve_index < consumer_index
 
-    @pytest.mark.parametrize(
-        "path",
-        [
-            ".github/workflows/smoke-tests.yml",
-            ".github/workflows/deploy.yml",
-        ],
-    )
-    def test_workflows_do_not_inline_docs_version_resolution(self, path: str) -> None:
-        contents = (ROOT / path).read_text(encoding="utf-8")
+    def test_workflows_do_not_inline_docs_version_resolution(self) -> None:
+        contents = (ROOT / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
 
         assert INLINE_RESOLVE_SNIPPET not in contents
 
-    def test_deploy_workflow_reuses_tested_site_artifact(self) -> None:
-        workflow = _load_workflow(".github/workflows/deploy.yml")
-        steps = cast(list[dict[str, Any]], workflow["jobs"]["deploy"]["steps"])
+    def test_site_build_uploads_site_dist_artifact_after_nojekyll(self) -> None:
+        steps = _job_steps(".github/workflows/ci.yml", "site-build")
+        nojekyll_index = _find_step_index(
+            steps,
+            ".nojekyll creation step",
+            lambda step: step.get("run") == "touch site/dist/.nojekyll",
+        )
+        upload_index = _find_step_index(
+            steps,
+            "site artifact upload step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/upload-artifact@"
+            ),
+        )
+        upload_step = steps[upload_index]
+
+        assert nojekyll_index < upload_index
+        assert upload_step["with"]["name"] == "site-dist"
+        assert upload_step["with"]["path"] == "site/dist/"
+
+    def test_tests_job_downloads_site_dist_and_uses_existing_build(self) -> None:
+        job = _job(".github/workflows/ci.yml", "tests")
+        steps = cast(list[dict[str, Any]], job["steps"])
         download_index = _find_step_index(
             steps,
             "site artifact download step",
@@ -483,86 +495,91 @@ class TestDocsVersionWorkflowContract:
             ),
         )
         download_step = steps[download_index]
+        tests_index = _find_step_index(
+            steps,
+            "retry-backed test runner step",
+            lambda step: step.get("id") == "tests"
+            and str(step.get("uses", "")).startswith("nick-fields/retry@"),
+        )
+        tests_step = steps[tests_index]
 
-        assert download_step["if"] == "github.event_name == 'workflow_run'"
+        assert job["needs"] == "site-build"
         assert download_step["with"]["name"] == "site-dist"
-        assert download_step["with"]["path"] == "site/dist/"
-        assert download_step["with"]["run-id"] == "${{ github.event.workflow_run.id }}"
-        assert download_step["with"]["github-token"] == "${{ github.token }}"
+        assert download_step["with"]["path"] == "site/dist"
+        assert tests_step["env"]["CHUNKHOUND_USE_EXISTING_SITE_DIST"] == "1"
 
-    def test_deploy_workflow_keeps_success_gate_for_automatic_runs(self) -> None:
-        workflow = _load_workflow(".github/workflows/deploy.yml")
-        deploy_job = cast(dict[str, Any], workflow["jobs"]["deploy"])
-
-        assert "github.event.workflow_run.conclusion == 'success'" in deploy_job["if"]
-
-    def test_site_workflows_create_nojekyll_before_upload(self) -> None:
-        workflows_and_jobs = [
-            (".github/workflows/smoke-tests.yml", "site-build"),
-            (".github/workflows/deploy.yml", "deploy"),
-        ]
-
-        for path, job_name in workflows_and_jobs:
-            steps = _job_steps(path, job_name)
-            nojekyll_index = _find_step_index(
-                steps,
-                ".nojekyll creation step",
-                lambda step: step.get("run") == "touch site/dist/.nojekyll",
-            )
-            upload_index = _find_step_index(
-                steps,
-                "site artifact upload step",
-                lambda step: str(step.get("uses", "")).startswith(
-                    ("actions/upload-artifact@", "actions/upload-pages-artifact@")
-                )
-                and step.get("with", {}).get("path") == "site/dist/",
-            )
-
-            assert nojekyll_index < upload_index
-
-    def test_deploy_path_b_build_steps_have_conditional_guards(self) -> None:
-        """Every build step on the workflow_dispatch fallback path must be
-        guarded with if: github.event_name != 'workflow_run' to maintain
-        mutual exclusivity with the artifact download path."""
-        steps = _job_steps(".github/workflows/deploy.yml", "deploy")
-        build_step_checks: list[tuple[str, Callable[[dict], bool]]] = [
-            (
-                "checkout",
-                lambda s: str(s.get("uses", "")).startswith("actions/checkout@"),
-            ),
-            (
-                "setup-node",
-                lambda s: str(s.get("uses", "")).startswith("actions/setup-node@"),
-            ),
-            (
-                "resolve docs version",
-                lambda s: s.get("run") == "bash scripts/resolve_docs_version.sh",
-            ),
-            (
-                "npm ci",
-                lambda s: s.get("run") == "npm ci --prefix site",
-            ),
-            (
-                "npm run build",
-                lambda s: s.get("run") == "npm run build --prefix site",
-            ),
-        ]
-        for name, predicate in build_step_checks:
-            idx = _find_step_index(steps, f"deploy build step: {name}", predicate)
-            assert steps[idx].get("if") == "github.event_name != 'workflow_run'", (
-                f"Build step '{name}' in deploy.yml must be guarded with "
-                f"github.event_name != 'workflow_run'"
-            )
-
-    def test_deploy_workflow_has_artifact_read_permission(self) -> None:
-        """The deploy workflow must have actions: read permission for
-        artifact download from the Tests workflow run."""
-        workflow = _load_workflow(".github/workflows/deploy.yml")
-        permissions = workflow.get("permissions", {})
-        assert isinstance(permissions, dict), (
-            "deploy.yml permissions must be a dict (not a blanket string "
-            "like 'read-all')"
+    def test_tests_job_matrix_uses_pytest_timeout_minutes_consistently(self) -> None:
+        matrix = cast(
+            list[dict[str, Any]],
+            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"][
+                "include"
+            ],
         )
-        assert permissions.get("actions") == "read", (
-            "deploy.yml must have 'actions: read' for download-artifact to work"
+
+        assert all("pytest_timeout_minutes" in entry for entry in matrix)
+        assert all("retry_timeout_minutes" not in entry for entry in matrix)
+
+    def test_site_build_validation_job_contract(self) -> None:
+        job = _job(".github/workflows/ci.yml", "site-build-validation")
+        steps = cast(list[dict[str, Any]], job["steps"])
+        matrix = cast(dict[str, Any], job["strategy"]["matrix"])
+
+        assert matrix["os"] == ["ubuntu-latest", "macos-latest", "windows-latest"]
+        assert job["runs-on"] == "${{ matrix.os }}"
+        assert not any(
+            str(step.get("uses", "")).startswith("actions/upload-artifact@")
+            for step in steps
         )
+
+    def test_pages_artifact_job_contract(self) -> None:
+        job = _job(".github/workflows/ci.yml", "pages-artifact")
+        steps = cast(list[dict[str, Any]], job["steps"])
+        download_index = _find_step_index(
+            steps,
+            "tested site artifact download step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/download-artifact@"
+            ),
+        )
+        upload_index = _find_step_index(
+            steps,
+            "pages artifact upload step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/upload-pages-artifact@"
+            ),
+        )
+        download_step = steps[download_index]
+        upload_step = steps[upload_index]
+        permissions = cast(dict[str, Any], job.get("permissions", {}))
+
+        assert job["needs"] == [
+            "site-build",
+            "tests",
+            "site-build-validation",
+            "watchman-rollout-gate",
+        ]
+        assert job["if"] == "github.ref == 'refs/heads/main'"
+        assert download_step["with"]["name"] == "site-dist"
+        assert download_step["with"]["path"] == "site/dist"
+        assert upload_step["with"]["path"] == "site/dist/"
+        assert permissions["contents"] == "read"
+
+    def test_workflow_concurrency_contract(self) -> None:
+        workflow = _load_workflow(".github/workflows/ci.yml")
+        concurrency = cast(dict[str, Any], workflow.get("concurrency", {}))
+
+        assert concurrency["group"] == (
+            "${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}"
+        )
+        assert concurrency["cancel-in-progress"] is False
+
+    def test_deploy_job_contract(self) -> None:
+        job = _job(".github/workflows/ci.yml", "deploy")
+        permissions = cast(dict[str, Any], job.get("permissions", {}))
+
+        assert job["needs"] == "pages-artifact"
+        assert job["if"] == "github.ref == 'refs/heads/main'"
+        assert "concurrency" not in job
+        assert permissions["contents"] == "read"
+        assert permissions["pages"] == "write"
+        assert permissions["id-token"] == "write"

@@ -319,5 +319,12 @@ site/node_modules/
 site/dist/
 site/.astro/
 
+# Generated — synced from root CHANGELOG.md at build time
+site/src/pages/docs/changelog.md
+
+# Generated — OG PNGs rendered from SVGs at build time
+site/public/og-image-dark.png
+site/public/og-image-light.png
+
 # Gemini-CLI
 .gemini/settings.json
