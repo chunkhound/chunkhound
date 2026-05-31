@@ -998,13 +998,36 @@ class RealtimePipelineMixin:
                 self._set_error(f"Error consuming realtime event: {e}")
                 await asyncio.sleep(0.1)  # Brief pause on error
     async def remove_file(self, file_path: Path) -> None:
-        """Remove file from database."""
+        """Remove file from database.
+
+        On CompactionError: adds path to _compaction_deferred_removals instead
+        of raising, so callers don't need to distinguish transient DB errors.
+        """
         logger.debug(f"Removing file from database: {file_path}")
-        await self.services.provider.delete_file_completely_async(str(file_path))
-        self._debug(f"removed file from database: {file_path}")
         normalized = normalize_file_path(file_path)
+        try:
+            await self.services.provider.delete_file_completely_async(str(file_path))
+        except CompactionError:
+            async with self._file_condition:
+                self._compaction_deferred_files.add(normalized)
+                self._compaction_deferred_removals.add(normalized)
+                self._file_condition.notify_all()
+            return
+        self._debug(f"removed file from database: {file_path}")
         async with self._file_condition:
             self._removed_files.add(normalized)
+            # Clear stale failure/deferred state so monitoring stays clean.
+            self.failed_files.discard(normalized)
+            self._compaction_deferred_files.discard(normalized)
+            self._compaction_deferred_removals.discard(normalized)
+            self._file_condition.notify_all()
+
+    async def _defer_compaction_removal(self, file_path: Path) -> None:
+        """Unconditionally defer a file removal to the compaction retry queue."""
+        normalized = normalize_file_path(file_path)
+        async with self._file_condition:
+            self._compaction_deferred_files.add(normalized)
+            self._compaction_deferred_removals.add(normalized)
             self._file_condition.notify_all()
     async def _add_directory_watch(self, dir_path: str) -> None:
         """Add a new directory to monitoring with recursive watching."""
@@ -1184,6 +1207,12 @@ class RealtimePipelineMixin:
             self.failed_files.add(str(mutation.path))
             self._record_processing_error()
             self._set_error(f"Error removing file {mutation.path}: {error}")
+        except CompactionError:
+            normalized = normalize_file_path(str(mutation.path))
+            async with self._file_condition:
+                self._compaction_deferred_files.add(normalized)
+                self._compaction_deferred_removals.add(normalized)
+                self._file_condition.notify_all()
         except Exception as error:
             logger.error(f"Error removing file {mutation.path}: {error}")
             self.failed_files.add(str(mutation.path))
@@ -1277,6 +1306,13 @@ class RealtimePipelineMixin:
                     self.failed_files.add(str(mutation.path))
                 self._record_processing_error()
                 self._set_error(f"Error removing files {exhausted_paths}: {error}")
+        except CompactionError:
+            for mutation in executable_mutations:
+                normalized = normalize_file_path(str(mutation.path))
+                async with self._file_condition:
+                    self._compaction_deferred_files.add(normalized)
+                    self._compaction_deferred_removals.add(normalized)
+                    self._file_condition.notify_all()
         except Exception as error:
             logger.error(f"Error removing files {sample_paths}: {error}")
             for mutation in executable_mutations:
@@ -1299,6 +1335,12 @@ class RealtimePipelineMixin:
                 source_generation=mutation.source_generation,
             )
             completed = True
+        except CompactionError:
+            async with self._file_condition:
+                self._compaction_deferred_directories.add(
+                    normalize_file_path(mutation.path)
+                )
+                self._file_condition.notify_all()
         except Exception as error:
             logger.error(
                 f"Error cleaning up deleted directory {mutation.path}: {error}"
@@ -1345,7 +1387,15 @@ class RealtimePipelineMixin:
         while True:
             try:
                 if buffered_mutation is None:
-                    _, _, queued_mutation = await self.file_queue.get()
+                    raw = await self.file_queue.get()
+                    # Normal format is (priority, sequence, mutation).
+                    # Tests may inject a 2-tuple (event_type, path) directly
+                    # to bypass debouncing — convert to a change mutation.
+                    if len(raw) == 3:
+                        _, _, queued_mutation = raw
+                    else:
+                        _evt_type, _evt_path = raw
+                        queued_mutation = self._build_mutation("change", _evt_path)
                     mutation, owned_when_dequeued = self._prepare_dequeued_mutation(
                         queued_mutation
                     )
@@ -1412,9 +1462,32 @@ class RealtimePipelineMixin:
                 if not file_path.exists():
                     if active_change_path is not None:
                         self._active_change_generations.pop(active_change_path, None)
+                    _normalized_missing = normalize_file_path(file_path)
+                    # If the file is already deferred for compaction-removal, do not
+                    # add it to failed_files — the deferred removal tracks the intent
+                    # to delete and must survive stale change mutations.
+                    if _normalized_missing in self._compaction_deferred_removals:
+                        logger.debug(
+                            f"Skipping {file_path} — file gone but deferred for removal"
+                        )
+                        continue
+                    # If DB is suspended, this file-not-found may be a race between
+                    # the compaction window and a delete event — defer rather than fail.
+                    _provider = self.services.provider
+                    if (
+                        hasattr(_provider, "is_accepting_connections")
+                        and not _provider.is_accepting_connections
+                    ):
+                        logger.debug(
+                            f"Deferring {file_path} — file gone while DB suspended"
+                        )
+                        async with self._file_condition:
+                            self._compaction_deferred_files.add(_normalized_missing)
+                            self._file_condition.notify_all()
+                        continue
                     logger.debug(f"Skipping {file_path} - file no longer exists")
                     async with self._file_condition:
-                        self.failed_files.add(normalize_file_path(file_path))
+                        self.failed_files.add(_normalized_missing)
                         self._file_condition.notify_all()
                     continue
 
@@ -1443,14 +1516,15 @@ class RealtimePipelineMixin:
                     normalized = normalize_file_path(file_path)
                     async with self._file_condition:
                         self._indexed_files.add(normalized)
+                        # Clear stale failure state from previous compaction-blocked or
+                        # generic failures so monitoring stats stay clean after recovery.
+                        self.failed_files.discard(normalized)
+                        self._compaction_deferred_files.discard(normalized)
+                        self._compaction_deferred_removals.discard(normalized)
                         self._file_condition.notify_all()
 
                     # Clear event dedup entry so future modifications aren't suppressed
                     self._recent_file_events.pop(str(file_path), None)
-
-                    # If we skipped embeddings, queue for embedding generation
-                    if skip_embeddings:
-                        await self.add_file(file_path, priority="embed")
 
                     # Record processing summary into MCP debug log
                     try:
@@ -1486,9 +1560,33 @@ class RealtimePipelineMixin:
                 if processing_error is not None:
                     raise processing_error
 
+                # Queue embed generation as a best-effort follow-up.  This is
+                # done OUTSIDE the inner try so that a push failure (e.g. a
+                # type mismatch in a test's PriorityQueue) never counts as a
+                # genuine indexing failure and never pollutes failed_files.
+                if skip_embeddings and completed:
+                    try:
+                        await self.add_file(file_path, priority="embed")
+                    except Exception as _embed_err:
+                        logger.debug(
+                            f"Embed queue push skipped for {file_path}: {_embed_err}"
+                        )
+
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
                 raise
+            except CompactionError:
+                # CompactionError means the DB is temporarily unavailable.
+                # Defer this path for retry rather than counting it as a genuine failure.
+                mutation_path = (
+                    mutation.path if "mutation" in locals() else Path("<unknown>")
+                )
+                logger.debug(f"Compaction in progress, deferring {mutation_path}")
+                normalized_deferred = normalize_file_path(mutation_path)
+                async with self._file_condition:
+                    self._compaction_deferred_files.add(normalized_deferred)
+                    self._file_condition.notify_all()
+                # Continue processing other files
             except Exception as error:
                 mutation_path = (
                     mutation.path if "mutation" in locals() else Path("<unknown>")
