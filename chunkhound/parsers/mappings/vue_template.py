@@ -17,6 +17,19 @@ logic for mapping Vue template AST nodes to semantic chunks.
 - Does not parse nested JavaScript expressions within directives
 - Component props are extracted as strings, not parsed as JS
 - Event handler expressions are captured but not analyzed
+
+## Metadata Notes
+
+Directive-related metadata is populated under the following keys (when applicable):
+
+- `directive_type`: One of `"event_handler"`, `"property_binding"`, `"v-model"`, `"slot"`, `"v-if"`, `"v-else-if"`, `"v-else"`, `"v-for"`, `"interpolation"`, or `"component_usage"`.
+- `event_name`, `property_name`, `slot_name`: The base name (modifiers are stripped for events and bindings).
+- For `v-model` specifically:
+  - `model_binding`: The expression being bound (e.g. `"user.name"`).
+  - `modifiers`: List of modifiers (e.g. `["trim", "number"]`). Empty list when none present.
+  - `model_argument`: Present for `v-model:foo` style bindings (the argument part).
+
+**Note on v-model metadata shape**: Previous versions of ChunkHound used a single `model_modifier` string field (populated from the tree-sitter `directive_argument` node). This was semantically incorrect for several forms (e.g. `v-model:foo`, `v-model:foo.trim`, and cases with multiple modifiers). The current shape (`modifiers` as a list + separate `model_argument`) is more accurate and was introduced as part of the Python 3.14 / tree-sitter grammar compatibility work.
 """
 
 from pathlib import Path
