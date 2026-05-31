@@ -190,6 +190,11 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._pending_mutations: dict[tuple[str, str], RealtimeMutation] = {}
         self._pending_path_counts: dict[str, int] = {}
         self.failed_files: set[str] = set()
+        # Compaction deferral tracking — files/removals/dirs blocked by compaction
+        # are tracked separately from genuine failures so monitoring stays clean.
+        self._compaction_deferred_files: set[str] = set()
+        self._compaction_deferred_removals: set[str] = set()
+        self._compaction_deferred_directories: set[str] = set()
         self._last_warning: str | None = None
         self._last_warning_at: str | None = None
         self._last_error: str | None = None
@@ -913,6 +918,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 await self._file_condition.wait_for(
                     lambda: normalized in self._indexed_files
                     or normalized in self.failed_files
+                    or normalized in self._compaction_deferred_files
                     or self._stopping
                 )
 
