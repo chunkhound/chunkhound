@@ -99,6 +99,7 @@ dependencies = [
     "tree-sitter-css>=0.25.0",
     "lark>=1.1.0",
     "markdownify>=1.0",
+    "zendriver>=0.15.3",
 ]
 
 [project.optional-dependencies]
