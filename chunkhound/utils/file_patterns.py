@@ -26,7 +26,7 @@ try:
 except ImportError:
     _RUST_AVAILABLE = False
 
-_USE_RUST = os.environ.get("CHUNKHOUND_USE_RUST", "0") == "1"
+_USE_RUST = os.environ.get("CHUNKHOUND_USE_RUST", "1" if _RUST_AVAILABLE else "0") == "1"
 _log = logging.getLogger(__name__)
 
 HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
