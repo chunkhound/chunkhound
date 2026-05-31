@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   must now set `llm.model` (or per-role model override) explicitly for these
   providers.
 
+### Added
+- **Claude Opus 4.8 support**: the Anthropic provider now gives Opus 4.8 full Opus 4.7 capability
+  parity: adaptive-only extended thinking (an explicit `manual` request auto-resolves to adaptive),
+  effort levels `low`/`medium`/`high`/`xhigh`/`max`, and the task-budgets beta. The pinned
+  `claude-opus` offline fallback was bumped to `claude-opus-4-8`. Fixes a `400 "thinking.type.enabled
+  is not supported for this model"` error when targeting `claude-opus-4-8` with thinking enabled.
+
 ### Changed
 - **DeepSeek/Grok refactored to data-driven registry** — Per-provider
   subclasses replaced with a unified `OpenAICompatibleSpec` registry.

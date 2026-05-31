@@ -1277,6 +1277,13 @@ class TestLLMConfigEnvLoading:
 class TestLLMConfigDefaults:
     """Pin default model selection."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_env(self, clean_environment):
+        # Default resolution must not depend on the developer's ambient
+        # CHUNKHOUND_* / provider-key env. clean_environment (conftest) strips
+        # it so this class behaves identically locally and in CI.
+        yield
+
     def test_anthropic_prompt_caching_default_disabled(self):
         from chunkhound.core.config.llm_config import LLMConfig
 
@@ -1834,6 +1841,65 @@ class TestRequestShape:
         assert kwargs["output_config"] == {"effort": "medium"}
         assert kwargs["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
         assert "betas" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_opus_48_emits_adaptive_thinking_and_xhigh_effort(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-8",
+            thinking_enabled=True,
+            effort="xhigh",
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+
+        await provider.complete("hello")
+
+        # Plain adaptive request: no beta features, so the standard endpoint.
+        assert provider._client.beta.messages.create.call_args is None
+        kwargs = provider._client.messages.create.call_args.kwargs
+        assert kwargs["model"] == "claude-opus-4-8"
+        # Opus 4.8 is adaptive-only; auto thinking must go out as adaptive.
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        # xhigh is a 4.7/4.8-only effort level and must reach output_config.
+        assert kwargs["output_config"] == {"effort": "xhigh"}
+
+    @pytest.mark.asyncio
+    async def test_opus_48_manual_thinking_falls_back_to_adaptive(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-8",
+            thinking_enabled=True,
+            thinking_mode="manual",
+            thinking_budget_tokens=8000,
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+
+        await provider.complete("hello")
+
+        # Opus 4.8 rejects thinking.type=enabled, so a manual/budgeted request
+        # must go out as adaptive (no budget_tokens), not the enabled shape.
+        kwargs = provider._client.messages.create.call_args.kwargs
+        assert kwargs["thinking"] == {"type": "adaptive"}
 
     @pytest.mark.asyncio
     async def test_complete_with_tools_routes_strict_tools_to_beta(self):
