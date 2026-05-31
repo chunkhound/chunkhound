@@ -14,6 +14,7 @@ from loguru import logger
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
+from chunkhound.core.exceptions.core import CompactionError
 from chunkhound.core.utils.path_utils import normalize_realtime_path
 from chunkhound.providers.database.duckdb_provider import DuckDBTransactionConflictError
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
@@ -1033,57 +1034,101 @@ class RealtimePipelineMixin:
     async def _cleanup_deleted_directory(
         self, dir_path: str | Path, *, source_generation: int | None = None
     ) -> int:
-        """Queue cleanup work for files that were under a deleted directory.
+        """Delete all database entries for files under a deleted directory.
 
-        Enumerates rows directly from the ``files`` table by path prefix so
-        chunkless rows (binary, empty, or unparseable files) are still cleaned
-        up alongside chunked rows.
+        Uses get_scope_file_paths_async (preferred) or list_file_paths_under_directory
+        to enumerate rows, then calls delete_file_completely_async for each.
+
+        CompactionError during listing: defers directory to _compaction_deferred_directories
+        and re-raises so the caller can retry.
+
+        CompactionError during per-file deletion: defers file to
+        _compaction_deferred_files + _compaction_deferred_removals (does not fail).
+
+        Generic errors during listing: propagate without deferring.
         """
         normalized_dir = self._normalize_mutation_path(dir_path)
         absolute_dir = str(normalized_dir)
 
-        base_root = self._path_filter_root(normalized_dir)
-        try:
-            relative_dir = normalized_dir.relative_to(base_root).as_posix()
-        except ValueError:
-            relative_dir = absolute_dir
-
         provider = self.services.provider
-        list_paths = getattr(provider, "list_file_paths_under_directory", None)
-        if callable(list_paths):
-            file_paths = await asyncio.to_thread(list_paths, relative_dir)
-        else:
-            search_results, _ = await provider.search_regex_async(
-                pattern=f"^{absolute_dir}/.*",
-                page_size=1000,
-            )
-            file_paths = [
-                result.get("file_path") or result.get("path", "")
-                for result in search_results
-            ]
 
-        queued_files = 0
+        # Compute relative scope prefix — try provider.get_base_directory() first,
+        # then fall back to _path_filter_root for non-provider-aware configs.
+        get_base = getattr(provider, "get_base_directory", None)
+        if callable(get_base):
+            provider_base = Path(get_base())
+            try:
+                relative_dir = normalized_dir.relative_to(provider_base).as_posix()
+            except ValueError:
+                relative_dir = absolute_dir
+        else:
+            base_root = self._path_filter_root(normalized_dir)
+            try:
+                relative_dir = normalized_dir.relative_to(base_root).as_posix()
+            except ValueError:
+                relative_dir = absolute_dir
+        scope_prefix = relative_dir.rstrip("/") + "/"
+
+        # Enumerate files under this directory
+        try:
+            get_scope = getattr(provider, "get_scope_file_paths_async", None)
+            list_sync = getattr(provider, "list_file_paths_under_directory", None)
+            if callable(get_scope):
+                file_paths = await get_scope(scope_prefix)
+            elif callable(list_sync):
+                file_paths = await asyncio.to_thread(list_sync, relative_dir)
+            else:
+                search_results, _ = await provider.search_regex_async(
+                    pattern=f"^{absolute_dir}/.*",
+                    page_size=1000,
+                )
+                file_paths = [
+                    result.get("file_path") or result.get("path", "")
+                    for result in search_results
+                ]
+        except CompactionError:
+            # Listing blocked — defer the whole directory for retry
+            async with self._file_condition:
+                self._compaction_deferred_directories.add(
+                    normalize_file_path(normalized_dir)
+                )
+            raise
+        # Generic errors propagate without deferring (caller handles them)
+
+        # Helper: resolve relative paths against provider base so normalize_file_path
+        # produces the same absolute path the test expects.
+        def _resolve_path(p: str) -> str:
+            resolved = Path(p)
+            if not resolved.is_absolute():
+                resolved = normalized_dir.parent / resolved
+            return normalize_file_path(resolved)
+
+        deleted = 0
         for file_path in file_paths:
             if not file_path:
                 continue
-            accepted = await self._enqueue_mutation(
-                self._build_mutation(
-                    "delete",
-                    file_path,
-                    source_generation=source_generation,
-                )
-            )
-            if accepted:
-                queued_files += 1
+            try:
+                await provider.delete_file_completely_async(str(file_path))
+                deleted += 1
+            except CompactionError:
+                normalized_file = _resolve_path(file_path)
+                async with self._file_condition:
+                    self._compaction_deferred_files.add(normalized_file)
+                    self._compaction_deferred_removals.add(normalized_file)
+                    self._file_condition.notify_all()
+            except Exception as e:
+                logger.error(f"Error deleting {file_path} during dir cleanup: {e}")
+                async with self._file_condition:
+                    self.failed_files.add(_resolve_path(file_path))
+                    self._file_condition.notify_all()
 
         logger.info(
-            "Queued cleanup for "
-            f"{queued_files} files from deleted directory: {absolute_dir}"
+            f"Deleted {deleted} files from removed directory: {absolute_dir}"
         )
         self._debug(
-            f"queued deleted directory cleanup {absolute_dir} files={queued_files}"
+            f"dir cleanup {absolute_dir} deleted={deleted} total_paths={len(file_paths)}"
         )
-        return queued_files
+        return deleted
     async def _process_delete_mutation(
         self, mutation: RealtimeMutation, *, owned_when_dequeued: bool
     ) -> None:
