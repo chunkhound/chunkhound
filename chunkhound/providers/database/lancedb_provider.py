@@ -564,6 +564,10 @@ class LanceDBProvider(SerialDatabaseProvider):
             ),
             "encoding": "utf-8",
             "line_count": 0,
+            # Explicitly clear skip_reason so re-indexing a previously-skipped file
+            # doesn't leave stale skip_reason in the row (when_matched_update_all only
+            # updates columns present in the source dict).
+            "skip_reason": None,
         }
 
         # Use merge_insert for atomic upsert based on path
@@ -802,8 +806,16 @@ class LanceDBProvider(SerialDatabaseProvider):
         if not self._files_table:
             self._executor_create_schema(conn, state)
 
+        # Preserve existing id so chunks.file_id references are not orphaned
+        # when a previously-indexed file transitions to skipped.
+        try:
+            existing = self._files_table.search().where(f"path = '{path}'").limit(1).to_list()
+            file_id = existing[0]["id"] if existing else int(time.time() * 1000000)
+        except Exception:
+            file_id = int(time.time() * 1000000)
+
         file_data = {
-            "id": int(time.time() * 1000000),
+            "id": file_id,
             "path": path,
             "size": size,
             "modified_time": mtime,

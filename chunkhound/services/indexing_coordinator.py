@@ -529,6 +529,24 @@ class IndexingCoordinator(BaseService):
                 return {"status": "error", "chunks": 0, "error": result.error}
 
             if result.status == "skipped":
+                try:
+                    rel = self._get_relative_path(file_path).as_posix()
+                    p = Path(file_path)
+                    await self._db.record_skipped_file_async(
+                        rel,
+                        p.name,
+                        p.suffix,
+                        result.file_size,
+                        result.file_mtime,
+                        result.language.value if result.language else None,
+                        getattr(result, "content_hash", None),
+                        result.error or "skipped",
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to record skipped file in DB; next run will re-evaluate",
+                        exc_info=True,
+                    )
                 return {"status": "skipped", "reason": result.error, "chunks": 0}
 
             # Store the single file result
