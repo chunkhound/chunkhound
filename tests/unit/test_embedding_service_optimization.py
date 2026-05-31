@@ -45,10 +45,16 @@ class TestEmbeddingServiceOptimization:
 
         provider.optimize_tables()
 
-        # Delete most files to create free blocks
+        # Delete most files to create logical free blocks.
         for i in range(8):
             provider.delete_file_completely(f"test_{i}.py")
-        provider.optimize_tables()
+
+        # DuckDB may auto-checkpoint during/after deletions, which clears the
+        # free_block counter and causes has_reclaimable_space() to return False.
+        # The fixture's semantic contract is "a provider that HAS reclaimable
+        # space" — monkeypatch the method on the instance so the contract holds
+        # regardless of DuckDB's internal checkpoint timing.
+        provider.has_reclaimable_space = lambda operation="": True  # type: ignore[method-assign]
 
         yield provider
 
