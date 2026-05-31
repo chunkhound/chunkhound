@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from loguru import logger
+from watchdog.observers import Observer  # re-exported for test monkeypatching
 from watchdog.observers.api import BaseObserver
 
 from chunkhound.core.config.config import Config
