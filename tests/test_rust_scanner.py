@@ -92,3 +92,39 @@ def test_walk_directory_tree_uses_rust_path(tmp_path):
         fp._USE_RUST = original
 
     assert {p.name for p in files} == {"a.py", "b.md"}
+
+
+@requires_rust
+def test_exclude_patterns_parity(tmp_path):
+    """Both paths must produce identical results when exclude_patterns are supplied."""
+    import chunkhound.utils.file_patterns as fp
+
+    (tmp_path / "keep.py").write_text("x = 1")
+    nm = tmp_path / "node_modules"
+    nm.mkdir()
+    (nm / "dep.py").write_text("y = 2")
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    (cache / "mod.pyc").write_bytes(b"")
+
+    exclude = ["**/node_modules/**", "**/__pycache__/**"]
+
+    rust_files = set(
+        _scan_files(
+            str(tmp_path),
+            ["py", "pyc"],
+            skip_dirs=[],
+            exclude_patterns=[fp._fnmatch_to_gitignore(p) for p in exclude],
+        )
+    )
+
+    original = fp._USE_RUST
+    fp._USE_RUST = False
+    try:
+        python_files, _ = fp.walk_directory_tree(
+            tmp_path, tmp_path, ["**/*.py", "**/*.pyc"], exclude, {}
+        )
+    finally:
+        fp._USE_RUST = original
+
+    assert rust_files == {str(p) for p in python_files}

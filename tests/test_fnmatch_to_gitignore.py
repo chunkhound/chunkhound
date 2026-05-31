@@ -10,27 +10,28 @@ from chunkhound.utils.file_patterns import _fnmatch_to_gitignore
 @pytest.mark.parametrize(
     "pattern, expected",
     [
-        # Simple single-segment patterns: drop '**/' since bare names are unanchored.
-        ("**/node_modules/**", "node_modules/"),
-        ("**/__pycache__/**", "__pycache__/"),
-        ("**/.git/**", ".git/"),
-        ("**/.venv/**", ".venv/"),
-        ("**/dist/**", "dist/"),
-        ("**/build/**", "build/"),
-        ("**/target/**", "target/"),
-        # Multi-segment patterns: must KEEP '**/' to avoid root-anchoring.
-        ("**/.yarn/cache/**", "**/.yarn/cache/"),
-        ("**/.yarn/unplugged/**", "**/.yarn/unplugged/"),
-        ("**/.vuepress/dist/**", "**/.vuepress/dist/"),
+        # Directory subtree patterns: keep '/**' so gi.matched(file, is_dir=false)
+        # matches files inside the directory, not just the directory node itself.
+        ("**/node_modules/**", "**/node_modules/**"),
+        ("**/__pycache__/**", "**/__pycache__/**"),
+        ("**/.git/**", "**/.git/**"),
+        ("**/.venv/**", "**/.venv/**"),
+        ("**/dist/**", "**/dist/**"),
+        ("**/build/**", "**/build/**"),
+        ("**/target/**", "**/target/**"),
+        ("**/.yarn/cache/**", "**/.yarn/cache/**"),
+        ("**/.yarn/unplugged/**", "**/.yarn/unplugged/**"),
+        ("**/.vuepress/dist/**", "**/.vuepress/dist/**"),
+        ("**/.mypy_cache/**", "**/.mypy_cache/**"),
+        ("**/.pytest_cache/**", "**/.pytest_cache/**"),
+        # Non-directory patterns: keep '**/' for multi-segment paths (root-anchor risk),
+        # drop '**/' for simple names/extensions (gitignore bare names match anywhere).
         ("**/.yarn/build-state.yml", "**/.yarn/build-state.yml"),
         ("**/.yarn/install-state.gz", "**/.yarn/install-state.gz"),
-        ("**/.mypy_cache/**", ".mypy_cache/"),
-        ("**/.pytest_cache/**", ".pytest_cache/"),
-        # Extension globs: drop '**/' (no embedded slash in remainder).
         ("**/*.swp", "*.swp"),
         ("**/*.pyc", "*.pyc"),
         # Patterns without a leading '**/' pass through unchanged.
-        ("tmp/**", "tmp/"),
+        ("tmp/**", "tmp/**"),
         (".chunkhound.json", ".chunkhound.json"),
     ],
 )

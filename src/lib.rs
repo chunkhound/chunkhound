@@ -39,8 +39,11 @@ fn scan_files(
         } else {
             let mut b = GitignoreBuilder::new(root);
             for p in &pats {
-                // Gitignore anchors patterns without a path separator to the root dir;
-                // prepend **/ to restore the recursive fnmatch-style semantics.
+                // Patterns are pre-normalized by Python's _fnmatch_to_gitignore before
+                // being passed here. Slash-containing patterns (e.g. "node_modules/",
+                // "**/.yarn/cache/") are passed through unchanged. Bare names (e.g.
+                // "*.pyc") have their "**/" stripped by Python and are re-added here so
+                // gitignore matches them at any depth rather than anchoring to root.
                 let line = if p.contains('/') {
                     p.clone()
                 } else {

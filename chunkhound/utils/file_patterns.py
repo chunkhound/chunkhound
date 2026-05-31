@@ -33,16 +33,23 @@ HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"
 
 
 def _fnmatch_to_gitignore(pattern: str) -> str:
-    """Convert a fnmatch-style glob to a gitignore-compatible pattern."""
+    """Convert a fnmatch-style glob to a gitignore-compatible pattern.
+
+    Patterns ending with '/**' are kept intact. Converting them to a trailing '/'
+    (directory-only gitignore syntax) causes Gitignore::matched(file, is_dir=false)
+    to miss files inside the directory — the trailing '/' only matches the directory
+    node itself, not its contents. Keeping '/**' makes the file-level check work.
+
+    The '**/' prefix is stripped only for simple extension/name patterns (no embedded
+    slash), where bare gitignore patterns already match at any depth.
+    """
     p = pattern
-    if p.endswith("/**"):
-        p = p[:-3] + "/"
-    if p.startswith("**/"):
+    if p.startswith("**/") and not p.endswith("/**"):
         rest = p[3:]
         # Only drop the '**/' prefix when the remainder has no embedded slash.
-        # gitignore treats patterns containing '/' (excluding a trailing slash) as
-        # root-anchored; keeping '**/' ensures multi-segment paths like
-        # '.yarn/cache/' match at any depth rather than only at the repo root.
+        # gitignore treats patterns containing '/' as root-anchored; keeping '**/'
+        # ensures multi-segment paths like '**/.yarn/build-state.yml' match at any
+        # depth rather than only at the repo root.
         if "/" not in rest.rstrip("/"):
             p = rest
     return p
@@ -482,7 +489,10 @@ def walk_directory_tree(
                 exclude_patterns=_gitignore_excludes,
                 exact_names=list(_names) if _names else None,
             )
-            _log.debug("[RUST_SCANNER] scan_files root=%s exts=%s names=%s files=%d", start_path, sorted(_exts), sorted(_names), len(_raw))
+            _log.debug(
+                "[RUST_SCANNER] scan_files root=%s exts=%s names=%s files=%d",
+                start_path, sorted(_exts), sorted(_names), len(_raw),
+            )
             results = [Path(p) for p in _raw]
             if ignore_engine is not None and hasattr(ignore_engine, "matches"):
                 results = [p for p in results if not ignore_engine.matches(p, is_dir=False)]

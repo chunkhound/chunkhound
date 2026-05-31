@@ -18,7 +18,11 @@ if not site.exists():
 with zipfile.ZipFile(wheels[-1]) as z:
     installed = []
     for name in z.namelist():
-        if name.startswith("chunkhound_native") and (name.endswith(".so") or name.endswith(".pyd")):
+        is_extension = name.startswith("chunkhound_native") and (
+            name.endswith(".so") or name.endswith(".pyd")
+        )
+        is_init = name == "chunkhound_native/__init__.py"
+        if is_extension or is_init:
             dest = site / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(z.read(name))
