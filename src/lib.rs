@@ -5,17 +5,24 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 #[pyfunction]
-#[pyo3(signature = (root, extensions, skip_dirs=None, exclude_patterns=None))]
+#[pyo3(signature = (root, extensions, skip_dirs=None, exclude_patterns=None, exact_names=None))]
 fn scan_files(
     root: &str,
     extensions: Vec<String>,
     skip_dirs: Option<Vec<String>>,
     exclude_patterns: Option<Vec<String>>,
+    exact_names: Option<Vec<String>>,
 ) -> PyResult<Vec<String>> {
     let ext_set = Arc::new(
         extensions
             .into_iter()
             .map(|e| e.to_lowercase())
+            .collect::<HashSet<String>>(),
+    );
+    let name_set = Arc::new(
+        exact_names
+            .unwrap_or_default()
+            .into_iter()
             .collect::<HashSet<String>>(),
     );
     let skip_set = Arc::new(
@@ -54,6 +61,7 @@ fn scan_files(
         .build_parallel()
         .run(|| {
             let ext_set = Arc::clone(&ext_set);
+            let name_set = Arc::clone(&name_set);
             let skip_set = Arc::clone(&skip_set);
             let custom_gi = Arc::clone(&custom_gi);
             let results = Arc::clone(&results);
@@ -82,12 +90,16 @@ fn scan_files(
                         return WalkState::Continue;
                     }
                 }
-                if let Some(ext) = path.extension() {
+                let file_name = entry.file_name().to_string_lossy();
+                let matched = if let Some(ext) = path.extension() {
                     let ext_lower = ext.to_string_lossy().to_lowercase();
-                    if ext_set.contains(ext_lower.as_str()) {
-                        if let Some(s) = path.to_str() {
-                            results.lock().unwrap().push(s.to_owned());
-                        }
+                    ext_set.contains(ext_lower.as_str())
+                } else {
+                    false
+                } || (!name_set.is_empty() && name_set.contains(file_name.as_ref()));
+                if matched {
+                    if let Some(s) = path.to_str() {
+                        results.lock().unwrap().push(s.to_owned());
                     }
                 }
                 WalkState::Continue

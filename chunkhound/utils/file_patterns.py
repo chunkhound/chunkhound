@@ -461,14 +461,13 @@ def walk_directory_tree(
     Returns:
         Tuple of (list of file paths found, updated gitignore_patterns dict)
     """
-    # Fast Rust path: ignore crate handles gitignore + exclude_patterns natively
+    # Fast Rust path: ignore crate handles gitignore + exclude_patterns natively.
+    # ignore_engine is applied as a post-filter so Rust handles the expensive I/O walk.
     if _USE_RUST and _RUST_AVAILABLE:
         _exts, _names, _has_complex = _summarize_include_patterns(patterns)
         if (
             not _has_complex
-            and _exts
-            and not _names          # exact-filename includes (e.g. Makefile) not handled by Rust
-            and ignore_engine is None   # Rust path doesn't support ignore_engine
+            and (_exts or _names)
             and max_files is None       # Rust path doesn't support max_files cap
         ):
             _gitignore_excludes = (
@@ -481,9 +480,13 @@ def walk_directory_tree(
                 [ext.lstrip(".") for ext in _exts],
                 skip_dirs=list(HEAVY_DIRS),
                 exclude_patterns=_gitignore_excludes,
+                exact_names=list(_names) if _names else None,
             )
-            _log.debug("[RUST_SCANNER] scan_files root=%s exts=%s files=%d", start_path, sorted(_exts), len(_raw))
-            return [Path(p) for p in _raw], parent_gitignores.copy()
+            _log.debug("[RUST_SCANNER] scan_files root=%s exts=%s names=%s files=%d", start_path, sorted(_exts), sorted(_names), len(_raw))
+            results = [Path(p) for p in _raw]
+            if ignore_engine is not None and hasattr(ignore_engine, "matches"):
+                results = [p for p in results if not ignore_engine.matches(p, is_dir=False)]
+            return results, parent_gitignores.copy()
 
     files = []
     gitignore_patterns: dict[Path, list[str]] = parent_gitignores.copy()
