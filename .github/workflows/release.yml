@@ -138,12 +138,14 @@ jobs:
             --repo "${{ github.repository }}"
 
   publish-native:
-    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    needs: [publish]
     runs-on: ubuntu-latest
-    # Separate environment so this job gets an OIDC token scoped to the
-    # chunkhound-native PyPI project (each PyPI project needs its own
-    # trusted-publisher entry referencing this environment name).
-    environment: pypi-native
+    # Separate environment so this job carries an OIDC token scoped to the
+    # chunkhound-native PyPI project (each project needs its own trusted-publisher
+    # entry referencing this environment name). Depends on publish so the main
+    # package is confirmed live before attempting the native publish — avoids
+    # deleting a successfully-published release if only the native wheel fails.
+    environment: pypi
     timeout-minutes: 15
 
     steps:
@@ -159,13 +161,3 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist-native
-
-      - name: Cleanup on failure (delete release and tag)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete "${{ github.event.release.tag_name }}" \
-            --cleanup-tag \
-            --yes \
-            --repo "${{ github.repository }}"

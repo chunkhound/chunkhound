@@ -8,7 +8,8 @@ except (ImportError, AttributeError):
 
 
 def test_scan_files_matches_python_walker(tmp_path):
-    from chunkhound.utils.file_patterns import walk_directory_tree
+    import chunkhound.utils.file_patterns as fp
+
     (tmp_path / "a.py").write_text("x = 1")
     (tmp_path / "b.md").write_text("# hi")
     (tmp_path / "c.txt").write_text("skip")
@@ -17,9 +18,16 @@ def test_scan_files_matches_python_walker(tmp_path):
     (sub / "d.py").write_text("y = 2")
 
     rust_files = set(scan_files(str(tmp_path), ["py", "md"]))
-    python_files, _ = walk_directory_tree(
-        tmp_path, tmp_path, ["**/*.py", "**/*.md"], [], {}
-    )
+
+    original = fp._USE_RUST
+    fp._USE_RUST = False
+    try:
+        python_files, _ = fp.walk_directory_tree(
+            tmp_path, tmp_path, ["**/*.py", "**/*.md"], [], {}
+        )
+    finally:
+        fp._USE_RUST = original
+
     assert rust_files == {str(p) for p in python_files}
 
 
@@ -37,6 +45,25 @@ def test_returns_empty_for_unknown_extension(tmp_path):
     (tmp_path / "file.py").write_text("x = 1")
     result = scan_files(str(tmp_path), ["xyz_never_exists"])
     assert result == []
+
+
+def test_python_fallback_when_rust_disabled(tmp_path):
+    """Python path is taken when _USE_RUST=False even if the extension is present."""
+    import chunkhound.utils.file_patterns as fp
+
+    (tmp_path / "a.py").write_text("x = 1")
+    (tmp_path / "b.rs").write_text("fn main() {}")
+
+    original = fp._USE_RUST
+    fp._USE_RUST = False
+    try:
+        files, _ = fp.walk_directory_tree(
+            tmp_path, tmp_path, ["**/*.py"], [], {}
+        )
+    finally:
+        fp._USE_RUST = original
+
+    assert {p.name for p in files} == {"a.py"}
 
 
 def test_walk_directory_tree_uses_rust_path(tmp_path):

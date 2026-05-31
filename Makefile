@@ -27,7 +27,7 @@ dev:
 	cargo check && uv run maturin develop && uv run pytest tests/test_smoke.py -v -n auto
 
 dev-release:
-	uv run maturin build --release --out target/wheels/ && uv run python scripts/install_native.py && uv run pytest tests/test_smoke.py -v -n auto
+	rm -rf target/wheels/ && uv run maturin build --release --out target/wheels/ && uv run python scripts/install_native.py && uv run pytest tests/test_smoke.py -v -n auto
 
 lint:
 	uv run ruff check chunkhound

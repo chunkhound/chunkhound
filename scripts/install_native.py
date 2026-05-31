@@ -7,6 +7,9 @@ import pathlib
 wheels = sorted(pathlib.Path("target/wheels").glob("chunkhound*.whl"))
 if not wheels:
     sys.exit("No wheel found in target/wheels/ — run 'maturin build --out target/wheels/' first")
+if len(wheels) > 1:
+    names = "\n  ".join(str(w) for w in wheels)
+    sys.exit(f"Multiple wheels found in target/wheels/ — clear the directory before rebuilding:\n  {names}")
 
 site = pathlib.Path(sysconfig.get_path("platlib"))
 if not site.exists():

@@ -142,17 +142,27 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Publish chunkhound to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish-rc-native:
+    needs: [publish-rc]
+    runs-on: ubuntu-latest
+    # Separate environment so this job carries an OIDC token scoped to the
+    # chunkhound-native PyPI project (each project needs its own trusted-publisher
+    # entry referencing this environment name).
+    environment: pypi-native
+    timeout-minutes: 15
+
+    steps:
       - name: Download native wheel artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: release-rc-dist-native-*
           path: dist-native
           merge-multiple: true
-
-      - name: Publish chunkhound to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
 
       - name: Publish chunkhound-native to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
