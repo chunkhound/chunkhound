@@ -39,17 +39,12 @@ fn scan_files(
         } else {
             let mut b = GitignoreBuilder::new(root);
             for p in &pats {
-                // Patterns are pre-normalized by Python's _fnmatch_to_gitignore before
-                // being passed here. Slash-containing patterns (e.g. "node_modules/",
-                // "**/.yarn/cache/") are passed through unchanged. Bare names (e.g.
-                // "*.pyc") have their "**/" stripped by Python and are re-added here so
-                // gitignore matches them at any depth rather than anchoring to root.
-                let line = if p.contains('/') {
-                    p.clone()
-                } else {
-                    format!("**/{p}")
-                };
-                let _ = b.add_line(None, &line);
+                // Patterns are fully normalized to gitignore syntax by Python's
+                // _fnmatch_to_gitignore before being passed here. Directory subtree
+                // patterns keep their "/**" suffix; bare extension/name patterns
+                // (e.g. "*.pyc") have "**/" stripped — gitignore bare patterns
+                // without a "/" already match at any depth, so no re-addition needed.
+                let _ = b.add_line(None, p);
             }
             b.build().ok()
         }

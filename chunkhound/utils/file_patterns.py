@@ -494,6 +494,11 @@ def walk_directory_tree(
                 start_path, sorted(_exts), sorted(_names), len(_raw),
             )
             results = [Path(p) for p in _raw]
+            # ignore_engine is applied as a file-level post-filter only — it does not
+            # prune directory subtrees the way the Python path does. The ignore crate's
+            # native .gitignore handling and skip_dirs cover the common heavy directories;
+            # any additional engine rules that would prune directories are still correct
+            # (files inside are filtered here) but incur the cost of descending into them.
             if ignore_engine is not None and hasattr(ignore_engine, "matches"):
                 results = [p for p in results if not ignore_engine.matches(p, is_dir=False)]
             return results, parent_gitignores.copy()
