@@ -662,7 +662,14 @@ class RealtimePipelineMixin:
                 except (OSError, PermissionError):
                     continue
         finally:
-            rglob_gen.close()
+            # Guard only the Python 3.14+ Windows case where rglob() can return a
+            # map object with no .close() (older Pythons returned a generator
+            # supporting explicit close for fd hygiene). Any actual error from
+            # calling close() when the attr exists is allowed to propagate so it
+            # is handled (and logged) by the existing monitor error loop, exactly
+            # as before the 3.14 regression.
+            if hasattr(rglob_gen, "close"):
+                rglob_gen.close()
 
         return current_files, files_checked, truncated
     def _collect_supported_files(self, dir_path: Path) -> list[Path]:
