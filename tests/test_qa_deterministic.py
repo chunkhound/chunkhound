@@ -40,6 +40,7 @@ from tests.helpers.embedding_config import (
 SEARCH_ITERATION_DELAY_SECONDS = 0.2      # Delay between search iterations
 FILE_OPERATION_DELAY_SECONDS = 0.3        # Delay between file operations
 RIPGREP_TIMEOUT_SECONDS = 10              # Timeout for ripgrep subprocess
+INITIAL_SCAN_WAIT_SECONDS = 10.0          # Wait for realtime service initial scan to complete
 
 # Budget Constants (used in timeout calculations)
 BASE_OVERHEAD_SECONDS = 60                # Fixture setup, initial scan, etc.
@@ -162,6 +163,7 @@ class TestQADeterministic:
 
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+    @pytest.mark.native_watcher
     @pytest.mark.asyncio
     async def test_file_lifecycle_search_validation(self, qa_setup):  # flaky: Windows CI polling monitor occasionally misses second file write within 45s window, tracked in issue #254
         """QA Items 1-4: Test file lifecycle with search validation."""

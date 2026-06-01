@@ -9,6 +9,7 @@ import asyncio
 import shutil
 import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -41,9 +42,17 @@ from tests.helpers.embedding_config import (
 )
 
 
+import re as _re
+
+
 def _tool_results(result: "dict | str") -> list:
     """Extract 'results' list from execute_tool output (returns str on error)."""
-    return (result if isinstance(result, dict) else {}).get("results", [])
+    if isinstance(result, dict):
+        return result.get("results", [])
+    if not isinstance(result, str) or result == "No results found.":
+        return []
+    # Markdown format: one '## `' heading per result block
+    return ["_"] * len(_re.findall(r"^## `", result, _re.MULTILINE))
 
 
 class _TestMCPServer(MCPServerBase):
@@ -229,6 +238,7 @@ def unique_mcp_test_function():
             f"MCP semantic search should find new file (was {initial_count}, now {new_count})"
         )
 
+    @pytest.mark.native_watcher
     @pytest.mark.asyncio
     async def test_mcp_regex_search_finds_modified_files(self, mcp_setup):
         """Test that MCP regex search returns modified file content."""
@@ -355,6 +365,7 @@ def delete_test_unique_function():
         assert len(after_delete.get("results", [])) == 0, \
             "Content should not be found after deletion"
 
+    @pytest.mark.native_watcher
     @pytest.mark.asyncio
     async def test_file_modification_detection_comprehensive(self, mcp_setup):
         """Comprehensive test to reproduce file modification detection issues."""

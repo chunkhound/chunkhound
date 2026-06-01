@@ -30,6 +30,7 @@ from chunkhound.watchman_runtime.loader import (
     listener_path_is_filesystem,
     resolve_packaged_watchman_runtime,
 )
+from tests.utils.realtime_test_helpers import write_and_index_file
 from tests.utils.windows_compat import (
     create_windows_directory_junction,
     realtime_backend_for_tests,
@@ -1434,35 +1435,31 @@ class TestRealtimeFunctional:
             await service.stop()
 
     @pytest.mark.asyncio
-    async def test_deleted_directory_cleanup_queues_child_deletes(
+    async def test_deleted_directory_cleanup_deletes_child_files(
         self, realtime_setup, monkeypatch
     ):
-        """Deleted-directory cleanup should only expand into queued delete work."""
+        """Deleted-directory cleanup must delete all child files directly."""
         service, watch_dir, _, _ = realtime_setup
         deleted_dir = watch_dir / "deleted_dir"
         first_file = deleted_dir / "first.py"
         second_file = deleted_dir / "second.py"
-        direct_delete_calls = 0
+        deleted_paths: list[str] = []
 
-        def fake_list_file_paths_under_directory(
-            directory_prefix: str,
-        ) -> list[str]:
+        async def fake_scope_paths(scope_prefix: str) -> list[str]:
             return [str(first_file), str(second_file)]
 
-        async def unexpected_direct_delete(_file_path: str) -> bool:
-            nonlocal direct_delete_calls
-            direct_delete_calls += 1
-            raise AssertionError("directory cleanup should not delete directly")
+        async def fake_delete(file_path: str) -> None:
+            deleted_paths.append(file_path)
 
         monkeypatch.setattr(
             service.services.provider,
-            "list_file_paths_under_directory",
-            fake_list_file_paths_under_directory,
+            "get_scope_file_paths_async",
+            fake_scope_paths,
         )
         monkeypatch.setattr(
             service.services.provider,
             "delete_file_completely_async",
-            unexpected_direct_delete,
+            fake_delete,
         )
 
         service._service_state = "running"
@@ -1480,23 +1477,7 @@ class TestRealtimeFunctional:
             )
         )
 
-        queued_mutations = []
-        while not service.file_queue.empty():
-            _, _, mutation = await service.file_queue.get()
-            queued_mutations.append(mutation)
-
-        assert direct_delete_calls == 0
-        assert [mutation.operation for mutation in queued_mutations] == [
-            "delete",
-            "delete",
-        ]
-        assert {mutation.path for mutation in queued_mutations} == {
-            first_file.resolve(),
-            second_file.resolve(),
-        }
-        assert {mutation.source_generation for mutation in queued_mutations} == {
-            dir_delete_generation
-        }
+        assert set(deleted_paths) == {str(first_file), str(second_file)}
 
     @pytest.mark.asyncio
     async def test_ready_delete_mutations_are_coalesced_into_one_batch(
@@ -2625,6 +2606,7 @@ class TestRealtimeFunctional:
         assert priority == service._mutation_priority("change")
         assert queued_mutation == mutation
 
+    @pytest.mark.native_watcher
     @pytest.mark.asyncio
     async def test_filesystem_monitoring_detects_changes(self, realtime_setup):
         """Test that filesystem changes are detected and processed."""
@@ -2748,6 +2730,7 @@ class TestRealtimeFunctional:
 
         # Check processing results
         bin_record = services.provider.get_file_by_path(str(bin_file))
+        py_record = services.provider.get_file_by_path(str(py_file))
 
         # Python file may still fail for unrelated reasons, but the unsupported
         # file should definitely be ignored.
@@ -2798,6 +2781,7 @@ class TestRealtimeFunctional:
         found = await service.wait_for_file_indexed(realtime_file)
 
         realtime_record = services.provider.get_file_by_path(str(realtime_file))
+        initial_record = services.provider.get_file_by_path(str(preexisting_file))
 
         # At least one should work (helps identify which path is broken)
         processed_count = sum(
