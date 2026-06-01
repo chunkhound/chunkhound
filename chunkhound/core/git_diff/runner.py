@@ -23,7 +23,7 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
     ):
         raise ValueError(f"Unsafe git ref rejected: {commit_range!r}")
     proc = await asyncio.create_subprocess_exec(
-        "git", "diff", commit_range,
+        "git", "diff", commit_range, "--",
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -46,7 +46,7 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
         if m and m.group(1) == m.group(2) and "unknown revision" in err:
             root_range = f"{_EMPTY_TREE_SHA}..{m.group(2)}"
             proc2 = await asyncio.create_subprocess_exec(
-                "git", "diff", root_range,
+                "git", "diff", root_range, "--",
                 cwd=str(cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

@@ -349,15 +349,37 @@ class DiffAwareSearchService:
         semantic_weight: float = 0.7,
         threshold: float | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        hybrid_result: tuple[list[dict[str, Any]], dict[str, Any]] = await self._original.search_hybrid(
-            query,
-            regex_pattern=regex_pattern,
-            page_size=page_size,
-            offset=offset,
+        from chunkhound.services.search.result_enhancer import ResultEnhancer
+
+        _enhancer = ResultEnhancer()
+        tasks: list[tuple[str, Any]] = []
+        tasks.append(("semantic", asyncio.create_task(
+            self.search_semantic(query, page_size=page_size * 2, offset=offset, threshold=threshold)
+        )))
+        if regex_pattern:
+            tasks.append(("regex", asyncio.create_task(
+                self.search_regex_async(regex_pattern, page_size=page_size * 2, offset=offset)
+            )))
+
+        results_by_type: dict[str, list[dict[str, Any]]] = {}
+        for search_type, task in tasks:
+            results, _ = await task
+            results_by_type[search_type] = results
+
+        combined = _enhancer.combine_search_results(
+            semantic_results=results_by_type.get("semantic", []),
+            regex_results=results_by_type.get("regex", []),
             semantic_weight=semantic_weight,
-            threshold=threshold,
+            limit=page_size,
         )
-        return hybrid_result
+        pagination: dict[str, Any] = {
+            "offset": offset,
+            "page_size": page_size,
+            "has_more": len(combined) == page_size,
+            "next_offset": offset + page_size if len(combined) == page_size else None,
+            "total": None,
+        }
+        return combined, pagination
 
     def get_chunk_context(
         self, chunk_id: Any, context_lines: int = 5

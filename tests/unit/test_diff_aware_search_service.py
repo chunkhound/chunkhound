@@ -95,6 +95,12 @@ def test_protocol_check():
     assert isinstance(svc, SearchServiceProtocol), "Protocol check failed"
 
 
+def test_search_service_satisfies_protocol():
+    """SearchService must satisfy SearchServiceProtocol — catches interface drift."""
+    from chunkhound.services.search_service import SearchService
+    assert isinstance(SearchService(MagicMock()), SearchServiceProtocol)
+
+
 # ---------------------------------------------------------------------------
 # vector_source == "db"
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ Any changes to this factory must be tested across all execution paths:
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.registry import configure_registry, get_registry
@@ -166,7 +166,7 @@ def create_database_with_dependencies(
         db_path=db_path,
         embedding_manager=embedding_manager,
         indexing_coordinator=services.indexing_coordinator,
-        search_service=cast("SearchService", services.search_service),
+        search_service=services.search_service,
         embedding_service=services.embedding_service,
         provider=services.provider,
     )
