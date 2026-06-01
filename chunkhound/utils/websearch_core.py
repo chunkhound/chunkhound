@@ -14,6 +14,7 @@ import html
 import html.parser
 import os
 import re
+import subprocess
 import sys
 import urllib.parse
 import urllib.request
@@ -22,13 +23,103 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from playwright.async_api import BrowserContext
+    import zendriver as zd
 
 from chunkhound.core.config.config import Config
 
 _MAX_FETCH_CONCURRENCY = 5
 
 WEBSEARCH_LIMIT_MAX = 100
+
+# Probe these paths before zendriver's auto-discovery. zendriver picks the
+# shortest-named binary from [google-chrome, chromium, chromium-browser,
+# chrome, google-chrome-stable], so `chromium` wins over `google-chrome`
+# when both are installed — masking the "Chrome not installed" failure that
+# the urllib fallback is designed to catch. Mirror Playwright's
+# channel="chrome" preference by checking known Chrome paths first.
+_CHROME_PATHS = [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/opt/google/chrome/chrome",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+]
+
+
+def _check_chrome_version(chrome_path: str) -> int:
+    """Return Chrome's major version; raise if older than 124.
+
+    zendriver 0.15.3's CDP binding declares ``Network.Response.charset`` as a
+    required str field. Chrome only began emitting ``charset`` on
+    ``Network.responseReceived`` around v124. On older Chrome every event
+    silently fails to parse in zendriver's listener loop (logged at INFO,
+    no handler fires) — navigations time out with no informative error.
+    Fail loudly at launch instead.
+
+    NOTE: ``subprocess.check_output`` failures (``CalledProcessError`` from
+    a non-zero exit, ``OSError`` from a non-executable path, ``TimeoutExpired``
+    from a hung probe) are intentionally NOT caught here and propagate out
+    of ``_resolve_chrome_path`` and ``fetch_and_save``. A binary that exists
+    but cannot report its version is a misconfiguration worth surfacing —
+    silent urllib fallback would mask the install problem.
+    """
+    out = subprocess.check_output(
+        [chrome_path, "--version"], text=True, timeout=5
+    ).strip()
+    major = next(
+        (int(tok.split(".")[0]) for tok in out.split() if tok.split(".")[0].isdigit()),
+        0,
+    )
+    # major == 0 means no parseable version token in --version output.
+    # Treat as fail-loud rather than fall through: an unverified Chrome may
+    # silently be <124 and hit the Response.charset parse-failure loop.
+    if major == 0:
+        raise RuntimeError(
+            f"Chrome version unparseable from {out!r}; need >=124 for "
+            f"zendriver 0.15.3 to emit Response.charset on "
+            f"Network.responseReceived. Upgrade Chrome or fall back to "
+            f"urllib by removing the binary."
+        )
+    if major < 124:
+        raise RuntimeError(
+            f"Chrome {major} is too old; need >=124 for zendriver 0.15.3 "
+            f"to emit Response.charset on Network.responseReceived. "
+            f"Upgrade Chrome or fall back to urllib by removing the binary."
+        )
+    return major
+
+
+def _resolve_chrome_path() -> str | None:
+    """Locate a Chrome binary and verify it is >=124.
+
+    Probes ``_CHROME_PATHS`` first; falls back to zendriver's auto-discovery
+    only when none of those paths exist. The version probe runs in both
+    branches so an auto-discovered Chromium <124 cannot slip through and
+    silently break every navigation. Returns ``None`` when no browser is
+    available (caller falls back to urllib). Old Chrome (<124) raises
+    ``RuntimeError`` instead of returning ``None`` — fail-loud is intentional
+    so the silent ``Response.charset`` parse-failure loop is never reached.
+    """
+    for p in _CHROME_PATHS:
+        if os.path.exists(p):
+            _check_chrome_version(p)
+            return p
+    try:
+        from zendriver.core.config import find_executable
+        resolved = find_executable("auto")
+    except Exception:
+        # Broad catch: zendriver's launch-failure surface is documented as
+        # generic exceptions, and the spike observed platform-dependent
+        # OSError variants when no Chrome/Chromium binary exists. A
+        # broader catch keeps the urllib fallback reachable when
+        # find_executable raises anything unexpected.
+        return None
+    if not resolved:
+        return None
+    resolved = str(resolved)
+    _check_chrome_version(resolved)
+    return resolved
 
 
 def clamp_limit(limit: int) -> int:
@@ -206,48 +297,135 @@ def _fetch_url(url: str) -> tuple[str, bytes, str]:
         return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
 
 
-async def _fetch_page(context: BrowserContext, url: str) -> tuple[str, bytes, str]:
-    """Fetch a single URL.
+async def _close_tab_quietly(tab: zd.Tab) -> None:
+    """Close a tab with a bounded wait.
 
-    HTML is fetched through Chrome's network stack. PDFs go through
-    Playwright's APIRequestContext because headless Chrome cannot reliably
-    expose PDF bytes to page.content()/response.body() — see Playwright #6342
-    and scrapy-playwright #243.
+    tab.close() routinely exceeds 3s on Chrome 148 and can hang on the PDF
+    viewer's 10s ack timeout. Cap at 5s and rely on ``browser.stop()`` to
+    reap anything left behind.
     """
-    page = await context.new_page()
     try:
-        # commit resolves once response headers are parsed — before Chrome
-        # hands a PDF to its viewer or starts rendering HTML.
-        response = await page.goto(url, timeout=30000, wait_until="commit")
-        if response is None:
-            raise ValueError("Navigation failed: no response")
+        await asyncio.wait_for(tab.close(), timeout=5)
+    except asyncio.TimeoutError:
+        pass
 
-        ct = _normalize_ct(response.headers.get("content-type"))
+
+async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
+    """Fetch a single URL via raw CDP.
+
+    Replicates Playwright's ``wait_until="commit"`` semantics by subscribing
+    to ``Network.responseReceived`` for the main frame and branching on the
+    content-type before Chrome's PDF viewer engages or HTML rendering starts.
+    PDFs are re-fetched via urllib because headless Chrome cannot reliably
+    expose PDF bytes through the DOM.
+    """
+    from zendriver import cdp
+
+    # ``new_tab=True`` is mandatory. Plain ``browser.get("about:blank")``
+    # reuses the active tab, so concurrent fetches under the 5-way semaphore
+    # would clobber each other's handlers and navigation state.
+    tab = await browser.get("about:blank", new_tab=True)
+    tab_closed = False
+    try:
+        # Buffer full ``ResponseReceived`` events (not ``event.response``):
+        # ``loader_id`` lives on the event, not on ``Response``. We need it
+        # to match buffered events against the navigation once its loader_id
+        # is known.
+        nav_loader_id: cdp.network.LoaderId | None = None
+        candidates: list[cdp.network.ResponseReceived] = []
+        main_response: asyncio.Future[cdp.network.Response] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+        # Handler MUST be ``async def``. zendriver 0.15.3's sync-dispatch
+        # path (connection.py:826) reassigns ``event`` in the listener scope
+        # before the thread-pool callback runs — sync handlers see stale
+        # events. The idempotency guard is load-bearing: zendriver
+        # occasionally routes async handlers through the sync branch
+        # (connection.py:830) and discards the returned coroutine, so the
+        # body must tolerate dropped invocations.
+        async def on_response(event: cdp.network.ResponseReceived) -> None:
+            if main_response.done():
+                return
+            if nav_loader_id is None:
+                candidates.append(event)
+                return
+            if event.loader_id == nav_loader_id:
+                main_response.set_result(event.response)
+
+        # Register the handler BEFORE Network.enable. Events that fire
+        # during the enable round-trip would otherwise land before the
+        # handler exists and be silently dropped.
+        tab.add_handler(cdp.network.ResponseReceived, on_response)
+        await tab.send(cdp.network.enable())
+
+        # Non-blocking navigate — does NOT wait for load. Bound the send
+        # itself so a stalled websocket cannot hang here indefinitely.
+        nav_result = await asyncio.wait_for(
+            tab.send(cdp.page.navigate(url=url)), timeout=30
+        )
+        # cdp.page.navigate returns (frameId, loaderId, errorText). Chrome
+        # populates errorText for network-stack failures it can classify
+        # synchronously (e.g. net::ERR_CONNECTION_CLOSED, ERR_NAME_NOT_RESOLVED
+        # on some platforms); other failure modes leave it None and fall
+        # through to the response-wait timeout below. This branch is the
+        # only failure surface for the former class — do not remove.
+        if nav_result[2]:
+            raise ValueError(f"Navigation failed: {nav_result[2]}")
+        nav_loader_id = nav_result[1]
+        # Drain anything that arrived before nav_loader_id was set. Match
+        # on the buffered event's loader_id (Response does not carry
+        # loader_id; the ResponseReceived event does).
+        for ev in candidates:
+            if ev.loader_id == nav_loader_id and not main_response.done():
+                main_response.set_result(ev.response)
+                break
+
+        response = await asyncio.wait_for(main_response, timeout=30)
+        ct = _normalize_ct(
+            response.headers.get("content-type")
+            or response.headers.get("Content-Type")
+        )
 
         if ct == "application/pdf":
-            await page.close()
-            direct = await context.request.get(url)
+            # Close the tab *before* urllib so Chrome stops holding the
+            # in-flight PDF download. _close_tab_quietly only swallows
+            # TimeoutError; any other failure (e.g. dead-connection error
+            # mid-close) still propagates, so set tab_closed in a finally
+            # to keep the outer finally from double-closing.
             try:
-                if not direct.ok:
-                    raise ValueError(f"PDF fetch failed: HTTP {direct.status}")
-                return "application/pdf", await direct.body(), "utf-8"
+                await _close_tab_quietly(tab)
             finally:
-                await direct.dispose()
+                tab_closed = True
+            # Force "application/pdf" so downstream routes via the PDF
+            # branch even if urllib's Content-Type differs (redirect / CDN
+            # strips the header). Hard-code "utf-8" to match the original's
+            # behavior: the charset is only consulted by
+            # _decode_pdf_or_fallback_html when the body is NOT a real PDF
+            # (e.g. paywall HTML served under application/pdf); preserving
+            # the literal avoids a silent decode-behavior change there.
+            # NOTE: bare urllib refetch does NOT inherit browser cookies,
+            # so auth-walled / cookie-gated PDFs will fail here.
+            _, body, _ = await asyncio.to_thread(_fetch_url, url)
+            return "application/pdf", body, "utf-8"
 
         if ct != "text/html":
             raise ValueError(f"Unsupported content-type: {ct!r}")
 
-        await page.wait_for_load_state("load")
-        return ct, (await page.content()).encode("utf-8"), "utf-8"
+        # Bounded load wait — replaces page.wait_for_load_state("load")'s
+        # implicit 30s timeout.
+        await asyncio.wait_for(tab.wait(), timeout=30)
+        html_str = await tab.get_content()
+        return ct, html_str.encode("utf-8"), "utf-8"
     finally:
-        if not page.is_closed():
-            await page.close()
+        if not tab_closed:
+            await _close_tab_quietly(tab)
 
 
 async def _fetch_one(
     url: str,
     tmpdir: Path,
-    context: BrowserContext | None,
+    browser: zd.Browser | None,
     progress_callback: Callable[[str], None] | None,
     warning_callback: Callable[[str], None] | None,
     semaphore: asyncio.Semaphore,
@@ -257,8 +435,8 @@ async def _fetch_one(
         if progress_callback:
             progress_callback(f"Fetching {url}...")
         try:
-            if context is not None:
-                ct, body, charset = await _fetch_page(context, url)
+            if browser is not None:
+                ct, body, charset = await _fetch_page(browser, url)
             else:
                 ct, body, charset = await asyncio.to_thread(_fetch_url, url)
             if ct == "application/pdf":
@@ -296,57 +474,73 @@ async def fetch_and_save(
     """Fetch each URL concurrently (bounded) and save content to tmpdir."""
     semaphore = asyncio.Semaphore(_MAX_FETCH_CONCURRENCY)
 
-    async def _run(context: BrowserContext | None) -> None:
+    async def _run(browser: zd.Browser | None) -> None:
         tasks = [
             _fetch_one(
-                url, tmpdir, context, progress_callback, warning_callback,
+                url, tmpdir, browser, progress_callback, warning_callback,
                 semaphore, mapping,
             )
             for url in urls
         ]
         await asyncio.gather(*tasks)
 
-    try:
-        from playwright.async_api import Error as PlaywrightError
-        from playwright.async_api import async_playwright
-    except ImportError:
+    # Lazy import: pulls in websockets + CDP binding modules. Wasted cost
+    # for CLI commands that never touch websearch (e.g. `chunkhound index`).
+    import zendriver as zd
+
+    # _resolve_chrome_path probes _CHROME_PATHS first, then zendriver's
+    # auto-discovery; version-checks the resolved binary (>=124 required
+    # for Network.Response.charset). None means no Chrome anywhere — fall
+    # back to urllib. RuntimeError (Chrome too old) propagates: silent
+    # fallback would mask a real install problem.
+    chrome_path = _resolve_chrome_path()
+    if chrome_path is None:
+        if warning_callback:
+            warning_callback(
+                "No Chrome binary found. Falling back to urllib."
+                " (Install Google Chrome to enable rich page fetches.)"
+            )
         await _run(None)
         return
 
-    async with async_playwright() as pw:
-        # channel="chrome" drives the system-installed Google Chrome instead
-        # of Playwright's bundled Chromium. The `chunkhound[browser]` extra
-        # only installs the Playwright Python package; users must also have
-        # Google Chrome installed system-wide — otherwise launch() fails and
-        # we fall through to the urllib path below.
-        #
-        # New headless mode is required for the PDF path: legacy --headless
-        # hands PDFs to an internal viewer and never exposes the response to
-        # _fetch_page. --headless=new keeps the navigation visible so we can
-        # branch on content-type at commit time.
-        try:
-            browser = await pw.chromium.launch(
-                channel="chrome",
-                args=["--headless=new"],
-                ignore_default_args=["--headless"],
+    # --headless=new is required for the PDF path: legacy --headless hands
+    # PDFs to Chrome's internal viewer and never exposes the response to
+    # _fetch_page. Pass both headless=True and the explicit flag — the
+    # relationship between zendriver's Config flag and the explicit arg is
+    # undocumented; belt-and-braces.
+    # --disable-dev-shm-usage: containers default /dev/shm to 64MB, which
+    # 5-way concurrent navigation of JS-heavy SPAs exhausts — Chrome dies
+    # and every in-flight tab raises ConnectionClosedError on its CDP
+    # WebSocket. --disable-gpu drops the unused GPU process to free RAM.
+    try:
+        browser = await zd.start(
+            headless=True,
+            browser_args=[
+                "--headless=new",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+            browser_executable_path=chrome_path,
+        )
+    except Exception as e:
+        if warning_callback:
+            warning_callback(
+                f"Browser launch failed: {e}. Falling back to urllib."
+                " (If Google Chrome is not installed, install it to"
+                " enable rich page fetches.)"
             )
-        except PlaywrightError as e:
-            if warning_callback:
-                warning_callback(
-                    f"Browser launch failed: {e}. Falling back to urllib."
-                    " (If Google Chrome is not installed, install it to"
-                    " enable rich page fetches.)"
-                )
-            await _run(None)
-            return
+        await _run(None)
+        return
+    try:
+        await _run(browser)
+    finally:
+        # Bounded best-effort stop. browser.stop() can wedge on a stuck
+        # websocket close or a Chrome process ignoring SIGTERM; the subprocess
+        # process-group reaps any orphans when _quickresearch exits.
         try:
-            context = await browser.new_context()
-            try:
-                await _run(context)
-            finally:
-                await context.close()
-        finally:
-            await browser.close()
+            await asyncio.wait_for(browser.stop(), timeout=10)
+        except asyncio.TimeoutError:
+            pass
 
 
 def search(

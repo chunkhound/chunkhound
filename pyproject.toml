@@ -99,13 +99,15 @@ dependencies = [
     "tree-sitter-css>=0.25.0",
     "lark>=1.1.0",
     "markdownify>=1.0",
-    "zendriver>=0.15.3",
+    # Exact pin: chunkhound/utils/websearch_core.py:_fetch_page couples to
+    # zendriver 0.15.3's CDP binding and sync-dispatch internals (see the
+    # connection.py:826/830 references in that file, plus the Chrome >=124
+    # Response.charset workaround). Bumping requires re-validating the
+    # response-event race ordering and the async-handler dispatch path.
+    "zendriver==0.15.3",
 ]
 
 [project.optional-dependencies]
-browser = [
-    "playwright>=1.49.0",
-]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
