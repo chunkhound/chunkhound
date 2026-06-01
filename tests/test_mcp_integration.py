@@ -964,9 +964,15 @@ class NewlyAddedClass:
                 await asyncio.wait_for(realtime_service.event_queue.join(), timeout=5.0)
 
                 normalized_deleted_dir = normalize_file_path(deleted_dir)
-                assert normalized_deleted_dir in (
-                    realtime_service._compaction_deferred_directories
-                )
+                # event_queue.join() only guarantees the event was dequeued and a
+                # dir_delete mutation was enqueued to file_queue. _process_loop must
+                # execute the mutation before _compaction_deferred_directories is
+                # populated. Poll until the state is visible.
+                async def _wait_for_dir_deferred() -> None:
+                    while normalized_deleted_dir not in realtime_service._compaction_deferred_directories:
+                        await asyncio.sleep(0.05)
+
+                await asyncio.wait_for(_wait_for_dir_deferred(), timeout=10.0)
             finally:
                 realtime_service._stopping = True
                 consumer.cancel()
@@ -1171,6 +1177,19 @@ class NewlyAddedClass:
         normalized_paths = {
             key: normalize_file_path(path) for key, (path, _) in files.items()
         }
+
+        # Stop background event/mutation processing before unlinking files.
+        # The filesystem watcher would otherwise detect the unlinks and call
+        # delete_file_completely_async asynchronously — consuming fail_b_once
+        # or deleting rows before the controlled mock is applied.
+        await realtime_service._cancel_processing_tasks()
+        while not realtime_service.event_queue.empty():
+            try:
+                realtime_service.event_queue.get_nowait()
+                realtime_service.event_queue.task_done()
+            except Exception:
+                break
+
         for path, _ in files.values():
             path.unlink()
 
