@@ -828,8 +828,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
             """)
 
-            # Ensure content_hash exists for existing DBs
+            # Ensure content_hash and skip_reason exist for existing DBs
             conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT")
+            conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS skip_reason TEXT")
 
             # Create sequence for chunks table
             conn.execute("CREATE SEQUENCE IF NOT EXISTS chunks_id_seq")
@@ -998,6 +999,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # Add metadata column if it doesn't exist (for databases without size/signature migration)
             conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata TEXT")
+
+            # Add skip_reason column for tracking files skipped during parsing
+            conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS skip_reason TEXT")
 
             for (table_name,) in conn.execute(
                 """
@@ -2076,10 +2080,59 @@ class DuckDBProvider(SerialDatabaseProvider):
             params.append(content_hash)
 
         if updates:
-            updates.append("updated_at = CURRENT_TIMESTAMP")
+            # Clear skip_reason whenever a file is successfully re-indexed
+            updates.append("skip_reason = NULL")
+            updates.append("updated_at = now()")  # CURRENT_TIMESTAMP parses as a column name in SET clauses; use now() instead
             query = f"UPDATE files SET {', '.join(updates)} WHERE id = ?"
             params.append(file_id)
             conn.execute(query, params)
+
+    def record_skipped_file(
+        self,
+        path: str,
+        name: str,
+        extension: str,
+        size: int,
+        mtime: float,
+        language: str | None,
+        content_hash: str | None,
+        skip_reason: str,
+    ) -> None:
+        """Upsert a file record with skip_reason to prevent re-scanning on next run."""
+        self._execute_in_db_thread_sync(
+            "record_skipped_file",
+            path, name, extension, size, mtime, language, content_hash, skip_reason,
+        )
+
+    def _executor_record_skipped_file(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        path: str,
+        name: str,
+        extension: str,
+        size: int,
+        mtime: float,
+        language: str | None,
+        content_hash: str | None,
+        skip_reason: str,
+    ) -> None:
+        """Executor method for record_skipped_file - runs in DB thread."""
+        track_operation(state)
+        conn.execute(
+            """
+            INSERT INTO files
+                (path, name, extension, size, modified_time, content_hash, language, skip_reason)
+            VALUES (?, ?, ?, ?, to_timestamp(?), ?, ?, ?)
+            ON CONFLICT (path) DO UPDATE SET
+                size = EXCLUDED.size,
+                modified_time = EXCLUDED.modified_time,
+                content_hash = EXCLUDED.content_hash,
+                skip_reason = EXCLUDED.skip_reason,
+                updated_at = now()  -- CURRENT_TIMESTAMP parses as a column name in ON CONFLICT SET; use now() instead
+            """,
+            [path, name, extension, size, mtime, content_hash, language, skip_reason],
+        )
 
     def delete_file_completely(self, file_path: str) -> bool:
         """Delete a file and all its chunks/embeddings completely - delegate to file repository."""

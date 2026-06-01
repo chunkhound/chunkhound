@@ -42,6 +42,7 @@ def get_files_schema() -> pa.Schema:
             ("language", pa.string()),
             ("encoding", pa.string()),
             ("line_count", pa.int64()),
+            ("skip_reason", pa.string()),
         ]
     )
 
@@ -354,6 +355,13 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Create files table if it doesn't exist
         try:
             self._files_table = conn.open_table("files")
+            # Migrate: add skip_reason column to existing tables
+            if "skip_reason" not in self._files_table.schema.names:
+                try:
+                    self._files_table.add_columns({"skip_reason": "cast(null as varchar)"})
+                    logger.info("Migrated files table: added skip_reason column")
+                except Exception as e:
+                    logger.warning(f"Could not add skip_reason column to files table: {e}")
         except Exception:
             # Table doesn't exist, create it
             # Create table using PyArrow schema
@@ -556,6 +564,10 @@ class LanceDBProvider(SerialDatabaseProvider):
             ),
             "encoding": "utf-8",
             "line_count": 0,
+            # Explicitly clear skip_reason so re-indexing a previously-skipped file
+            # doesn't leave stale skip_reason in the row (when_matched_update_all only
+            # updates columns present in the source dict).
+            "skip_reason": None,
         }
 
         # Use merge_insert for atomic upsert based on path
@@ -748,6 +760,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             if content_hash is not None:
                 updated_file["content_hash"] = content_hash
             updated_file["indexed_time"] = time.time()
+            # Clear skip_reason whenever a file is successfully re-indexed
+            updated_file["skip_reason"] = None
 
             # LanceDB doesn't support in-place updates, so we use merge_insert
             # This updates the record by matching on the 'id' field
@@ -757,6 +771,65 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         except Exception as e:
             logger.error(f"Error updating file {file_id}: {e}")
+
+    def record_skipped_file(
+        self,
+        path: str,
+        name: str,
+        extension: str,
+        size: int,
+        mtime: float,
+        language: str | None,
+        content_hash: str | None,
+        skip_reason: str,
+    ) -> None:
+        """Upsert a file record with skip_reason to prevent re-scanning on next run."""
+        self._execute_in_db_thread_sync(
+            "record_skipped_file",
+            path, name, extension, size, mtime, language, content_hash, skip_reason,
+        )
+
+    def _executor_record_skipped_file(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        path: str,
+        name: str,
+        extension: str,
+        size: int,
+        mtime: float,
+        language: str | None,
+        content_hash: str | None,
+        skip_reason: str,
+    ) -> None:
+        """Executor method for record_skipped_file - runs in DB thread."""
+        if not self._files_table:
+            self._executor_create_schema(conn, state)
+
+        # Preserve existing id so chunks.file_id references are not orphaned
+        # when a previously-indexed file transitions to skipped.
+        try:
+            existing = self._files_table.search().where(f"path = '{path}'").limit(1).to_list()
+            file_id = existing[0]["id"] if existing else int(time.time() * 1000000)
+        except Exception:
+            file_id = int(time.time() * 1000000)
+
+        file_data = {
+            "id": file_id,
+            "path": path,
+            "size": size,
+            "modified_time": mtime,
+            "content_hash": content_hash or "",
+            "indexed_time": time.time(),
+            "language": language or "",
+            "encoding": "utf-8",
+            "line_count": 0,
+            "skip_reason": skip_reason,
+        }
+
+        self._files_table.merge_insert(
+            "path"
+        ).when_matched_update_all().when_not_matched_insert_all().execute([file_data])
 
     def delete_file_completely(self, file_path: str) -> bool:
         """Delete a file and all its chunks/embeddings completely."""
