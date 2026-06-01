@@ -23,6 +23,7 @@ from chunkhound.services.compaction_service import CompactionService
 from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.tools import execute_tool, search_impl
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.events import normalize_file_path
 from tests.utils.realtime_test_helpers import (
     remove_file_from_index,
     write_and_index_file,

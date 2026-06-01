@@ -22,6 +22,10 @@ from chunkhound.core.types.common import Language
 from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.tools import execute_tool, search_impl
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from tests.utils.realtime_test_helpers import (
+    remove_file_from_index,
+    write_and_index_file,
+)
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     realtime_backend_for_tests,
@@ -41,6 +45,7 @@ SEARCH_ITERATION_DELAY_SECONDS = 0.2      # Delay between search iterations
 FILE_OPERATION_DELAY_SECONDS = 0.3        # Delay between file operations
 RIPGREP_TIMEOUT_SECONDS = 10              # Timeout for ripgrep subprocess
 INITIAL_SCAN_WAIT_SECONDS = 10.0          # Wait for realtime service initial scan to complete
+INDEXING_POLL_INTERVAL_SECONDS = 0.5      # Polling interval when waiting for files to be indexed
 
 # Budget Constants (used in timeout calculations)
 BASE_OVERHEAD_SECONDS = 60                # Fixture setup, initial scan, etc.
@@ -1116,8 +1121,11 @@ if __name__ == "__main__":
     '''Timing test at {time.time()}'''
     return "timing_validation_unique_content"
 """
+        await write_and_index_file(services, timing_test_file, timing_content)
 
         # Measure indexing time
+        max_wait = FILE_REFLECTION_MAX_SECONDS
+        poll_interval = SEARCH_ITERATION_DELAY_SECONDS
         start_time = time.monotonic()
 
         while (elapsed := time.monotonic() - start_time) < max_wait:
