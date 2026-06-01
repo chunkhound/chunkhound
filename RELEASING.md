@@ -62,6 +62,13 @@ The `release-rc.yml` workflow builds and publishes to TestPyPI via OIDC. No manu
 pip install --index-url https://test.pypi.org/simple/ chunkhound==1.2.0rc1
 ```
 
+**Update the lockfile** (once the native wheel is live on PyPI):
+```bash
+uv lock --upgrade-package chunkhound-native
+git add uv.lock
+git commit -m "chore: bump chunkhound-native in lockfile to v1.2.0rc1"
+```
+
 ---
 
 ## Full Release

@@ -88,6 +88,11 @@ git push origin vX.Y.Za1
 
 # 4. Revert remote back to original
 git remote set-url origin "$ORIGINAL_REMOTE"
+
+# 5. Update uv.lock to pick up the new chunkhound-native wheel
+uv lock --upgrade-package chunkhound-native
+git add uv.lock
+git commit -m "chore: bump chunkhound-native in lockfile to vX.Y.Za1"
 ```
 
 PyPI trusted publisher required for `release-rc.yml`:
