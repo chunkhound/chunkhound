@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import signal
+import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,6 +21,12 @@ def test_default_timeout():
 
 class TestOpenCodeCLIProvider:
     """Test cases for OpenCode CLI provider."""
+
+    @pytest.fixture(autouse=True)
+    def posix_signal_constants(self):
+        """Make POSIX-only signal constants available for mocked Unix tests."""
+        with patch("signal.SIGKILL", 9, create=True):
+            yield
 
     @pytest.fixture
     def provider(self):
@@ -267,10 +275,221 @@ class TestOpenCodeCLIProvider:
             assert mock_subprocess.call_count == provider._max_retries
 
     @pytest.mark.asyncio
+    async def test_run_single_attempt_timeout_uses_killpg(self, provider):
+        """Timeout cleanup kills the captured process group, not just the parent."""
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", create=True) as mock_killpg,
+        ):
+            mock_process = AsyncMock()
+            mock_process.pid = 4321
+            mock_process.communicate.side_effect = asyncio.TimeoutError()
+            mock_process.wait = AsyncMock()
+            mock_process.kill = MagicMock()
+            mock_process.returncode = None
+            mock_subprocess.return_value = mock_process
+
+            result = await provider._run_single_attempt(
+                "Test prompt",
+                1,
+                model="test-provider/test-model",
+                use_json=False,
+            )
+
+            assert result.action == "timeout"
+            assert mock_subprocess.call_args.kwargs["start_new_session"] is True
+            killpg_calls = [
+                (args[0], args[1]) for args, _kwargs in mock_killpg.call_args_list
+            ]
+            assert (4321, signal.SIGTERM) in killpg_calls
+            assert (4321, signal.SIGKILL) in killpg_calls
+            mock_process.kill.assert_not_called()
+            mock_process.wait.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_run_single_attempt_group_escalation_uses_captured_pgid(
+        self, provider
+    ):
+        """Cleanup uses the PGID captured at spawn rather than a later PID lookup."""
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", create=True) as mock_killpg,
+            patch(
+                "os.getpgid",
+                side_effect=AssertionError("late PGID lookup"),
+                create=True,
+            ),
+        ):
+            mock_process = AsyncMock()
+            mock_process.pid = 4321
+
+            async def timeout_after_pid_change(*_args, **_kwargs):
+                mock_process.pid = 9999
+                raise asyncio.TimeoutError()
+
+            mock_process.communicate.side_effect = timeout_after_pid_change
+            mock_process.wait = AsyncMock()
+            mock_process.kill = MagicMock()
+            mock_process.returncode = None
+            mock_subprocess.return_value = mock_process
+
+            result = await provider._run_single_attempt(
+                "Test prompt",
+                1,
+                model="test-provider/test-model",
+                use_json=False,
+            )
+
+            assert result.action == "timeout"
+            killpg_calls = [
+                (args[0], args[1]) for args, _kwargs in mock_killpg.call_args_list
+            ]
+            assert (4321, signal.SIGTERM) in killpg_calls
+            assert (4321, signal.SIGKILL) in killpg_calls
+            assert all(pgid == 4321 for pgid, _sig in killpg_calls)
+
+    @pytest.mark.asyncio
+    async def test_run_single_attempt_parent_exit_still_killpg_captured_pgid(
+        self, provider
+    ):
+        """SIGKILL is still attempted for descendants after the parent exits."""
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", create=True) as mock_killpg,
+        ):
+            mock_process = AsyncMock()
+            mock_process.pid = 4321
+            mock_process.communicate.side_effect = asyncio.TimeoutError()
+
+            async def wait_and_mark_parent_exit():
+                mock_process.returncode = 0
+                return 0
+
+            mock_process.wait = AsyncMock(side_effect=wait_and_mark_parent_exit)
+            mock_process.kill = MagicMock()
+            mock_process.returncode = None
+            mock_subprocess.return_value = mock_process
+
+            result = await provider._run_single_attempt(
+                "Test prompt",
+                1,
+                model="test-provider/test-model",
+                use_json=False,
+            )
+
+            assert result.action == "timeout"
+            killpg_calls = [
+                (args[0], args[1]) for args, _kwargs in mock_killpg.call_args_list
+            ]
+            assert (4321, signal.SIGTERM) in killpg_calls
+            assert (4321, signal.SIGKILL) in killpg_calls
+
+    @pytest.mark.asyncio
+    async def test_run_single_attempt_cancelled_cleans_up(self, provider):
+        """Cancelled tasks propagate only after process-group cleanup runs."""
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", create=True) as mock_killpg,
+        ):
+            mock_process = AsyncMock()
+            mock_process.pid = 4321
+            mock_process.communicate.side_effect = asyncio.CancelledError()
+            mock_process.wait = AsyncMock()
+            mock_process.kill = MagicMock()
+            mock_process.returncode = None
+            mock_subprocess.return_value = mock_process
+
+            with pytest.raises(asyncio.CancelledError):
+                await provider._run_single_attempt(
+                    "Test prompt",
+                    30,
+                    model="test-provider/test-model",
+                    use_json=False,
+                )
+
+            mock_killpg.assert_any_call(4321, signal.SIGTERM)
+            mock_killpg.assert_any_call(4321, signal.SIGKILL)
+            mock_process.kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_single_attempt_exception_cleans_up(self, provider):
+        """Unexpected subprocess-body exceptions trigger process-tree cleanup."""
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", create=True) as mock_killpg,
+        ):
+            mock_process = AsyncMock()
+            mock_process.pid = 4321
+            mock_process.communicate.side_effect = OSError("boom")
+            mock_process.wait = AsyncMock()
+            mock_process.kill = MagicMock()
+            mock_process.returncode = None
+            mock_subprocess.return_value = mock_process
+
+            result = await provider._run_single_attempt(
+                "Test prompt",
+                30,
+                model="test-provider/test-model",
+                use_json=False,
+            )
+
+            assert result.action == "failure"
+            assert "boom" in str(result.error)
+            mock_killpg.assert_any_call(4321, signal.SIGTERM)
+            mock_killpg.assert_any_call(4321, signal.SIGKILL)
+            mock_process.kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_single_attempt_windows_uses_taskkill(self, provider):
+        """Windows cleanup routes to taskkill /T without blocking the event loop."""
+        with (
+            patch("sys.platform", "win32"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
+            patch("subprocess.CREATE_NEW_PROCESS_GROUP", 0x00000200, create=True),
+            patch("os.killpg", create=True) as mock_killpg,
+        ):
+            mock_process = AsyncMock()
+            mock_process.pid = 2468
+            mock_process.communicate.side_effect = asyncio.TimeoutError()
+            mock_process.wait = AsyncMock()
+            mock_process.kill = MagicMock()
+            mock_process.returncode = None
+            mock_subprocess.return_value = mock_process
+
+            result = await provider._run_single_attempt(
+                "Test prompt",
+                1,
+                model="test-provider/test-model",
+                use_json=False,
+            )
+
+            assert result.action == "timeout"
+            assert "start_new_session" not in mock_subprocess.call_args.kwargs
+            assert mock_subprocess.call_args.kwargs["creationflags"] == 0x00000200
+            mock_to_thread.assert_awaited_once_with(
+                subprocess.run,
+                ["taskkill", "/T", "/PID", "2468", "/F"],
+                check=False,
+                timeout=10,
+            )
+            mock_killpg.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_run_cli_command_timeout(self, provider):
         """Test CLI command timeout."""
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", create=True) as mock_killpg,
+        ):
             mock_process = AsyncMock()
+            mock_process.pid = 4321
             mock_process.communicate.side_effect = asyncio.TimeoutError()
             mock_process.wait = AsyncMock()
             mock_process.kill = MagicMock()
@@ -283,7 +502,9 @@ class TestOpenCodeCLIProvider:
             msg = str(exc.value)
             assert "model=test-provider/test-model" in msg
             assert "Test prompt" not in msg
-            mock_process.kill.assert_called()
+            mock_killpg.assert_any_call(4321, signal.SIGTERM)
+            mock_killpg.assert_any_call(4321, signal.SIGKILL)
+            mock_process.kill.assert_not_called()
             mock_process.wait.assert_awaited()
 
     @pytest.mark.asyncio
@@ -291,36 +512,72 @@ class TestOpenCodeCLIProvider:
         self, provider
     ):
         """Stale process cleanup must not mask the timeout error."""
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", side_effect=ProcessLookupError(), create=True),
+        ):
             mock_process = AsyncMock()
+            mock_process.pid = 4321
             mock_process.communicate.side_effect = asyncio.TimeoutError()
             mock_process.wait = AsyncMock()
             mock_process.returncode = None
-            mock_process.kill = MagicMock(side_effect=ProcessLookupError())
+            mock_process.kill = MagicMock()
             mock_subprocess.return_value = mock_process
 
             with pytest.raises(RuntimeError, match="timed out"):
                 await provider._run_cli_command("Test prompt")
 
             mock_process.wait.assert_awaited()
+            mock_process.kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_cli_command_timeout_ignores_killpg_permission_error(
+        self, provider
+    ):
+        """Permission-denied process groups must not mask timeout errors."""
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", side_effect=PermissionError(), create=True),
+        ):
+            mock_process = AsyncMock()
+            mock_process.pid = 4321
+            mock_process.communicate.side_effect = asyncio.TimeoutError()
+            mock_process.wait = AsyncMock()
+            mock_process.returncode = None
+            mock_process.kill = MagicMock()
+            mock_subprocess.return_value = mock_process
+
+            with pytest.raises(RuntimeError, match="timed out"):
+                await provider._run_cli_command("Test prompt")
+
+            mock_process.wait.assert_awaited()
+            mock_process.kill.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_run_cli_command_generic_failure_ignores_stale_process_lookup_error(
         self, provider
     ):
         """Unexpected failures must survive stale process cleanup."""
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", side_effect=ProcessLookupError(), create=True),
+        ):
             mock_process = AsyncMock()
+            mock_process.pid = 4321
             mock_process.communicate.side_effect = ValueError("boom")
             mock_process.wait = AsyncMock()
             mock_process.returncode = None
-            mock_process.kill = MagicMock(side_effect=ProcessLookupError())
+            mock_process.kill = MagicMock()
             mock_subprocess.return_value = mock_process
 
             with pytest.raises(RuntimeError, match="OpenCode CLI command failed: boom"):
                 await provider._run_cli_command("Test prompt")
 
-            assert mock_process.wait.await_count == provider._max_retries
+            mock_process.wait.assert_awaited()
+            mock_process.kill.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_run_cli_command_failure_redacts_prompt_from_error(self, provider):
@@ -1001,8 +1258,13 @@ class TestOpenCodeCLIProvider:
                 max_retries=1,
             )
 
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", create=True),
+        ):
             mock_process_timeout = AsyncMock()
+            mock_process_timeout.pid = 4321
             mock_process_timeout.communicate.side_effect = asyncio.TimeoutError()
             mock_process_timeout.wait = AsyncMock()
             mock_process_timeout.kill = MagicMock()
@@ -1066,8 +1328,13 @@ class TestOpenCodeCLIProvider:
                 max_retries=1,
             )
 
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", create=True),
+        ):
             mock_process_timeout = AsyncMock()
+            mock_process_timeout.pid = 4321
             mock_process_timeout.communicate.side_effect = asyncio.TimeoutError()
             mock_process_timeout.wait = AsyncMock()
             mock_process_timeout.kill = MagicMock()
@@ -1098,8 +1365,13 @@ class TestOpenCodeCLIProvider:
                 max_retries=1,
             )
 
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", create=True),
+        ):
             mock_process_timeout = AsyncMock()
+            mock_process_timeout.pid = 4321
             mock_process_timeout.communicate.side_effect = asyncio.TimeoutError()
             mock_process_timeout.wait = AsyncMock()
             mock_process_timeout.kill = MagicMock()
@@ -1137,14 +1409,20 @@ class TestOpenCodeCLIProvider:
                 max_retries=1,
             )
 
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+        with (
+            patch("sys.platform", "linux"),
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch("os.killpg", create=True),
+        ):
             mock_process_timeout = AsyncMock()
+            mock_process_timeout.pid = 4321
             mock_process_timeout.communicate.side_effect = asyncio.TimeoutError()
             mock_process_timeout.wait = AsyncMock()
             mock_process_timeout.kill = MagicMock()
             mock_process_timeout.returncode = None
 
             mock_process_fallback = AsyncMock()
+            mock_process_fallback.pid = 8765
             mock_process_fallback.communicate.side_effect = asyncio.TimeoutError()
             mock_process_fallback.wait = AsyncMock()
             mock_process_fallback.kill = MagicMock()
