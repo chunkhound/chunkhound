@@ -2129,7 +2129,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 modified_time = EXCLUDED.modified_time,
                 content_hash = EXCLUDED.content_hash,
                 skip_reason = EXCLUDED.skip_reason,
-                updated_at = now()
+                updated_at = CURRENT_TIMESTAMP
             """,
             [path, name, extension, size, mtime, content_hash, language, skip_reason],
         )
