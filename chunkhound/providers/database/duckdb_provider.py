@@ -2082,7 +2082,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         if updates:
             # Clear skip_reason whenever a file is successfully re-indexed
             updates.append("skip_reason = NULL")
-            updates.append("updated_at = CURRENT_TIMESTAMP")
+            updates.append("updated_at = now()")  # CURRENT_TIMESTAMP parses as a column name in SET clauses; use now() instead
             query = f"UPDATE files SET {', '.join(updates)} WHERE id = ?"
             params.append(file_id)
             conn.execute(query, params)
@@ -2129,7 +2129,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 modified_time = EXCLUDED.modified_time,
                 content_hash = EXCLUDED.content_hash,
                 skip_reason = EXCLUDED.skip_reason,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = now()  -- CURRENT_TIMESTAMP parses as a column name in ON CONFLICT SET; use now() instead
             """,
             [path, name, extension, size, mtime, content_hash, language, skip_reason],
         )
