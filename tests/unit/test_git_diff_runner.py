@@ -57,6 +57,9 @@ async def test_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         def kill(self) -> None:
             pass
 
+        async def wait(self) -> None:
+            pass
+
     with patch("asyncio.create_subprocess_exec", return_value=SlowProcess()):
         with pytest.raises(TimeoutError, match="timed out"):
             await run_git_diff("HEAD~1..HEAD", tmp_path)

@@ -525,7 +525,7 @@ def _resolve_commit_range(
 _EMBED_TIMEOUT_SECONDS = 120  # same as provider-level default in .chunkhound.json
 
 
-def _git_cwd_from_services(services: DatabaseServices) -> Path:
+async def _git_cwd_from_services(services: DatabaseServices) -> Path:
     """Derive git repo root from the indexed DB path, not from process cwd.
 
     In MCP / ``--db`` flows the process cwd may point to an unrelated directory.
@@ -533,19 +533,17 @@ def _git_cwd_from_services(services: DatabaseServices) -> Path:
     gives the correct repo root for the indexed project.  Falls back to
     project-marker detection then cwd only when the git lookup fails.
     """
-    import subprocess as _subprocess
-
     try:
         db_path = Path(services.provider.db_path)
         start = db_path if db_path.is_dir() else db_path.parent
-        r = _subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(start), "rev-parse", "--show-toplevel",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        if r.returncode == 0:
-            return Path(r.stdout.strip())
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        if proc.returncode == 0:
+            return Path(stdout.decode("utf-8", errors="replace").strip())
     except Exception:
         pass
 
@@ -563,7 +561,13 @@ async def _inject_diff_service(
     effective_commit_range: str,
     vector_source: str,
     embedding_manager: Any,
-) -> DatabaseServices:
+) -> tuple[DatabaseServices, str | None]:
+    """Build a DiffAwareSearchService and return it alongside a truncation warning.
+
+    Returns (updated_services, warning_str | None).  The warning is non-None when
+    the diff produced more than MAX_DIFF_CHUNKS chunks and results were capped —
+    callers must surface this to the MCP client so the LLM knows results are partial.
+    """
     # Local imports avoid circular dependency: tools → git_diff → (nothing in tools)
     import asyncio as _asyncio
 
@@ -572,15 +576,16 @@ async def _inject_diff_service(
     from chunkhound.core.git_diff import parse_diff_to_chunks, run_git_diff
     from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
 
-    _cwd = _git_cwd_from_services(services)
+    _cwd = await _git_cwd_from_services(services)
     raw_diff = await run_git_diff(effective_commit_range, cwd=_cwd)
     diff_chunks = parse_diff_to_chunks(raw_diff, max_chunk_chars=MAX_DIFF_CHUNK_CHARS)
+    truncation_warning: str | None = None
     if len(diff_chunks) > MAX_DIFF_CHUNKS:
-        _log.warning(
-            "diff range produced {} chunks; capping at {} to avoid OOM",
-            len(diff_chunks),
-            MAX_DIFF_CHUNKS,
+        truncation_warning = (
+            f"Diff range produced {len(diff_chunks)} chunks; results capped at "
+            f"{MAX_DIFF_CHUNKS} to avoid OOM. Use a narrower commit range for complete coverage."
         )
+        _log.warning(truncation_warning)
         diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
     diff_embeddings: list[list[float]] = []
     if diff_chunks and embedding_manager is not None:
@@ -605,7 +610,7 @@ async def _inject_diff_service(
         vector_source=vector_source,
         embedding_manager=embedding_manager,
     )
-    return services._replace(search_service=diff_service)
+    return services._replace(search_service=diff_service), truncation_warning
 
 
 @register_tool(
@@ -668,8 +673,9 @@ async def search_impl(
                 "Use type='regex' for pattern-based search without embeddings."
             )
 
+    truncation_warning: str | None = None
     if effective_commit_range is not None and type == "semantic" and vector_source != "db":
-        services = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
+        services, truncation_warning = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
 
     if type == "semantic":
 
@@ -702,9 +708,10 @@ async def search_impl(
     # Convert file paths to native platform format
     native_results = _convert_paths_to_native(results)
 
-    return cast(
-        SearchResponse, {"results": native_results, "pagination": pagination}
-    )
+    response: dict[str, Any] = {"results": native_results, "pagination": pagination}
+    if truncation_warning:
+        response["warnings"] = [truncation_warning]
+    return cast(SearchResponse, response)
 
 
 @register_tool(
@@ -786,8 +793,9 @@ async def deep_research_impl(
 
     effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
 
+    truncation_warning: str | None = None
     if effective_commit_range is not None and vector_source != "db":
-        services = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
+        services, truncation_warning = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
 
     # Create default config from environment if not provided
     if config is None:
@@ -805,7 +813,10 @@ async def deep_research_impl(
         path_filter=path,
     )
 
-    return await research_service.deep_research(query)
+    result = await research_service.deep_research(query)
+    if truncation_warning:
+        result = f"> **Note:** {truncation_warning}\n\n{result}"
+    return result
 
 
 @register_tool(

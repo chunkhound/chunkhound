@@ -11,7 +11,9 @@ _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 # Pattern matching <hash>^..<hash> produced by _resolve_commit_range for a
 # single commit_hash.  Both capture groups must be identical.
-_SINGLE_COMMIT_RANGE_RE = re.compile(r'^([0-9a-f]{4,40})\^\.\.([0-9a-f]{4,40})\Z')
+# Accepts uppercase hex (git emits lowercase but accepts both) and up to 64
+# chars to cover SHA256 object hashes as well as the standard SHA1 40-char form.
+_SINGLE_COMMIT_RANGE_RE = re.compile(r'^([0-9a-fA-F]{4,64})\^\.\.([0-9a-fA-F]{4,64})\Z')
 
 
 async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
@@ -34,6 +36,7 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
         )
     except asyncio.TimeoutError:
         proc.kill()
+        await proc.wait()
         raise TimeoutError(
             f"git diff timed out after {_GIT_DIFF_TIMEOUT_SECONDS}s"
             f" for range {commit_range!r}"
@@ -57,6 +60,7 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
                 )
             except asyncio.TimeoutError:
                 proc2.kill()
+                await proc2.wait()
                 raise TimeoutError(
                     f"git diff timed out after {_GIT_DIFF_TIMEOUT_SECONDS}s"
                     f" for range {root_range!r}"

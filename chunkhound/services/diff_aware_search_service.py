@@ -82,13 +82,13 @@ class DiffAwareSearchService:
 
     def __init__(
         self,
-        original: Any,  # SearchService duck-type
+        original: SearchServiceProtocol,
         diff_chunks: list,  # list[Chunk]
         diff_embeddings: list[list[float]],
         vector_source: str,  # "diff", "db", or "both"
         embedding_manager: Any,  # EmbeddingManager
     ) -> None:
-        self._original = original
+        self._original: SearchServiceProtocol = original
         self._diff_chunks = diff_chunks
         self._vector_source = vector_source
         self._embedding_manager = embedding_manager
@@ -271,7 +271,10 @@ class DiffAwareSearchService:
 
         (diff_results, _), (db_results, _) = await asyncio.gather(diff_task, db_task)
 
-        # B3 — normalise DB results that use distance-based scoring
+        # B3 — normalise DB results that use distance-based scoring.
+        # Effectively dead code today: DuckDB and LanceDB providers both emit
+        # "similarity"/"score" upstream.  Kept as a safety net for future
+        # providers, but assumes cosine distance (1 - distance = similarity).
         normalised_db: list[dict[str, Any]] = []
         for r in db_results:
             r = dict(r)
@@ -324,7 +327,7 @@ class DiffAwareSearchService:
         offset: int = 0,
         path_filter: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        return self._original.search_regex(  # type: ignore[no-any-return]
+        return self._original.search_regex(
             pattern, page_size=page_size, offset=offset, path_filter=path_filter
         )
 
@@ -384,7 +387,7 @@ class DiffAwareSearchService:
     def get_chunk_context(
         self, chunk_id: Any, context_lines: int = 5
     ) -> dict[str, Any]:
-        return self._original.get_chunk_context(chunk_id, context_lines)  # type: ignore[no-any-return]
+        return self._original.get_chunk_context(chunk_id, context_lines)
 
     def get_file_chunks(self, file_path: str) -> list[dict[str, Any]]:
-        return self._original.get_file_chunks(file_path)  # type: ignore[no-any-return]
+        return self._original.get_file_chunks(file_path)
