@@ -57,7 +57,7 @@ class TestRealtimeFailures:
         )
 
         services = create_services(db_path, config)
-        services.provider.connect()
+        await asyncio.to_thread(services.provider.connect)
 
         realtime_service = RealtimeIndexingService(services, config)
 
@@ -70,7 +70,7 @@ class TestRealtimeFailures:
             pass
 
         try:
-            services.provider.disconnect()
+            await asyncio.to_thread(services.provider.disconnect)
         except Exception:
             pass
 
@@ -330,7 +330,9 @@ class TestRealtimeFailures:
         # Simulate compaction: close gate AND drop thread-local connection
         # so next DB access raises CompactionError instead of reusing existing conn.
         services.provider._connection_allowed.clear()
-        services.provider.soft_disconnect(skip_checkpoint=True)
+        await asyncio.to_thread(
+            lambda: services.provider.soft_disconnect(skip_checkpoint=True)
+        )
 
         # Put file directly in the queue — bypasses debouncing
         await service.file_queue.put(("change", test_file))
@@ -350,7 +352,7 @@ class TestRealtimeFailures:
 
         # Restore gate and reconnect for clean teardown
         services.provider._connection_allowed.set()
-        services.provider.connect()
+        await asyncio.to_thread(services.provider.connect)
         await service.stop()
 
     @pytest.mark.asyncio
@@ -433,14 +435,16 @@ class TestRealtimeFailures:
 
         # 1. Force CompactionError — file lands in deferred tracking only.
         services.provider._connection_allowed.clear()
-        services.provider.soft_disconnect(skip_checkpoint=True)
+        await asyncio.to_thread(
+            lambda: services.provider.soft_disconnect(skip_checkpoint=True)
+        )
         await service.file_queue.put(("change", test_file))
         await service.wait_for_file_indexed(test_file, timeout=5.0)
         assert normalized not in service.failed_files
 
         # 2. Reopen gate so remove_file()'s provider call can succeed.
         services.provider._connection_allowed.set()
-        services.provider.connect()
+        await asyncio.to_thread(services.provider.connect)
 
         # 3. Delete on disk and call remove_file() directly. This exercises
         # the method-level contract without depending on the filesystem
@@ -477,7 +481,9 @@ class TestRealtimeFailures:
         test_file.write_text("def deferred_remove(): pass")
 
         services.provider._connection_allowed.clear()
-        services.provider.soft_disconnect(skip_checkpoint=True)
+        await asyncio.to_thread(
+            lambda: services.provider.soft_disconnect(skip_checkpoint=True)
+        )
 
         test_file.unlink()
         await service.remove_file(test_file)
@@ -493,7 +499,7 @@ class TestRealtimeFailures:
         assert normalized in service._compaction_deferred_removals
 
         services.provider._connection_allowed.set()
-        services.provider.connect()
+        await asyncio.to_thread(services.provider.connect)
         await service.stop()
 
     @pytest.mark.asyncio
