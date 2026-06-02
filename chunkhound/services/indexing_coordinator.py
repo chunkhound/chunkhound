@@ -709,6 +709,9 @@ class IndexingCoordinator(BaseService):
                 # Cap concurrent timeout children to avoid resource exhaustion
                 "max_concurrent_timeouts": min(max(1, num_workers) * 2, 32),
                 "detect_embedded_sql": detect_embedded_sql,
+                "index_unknown_files": bool(
+                    getattr(getattr(self.config, "indexing", None), "index_unknown_files", False)
+                ),
             }
 
             # Normalize to the batch-processor input format
@@ -778,6 +781,9 @@ class IndexingCoordinator(BaseService):
                 # Cap concurrent timeout children to avoid resource exhaustion
                 "max_concurrent_timeouts": min(num_workers * 2, 32),
                 "detect_embedded_sql": detect_embedded_sql,
+                "index_unknown_files": bool(
+                    getattr(getattr(self.config, "indexing", None), "index_unknown_files", False)
+                ),
             }
             futures = [
                 loop.run_in_executor(executor, process_file_batch, batch, config_dict)

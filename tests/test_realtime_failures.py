@@ -372,18 +372,23 @@ class TestRealtimeFailures:
 
         # 1. Force CompactionError — file lands in deferred tracking only.
         services.provider._connection_allowed.clear()
-        services.provider.soft_disconnect(skip_checkpoint=True)
+        await asyncio.to_thread(
+            lambda: services.provider.soft_disconnect(skip_checkpoint=True)
+        )
         await service.file_queue.put(("change", test_file))
         await service.wait_for_file_indexed(test_file, timeout=5.0)
         assert normalized not in service.failed_files
 
         # 2. Reopen the gate and reconnect so the retry can succeed.
+        # Use to_thread so the event loop stays responsive on macOS — blocking
+        # connect() in the event loop thread can starve the pipeline long enough
+        # that the 10 s wait below times out.
         services.provider._connection_allowed.set()
-        services.provider.connect()
+        await asyncio.to_thread(services.provider.connect)
 
         # 3. Re-queue the same file. Wait specifically for the success-path
         # update on _indexed_files — wait_for_file_indexed would return
-        # immediately because failed_files still contains the entry.
+        # immediately because _compaction_deferred_files still contains the entry.
         await service.file_queue.put(("change", test_file))
 
         async def _wait_until_indexed() -> None:
