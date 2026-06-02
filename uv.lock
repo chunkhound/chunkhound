@@ -466,9 +466,6 @@ dev = [
     { name = "pytest-timeout" },
     { name = "ruff" },
 ]
-native = [
-    { name = "chunkhound-native" },
-]
 test = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -496,7 +493,6 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.12.15" },
     { name = "anthropic", specifier = ">=0.96.0,<1.0.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
-    { name = "chunkhound-native", marker = "extra == 'native'", specifier = ">=0.1.0" },
     { name = "duckdb", specifier = ">=1.4.0,<1.5.3.dev0" },
     { name = "google-genai", specifier = ">=1.51.0" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -583,14 +579,6 @@ dev = [
     { name = "ruff", specifier = ">=0.11.12" },
     { name = "types-jsonschema", specifier = ">=4.0.0" },
     { name = "types-psutil", specifier = ">=7.0.0.20250601" },
-]
-
-[[package]]
-name = "chunkhound-native"
-version = "0.1.0"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ed/d3/58491cafaa07262f70a6bcefaffe15f54d3cdcdfeac4553036e109e46dc3/chunkhound_native-0.1.0-cp310-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:54ce2b91a3d6dcac28664620e0770c8fc434e4538bf5be16636bfc95ee578735", size = 945887, upload-time = "2026-05-27T12:57:59.094Z" },
 ]
 
 [[package]]
