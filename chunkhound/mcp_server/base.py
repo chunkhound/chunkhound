@@ -27,6 +27,7 @@ from loguru import logger
 
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.interfaces.embedding_provider import (
@@ -408,7 +409,7 @@ class MCPServerBase(ABC):
                             f"(utility: {utility_config['model']}, "
                             f"synthesis: {synthesis_config['model']})"
                         )
-                except ValueError as e:
+                except (ValueError, ConfigurationError) as e:
                     # API key or configuration issue - expected if LLM not needed
                     msg = f"LLM provider setup skipped: {e}"
                     logger.warning(msg)

@@ -17,6 +17,11 @@ from typing_extensions import assert_never
 from chunkhound.core.config.claude_model_resolution import (
     CLAUDE_HAIKU_SENTINEL,
 )
+from chunkhound.core.config.openai_utils import is_official_openai_endpoint
+from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
+from chunkhound.core.exceptions.core import ConfigurationError
+
+from ._utils import _parse_env_bool
 
 REASONING_EFFORT_PROVIDERS: tuple[str, ...] = (
     "codex-cli",
@@ -27,6 +32,7 @@ REASONING_EFFORT_PROVIDERS: tuple[str, ...] = (
 
 OPENAI_REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
 GROK_REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
+GEMINI_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high")
 
 NO_KEY_PROVIDERS: tuple[str, ...] = (
     "ollama",
@@ -51,21 +57,16 @@ _PROVIDER_CHOICES: list[str] = list(get_args(LLMProviderLiteral))
 
 ReasoningEffortLiteral = Literal["minimal", "low", "medium", "high", "xhigh"]
 
-from ._utils import _parse_env_bool
-
-from chunkhound.core.config.openai_utils import is_official_openai_endpoint
-from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
-
 DEFAULT_LLM_TIMEOUT = 120
 # "openai" uses OpenAILLMProvider (special class with Responses API), not the
 # generic OpenAICompatibleProvider path.  It is included here because it speaks
 # the same Chat Completions protocol — used for config-level validation.
-OPENAI_COMPATIBLE_LLM_PROVIDERS: set[str] = (
-    {"openai"} | set(OPENAI_COMPATIBLE_PROVIDERS.keys())
+OPENAI_COMPATIBLE_LLM_PROVIDERS: set[str] = {"openai"} | set(
+    OPENAI_COMPATIBLE_PROVIDERS.keys()
 )
-BASE_URL_CAPABLE_LLM_PROVIDERS: set[str] = (
-    OPENAI_COMPATIBLE_LLM_PROVIDERS | {"anthropic"}
-)
+BASE_URL_CAPABLE_LLM_PROVIDERS: set[str] = OPENAI_COMPATIBLE_LLM_PROVIDERS | {
+    "anthropic"
+}
 
 REMOVED_PROVIDERS: dict[str, str] = {
     "ollama": (
@@ -365,6 +366,26 @@ class LLMConfig(BaseSettings):
         ),
     )
 
+    # Gemini Thinking Configuration
+    gemini_thinking_level: str | None = Field(
+        default=None,
+        description=(
+            "Thinking depth for Gemini 3+ series. "
+            'One of "low", "medium", "high". '
+            "When set, forwarded as ``thinking_level`` to the Google Gen AI SDK."
+        ),
+    )
+
+    gemini_thinking_budget: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Fixed thinking token budget for Gemini 2.5+ series. "
+            "When set, forwarded as ``ThinkingConfig(thinking_budget=...)`` "
+            "to the Google Gen AI SDK."
+        ),
+    )
+
     api_key: SecretStr | None = Field(
         default=None, description="API key for authentication (provider-specific)"
     )
@@ -611,15 +632,26 @@ class LLMConfig(BaseSettings):
         "anthropic_thinking_mode",
         "anthropic_thinking_display",
         "anthropic_cache_ttl",
+        "gemini_thinking_level",
         mode="before",
     )
-    def _normalize_effort_strings(cls, v: str | None) -> str | None:  # noqa: N805
-        """Normalize effort / mode / display / ttl strings to lowercase."""
+    def _normalize_string_fields(cls, v: str | None) -> str | None:  # noqa: N805
+        """Normalize string config fields to trimmed lowercase."""
         if v is None:
             return v
         if isinstance(v, str):
             return v.strip().lower()
         raise ValueError(f"Expected str or None, got {type(v).__name__}")
+
+    @field_validator("gemini_thinking_level")
+    def validate_gemini_thinking_level(cls, v: str | None) -> str | None:  # noqa: N805
+        """Reject unsupported Gemini thinking levels during config validation."""
+        if v is None:
+            return v
+        if v not in GEMINI_THINKING_LEVELS:
+            allowed = ", ".join(GEMINI_THINKING_LEVELS)
+            raise ValueError(f"gemini_thinking_level must be one of: {allowed}")
+        return v
 
     def _base_url_for_provider(self, provider: str) -> str | None:
         """Return the configured base URL only for providers that support it."""
@@ -639,9 +671,13 @@ class LLMConfig(BaseSettings):
         # fail at config consumption time (not during config construction)
         # so that introspection methods like ``get_missing_config`` still work.
         if provider in OPENAI_COMPATIBLE_PROVIDERS and not model:
-            raise ValueError(
-                f"Model is required for '{provider}'."
-                " Set `llm.model` (or per-role model override) in your configuration."
+            raise ConfigurationError(
+                config_key="llm.model",
+                reason=(
+                    f"Model is required for '{provider}'. "
+                    "Set `llm.model` (or per-role model override) "
+                    "in your configuration."
+                ),
             )
 
         config: dict[str, Any] = {
@@ -665,14 +701,14 @@ class LLMConfig(BaseSettings):
             config["thinking_enabled"] = self.anthropic_thinking_enabled
             config["thinking_budget_tokens"] = self.anthropic_thinking_budget_tokens
             config["interleaved_thinking"] = self.anthropic_interleaved_thinking
-            if self.anthropic_thinking_mode:
+            if self.anthropic_thinking_mode is not None:
                 config["thinking_mode"] = self.anthropic_thinking_mode
-            if self.anthropic_thinking_display:
+            if self.anthropic_thinking_display is not None:
                 config["thinking_display"] = self.anthropic_thinking_display
-            if self.anthropic_effort:
+            if self.anthropic_effort is not None:
                 config["effort"] = self.anthropic_effort
             config["prompt_caching"] = self.anthropic_prompt_caching
-            if self.anthropic_cache_ttl:
+            if self.anthropic_cache_ttl is not None:
                 config["cache_ttl"] = self.anthropic_cache_ttl
             if self.anthropic_task_budget_tokens is not None:
                 config["task_budget_tokens"] = self.anthropic_task_budget_tokens
@@ -688,6 +724,12 @@ class LLMConfig(BaseSettings):
                     )
                 if self.anthropic_clear_tool_uses_keep is not None:
                     config["clear_tool_uses_keep"] = self.anthropic_clear_tool_uses_keep
+
+        if provider == "gemini":
+            if self.gemini_thinking_level is not None:
+                config["thinking_level"] = self.gemini_thinking_level
+            if self.gemini_thinking_budget is not None:
+                config["thinking_budget"] = self.gemini_thinking_budget
 
         return config
 
@@ -718,12 +760,18 @@ class LLMConfig(BaseSettings):
 
         # Propagate supports_structured_outputs to primary roles unconditionally
         # and to secondary roles only when their resolved provider matches
-        # the synthesis provider. Explicit overrides to a different provider
-        # do not inherit capability flags — the provider uses its own
-        # registry default (e.g. False for DeepSeek).
+        # the synthesis provider exactly. Explicit overrides to a different
+        # provider do not inherit capability flags — the provider uses its
+        # own registry default (e.g. False for DeepSeek).
+        #
+        # We use exact match here (not _provider_family) because registry
+        # providers like DeepSeek and Grok share the same "openai-compatible"
+        # family but may have different capability support. Model inheritance
+        # (in _configured_model_for_role) still uses family match since
+        # OpenAI-compatible models share the same API surface.
         if self.supports_structured_outputs is not None and (
             role in {"utility", "synthesis"}
-            or self._provider_family(provider) == self._provider_family(self.synthesis_provider or self.provider)
+            or provider == (self.synthesis_provider or self.provider)
         ):
             role_config["supports_structured_outputs"] = (
                 self.supports_structured_outputs
@@ -1195,6 +1243,16 @@ class LLMConfig(BaseSettings):
             type=int,
             help="Number of recent tool use/result pairs to keep after clearing",
         )
+        parser.add_argument(
+            "--llm-gemini-thinking-level",
+            choices=["low", "medium", "high"],
+            help="Thinking depth for Gemini 3+ series (low, medium, high)",
+        )
+        parser.add_argument(
+            "--llm-gemini-thinking-budget",
+            type=int,
+            help="Token budget for Gemini 2.5+ series thinking",
+        )
 
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
@@ -1280,6 +1338,7 @@ class LLMConfig(BaseSettings):
             ("CHUNKHOUND_LLM_ANTHROPIC_THINKING_DISPLAY", "anthropic_thinking_display"),
             ("CHUNKHOUND_LLM_ANTHROPIC_EFFORT", "anthropic_effort"),
             ("CHUNKHOUND_LLM_ANTHROPIC_CACHE_TTL", "anthropic_cache_ttl"),
+            ("CHUNKHOUND_LLM_GEMINI_THINKING_LEVEL", "gemini_thinking_level"),
         )
         for env_name, key in str_fields:
             raw = os.getenv(env_name)
@@ -1306,6 +1365,10 @@ class LLMConfig(BaseSettings):
             (
                 "CHUNKHOUND_LLM_ANTHROPIC_CLEAR_TOOL_USES_KEEP",
                 "anthropic_clear_tool_uses_keep",
+            ),
+            (
+                "CHUNKHOUND_LLM_GEMINI_THINKING_BUDGET",
+                "gemini_thinking_budget",
             ),
         )
         for env_name, key in int_fields:
@@ -1411,6 +1474,15 @@ class LLMConfig(BaseSettings):
             "llm_anthropic_clear_tool_uses_keep": "anthropic_clear_tool_uses_keep",
         }
         for arg_name, config_key in anthropic_flag_map.items():
+            value = getattr(args, arg_name, None)
+            if value is not None:
+                overrides[config_key] = value
+
+        gemini_flag_map = {
+            "llm_gemini_thinking_level": "gemini_thinking_level",
+            "llm_gemini_thinking_budget": "gemini_thinking_budget",
+        }
+        for arg_name, config_key in gemini_flag_map.items():
             value = getattr(args, arg_name, None)
             if value is not None:
                 overrides[config_key] = value

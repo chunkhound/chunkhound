@@ -9,6 +9,7 @@ from loguru import logger
 from chunkhound.api.cli.utils import verify_database_exists
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
@@ -46,7 +47,7 @@ def setup_embedding_llm(
         if config.llm:
             utility_config, synthesis_config = config.llm.get_provider_configs()
             llm_manager = LLMManager(utility_config, synthesis_config)
-    except ValueError as e:
+    except (ValueError, ConfigurationError) as e:
         formatter.error(f"LLM provider setup failed: {e}")
         formatter.info(
             "Configure an LLM provider via:\n"
