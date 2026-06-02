@@ -16,13 +16,16 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from http.client import HTTPMessage
+
     import zendriver as zd
 
 from chunkhound.core.config.config import Config
@@ -301,9 +304,48 @@ def _decode_pdf_or_fallback_html(body: bytes, charset: str) -> tuple[str, str | 
     return ".md", _html_to_markdown(body.decode(charset, errors="replace"))
 
 
-def _fetch_url(url: str) -> tuple[str, bytes, str]:
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Fail-loud redirect blocker for the cookie-bearing urllib refetch.
+
+    Chrome already resolved redirects before we re-fetched. Any redirect
+    here would cause urllib to forward our Cookie header to a domain
+    other than the one we extracted cookies for — silently leaking
+    credentials. Raise instead.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            f"Redirect to {newurl} blocked on cookie-bearing fetch",
+            headers,
+            fp,
+        )
+
+
+def _fetch_url(
+    url: str,
+    extra_headers: dict[str, str] | None = None,
+    follow_redirects: bool = True,
+) -> tuple[str, bytes, str]:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, headers=headers)
+    opener = (
+        urllib.request.build_opener()
+        if follow_redirects
+        else urllib.request.build_opener(_NoRedirect)
+    )
+    with opener.open(req, timeout=30) as resp:
         ct = _normalize_ct(resp.headers.get("Content-Type"))
         return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
 
@@ -399,6 +441,31 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         )
 
         if ct == "application/pdf":
+            # Forward Chrome's cookies to the urllib refetch so cookie-
+            # gated PDFs (signed-URL CDNs, session-token-protected docs)
+            # still resolve. Two defenses keep urllib's static Cookie
+            # header from leaking credentials to a different origin:
+            #   1. Scope to response.url (Chrome's final URL after
+            #      redirects), so get_cookies returns only cookies
+            #      applicable to that domain.
+            #   2. Block redirects in the refetch (follow_redirects=False)
+            #      — Chrome already resolved them, and any redirect now
+            #      would re-send our Cookie header to a new origin.
+            pdf_url = response.url or url
+            # 10s cap matches the other bounded CDP sends in this function.
+            # On timeout, fall back to a no-cookie refetch (still
+            # redirect-blocked) rather than failing the whole fetch — the
+            # request may still succeed for non-cookie-gated PDFs.
+            try:
+                cookies = await asyncio.wait_for(
+                    tab.send(cdp.network.get_cookies(urls=[pdf_url])),
+                    timeout=10,
+                )
+                cookie_header = "; ".join(
+                    f"{c.name}={c.value}" for c in cookies
+                )
+            except asyncio.TimeoutError:
+                cookie_header = ""
             # Close the tab *before* urllib so Chrome stops holding the
             # in-flight PDF download. _close_tab_quietly only swallows
             # TimeoutError; any other failure (e.g. dead-connection error
@@ -415,9 +482,10 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             # _decode_pdf_or_fallback_html when the body is NOT a real PDF
             # (e.g. paywall HTML served under application/pdf); preserving
             # the literal avoids a silent decode-behavior change there.
-            # NOTE: bare urllib refetch does NOT inherit browser cookies,
-            # so auth-walled / cookie-gated PDFs will fail here.
-            _, body, _ = await asyncio.to_thread(_fetch_url, url)
+            extra = {"Cookie": cookie_header} if cookie_header else None
+            _, body, _ = await asyncio.to_thread(
+                _fetch_url, pdf_url, extra, False  # follow_redirects=False
+            )
             return "application/pdf", body, "utf-8"
 
         if ct != "text/html":

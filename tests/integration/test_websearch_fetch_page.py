@@ -18,8 +18,10 @@ parse-failure loop on older Chrome.
 from __future__ import annotations
 
 import asyncio
+import http.server
 import os
-from collections.abc import AsyncIterator
+import threading
+from collections.abc import AsyncIterator, Iterator
 from typing import TYPE_CHECKING
 
 import pytest
@@ -152,3 +154,103 @@ async def test_fetch_page_pdf_branch(chrome_browser: zd.Browser) -> None:
     assert final in (baseline, baseline + 1), (
         f"PDF branch leaked unexpectedly many tabs: {final - baseline}"
     )
+
+
+# Minimal valid PDF prefix — the test only asserts the %PDF- magic bytes,
+# so the body doesn't need to be a structurally complete PDF.
+_MINIMAL_PDF = b"%PDF-1.4\n%minimal\n"
+
+
+@pytest.fixture
+def cookie_pdf_server() -> Iterator[tuple[str, list[str]]]:
+    """Background HTTP server serving cookie-gated PDF endpoints.
+
+    Uses ``ThreadingHTTPServer`` (not ``HTTPServer``) so HTTP/1.1
+    keep-alive connections from Chrome cannot starve the urllib refetch:
+    a single-threaded server holding Chrome's keep-alive socket would
+    block accept() of the subsequent urllib connection and deadlock.
+
+    The handler is defined inside the fixture so it closes over the
+    per-invocation ``received`` list — no class-level state, no
+    monkey-patched server attribute.
+    """
+    received: list[str] = []
+
+    class _CookieGatedPDFHandler(http.server.BaseHTTPRequestHandler):
+        """Local server: /pdf gates a PDF on the ``session=valid`` cookie.
+
+        Returns the PDF body only when ``session=valid`` is present;
+        otherwise 302s to ``/login`` (so the test fails loudly if
+        redirect-block is reverted).
+        """
+
+        def do_GET(self) -> None:  # noqa: N802 — stdlib API
+            if self.path == "/pdf":
+                cookie = self.headers.get("Cookie", "")
+                received.append(cookie)
+                if "session=valid" in cookie:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/pdf")
+                    self.send_header("Content-Length", str(len(_MINIMAL_PDF)))
+                    self.end_headers()
+                    self.wfile.write(_MINIMAL_PDF)
+                    return
+                self.send_response(302)
+                self.send_header("Location", "/login")
+                self.end_headers()
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _CookieGatedPDFHandler
+    )
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}", received
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+async def test_fetch_page_pdf_forwards_browser_cookies(
+    chrome_browser: zd.Browser,
+    cookie_pdf_server: tuple[str, list[str]],
+) -> None:
+    """PDF refetch carries cookies present in Chrome's jar.
+
+    The cookie is injected directly into Chrome via CDP rather than
+    obtained through a real /auth round-trip — we are testing our
+    contract ("if a cookie is in Chrome's jar, our refetch forwards it"),
+    not Chrome's Set-Cookie handling. Locks in both halves of the
+    contract:
+      - Cookies extracted from Chrome reach the urllib refetch (the tail
+        recorded Cookie header contains ``session=valid``).
+      - Redirects in the cookie-bearing refetch are blocked: without the
+        defense, the cookie-less fallback path (or any reverted refetch)
+        would follow 302 → /login and return non-PDF content, failing
+        the magic-byte assertion.
+    """
+    from zendriver import cdp
+
+    base, received_cookie_headers = cookie_pdf_server
+
+    await chrome_browser.cookies.set_all(
+        [cdp.network.CookieParam(name="session", value="valid", url=f"{base}/")]
+    )
+
+    ct, body, _ = await _fetch_page(chrome_browser, f"{base}/pdf")
+
+    assert ct == "application/pdf"
+    assert body.startswith(b"%PDF-")
+    # The urllib refetch is the LAST request hitting /pdf. Asserting on
+    # the tail entry directly proves the cookie traveled via the urllib
+    # path — not just that Chrome's own navigation succeeded.
+    assert received_cookie_headers, "no /pdf requests recorded"
+    assert "session=valid" in received_cookie_headers[-1]
