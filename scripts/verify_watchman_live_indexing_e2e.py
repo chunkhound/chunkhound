@@ -853,6 +853,11 @@ async def _verify_fallback_install_contract(
         )
 
     lock_path = _lock_path_for_runtime(watchman_project_dir, failure_runtime_dir)
+    # The daemon is a detached subprocess that runs _graceful_shutdown after the
+    # proxy exits. Poll until the daemon removes its own lock (or we time out).
+    lock_poll_deadline = time.monotonic() + 15.0
+    while lock_path.exists() and time.monotonic() < lock_poll_deadline:
+        await asyncio.sleep(0.25)
     if lock_path.exists():
         raise RuntimeError(
             f"Explicit {install_label} watchman failure published a daemon lock"
