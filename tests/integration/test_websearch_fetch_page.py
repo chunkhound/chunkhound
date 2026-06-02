@@ -134,14 +134,13 @@ async def test_fetch_page_html_branch(chrome_browser: zd.Browser) -> None:
 async def test_fetch_page_pdf_branch(chrome_browser: zd.Browser) -> None:
     """PDF branch returns raw bytes; tab close is best-effort.
 
-    Per ZENDRIVER_MIGRATION.md "Known behavior changes" item 6,
-    ``tab.close()`` on the PDF viewer path exceeds zendriver's internal
-    10s ack timeout, which exceeds ``_close_tab_quietly``'s 5s cap — so
-    the PDF tab typically remains in ``browser.targets`` until
-    ``browser.stop()`` reaps it. Allow either outcome (clean close OR
-    one leaked tab) but no more, so we detect both regressions (multi-tab
-    leak) and improvements (future zendriver/Chrome fix that lets the
-    close succeed).
+    ``tab.close()`` on the PDF viewer path waits on zendriver's internal
+    10s ack (the PDF viewer is still ingesting the in-flight download),
+    which exceeds ``_close_tab_quietly``'s 5s cap — so the PDF tab
+    typically remains in ``browser.targets`` until ``browser.stop()``
+    reaps it. Allow either outcome (clean close OR one leaked tab) but
+    no more, so we detect both regressions (multi-tab leak) and
+    improvements (future zendriver/Chrome fix that lets the close succeed).
     """
     baseline = _page_target_count(chrome_browser)
 

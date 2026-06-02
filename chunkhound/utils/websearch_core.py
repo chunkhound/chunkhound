@@ -336,6 +336,8 @@ def _fetch_url(
     extra_headers: dict[str, str] | None = None,
     follow_redirects: bool = True,
 ) -> tuple[str, bytes, str]:
+    # Header values are passed verbatim. http.client blocks CRLF, but
+    # nothing else is validated — never pass attacker-influenced values.
     headers = {"User-Agent": "Mozilla/5.0"}
     if extra_headers:
         headers.update(extra_headers)
@@ -353,9 +355,9 @@ def _fetch_url(
 async def _close_tab_quietly(tab: zd.Tab) -> None:
     """Close a tab with a bounded wait.
 
-    tab.close() routinely exceeds 3s on Chrome 148 and can hang on the PDF
-    viewer's 10s ack timeout. Cap at 5s and rely on ``browser.stop()`` to
-    reap anything left behind.
+    tab.close() can hang on the PDF viewer's 10s ack timeout and has been
+    observed to take >3s even on the HTML path. Cap at 5s and rely on
+    ``browser.stop()`` to reap anything left behind.
     """
     try:
         await asyncio.wait_for(tab.close(), timeout=5)
