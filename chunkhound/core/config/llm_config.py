@@ -68,6 +68,9 @@ BASE_URL_CAPABLE_LLM_PROVIDERS: set[str] = OPENAI_COMPATIBLE_LLM_PROVIDERS | {
     "anthropic"
 }
 
+# Native providers without a baked-in default model — user must set llm.model explicitly
+NO_DEFAULT_MODEL_PROVIDERS: set[str] = {"gemini"}
+
 REMOVED_PROVIDERS: dict[str, str] = {
     "ollama": (
         "The 'ollama' provider has been removed. "
@@ -667,16 +670,20 @@ class LLMConfig(BaseSettings):
         reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """Build a provider config using the current shared config fields."""
-        # Registry providers (deepseek, grok) require an explicit model —
-        # fail at config consumption time (not during config construction)
-        # so that introspection methods like ``get_missing_config`` still work.
-        if provider in OPENAI_COMPATIBLE_PROVIDERS and not model:
+        # Registry and native providers without a baked-in default model
+        # (deepseek, grok, gemini) require an explicit model — fail at config
+        # consumption time (not during config construction) so that introspection
+        # methods like ``get_missing_config`` still work.
+        if (
+            provider in OPENAI_COMPATIBLE_PROVIDERS
+            or provider in NO_DEFAULT_MODEL_PROVIDERS
+        ) and not model:
             raise ConfigurationError(
                 config_key="llm.model",
                 reason=(
                     f"Model is required for '{provider}'. "
-                    "Set `llm.model` (or per-role model override) "
-                    "in your configuration."
+                    "Set `llm.model`, CHUNKHOUND_LLM_MODEL, "
+                    "or a per-role model override in your configuration."
                 ),
             )
 
@@ -793,8 +800,12 @@ class LLMConfig(BaseSettings):
     @staticmethod
     def _get_default_models_for(provider: LLMProviderLiteral) -> tuple[str, str]:
         """Get default utility and synthesis model names for a provider."""
-        # Registry providers: no baked-in model — user must set llm.model explicitly
-        if provider in OPENAI_COMPATIBLE_PROVIDERS:
+        # Registry and native providers with no baked-in default:
+        # user must set llm.model (or CHUNKHOUND_LLM_MODEL) explicitly.
+        if (
+            provider in OPENAI_COMPATIBLE_PROVIDERS
+            or provider in NO_DEFAULT_MODEL_PROVIDERS
+        ):
             return ("", "")
 
         # Provider-specific smart defaults
@@ -810,12 +821,6 @@ class LLMConfig(BaseSettings):
         elif provider == "codex-cli":
             # Codex CLI: nominal label; require explicit model if desired
             return ("codex", "codex")
-        elif provider == "gemini":
-            # Gemini: model from env var; fallback to stable production default.
-            # The provider is model-agnostic so this string is purely a default
-            # that can be overridden at config or env level.
-            model = os.environ.get("CHUNKHOUND_GEMINI_MODEL", "gemini-2.5-pro")
-            return (model, model)
         elif provider == "anthropic":
             # Anthropic intentionally uses Claude Haiku for both utility and
             # synthesis. Haiku is capable enough for synthesis and is Anthropic's
@@ -1019,6 +1024,19 @@ class LLMConfig(BaseSettings):
             missing.append(
                 "explicit model selection required for custom OpenAI-compatible "
                 f"endpoint roles: {roles_text}"
+            )
+
+        # Native providers with no baked-in default require explicit model
+        no_default_model_roles = [
+            role
+            for role in roles
+            if self._resolved_provider_for_role(role) in NO_DEFAULT_MODEL_PROVIDERS
+            and self._configured_model_for_role(role) is None
+        ]
+        if no_default_model_roles:
+            roles_text = ", ".join(no_default_model_roles)
+            missing.append(
+                f"explicit model selection required for gemini roles: {roles_text}"
             )
 
         return missing

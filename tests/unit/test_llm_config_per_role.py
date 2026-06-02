@@ -222,12 +222,14 @@ def test_registry_provider_missing_model_raises_configuration_error():
 
     assert str(exc_info.value) == (
         "Configuration error for 'llm.model': Model is required for 'deepseek'. "
-        "Set `llm.model` (or per-role model override) in your configuration."
+        "Set `llm.model`, CHUNKHOUND_LLM_MODEL, "
+        "or a per-role model override in your configuration."
     )
     assert exc_info.value.config_key == "llm.model"
     assert exc_info.value.reason == (
         "Model is required for 'deepseek'. "
-        "Set `llm.model` (or per-role model override) in your configuration."
+        "Set `llm.model`, CHUNKHOUND_LLM_MODEL, "
+        "or a per-role model override in your configuration."
     )
 
 
@@ -262,7 +264,7 @@ def test_registry_provider_utility_override_without_model():
 def test_gemini_build_provider_config_forwards_thinking_options():
     cfg = LLMConfig(
         provider="gemini",
-        model="gemini-2.5-pro",
+        model="gemini-3.5-flash",
         gemini_thinking_level="HIGH",
         gemini_thinking_budget=2048,
     )
@@ -273,6 +275,25 @@ def test_gemini_build_provider_config_forwards_thinking_options():
     assert utility_config["thinking_budget"] == 2048
     assert synthesis_config["thinking_level"] == "high"
     assert synthesis_config["thinking_budget"] == 2048
+
+
+def test_gemini_without_model_raises_configuration_error():
+    """Gemini requires explicit model — no model raises ConfigurationError."""
+    cfg = LLMConfig(provider="gemini")
+
+    with pytest.raises(ConfigurationError, match="Model is required for 'gemini'"):
+        cfg.get_provider_configs()
+
+
+def test_gemini_without_model_shows_in_get_missing_config():
+    """Gemini with no model appears in get_missing_config()."""
+    cfg = LLMConfig(provider="gemini", api_key=SecretStr("sk-test"))
+
+    missing = cfg.get_missing_config()
+    assert missing == [
+        "explicit model selection required for gemini roles: "
+        "utility, synthesis, map_hyde, autodoc_cleanup"
+    ], f"Unexpected missing config: {missing}"
 
 
 def test_deepseek_does_not_forward_structured_outputs_override_by_default():

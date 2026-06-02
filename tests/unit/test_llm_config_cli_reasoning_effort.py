@@ -146,7 +146,11 @@ def test_cli_extracts_gemini_thinking_overrides() -> None:
 @pytest.mark.parametrize("raw", ["max", "extreme", " medium-high "])
 def test_invalid_gemini_thinking_level_fails_at_config_time(raw: str) -> None:
     with pytest.raises(ValueError, match="gemini_thinking_level must be one of"):
-        LLMConfig(provider="gemini", model="gemini-2.5-pro", gemini_thinking_level=raw)
+        LLMConfig(
+            provider="gemini",
+            model="gemini-3.5-flash",
+            gemini_thinking_level=raw,
+        )
 
 
 def test_load_from_env_parses_gemini_thinking_settings(
