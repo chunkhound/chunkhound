@@ -10,7 +10,7 @@ from chunkhound.core.config.llm_config import (
     OPENAI_COMPATIBLE_LLM_PROVIDERS,
     REASONING_EFFORT_PROVIDERS,
 )
-from chunkhound.core.config.openai_utils import is_official_openai_endpoint
+from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider

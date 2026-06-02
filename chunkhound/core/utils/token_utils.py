@@ -4,12 +4,73 @@ This module provides centralized token estimation to ensure consistency
 between parser chunking and embedding service batching.
 """
 
+import functools
+
+from loguru import logger
+
+from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
+
 try:
     import tiktoken
 
     TIKTOKEN_AVAILABLE = True
 except ImportError:
     TIKTOKEN_AVAILABLE = False
+
+
+@functools.cache
+def _encoding_for_model_safe(model: str) -> "tiktoken.Encoding | None":
+    """tiktoken.encoding_for_model with all failures → None.
+
+    Negative-caches both unknown models (KeyError) and BPE-download
+    failures (e.g. on-prem hosts blocking openaipublic.blob.core.windows.net).
+    tiktoken does not cache failed downloads, so without this every call
+    retries and stalls on the connect timeout. functools.cache ensures the
+    body runs once per unique model, so the warning fires once per model.
+
+    MODULE INVARIANT: tiktoken (>=0.4) eagerly loads the BPE file inside
+    Encoding.__init__, so a blocked download surfaces here — NOT from a
+    later enc.encode() call. If a future tiktoken version defers BPE
+    loading to first encode(), this wrapper will return a non-None
+    encoding and the network error will leak past enc.encode(text) in
+    _estimate_tokens_openai; revisit when bumping the tiktoken pin.
+    """
+    if not TIKTOKEN_AVAILABLE:
+        return None
+    try:
+        return tiktoken.encoding_for_model(model)
+    except Exception as e:
+        # Broad on purpose: tiktoken's download path raises urllib.error.URLError,
+        # ConnectionError, TimeoutError, OSError, plus client-specific errors
+        # that vary across versions. KeyError is the unknown-model case. We also
+        # accept that programming-bug exceptions (TypeError on a bad model arg,
+        # etc.) collapse to the heuristic — the logged type+message lets an
+        # operator distinguish "blocked network" from "bad input" in logs.
+        logger.warning(
+            "tiktoken failed for model {!r} ({}: {}); using char-count heuristic",
+            model, type(e).__name__, e,
+        )
+        return None
+
+
+@functools.cache
+def _cl100k_base_safe() -> "tiktoken.Encoding | None":
+    """Cached cl100k_base lookup; None if the download is blocked.
+
+    functools.cache makes this a one-shot — the warning fires at most once per process.
+    """
+    if not TIKTOKEN_AVAILABLE:
+        return None
+    try:
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception as e:
+        # See _encoding_for_model_safe for why this is broad.
+        logger.warning(
+            "tiktoken cl100k_base download failed ({}: {}); using char-count heuristic",
+            type(e).__name__, e,
+        )
+        return None
+
 
 # Token estimation ratios (characters per token)
 EMBEDDING_CHARS_PER_TOKEN = 3  # Embedding APIs (measured ~3.0 for VoyageAI/OpenAI)
@@ -46,6 +107,7 @@ def estimate_tokens(
     provider: str | None = None,
     model: str | None = None,
     require_provider: bool = False,
+    base_url: str | None = None,
 ) -> int:
     """Estimate token count for text using provider-specific methods.
 
@@ -57,6 +119,9 @@ def estimate_tokens(
             If None, gets from registry config.
         require_provider: If True, raises error when no provider configured.
             If False, uses default estimation.
+        base_url: Endpoint URL. Used to distinguish official OpenAI from
+            OpenAI-compatible proxies (e.g. Qwen via vLLM) where cl100k_base
+            would imply false precision. If None, gets from registry config.
 
     Returns:
         Estimated token count
@@ -73,6 +138,7 @@ def estimate_tokens(
         if config and config.embedding:
             provider = config.embedding.provider
             model = config.embedding.model or ""
+            base_url = config.embedding.base_url
         elif require_provider:
             raise ValueError("No embedding provider configured")
         else:
@@ -80,28 +146,46 @@ def estimate_tokens(
             return _estimate_tokens_default(text)
 
     if provider in ("openai", "azure_openai"):
-        return _estimate_tokens_openai(text, model or "")
+        return _estimate_tokens_openai(
+            text, model or "", _uses_openai_tokenizer(provider, base_url)
+        )
     elif provider == "voyageai":
         return _estimate_tokens_voyageai(text)
     else:
         return _estimate_tokens_default(text)
 
 
-def _estimate_tokens_openai(text: str, model: str) -> int:
-    """Use tiktoken for exact OpenAI token counting."""
-    if not TIKTOKEN_AVAILABLE:
-        # Fallback: EMBEDDING_CHARS_PER_TOKEN is correct here because this function
-        # is only called from estimate_tokens() for embedding providers. LLM callers
-        # use estimate_tokens_llm() which uses LLM_CHARS_PER_TOKEN directly.
-        return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
+def _uses_openai_tokenizer(provider: str, base_url: str | None) -> bool:
+    """True iff this endpoint serves models with real OpenAI tokenizers.
 
-    try:
-        encoding = tiktoken.encoding_for_model(model)
-        return len(encoding.encode(text))
-    except KeyError:
-        # Model not found, use default encoding
-        encoding = tiktoken.get_encoding("cl100k_base")  # GPT-4 default
-        return len(encoding.encode(text))
+    Azure deployments always do (real OpenAI models under arbitrary
+    deployment names). Official OpenAI endpoints do. OpenAI-compatible
+    proxies (e.g. Qwen via vLLM) do NOT — falling back to cl100k_base
+    there would imply false precision.
+    """
+    if provider == "azure_openai":
+        return True
+    return provider == "openai" and is_official_openai_endpoint(base_url)
+
+
+def _estimate_tokens_openai(
+    text: str, model: str, cl100k_fallback_ok: bool
+) -> int:
+    """Use tiktoken for exact OpenAI token counting, with safe fallback.
+
+    cl100k_fallback_ok controls what happens when tiktoken can't resolve
+    the model: True (official OpenAI / Azure) uses cl100k_base; False
+    (compatible proxy) goes straight to the char heuristic.
+    """
+    enc = _encoding_for_model_safe(model)
+    if enc is None and cl100k_fallback_ok:
+        enc = _cl100k_base_safe()
+    if enc is not None:
+        return len(enc.encode(text))
+    # EMBEDDING_CHARS_PER_TOKEN (not LLM_CHARS_PER_TOKEN) because this function
+    # is only called from estimate_tokens() for embedding providers; LLM callers
+    # use estimate_tokens_llm() directly.
+    return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
 
 
 def _estimate_tokens_voyageai(text: str) -> int:

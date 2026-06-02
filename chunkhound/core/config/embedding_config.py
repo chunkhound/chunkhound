@@ -16,9 +16,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.utils.openai_utils import (
+    is_azure_openai_endpoint,
+    is_official_openai_endpoint,
+)
 
 from ._utils import _parse_env_bool
-from .openai_utils import is_azure_openai_endpoint, is_official_openai_endpoint
 from .voyageai_utils import is_official_voyageai_endpoint
 
 # Error message constants for consistent messaging across config and provider

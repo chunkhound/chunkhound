@@ -756,7 +756,10 @@ class EmbeddingService(BaseService):
             # Use accurate provider-specific token estimation
             if self._embedding_provider:
                 text_tokens = estimate_tokens(
-                    text, self._embedding_provider.name, self._embedding_provider.model
+                    text,
+                    self._embedding_provider.name,
+                    self._embedding_provider.model,
+                    base_url=getattr(self._embedding_provider, "base_url", None),
                 )
             else:
                 # Fallback for no provider (conservative default)

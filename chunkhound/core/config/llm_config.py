@@ -53,7 +53,7 @@ ReasoningEffortLiteral = Literal["minimal", "low", "medium", "high", "xhigh"]
 
 from ._utils import _parse_env_bool
 
-from chunkhound.core.config.openai_utils import is_official_openai_endpoint
+from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
 
 DEFAULT_LLM_TIMEOUT = 120
 OPENAI_COMPATIBLE_LLM_PROVIDERS = {"openai", "grok", "deepseek"}
