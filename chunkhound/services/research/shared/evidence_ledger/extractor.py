@@ -174,18 +174,26 @@ class FactExtractor:
 
         # Keep prompt and parser aligned: URL provenance lives in `url`.
         # If compatibility prompts put the URL in `source`, normalize it.
+        # Only normalize if the source URL is not already a cluster content key
+        # (avoids breaking file-scoped lookups for URL-based content keys).
         normalized_source_url = False
         if source.lower().startswith(("http://", "https://")):
-            if not url:
-                logger.debug(f"Normalizing source URL into url field: {source[:80]}")
-                url = source
-            normalized_source_url = True
+            if source not in cluster_content:
+                if not url:
+                    logger.debug(f"Normalizing source URL into url field: {source[:80]}")
+                    url = source
+                normalized_source_url = True
 
         if not source and not url:
             logger.debug(
                 f"Skipping fact with no source or URL: {item}"
             )
             return None
+
+        # URL-only facts with empty source — fall back to cluster source key
+        # so file-scoped lookups via get_facts_for_files still work.
+        if not source and url and len(cluster_content) == 1:
+            source = next(iter(cluster_content))
 
         # Parse location into line numbers or section
         start_line = 0
@@ -213,16 +221,22 @@ class FactExtractor:
             end_line = int(item.get("end_line", start_line))
 
         file_path = source
-        if normalized_source_url and source not in cluster_content:
-            # Keep cluster-scoped fact lookup tied to the source key used
-            # for this extraction when the cluster contains a single source.
+        if normalized_source_url:
+            # Source was a URL not in cluster_content — fall back to
+            # the sole cluster key for file-scoped lookup support.
+            # For multi-source clusters, source (the URL) remains as
+            # file_path, preserving provenance for downstream consumers.
             if len(cluster_content) == 1:
                 file_path = next(iter(cluster_content))
 
         category = item.get("category", "general").strip()
         confidence = _parse_confidence(item.get("confidence", "uncertain"))
+        # Safely handle string-valued entities (iterating a string yields chars)
+        entities_raw = item.get("entities", [])
+        if isinstance(entities_raw, str):
+            entities_raw = [entities_raw]
         entities = tuple(
-            e.strip() for e in item.get("entities", []) if e.strip()
+            e.strip() for e in entities_raw if e.strip()
         )
 
         fact_id = FactEntry.generate_id(
