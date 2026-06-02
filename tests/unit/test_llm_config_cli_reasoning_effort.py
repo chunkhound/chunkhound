@@ -110,7 +110,9 @@ def test_cli_accepts_deepseek_provider_overrides() -> None:
     assert args.llm_autodoc_cleanup_provider == "deepseek"
 
 
-def test_cli_rejects_unknown_provider_with_valid_choices(capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_rejects_unknown_provider_with_valid_choices(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     parser = argparse.ArgumentParser()
     LLMConfig.add_cli_arguments(parser)
 
@@ -119,6 +121,53 @@ def test_cli_rejects_unknown_provider_with_valid_choices(capsys: pytest.CaptureF
     err = capsys.readouterr().err
     # deepseek must appear in the argparse choices list
     assert "deepseek" in err
+
+
+def test_cli_extracts_gemini_thinking_overrides() -> None:
+    parser = argparse.ArgumentParser()
+    LLMConfig.add_cli_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--llm-gemini-thinking-level",
+            "high",
+            "--llm-gemini-thinking-budget",
+            "2048",
+        ]
+    )
+    overrides = LLMConfig.extract_cli_overrides(args)
+
+    assert overrides == {
+        "gemini_thinking_level": "high",
+        "gemini_thinking_budget": 2048,
+    }
+
+
+@pytest.mark.parametrize("raw", ["max", "extreme", " medium-high "])
+def test_invalid_gemini_thinking_level_fails_at_config_time(raw: str) -> None:
+    with pytest.raises(ValueError, match="gemini_thinking_level must be one of"):
+        LLMConfig(provider="gemini", model="gemini-2.5-pro", gemini_thinking_level=raw)
+
+
+def test_load_from_env_parses_gemini_thinking_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHUNKHOUND_LLM_GEMINI_THINKING_LEVEL", " HIGH ")
+    monkeypatch.setenv("CHUNKHOUND_LLM_GEMINI_THINKING_BUDGET", "2048")
+
+    config = LLMConfig.load_from_env()
+
+    assert config["gemini_thinking_level"] == "high"
+    assert config["gemini_thinking_budget"] == 2048
+
+
+def test_invalid_gemini_thinking_level_from_env_fails_at_config_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHUNKHOUND_LLM_GEMINI_THINKING_LEVEL", "EXTREME")
+
+    with pytest.raises(ValueError, match="gemini_thinking_level must be one of"):
+        LLMConfig(**LLMConfig.load_from_env())
 
 
 def test_cli_parses_llm_ssl_verify_flags() -> None:

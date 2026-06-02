@@ -174,6 +174,12 @@ class LLMManager:
                     if (keep := config.get("clear_tool_uses_keep")) is not None:
                         provider_kwargs["clear_tool_uses_keep"] = keep
 
+            elif provider_name == "gemini":
+                if (thinking_level := config.get("thinking_level")) is not None:
+                    provider_kwargs["thinking_level"] = thinking_level
+                if (thinking_budget := config.get("thinking_budget")) is not None:
+                    provider_kwargs["thinking_budget"] = thinking_budget
+
             provider = provider_class(**provider_kwargs)
             return provider
         except Exception as e:
