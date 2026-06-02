@@ -393,6 +393,22 @@ async def test_cancellation_kills_subprocess_and_cleans_tempdir(
         assert not Path(p).exists(), f"tempdir {p} should be removed"
 
 
+# ---------------------------------------------------------------------------
+# parse_mcp_arguments: MCP passes all values as strings
+# ---------------------------------------------------------------------------
+
+
+def test_parse_mcp_arguments_accepts_string_typed_limit():
+    """String-typed limit must be tolerated (MCP passes all values as strings)."""
+    from chunkhound.mcp_server.common import parse_mcp_arguments
+
+    parsed = parse_mcp_arguments({"limit": "0", "query": "q"})
+    assert parsed["limit"] == 0
+
+    parsed = parse_mcp_arguments({"limit": "999", "query": "q"})
+    assert parsed["limit"] == 999
+
+
 @pytest.mark.asyncio
 async def test_answer_rewrites_filenames_to_source_urls(monkeypatch, patched):
     monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
