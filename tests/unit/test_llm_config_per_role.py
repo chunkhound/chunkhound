@@ -6,6 +6,7 @@ import pytest
 from pydantic import SecretStr
 
 from chunkhound.core.config.llm_config import LLMConfig
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.llm_manager import LLMManager
 from tests.helpers import DummyProc
 
@@ -213,6 +214,23 @@ def test_registry_provider_without_model_is_not_configured():
 
 
 
+def test_registry_provider_missing_model_raises_configuration_error():
+    cfg = LLMConfig(provider="deepseek", api_key=SecretStr("sk-test"))
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        cfg.get_provider_config_for_role("utility")
+
+    assert str(exc_info.value) == (
+        "Configuration error for 'llm.model': Model is required for 'deepseek'. "
+        "Set `llm.model` (or per-role model override) in your configuration."
+    )
+    assert exc_info.value.config_key == "llm.model"
+    assert exc_info.value.reason == (
+        "Model is required for 'deepseek'. "
+        "Set `llm.model` (or per-role model override) in your configuration."
+    )
+
+
 def test_registry_provider_utility_override_with_model():
     """Per-role utility override to a registry provider with explicit model."""
     cfg = LLMConfig(
@@ -239,6 +257,22 @@ def test_registry_provider_utility_override_without_model():
     assert cfg.get_missing_config() == [
         "explicit model selection required for registry provider roles: utility"
     ]
+
+
+def test_gemini_build_provider_config_forwards_thinking_options():
+    cfg = LLMConfig(
+        provider="gemini",
+        model="gemini-2.5-pro",
+        gemini_thinking_level="HIGH",
+        gemini_thinking_budget=2048,
+    )
+
+    utility_config, synthesis_config = cfg.get_provider_configs()
+
+    assert utility_config["thinking_level"] == "high"
+    assert utility_config["thinking_budget"] == 2048
+    assert synthesis_config["thinking_level"] == "high"
+    assert synthesis_config["thinking_budget"] == 2048
 
 
 def test_deepseek_does_not_forward_structured_outputs_override_by_default():
@@ -804,7 +838,7 @@ def test_role_config_does_not_propagate_structured_outputs_across_provider_switc
     model: str,
     synth_provider: str,
 ) -> None:
-    """Cross-family secondary role override does not inherit supports_structured_outputs."""
+    """Cross-family override does not inherit supports_structured_outputs."""
     kwargs: dict[str, object] = {
         "provider": synth_provider,
         "api_key": "sk-test",
@@ -822,8 +856,15 @@ def test_role_config_does_not_propagate_structured_outputs_across_provider_switc
     assert "supports_structured_outputs" not in role_cfg
 
 
-def test_role_config_propagates_structured_outputs_across_same_family_switch() -> None:
-    """Same-family secondary role override inherits supports_structured_outputs."""
+def test_role_config_does_not_propagate_structured_outputs_across_registry_providers() -> (
+    None
+):
+    """
+    Registry providers in the same OpenAI-compatible family (e.g., DeepSeek and
+    Grok) must NOT inherit each other's ``supports_structured_outputs`` -- the
+    flag only propagates when the resolved provider exactly matches the synthesis
+    provider, since different registry providers may have different capabilities.
+    """
     cfg = LLMConfig(
         provider="deepseek",
         api_key="sk-test",
@@ -837,7 +878,7 @@ def test_role_config_propagates_structured_outputs_across_same_family_switch() -
 
     assert role_cfg["provider"] == "grok"
     assert role_cfg["model"] == "grok-3"
-    assert role_cfg["supports_structured_outputs"] is False
+    assert "supports_structured_outputs" not in role_cfg
 
 
 def test_get_provider_config_for_role_utility_propagates_structured_outputs() -> None:
