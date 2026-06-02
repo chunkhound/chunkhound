@@ -21,6 +21,7 @@ from watchdog.observers.api import BaseObserver
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions.core import CompactionError
+from chunkhound.providers.database.duckdb_provider import DuckDBTransactionConflictError
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.services.realtime_path_filter import (
     RealtimePathFilter,
@@ -1041,7 +1042,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         normalized = normalize_file_path(path)
         try:
             await self.services.provider.delete_file_completely_async(str(normalized))
-        except CompactionError:
+        except (CompactionError, DuckDBTransactionConflictError):
             async with self._file_condition:
                 self._compaction_deferred_files.add(normalized)
                 self._compaction_deferred_removals.add(normalized)
