@@ -84,8 +84,9 @@ async def chrome_browser() -> AsyncIterator[zd.Browser]:
 
     Uses the production ``_resolve_chrome_path`` so the explicit-path
     probe + version check that ``fetch_and_save`` relies on is exercised
-    here — a Chrome <124 raises out of the resolver instead of letting
-    the test hit the silent-event-drop loop in zendriver's listener.
+    here — a Chrome <124 or otherwise unverifiable binary returns ``None``
+    and skips the test instead of letting it hit the silent-event-drop
+    loop in zendriver's listener.
     """
     import zendriver as zd
 

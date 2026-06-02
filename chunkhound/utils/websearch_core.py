@@ -47,63 +47,65 @@ _CHROME_PATHS = [
 ]
 
 
-def _check_chrome_version(chrome_path: str) -> int:
-    """Return Chrome's major version; raise if older than 124.
+def _check_chrome_version(chrome_path: str) -> None:
+    """Raise ``RuntimeError`` if Chrome at ``chrome_path`` is unverifiable or <124.
 
     zendriver 0.15.3's CDP binding declares ``Network.Response.charset`` as a
     required str field. Chrome only began emitting ``charset`` on
     ``Network.responseReceived`` around v124. On older Chrome every event
     silently fails to parse in zendriver's listener loop (logged at INFO,
     no handler fires) — navigations time out with no informative error.
-    Fail loudly at launch instead.
-
-    NOTE: ``subprocess.check_output`` failures (``CalledProcessError`` from
-    a non-zero exit, ``OSError`` from a non-executable path, ``TimeoutExpired``
-    from a hung probe) are intentionally NOT caught here and propagate out
-    of ``_resolve_chrome_path`` and ``fetch_and_save``. A binary that exists
-    but cannot report its version is a misconfiguration worth surfacing —
-    silent urllib fallback would mask the install problem.
     """
-    out = subprocess.check_output(
-        [chrome_path, "--version"], text=True, timeout=5
-    ).strip()
+    try:
+        out = subprocess.check_output(
+            [chrome_path, "--version"], text=True, timeout=5
+        ).strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        raise RuntimeError(
+            f"--version probe at {chrome_path!r} failed: "
+            f"{type(e).__name__}: {e}"
+        ) from e
     major = next(
         (int(tok.split(".")[0]) for tok in out.split() if tok.split(".")[0].isdigit()),
-        0,
+        None,
     )
-    # major == 0 means no parseable version token in --version output.
-    # Treat as fail-loud rather than fall through: an unverified Chrome may
-    # silently be <124 and hit the Response.charset parse-failure loop.
-    if major == 0:
+    if major is None:
         raise RuntimeError(
-            f"Chrome version unparseable from {out!r}; need >=124 for "
-            f"zendriver 0.15.3 to emit Response.charset on "
-            f"Network.responseReceived. Upgrade Chrome or fall back to "
-            f"urllib by removing the binary."
+            f"unparseable --version output from {chrome_path!r}: {out!r}"
         )
     if major < 124:
         raise RuntimeError(
-            f"Chrome {major} is too old; need >=124 for zendriver 0.15.3 "
-            f"to emit Response.charset on Network.responseReceived. "
-            f"Upgrade Chrome or fall back to urllib by removing the binary."
+            f"Chrome at {chrome_path!r} is v{major} (from {out!r}); "
+            f"need >=124 for zendriver 0.15.3 to emit Response.charset "
+            f"on Network.responseReceived"
         )
-    return major
 
 
-def _resolve_chrome_path() -> str | None:
-    """Locate a Chrome binary and verify it is >=124.
+def _resolve_chrome_path(
+    warning_callback: Callable[[str], None] | None = None,
+) -> str | None:
+    """Locate a Chrome binary >=124; collapse every failure mode to ``None``.
 
     Probes ``_CHROME_PATHS`` first; falls back to zendriver's auto-discovery
-    only when none of those paths exist. The version probe runs in both
-    branches so an auto-discovered Chromium <124 cannot slip through and
-    silently break every navigation. Returns ``None`` when no browser is
-    available (caller falls back to urllib). Old Chrome (<124) raises
-    ``RuntimeError`` instead of returning ``None`` — fail-loud is intentional
-    so the silent ``Response.charset`` parse-failure loop is never reached.
+    only when none of those paths exist. Failure modes (no binary, version
+    <124, unparseable output, hung/failing --version probe) are reported
+    via ``warning_callback`` when one is provided, and the caller falls
+    back to urllib in all cases.
     """
+    def _warn_verification_failed(e: RuntimeError) -> None:
+        if warning_callback:
+            warning_callback(
+                f"Chrome verification failed: {e}. Falling back to urllib."
+                " (Upgrade Google Chrome to >=124 to enable rich page fetches.)"
+            )
+
     for p in _CHROME_PATHS:
         if os.path.exists(p):
-            _check_chrome_version(p)
+            try:
+                _check_chrome_version(p)
+            except RuntimeError as e:
+                _warn_verification_failed(e)
+                return None
             return p
     try:
         from zendriver.core.config import find_executable
@@ -111,14 +113,23 @@ def _resolve_chrome_path() -> str | None:
     except Exception:
         # Broad catch: zendriver's launch-failure surface is documented as
         # generic exceptions, and the spike observed platform-dependent
-        # OSError variants when no Chrome/Chromium binary exists. A
-        # broader catch keeps the urllib fallback reachable when
-        # find_executable raises anything unexpected.
-        return None
+        # OSError variants when no Chrome/Chromium binary exists. A broader
+        # catch keeps the urllib fallback reachable when find_executable
+        # raises anything unexpected.
+        resolved = None
     if not resolved:
+        if warning_callback:
+            warning_callback(
+                "No Chrome binary found. Falling back to urllib."
+                " (Install Google Chrome to enable rich page fetches.)"
+            )
         return None
     resolved = str(resolved)
-    _check_chrome_version(resolved)
+    try:
+        _check_chrome_version(resolved)
+    except RuntimeError as e:
+        _warn_verification_failed(e)
+        return None
     return resolved
 
 
@@ -488,18 +499,13 @@ async def fetch_and_save(
     # for CLI commands that never touch websearch (e.g. `chunkhound index`).
     import zendriver as zd
 
-    # _resolve_chrome_path probes _CHROME_PATHS first, then zendriver's
-    # auto-discovery; version-checks the resolved binary (>=124 required
-    # for Network.Response.charset). None means no Chrome anywhere — fall
-    # back to urllib. RuntimeError (Chrome too old) propagates: silent
-    # fallback would mask a real install problem.
-    chrome_path = _resolve_chrome_path()
+    # _resolve_chrome_path returns None for every "no usable Chrome >=124"
+    # case (not installed, too old, --version probe failed) and emits its
+    # own warning describing the cause. urllib is the unified fallback —
+    # we never hand a bad binary to zendriver, so the silent
+    # Response.charset parse-failure loop is never reached.
+    chrome_path = _resolve_chrome_path(warning_callback)
     if chrome_path is None:
-        if warning_callback:
-            warning_callback(
-                "No Chrome binary found. Falling back to urllib."
-                " (Install Google Chrome to enable rich page fetches.)"
-            )
         await _run(None)
         return
 
