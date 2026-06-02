@@ -271,6 +271,7 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DATABASE__PROVIDER` | Database backend (`duckdb` or `lancedb`) |
 | `CHUNKHOUND_DATABASE__PATH` | Database storage path |
 | `CHUNKHOUND_LLM_PROVIDER` | LLM provider for research |
+| `CHUNKHOUND_LLM_MODEL` | LLM model shorthand that sets both utility and synthesis roles |
 | `CHUNKHOUND_LLM_UTILITY_MODEL` | LLM model for utility tasks (fast, lower cost) |
 | `CHUNKHOUND_LLM_SYNTHESIS_MODEL` | LLM model for synthesis tasks (primary output) |
 | `CHUNKHOUND_LLM_API_KEY` | API key for LLM provider |

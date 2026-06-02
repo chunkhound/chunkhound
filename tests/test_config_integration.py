@@ -227,6 +227,26 @@ def test_llm_config_ssl_env_var(monkeypatch, clean_environment):
     assert config["ssl_verify"] is False
 
 
+def test_gemini_env_model_satisfies_runtime_config_validation(
+    monkeypatch, clean_environment
+) -> None:
+    """CHUNKHOUND_LLM_MODEL must satisfy Gemini's explicit-model contract."""
+    monkeypatch.setenv("CHUNKHOUND_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("CHUNKHOUND_LLM_MODEL", "gemini-3.5-flash")
+    monkeypatch.setenv("CHUNKHOUND_LLM_API_KEY", "sk-test")
+
+    with windows_safe_tempdir() as temp_path:
+        config = Config(target_dir=temp_path)
+
+    assert config.llm is not None
+    assert config.llm.model == "gemini-3.5-flash"
+    assert config.validate_for_command("research") == []
+
+    utility_config, synthesis_config = config.llm.get_provider_configs()
+    assert utility_config["model"] == "gemini-3.5-flash"
+    assert synthesis_config["model"] == "gemini-3.5-flash"
+
+
 def test_gemini_legacy_env_model_does_not_satisfy_runtime_config_validation(
     monkeypatch, clean_environment
 ) -> None:

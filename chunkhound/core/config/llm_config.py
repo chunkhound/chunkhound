@@ -1286,6 +1286,8 @@ class LLMConfig(BaseSettings):
                 config["ssl_verify"] = ssl_verify
         if provider := os.getenv("CHUNKHOUND_LLM_PROVIDER"):
             config["provider"] = provider
+        if model := os.getenv("CHUNKHOUND_LLM_MODEL"):
+            config["model"] = model
         if u_provider := os.getenv("CHUNKHOUND_LLM_UTILITY_PROVIDER"):
             config["utility_provider"] = u_provider
         if s_provider := os.getenv("CHUNKHOUND_LLM_SYNTHESIS_PROVIDER"):
