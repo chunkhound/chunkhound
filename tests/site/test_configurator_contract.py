@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from chunkhound.api.cli.utils.config_factory import create_validated_config
 from chunkhound.core.config.config import Config
 from tests.site.tsx_runner import run_tsx_json
