@@ -161,7 +161,13 @@ class DiffAwareSearchService:
 
         # G1 — path_filter (normalise to dir prefix to avoid partial name matches)
         if path_filter:
-            _pf = path_filter.rstrip('/') + '/'
+            for _danger in ("..", "~", "*", "?", "[", "]", "\0", "\n", "\r"):
+                if _danger in path_filter:
+                    raise ValueError(
+                        f"Path filter contains forbidden pattern: {_danger!r}"
+                    )
+            path_filter = path_filter.replace("\\", "/").lstrip("/")
+            _pf = path_filter.rstrip("/") + "/"
             sorted_indices = [
                 i
                 for i in sorted_indices

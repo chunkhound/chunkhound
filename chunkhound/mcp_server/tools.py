@@ -338,6 +338,7 @@ class SearchResponse(TypedDict):
 
     results: list[dict[str, Any]]
     pagination: PaginationInfo
+    warnings: NotRequired[list[str]]
 
 
 def estimate_tokens(text: str) -> int:
@@ -545,7 +546,8 @@ async def _git_cwd_from_services(services: DatabaseServices) -> Path:
         if proc.returncode == 0:
             return Path(stdout.decode("utf-8", errors="replace").strip())
     except Exception:
-        pass
+        from loguru import logger as _log
+        _log.debug("git rev-parse failed from {}, falling back", start, exc_info=True)
 
     # Fallback: project markers, then bare cwd
     from chunkhound.utils.project_detection import find_project_root
@@ -568,9 +570,10 @@ async def _inject_diff_service(
     the diff produced more than MAX_DIFF_CHUNKS chunks and results were capped —
     callers must surface this to the MCP client so the LLM knows results are partial.
     """
-    # Local imports avoid circular dependency: tools → git_diff → (nothing in tools)
-    import asyncio as _asyncio
+    if vector_source not in ("diff", "db", "both"):
+        raise ValueError(f"Invalid vector_source: {vector_source!r}. Must be 'diff', 'db', or 'both'.")
 
+    # Local imports avoid circular dependency: tools → git_diff → (nothing in tools)
     from loguru import logger as _log
 
     from chunkhound.core.git_diff import parse_diff_to_chunks, run_git_diff
@@ -590,19 +593,17 @@ async def _inject_diff_service(
     diff_embeddings: list[list[float]] = []
     if diff_chunks and embedding_manager is not None:
         try:
-            emb_result = await _asyncio.wait_for(
+            emb_result = await asyncio.wait_for(
                 embedding_manager.embed_texts([c.code for c in diff_chunks]),
                 timeout=_EMBED_TIMEOUT_SECONDS,
             )
-        except _asyncio.TimeoutError:
+        except asyncio.TimeoutError:
             raise TimeoutError(
                 f"Embedding {len(diff_chunks)} diff chunks timed out after "
                 f"{_EMBED_TIMEOUT_SECONDS}s. Use a smaller commit range or "
                 "set vector_source='db' to skip diff embedding."
             )
         diff_embeddings = emb_result.embeddings
-    if vector_source not in ("diff", "db", "both"):
-        raise ValueError(f"Invalid vector_source: {vector_source!r}. Must be 'diff', 'db', or 'both'.")
     diff_service = DiffAwareSearchService(
         original=services.search_service,
         diff_chunks=diff_chunks,
@@ -1017,6 +1018,7 @@ async def execute_tool(
             search_type = arguments.get("type", "regex")
             results_list = list(result.get("results", []))
             pagination = dict(result.get("pagination", {}))
+            diff_warnings: list[str] = result.get("warnings", [])
             md = format_search_results_markdown(results_list, pagination, search_type)
             # Keep at least 1 result; preserve original page_size so the footer's
             # total-page count stays calibrated to the requested page size.
@@ -1044,6 +1046,9 @@ async def execute_tool(
                     max_content_chars = max(0, max_content_chars - excess_chars - 1)
                     result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
                     md = format_search_results_markdown([result_copy], pagination, search_type)
+            if diff_warnings:
+                warning_block = "\n".join(f"> **Warning:** {w}" for w in diff_warnings)
+                md = f"{warning_block}\n\n{md}"
             return md
 
     # String return types (e.g., websearch) pass through directly as markdown
