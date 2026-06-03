@@ -1313,6 +1313,68 @@ class TestFactExtractor:
         assert list(ledger.facts.values())[0].statement == "Survives malformed siblings"
 
     @pytest.mark.asyncio
+    async def test_extract_handles_null_field_items(self, mock_llm_provider):
+        """Fact dicts with null-valued fields don't crash; defaults apply."""
+        mock_response = MagicMock()
+        # confidence=null (None) formerly raised AttributeError in _parse_confidence
+        # category=null (None) formerly raised AttributeError on .strip()
+        # source=null (None) with file_path=null must gracefully skip
+        mock_response.content = ("""\
+[
+  {
+    "statement": "Null confidence defaults to UNCERTAIN",
+    "file_path": "ok.py",
+    "start_line": 1,
+    "end_line": 2,
+    "category": "behavior",
+    "confidence": null,
+    "entities": []
+  },
+  {
+    "statement": "Null category defaults to general",
+    "file_path": "ok.py",
+    "start_line": 3,
+    "end_line": 4,
+    "category": null,
+    "confidence": "definite",
+    "entities": []
+  },
+  {
+    "statement": "Null source with no file_path is skipped",
+    "source": null,
+    "file_path": null,
+    "start_line": 5,
+    "end_line": 6,
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]
+""")
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"ok.py": "code"},
+            root_query="query",
+        )
+
+        # Two valid facts survive; the null-source one is skipped
+        assert ledger.facts_count == 2
+        facts = list(ledger.facts.values())
+
+        f1 = facts[0] if facts[0].statement.startswith("Null confidence") else facts[1]
+        f2 = facts[1] if facts[1].statement.startswith("Null category") else facts[0]
+
+        assert f1.statement == "Null confidence defaults to UNCERTAIN"
+        assert f1.confidence == ConfidenceLevel.UNCERTAIN
+
+        assert f2.statement == "Null category defaults to general"
+        assert f2.confidence == ConfidenceLevel.DEFINITE
+        assert f2.category == "general"
+
+    @pytest.mark.asyncio
     async def test_extract_from_clusters_merges_results(self, mock_llm_provider):
         """Test extract_from_clusters merges results from multiple clusters."""
         # Create responses for two clusters

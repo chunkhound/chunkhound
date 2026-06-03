@@ -98,7 +98,7 @@ def _parse_confidence(value: str) -> ConfidenceLevel:
     """
     try:
         return ConfidenceLevel(value.lower().strip())
-    except ValueError:
+    except (ValueError, AttributeError):
         logger.debug(f"Unknown confidence level '{value}', defaulting to UNCERTAIN")
         return ConfidenceLevel.UNCERTAIN
 
@@ -172,9 +172,9 @@ class FactExtractor:
 
         # Parse source: accept both new-style (source + location)
         # and old-style (file_path + start_line + end_line)
-        source = item.get("source", "").strip() or item.get("file_path", "").strip()
-        location_raw = item.get("location", "").strip()
-        url = item.get("url", "").strip() or None
+        source = (item.get("source") or "").strip() or (item.get("file_path") or "").strip()
+        location_raw = (item.get("location") or "").strip()
+        url = (item.get("url") or "").strip() or None
         has_new_style_fields = any(key in item for key in ("source", "location", "url"))
         has_old_style_fields = any(
             key in item for key in ("file_path", "start_line", "end_line")
@@ -246,8 +246,8 @@ class FactExtractor:
 
         file_path = source
 
-        category = item.get("category", "general").strip()
-        confidence = _parse_confidence(item.get("confidence", "uncertain"))
+        category = (item.get("category") or "general").strip()
+        confidence = _parse_confidence(item.get("confidence") or "uncertain")
         # Safely handle string-valued entities (iterating a string yields chars)
         entities_raw = item.get("entities", [])
         if isinstance(entities_raw, str):
