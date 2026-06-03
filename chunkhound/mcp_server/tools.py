@@ -873,12 +873,12 @@ async def execute_tool(
                 # two fence lines of max_run+1 backticks each) means the 300-char reserve
                 # can be wildly insufficient; re-render and shrink until the actual output fits.
                 max_content_chars = max(0, MAX_RESPONSE_TOKENS * 3 - 300)
-                result_copy["content"] = content[:max_content_chars]
+                result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
                 md = format_search_results_markdown([result_copy], pagination, search_type)
                 while estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0:
                     excess_chars = (estimate_tokens(md) - MAX_RESPONSE_TOKENS) * 3
                     max_content_chars = max(0, max_content_chars - excess_chars - 1)
-                    result_copy["content"] = content[:max_content_chars]
+                    result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
                     md = format_search_results_markdown([result_copy], pagination, search_type)
             return md
 
