@@ -8,10 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
-- **DeepSeek and Grok require explicit model** — The baked-in default models
-  (`deepseek-v4-flash`, `grok-4-1-fast-reasoning`) have been removed. Users
-  must now set `llm.model` (or per-role model override) explicitly for these
-  providers.
+- **DeepSeek, Grok, and Gemini require explicit model** — The baked-in default
+  models (`deepseek-v4-flash`, `grok-4-1-fast-reasoning`, and Gemini's prior
+  fallback/default path) have been removed. Users must now set `llm.model` (or
+  per-role model override) explicitly for these providers.
 
 ### Added
 - **Claude Opus 4.8 support**: the Anthropic provider now gives Opus 4.8 full Opus 4.7 capability
@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type annotations instead of a full subclass. Net: -527 lines.
 
 ### Fixed
+- **Multi-source URL provenance in fact extraction** — URL-backed facts in
+  multi-source clusters are now correctly skipped instead of being stored
+  with the URL as a file-path, which broke file-scoped retrieval. New-style
+  facts missing a `location` field are also skipped instead of defaulting
+  to line 1-1.
 - **MCP websearch traceback pollution** — Error output from research
   subprocesses strips internal Python traceback frames, keeping only the
   last meaningful error line.
