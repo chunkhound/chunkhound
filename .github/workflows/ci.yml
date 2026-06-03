@@ -64,7 +64,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.12"]
+        python: ["3.12", "3.14"]
         include:
           - os: ubuntu-latest
             job_timeout_minutes: 30
@@ -186,7 +186,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python: ["3.12"]
+        python: ["3.12", "3.14"]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -280,10 +280,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
+      # The watchman gate uses a stable 3.11 environment only for its wheel verification scripts.
+      # Real 3.12 + 3.14 coverage lives in the preceding "tests" and "watchman-runtime-validation"
+      # job matrices (exercised on ubuntu/windows for 3.14 as part of python3-14 upgrade).
+      # This gate just needs one reliable Python after the wheels have been built.
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3

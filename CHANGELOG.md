@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   websearch results) now pass through as markdown instead of being wrapped
   in JSON objects.
 
+### Changed
+- **Vue template metadata schema for v-model directives** — The shape of metadata produced for `v-model` (and `v-model:arg`) directives has changed:
+  - Old: `model_modifier` (string)
+  - New: `modifiers` (list of strings) + `model_argument` (optional string for `v-model:foo` style bindings)
+
+  The previous `model_modifier` field was already semantically incorrect on many real cases (it was derived from the tree-sitter `directive_argument` node and could not properly distinguish arguments from modifiers or represent multiple modifiers). The new fields are more correct and consistent with how `parse_vue_directive` works. This is a breaking change for any code or LLM prompts that directly inspected `chunk.metadata["model_modifier"]` on Vue chunks. Most other Vue directive metadata keys (`event_name`, `property_name`, `slot_name`, etc.) are unchanged in meaning.
+
 ## [5.1.0] - 2026-05-20
 
 ### Breaking Changes
