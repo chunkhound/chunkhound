@@ -219,6 +219,32 @@ async def test_both_mode_deduplicates_on_file_and_start_line():
 
 
 # ---------------------------------------------------------------------------
+# Split fragment dedup safety
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_split_hunk_fragments_survive_both_mode_dedup():
+    """Split fragments from same hunk (same file, different start_line) must not be
+    collapsed by (file_path, start_line) dedupe — regression for oversized hunk splitting."""
+    chunk_part1 = make_chunk("fn (part 1)", file_path="src/big.json", start_line=1)
+    chunk_part2 = make_chunk("fn (part 2)", file_path="src/big.json", start_line=500)
+    diff_embeddings = [[1.0, 0.0, 0.0], [0.9, 0.1, 0.0]]
+
+    original = make_original()
+    manager = make_embedding_manager([[1.0, 0.0, 0.0]])
+
+    svc = DiffAwareSearchService(
+        original, [chunk_part1, chunk_part2], diff_embeddings, "diff", manager
+    )
+    results, _ = await svc.search_semantic("query")
+
+    file_results = [r for r in results if r["file_path"] == "src/big.json"]
+    assert len(file_results) == 2, "both split fragments must survive — neither dropped by dedup"
+    start_lines = {r["start_line"] for r in file_results}
+    assert start_lines == {1, 500}
+
+
+# ---------------------------------------------------------------------------
 # Threshold filtering
 # ---------------------------------------------------------------------------
 

@@ -158,6 +158,22 @@ def test_oversized_hunk_splits_into_parts() -> None:
     assert all("(part" in c.symbol for c in chunks)
 
 
+def test_oversized_hunk_fragments_have_unique_start_lines() -> None:
+    big_lines = [f"+line_{i:05d}\n" for i in range(1000)]  # ~12k chars, forces split
+    diff = (
+        "diff --git a/big.json b/big.json\n"
+        "index abc..def 100644\n"
+        "--- a/big.json\n"
+        "+++ b/big.json\n"
+        "@@ -0,0 +1,1000 @@ root\n"
+        + "".join(big_lines)
+    )
+    chunks = parse_diff_to_chunks(diff)
+    assert len(chunks) > 1
+    start_lines = [c.start_line for c in chunks]
+    assert len(start_lines) == len(set(start_lines)), "split fragments must have unique start_lines"
+
+
 def test_oversized_hunk_custom_max() -> None:
     lines = [f"+x\n"] * 50  # 50 × 3 chars = 150 chars
     diff = (

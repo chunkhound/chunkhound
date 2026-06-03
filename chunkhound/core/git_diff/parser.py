@@ -71,10 +71,11 @@ def parse_diff_to_chunks(raw_diff: str, max_chunk_chars: int = 10_000) -> list[C
                     parts.append("".join(current_part))
                 for n, part in enumerate(parts, 1):
                     part_symbol = f"{symbol} (part {n})" if len(parts) > 1 else symbol
+                    part_start = max(1, hunk_start + (n - 1))
                     chunks.append(Chunk(
                         symbol=part_symbol,
-                        start_line=LineNumber(max(1, hunk_start)),
-                        end_line=LineNumber(max(hunk_start, hunk_end)),
+                        start_line=LineNumber(part_start),
+                        end_line=LineNumber(max(part_start, hunk_end)),
                         code=part,
                         chunk_type=ChunkType.BLOCK,
                         file_id=FileId(0),

@@ -816,7 +816,8 @@ async def deep_research_impl(
 
     result = await research_service.deep_research(query)
     if truncation_warning:
-        result = f"> **Note:** {truncation_warning}\n\n{result}"
+        answer = result.get("answer", "")
+        result["answer"] = f"> **Note:** {truncation_warning}\n\n{answer}"
     return result
 
 
