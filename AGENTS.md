@@ -89,7 +89,7 @@ git push origin vX.Y.Za1
 # 4. Revert remote back to original
 git remote set-url origin "$ORIGINAL_REMOTE"
 
-# 5. Update uv.lock to pick up the new chunkhound-native wheel
+# 5. Update uv.lock (only needed when chunkhound[native] extra is re-enabled)
 uv lock --upgrade-package chunkhound-native
 git add uv.lock
 git commit -m "chore: bump chunkhound-native in lockfile to vX.Y.Za1"

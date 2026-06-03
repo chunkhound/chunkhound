@@ -100,6 +100,12 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           uv run maturin build --release --out dist/ --set-version "$VERSION"
 
+      - name: Smoke test native wheel
+        shell: bash
+        run: |
+          uv pip install dist/chunkhound_native-*.whl
+          python -c "from chunkhound_native import scan_files; r = scan_files('.', ['py']); assert isinstance(r, list)"
+
       - name: Upload native wheel artifact
         uses: actions/upload-artifact@v4
         with:

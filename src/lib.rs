@@ -55,6 +55,8 @@ fn scan_files(
     WalkBuilder::new(root)
         .git_ignore(true)
         .git_global(false)
+        .git_exclude(false)  // .git/info/exclude not modeled by Python path
+        .ignore(false)       // .ignore files not modeled by Python path
         .hidden(false)
         .build_parallel()
         .run(|| {

@@ -62,7 +62,7 @@ The `release-rc.yml` workflow builds and publishes to TestPyPI via OIDC. No manu
 pip install --index-url https://test.pypi.org/simple/ chunkhound==1.2.0rc1
 ```
 
-**Update the lockfile** (once the native wheel is live on PyPI):
+**Update the lockfile** (only needed when `chunkhound[native]` extra is re-enabled):
 ```bash
 uv lock --upgrade-package chunkhound-native
 git add uv.lock
@@ -91,7 +91,7 @@ git commit -m "chore: bump chunkhound-native in lockfile to v1.2.0rc1"
 
    Publishing triggers `release.yml`, which builds and publishes to PyPI via OIDC. The `pypi` environment requires maintainer approval before the publish step runs.
 
-4. **If the build or publish fails** — the workflow automatically deletes the GitHub Release and its tag (`--cleanup-tag`). No orphaned public state. Simply fix the issue and repeat from step 1.
+4. **If the build or publish fails** — the cleanup step runs only if the main `chunkhound` publish fails; it deletes the GitHub Release and its tag so you can retry from step 1. If `publish-native` fails after the main package is already live, the GitHub Release remains published and cleanup does not run. In that case re-trigger `publish-native` manually via Actions (it is idempotent), or upload the native wheel directly with a PyPI token scoped to `chunkhound-native`.
 
 ---
 
