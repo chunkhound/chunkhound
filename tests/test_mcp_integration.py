@@ -96,8 +96,60 @@ class TestMCPIntegration:
 
     @pytest.fixture
     async def mcp_setup(self):
-        """Setup MCP server with real services and temp directory."""
-        # Get embedding config using centralized helper
+        """Setup MCP server with real services and temp directory.
+
+        Intentionally does NOT configure an embedding manager so that
+        process_file / _post_compaction_reindex never call the embedding
+        API.  Tests that need semantic search should use
+        mcp_setup_with_embeddings instead.
+        """
+        temp_dir = Path(tempfile.mkdtemp())
+        db_path = temp_dir / ".chunkhound" / "test.db"
+        watch_dir = temp_dir / "project"
+        watch_dir.mkdir(parents=True)
+
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        from types import SimpleNamespace
+
+        fake_args = SimpleNamespace(path=temp_dir)
+        config = Config(
+            args=fake_args,
+            database={"path": str(db_path), "provider": "duckdb"},
+            indexing={
+                "include": ["*.py", "*.js"],
+                "exclude": ["*.log"],
+                "realtime_backend": realtime_backend_for_tests(),
+            },
+        )
+
+        # No embedding manager — keeps indexing deterministic and avoids
+        # hitting the external API during non-semantic-search tests.
+        services = create_services(db_path, config, None)
+        realtime_service = RealtimeIndexingService(services, config)
+        await realtime_service.start(watch_dir)
+
+        yield services, realtime_service, watch_dir, temp_dir, None
+
+        try:
+            await realtime_service.stop()
+        except Exception:
+            pass
+
+        try:
+            services.provider.disconnect()
+        except Exception:
+            pass
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @pytest.fixture
+    async def mcp_setup_with_embeddings(self):
+        """mcp_setup variant that configures a real embedding manager.
+
+        Use only for tests that exercise semantic search, since this fixture
+        will call the external embedding API during indexing.
+        """
         config_dict = get_embedding_config_for_tests()
         embedding_config = build_embedding_config_from_dict(config_dict)
 
@@ -106,10 +158,8 @@ class TestMCPIntegration:
         watch_dir = temp_dir / "project"
         watch_dir.mkdir(parents=True)
 
-        # Ensure database directory exists
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Use fake args to prevent find_project_root call that fails in CI
         from types import SimpleNamespace
 
         fake_args = SimpleNamespace(path=temp_dir)
@@ -124,20 +174,13 @@ class TestMCPIntegration:
             },
         )
 
-        # Create embedding manager if API key is available
-        # create_services() handles None manager gracefully
         embedding_manager = create_embedding_manager_for_tests(config_dict)
-
-        # Create services - this is what MCP server uses
         services = create_services(db_path, config, embedding_manager)
-        services.provider.connect()
-        # Initialize realtime indexing service (what MCP server should do)
         realtime_service = RealtimeIndexingService(services, config)
         await realtime_service.start(watch_dir)
 
         yield services, realtime_service, watch_dir, temp_dir, embedding_manager
 
-        # Cleanup
         try:
             await realtime_service.stop()
         except Exception:
@@ -194,9 +237,9 @@ class TestMCPIntegration:
         get_api_key_for_tests()[0] is None, reason="No API key available"
     )
     @pytest.mark.asyncio
-    async def test_mcp_semantic_search_finds_new_files(self, mcp_setup):
+    async def test_mcp_semantic_search_finds_new_files(self, mcp_setup_with_embeddings):
         """Test that MCP semantic search finds newly created files."""
-        services, _, watch_dir, _, embedding_manager = mcp_setup
+        services, _, watch_dir, _, embedding_manager = mcp_setup_with_embeddings
 
         # Get initial search results using search_impl for dict access
         initial_results = await search_impl(

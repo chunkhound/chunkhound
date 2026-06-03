@@ -1127,23 +1127,24 @@ class RealtimePipelineMixin:
             return normalize_file_path(resolved)
 
         deleted = 0
-        for file_path in file_paths:
-            if not file_path:
-                continue
-            try:
-                await provider.delete_file_completely_async(str(file_path))
-                deleted += 1
-            except CompactionError:
-                normalized_file = _resolve_path(file_path)
-                async with self._file_condition:
-                    self._compaction_deferred_files.add(normalized_file)
-                    self._compaction_deferred_removals.add(normalized_file)
-                    self._file_condition.notify_all()
-            except Exception as e:
-                logger.error(f"Error deleting {file_path} during dir cleanup: {e}")
-                async with self._file_condition:
-                    self.failed_files.add(_resolve_path(file_path))
-                    self._file_condition.notify_all()
+        async with self.services.provider.exclusive_transaction_span():
+            for file_path in file_paths:
+                if not file_path:
+                    continue
+                try:
+                    await provider.delete_file_completely_async(str(file_path))
+                    deleted += 1
+                except CompactionError:
+                    normalized_file = _resolve_path(file_path)
+                    async with self._file_condition:
+                        self._compaction_deferred_files.add(normalized_file)
+                        self._compaction_deferred_removals.add(normalized_file)
+                        self._file_condition.notify_all()
+                except Exception as e:
+                    logger.error(f"Error deleting {file_path} during dir cleanup: {e}")
+                    async with self._file_condition:
+                        self.failed_files.add(_resolve_path(file_path))
+                        self._file_condition.notify_all()
 
         logger.info(
             f"Deleted {deleted} files from removed directory: {absolute_dir}"
