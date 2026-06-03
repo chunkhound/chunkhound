@@ -1,5 +1,10 @@
 """Evidence Ledger: Unified constants and facts for research synthesis.
 
+INTERNAL: Produces structured evidence consumed by LLM synthesizers during
+the map-reduce research pipeline, not rendered to end-users directly.
+The ``_prompt_context`` / ``_prompt_instruction`` methods format evidence
+into markdown that an LLM reads during synthesis.
+
 Provides:
 1. EvidenceLedger - Unified collection of constants and facts
 2. FactExtractor - LLM-based fact extraction from source clusters

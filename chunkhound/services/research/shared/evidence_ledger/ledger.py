@@ -1,5 +1,9 @@
 """Evidence Ledger: Unified aggregation of constants and facts for research context.
 
+INTERNAL: The ``get_*_prompt_context()`` and ``get_*_prompt_instruction()``
+methods format evidence for LLM consumption during map-reduce synthesis,
+not for end-user display.
+
 Combines ConstantsLedger and FactsLedger into a single class for:
 1. Providing verified evidence to LLM during synthesis
 2. Constants extraction from chunk metadata

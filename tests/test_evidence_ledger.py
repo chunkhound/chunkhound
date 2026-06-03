@@ -13,6 +13,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from loguru import logger as _loguru_logger
 
 from chunkhound.services.research.shared.evidence_ledger import (
     ConfidenceLevel,
@@ -710,8 +711,14 @@ class TestEvidenceLedgerConstantsPromptGeneration:
     def test_get_constants_prompt_context_formats_correctly(self):
         """Test get_constants_prompt_context formats constants properly."""
         ledger = EvidenceLedger()
-        ledger.add_constant(ConstantEntry(name="DEBUG", file_path="config.py", value="True", type="bool"))
-        ledger.add_constant(ConstantEntry(name="TIMEOUT", file_path="config.py", value="30", type="int"))
+        ledger.add_constant(
+            ConstantEntry(
+                name="DEBUG", file_path="config.py", value="True", type="bool"
+            )
+        )
+        ledger.add_constant(
+            ConstantEntry(name="TIMEOUT", file_path="config.py", value="30", type="int")
+        )
 
         context = ledger.get_constants_prompt_context()
 
@@ -809,7 +816,9 @@ class TestEvidenceLedgerReportGeneration:
     def test_get_report_suffix_includes_both_types(self):
         """Test get_report_suffix includes both constants and facts."""
         ledger = EvidenceLedger()
-        ledger.add_constant(ConstantEntry(name="DEBUG", file_path="config.py", value="True"))
+        ledger.add_constant(
+            ConstantEntry(name="DEBUG", file_path="config.py", value="True")
+        )
         ledger.add_fact(
             FactEntry(
                 fact_id="fact1",
@@ -909,7 +918,9 @@ class TestEvidenceLedgerReportGeneration:
         assert "(docs/api.md — Pagination)" in suffix
         assert "docs/api.md:0" not in suffix
 
-    def test_get_report_suffix_keeps_file_location_for_file_based_fact(self, sample_ledger):
+    def test_get_report_suffix_keeps_file_location_for_file_based_fact(
+        self, sample_ledger
+    ):
         """Test report keeps file:line formatting for file-backed facts."""
         suffix = sample_ledger.get_report_suffix()
 
@@ -972,7 +983,9 @@ class TestEvidenceLedgerProgressTable:
     def test_format_progress_table_uses_evidence_context_header(self):
         """Test format_progress_table uses Evidence Context header."""
         ledger = EvidenceLedger()
-        ledger.add_constant(ConstantEntry(name="DEBUG", file_path="config.py", value="True"))
+        ledger.add_constant(
+            ConstantEntry(name="DEBUG", file_path="config.py", value="True")
+        )
 
         table = ledger.format_progress_table()
 
@@ -985,7 +998,9 @@ class TestEvidenceLedgerProgressTable:
     def test_format_progress_table_includes_constants(self):
         """Test format_progress_table includes constants in markdown format."""
         ledger = EvidenceLedger()
-        ledger.add_constant(ConstantEntry(name="MY_CONST", file_path="config.py", value="42"))
+        ledger.add_constant(
+            ConstantEntry(name="MY_CONST", file_path="config.py", value="42")
+        )
 
         table = ledger.format_progress_table()
 
@@ -1107,7 +1122,9 @@ class TestEvidenceLedgerSerialization:
         data = {
             "constants": {},
             "facts": {},
-            "conflicts": [{"fact_id_a": "x", "fact_id_b": "y", "reason": "test reason"}],
+            "conflicts": [
+                {"fact_id_a": "x", "fact_id_b": "y", "reason": "test reason"}
+            ],
         }
 
         ledger = EvidenceLedger.from_dict(data)
@@ -1614,7 +1631,11 @@ class TestSimpleFormatting:
 
         # Add facts with different confidence levels (in reverse order)
         for i, conf in enumerate(
-            [ConfidenceLevel.UNCERTAIN, ConfidenceLevel.DEFINITE, ConfidenceLevel.LIKELY]
+            [
+                ConfidenceLevel.UNCERTAIN,
+                ConfidenceLevel.DEFINITE,
+                ConfidenceLevel.LIKELY,
+            ]
         ):
             fact = FactEntry(
                 fact_id=f"fact{i}",
@@ -2069,7 +2090,6 @@ class TestGenerateIdWithSection:
             int(fid, 16)  # valid hex
 
 
-
 class TestExtractorNewStyleJson:
     """Tests for extractor handling new-style JSON with source/location keys."""
 
@@ -2313,7 +2333,9 @@ class TestExtractorUrlBasedFacts:
         assert fact.source_section == "Pagination"
 
     @pytest.mark.asyncio
-    async def test_source_url_without_explicit_url_is_normalized(self, mock_llm_provider):
+    async def test_source_url_without_explicit_url_is_normalized(
+        self, mock_llm_provider
+    ):
         """Test source URLs become URL provenance without losing cluster source identity."""
         mock_response = MagicMock()
         mock_response.content = """[
@@ -2369,12 +2391,54 @@ class TestExtractorUrlBasedFacts:
         assert fact.file_path == "docs/api.md"
 
     @pytest.mark.asyncio
-    async def test_multi_source_normalized_url_fact_stays_visible_in_map_context(
+    async def test_new_style_fact_missing_location_is_skipped(
         self, mock_llm_provider
     ):
-        """Test map-phase lookup keeps normalized URL facts in multi-source clusters."""
-        mock_response = MagicMock()
-        mock_response.content = """[
+        """Test new-style facts without location are skipped, not fabricated as 1-1."""
+        captured: list[str] = []
+        sink_id = _loguru_logger.add(
+            lambda msg: captured.append(msg), level="WARNING", format="{message}"
+        )
+        try:
+            mock_response = MagicMock()
+            mock_response.content = """[
+  {
+    "statement": "API supports pagination",
+    "source": "docs/api.md",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": ["API"]
+  }
+]"""
+            mock_llm_provider.complete.return_value = mock_response
+
+            extractor = FactExtractor(mock_llm_provider)
+            ledger = await extractor.extract_from_cluster(
+                cluster_id=0,
+                cluster_content={"docs/api.md": "content"},
+                root_query="query",
+            )
+
+            assert ledger.facts_count == 0
+            assert any(
+                "Skipping fact with missing location in new-style payload" in msg
+                for msg in captured
+            ), f"Expected warning not found in: {captured}"
+        finally:
+            _loguru_logger.remove(sink_id)
+
+    @pytest.mark.asyncio
+    async def test_multi_source_normalized_url_fact_is_skipped_as_ambiguous(
+        self, mock_llm_provider
+    ):
+        """Test ambiguous URL-backed facts are skipped for multi-source clusters."""
+        captured: list[str] = []
+        sink_id = _loguru_logger.add(
+            lambda msg: captured.append(msg), level="WARNING", format="{message}"
+        )
+        try:
+            mock_response = MagicMock()
+            mock_response.content = """[
   {
     "statement": "API supports pagination",
     "source": "https://docs.example.com/api#pagination",
@@ -2384,29 +2448,76 @@ class TestExtractorUrlBasedFacts:
     "entities": ["API"]
   }
 ]"""
-        mock_llm_provider.complete.return_value = mock_response
+            mock_llm_provider.complete.return_value = mock_response
 
-        extractor = FactExtractor(mock_llm_provider)
-        ledger = await extractor.extract_from_cluster(
-            cluster_id=7,
-            cluster_content={
-                "docs/api.md": "content",
-                "docs/auth.md": "other content",
-            },
-            root_query="query",
+            extractor = FactExtractor(mock_llm_provider)
+            ledger = await extractor.extract_from_cluster(
+                cluster_id=7,
+                cluster_content={
+                    "docs/api.md": "content",
+                    "docs/auth.md": "other content",
+                },
+                root_query="query",
+            )
+
+            assert ledger.facts_count == 0
+            assert ledger.get_facts_for_files({"docs/api.md", "docs/auth.md"}) == []
+            assert (
+                ledger.get_facts_map_prompt_context(
+                    {"docs/api.md", "docs/auth.md"},
+                    cluster_id=7,
+                )
+                == ""
+            )
+            assert any(
+                "Skipping URL-backed fact with ambiguous multi-source cluster provenance"
+                in msg
+                for msg in captured
+            ), f"Expected warning not found in: {captured}"
+        finally:
+            _loguru_logger.remove(sink_id)
+
+    @pytest.mark.asyncio
+    async def test_url_only_fact_in_multi_source_cluster_is_skipped(
+        self, mock_llm_provider
+    ):
+        """Test URL-only facts (no source, has url) are skipped in multi-source clusters."""
+        captured: list[str] = []
+        sink_id = _loguru_logger.add(
+            lambda msg: captured.append(msg), level="WARNING", format="{message}"
         )
+        try:
+            mock_response = MagicMock()
+            mock_response.content = """[
+  {
+    "statement": "API supports pagination",
+    "url": "https://docs.example.com/api#pagination",
+    "location": "Pagination",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+            mock_llm_provider.complete.return_value = mock_response
 
-        fact = list(ledger.facts.values())[0]
-        assert fact.file_path == "https://docs.example.com/api#pagination"
-        assert ledger.get_facts_for_files({"docs/api.md", "docs/auth.md"}) == []
+            extractor = FactExtractor(mock_llm_provider)
+            ledger = await extractor.extract_from_cluster(
+                cluster_id=0,
+                cluster_content={
+                    "docs/api.md": "content",
+                    "docs/auth.md": "other content",
+                },
+                root_query="query",
+            )
 
-        context = ledger.get_facts_map_prompt_context(
-            {"docs/api.md", "docs/auth.md"},
-            cluster_id=7,
-        )
-
-        assert "API supports pagination" in context
-        assert "https://docs.example.com/api#pagination — Pagination" in context
+            assert ledger.facts_count == 0
+            assert any(
+                "Skipping URL-only fact with ambiguous multi-source cluster provenance"
+                in msg
+                for msg in captured
+            ), f"Expected warning not found in: {captured}"
+        finally:
+            _loguru_logger.remove(sink_id)
 
 
 class TestSerializationWithUrlAndSection:
@@ -2540,7 +2651,10 @@ class TestFormatFactsSimpleWithUrlFacts:
 
         context = ledger.get_facts_reduce_prompt_context()
 
-        assert "[DEF] API supports pagination (https://docs.example.com/api — Pagination)" in context
+        assert (
+            "[DEF] API supports pagination (https://docs.example.com/api — Pagination)"
+            in context
+        )
         assert "(:0-0)" not in context
 
     def test_url_fact_without_section_shows_url(self):
@@ -2916,7 +3030,9 @@ class TestMergeFactIdBehavior:
         )
 
         # Same logical fact, different IDs
-        assert old_id != new_id, "Same logical fact should get different IDs across formats"
+        assert old_id != new_id, (
+            "Same logical fact should get different IDs across formats"
+        )
 
         # Build old and new ledgers
         old_ledger = EvidenceLedger()
@@ -2984,15 +3100,6 @@ class TestExtractorMixedFormatResponse:
     "category": "constraint",
     "confidence": "definite",
     "entities": []
-  },
-  {
-    "statement": "Webhook timeout is 30s",
-    "source": "https://docs.example.com/webhooks",
-    "location": "Timeouts section",
-    "url": "https://docs.example.com/webhooks",
-    "category": "behavior",
-    "confidence": "likely",
-    "entities": []
   }
 ]
 """
@@ -3005,12 +3112,14 @@ class TestExtractorMixedFormatResponse:
             root_query="How does search work?",
         )
 
-        assert ledger.facts_count == 3, "All three facts should be parsed"
+        assert ledger.facts_count == 2, "Both new-style and old-style facts should be parsed"
 
         facts = list(ledger.facts.values())
 
         # New-style fact with location
-        fact1 = next(f for f in facts if f.statement == "Search service uses TF-IDF scoring")
+        fact1 = next(
+            f for f in facts if f.statement == "Search service uses TF-IDF scoring"
+        )
         assert fact1.file_path == "search.py"
         assert fact1.start_line == 15
         assert fact1.end_line == 30
@@ -3021,9 +3130,3 @@ class TestExtractorMixedFormatResponse:
         assert fact2.start_line == 42
         assert fact2.end_line == 45
 
-        # URL-based fact with source_section
-        fact3 = next(f for f in facts if f.statement == "Webhook timeout is 30s")
-        assert fact3.url == "https://docs.example.com/webhooks"
-        assert fact3.source_section == "Timeouts section"
-        assert fact3.start_line == 0
-        assert fact3.end_line == 0

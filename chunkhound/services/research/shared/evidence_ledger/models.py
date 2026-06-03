@@ -61,7 +61,7 @@ class FactEntry:
 
     fact_id: str  # sha256 hash of statement, primary source, and location [:12]
     statement: str  # The atomic fact (one verifiable claim)
-    file_path: str  # Source file, URL, or identifier
+    file_path: str  # Stable cluster/file lookup key for file-scoped retrieval
     start_line: int  # Line range start
     end_line: int  # Line range end
     category: str  # LLM-determined (architecture, behavior, etc.)
@@ -69,7 +69,9 @@ class FactEntry:
     entities: tuple[str, ...]  # Named entities referenced (for linking)
     cluster_id: int  # Which cluster extracted this
     url: str | None = None  # Source URL (for web sources)
-    source_section: str | None = None  # Section within source (for non-line-based locations like section names)
+    source_section: str | None = (
+        None  # Section within source for non-line-based locations
+    )
 
     @staticmethod
     def generate_id(

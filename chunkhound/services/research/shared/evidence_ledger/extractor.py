@@ -1,7 +1,9 @@
 """Fact Extractor: LLM-based extraction of atomic facts from source material.
 
-Extracts structured facts from cluster chunks using LLM calls,
-then aggregates them into a unified EvidenceLedger.
+INTERNAL: Extracted facts feed into EvidenceLedger which an LLM synthesizer
+reads during map-reduce research. Skipped facts (returning ``None`` from
+``_parse_fact_item``) simply mean that evidence is absent from the LLM's
+synthesis context, not user-facing data loss.
 """
 
 from __future__ import annotations
@@ -75,7 +77,8 @@ def _extract_json_array(response: str) -> list[dict]:
             dicts = [item for item in result if isinstance(item, dict)]
             if len(dicts) < len(result):
                 logger.debug(
-                    f"Filtering {len(result) - len(dicts)} non-dict items from JSON array"
+                    "Filtering "
+                    f"{len(result) - len(dicts)} non-dict items from JSON array"
                 )
             return dicts
         return []
@@ -129,18 +132,21 @@ class FactExtractor:
     def _parse_fact_item(
         item: dict,
         cluster_content: dict[str, str],
-    ) -> tuple[
-        str,  # statement
-        str,  # file_path
-        int,  # start_line
-        int,  # end_line
-        str | None,  # url
-        str | None,  # source_section
-        str,  # category
-        ConfidenceLevel,  # confidence
-        tuple[str, ...],  # entities
-        str,  # fact_id
-    ] | None:
+    ) -> (
+        tuple[
+            str,  # statement
+            str,  # file_path
+            int,  # start_line
+            int,  # end_line
+            str | None,  # url
+            str | None,  # source_section
+            str,  # category
+            ConfidenceLevel,  # confidence
+            tuple[str, ...],  # entities
+            str,  # fact_id
+        ]
+        | None
+    ):
         """Parse a single fact item from the LLM response.
 
         Handles both new-style (source + location) and old-style
@@ -166,34 +172,46 @@ class FactExtractor:
 
         # Parse source: accept both new-style (source + location)
         # and old-style (file_path + start_line + end_line)
-        source = item.get("source", "").strip() or item.get(
-            "file_path", ""
-        ).strip()
+        source = item.get("source", "").strip() or item.get("file_path", "").strip()
         location_raw = item.get("location", "").strip()
         url = item.get("url", "").strip() or None
+        has_new_style_fields = any(key in item for key in ("source", "location", "url"))
+        has_old_style_fields = any(
+            key in item for key in ("file_path", "start_line", "end_line")
+        )
 
-        # Keep prompt and parser aligned: URL provenance lives in `url`.
-        # If compatibility prompts put the URL in `source`, normalize it.
-        # Only normalize if the source URL is not already a cluster content key
-        # (avoids breaking file-scoped lookups for URL-based content keys).
+        # Keep prompt and parser aligned: canonical web provenance lives in
+        # `url`, while `file_path` should remain a stable cluster lookup key.
         normalized_source_url = False
-        if source.lower().startswith(("http://", "https://")):
-            if source not in cluster_content:
-                if not url:
-                    logger.debug(f"Normalizing source URL into url field: {source[:80]}")
-                    url = source
-                normalized_source_url = True
+        if (
+            source.lower().startswith(("http://", "https://"))
+            and source not in cluster_content
+        ):
+            if not url:
+                logger.debug(f"Normalizing source URL into url field: {source[:80]}")
+                url = source
+            normalized_source_url = True
+
+        if normalized_source_url:
+            if len(cluster_content) != 1:
+                logger.warning(
+                    "Skipping URL-backed fact with ambiguous multi-source cluster "
+                    f"provenance: {source[:80]}"
+                )
+                return None
+            source = next(iter(cluster_content))
+        elif not source and url:
+            if len(cluster_content) != 1:
+                logger.warning(
+                    "Skipping URL-only fact with ambiguous multi-source "
+                    f"cluster provenance \u2014 url: {url[:80]}"
+                )
+                return None
+            source = next(iter(cluster_content))
 
         if not source and not url:
-            logger.debug(
-                f"Skipping fact with no source or URL: {item}"
-            )
+            logger.debug(f"Skipping fact with no source or URL: {item}")
             return None
-
-        # URL-only facts with empty source — fall back to cluster source key
-        # so file-scoped lookups via get_facts_for_files still work.
-        if not source and url and len(cluster_content) == 1:
-            source = next(iter(cluster_content))
 
         # Parse location into line numbers or section
         start_line = 0
@@ -211,23 +229,22 @@ class FactExtractor:
                 end_line = int(bare_match.group(2) or bare_match.group(1))
             else:
                 source_section = location_raw
-        else:
-            # Fall back to old-style line numbers
+        elif has_old_style_fields:
             logger.debug(
                 f"No location parsed — using old-style line numbers for "
                 f"fact: {item.get('statement', '')[:50]}"
             )
             start_line = int(item.get("start_line", 1))
             end_line = int(item.get("end_line", start_line))
+        elif has_new_style_fields:
+            statement_preview = item.get("statement", "")[:50]
+            logger.warning(
+                f"Skipping fact with missing location in new-style payload: "
+                f"{statement_preview}"
+            )
+            return None
 
         file_path = source
-        if normalized_source_url:
-            # Source was a URL not in cluster_content — fall back to
-            # the sole cluster key for file-scoped lookup support.
-            # For multi-source clusters, source (the URL) remains as
-            # file_path, preserving provenance for downstream consumers.
-            if len(cluster_content) == 1:
-                file_path = next(iter(cluster_content))
 
         category = item.get("category", "general").strip()
         confidence = _parse_confidence(item.get("confidence", "uncertain"))
@@ -235,9 +252,7 @@ class FactExtractor:
         entities_raw = item.get("entities", [])
         if isinstance(entities_raw, str):
             entities_raw = [entities_raw]
-        entities = tuple(
-            e.strip() for e in entities_raw if e.strip()
-        )
+        entities = tuple(e.strip() for e in entities_raw if e.strip())
 
         fact_id = FactEntry.generate_id(
             statement,
@@ -396,8 +411,8 @@ class FactExtractor:
         merged.conflicts.extend(conflicts)
 
         logger.info(
-            f"Extracted {merged.facts_count} total facts from {len(clusters)} clusters, "
-            f"{len(merged.conflicts)} conflicts detected"
+            f"Extracted {merged.facts_count} total facts from "
+            f"{len(clusters)} clusters, {len(merged.conflicts)} conflicts detected"
         )
 
         return merged
