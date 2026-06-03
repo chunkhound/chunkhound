@@ -7,11 +7,13 @@ from loguru import logger
 from chunkhound.core.config.llm_config import (
     BASE_URL_CAPABLE_LLM_PROVIDERS,
     DEFAULT_LLM_TIMEOUT,
+    NO_DEFAULT_MODEL_PROVIDERS,
     OPENAI_COMPATIBLE_LLM_PROVIDERS,
     REASONING_EFFORT_PROVIDERS,
 )
 from chunkhound.core.config.openai_utils import is_official_openai_endpoint
 from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
@@ -90,9 +92,20 @@ class LLMManager:
             model_name = config.get("model")
             base_url = config.get("base_url")
             # Note: Registry providers (deepseek, grok) exit at the
-            # OPENAI_COMPATIBLE_PROVIDERS guard above, so this check is
-            # only reachable for "openai" (which uses OpenAILLMProvider,
-            # not the generic OpenAICompatibleProvider).
+            # OPENAI_COMPATIBLE_PROVIDERS guard above. This check fires
+            # only for native providers without baked-in defaults
+            # (currently only "gemini" — Anthropic has a baked-in CLI
+            # default; OpenAILLMProvider resolves at the config layer).
+            if provider_name in NO_DEFAULT_MODEL_PROVIDERS and not model_name:
+                raise ConfigurationError(
+                    config_key="llm.model",
+                    reason=(
+                        f"Model is required for '{provider_name}'. "
+                        "Set `llm.model` (or the per-role model override) in "
+                        "your configuration."
+                    ),
+                )
+
             if (
                 provider_name in OPENAI_COMPATIBLE_LLM_PROVIDERS
                 and not is_official_openai_endpoint(base_url)
@@ -150,9 +163,7 @@ class LLMManager:
 
                 # Prompt caching is opt-in; cache writes cost extra and
                 # ChunkHound requests rarely reuse prefixes enough to benefit.
-                provider_kwargs["prompt_caching"] = config.get(
-                    "prompt_caching", False
-                )
+                provider_kwargs["prompt_caching"] = config.get("prompt_caching", False)
                 if cache_ttl := config.get("cache_ttl"):
                     provider_kwargs["cache_ttl"] = cache_ttl
 

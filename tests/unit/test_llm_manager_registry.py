@@ -1,6 +1,7 @@
 import pytest
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.llm_manager import LLMManager
 
 
@@ -60,6 +61,17 @@ def test_create_provider_keeps_provider_default_model_when_omitted():
 
     provider = manager._create_provider({"provider": "opencode-cli"})  # type: ignore[attr-defined]
     assert provider.model == ""  # opencode-cli has no default — user must specify model
+
+
+def test_create_provider_requires_model_for_gemini_public_factory():
+    """Public factory must enforce Gemini's explicit-model contract too."""
+    manager = object.__new__(LLMManager)
+    manager._providers = LLMManager._providers
+
+    with pytest.raises(ConfigurationError, match="Model is required for 'gemini'"):
+        manager.create_provider_for_config(
+            {"provider": "gemini", "api_key": "sk-test-key"}
+        )
 
 
 def test_create_provider_passes_base_url_to_anthropic_provider():
