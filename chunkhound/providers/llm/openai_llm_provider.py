@@ -93,8 +93,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             timeout=timeout,
             max_retries=max_retries,
             supports_structured_outputs=supports_structured_outputs,
+            reasoning_effort=reasoning_effort,
         )
-        self._reasoning_effort = reasoning_effort
 
     def _get_default_base_url(self) -> str | None:
         """Get the default OpenAI API base URL.

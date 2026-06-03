@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from chunkhound.api.cli.utils.config_factory import create_validated_config
 from chunkhound.core.config.config import Config
 from tests.site.tsx_runner import run_tsx_json
@@ -163,5 +165,62 @@ def test_vllm_generated_config_passes_research_validation(
     tmp_path, clean_environment
 ) -> None:
     errors = _validated_config_errors(tmp_path, "research", "vllm-embed", "vllm-llm")
+
+    assert errors == []
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_deepseek_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "deepseek")
+
+    assert config["provider"] == "deepseek"
+    assert config["model"] == "deepseek-v4-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_grok_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "grok")
+
+    assert config["provider"] == "grok"
+    assert config["model"] == "grok-4.3"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_gemini_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "gemini")
+
+    assert config["provider"] == "gemini"
+    assert config["model"] == "gemini-3.5-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_deepseek_config_passes_research_validation(
+    tmp_path, clean_environment
+) -> None:
+    errors = _validated_config_errors(
+        tmp_path, "research", "voyageai", "deepseek"
+    )
+
+    assert errors == []
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_grok_config_passes_research_validation(
+    tmp_path, clean_environment
+) -> None:
+    errors = _validated_config_errors(
+        tmp_path, "research", "voyageai", "grok"
+    )
+
+    assert errors == []
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_gemini_config_passes_research_validation(
+    tmp_path, clean_environment
+) -> None:
+    errors = _validated_config_errors(
+        tmp_path, "research", "voyageai", "gemini"
+    )
 
     assert errors == []

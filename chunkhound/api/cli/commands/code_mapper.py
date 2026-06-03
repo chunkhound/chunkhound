@@ -38,6 +38,7 @@ from chunkhound.code_mapper.service import (
 from chunkhound.code_mapper.writer import write_code_mapper_outputs
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
@@ -58,6 +59,31 @@ async def run_code_mapper_overview_hyde(
 
 # Re-export for tests that monkeypatch HyDE provider metadata wiring.
 build_llm_metadata_and_map_hyde = code_mapper_llm.build_llm_metadata_and_map_hyde
+
+
+def _create_code_mapper_llm_manager(
+    config: Config, formatter: RichOutputFormatter
+) -> LLMManager:
+    """Create the LLM manager required for Code Mapper HyDE planning."""
+    try:
+        if config.llm:
+            utility_config, synthesis_config = config.llm.get_provider_configs()
+            return LLMManager(utility_config, synthesis_config)
+        raise ValueError("No LLM provider configured for Code Mapper")
+    except (ValueError, ConfigurationError) as e:
+        formatter.error(f"LLM provider setup failed: {e}")
+        formatter.info(
+            "Configure an LLM provider via:\n"
+            "1. Create a .chunkhound.json config file with `llm` configuration\n"
+            "   (for Gemini, DeepSeek, and Grok you must also set `llm.model`), OR\n"
+            "2. Set CHUNKHOUND_LLM_API_KEY (and CHUNKHOUND_LLM_MODEL if your "
+            "provider requires an explicit model)"
+        )
+        sys.exit(1)
+    except (ImportError, OSError, RuntimeError, TypeError) as e:
+        formatter.error(f"Unexpected error setting up LLM provider: {e}")
+        logger.exception("Full error details:")
+        sys.exit(1)
 
 
 async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
@@ -103,12 +129,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         except (OSError, RuntimeError):
             out_dir = None
 
-        try:
-            if config.llm:
-                utility_config, synthesis_config = config.llm.get_provider_configs()
-                llm_manager = LLMManager(utility_config, synthesis_config)
-        except (AttributeError, TypeError, ValueError):
-            llm_manager = None
+        llm_manager = _create_code_mapper_llm_manager(config, formatter)
 
         orchestrator = CodeMapperOrchestrator(
             config=config,
@@ -201,24 +222,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         sys.exit(1)
 
     # Initialize LLM manager (required for deep research)
-    try:
-        if config.llm:
-            utility_config, synthesis_config = config.llm.get_provider_configs()
-            llm_manager = LLMManager(utility_config, synthesis_config)
-        else:
-            raise ValueError("No LLM provider configured for Code Mapper")
-    except ValueError as e:
-        formatter.error(f"LLM provider setup failed: {e}")
-        formatter.info(
-            "Configure an LLM provider via:\n"
-            "1. Create a .chunkhound.json config file with llm configuration, OR\n"
-            "2. Set CHUNKHOUND_LLM_API_KEY environment variable"
-        )
-        sys.exit(1)
-    except (OSError, RuntimeError, TypeError) as e:
-        formatter.error(f"Unexpected error setting up LLM provider: {e}")
-        logger.exception("Full error details:")
-        sys.exit(1)
+    llm_manager = _create_code_mapper_llm_manager(config, formatter)
 
     # Create services using unified factory (exactly like MCP/CLI research)
     try:

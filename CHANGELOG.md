@@ -7,8 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+- **DeepSeek, Grok, and Gemini require explicit model** — The baked-in default
+  models (`deepseek-v4-flash`, `grok-4-1-fast-reasoning`, and Gemini's prior
+  fallback/default path) have been removed. Users must now set `llm.model` (or
+  per-role model override) explicitly for these providers.
+
 ### Added
-- **Claude Opus 4.8 support**: the Anthropic provider now gives Opus 4.8 full Opus 4.7 capability parity: adaptive-only extended thinking (an explicit `manual` request auto-resolves to adaptive), effort levels `low`/`medium`/`high`/`xhigh`/`max`, and the task-budgets beta. The pinned `claude-opus` offline fallback was bumped to `claude-opus-4-8`. Fixes a `400 "thinking.type.enabled is not supported for this model"` error when targeting `claude-opus-4-8` with thinking enabled.
+- **Claude Opus 4.8 support**: the Anthropic provider now gives Opus 4.8 full Opus 4.7 capability
+  parity: adaptive-only extended thinking (an explicit `manual` request auto-resolves to adaptive),
+  effort levels `low`/`medium`/`high`/`xhigh`/`max`, and the task-budgets beta. The pinned
+  `claude-opus` offline fallback was bumped to `claude-opus-4-8`. Fixes a `400 "thinking.type.enabled
+  is not supported for this model"` error when targeting `claude-opus-4-8` with thinking enabled.
+
+### Changed
+- **DeepSeek/Grok refactored to data-driven registry** — Per-provider
+  subclasses replaced with a unified `OpenAICompatibleSpec` registry.
+  Adding a new OpenAI-compatible provider is now a data entry + a few
+  type annotations instead of a full subclass. Net: -527 lines.
+
+### Fixed
+- **Multi-source URL provenance in fact extraction** — URL-backed facts in
+  multi-source clusters are now correctly skipped instead of being stored
+  with the URL as a file-path, which broke file-scoped retrieval. New-style
+  facts missing a `location` field are also skipped instead of defaulting
+  to line 1-1.
+- **MCP websearch traceback pollution** — Error output from research
+  subprocesses strips internal Python traceback frames, keeping only the
+  last meaningful error line.
+- **MCP string return passthrough** — Tools returning raw strings (e.g.
+  websearch results) now pass through as markdown instead of being wrapped
+  in JSON objects.
 
 ## [5.1.0] - 2026-05-20
 

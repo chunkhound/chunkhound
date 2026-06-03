@@ -3,6 +3,7 @@ from __future__ import annotations
 from loguru import logger
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
 
@@ -37,7 +38,10 @@ def build_llm_metadata_and_map_hyde(
     map_hyde_provider_name = getattr(llm, "map_hyde_provider", None)
     map_hyde_model_name = getattr(llm, "map_hyde_model", None)
     map_hyde_effort = getattr(llm, "map_hyde_reasoning_effort", None)
-    map_hyde_cfg = llm.get_provider_config_for_role("map_hyde")
+    try:
+        map_hyde_cfg = llm.get_provider_config_for_role("map_hyde")
+    except ConfigurationError:
+        map_hyde_cfg = {}
 
     needs_custom_map_hyde = bool(
         map_hyde_provider_name or map_hyde_model_name or map_hyde_effort
@@ -62,7 +66,7 @@ def build_llm_metadata_and_map_hyde(
                 llm_meta["map_hyde_reasoning_effort"] = str(
                     map_hyde_cfg["reasoning_effort"]
                 )
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        except (OSError, RuntimeError, TypeError, ValueError, ConfigurationError) as exc:
             logger.warning(f"Code Mapper: invalid HyDE planning provider: {exc}")
             raise ValueError(
                 f"Invalid map_hyde configuration: {exc}"

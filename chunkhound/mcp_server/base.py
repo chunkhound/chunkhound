@@ -23,8 +23,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
+from loguru import logger
+
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.interfaces.embedding_provider import (
@@ -381,12 +384,14 @@ class MCPServerBase(ABC):
                         )
                 except ValueError as e:
                     # API key or configuration issue - expected for search-only usage
-                    self.debug_log(f"Embedding provider setup skipped: {e}")
+                    msg = f"Embedding provider setup skipped: {e}"
+                    logger.warning(msg)
+                    self.debug_log(msg)
                 except Exception as e:
                     # Unexpected error - log but continue
-                    self.debug_log(
-                        f"Unexpected error setting up embedding provider: {e}"
-                    )
+                    msg = f"Unexpected error setting up embedding provider: {e}"
+                    logger.error(msg)
+                    self.debug_log(msg)
 
                 # Initialize LLM manager with dual providers
                 # (optional - continue if it fails)
@@ -404,12 +409,16 @@ class MCPServerBase(ABC):
                             f"(utility: {utility_config['model']}, "
                             f"synthesis: {synthesis_config['model']})"
                         )
-                except ValueError as e:
+                except (ValueError, ConfigurationError) as e:
                     # API key or configuration issue - expected if LLM not needed
-                    self.debug_log(f"LLM provider setup skipped: {e}")
+                    msg = f"LLM provider setup skipped: {e}"
+                    logger.warning(msg)
+                    self.debug_log(msg)
                 except Exception as e:
                     # Unexpected error - log but continue
-                    self.debug_log(f"Unexpected error setting up LLM provider: {e}")
+                    msg = f"Unexpected error setting up LLM provider: {e}"
+                    logger.error(msg)
+                    self.debug_log(msg)
 
                 # Create services using unified factory (lazy connect for fast init)
                 self.services = create_services(
@@ -1247,6 +1256,23 @@ class MCPServerBase(ABC):
                     "inputSchema": tool_params,
                 }
             )
+
+        filtered_count = len(TOOL_REGISTRY) - len(tools)
+        if filtered_count > 0:
+            has_llm = self.llm_manager is not None
+            has_emb = (
+                self.embedding_manager is not None
+                and bool(self.embedding_manager.list_providers())
+            )
+            has_reranker = has_reranker_support(self.embedding_manager)
+            if debug_log := getattr(self, "debug_log", None):
+                debug_log(
+                    f"{filtered_count} tool(s) hidden due to missing capabilities "
+                    f"(llm={'yes' if has_llm else 'no'}, "
+                    f"embeddings={'yes' if has_emb else 'no'}, "
+                    f"reranker={'yes' if has_reranker else 'no'})"
+                )
+
         return tools
 
     @abstractmethod

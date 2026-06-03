@@ -284,6 +284,9 @@ def parse_mcp_arguments(args: dict[str, Any]) -> dict[str, Any]:
     if "max_response_tokens" in parsed:
         if not isinstance(parsed["max_response_tokens"], int):
             parsed["max_response_tokens"] = int(parsed["max_response_tokens"])
+    if "limit" in parsed:
+        if not isinstance(parsed["limit"], int):
+            parsed["limit"] = int(parsed["limit"])
     if "threshold" in parsed and parsed["threshold"] is not None:
         if not isinstance(parsed["threshold"], float):
             parsed["threshold"] = float(parsed["threshold"])
