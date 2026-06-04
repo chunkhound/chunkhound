@@ -100,10 +100,14 @@ fn scan_files(
                         ext_set.contains(ext_lower.as_str())
                     } else {
                         false
-                    } || (!name_set.is_empty() && name_set.contains(file_name.as_ref()));
+                    } || (!name_set.is_empty()
+                        && name_set.contains(file_name.as_ref()));
                     if matched {
                         if let Some(s) = path.to_str() {
-                            results.lock().expect("results mutex poisoned").push(s.to_owned());
+                            results
+                                .lock()
+                                .expect("results mutex poisoned")
+                                .push(s.to_owned());
                         }
                     }
                     WalkState::Continue
