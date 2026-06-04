@@ -219,6 +219,7 @@ Controls the `code_research` MCP tool and `chunkhound research` command.
 | `multi_hop_result_limit` | `number` | `500` | `CHUNKHOUND_RESEARCH_MULTI_HOP_RESULT_LIMIT` | Max accumulated chunks |
 | `target_tokens` | `number` | `20000` | `CHUNKHOUND_RESEARCH_TARGET_TOKENS` | Output token budget for synthesis |
 | `query_expansion_enabled` | `bool` | `true` | `CHUNKHOUND_RESEARCH_QUERY_EXPANSION_ENABLED` | LLM-based query expansion |
+| `exploration_query_generation_max_completion_tokens` | `number` | `10000` | `CHUNKHOUND_RESEARCH_EXPLORATION_QUERY_GENERATION_MAX_COMPLETION_TOKENS` | Completion/reasoning token budget for depth exploration query generation |
 | `relevance_threshold` | `number` | `0.5` | `CHUNKHOUND_RESEARCH_RELEVANCE_THRESHOLD` | Min rerank score for inclusion |
 
 ```json
@@ -228,6 +229,7 @@ Controls the `code_research` MCP tool and `chunkhound research` command.
     "exhaustive_mode": false,
     "target_tokens": 20000,
     "query_expansion_enabled": true,
+    "exploration_query_generation_max_completion_tokens": 10000,
     "relevance_threshold": 0.5
   }
 }

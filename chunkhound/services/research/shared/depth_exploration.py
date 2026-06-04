@@ -45,7 +45,6 @@ from chunkhound.services.research.shared.import_resolution_helper import (
 )
 from chunkhound.services.research.shared.models import (
     IMPORT_DEFAULT_SCORE,
-    QUERY_EXPANSION_TOKENS,
     ResearchContext,
 )
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
@@ -395,7 +394,9 @@ Output JSON with queries array."""
             result = await llm.complete_structured(
                 prompt=prompt,
                 json_schema=schema,
-                max_completion_tokens=QUERY_EXPANSION_TOKENS,
+                max_completion_tokens=(
+                    self._config.exploration_query_generation_max_completion_tokens
+                ),
             )
 
             queries: list[str] = result.get("queries", [])
