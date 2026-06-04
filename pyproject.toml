@@ -109,6 +109,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+native = [
+    # disabled until chunkhound-native>=0.2.0 is published with exact_names support
+    # restore: "chunkhound-native>=0.2.0"
+]
 browser = [
     "playwright>=1.49.0",
 ]

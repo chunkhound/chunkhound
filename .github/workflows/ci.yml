@@ -118,6 +118,27 @@ jobs:
           name: site-dist
           path: site/dist
 
+      - name: Install Rust stable toolchain
+        if: hashFiles('Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        if: hashFiles('Cargo.toml') != ''
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build Rust extension (maturin develop)
+        if: hashFiles('Cargo.toml') != ''
+        run: |
+          uv pip install maturin
+          uv run maturin develop
+
       - name: Test collection check
         run: uv run pytest tests/ --collect-only -q --tb=no
 

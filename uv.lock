@@ -634,7 +634,7 @@ requires-dist = [
     { name = "xxhash", specifier = ">=3.0.0" },
     { name = "zstandard", specifier = ">=0.23.0" },
 ]
-provides-extras = ["browser", "dev", "test"]
+provides-extras = ["browser", "dev", "native", "test"]
 
 [package.metadata.requires-dev]
 dev = [
