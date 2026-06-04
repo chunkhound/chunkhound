@@ -395,12 +395,11 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         )
 
         # Handler MUST be ``async def``. zendriver 0.15.3's sync-dispatch
-        # path (connection.py:826) reassigns ``event`` in the listener scope
-        # before the thread-pool callback runs — sync handlers see stale
-        # events. The idempotency guard is load-bearing: zendriver
-        # occasionally routes async handlers through the sync branch
-        # (connection.py:830) and discards the returned coroutine, so the
-        # body must tolerate dropped invocations.
+        # path reassigns ``event`` in the listener scope before the
+        # thread-pool callback runs — sync handlers see stale events. The
+        # idempotency guard is load-bearing: zendriver occasionally routes
+        # async handlers through the sync branch and discards the returned
+        # coroutine, so the body must tolerate dropped invocations.
         async def on_response(event: cdp.network.ResponseReceived) -> None:
             if main_response.done():
                 return

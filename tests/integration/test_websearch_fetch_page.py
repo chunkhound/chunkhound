@@ -55,10 +55,10 @@ pytestmark = [
 def _page_target_count(browser: zd.Browser) -> int:
     """Count page-type targets currently held by the browser.
 
-    Mirrors the spike's filtering (``getattr(t, "type_", None) == "page"``)
-    so service workers and other non-page targets do not skew the baseline.
+    Filters on ``TargetInfo.type_ == "page"`` so service workers and other
+    non-page targets do not skew the baseline.
     """
-    return sum(1 for t in browser.targets if getattr(t, "type_", None) == "page")
+    return sum(1 for t in browser.targets if t.type_ == "page")
 
 
 async def _wait_for_target_count(
