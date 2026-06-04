@@ -139,6 +139,18 @@ jobs:
           uv pip install maturin
           uv run maturin develop
 
+      - name: Check Rust formatting
+        if: hashFiles('Cargo.toml') != ''
+        run: cargo fmt --check
+
+      - name: Clippy (Rust lints)
+        if: hashFiles('Cargo.toml') != ''
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Rust unit tests
+        if: hashFiles('Cargo.toml') != ''
+        run: cargo test
+
       - name: Test collection check
         run: uv run pytest tests/ --collect-only -q --tb=no
 
