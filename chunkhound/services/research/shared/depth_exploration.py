@@ -395,7 +395,7 @@ Output JSON with queries array."""
                 prompt=prompt,
                 json_schema=schema,
                 max_completion_tokens=(
-                    self._config.exploration_query_generation_max_completion_tokens
+                    self._config.depth_exploration_max_completion_tokens
                 ),
             )
 

@@ -25,8 +25,8 @@ _DEFAULT_MAX_CHUNKS_PER_FILE_REPR = 5
 _DEFAULT_MAX_TOKENS_PER_FILE_REPR = 2000
 _DEFAULT_QUERY_EXPANSION_ENABLED = True
 _DEFAULT_NUM_EXPANDED_QUERIES = 2
-# Preserve the previous query-expansion utility budget as the default.
-_DEFAULT_EXPLORATION_QUERY_GENERATION_MAX_COMPLETION_TOKENS = 10_000
+# Use the query-expansion utility budget as the depth exploration default.
+_DEFAULT_DEPTH_EXPLORATION_MAX_COMPLETION_TOKENS = 10_000
 
 
 class ResearchConfig(BaseSettings):
@@ -43,7 +43,7 @@ class ResearchConfig(BaseSettings):
         CHUNKHOUND_RESEARCH_ALGORITHM=v2
         CHUNKHOUND_RESEARCH_QUERY_EXPANSION_ENABLED=true
         CHUNKHOUND_RESEARCH_NUM_EXPANDED_QUERIES=2
-        CHUNKHOUND_RESEARCH_EXPLORATION_QUERY_GENERATION_MAX_COMPLETION_TOKENS=10000
+        CHUNKHOUND_RESEARCH_DEPTH_EXPLORATION_MAX_COMPLETION_TOKENS=10000
         CHUNKHOUND_RESEARCH_EXHAUSTIVE_MODE=false
     """
 
@@ -178,8 +178,8 @@ class ResearchConfig(BaseSettings):
         description="Number of aspect-based queries to generate per file",
     )
 
-    exploration_query_generation_max_completion_tokens: int = Field(
-        default=_DEFAULT_EXPLORATION_QUERY_GENERATION_MAX_COMPLETION_TOKENS,
+    depth_exploration_max_completion_tokens: int = Field(
+        default=_DEFAULT_DEPTH_EXPLORATION_MAX_COMPLETION_TOKENS,
         ge=1,
         le=50_000,
         description=(
@@ -430,9 +430,9 @@ class ResearchConfig(BaseSettings):
             config["exploration_queries_per_file"] = int(exp_queries)
 
         if exp_query_tokens := os.getenv(
-            "CHUNKHOUND_RESEARCH_EXPLORATION_QUERY_GENERATION_MAX_COMPLETION_TOKENS"
+            "CHUNKHOUND_RESEARCH_DEPTH_EXPLORATION_MAX_COMPLETION_TOKENS"
         ):
-            config["exploration_query_generation_max_completion_tokens"] = int(
+            config["depth_exploration_max_completion_tokens"] = int(
                 exp_query_tokens
             )
 

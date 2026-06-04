@@ -468,7 +468,7 @@ class TestGenerateExplorationQueries:
         self, depth_service, fake_llm_provider
     ):
         """Should pass configured completion budget to query-generation LLM call."""
-        depth_service._config.exploration_query_generation_max_completion_tokens = (
+        depth_service._config.depth_exploration_max_completion_tokens = (
             12_345
         )
         fragments = [
