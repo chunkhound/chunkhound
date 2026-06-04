@@ -184,6 +184,46 @@ async def test_partial_fetch_warnings_render_bullets(monkeypatch, patched):
 
 
 @pytest.mark.asyncio
+async def test_multiline_warning_keeps_blockquote(monkeypatch, patched):
+    """A multi-line warning must have ``> `` prefixed to every line."""
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+
+    multiline = (
+        "Chrome verification failed; falling back to urllib:\n"
+        "  - /usr/bin/google-chrome is v100; need >=124\n"
+        "(Upgrade Google Chrome to >=124 to enable rich page fetches.)"
+    )
+
+    async def fetch_with_multiline_warning(
+        urls, tmpdir, progress_callback=None, warning_callback=None, mapping=None
+    ):
+        assert warning_callback is not None
+        warning_callback(multiline)
+
+    monkeypatch.setattr(ws_mod, "fetch_and_save", fetch_with_multiline_warning)
+
+    fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    result = await tools_mod.websearch_impl(
+        embedding_manager=None,
+        llm_manager=None,
+        config=None,
+        query="multiline",
+    )
+
+    # First line gets the bullet; subsequent lines get a bare blockquote prefix.
+    assert "> - Chrome verification failed; falling back to urllib:" in result
+    assert "\n>   - /usr/bin/google-chrome is v100; need >=124" in result
+    assert "\n> (Upgrade Google Chrome to >=124" in result
+    # No continuation line escapes the blockquote.
+    assert "\n  - /usr/bin/google-chrome" not in result
+    assert "\n(Upgrade Google Chrome" not in result
+
+
+@pytest.mark.asyncio
 async def test_subprocess_nonzero_exit_raises_mcperror(monkeypatch, patched):
     monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
     monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)

@@ -90,26 +90,20 @@ def _resolve_chrome_path(
     """Locate a Chrome binary >=124; collapse every failure mode to ``None``.
 
     Probes ``_CHROME_PATHS`` first; falls back to zendriver's auto-discovery
-    only when none of those paths exist. Failure modes (no binary, version
-    <124, unparseable output, hung/failing --version probe) are reported
-    via ``warning_callback`` when one is provided, and the caller falls
-    back to urllib in all cases.
+    if no listed path verifies. Per-candidate failures (version <124,
+    unparseable output, hung/failing --version probe) are deferred and only
+    emitted via ``warning_callback`` when no usable Chrome is ultimately
+    found — a later candidate succeeding silences earlier failures.
     """
-    def _warn_verification_failed(e: RuntimeError) -> None:
-        if warning_callback:
-            warning_callback(
-                f"Chrome verification failed: {e}. Falling back to urllib."
-                " (Upgrade Google Chrome to >=124 to enable rich page fetches.)"
-            )
+    deferred: dict[str, RuntimeError] = {}
 
     for p in _CHROME_PATHS:
         if os.path.exists(p):
             try:
                 _check_chrome_version(p)
+                return p
             except RuntimeError as e:
-                _warn_verification_failed(e)
-                return None
-            return p
+                deferred[p] = e
     try:
         from zendriver.core.config import find_executable
         resolved = find_executable("auto")
@@ -120,20 +114,28 @@ def _resolve_chrome_path(
         # catch keeps the urllib fallback reachable when find_executable
         # raises anything unexpected.
         resolved = None
-    if not resolved:
-        if warning_callback:
+    if resolved:
+        auto_path = str(resolved)
+        if auto_path not in deferred:
+            try:
+                _check_chrome_version(auto_path)
+                return auto_path
+            except RuntimeError as e:
+                deferred[auto_path] = e
+
+    if warning_callback:
+        if deferred:
+            bullets = "\n  - " + "\n  - ".join(str(e) for e in deferred.values())
+            warning_callback(
+                f"Chrome verification failed; falling back to urllib:{bullets}"
+                "\n(Upgrade Google Chrome to >=124 to enable rich page fetches.)"
+            )
+        else:
             warning_callback(
                 "No Chrome binary found. Falling back to urllib."
                 " (Install Google Chrome to enable rich page fetches.)"
             )
-        return None
-    resolved = str(resolved)
-    try:
-        _check_chrome_version(resolved)
-    except RuntimeError as e:
-        _warn_verification_failed(e)
-        return None
-    return resolved
+    return None
 
 
 def clamp_limit(limit: int) -> int:

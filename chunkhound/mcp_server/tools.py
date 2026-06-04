@@ -733,9 +733,12 @@ async def websearch_impl(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     answer = replace_paths_with_urls(answer, mapping).rstrip()
+    # Warnings may be multi-line; prefix every line to keep the blockquote.
     warn_block = (
         "\n\n> **Fetch warnings:**\n"
-        + "\n".join(f"> - {w}" for w in warnings)
+        + "\n".join(
+            "> - " + w.replace("\n", "\n> ") for w in warnings
+        )
     ) if warnings else ""
     return f"{answer}{warn_block}"
 
