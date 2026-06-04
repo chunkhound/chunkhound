@@ -2,7 +2,7 @@
 
 Templates for:
 1. Constants instruction text for LLM prompts
-2. Extracting atomic facts from code during map phase
+2. Extracting atomic facts from source material during map phase
 3. Integrating facts into synthesis prompts (map and reduce)
 """
 
@@ -15,13 +15,13 @@ from __future__ import annotations
 # Standard instruction text for LLM prompts when constants are present
 CONSTANTS_INSTRUCTION_FULL = (
     "IMPORTANT: When your answer references configuration values, "
-    "limits, or magic numbers from the code, refer to them by their "
-    "constant names (e.g., 'the system retries up to MAX_RETRIES times') "
+    "limits, or key figures from the source material, refer to them by their "
+    "names (e.g., 'the system processes up to MAX_BATCH_SIZE items') "
     "rather than embedding raw values."
 )
 
 CONSTANTS_INSTRUCTION_SHORT = (
-    "When referencing configuration values or limits, use constant names "
+    "When referencing configuration values or key figures, use their names "
     "rather than raw values."
 )
 
@@ -31,11 +31,11 @@ CONSTANTS_INSTRUCTION_SHORT = (
 # =============================================================================
 
 # System prompt for fact extraction LLM calls
-FACT_EXTRACTION_SYSTEM = """You extract atomic facts from code for research synthesis.
+FACT_EXTRACTION_SYSTEM = """You extract atomic facts from source material for research synthesis.
 
-An ATOMIC FACT is ONE verifiable claim about the code:
-- Specific enough to cite with file:line
-- Grounded in literal code, not naming inference alone
+An ATOMIC FACT is ONE verifiable claim about the source material:
+- Specific enough to cite with source:location
+- Grounded in literal content, not inference alone
 - MUST be 3-5 words only
 
 Confidence levels (pick most appropriate):
@@ -46,30 +46,31 @@ Confidence levels (pick most appropriate):
 
 REASONING APPROACH (Chain of Draft):
 Before extracting facts, analyze using minimal draft notes (5 words max per step):
-1. Scan code → identify key behaviors
-2. Note patterns → architecture, constraints
-3. Spot constants → values, purposes
+1. Scan source → identify key behaviors
+2. Note patterns → structure, constraints
+3. Spot key figures → values, purposes
 4. Filter → query-relevant facts only
 
 Draft example:
-- "retry logic with backoff"
-- "MAX_RETRIES limits attempts"
-- "async pattern throughout"
+- "rate limiting with thresholds"
+- "BATCH_SIZE controls chunking"
+- "concurrent processing used"
 
 Then extract atomic facts from your draft insights.
 
 For each fact, extract:
 1. statement: The atomic claim (3-5 WORDS ONLY - ultra terse)
-2. file_path: Source file
-3. start_line, end_line: Line range
-4. category: Your classification (architecture, behavior, constraint, etc.)
-5. confidence: One of the levels above
-6. entities: Code entities referenced (class/function/module names)
+2. source: Source file path or source identifier
+3. location: Location within source (line range like "lines 45-52" / "L45" or a section)
+4. url: Canonical source URL when the source material comes from the web (optional)
+5. category: Your classification (architecture, behavior, constraint, etc.)
+6. confidence: One of the levels above
+7. entities: Named entities referenced (components/sources/concepts)
 
 Statement examples:
-GOOD: "Uses exponential backoff" (3 words)
-GOOD: "Retries up to MAX_RETRIES" (4 words)
-BAD: "SearchService uses exponential backoff for retries" (6 words - too long)
+GOOD: "Limits requests per second" (4 words)
+GOOD: "Batches up to BATCH_SIZE" (4 words)
+BAD: "Service throttles requests with rate limiting" (6 words - too long)
 
 IMPORTANT:
 - Extract facts RELEVANT to the query
@@ -82,21 +83,29 @@ IMPORTANT:
 # User prompt template for extraction
 FACT_EXTRACTION_USER = """Query: {root_query}
 
-Extract atomic facts from this code cluster:
+Extract atomic facts from this source material:
 
-{code_context}
+{source_context}
 
 Respond with JSON array:
 ```json
 [
   {{
-    "statement": "Retries up to MAX_RETRIES",
-    "file_path": "services/search.py",
-    "start_line": 45,
-    "end_line": 52,
+    "statement": "Limits requests per second",
+    "source": "services/search.py",
+    "location": "lines 45-52",
     "category": "behavior",
     "confidence": "definite",
     "entities": ["SearchService", "MAX_RETRIES"]
+  }},
+  {{
+    "statement": "Supports cursor pagination",
+    "source": "docs/api.md",
+    "location": "Pagination",
+    "url": "https://docs.example.com/api#pagination",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": ["API"]
   }}
 ]
 ```"""
@@ -108,7 +117,7 @@ Respond with JSON array:
 
 # Instruction for map phase synthesis (per-cluster)
 FACTS_MAP_INSTRUCTION = """## Verified Facts (This Cluster)
-Use these verified facts to ground your analysis. Cite fact IDs [F-xxx] alongside file refs [N].
+Use these verified facts to ground your analysis alongside source refs [N].
 If you find contradictory evidence, note the discrepancy.
 
 {facts_context}"""
@@ -116,7 +125,7 @@ If you find contradictory evidence, note the discrepancy.
 
 # Instruction for reduce phase synthesis (global)
 FACTS_REDUCE_INSTRUCTION = """## Verified Facts Ledger
-These facts were extracted from analyzed code. Ground synthesis in verified evidence.
+These facts were extracted from source material. Ground synthesis in verified evidence.
 
 Confidence: DEFINITE (cite directly) > LIKELY (confident) > INFERRED (qualify) > UNCERTAIN (verify)
 

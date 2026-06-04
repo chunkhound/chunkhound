@@ -47,7 +47,13 @@ def test_cleanup_provider_override_drops_inherited_reasoning_effort() -> None:
 
 def test_cleanup_provider_override_requires_explicit_model_on_provider_switch() -> None:
     """Provider switches require an explicit model — even within the same family."""
-    with pytest.raises(ValueError, match="autodoc_cleanup provider override requires an explicit autodoc_cleanup_model"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "autodoc_cleanup provider override requires an explicit "
+            "autodoc_cleanup_model"
+        ),
+    ):
         LLMConfig(
             provider="openai",
             synthesis_model="gpt-5",

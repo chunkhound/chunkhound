@@ -13,6 +13,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from loguru import logger as _loguru_logger
 
 from chunkhound.services.research.shared.evidence_ledger import (
     ConfidenceLevel,
@@ -710,8 +711,14 @@ class TestEvidenceLedgerConstantsPromptGeneration:
     def test_get_constants_prompt_context_formats_correctly(self):
         """Test get_constants_prompt_context formats constants properly."""
         ledger = EvidenceLedger()
-        ledger.add_constant(ConstantEntry(name="DEBUG", file_path="config.py", value="True", type="bool"))
-        ledger.add_constant(ConstantEntry(name="TIMEOUT", file_path="config.py", value="30", type="int"))
+        ledger.add_constant(
+            ConstantEntry(
+                name="DEBUG", file_path="config.py", value="True", type="bool"
+            )
+        )
+        ledger.add_constant(
+            ConstantEntry(name="TIMEOUT", file_path="config.py", value="30", type="int")
+        )
 
         context = ledger.get_constants_prompt_context()
 
@@ -740,6 +747,7 @@ class TestEvidenceLedgerFactsPromptGeneration:
         assert "search.py" in context  # Basename only in simple format
         assert "[DEF]" in context  # Simple format uses abbreviated confidence
         assert "Verified Facts" in context
+        assert "Cite fact IDs" not in context
 
     def test_get_facts_map_prompt_context_empty_for_no_matches(self, sample_ledger):
         """Test get_facts_map_prompt_context returns empty for non-matching files."""
@@ -808,7 +816,9 @@ class TestEvidenceLedgerReportGeneration:
     def test_get_report_suffix_includes_both_types(self):
         """Test get_report_suffix includes both constants and facts."""
         ledger = EvidenceLedger()
-        ledger.add_constant(ConstantEntry(name="DEBUG", file_path="config.py", value="True"))
+        ledger.add_constant(
+            ConstantEntry(name="DEBUG", file_path="config.py", value="True")
+        )
         ledger.add_fact(
             FactEntry(
                 fact_id="fact1",
@@ -837,6 +847,84 @@ class TestEvidenceLedgerReportGeneration:
 
         assert "SearchService retries up to MAX_RETRIES times" in suffix
         assert "Definite Facts" in suffix
+
+    def test_get_report_suffix_formats_url_only_fact_location(self):
+        """Test report keeps URL provenance for URL-backed facts."""
+        ledger = EvidenceLedger()
+        ledger.add_fact(
+            FactEntry(
+                fact_id="url1",
+                statement="API rate-limits at 100 req/s",
+                file_path="docs/api.md",
+                start_line=0,
+                end_line=0,
+                category="constraint",
+                confidence=ConfidenceLevel.DEFINITE,
+                entities=("API",),
+                cluster_id=0,
+                url="https://docs.example.com/api",
+            )
+        )
+
+        suffix = ledger.get_report_suffix()
+
+        assert "(https://docs.example.com/api)" in suffix
+        assert "docs/api.md:0" not in suffix
+
+    def test_get_report_suffix_formats_url_and_section_fact_location(self):
+        """Test report keeps URL and section provenance for doc facts."""
+        ledger = EvidenceLedger()
+        ledger.add_fact(
+            FactEntry(
+                fact_id="url2",
+                statement="Authentication uses OAuth2",
+                file_path="docs/auth.md",
+                start_line=0,
+                end_line=0,
+                category="architecture",
+                confidence=ConfidenceLevel.DEFINITE,
+                entities=("Auth",),
+                cluster_id=0,
+                url="https://docs.example.com/auth",
+                source_section="OAuth2",
+            )
+        )
+
+        suffix = ledger.get_report_suffix()
+
+        assert "(https://docs.example.com/auth — OAuth2)" in suffix
+        assert "docs/auth.md:0" not in suffix
+
+    def test_get_report_suffix_formats_file_section_fact_location(self):
+        """Test report keeps file-section provenance for non-URL facts."""
+        ledger = EvidenceLedger()
+        ledger.add_fact(
+            FactEntry(
+                fact_id="sec1",
+                statement="Pagination is cursor-based",
+                file_path="docs/api.md",
+                start_line=0,
+                end_line=0,
+                category="behavior",
+                confidence=ConfidenceLevel.DEFINITE,
+                entities=("API",),
+                cluster_id=0,
+                source_section="Pagination",
+            )
+        )
+
+        suffix = ledger.get_report_suffix()
+
+        assert "(docs/api.md — Pagination)" in suffix
+        assert "docs/api.md:0" not in suffix
+
+    def test_get_report_suffix_keeps_file_location_for_file_based_fact(
+        self, sample_ledger
+    ):
+        """Test report keeps file:line formatting for file-backed facts."""
+        suffix = sample_ledger.get_report_suffix()
+
+        assert "(services/search.py:45-52)" in suffix
 
     def test_get_report_suffix_empty_ledger(self):
         """Test get_report_suffix returns empty for empty ledger."""
@@ -895,7 +983,9 @@ class TestEvidenceLedgerProgressTable:
     def test_format_progress_table_uses_evidence_context_header(self):
         """Test format_progress_table uses Evidence Context header."""
         ledger = EvidenceLedger()
-        ledger.add_constant(ConstantEntry(name="DEBUG", file_path="config.py", value="True"))
+        ledger.add_constant(
+            ConstantEntry(name="DEBUG", file_path="config.py", value="True")
+        )
 
         table = ledger.format_progress_table()
 
@@ -908,7 +998,9 @@ class TestEvidenceLedgerProgressTable:
     def test_format_progress_table_includes_constants(self):
         """Test format_progress_table includes constants in markdown format."""
         ledger = EvidenceLedger()
-        ledger.add_constant(ConstantEntry(name="MY_CONST", file_path="config.py", value="42"))
+        ledger.add_constant(
+            ConstantEntry(name="MY_CONST", file_path="config.py", value="42")
+        )
 
         table = ledger.format_progress_table()
 
@@ -1030,7 +1122,9 @@ class TestEvidenceLedgerSerialization:
         data = {
             "constants": {},
             "facts": {},
-            "conflicts": [{"fact_id_a": "x", "fact_id_b": "y", "reason": "test reason"}],
+            "conflicts": [
+                {"fact_id_a": "x", "fact_id_b": "y", "reason": "test reason"}
+            ],
         }
 
         ledger = EvidenceLedger.from_dict(data)
@@ -1219,6 +1313,68 @@ class TestFactExtractor:
         assert list(ledger.facts.values())[0].statement == "Survives malformed siblings"
 
     @pytest.mark.asyncio
+    async def test_extract_handles_null_field_items(self, mock_llm_provider):
+        """Fact dicts with null-valued fields don't crash; defaults apply."""
+        mock_response = MagicMock()
+        # confidence=null (None) formerly raised AttributeError in _parse_confidence
+        # category=null (None) formerly raised AttributeError on .strip()
+        # source=null (None) with file_path=null must gracefully skip
+        mock_response.content = ("""\
+[
+  {
+    "statement": "Null confidence defaults to UNCERTAIN",
+    "file_path": "ok.py",
+    "start_line": 1,
+    "end_line": 2,
+    "category": "behavior",
+    "confidence": null,
+    "entities": []
+  },
+  {
+    "statement": "Null category defaults to general",
+    "file_path": "ok.py",
+    "start_line": 3,
+    "end_line": 4,
+    "category": null,
+    "confidence": "definite",
+    "entities": []
+  },
+  {
+    "statement": "Null source with no file_path is skipped",
+    "source": null,
+    "file_path": null,
+    "start_line": 5,
+    "end_line": 6,
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]
+""")
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"ok.py": "code"},
+            root_query="query",
+        )
+
+        # Two valid facts survive; the null-source one is skipped
+        assert ledger.facts_count == 2
+        facts = list(ledger.facts.values())
+
+        f1 = facts[0] if facts[0].statement.startswith("Null confidence") else facts[1]
+        f2 = facts[1] if facts[1].statement.startswith("Null category") else facts[0]
+
+        assert f1.statement == "Null confidence defaults to UNCERTAIN"
+        assert f1.confidence == ConfidenceLevel.UNCERTAIN
+
+        assert f2.statement == "Null category defaults to general"
+        assert f2.confidence == ConfidenceLevel.DEFINITE
+        assert f2.category == "general"
+
+    @pytest.mark.asyncio
     async def test_extract_from_clusters_merges_results(self, mock_llm_provider):
         """Test extract_from_clusters merges results from multiple clusters."""
         # Create responses for two clusters
@@ -1308,6 +1464,152 @@ class TestFactExtractor:
         fact = list(ledger.facts.values())[0]
         assert fact.confidence == ConfidenceLevel.UNCERTAIN
 
+    @pytest.mark.asyncio
+    async def test_extract_parses_location_line_range_format(self, mock_llm_provider):
+        """Facts with location like \"Lines 45-52\" parse start_line/end_line."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Service uses retry logic",
+    "source": "search.py",
+    "location": "Lines 45-52",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "class SearchService: pass"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 45
+        assert fact.end_line == 52
+
+    @pytest.mark.asyncio
+    async def test_extract_parses_location_bare_line_range(self, mock_llm_provider):
+        """Facts with bare location like \"45-52\" parse start_line/end_line."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Service uses retry logic",
+    "source": "search.py",
+    "location": "45-52",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "class SearchService: pass"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 45
+        assert fact.end_line == 52
+
+    @pytest.mark.asyncio
+    async def test_extract_parses_location_bare_single_line(self, mock_llm_provider):
+        """Facts with bare single line location like \"45\" set end_line = start_line."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Service uses retry logic",
+    "source": "search.py",
+    "location": "45",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "class SearchService: pass"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 45
+        assert fact.end_line == 45
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("location", ["45 to 52", "45 TO 52", "45 To 52"])
+    async def test_extract_parses_location_with_to_separator(
+        self, mock_llm_provider, location
+    ):
+        """Bare line ranges parse regardless of the separator case."""
+        mock_response = MagicMock()
+        mock_response.content = f"""[
+  {{
+    "statement": "Service uses retry logic",
+    "source": "search.py",
+    "location": "{location}",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }}
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "class SearchService: pass"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 45
+        assert fact.end_line == 52
+
+    @pytest.mark.asyncio
+    async def test_extract_falls_back_to_section_when_location_unparseable(
+        self, mock_llm_provider
+    ):
+        """Non-numeric location falls back to source_section."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Service uses retry logic",
+    "source": "search.py",
+    "location": "Section: Configuration",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "class SearchService: pass"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 0
+        assert fact.end_line == 0
+        assert fact.source_section == "Section: Configuration"
+
 
 # =============================================================================
 # EntityLink and FactConflict Tests
@@ -1383,7 +1685,7 @@ class TestSimpleFormatting:
         context = ledger.get_facts_reduce_prompt_context()
 
         # Check format: - [CONF] statement (file:lines)
-        assert "- [DEF] Uses exponential backoff (search.py:45-52)" in context
+        assert "- [DEF] Uses exponential backoff (services/search.py:45-52)" in context
 
     def test_format_facts_simple_sorts_by_confidence(self):
         """Test facts are sorted by confidence (definite first)."""
@@ -1391,7 +1693,11 @@ class TestSimpleFormatting:
 
         # Add facts with different confidence levels (in reverse order)
         for i, conf in enumerate(
-            [ConfidenceLevel.UNCERTAIN, ConfidenceLevel.DEFINITE, ConfidenceLevel.LIKELY]
+            [
+                ConfidenceLevel.UNCERTAIN,
+                ConfidenceLevel.DEFINITE,
+                ConfidenceLevel.LIKELY,
+            ]
         ):
             fact = FactEntry(
                 fact_id=f"fact{i}",
@@ -1709,6 +2015,872 @@ class TestKMeansClusterCountCalculation:
 # =============================================================================
 
 
+# =============================================================================
+# Domain-Agnostic Evidence Tests (url / source_section)
+# =============================================================================
+
+
+class TestFactEntryUrlAndSourceSection:
+    """Tests for FactEntry with url and source_section fields."""
+
+    def test_fact_with_url(self):
+        """Test FactEntry stores url field."""
+        fact = FactEntry(
+            fact_id="abc123",
+            statement="API rate-limits at 100 req/s",
+            file_path="docs/api.md",
+            start_line=0,
+            end_line=0,
+            category="constraint",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=("API",),
+            cluster_id=0,
+            url="https://docs.example.com/api",
+        )
+        assert fact.url == "https://docs.example.com/api"
+        assert fact.source_section is None
+
+    def test_fact_with_source_section(self):
+        """Test FactEntry stores source_section field."""
+        fact = FactEntry(
+            fact_id="def456",
+            statement="Rate limiting policy applies globally",
+            file_path="docs/api.md",
+            start_line=0,
+            end_line=0,
+            category="behavior",
+            confidence=ConfidenceLevel.LIKELY,
+            entities=("RateLimiter",),
+            cluster_id=0,
+            source_section="Rate Limiting",
+        )
+        assert fact.source_section == "Rate Limiting"
+        assert fact.url is None
+
+    def test_fact_with_both_url_and_section(self):
+        """Test FactEntry with both url and source_section."""
+        fact = FactEntry(
+            fact_id="ghi789",
+            statement="Authentication uses OAuth2",
+            file_path="docs/auth.md",
+            start_line=0,
+            end_line=0,
+            category="architecture",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=("Auth",),
+            cluster_id=0,
+            url="https://docs.example.com/auth",
+            source_section="OAuth2",
+        )
+        assert fact.url == "https://docs.example.com/auth"
+        assert fact.source_section == "OAuth2"
+
+    def test_fact_defaults_url_and_section_to_none(self):
+        """Test FactEntry defaults url and source_section to None."""
+        fact = FactEntry(
+            fact_id="jkl012",
+            statement="Basic fact",
+            file_path="file.py",
+            start_line=1,
+            end_line=5,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+        )
+        assert fact.url is None
+        assert fact.source_section is None
+
+    def test_url_fact_updates_entity_index(self):
+        """Test URL-based facts populate the entity index correctly."""
+        ledger = EvidenceLedger()
+        fact = FactEntry(
+            fact_id="url_fact_1",
+            statement="Rate limited at 100 req/s",
+            file_path="docs/api.md",
+            start_line=0,
+            end_line=0,
+            category="constraint",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=("RateLimiter", "API"),
+            cluster_id=0,
+            url="https://docs.example.com/api",
+            source_section="Rate Limiting",
+        )
+        ledger.add_fact(fact)
+
+        # Entity index should have both entities (lowercased)
+        assert "ratelimiter" in ledger.entity_index
+        assert "api" in ledger.entity_index
+        assert ledger.entity_index["ratelimiter"].fact_ids == ("url_fact_1",)
+        assert ledger.entity_index["api"].fact_ids == ("url_fact_1",)
+
+        # Query by entity should return the URL fact
+        results = ledger.get_facts_for_entity("RateLimiter")
+        assert len(results) == 1
+        assert results[0].fact_id == "url_fact_1"
+        assert results[0].url == "https://docs.example.com/api"
+
+
+class TestGenerateIdWithSection:
+    """Tests for generate_id with section parameter."""
+
+    def test_generate_id_with_section_deterministic(self):
+        """Test generate_id with section produces consistent hashes."""
+        id1 = FactEntry.generate_id("stmt", "src", section="intro")
+        id2 = FactEntry.generate_id("stmt", "src", section="intro")
+        assert id1 == id2
+
+    def test_generate_id_with_section_differs_from_no_section(self):
+        """Test generate_id with section differs from line-based id."""
+        id_section = FactEntry.generate_id("stmt", "src", section="intro")
+        id_lines = FactEntry.generate_id("stmt", "src", 0, 0)
+        assert id_section != id_lines
+
+    def test_generate_id_different_sections_differ(self):
+        """Test generate_id produces different ids for different sections."""
+        id1 = FactEntry.generate_id("stmt", "src", section="intro")
+        id2 = FactEntry.generate_id("stmt", "src", section="conclusion")
+        assert id1 != id2
+
+    def test_generate_id_section_vs_lines(self):
+        """Test section-based id and line-based id are both 12-char hex."""
+        id_section = FactEntry.generate_id("stmt", "src", section="intro")
+        id_lines = FactEntry.generate_id("stmt", "src", 10, 20)
+        for fid in (id_section, id_lines):
+            assert len(fid) == 12
+            int(fid, 16)  # valid hex
+
+
+class TestExtractorNewStyleJson:
+    """Tests for extractor handling new-style JSON with source/location keys."""
+
+    @pytest.mark.asyncio
+    async def test_new_style_source_and_location(self, mock_llm_provider):
+        """Test extraction with 'source' and 'location' keys (not file_path/start_line)."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Service handles retries",
+    "source": "search.py",
+    "location": "lines 10-20",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": ["Service"]
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "code"},
+            root_query="How does search work?",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.statement == "Service handles retries"
+        assert fact.file_path == "search.py"
+        assert fact.start_line == 10
+        assert fact.end_line == 20
+
+    @pytest.mark.asyncio
+    async def test_new_style_single_line_location(self, mock_llm_provider):
+        """Test structured single-line locations stay line-based."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Single line fact",
+    "source": "search.py",
+    "location": "L45",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "code"},
+            root_query="query",
+        )
+
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 45
+        assert fact.end_line == 45
+        assert fact.source_section is None
+
+    @pytest.mark.asyncio
+    async def test_new_style_with_section_location(self, mock_llm_provider):
+        """Test extraction with free-text location becomes source_section."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Rate limiting policy",
+    "source": "docs/api.md",
+    "location": "Rate Limiting",
+    "category": "constraint",
+    "confidence": "likely",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"docs/api.md": "content"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.source_section == "Rate Limiting"
+        assert fact.start_line == 0
+        assert fact.end_line == 0
+
+    @pytest.mark.asyncio
+    async def test_old_style_still_works(self, mock_llm_provider):
+        """Test old-style JSON (file_path, start_line, end_line) still works."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Legacy fact",
+    "file_path": "legacy.py",
+    "start_line": 30,
+    "end_line": 40,
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"legacy.py": "code"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.file_path == "legacy.py"
+        assert fact.start_line == 30
+        assert fact.end_line == 40
+        assert fact.url is None
+        assert fact.source_section is None
+
+    @pytest.mark.asyncio
+    async def test_new_style_to_separator(self, mock_llm_provider):
+        """Test extraction with 'lines X to Y' location format."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Handles retries with backoff",
+    "source": "search.py",
+    "location": "lines 45 to 52",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": ["SearchService"]
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "code"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 45
+        assert fact.end_line == 52
+        assert fact.source_section is None
+
+    @pytest.mark.asyncio
+    async def test_new_style_singular_line(self, mock_llm_provider):
+        """Test extraction with singular 'line X' location format."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Starts server on port",
+    "source": "main.py",
+    "location": "line 42",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"main.py": "code"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 42
+        assert fact.end_line == 42
+        assert fact.source_section is None
+
+    @pytest.mark.asyncio
+    async def test_new_style_l_to_separator(self, mock_llm_provider):
+        """Test extraction with 'L10 to L20' location format."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "Config value for timeout",
+    "source": "config.py",
+    "location": "L10 to L20",
+    "category": "constraint",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"config.py": "code"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.start_line == 10
+        assert fact.end_line == 20
+        assert fact.source_section is None
+
+
+class TestExtractorUrlBasedFacts:
+    """Tests for extractor handling URL-based fact extraction."""
+
+    @pytest.mark.asyncio
+    async def test_url_fact_extraction(self, mock_llm_provider):
+        """Test extraction with 'url' field produces URL-based fact."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "API supports pagination",
+    "source": "docs/api.md",
+    "location": "Pagination",
+    "url": "https://docs.example.com/api#pagination",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": ["API"]
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"docs/api.md": "content"},
+            root_query="query",
+        )
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.url == "https://docs.example.com/api#pagination"
+        assert fact.source_section == "Pagination"
+
+    @pytest.mark.asyncio
+    async def test_source_url_without_explicit_url_is_normalized(
+        self, mock_llm_provider
+    ):
+        """Test source URLs become URL provenance without losing cluster source identity."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "API supports pagination",
+    "source": "https://docs.example.com/api#pagination",
+    "location": "Pagination",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": ["API"]
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"docs/api.md": "content"},
+            root_query="query",
+        )
+
+        fact = list(ledger.facts.values())[0]
+        assert fact.url == "https://docs.example.com/api#pagination"
+        assert fact.file_path == "docs/api.md"
+        assert fact.source_section == "Pagination"
+        assert ledger.get_facts_for_files({"docs/api.md"}) == [fact]
+
+    @pytest.mark.asyncio
+    async def test_uppercase_url_normalized(self, mock_llm_provider):
+        """Test uppercase HTTPS:// in source is normalized to url."""
+        mock_response = MagicMock()
+        mock_response.content = """[
+  {
+    "statement": "API supports pagination",
+    "source": "HTTPS://docs.example.com/api#pagination",
+    "location": "Pagination",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"docs/api.md": "content"},
+            root_query="query",
+        )
+
+        fact = list(ledger.facts.values())[0]
+        assert fact.url == "HTTPS://docs.example.com/api#pagination"
+        assert fact.file_path == "docs/api.md"
+
+    @pytest.mark.asyncio
+    async def test_new_style_fact_missing_location_is_skipped(
+        self, mock_llm_provider
+    ):
+        """Test new-style facts without location are skipped, not fabricated as 1-1."""
+        captured: list[str] = []
+        sink_id = _loguru_logger.add(
+            lambda msg: captured.append(msg), level="WARNING", format="{message}"
+        )
+        try:
+            mock_response = MagicMock()
+            mock_response.content = """[
+  {
+    "statement": "API supports pagination",
+    "source": "docs/api.md",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": ["API"]
+  }
+]"""
+            mock_llm_provider.complete.return_value = mock_response
+
+            extractor = FactExtractor(mock_llm_provider)
+            ledger = await extractor.extract_from_cluster(
+                cluster_id=0,
+                cluster_content={"docs/api.md": "content"},
+                root_query="query",
+            )
+
+            assert ledger.facts_count == 0
+            assert any(
+                "Skipping fact with missing location in new-style payload" in msg
+                for msg in captured
+            ), f"Expected warning not found in: {captured}"
+        finally:
+            _loguru_logger.remove(sink_id)
+
+    @pytest.mark.asyncio
+    async def test_multi_source_normalized_url_fact_is_skipped_as_ambiguous(
+        self, mock_llm_provider
+    ):
+        """Test ambiguous URL-backed facts are skipped for multi-source clusters."""
+        captured: list[str] = []
+        sink_id = _loguru_logger.add(
+            lambda msg: captured.append(msg), level="WARNING", format="{message}"
+        )
+        try:
+            mock_response = MagicMock()
+            mock_response.content = """[
+  {
+    "statement": "API supports pagination",
+    "source": "https://docs.example.com/api#pagination",
+    "location": "Pagination",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": ["API"]
+  }
+]"""
+            mock_llm_provider.complete.return_value = mock_response
+
+            extractor = FactExtractor(mock_llm_provider)
+            ledger = await extractor.extract_from_cluster(
+                cluster_id=7,
+                cluster_content={
+                    "docs/api.md": "content",
+                    "docs/auth.md": "other content",
+                },
+                root_query="query",
+            )
+
+            assert ledger.facts_count == 0
+            assert ledger.get_facts_for_files({"docs/api.md", "docs/auth.md"}) == []
+            assert (
+                ledger.get_facts_map_prompt_context(
+                    {"docs/api.md", "docs/auth.md"},
+                    cluster_id=7,
+                )
+                == ""
+            )
+            assert any(
+                "Skipping URL-backed fact with ambiguous multi-source cluster provenance"
+                in msg
+                for msg in captured
+            ), f"Expected warning not found in: {captured}"
+        finally:
+            _loguru_logger.remove(sink_id)
+
+    @pytest.mark.asyncio
+    async def test_url_only_fact_in_multi_source_cluster_is_skipped(
+        self, mock_llm_provider
+    ):
+        """Test URL-only facts (no source, has url) are skipped in multi-source clusters."""
+        captured: list[str] = []
+        sink_id = _loguru_logger.add(
+            lambda msg: captured.append(msg), level="WARNING", format="{message}"
+        )
+        try:
+            mock_response = MagicMock()
+            mock_response.content = """[
+  {
+    "statement": "API supports pagination",
+    "url": "https://docs.example.com/api#pagination",
+    "location": "Pagination",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": []
+  }
+]"""
+            mock_llm_provider.complete.return_value = mock_response
+
+            extractor = FactExtractor(mock_llm_provider)
+            ledger = await extractor.extract_from_cluster(
+                cluster_id=0,
+                cluster_content={
+                    "docs/api.md": "content",
+                    "docs/auth.md": "other content",
+                },
+                root_query="query",
+            )
+
+            assert ledger.facts_count == 0
+            assert any(
+                "Skipping URL-only fact with ambiguous multi-source cluster provenance"
+                in msg
+                for msg in captured
+            ), f"Expected warning not found in: {captured}"
+        finally:
+            _loguru_logger.remove(sink_id)
+
+
+class TestSerializationWithUrlAndSection:
+    """Tests for to_dict/from_dict round-trip with url and source_section."""
+
+    def test_roundtrip_preserves_url(self):
+        """Test serialization round-trip preserves url field."""
+        ledger = EvidenceLedger()
+        fact = FactEntry(
+            fact_id="abc123",
+            statement="API rate-limits at 100 req/s",
+            file_path="docs/api.md",
+            start_line=0,
+            end_line=0,
+            category="constraint",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=("API",),
+            cluster_id=0,
+            url="https://docs.example.com/api",
+        )
+        ledger.add_fact(fact)
+
+        data = ledger.to_dict()
+        restored = EvidenceLedger.from_dict(data)
+
+        assert restored.facts_count == 1
+        restored_fact = list(restored.facts.values())[0]
+        assert restored_fact.url == "https://docs.example.com/api"
+        assert restored_fact.statement == "API rate-limits at 100 req/s"
+
+    def test_roundtrip_preserves_source_section(self):
+        """Test serialization round-trip preserves source_section field."""
+        ledger = EvidenceLedger()
+        fact = FactEntry(
+            fact_id="def456",
+            statement="Authentication uses OAuth2",
+            file_path="docs/auth.md",
+            start_line=0,
+            end_line=0,
+            category="architecture",
+            confidence=ConfidenceLevel.LIKELY,
+            entities=("Auth",),
+            cluster_id=0,
+            url="https://docs.example.com/auth",
+            source_section="OAuth2",
+        )
+        ledger.add_fact(fact)
+
+        data = ledger.to_dict()
+        restored = EvidenceLedger.from_dict(data)
+
+        restored_fact = list(restored.facts.values())[0]
+        assert restored_fact.url == "https://docs.example.com/auth"
+        assert restored_fact.source_section == "OAuth2"
+
+    def test_roundtrip_preserves_none_fields(self):
+        """Test serialization round-trip preserves None for url/section."""
+        ledger = EvidenceLedger()
+        fact = FactEntry(
+            fact_id="ghi789",
+            statement="File-based fact",
+            file_path="file.py",
+            start_line=10,
+            end_line=20,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+        )
+        ledger.add_fact(fact)
+
+        data = ledger.to_dict()
+        restored = EvidenceLedger.from_dict(data)
+
+        restored_fact = list(restored.facts.values())[0]
+        assert restored_fact.url is None
+        assert restored_fact.source_section is None
+
+    def test_from_dict_old_format_missing_keys(self):
+        """Test from_dict handles old-format dicts without url/source_section."""
+        data = {
+            "constants": {},
+            "facts": {
+                "fact1": {
+                    "fact_id": "fact1",
+                    "statement": "Test statement",
+                    "file_path": "file.py",
+                    "start_line": 10,
+                    "end_line": 20,
+                    "category": "behavior",
+                    "confidence": "definite",
+                    "entities": [],
+                    "cluster_id": 0,
+                }
+            },
+            "conflicts": [],
+        }
+
+        ledger = EvidenceLedger.from_dict(data)
+
+        assert ledger.facts_count == 1
+        fact = list(ledger.facts.values())[0]
+        assert fact.url is None
+        assert fact.source_section is None
+        assert fact.statement == "Test statement"
+        assert fact.file_path == "file.py"
+        assert fact.start_line == 10
+        assert fact.end_line == 20
+
+
+class TestFormatFactsSimpleWithUrlFacts:
+    """Tests for _format_facts_simple with URL-based facts."""
+
+    def test_url_fact_shows_section_and_url(self):
+        """Test URL facts keep source identity when a section is present."""
+        ledger = EvidenceLedger()
+        fact = FactEntry(
+            fact_id="abc123",
+            statement="API supports pagination",
+            file_path="docs/api.md",
+            start_line=0,
+            end_line=0,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+            url="https://docs.example.com/api",
+            source_section="Pagination",
+        )
+        ledger.add_fact(fact)
+
+        context = ledger.get_facts_reduce_prompt_context()
+
+        assert (
+            "[DEF] API supports pagination (https://docs.example.com/api — Pagination)"
+            in context
+        )
+        assert "(:0-0)" not in context
+
+    def test_url_fact_without_section_shows_url(self):
+        """Test URL facts without section show the URL."""
+        ledger = EvidenceLedger()
+        fact = FactEntry(
+            fact_id="def456",
+            statement="Rate limit is 100 req/s",
+            file_path="docs/api.md",
+            start_line=0,
+            end_line=0,
+            category="constraint",
+            confidence=ConfidenceLevel.LIKELY,
+            entities=(),
+            cluster_id=0,
+            url="https://docs.example.com/api",
+        )
+        ledger.add_fact(fact)
+
+        context = ledger.get_facts_reduce_prompt_context()
+
+        assert "[LIK] Rate limit is 100 req/s (https://docs.example.com/api)" in context
+
+    def test_file_fact_unchanged(self):
+        """Test file-based facts still format as (file:line-line)."""
+        ledger = EvidenceLedger()
+        fact = FactEntry(
+            fact_id="ghi789",
+            statement="Standard file fact",
+            file_path="services/search.py",
+            start_line=45,
+            end_line=52,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+        )
+        ledger.add_fact(fact)
+
+        context = ledger.get_facts_reduce_prompt_context()
+
+        assert "[DEF] Standard file fact (services/search.py:45-52)" in context
+
+    def test_file_fact_nested_path_includes_directory(self):
+        """Test nested file paths preserve directory context."""
+        ledger = EvidenceLedger()
+        fact = FactEntry(
+            fact_id="nested1",
+            statement="Nested file fact",
+            file_path="src/deep/nested/file.py",
+            start_line=42,
+            end_line=48,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+        )
+        ledger.add_fact(fact)
+
+        context = ledger.get_facts_reduce_prompt_context()
+
+        # Must include full path, not just basename
+        assert "src/deep/nested/file.py:42-48" in context
+
+
+class TestGetFactsForFilesIncludesUrlFacts:
+    """Tests for get_facts_for_files file-scoped behavior."""
+
+    def test_url_facts_follow_file_path_filter(self):
+        """Test URL facts are only returned when their file_path matches."""
+        ledger = EvidenceLedger()
+
+        file_fact = FactEntry(
+            fact_id="file1",
+            statement="File-based fact",
+            file_path="search.py",
+            start_line=1,
+            end_line=5,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+        )
+        url_fact = FactEntry(
+            fact_id="url1",
+            statement="URL-based fact",
+            file_path="docs/api.md",
+            start_line=0,
+            end_line=0,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+            url="https://docs.example.com/api",
+        )
+        ledger.add_fact(file_fact)
+        ledger.add_fact(url_fact)
+
+        # Query for search.py only — unrelated URL fact should not appear
+        results = ledger.get_facts_for_files({"search.py"})
+        fact_ids = {f.fact_id for f in results}
+
+        assert "file1" in fact_ids
+        assert "url1" not in fact_ids
+
+    def test_url_facts_not_double_counted(self):
+        """Test URL facts aren't duplicated when their file_path is also in the set."""
+        ledger = EvidenceLedger()
+        url_fact = FactEntry(
+            fact_id="url1",
+            statement="URL fact with matching file_path",
+            file_path="docs/api.md",
+            start_line=0,
+            end_line=0,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+            url="https://docs.example.com/api",
+        )
+        ledger.add_fact(url_fact)
+
+        results = ledger.get_facts_for_files({"docs/api.md"})
+        assert len(results) == 1
+        assert results[0].fact_id == "url1"
+
+    def test_non_matching_file_facts_excluded(self):
+        """Test non-matching file and URL facts are excluded."""
+        ledger = EvidenceLedger()
+
+        other_fact = FactEntry(
+            fact_id="other1",
+            statement="Other file fact",
+            file_path="other.py",
+            start_line=1,
+            end_line=5,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+        )
+        url_fact = FactEntry(
+            fact_id="url1",
+            statement="URL fact",
+            file_path="external.md",
+            start_line=0,
+            end_line=0,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+            url="https://example.com",
+        )
+        ledger.add_fact(other_fact)
+        ledger.add_fact(url_fact)
+
+        # Query for nonexistent file
+        results = ledger.get_facts_for_files({"nonexistent.py"})
+        fact_ids = {f.fact_id for f in results}
+
+        assert "other1" not in fact_ids
+        assert "url1" not in fact_ids
+
+
 class TestReplaceConstantsFromChunks:
     """Tests for replace_constants_from_chunks method."""
 
@@ -1893,3 +3065,130 @@ class TestReplaceConstantsFromChunks:
         # Original should be unchanged
         assert ledger.constants_count == original_const_count
         assert ledger.facts_count == original_fact_count
+
+
+class TestMergeFactIdBehavior:
+    """Tests documenting fact ID stability across merge operations."""
+
+    def test_merge_same_logical_fact_different_ids(self):
+        """Test that the same logical fact extracted via old-style vs new-style
+        paths gets different IDs, proving old and new ledgers cannot be cleanly merged.
+        """
+        statement = "API supports rate limiting"
+
+        # Old-style: file_path-based with line numbers
+        old_id = FactEntry.generate_id(
+            statement=statement,
+            primary_source="api/handler.py",
+            start_line=10,
+            end_line=25,
+        )
+
+        # New-style: URL-based with section
+        new_id = FactEntry.generate_id(
+            statement=statement,
+            primary_source="https://docs.example.com/api",
+            section="Rate limiting",
+        )
+
+        # Same logical fact, different IDs
+        assert old_id != new_id, (
+            "Same logical fact should get different IDs across formats"
+        )
+
+        # Build old and new ledgers
+        old_ledger = EvidenceLedger()
+        old_fact = FactEntry(
+            fact_id=old_id,
+            statement=statement,
+            file_path="api/handler.py",
+            start_line=10,
+            end_line=25,
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=0,
+        )
+        old_ledger.add_fact(old_fact)
+
+        new_ledger = EvidenceLedger()
+        new_fact = FactEntry(
+            fact_id=new_id,
+            statement=statement,
+            file_path="https://docs.example.com/api",
+            start_line=0,
+            end_line=0,
+            url="https://docs.example.com/api",
+            source_section="Rate limiting",
+            category="behavior",
+            confidence=ConfidenceLevel.DEFINITE,
+            entities=(),
+            cluster_id=1,
+        )
+        new_ledger.add_fact(new_fact)
+
+        # Merge — both facts should be present (different IDs)
+        merged = old_ledger.merge(new_ledger)
+
+        assert merged.facts_count == 2
+        assert old_id in merged.facts
+        assert new_id in merged.facts
+
+
+class TestExtractorMixedFormatResponse:
+    """Tests for extractor handling mixed old-style and new-style facts
+    in a single LLM extraction response."""
+
+    @pytest.mark.asyncio
+    async def test_mixed_format_in_single_response(self, mock_llm_provider):
+        """Test that both old-style (file_path/start_line/end_line) and
+        new-style (source/location/url) facts parse correctly in one response."""
+        mock_response = MagicMock()
+        mock_response.content = """\
+[
+  {
+    "statement": "Search service uses TF-IDF scoring",
+    "source": "search.py",
+    "location": "lines 15-30",
+    "category": "behavior",
+    "confidence": "definite",
+    "entities": ["SearchService", "TF-IDF"]
+  },
+  {
+    "statement": "Rate limit is 1000 req/min",
+    "file_path": "api/handler.py",
+    "start_line": 42,
+    "end_line": 45,
+    "category": "constraint",
+    "confidence": "definite",
+    "entities": []
+  }
+]
+"""
+        mock_llm_provider.complete.return_value = mock_response
+
+        extractor = FactExtractor(mock_llm_provider)
+        ledger = await extractor.extract_from_cluster(
+            cluster_id=0,
+            cluster_content={"search.py": "code", "api/handler.py": "code"},
+            root_query="How does search work?",
+        )
+
+        assert ledger.facts_count == 2, "Both new-style and old-style facts should be parsed"
+
+        facts = list(ledger.facts.values())
+
+        # New-style fact with location
+        fact1 = next(
+            f for f in facts if f.statement == "Search service uses TF-IDF scoring"
+        )
+        assert fact1.file_path == "search.py"
+        assert fact1.start_line == 15
+        assert fact1.end_line == 30
+
+        # Old-style fact with file_path/start_line/end_line
+        fact2 = next(f for f in facts if f.statement == "Rate limit is 1000 req/min")
+        assert fact2.file_path == "api/handler.py"
+        assert fact2.start_line == 42
+        assert fact2.end_line == 45
+

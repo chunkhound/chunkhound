@@ -173,14 +173,14 @@ class SynthesisEngine:
                 "This indicates a bug in aggregation or budget management."
             )
             raise RuntimeError(
-                f"Cannot synthesize answer: no code context available. "
+                f"Cannot synthesize answer: no source context available. "
                 f"Found {original_chunk_count} chunks but received 0 files for synthesis. "
                 f"This is a bug - earlier validation should have caught this. "
                 f"Check aggregation and budget management logs."
             )
 
-        # Build code context sections
-        code_sections = []
+        # Build source context sections
+        source_sections = []
 
         # Group chunks by file for better presentation
         chunks_by_file: dict[str, list[dict[str, Any]]] = {}
@@ -217,11 +217,11 @@ class SynthesisEngine:
                 # No chunks for this file, use full content from budget
                 file_content = content
 
-            code_sections.append(
+            source_sections.append(
                 f"### {file_path}\n{'=' * 80}\n{file_content}\n{'=' * 80}"
             )
 
-        code_context = "\n\n".join(code_sections)
+        source_context = "\n\n".join(source_sections)
 
         # Build file reference map for numbered citations
         file_reference_map = self._parent._citation_manager.build_file_reference_map(
@@ -246,7 +246,7 @@ class SynthesisEngine:
         # Build output guidance using shared utility (targets ~15k for concise output)
         output_guidance = build_output_guidance(TARGET_OUTPUT_TOKENS)
 
-        # Build comprehensive synthesis prompt (adapted from Code Expert methodology)
+        # Build comprehensive synthesis prompt
         system = prompts.SYNTHESIS_SYSTEM_BUILDER(output_guidance)
 
         # Combine root_query with constants and facts context
@@ -255,7 +255,7 @@ class SynthesisEngine:
         prompt = prompts.SYNTHESIS_USER.format(
             root_query=query_with_context,
             reference_table=reference_table,
-            code_context=code_context,
+            source_context=source_context,
         )
 
         logger.info(
@@ -351,8 +351,8 @@ class SynthesisEngine:
 
         llm = self._llm_manager.get_synthesis_provider()
 
-        # Build code context for this cluster (same logic as single-pass)
-        code_sections = []
+        # Build source context for this cluster (same logic as single-pass)
+        source_sections = []
         chunks_by_file: dict[str, list[dict[str, Any]]] = {}
         for chunk in cluster_chunks:
             file_path = chunk.get("file_path", "unknown")
@@ -378,11 +378,11 @@ class SynthesisEngine:
             else:
                 file_content = content
 
-            code_sections.append(
+            source_sections.append(
                 f"### {file_path}\n{'=' * 80}\n{file_content}\n{'=' * 80}"
             )
 
-        code_context = "\n\n".join(code_sections)
+        source_context = "\n\n".join(source_sections)
 
         # Build file reference map for numbered citations (cluster-specific)
         cluster_files = cluster.files_content
@@ -399,7 +399,10 @@ class SynthesisEngine:
         cluster_proportion = (
             cluster.total_tokens / total_input_tokens if total_input_tokens > 0 else 1.0
         )
-        cluster_output_tokens = max(5000, int(total_input_tokens * cluster_proportion))
+        cluster_output_tokens = max(
+            5000,
+            int(synthesis_budgets["output_tokens"] * cluster_proportion),
+        )
         # Cap cluster target to half of TARGET_OUTPUT_TOKENS (clusters combine in reduce)
         cluster_target = min(cluster_output_tokens, TARGET_OUTPUT_TOKENS // 2)
 
@@ -415,12 +418,12 @@ class SynthesisEngine:
         if facts_context:
             facts_section = f"\n{facts_context}"
 
-        system = f"""You are analyzing a subset of code files as part of a larger codebase analysis.
+        system = f"""You are analyzing a subset of sources as part of a larger analysis.
 
 Focus on:
-1. Key architectural patterns and components in these files
-2. Important implementation details and relationships
-3. How these files contribute to answering the query
+1. Key structural patterns and components in these sources
+2. Important details and relationships
+3. How these sources contribute to answering the query
 
 {prompts.CITATION_REQUIREMENTS}
 
@@ -431,9 +434,9 @@ Be thorough but concise - your analysis will be combined with other clusters.
 {constants_section}{facts_section}
 {reference_table}
 
-Analyze the following code files and provide insights relevant to the query above:
+Analyze the following sources and provide insights relevant to the query above:
 
-{code_context}
+{source_context}
 
 Provide a comprehensive analysis focusing on the query."""
 

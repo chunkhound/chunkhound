@@ -79,9 +79,10 @@ async def test_json_size_threshold_filtering(tmp_path, real_components):
     
     # Small file should be in DB
     assert small_file is not None, "Small JSON should be indexed"
-    
-    # Large file should NOT be in DB
-    assert large_file is None, "Large JSON should not be indexed"
+
+    # Large file should have a skip record in DB (content_hash=None) but not be chunked
+    assert large_file is not None, "Large JSON should have a skip record in DB"
+    assert large_file["content_hash"] is None, "Large JSON skip record must have no content_hash"
 
 
 @pytest.mark.asyncio
@@ -151,7 +152,8 @@ dependencies:
     large_file = db.get_file_by_path(str(large_yaml_path))
 
     assert small_file is not None, "Small YAML should be indexed"
-    assert large_file is None, "Large YAML should not be indexed"
+    assert large_file is not None, "Large YAML should have a skip record in DB"
+    assert large_file["content_hash"] is None, "Large YAML skip record must have no content_hash"
 
 
 @pytest.mark.asyncio
@@ -200,7 +202,8 @@ package-3 = "3.0.0"
     large_file = db.get_file_by_path(str(large_toml_path))
 
     assert small_file is not None, "Small TOML should be indexed"
-    assert large_file is None, "Large TOML should not be indexed"
+    assert large_file is not None, "Large TOML should have a skip record in DB"
+    assert large_file["content_hash"] is None, "Large TOML skip record must have no content_hash"
 
 
 @pytest.mark.asyncio
@@ -312,6 +315,9 @@ async def test_json_filtering_in_directory_processing(tmp_path, real_components)
     assert eslint_file is not None, "ESLint config should be indexed"
     assert python_file is not None, "Python file should be indexed"
     
-    # Should NOT be indexed
-    assert cache_file is None, "Large JSON should not be indexed (>20KB)"
+    # Large JSON: recorded in DB as a skip record (content_hash=None) but not chunked.
+    # This is intentional — skipped files are persisted to avoid re-scanning on each run.
+    assert cache_file is not None, "Large JSON should have a skip record in DB (>20KB)"
+    assert cache_file["content_hash"] is None, "Large JSON skip record must have no content_hash"
+    # Excluded-by-pattern files are never processed at all, so no DB record is created.
     assert lock_file is None, "Lock file should not be indexed (excluded pattern)"

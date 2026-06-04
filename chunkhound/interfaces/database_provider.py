@@ -131,6 +131,20 @@ class DatabaseProvider(Protocol):
         """Update file record with new values (asynchronous)."""
         ...
 
+    async def record_skipped_file_async(
+        self,
+        path: str,
+        name: str,
+        extension: str,
+        size: int,
+        mtime: float,
+        language: str | None,
+        content_hash: str | None,
+        skip_reason: str,
+    ) -> None:
+        """Upsert a file record with skip_reason to prevent re-scanning (asynchronous)."""
+        ...
+
     # Chunk Operations
     def insert_chunk(self, chunk: Chunk) -> int:
         """Insert chunk record and return chunk ID."""

@@ -297,6 +297,9 @@ class TestExecuteToolSearchReturnsMarkdown:
             f"Single oversized result must be truncated to fit within MAX_RESPONSE_TOKENS; "
             f"got {estimate_tokens(result)} tokens"
         )
+        assert "[... truncated ...]" in result, (
+            "Truncated content must include truncation marker"
+        )
 
     async def test_trim_loop_single_oversized_backtick_heavy_content(self) -> None:
         """Single result with a long backtick run must still fit within MAX_RESPONSE_TOKENS.
@@ -326,6 +329,9 @@ class TestExecuteToolSearchReturnsMarkdown:
         assert estimate_tokens(result) <= MAX_RESPONSE_TOKENS, (
             f"Backtick-heavy content must be truncated to fit within MAX_RESPONSE_TOKENS; "
             f"got {estimate_tokens(result)} tokens (fence overhead was not accounted for)"
+        )
+        assert "[... truncated ...]" in result, (
+            "Truncated content must include truncation marker even with backtick-heavy content"
         )
 
     async def test_trim_loop_preserves_original_page_size_in_footer(self) -> None:

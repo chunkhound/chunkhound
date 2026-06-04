@@ -8,7 +8,6 @@ The registry pattern ensures consistent tool metadata and behavior.
 
 import asyncio
 import inspect
-import json
 import os
 import re
 import shutil
@@ -36,6 +35,38 @@ from chunkhound.services.research.factory import ResearchServiceFactory
 MAX_RESPONSE_TOKENS = 20000
 MIN_RESPONSE_TOKENS = 1000
 MAX_ALLOWED_TOKENS = 25000
+
+
+def _summarize_subprocess_stderr(stderr: bytes) -> str:
+    """Return the user-visible stderr summary for MCP subprocess failures."""
+    stderr_text = stderr.decode(errors="replace").strip()
+    lines = [line.rstrip() for line in stderr_text.split("\n")]
+    in_traceback = False
+    raise_summary: str | None = None
+    clean: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if line.startswith("Traceback") or line.startswith("  File"):
+            in_traceback = True
+            continue
+        if in_traceback and line.startswith("    "):
+            if stripped.startswith("raise ") and raise_summary is None:
+                raise_summary = stripped.removeprefix("raise ")
+            continue
+        # Reset traceback mode when encountering a non-traceback line
+        # (e.g. the error type after the traceback like "ValueError: ...").
+        # Without this reset, any indented diagnostics that follow the
+        # traceback would be silently consumed.
+        in_traceback = False
+        clean.append(line)
+
+    if clean:
+        return "\n".join(clean)[-500:]
+    if raise_summary:
+        return raise_summary[-500:]
+    return stderr_text[-200:]
 
 
 # =============================================================================
@@ -720,9 +751,9 @@ async def websearch_impl(
                 f"websearch timed out after {timeout_s:.0f}s"
             ) from None
         if proc.returncode != 0:
+            tail = _summarize_subprocess_stderr(stderr)
             raise MCPError(
-                f"Research subprocess failed (exit {proc.returncode}): "
-                f"{stderr.decode(errors='replace').strip()[-2000:]}"
+                f"Research subprocess failed (exit {proc.returncode}): {tail}"
             )
         answer = stdout.decode(errors="replace")
     finally:
@@ -842,14 +873,18 @@ async def execute_tool(
                 # two fence lines of max_run+1 backticks each) means the 300-char reserve
                 # can be wildly insufficient; re-render and shrink until the actual output fits.
                 max_content_chars = max(0, MAX_RESPONSE_TOKENS * 3 - 300)
-                result_copy["content"] = content[:max_content_chars]
+                result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
                 md = format_search_results_markdown([result_copy], pagination, search_type)
                 while estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0:
                     excess_chars = (estimate_tokens(md) - MAX_RESPONSE_TOKENS) * 3
                     max_content_chars = max(0, max_content_chars - excess_chars - 1)
-                    result_copy["content"] = content[:max_content_chars]
+                    result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
                     md = format_search_results_markdown([result_copy], pagination, search_type)
             return md
+
+    # String return types (e.g., websearch) pass through directly as markdown
+    if isinstance(result, str):
+        return result
 
     # Convert result to dict if it's not already
     if hasattr(result, "__dict__"):

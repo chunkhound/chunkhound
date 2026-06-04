@@ -1,11 +1,22 @@
 import pytest
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.llm_manager import LLMManager
 
 
 def test_llm_manager_registry_includes_codex_cli():
     assert "codex-cli" in LLMManager._providers
+
+
+def test_list_providers_includes_registry_backed_providers():
+    manager = object.__new__(LLMManager)
+    manager._providers = LLMManager._providers
+
+    provider_names = manager.list_providers()
+
+    assert "deepseek" in provider_names
+    assert "grok" in provider_names
 
 
 def test_create_provider_uses_default_timeout_when_omitted():
@@ -31,7 +42,7 @@ def test_create_provider_requires_model_for_custom_grok_endpoint():
     manager = object.__new__(LLMManager)
     manager._providers = LLMManager._providers
 
-    with pytest.raises(ValueError, match="require an explicit model"):
+    with pytest.raises(ValueError) as exc:
         manager._create_provider(  # type: ignore[attr-defined]
             {
                 "provider": "grok",
@@ -39,6 +50,8 @@ def test_create_provider_requires_model_for_custom_grok_endpoint():
                 "api_key": "sk-test-key",
             }
         )
+    # Registry providers fail with "Model is required" (no baked-in default).
+    assert "Model is required" in str(exc.value)
 
 
 def test_create_provider_keeps_provider_default_model_when_omitted():
@@ -50,8 +63,19 @@ def test_create_provider_keeps_provider_default_model_when_omitted():
     assert provider.model == ""  # opencode-cli has no default — user must specify model
 
 
+def test_create_provider_requires_model_for_gemini_public_factory():
+    """Public factory must enforce Gemini's explicit-model contract too."""
+    manager = object.__new__(LLMManager)
+    manager._providers = LLMManager._providers
+
+    with pytest.raises(ConfigurationError, match="Model is required for 'gemini'"):
+        manager.create_provider_for_config(
+            {"provider": "gemini", "api_key": "sk-test-key"}
+        )
+
+
 def test_create_provider_passes_base_url_to_anthropic_provider():
-    """Anthropic provider receives base_url even though it is not in OPENAI_COMPATIBLE_LLM_PROVIDERS."""
+    """Anthropic provider receives base_url outside the OpenAI-compatible path."""
     manager = object.__new__(LLMManager)
 
     captured: dict[str, object] = {}

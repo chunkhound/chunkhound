@@ -14,7 +14,9 @@ Note: This provider is configured for vanilla LLM behavior:
 import asyncio
 import json
 import os
+import signal
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from typing import Literal
@@ -415,6 +417,47 @@ class OpenCodeCLIProvider(BaseCLIProvider):
 
         return _JSONParseResult(action="success", text="".join(text_parts).strip())
 
+    async def _kill_process_tree(
+        self, process: asyncio.subprocess.Process, *, pgid: int | None = None
+    ) -> None:
+        """Terminate an opencode subprocess and its descendants."""
+        if sys.platform == "win32":
+            try:
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["taskkill", "/T", "/PID", str(process.pid), "/F"],
+                    check=False,
+                    timeout=10,
+                )
+            except (FileNotFoundError, subprocess.SubprocessError, OSError):
+                logger.debug("Windows taskkill failed during OpenCode cleanup")
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                pass
+            return
+
+        process_group_id = pgid if pgid is not None else process.pid
+        try:
+            os.killpg(process_group_id, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
+
+        try:
+            os.killpg(process_group_id, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
+
     async def _run_single_attempt(
         self,
         message: str,
@@ -431,15 +474,35 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         """
         cmd = self._build_cmd(model, use_json)
         process = None
+        captured_process_pid: int | None = None
+        cleanup_required = False
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=os.environ.copy(),
-                cwd=tempfile.gettempdir(),
-            )
+            if sys.platform == "win32":
+                create_new_process_group = getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+                )
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=os.environ.copy(),
+                    cwd=tempfile.gettempdir(),
+                    creationflags=create_new_process_group,
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=os.environ.copy(),
+                    cwd=tempfile.gettempdir(),
+                    start_new_session=True,
+                )
+            cleanup_required = True
+            if sys.platform != "win32":
+                captured_process_pid = process.pid
 
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(input=message.encode("utf-8")),
@@ -456,6 +519,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                 raise RuntimeError(
                     "Subprocess communicate() completed but returncode is None"
                 )
+            cleanup_required = False
 
             if use_json:
                 json_result = self._parse_json_output(
@@ -519,13 +583,6 @@ class OpenCodeCLIProvider(BaseCLIProvider):
             return _PhaseResult(action="success", output=output, attempts_used=1)
 
         except asyncio.TimeoutError:
-            if process and process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-
             cmd_ctx = self._describe_command_context(model=model, use_json=use_json)
             error = RuntimeError(
                 f"OpenCode CLI command timed out after {request_timeout}s "
@@ -537,17 +594,14 @@ class OpenCodeCLIProvider(BaseCLIProvider):
             if isinstance(e, RuntimeError):
                 raise
 
-            if process and process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-
             cmd_ctx = self._describe_command_context(model=model, use_json=use_json)
             error = RuntimeError(f"OpenCode CLI command failed: {e} ({cmd_ctx})")
             error.__cause__ = e
             return _PhaseResult(action="failure", error=error, attempts_used=1)
+
+        finally:
+            if cleanup_required and process is not None:
+                await self._kill_process_tree(process, pgid=captured_process_pid)
 
     async def _try_phase(
         self,

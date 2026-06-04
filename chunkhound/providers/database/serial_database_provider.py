@@ -353,6 +353,23 @@ class SerialDatabaseProvider(ABC):
         """Async variant of insert_file."""
         return cast(int, await self._execute_in_db_thread("insert_file", file))
 
+    async def record_skipped_file_async(
+        self,
+        path: str,
+        name: str,
+        extension: str,
+        size: int,
+        mtime: float,
+        language: str | None,
+        content_hash: str | None,
+        skip_reason: str,
+    ) -> None:
+        """Async variant of record_skipped_file."""
+        await self._execute_in_db_thread(
+            "record_skipped_file",
+            path, name, extension, size, mtime, language, content_hash, skip_reason,
+        )
+
     async def get_chunks_by_file_id_async(
         self, file_id: int, as_model: bool = False
     ) -> list[dict[str, Any] | Chunk]:
