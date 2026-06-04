@@ -100,6 +100,9 @@ class RemovalReplayState:
         self.deferred_removals.update(paths)
         self.deferred_files.update(paths)
 
+    def clear_post_compaction_state(self) -> None:
+        self.failed_files.clear()
+
     async def replay_compaction_deferred_removal(self, path: str) -> None:
         self.replay_attempts.append(path)
         if path == self.fail_path and not self._failed_once:
@@ -166,6 +169,9 @@ async def test_clears_compaction_deferrals_before_reindex(
 
         async def restore_compaction_deferred_removals(self, paths: set[str]) -> None:
             pass
+
+        def clear_post_compaction_state(self) -> None:
+            self.failed_files.clear()
 
     realtime = RealtimeStub()
     server.realtime_indexing = realtime
@@ -521,6 +527,9 @@ async def test_ensure_services_retries_partial_deferred_removal_replay(
         async def restore_compaction_deferred_removals(self, paths: set[str]) -> None:
             self.deferred_removals.update(paths)
             self.deferred_files.update(paths)
+
+        def clear_post_compaction_state(self) -> None:
+            self.failed_files.clear()
 
         async def replay_compaction_deferred_removal(self, path: str) -> None:
             self.replay_attempts.append(path)

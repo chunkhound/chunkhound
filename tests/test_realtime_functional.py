@@ -2728,17 +2728,16 @@ class TestRealtimeFunctional:
 
         # Create unsupported file
         bin_file = watch_dir / "unsupported.xyz"
-        await write_and_index_file(services, bin_file, "unsupported content")
+        bin_result = await write_and_index_file(services, bin_file, "unsupported content")
 
         # Check processing results
-        bin_record = services.provider.get_file_by_path(str(bin_file))
         py_record = services.provider.get_file_by_path(str(py_file))
 
         # Python file may still fail for unrelated reasons, but the unsupported
-        # file should definitely be ignored.
-        # Binary file should definitely be ignored
+        # file should definitely be skipped with zero chunks.
         assert py_record is not None, "Supported file types should be indexed"
-        assert bin_record is None, "Unsupported file types should be ignored"
+        assert bin_result.get("status") == "skipped", "Unsupported file types should be skipped"
+        assert bin_result.get("chunks", 0) == 0, "Unsupported file types should produce no chunks"
 
     @pytest.mark.asyncio
     @pytest.mark.native_watcher
