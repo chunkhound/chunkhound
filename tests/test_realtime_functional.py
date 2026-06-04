@@ -120,6 +120,7 @@ class TestRealtimeFunctional:
             indexing={
                 "include": ["*.py", "*.js"],
                 "exclude": ["*.log"],
+                "index_unknown_files": False,
                 "realtime_backend": realtime_backend_for_tests(),
             },
         )
@@ -191,6 +192,7 @@ class TestRealtimeFunctional:
             indexing={
                 "include": ["*.py"],
                 "exclude": [],
+                "index_unknown_files": False,
                 "realtime_backend": "watchman",
             },
         )
@@ -1737,7 +1739,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -1787,7 +1789,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -1844,7 +1846,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -1903,7 +1905,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -1956,7 +1958,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -2025,7 +2027,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -2234,7 +2236,7 @@ class TestRealtimeFunctional:
                 "path": str(watch_dir / ".chunkhound" / "test.db"),
                 "provider": "duckdb",
             },
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
         Path(config.database.path).parent.mkdir(parents=True, exist_ok=True)
 

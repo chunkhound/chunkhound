@@ -1686,6 +1686,7 @@ async def test_watchman_junction_scope_filter_uses_logical_scope_root(
         indexing={
             "include": ["**/*.py"],
             "exclude": ["generated/**"],
+            "index_unknown_files": False,
             "realtime_backend": "watchman",
         },
     )

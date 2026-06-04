@@ -146,7 +146,7 @@ def test_realtime_service_logs_install_default_backend_resolution(
     config = Config(
         args=SimpleNamespace(path=tmp_path),
         database={"path": str(db_path), "provider": "duckdb"},
-        indexing={"include": ["*.py"], "exclude": []},
+        indexing={"include": ["*.py"], "exclude": [], "index_unknown_files": False},
     )
     config.indexing.realtime_backend = None
     info_messages: list[str] = []

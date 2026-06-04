@@ -71,6 +71,7 @@ def _build_config(
         indexing={
             "include": ["**/*.py"],
             "exclude": [],
+            "index_unknown_files": False,
             "exclude_sentinel": ".gitignore",
             "realtime_backend": realtime_backend,
         },
@@ -144,6 +145,7 @@ async def test_watchdog_delete_admits_previously_indexed_excluded_file(
         indexing={
             "include": ["**/*.keep"],
             "exclude": [],
+            "index_unknown_files": False,
             "realtime_backend": "watchdog",
         },
     )
@@ -246,6 +248,7 @@ async def test_watchman_delete_admits_previously_indexed_excluded_file(
         indexing={
             "include": ["**/*.keep"],
             "exclude": [],
+            "index_unknown_files": False,
             "realtime_backend": "watchman",
         },
     )

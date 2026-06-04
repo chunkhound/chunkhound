@@ -1467,7 +1467,10 @@ class RealtimePipelineMixin:
                     # If the file is already deferred for compaction-removal, do not
                     # add it to failed_files — the deferred removal tracks the intent
                     # to delete and must survive stale change mutations.
-                    if _normalized_missing in self._compaction_deferred_removals:
+                    if (
+                        _normalized_missing in self._compaction_deferred_removals
+                        or _normalized_missing in self._drained_compaction_removals
+                    ):
                         logger.debug(
                             f"Skipping {file_path} — file gone but deferred for removal"
                         )

@@ -123,6 +123,7 @@ class TestQADeterministic:
             indexing={
                 "include": ["*"],
                 "exclude": ["*.log", "__pycache__/"],
+                "index_unknown_files": False,
                 "realtime_backend": realtime_backend_for_tests(),
             },  # More inclusive for QA
         )

@@ -49,7 +49,8 @@ class TestOversizedChunkReproduction:
             },
             indexing={
                 "max_chunk_size": 2000,  # Standard size limit
-                "min_chunk_size": 50
+                "min_chunk_size": 50,
+                "index_unknown_files": False,
             }
         )
 

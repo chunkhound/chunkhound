@@ -119,6 +119,7 @@ class TestMCPIntegration:
             indexing={
                 "include": ["*.py", "*.js"],
                 "exclude": ["*.log"],
+                "index_unknown_files": False,
                 "realtime_backend": realtime_backend_for_tests(),
             },
         )
@@ -170,6 +171,7 @@ class TestMCPIntegration:
             indexing={
                 "include": ["*.py", "*.js"],
                 "exclude": ["*.log"],
+                "index_unknown_files": False,
                 "realtime_backend": realtime_backend_for_tests(),
             },
         )
@@ -582,7 +584,7 @@ class NewlyAddedClass:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]},
+            indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"], "index_unknown_files": False},
         )
         server = _TestMCPServer(config=config, args=fake_args)
 
@@ -703,7 +705,7 @@ class NewlyAddedClass:
                 "compaction_threshold": 0.0,
                 "compaction_min_size_mb": 0,
             },
-            indexing={"include": ["*.py"], "exclude": [], "force_reindex": True},
+            indexing={"include": ["*.py"], "exclude": [], "force_reindex": True, "index_unknown_files": False},
         )
 
         export_started = threading.Event()
@@ -831,6 +833,7 @@ class NewlyAddedClass:
                 "exclude": [],
                 "force_reindex": True,
                 "cleanup": False,
+                "index_unknown_files": False,
             },
         )
 
@@ -961,6 +964,7 @@ class NewlyAddedClass:
                 "exclude": [],
                 "force_reindex": True,
                 "cleanup": False,
+                "index_unknown_files": False,
             },
         )
 
@@ -1059,7 +1063,7 @@ class NewlyAddedClass:
                 "compaction_threshold": 0.0,
                 "compaction_min_size_mb": 0,
             },
-            indexing={"include": ["*.py"], "exclude": [], "force_reindex": True},
+            indexing={"include": ["*.py"], "exclude": [], "force_reindex": True, "index_unknown_files": False},
         )
 
         export_started = threading.Event()
@@ -1252,6 +1256,7 @@ class NewlyAddedClass:
                 "exclude": [],
                 "force_reindex": True,
                 "cleanup": False,
+                "index_unknown_files": False,
             },
         )
 

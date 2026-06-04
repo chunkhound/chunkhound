@@ -6,6 +6,7 @@ These tests are designed to fail and show what's actually broken.
 import asyncio
 import shutil
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,6 +53,7 @@ class TestRealtimeFailures:
             indexing={
                 "include": ["*.py", "*.js"],
                 "exclude": ["*.log"],
+                "index_unknown_files": False,
                 "realtime_backend": realtime_backend_for_tests(),
             },
         )
@@ -552,6 +554,10 @@ class TestRealtimeFailures:
             async def delete_file_completely_async(self, path: str) -> None:
                 raise CompactionError("busy", operation="delete")
 
+            @asynccontextmanager
+            async def exclusive_transaction_span(self):
+                yield
+
         service = RealtimeIndexingService(
             SimpleNamespace(provider=Provider()),
             SimpleNamespace(),
@@ -574,6 +580,10 @@ class TestRealtimeFailures:
         class Provider:
             async def delete_file_completely_async(self, path: str) -> None:
                 raise RuntimeError("delete failed")
+
+            @asynccontextmanager
+            async def exclusive_transaction_span(self):
+                yield
 
         service = RealtimeIndexingService(
             SimpleNamespace(provider=Provider()),
@@ -612,6 +622,10 @@ class TestRealtimeFailures:
             async def delete_file_completely_async(self, path: str) -> None:
                 raise CompactionError("busy", operation="delete")
 
+            @asynccontextmanager
+            async def exclusive_transaction_span(self):
+                yield
+
         service = RealtimeIndexingService(
             SimpleNamespace(provider=Provider()),
             SimpleNamespace(),
@@ -638,6 +652,10 @@ class TestRealtimeFailures:
                 self, scope_prefix: str | None
             ) -> list[str]:
                 raise CompactionError("busy", operation="search")
+
+            @asynccontextmanager
+            async def exclusive_transaction_span(self):
+                yield
 
         service = RealtimeIndexingService(
             SimpleNamespace(provider=Provider()),
@@ -670,6 +688,10 @@ class TestRealtimeFailures:
             ) -> list[str]:
                 raise RuntimeError("lookup failed")
 
+            @asynccontextmanager
+            async def exclusive_transaction_span(self):
+                yield
+
         service = RealtimeIndexingService(
             SimpleNamespace(provider=Provider()),
             SimpleNamespace(),
@@ -699,6 +721,10 @@ class TestRealtimeFailures:
             ) -> list[str]:
                 raise RuntimeError("lookup failed")
 
+            @asynccontextmanager
+            async def exclusive_transaction_span(self):
+                yield
+
         service = RealtimeIndexingService(
             SimpleNamespace(provider=Provider()),
             SimpleNamespace(),
@@ -726,6 +752,10 @@ class TestRealtimeFailures:
                 self, scope_prefix: str | None
             ) -> list[str]:
                 raise CompactionError("busy", operation="search")
+
+            @asynccontextmanager
+            async def exclusive_transaction_span(self):
+                yield
 
         service = RealtimeIndexingService(
             SimpleNamespace(provider=Provider()),
@@ -783,6 +813,10 @@ class TestRealtimeFailures:
 
             async def delete_file_completely_async(self, path: str) -> None:
                 deleted_calls.append(path)
+
+            @asynccontextmanager
+            async def exclusive_transaction_span(self):
+                yield
 
         service = RealtimeIndexingService(
             SimpleNamespace(provider=Provider()),

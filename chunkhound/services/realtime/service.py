@@ -196,6 +196,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         # are tracked separately from genuine failures so monitoring stays clean.
         self._compaction_deferred_files: set[str] = set()
         self._compaction_deferred_removals: set[str] = set()
+        self._drained_compaction_removals: set[str] = set()
         self._compaction_deferred_directories: set[str] = set()
         self._last_warning: str | None = None
         self._last_warning_at: str | None = None
@@ -1016,6 +1017,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
             removals_snapshot = set(self._compaction_deferred_removals)
             self._compaction_deferred_files.clear()
             self._compaction_deferred_removals.clear()
+            self._drained_compaction_removals.update(removals_snapshot)
             return files_snapshot, removals_snapshot
 
     async def restore_compaction_deferred_files(self, paths: set[str]) -> None:
@@ -1057,6 +1059,15 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         async with self._file_condition:
             self._compaction_deferred_files.discard(normalized)
             self._compaction_deferred_removals.discard(normalized)
+
+    def clear_post_compaction_state(self) -> None:
+        """Clear failed_files and the drained-removal shadow after a successful post-compaction reindex.
+
+        Clears both sets so that stale watcher events for paths replayed during
+        post-compaction do not land in failed_files after the shadow is gone.
+        """
+        self.failed_files.clear()
+        self._drained_compaction_removals.clear()
 
     async def clear_compaction_deferred_files(self) -> None:
         """Clear all compaction-deferred tracking sets without touching failed_files.
