@@ -6,6 +6,8 @@ use pyo3::prelude::*;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+// PyO3 0.22 macro expansion generates a PyErr→PyErr .into() that clippy flags as useless.
+#[allow(clippy::useless_conversion)]
 #[pyfunction]
 #[pyo3(signature = (root, extensions, skip_dirs=None, exclude_patterns=None, exact_names=None))]
 fn scan_files(
