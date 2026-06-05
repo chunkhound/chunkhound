@@ -1017,6 +1017,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
             removals_snapshot = set(self._compaction_deferred_removals)
             self._compaction_deferred_files.clear()
             self._compaction_deferred_removals.clear()
+            # Reset shadow set for this compaction cycle — previous cycle's paths
+            # have had enough time to drain from the watcher event queue.
+            self._drained_compaction_removals.clear()
             self._drained_compaction_removals.update(removals_snapshot)
             return files_snapshot, removals_snapshot
 
@@ -1061,13 +1064,13 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
             self._compaction_deferred_removals.discard(normalized)
 
     def clear_post_compaction_state(self) -> None:
-        """Clear failed_files and the drained-removal shadow after a successful post-compaction reindex.
+        """Clear failed_files after a successful post-compaction reindex.
 
-        Clears both sets so that stale watcher events for paths replayed during
-        post-compaction do not land in failed_files after the shadow is gone.
+        Does NOT clear _drained_compaction_removals — that shadow set must persist
+        until the next compaction begins so late-firing watchdog/inotify events for
+        paths already replayed don't land in failed_files.
         """
         self.failed_files.clear()
-        self._drained_compaction_removals.clear()
 
     async def clear_compaction_deferred_files(self) -> None:
         """Clear all compaction-deferred tracking sets without touching failed_files.
