@@ -4,28 +4,6 @@ This document describes how to set up a local reranking service for **testing** 
 
 **Note:** Production users should use providers with built-in reranking support like VoyageAI. This setup is only needed for testing and development.
 
-## Quick Start: Automatic Mock Server
-
-The easiest way to run tests with reranking is using the automatic mock server:
-
-```bash
-# Run all multi-hop semantic search tests with automatic mock server
-python tests/run_with_rerank_server.py
-
-# Run specific tests with automatic mock server
-python tests/run_with_rerank_server.py tests/test_embeddings.py -v
-
-# Run any pytest command with automatic mock server
-python tests/run_with_rerank_server.py -k rerank -v
-```
-
-The script will:
-1. Check if a reranking server is already running
-2. If not, start a lightweight mock server
-3. Run your tests
-4. Automatically clean up the server when done
-
-This mock server provides Cohere-compatible `/rerank` API for testing without heavy dependencies.
 
 ## Prerequisites
 
