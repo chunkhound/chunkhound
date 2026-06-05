@@ -464,6 +464,37 @@ class TestGenerateExplorationQueries:
         ]
 
     @pytest.mark.asyncio
+    async def test_uses_configured_query_generation_token_budget(
+        self, depth_service, fake_llm_provider
+    ):
+        """Should pass configured completion budget to query-generation LLM call."""
+        depth_service._config.depth_exploration_max_completion_tokens = (
+            12_345
+        )
+        fragments = [
+            {"chunk_id": "c1", "content": "def main(): pass", "file_path": "test.py"}
+        ]
+        captured: dict[str, int] = {}
+        original_complete = fake_llm_provider.complete_structured
+
+        async def capturing_complete(*args, **kwargs):
+            captured["max_completion_tokens"] = kwargs["max_completion_tokens"]
+            return {"queries": ["How does initialization work?"]}
+
+        fake_llm_provider.complete_structured = capturing_complete
+
+        try:
+            await depth_service._generate_exploration_queries(
+                root_query="How does the system work?",
+                fragments=fragments,
+                file_path="test.py",
+            )
+        finally:
+            fake_llm_provider.complete_structured = original_complete
+
+        assert captured["max_completion_tokens"] == 12_345
+
+    @pytest.mark.asyncio
     async def test_returns_empty_on_llm_failure(self, depth_service, fake_llm_provider):
         """Should return empty list on LLM failure."""
         # Make LLM raise exception
