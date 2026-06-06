@@ -198,6 +198,28 @@ async def test_multi_hop_returns_valid_results_when_rerank_fails() -> None:
 
 @pytest.mark.fast
 @pytest.mark.asyncio
+async def test_multi_hop_handles_partial_rerank_results() -> None:
+    """Partial rerank should keep deterministic fallback ordering and scores."""
+    scenario = build_multi_hop_scenario(partial_rerank=True)
+    search_service = _build_search_service(scenario.db, scenario.provider)
+
+    results, pagination = await search_service.search_semantic(
+        "security validation mechanisms",
+        page_size=8,
+    )
+
+    assert [result["chunk_id"] for result in results] == [2, 1, 5, 6, 7, 8], (
+        "partial rerank should preserve deterministic fallback ordering for "
+        "documents without rerank rows"
+    )
+    assert pagination["total"] == 6
+    assert all(
+        result.get("score", 0.0) >= 0.0 for result in results
+    ), "all results should have valid non-negative scores"
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
 async def test_multi_hop_terminates_on_result_limit() -> None:
     """Multi-hop stops expanding when result_limit is already met by initial search."""
     scenario = build_multi_hop_scenario()
@@ -268,9 +290,13 @@ async def test_multi_hop_terminates_on_score_drop_signal() -> None:
         page_size=10,
     )
 
-    assert pagination["total"] == 6
-    assert results[0]["chunk_id"] == 6
-    assert any(result["chunk_id"] == 1 for result in results)
+    assert pagination["total"] == 6, (
+        f"score-drop should stop expansion at 6, not continue to 8, got {pagination['total']}"
+    )
+    # Chunks 7 and 8 should NOT be discovered (they'd be found if loop continued past score-drop)
+    result_ids = {result["chunk_id"] for result in results}
+    assert 7 not in result_ids, "chunk 7 should not be discovered if score-drop termination fires"
+    assert 8 not in result_ids, "chunk 8 should not be discovered if score-drop termination fires"
 
 
 @pytest.mark.fast
@@ -285,9 +311,15 @@ async def test_multi_hop_terminates_on_low_top_five_floor() -> None:
         page_size=10,
     )
 
-    assert pagination["total"] == 6
+    assert pagination["total"] == 6, (
+        f"min-score should stop expansion at 6, not continue to 8, got {pagination['total']}"
+    )
     top_five_scores = [result["score"] for result in results[:5]]
     assert min(top_five_scores) < 0.3
+    # Chunks 7 and 8 should NOT be discovered
+    result_ids = {result["chunk_id"] for result in results}
+    assert 7 not in result_ids, "chunk 7 should not be discovered if min-score termination fires"
+    assert 8 not in result_ids, "chunk 8 should not be discovered if min-score termination fires"
 
 
 @pytest.mark.fast

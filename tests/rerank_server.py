@@ -1,176 +1,167 @@
 #!/usr/bin/env python3
-"""
-Mock reranking server for testing multi-hop semantic search.
-
-This lightweight server provides a /rerank endpoint compatible with both:
-- Cohere format (documents field, relevance_score)
-- TEI format (texts field, score)
-
-Auto-detects format from request for testing purposes without requiring
-heavy dependencies like vLLM or TEI servers.
-"""
+"""Deterministic mock rerank server for HTTP-level rerank contract tests."""
 
 import asyncio
-import json
 import sys
+from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
 from aiohttp import web
 from loguru import logger
 
-# Configure logger for testing
-logger.remove()  # Remove default handler
+logger.remove()
 logger.add(sys.stderr, level="INFO", format="{time:HH:mm:ss} | {level} | {message}")
 
 
-class MockRerankServer:
-    """Mock reranking server with Cohere and TEI compatible API using aiohttp."""
+@dataclass
+class MockRerankResult:
+    """One rerank row returned by the mock service."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8001):
+    index: int
+    score: float
+
+
+@dataclass
+class MockRerankScenario:
+    """Deterministic rerank scenario matched by exact query + document list."""
+
+    query: str
+    documents: list[str]
+    results: list[MockRerankResult]
+    response_format: str = "cohere"
+    name: str = "scenario"
+    status_code: int = 200
+    error: str | None = None
+
+
+class MockRerankServer:
+    """Small deterministic rerank server with explicit scenario-driven responses."""
+
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8001,
+        *,
+        scenarios: list[MockRerankScenario] | None = None,
+    ):
         self.host = host
         self.port = port
-        self.app = None
-        self.runner = None
-        self.site = None
+        self.scenarios = scenarios or []
+        self.requests: list[dict[str, Any]] = []
+        self.app: web.Application | None = None
+        self.runner: web.AppRunner | None = None
+        self.site: web.TCPSite | None = None
 
     async def health_handler(self, request: web.Request) -> web.Response:
-        """Handle health check requests."""
-        return web.json_response({"healthy": True, "service": "mock-rerank-server"})
+        """Return server identity so tests can verify the expected mock is running."""
+        return web.json_response(
+            {
+                "healthy": True,
+                "service": "mock-rerank-server",
+                "scenario_count": len(self.scenarios),
+            }
+        )
 
     async def rerank_handler(self, request: web.Request) -> web.Response:
-        """Handle reranking requests with Cohere and TEI compatible API.
-
-        Auto-detects format from request:
-        - Cohere: uses 'documents' field, requires 'model'
-        - TEI: uses 'texts' field, model optional
-        """
+        """Return the predeclared response for the matching scenario."""
         try:
-            # Parse request body
             body = await request.json()
+            self.requests.append(body)
 
-            # Extract parameters and detect format
+            request_format = "tei" if "texts" in body else "cohere"
+            documents = body.get("texts" if request_format == "tei" else "documents", [])
             query = body.get("query", "")
-            model = body.get("model", "mock-reranker")
-
-            # Detect format: TEI uses "texts", Cohere uses "documents"
-            is_tei = "texts" in body
-            documents = body.get("texts" if is_tei else "documents", [])
             top_n = body.get("top_n")
 
-            format_name = "TEI" if is_tei else "Cohere"
-            logger.debug(f"Detected {format_name} format request with {len(documents)} documents")
+            scenario = self._match_scenario(query=query, documents=documents)
+            if scenario is None:
+                return web.json_response(
+                    {
+                        "error": "No mock rerank scenario matched request",
+                        "query": query,
+                        "documents": documents,
+                        "request_format": request_format,
+                    },
+                    status=400,
+                )
 
-            # Calculate mock relevance scores
-            results = []
-            for idx, doc in enumerate(documents):
-                score = self._calculate_relevance(query, doc)
+            if scenario.error is not None:
+                return web.json_response(
+                    {"error": scenario.error, "error_type": "MockScenarioError"},
+                    status=scenario.status_code,
+                )
 
-                # Use format-appropriate field name
-                if is_tei:
-                    results.append({"index": idx, "score": score})
-                else:
-                    results.append({"index": idx, "relevance_score": score})
-
-            # Sort by score descending (works for both field names)
-            score_field = "score" if is_tei else "relevance_score"
-            results.sort(key=lambda x: x[score_field], reverse=True)
-
-            # Apply top_n if specified
+            results = list(scenario.results)
             if top_n is not None and top_n > 0:
                 results = results[:top_n]
 
-            logger.debug(
-                f"Reranked {len(documents)} documents, returning {len(results)} results ({format_name} format)"
-            )
+            payload = self._build_response_payload(scenario, results)
+            return web.json_response(payload, status=scenario.status_code)
 
-            return web.json_response({"results": results, "model": model, "meta": {"api_version": "v1"}})
+        except Exception as exc:
+            logger.error(f"Error in rerank handler: {exc}")
+            return web.json_response({"error": str(exc)}, status=400)
 
-        except Exception as e:
-            logger.error(f"Error in rerank handler: {e}")
-            return web.json_response({"error": str(e)}, status=400)
-    
-    def _calculate_relevance(self, query: str, document: str) -> float:
-        """
-        Calculate mock relevance score using simple heuristics.
-        
-        This is for testing only - uses basic text similarity.
-        """
-        if not query or not document:
-            return 0.0
-        
-        # Convert to lowercase for comparison
-        query_lower = query.lower()
-        doc_lower = document.lower()
-        
-        # Simple scoring heuristics
-        score = 0.0
-        
-        # 1. Exact query match
-        if query_lower in doc_lower:
-            score += 0.5
-        
-        # 2. Word overlap (Jaccard similarity)
-        query_words = set(query_lower.split())
-        doc_words = set(doc_lower.split())
-        
-        if query_words and doc_words:
-            intersection = query_words & doc_words
-            union = query_words | doc_words
-            if union:
-                jaccard = len(intersection) / len(union)
-                score += jaccard * 0.3
-        
-        # 3. Keyword matching for common programming terms
-        programming_keywords = {
-            "function", "class", "method", "def", "import", 
-            "return", "async", "await", "api", "endpoint"
-        }
-        
-        query_has_keywords = bool(query_words & programming_keywords)
-        doc_has_keywords = bool(doc_words & programming_keywords)
-        
-        if query_has_keywords and doc_has_keywords:
-            score += 0.2
-        
-        # Ensure score is between 0 and 1
-        return min(max(score, 0.0), 1.0)
-    
+    def _match_scenario(
+        self, *, query: str, documents: list[str]
+    ) -> MockRerankScenario | None:
+        for scenario in self.scenarios:
+            if scenario.query == query and scenario.documents == documents:
+                return scenario
+        return None
+
+    def _build_response_payload(
+        self, scenario: MockRerankScenario, results: list[MockRerankResult]
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        if scenario.response_format == "tei-bare":
+            return [
+                {"index": result.index, "score": result.score} for result in results
+            ]
+
+        if scenario.response_format == "tei":
+            return {
+                "results": [
+                    {"index": result.index, "score": result.score}
+                    for result in results
+                ]
+            }
+
+        if scenario.response_format == "cohere":
+            return {
+                "results": [
+                    {"index": result.index, "relevance_score": result.score}
+                    for result in results
+                ]
+            }
+
+        raise ValueError(f"Unsupported mock response format: {scenario.response_format}")
+
     async def start(self) -> None:
-        """Start the mock server."""
+        """Start the aiohttp server."""
         logger.info(f"Starting mock rerank server on {self.host}:{self.port}")
-
-        # Create aiohttp application
         self.app = web.Application()
         self.app.router.add_get("/health", self.health_handler)
         self.app.router.add_post("/rerank", self.rerank_handler)
-
-        # Start server
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
         self.site = web.TCPSite(self.runner, self.host, self.port)
         await self.site.start()
 
-        logger.info(f"Mock rerank server listening on http://{self.host}:{self.port}")
-        logger.info(f"Endpoints: /health, /rerank")
-
     async def stop(self) -> None:
-        """Stop the mock server."""
-        if self.site:
-            logger.info("Stopping mock rerank server")
+        """Stop the aiohttp server."""
+        if self.site is not None:
             await self.site.stop()
             self.site = None
-        if self.runner:
+        if self.runner is not None:
             await self.runner.cleanup()
             self.runner = None
         self.app = None
+        self.requests.clear()
 
     async def serve_forever(self) -> None:
         """Run the server until interrupted."""
-        if not self.runner:
+        if self.runner is None:
             await self.start()
-
-        # Keep running until stopped
         try:
             while True:
                 await asyncio.sleep(3600)
@@ -178,65 +169,20 @@ class MockRerankServer:
             await self.stop()
 
 
-async def test_server():
-    """Test the mock server with a sample request."""
-    # Start server
-    server = MockRerankServer()
-    await server.start()
-    
-    try:
-        # Give server time to start
-        await asyncio.sleep(0.1)
-        
-        # Test health endpoint
-        async with httpx.AsyncClient() as client:
-            response = await client.get("http://localhost:8001/health")
-            print(f"Health check: {response.status_code} - {response.json()}")
-            
-            # Test rerank endpoint
-            rerank_request = {
-                "model": "test-model",
-                "query": "python function definition",
-                "documents": [
-                    "def calculate_sum(a, b): return a + b",
-                    "import numpy as np",
-                    "class Calculator: pass",
-                    "function add(x, y) { return x + y; }"
-                ]
-            }
-            
-            response = await client.post(
-                "http://localhost:8001/rerank",
-                json=rerank_request
-            )
-            print(f"Rerank response: {response.status_code}")
-            print(json.dumps(response.json(), indent=2))
-            
-    finally:
-        await server.stop()
-
-
-def main():
-    """Run the mock rerank server."""
+def main() -> None:
+    """Run an empty deterministic server for manual debugging."""
     import argparse
-    
-    parser = argparse.ArgumentParser(description="Mock reranking server for testing")
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8001, help="Port to bind to")
-    parser.add_argument("--test", action="store_true", help="Run test mode")
-    
+
+    parser = argparse.ArgumentParser(description="Deterministic mock rerank server")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8001)
     args = parser.parse_args()
-    
-    if args.test:
-        # Run test mode
-        asyncio.run(test_server())
-    else:
-        # Run server
-        server = MockRerankServer(host=args.host, port=args.port)
-        try:
-            asyncio.run(server.serve_forever())
-        except KeyboardInterrupt:
-            logger.info("Server interrupted by user")
+
+    server = MockRerankServer(host=args.host, port=args.port)
+    try:
+        asyncio.run(server.serve_forever())
+    except KeyboardInterrupt:
+        logger.info("Server interrupted by user")
 
 
 if __name__ == "__main__":

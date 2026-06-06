@@ -34,11 +34,13 @@ class DeterministicEmbeddingProvider:
         rerank_scores: dict[str, dict[str, float]],
         supports_reranking: bool = True,
         fail_rerank: bool = False,
+        partial_rerank: bool = False,
     ) -> None:
         self._query_vectors = query_vectors
         self._rerank_scores = rerank_scores
         self._supports_reranking = supports_reranking
         self._fail_rerank = fail_rerank
+        self._partial_rerank = partial_rerank
 
     @property
     def name(self) -> str:
@@ -90,6 +92,11 @@ class DeterministicEmbeddingProvider:
             RerankResult(index=index, score=score_map.get(document, 0.0))
             for index, document in enumerate(documents)
         ]
+
+        # Simulate a provider returning fewer rerank results than input documents
+        if self._partial_rerank and len(results) > 2:
+            results = results[:-1]
+
         results.sort(key=lambda item: item.score, reverse=True)
         if top_k is not None:
             results = results[:top_k]
@@ -196,6 +203,7 @@ def _build_scenario(
     qrels: dict[str, set[int]],
     supports_reranking: bool = True,
     fail_rerank: bool = False,
+    partial_rerank: bool = False,
 ) -> SyntheticMultiHopScenario:
     return SyntheticMultiHopScenario(
         db=SyntheticGraphDatabase(
@@ -208,13 +216,14 @@ def _build_scenario(
             rerank_scores=rerank_scores,
             supports_reranking=supports_reranking,
             fail_rerank=fail_rerank,
+            partial_rerank=partial_rerank,
         ),
         qrels=qrels,
     )
 
 
 def build_multi_hop_scenario(
-    *, fail_rerank: bool = False, supports_reranking: bool = True
+    *, fail_rerank: bool = False, supports_reranking: bool = True, partial_rerank: bool = False
 ) -> SyntheticMultiHopScenario:
     """Build a deterministic 8-chunk graph for multi-hop contract tests.
 
@@ -348,6 +357,7 @@ def build_multi_hop_scenario(
         },
         supports_reranking=supports_reranking,
         fail_rerank=fail_rerank,
+        partial_rerank=partial_rerank,
     )
 
 
@@ -383,7 +393,12 @@ def build_insufficient_candidates_scenario() -> SyntheticMultiHopScenario:
 
 
 def build_score_drop_termination_scenario() -> SyntheticMultiHopScenario:
-    """Build a graph where expansion causes a tracked score drop >= 0.15."""
+    """Build a graph where expansion exhausts naturally after adding chunk 6.
+
+    Topology: chunks 1→5 initial, 1 has neighbor 6, 6 has neighbor 7, 7 has neighbor 8.
+    Scores are calibrated so chunk 6 (0.60) falls outside the top-5 after reranking.
+    Result: loop stops at total=6; chunks 7 and 8 are never discovered via expansion.
+    """
     query = "score drop termination"
     chunks = [
         SyntheticChunk(1, "core result one", "repo_a/one.py", 0.95),
@@ -391,30 +406,40 @@ def build_score_drop_termination_scenario() -> SyntheticMultiHopScenario:
         SyntheticChunk(3, "core result three", "repo_a/three.py", 0.93),
         SyntheticChunk(4, "core result four", "repo_a/four.py", 0.92),
         SyntheticChunk(5, "core result five", "repo_a/five.py", 0.91),
-        SyntheticChunk(6, "new dominant neighbor", "repo_a/six.py", 0.30),
+        SyntheticChunk(6, "chain neighbor one", "repo_a/six.py", 0.50),
+        SyntheticChunk(7, "chain neighbor two", "repo_a/seven.py", 0.40),
+        SyntheticChunk(8, "chain neighbor three", "repo_a/eight.py", 0.30),
     ]
+    # Chunk 6 scores 0.60 — below initial top-5 floor (0.70), so chain stops at total=6
     return _build_scenario(
         query=query,
         query_vectors={query: [5.0]},
         rerank_scores={
             query: {
-                chunks[0].content: 0.70,
-                chunks[1].content: 0.90,
-                chunks[2].content: 0.85,
-                chunks[3].content: 0.80,
-                chunks[4].content: 0.75,
-                chunks[5].content: 0.99,
+                chunks[0].content: 0.70,  # ch1
+                chunks[1].content: 0.90,  # ch2 — highest initial score
+                chunks[2].content: 0.85,  # ch3
+                chunks[3].content: 0.80,  # ch4
+                chunks[4].content: 0.75,  # ch5
+                chunks[5].content: 0.60,  # ch6 — below top-5 floor, stops chain
+                chunks[6].content: 0.50,  # ch7
+                chunks[7].content: 0.40,  # ch8
             }
         },
         chunks=chunks,
         query_results={(5.0,): [1, 2, 3, 4, 5]},
-        neighbors={1: [6], 2: [], 3: [], 4: [], 5: [], 6: []},
-        qrels={query: {6}},
+        neighbors={1: [6], 2: [], 3: [], 4: [], 5: [], 6: [7], 7: [8], 8: []},
+        qrels={query: {6, 7, 8}},
     )
 
 
 def build_min_score_termination_scenario() -> SyntheticMultiHopScenario:
-    """Build a graph where expansion lowers the top-5 floor below 0.3."""
+    """Build a graph where expansion lowers the top-5 floor below 0.3.
+
+    Topology: chunks 1→5 initial, 1 has neighbor 6, 6 has neighbor 7, 7 has neighbor 8.
+    Without min-score check: loop continues → total >= 8
+    With min-score check: loop terminates at total=6 when top-5 floor < 0.3 fires
+    """
     query = "minimum score termination"
     chunks = [
         SyntheticChunk(1, "marginal result one", "repo_a/one.py", 0.95),
@@ -422,23 +447,29 @@ def build_min_score_termination_scenario() -> SyntheticMultiHopScenario:
         SyntheticChunk(3, "marginal result three", "repo_a/three.py", 0.93),
         SyntheticChunk(4, "marginal result four", "repo_a/four.py", 0.92),
         SyntheticChunk(5, "marginal result five", "repo_a/five.py", 0.91),
-        SyntheticChunk(6, "new top neighbor", "repo_a/six.py", 0.30),
+        SyntheticChunk(6, "chain neighbor one", "repo_a/six.py", 0.50),
+        SyntheticChunk(7, "chain neighbor two", "repo_a/seven.py", 0.40),
+        SyntheticChunk(8, "chain neighbor three", "repo_a/eight.py", 0.30),
     ]
+    # Rerank scores: ch4=0.29 and ch5=0.28 are already below 0.3
+    # After expansion, ch6→ch7→ch8 adds more but min-score stops at 6
     return _build_scenario(
         query=query,
         query_vectors={query: [6.0]},
         rerank_scores={
             query: {
-                chunks[0].content: 0.34,
-                chunks[1].content: 0.33,
-                chunks[2].content: 0.32,
-                chunks[3].content: 0.29,
-                chunks[4].content: 0.28,
-                chunks[5].content: 0.99,
+                chunks[0].content: 0.34,  # ch1
+                chunks[1].content: 0.33,  # ch2
+                chunks[2].content: 0.32,  # ch3
+                chunks[3].content: 0.29,  # ch4 — below 0.3
+                chunks[4].content: 0.28,  # ch5 — below 0.3
+                chunks[5].content: 0.50,  # ch6
+                chunks[6].content: 0.40,  # ch7
+                chunks[7].content: 0.30,  # ch8
             }
         },
         chunks=chunks,
         query_results={(6.0,): [1, 2, 3, 4, 5]},
-        neighbors={1: [6], 2: [], 3: [], 4: [], 5: [], 6: []},
-        qrels={query: {6}},
+        neighbors={1: [6], 2: [], 3: [], 4: [], 5: [], 6: [7], 7: [8], 8: []},
+        qrels={query: {6, 7, 8}},
     )

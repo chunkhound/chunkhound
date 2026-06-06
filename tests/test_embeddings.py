@@ -1,28 +1,26 @@
-"""Test script to verify embedding system functionality without making API calls."""
+"""Deterministic embedding and rerank provider contract tests."""
 
 import asyncio
-import os
 import sys
-from pathlib import Path
-
-# Add parent directory to path to import chunkhound modules
-sys.path.insert(0, str(Path(__file__).parent))
-
 from pathlib import Path
 
 import pytest
 
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
+from tests.fixtures.rerank_server_manager import RerankServerManager
+from tests.rerank_server import MockRerankResult, MockRerankScenario
+
+# Add parent directory to path to import chunkhound modules.
+sys.path.insert(0, str(Path(__file__).parent))
 
 
-async def test_official_openai_validation():
-    """Test official OpenAI API key validation logic."""
-    # Should work: API key provided
+@pytest.mark.asyncio
+async def test_official_openai_validation() -> None:
+    """Official OpenAI must require an API key."""
     provider = OpenAIEmbeddingProvider(api_key="sk-fake-key")
     assert provider.api_key == "sk-fake-key"
 
-    # Should fail: No API key for official OpenAI
     provider = OpenAIEmbeddingProvider()
     with pytest.raises(
         ValueError, match="OpenAI API key is required for official OpenAI API"
@@ -30,31 +28,28 @@ async def test_official_openai_validation():
         await provider._ensure_client()
 
 
-async def test_custom_endpoint_validation():
-    """Test custom endpoint mode allows optional API key."""
-    # Should work: Custom endpoint, no API key
+@pytest.mark.asyncio
+async def test_custom_endpoint_validation() -> None:
+    """Custom endpoints may omit an API key."""
     provider = OpenAIEmbeddingProvider(
         base_url="http://localhost:11434", model="nomic-embed-text"
     )
     assert provider.base_url == "http://localhost:11434"
 
-    # Should work: Custom endpoint + API key
     provider = OpenAIEmbeddingProvider(
         base_url="http://localhost:1234", api_key="custom-key"
     )
     assert provider.api_key == "custom-key"
 
 
-def test_url_detection_logic():
-    """Test the logic that determines official vs custom endpoints."""
-    # Official OpenAI URLs (should require API key)
+def test_url_detection_logic() -> None:
+    """Only the canonical OpenAI host should be treated as official."""
     official_urls = [
         None,
         "https://api.openai.com",
         "https://api.openai.com/v1",
         "https://api.openai.com/v1/",
     ]
-
     for url in official_urls:
         provider = OpenAIEmbeddingProvider(base_url=url)
         is_official = not provider._base_url or (
@@ -64,16 +59,14 @@ def test_url_detection_logic():
                 or provider._base_url.startswith("https://api.openai.com/")
             )
         )
-        assert is_official, f"URL {url} should be detected as official OpenAI"
+        assert is_official
 
-    # Custom URLs (should NOT require API key)
     custom_urls = [
         "http://localhost:11434",
         "https://api.example.com/v1/embeddings",
         "https://api.openai.com.evil.com/v1",
         "http://api.openai.com/v1",
     ]
-
     for url in custom_urls:
         provider = OpenAIEmbeddingProvider(base_url=url)
         is_official = not provider._base_url or (
@@ -83,285 +76,346 @@ def test_url_detection_logic():
                 or provider._base_url.startswith("https://api.openai.com/")
             )
         )
-        assert not is_official, f"URL {url} should be detected as custom endpoint"
+        assert not is_official
 
 
-async def test_custom_endpoint_mock_behavior():
-    """Test custom endpoint behavior without real server."""
+@pytest.mark.asyncio
+async def test_custom_endpoint_mock_behavior() -> None:
+    """Client setup for custom endpoints must not fail on missing API key."""
     provider = OpenAIEmbeddingProvider(
         base_url="http://localhost:11434", model="nomic-embed-text"
     )
 
     try:
         await provider._ensure_client()
-    except Exception as e:
-        assert "API key" not in str(e), (
-            f"Should not require API key for custom endpoint: {e}"
-        )
+    except Exception as exc:  # pragma: no cover - network is irrelevant here
+        assert "API key" not in str(exc)
 
 
-async def test_ollama_with_reranking_configuration():
-    """Test OpenAI provider configured for Ollama with dual-endpoint reranking."""
-    # Test configuration using OpenAI provider for Ollama embeddings and separate reranking endpoint
-    provider = OpenAIEmbeddingProvider(
-        base_url="http://localhost:11434/v1",  # Ollama's OpenAI-compatible endpoint
-        model="nomic-embed-text",
-        api_key="dummy-key-for-custom-endpoint",  # Custom endpoints don't validate API keys
-        rerank_model="test-reranker",
-        rerank_url="http://localhost:8001/rerank",  # Separate rerank service
-    )
-
-    # Verify configuration
-    assert provider.base_url == "http://localhost:11434/v1"
-    assert provider.model == "nomic-embed-text"
-    assert provider._rerank_model == "test-reranker"
-    assert provider._rerank_url == "http://localhost:8001/rerank"
-
-    # Test that reranking is supported when rerank_model is configured
-    assert provider.supports_reranking() == True
-
-    # Test reranking call (will fail due to no actual service, but tests structure)
-    try:
-        await provider.rerank("test query", ["doc1", "doc2"])
-    except Exception as e:
-        # Expected to fail since we don't have actual rerank service running
-        # But should not be an API key error
-        assert "API key" not in str(e), (
-            f"Should not require API key error for reranking: {e}"
-        )
-        # Should be a connection error since the rerank service isn't running
-        assert any(
-            keyword in str(e).lower()
-            for keyword in ["connection", "network", "reranking failed"]
-        ), f"Expected connection error for rerank service, got: {e}"
-
-
-@pytest.mark.skipif(
-    not (
-        # Check if Ollama is running
-        os.system("curl -s http://localhost:11434/api/tags > /dev/null 2>&1") == 0
-        and
-        # Check if rerank service is running
-        os.system("curl -s http://localhost:8001/health > /dev/null 2>&1") == 0
-    ),
-    reason="Ollama and/or rerank service not running",
-)
-async def test_ollama_with_live_reranking():
-    """Test OpenAI provider configured for Ollama with actual reranking service.
-
-    Note: This test requires a real reranking service (e.g., vLLM) and may not work
-    with the simple mock server due to HTTP parsing limitations in the mock server.
-    """
-    # Check if we're using the mock server (which has HTTP parsing issues with httpx)
-    import httpx
-
-    try:
-        # Use synchronous check since we can't use async in the test setup
-        with httpx.Client(timeout=1.0) as client:
-            response = client.get("http://localhost:8001/health")
-            if response.json().get("service") == "mock-rerank-server":
-                # Mock server has issues with httpx requests - skip this test
-                pytest.skip(
-                    "Mock server has HTTP parsing issues with httpx - use vLLM for this test"
-                )
-    except Exception:
-        # If we can't check, continue with test
-        pass
-
-    # This test uses OpenAI provider configured for Ollama embeddings and a separate service for reranking
-    # Embeddings come from Ollama (port 11434)
-    # Reranking goes to separate service (port 8001)
-    provider = OpenAIEmbeddingProvider(
-        base_url="http://localhost:11434/v1",  # Ollama's OpenAI-compatible endpoint
-        model="nomic-embed-text",
-        api_key="dummy-key",  # Ollama doesn't require real API key
-        rerank_model="test-model",
-        rerank_url="http://localhost:8001/rerank",  # Absolute URL to rerank service
-    )
-
-    # Test that reranking works end-to-end
-    test_docs = [
+@pytest.mark.asyncio
+async def test_ollama_style_rerank_configuration_uses_mock_server() -> None:
+    """OpenAI provider should rerank against a separate deterministic HTTP service."""
+    query = "python function definition"
+    documents = [
         "def calculate_sum(a, b): return a + b",
         "import numpy as np",
         "class Calculator: pass",
         "function add(x, y) { return x + y; }",
     ]
-
-    results = await provider.rerank("python function definition", test_docs, top_k=3)
-
-    # Verify results structure
-    assert len(results) <= 3, "Should respect top_k limit"
-    assert all(hasattr(r, "index") and hasattr(r, "score") for r in results), (
-        "Results should have index and score"
-    )
-    assert all(0 <= r.index < len(test_docs) for r in results), (
-        "Indices should be valid"
-    )
-    assert all(isinstance(r.score, float) for r in results), "Scores should be floats"
-
-    # Verify we got meaningful results (ranking may vary with embeddings)
-    assert len(results) > 0, "Should return results"
-
-    print("✅ Live reranking test passed:")
-    print(f"   • Reranked {len(test_docs)} documents")
-    print(
-        f"   • Top result: '{test_docs[results[0].index][:50]}...' (score: {results[0].score:.3f})"
-    )
-    print(f"   • All results: {[(r.index, f'{r.score:.3f}') for r in results]}")
-    print("   • Document mapping:")
-    for i, doc in enumerate(test_docs):
-        print(f"     [{i}]: {doc}")
-
-    # Check that scores are in descending order
-    for i in range(len(results) - 1):
-        assert results[i].score >= results[i + 1].score, (
-            "Results should be ordered by score"
-        )
-
-
-async def test_tei_reranking_format_with_model():
-    """Test TEI reranking format with optional model field."""
-    # TEI format: uses "texts" instead of "documents", model is optional
-    provider = OpenAIEmbeddingProvider(
-        base_url="http://localhost:11434/v1",
-        model="nomic-embed-text",
-        api_key="dummy-key",
-        rerank_model="BAAI/bge-reranker-base",  # Optional for TEI
-        rerank_url="http://localhost:8001/rerank",
-        rerank_format="tei",  # Explicit TEI format
+    scenario = MockRerankScenario(
+        name="cohere-provider-contract",
+        query=query,
+        documents=documents,
+        results=[
+            MockRerankResult(index=0, score=0.97),
+            MockRerankResult(index=2, score=0.66),
+            MockRerankResult(index=3, score=0.61),
+            MockRerankResult(index=1, score=0.11),
+        ],
+        response_format="cohere",
     )
 
-    # Verify configuration
-    assert provider._rerank_format == "tei"
-    assert provider._rerank_model == "BAAI/bge-reranker-base"
-    assert provider.supports_reranking() == True
-
-    # Test reranking call (will fail due to no actual service, but tests structure)
-    try:
-        await provider.rerank("test query", ["doc1", "doc2"])
-    except Exception as e:
-        # Expected to fail since we don't have actual rerank service running
-        # Should be a connection error
-        assert any(
-            keyword in str(e).lower() for keyword in ["connection", "network"]
-        ), f"Expected connection error, got: {e}"
-
-    print("✅ TEI format with model test passed")
-
-
-async def test_tei_reranking_format_without_model():
-    """Test TEI reranking format without model field (model set at deployment)."""
-    # TEI format: model is set at deployment time with --model-id flag
-    provider = OpenAIEmbeddingProvider(
-        base_url="http://localhost:11434/v1",
-        model="nomic-embed-text",
-        api_key="dummy-key",
-        rerank_url="http://localhost:8001/rerank",
-        rerank_format="tei",  # Explicit TEI format, no model needed
-    )
-
-    # Verify configuration
-    assert provider._rerank_format == "tei"
-    assert provider._rerank_model is None  # No model in config
-    assert provider.supports_reranking() == True  # Still supports reranking
-
-    # Test reranking call
-    try:
-        await provider.rerank("test query", ["doc1", "doc2"])
-    except Exception as e:
-        # Expected to fail since we don't have actual rerank service running
-        assert any(
-            keyword in str(e).lower() for keyword in ["connection", "network"]
-        ), f"Expected connection error, got: {e}"
-
-    print("✅ TEI format without model test passed")
-
-
-async def test_tei_bare_array_response_format():
-    """Test that bare array TEI responses are correctly normalized.
-
-    Real TEI servers return: [{"index": 0, "score": 0.95}, ...]
-    This test verifies the normalization to: {"results": [...]}
-    """
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    provider = OpenAIEmbeddingProvider(
-        api_key="test-key",
-        base_url="http://localhost:8080",
-        model="text-embedding-3-small",
-        rerank_url="http://localhost:8080/rerank",
-        rerank_format="tei",  # Explicit TEI format
-    )
-
-    # Initialize the OpenAI client BEFORE patching
-    await provider._ensure_client()
-
-    # Mock httpx.AsyncClient's post method to return bare array (real TEI format)
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = [
-        {"index": 0, "score": 0.95},
-        {"index": 1, "score": 0.42},
-    ]
-    mock_response.raise_for_status = MagicMock()
-
-    # Create a mock client that returns the mock response
-    mock_client = AsyncMock()
-    mock_client.post = AsyncMock(return_value=mock_response)
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=None)
-
-    # Patch httpx.AsyncClient in the provider module
-    with patch(
-        "chunkhound.providers.embeddings.openai_provider.httpx.AsyncClient",
-        return_value=mock_client,
-    ):
-        results = await provider.rerank("test query", ["doc1", "doc2"])
-
-        # Verify results were parsed correctly
-        assert len(results) == 2
-        assert results[0].index == 0
-        assert results[0].score == 0.95
-        assert results[1].index == 1
-        assert results[1].score == 0.42
-
-    print("✅ TEI bare array response format test passed")
-
-
-async def test_auto_format_detection():
-    """Test auto-detection of reranking format from response."""
-    # Auto mode: should detect format from response
-    provider = OpenAIEmbeddingProvider(
-        base_url="http://localhost:11434/v1",
-        model="nomic-embed-text",
-        api_key="dummy-key",
-        rerank_url="http://localhost:8001/rerank",
-        rerank_format="auto",  # Auto-detect
-    )
-
-    # Verify configuration
-    assert provider._rerank_format == "auto"
-    assert provider._detected_rerank_format is None  # Not detected yet
-
-    print("✅ Auto-detection configuration test passed")
-
-
-async def test_cohere_format_requires_model():
-    """Test that Cohere format requires rerank_model (fail-fast validation)."""
-    # Cohere format requires model - now validated at init time (fail-fast)
-    with pytest.raises(ValueError, match="rerank_model is required.*cohere"):
+    async with RerankServerManager(scenarios=[scenario]) as manager:
         provider = OpenAIEmbeddingProvider(
             base_url="http://localhost:11434/v1",
             model="nomic-embed-text",
-            rerank_url="http://localhost:8001/rerank",
-            rerank_format="cohere",  # Cohere requires model - fails at init
+            api_key="dummy-key-for-custom-endpoint",
+            rerank_model="test-reranker",
+            rerank_url=f"{manager.base_url}/rerank",
         )
 
-    print("✅ Cohere format model requirement test passed")
+        results = await provider.rerank(query, documents, top_k=3)
+
+        assert [(result.index, result.score) for result in results] == [
+            (0, 0.97),
+            (2, 0.66),
+            (3, 0.61),
+        ]
+        assert manager.requests == [
+            {
+                "model": "test-reranker",
+                "query": query,
+                "documents": documents,
+                "top_n": 3,
+            }
+        ]
 
 
-def test_rerank_format_propagates_through_config():
-    """Verify rerank_format propagates from config to provider."""
+@pytest.mark.asyncio
+async def test_tei_reranking_format_with_model_uses_texts_payload() -> None:
+    """TEI format should send texts and parse score fields."""
+    # This contract test uses the real provider + mock HTTP server so request shape
+    # and response parsing stay covered together across refactors.
+    query = "python programming"
+    documents = [
+        "Python is a programming language",
+        "JavaScript is used for web development",
+        "def calculate_sum(a, b): return a + b",
+    ]
+    scenario = MockRerankScenario(
+        name="tei-with-model",
+        query=query,
+        documents=documents,
+        results=[
+            MockRerankResult(index=2, score=0.91),
+            MockRerankResult(index=0, score=0.74),
+            MockRerankResult(index=1, score=0.09),
+        ],
+        response_format="tei",
+    )
+
+    async with RerankServerManager(scenarios=[scenario]) as manager:
+        provider = OpenAIEmbeddingProvider(
+            base_url="http://localhost:11434/v1",
+            model="nomic-embed-text",
+            api_key="dummy-key",
+            rerank_model="BAAI/bge-reranker-base",
+            rerank_url=f"{manager.base_url}/rerank",
+            rerank_format="tei",
+        )
+
+        results = await provider.rerank(query, documents, top_k=2)
+
+        assert [(result.index, result.score) for result in results] == [
+            (2, 0.91),
+            (0, 0.74),
+        ]
+        assert manager.requests == [{"query": query, "texts": documents}]
+
+
+@pytest.mark.asyncio
+async def test_tei_reranking_format_without_model_is_supported() -> None:
+    """TEI deployments may fix the model server-side and omit it from config."""
+    query = "server side model"
+    documents = ["doc1", "doc2"]
+    scenario = MockRerankScenario(
+        name="tei-without-model",
+        query=query,
+        documents=documents,
+        results=[MockRerankResult(index=1, score=0.88)],
+        response_format="tei",
+    )
+
+    async with RerankServerManager(scenarios=[scenario]) as manager:
+        provider = OpenAIEmbeddingProvider(
+            base_url="http://localhost:11434/v1",
+            model="nomic-embed-text",
+            api_key="dummy-key",
+            rerank_url=f"{manager.base_url}/rerank",
+            rerank_format="tei",
+        )
+
+        assert provider.supports_reranking() is True
+        results = await provider.rerank(query, documents)
+
+        assert [(result.index, result.score) for result in results] == [(1, 0.88)]
+        assert manager.requests == [{"query": query, "texts": documents}]
+
+
+@pytest.mark.asyncio
+async def test_tei_bare_array_response_format() -> None:
+    """Bare-array TEI responses should normalize into ChunkHound rerank results."""
+    query = "bare format"
+    documents = ["doc1", "doc2"]
+    scenario = MockRerankScenario(
+        name="tei-bare-array",
+        query=query,
+        documents=documents,
+        results=[
+            MockRerankResult(index=0, score=0.95),
+            MockRerankResult(index=1, score=0.42),
+        ],
+        response_format="tei-bare",
+    )
+
+    async with RerankServerManager(scenarios=[scenario]) as manager:
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            base_url="http://localhost:8080",
+            model="text-embedding-3-small",
+            rerank_url=f"{manager.base_url}/rerank",
+            rerank_format="tei",
+        )
+
+        results = await provider.rerank(query, documents)
+
+        assert [(result.index, result.score) for result in results] == [
+            (0, 0.95),
+            (1, 0.42),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_auto_format_detection_caches_format() -> None:
+    """Auto mode should detect response shape once and reuse that format."""
+    first_documents = ["doc1", "doc2", "doc3"]
+    second_documents = ["docA", "docB", "docC"]
+    scenarios = [
+        MockRerankScenario(
+            name="auto-detect-first",
+            query="query one",
+            documents=first_documents,
+            results=[MockRerankResult(index=1, score=0.8)],
+            response_format="tei",
+        ),
+        MockRerankScenario(
+            name="auto-detect-second",
+            query="query two",
+            documents=second_documents,
+            results=[MockRerankResult(index=2, score=0.7)],
+            response_format="tei",
+        ),
+    ]
+
+    async with RerankServerManager(scenarios=scenarios) as manager:
+        provider = OpenAIEmbeddingProvider(
+            base_url="http://localhost:11434/v1",
+            model="nomic-embed-text",
+            api_key="test-key",
+            rerank_url=f"{manager.base_url}/rerank",
+            rerank_format="auto",
+        )
+
+        assert provider._detected_rerank_format is None
+        first = await provider.rerank("query one", first_documents)
+        assert [(result.index, result.score) for result in first] == [(1, 0.8)]
+        assert provider._detected_rerank_format == "tei"
+
+        second = await provider.rerank("query two", second_documents)
+        assert [(result.index, result.score) for result in second] == [(2, 0.7)]
+        assert provider._detected_rerank_format == "tei"
+        assert manager.requests == [
+            {"query": "query one", "texts": first_documents},
+            {"query": "query two", "texts": second_documents},
+        ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_rerank_calls_share_auto_detected_format_without_races() -> (
+    None
+):
+    """Concurrent auto-mode calls should all succeed with one stable detected format."""
+    documents = ["doc1", "doc2", "doc3"]
+    scenarios = [
+        MockRerankScenario(
+            name=f"concurrent-{index}",
+            query=f"query {index}",
+            documents=documents,
+            results=[MockRerankResult(index=index % 3, score=0.9 - (index * 0.01))],
+            response_format="tei",
+        )
+        for index in range(10)
+    ]
+
+    async with RerankServerManager(scenarios=scenarios) as manager:
+        provider = OpenAIEmbeddingProvider(
+            base_url="http://localhost:11434/v1",
+            model="nomic-embed-text",
+            api_key="test-key",
+            rerank_url=f"{manager.base_url}/rerank",
+            rerank_format="auto",
+        )
+
+        results_list = await asyncio.gather(
+            *[provider.rerank(f"query {index}", documents) for index in range(10)]
+        )
+
+        assert [results[0].index for results in results_list] == [
+            index % 3 for index in range(10)
+        ]
+        assert provider._detected_rerank_format == "tei"
+        assert len(manager.requests) == 10
+        assert {request["query"] for request in manager.requests} == {
+            f"query {index}" for index in range(10)
+        }
+        assert all(request["texts"] == documents for request in manager.requests)
+
+
+@pytest.mark.asyncio
+async def test_malformed_rerank_response() -> None:
+    """Malformed responses should fail loudly or skip invalid rows."""
+    provider = OpenAIEmbeddingProvider(
+        base_url="http://localhost:11434/v1",
+        model="nomic-embed-text",
+        api_key="test-key",
+        rerank_format="tei",
+    )
+
+    with pytest.raises(ValueError, match="missing 'results' field"):
+        await provider._parse_rerank_response({"status": "ok"}, "tei", num_documents=3)
+
+    with pytest.raises(ValueError, match="'results' must be a list"):
+        await provider._parse_rerank_response(
+            {"results": "not a list"}, "tei", num_documents=3
+        )
+
+    with pytest.raises(ValueError, match="must have 'index' field"):
+        await provider._parse_rerank_response(
+            {"results": [{"score": 0.5}]}, "tei", num_documents=3
+        )
+
+    with pytest.raises(
+        ValueError, match="must have 'relevance_score' or 'score' field"
+    ):
+        await provider._parse_rerank_response(
+            {"results": [{"index": 0}]}, "tei", num_documents=3
+        )
+
+    assert (
+        await provider._parse_rerank_response({"results": []}, "tei", num_documents=3)
+        == []
+    )
+
+    mixed_results = {
+        "results": [
+            {"index": 0, "score": 0.9},
+            {"index": "invalid", "score": 0.8},
+            {"index": 2, "score": "invalid"},
+            {"index": 3, "score": 0.7},
+        ]
+    }
+    parsed = await provider._parse_rerank_response(
+        mixed_results, "tei", num_documents=4
+    )
+    assert [(result.index, result.score) for result in parsed] == [(0, 0.9), (3, 0.7)]
+
+    out_of_bounds_results = {
+        "results": [
+            {"index": 0, "score": 0.9},
+            {"index": 5, "score": 0.8},
+            {"index": 2, "score": 0.7},
+        ]
+    }
+    parsed = await provider._parse_rerank_response(
+        out_of_bounds_results, "tei", num_documents=3
+    )
+    assert [(result.index, result.score) for result in parsed] == [(0, 0.9), (2, 0.7)]
+
+    negative_index_results = {
+        "results": [
+            {"index": -1, "score": 0.9},
+            {"index": 0, "score": 0.8},
+        ]
+    }
+    parsed = await provider._parse_rerank_response(
+        negative_index_results, "tei", num_documents=3
+    )
+    assert [(result.index, result.score) for result in parsed] == [(0, 0.8)]
+
+
+def test_cohere_format_requires_model() -> None:
+    """Cohere format should fail fast without rerank_model."""
+    with pytest.raises(ValueError, match="rerank_model is required.*cohere"):
+        OpenAIEmbeddingProvider(
+            base_url="http://localhost:11434/v1",
+            model="nomic-embed-text",
+            rerank_url="http://localhost:8001/rerank",
+            rerank_format="cohere",
+        )
+
+
+def test_rerank_format_propagates_through_config() -> None:
+    """rerank_format should flow from config into the provider instance."""
     from chunkhound.core.config.embedding_config import EmbeddingConfig
     from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 
@@ -374,15 +428,11 @@ def test_rerank_format_propagates_through_config():
     )
 
     provider = EmbeddingProviderFactory.create_provider(config)
-    assert provider._rerank_format == "tei", "Format should propagate from config"
-
-    print("✅ Config propagation test passed")
+    assert provider._rerank_format == "tei"
 
 
-def test_cohere_format_validation_requires_model():
-    """Test that Cohere format validation correctly requires model."""
-    import pytest
-
+def test_cohere_format_validation_requires_model() -> None:
+    """EmbeddingConfig should enforce the Cohere model requirement."""
     from chunkhound.core.config.embedding_config import EmbeddingConfig
 
     with pytest.raises(ValueError, match="rerank_model is required.*cohere"):
@@ -390,480 +440,93 @@ def test_cohere_format_validation_requires_model():
             provider="openai",
             base_url="http://localhost:8001",
             model="text-embedding-3-small",
-            rerank_format="cohere",  # Missing rerank_model
+            rerank_format="cohere",
         )
 
-    print("✅ Cohere validation test passed")
 
-
-def test_tei_format_validation_without_model():
-    """Test that TEI format works without model (set at deployment)."""
+def test_tei_format_validation_without_model() -> None:
+    """TEI format should validate without rerank_model."""
     from chunkhound.core.config.embedding_config import EmbeddingConfig
 
-    # Should not raise
     config = EmbeddingConfig(
         provider="openai",
         base_url="http://localhost:8001",
         model="text-embedding-3-small",
         rerank_url="/rerank",
-        rerank_format="tei",  # No model needed
+        rerank_format="tei",
     )
     assert config.rerank_format == "tei"
 
-    print("✅ TEI validation test passed")
 
-
-def test_supports_reranking_with_incomplete_cohere_config():
-    """Test that incomplete Cohere config fails at init (fail-fast validation)."""
-    # With fail-fast validation, incomplete Cohere config now raises at init time
+def test_supports_reranking_with_incomplete_cohere_config() -> None:
+    """Fail-fast validation should reject incomplete Cohere rerank config."""
     with pytest.raises(ValueError, match="rerank_model is required.*cohere"):
-        provider = OpenAIEmbeddingProvider(
+        OpenAIEmbeddingProvider(
             base_url="http://localhost:8001",
             model="text-embedding-3-small",
             rerank_url="/rerank",
             rerank_format="cohere",
-            # Missing rerank_model - fails at init now
         )
 
-    print("✅ Incomplete Cohere config validation test passed")
 
-
-def test_supports_reranking_with_tei_config():
-    """Test that supports_reranking returns True for TEI without model."""
+def test_supports_reranking_with_tei_config() -> None:
+    """TEI config only needs a rerank URL."""
     provider = OpenAIEmbeddingProvider(
         base_url="http://localhost:8001",
         model="text-embedding-3-small",
         rerank_url="/rerank",
         rerank_format="tei",
-        # No model needed for TEI
     )
+    assert provider.supports_reranking()
 
-    assert provider.supports_reranking(), "Should return True when TEI format has URL"
 
-    print("✅ supports_reranking() TEI test passed")
-
-
-def test_embedding_manager():
-    """Test embedding manager functionality."""
-    print("\nTesting embedding manager...")
-
-    try:
-        manager = EmbeddingManager()
-
-        # Create a mock provider
-        provider = OpenAIEmbeddingProvider(
-            api_key="sk-test-key-for-testing", model="text-embedding-3-small"
-        )
-
-        # Register provider
-        manager.register_provider(provider, set_default=True)
-
-        # Test provider retrieval
-        retrieved = manager.get_provider()
-        assert retrieved.name == "openai"
-        assert retrieved.model == "text-embedding-3-small"
-
-        # Test provider listing
-        providers = manager.list_providers()
-        assert "openai" in providers
-
-        print("✅ Embedding manager tests passed:")
-        print(f"   • Registered providers: {providers}")
-        print(f"   • Default provider: {retrieved.name}/{retrieved.model}")
-
-    except Exception as e:
-        print(f"❌ Embedding manager test failed: {e}")
-        assert False, f"Embedding manager test failed: {e}"
-
-
-async def test_mock_embedding_generation():
-    """Test embedding generation with mock data (no API call)."""
-    print("\nTesting mock embedding generation...")
-
-    try:
-        # This will fail with API call, but we can test the structure
-        provider = OpenAIEmbeddingProvider(
-            api_key="sk-test-key-for-testing", model="text-embedding-3-small"
-        )
-
-        # Test input validation
-        empty_result = await provider.embed([])
-        assert empty_result == []
-        print("✅ Empty input handling works")
-
-        # Test with actual text (this will fail due to fake API key, but that's expected)
-        try:
-            result = await provider.embed(["def hello(): pass"])
-            print("❌ Unexpected success - should have failed with fake API key")
-        except Exception as e:
-            print(f"✅ Expected API failure with fake key: {type(e).__name__}")
-
-        return True
-
-    except Exception as e:
-        print(f"❌ Mock embedding test failed: {e}")
-        return False
-
-
-def test_provider_integration():
-    """Test integration of all providers with EmbeddingManager."""
-    print("\nTesting provider integration with EmbeddingManager...")
-
-    try:
-        manager = EmbeddingManager()
-
-        # Register OpenAI provider
-        openai_provider = OpenAIEmbeddingProvider(
-            api_key="sk-test-key", model="text-embedding-3-small"
-        )
-        manager.register_provider(openai_provider)
-
-        # Test provider listing
-        providers = manager.list_providers()
-        expected_providers = {"openai"}
-        assert expected_providers.issubset(set(providers))
-
-        # Test specific provider retrieval
-        openai_retrieved = manager.get_provider("openai")
-        assert openai_retrieved.name == "openai"
-
-        print("✅ Provider integration successful:")
-        print(f"   • Registered providers: {providers}")
-        print("   • Can retrieve by name: ✓")
-
-    except Exception as e:
-        print(f"❌ Provider integration test failed: {e}")
-        assert False, f"Provider integration failed: {e}"
-
-
-def test_environment_variable_handling():
-    """Test environment variable handling."""
-    print("\nTesting environment variable handling...")
-
-    # Save original env vars
-    original_key = os.getenv("OPENAI_API_KEY")
-    original_url = os.getenv("OPENAI_BASE_URL")
-
-    try:
-        # Test with env vars
-        os.environ["OPENAI_API_KEY"] = "sk-test-env-key"
-        os.environ["OPENAI_BASE_URL"] = "https://test.example.com"
-
-        provider = OpenAIEmbeddingProvider()
-        print("✅ Environment variable loading works")
-
-        # Test missing API key
-        del os.environ["OPENAI_API_KEY"]
-        try:
-            provider = OpenAIEmbeddingProvider()
-            print("❌ Should have failed with missing API key")
-        except ValueError:
-            print("✅ Correctly handles missing API key")
-
-    except Exception as e:
-        print(f"❌ Environment test failed: {e}")
-
-    finally:
-        # Restore original env vars
-        if original_key:
-            os.environ["OPENAI_API_KEY"] = original_key
-        elif "OPENAI_API_KEY" in os.environ:
-            del os.environ["OPENAI_API_KEY"]
-
-        if original_url:
-            os.environ["OPENAI_BASE_URL"] = original_url
-        elif "OPENAI_BASE_URL" in os.environ:
-            del os.environ["OPENAI_BASE_URL"]
-
-
-async def test_tei_format_end_to_end_with_mock_server():
-    """Test TEI format with actual mock server for end-to-end verification.
-
-    This test requires the mock rerank server running on localhost:8001.
-    Run: uv run python tests/rerank_server.py
-    """
-    import subprocess
-    import time
-
-    # Start mock server in background
-    server_process = None
-    try:
-        server_process = subprocess.Popen(
-            [sys.executable, "tests/rerank_server.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        # Wait for server to start
-        time.sleep(2)
-
-        # Create provider with TEI format
-        provider = OpenAIEmbeddingProvider(
-            base_url="http://localhost:11434/v1",
-            model="nomic-embed-text",
-            api_key="test-key",
-            rerank_url="http://localhost:8001/rerank",
-            rerank_format="tei",  # Explicit TEI format
-        )
-
-        # Make actual request to mock server
-        test_docs = [
-            "Python is a programming language",
-            "JavaScript is used for web development",
-            "def calculate_sum(a, b): return a + b",
-        ]
-
-        results = await provider.rerank("python programming", test_docs, top_k=2)
-
-        # Check if mock server returned empty results (HTTP parsing issue)
-        if len(results) == 0:
-            pytest.skip(
-                "Mock server HTTP parsing issue - returned empty results (use vLLM/TEI for full testing)"
-            )
-
-        # Verify response structure
-        assert len(results) > 0, "Should return results"
-        assert len(results) <= 2, "Should respect top_k limit"
-        assert all(hasattr(r, "index") and hasattr(r, "score") for r in results)
-        assert all(0 <= r.index < len(test_docs) for r in results)
-        assert all(isinstance(r.score, float) for r in results)
-
-        # Verify scores are descending
-        for i in range(len(results) - 1):
-            assert results[i].score >= results[i + 1].score
-
-        print("✅ TEI end-to-end test passed")
-        print(f"   • Reranked {len(test_docs)} documents")
-        print(f"   • Got {len(results)} results")
-        print(f"   • Top score: {results[0].score:.3f}")
-
-    finally:
-        if server_process:
-            server_process.terminate()
-            server_process.wait(timeout=5)
-
-
-async def test_auto_detection_caches_format():
-    """Verify format detection caches result for subsequent calls."""
-    import subprocess
-    import time
-
-    # Start mock server
-    server_process = None
-    try:
-        server_process = subprocess.Popen(
-            [sys.executable, "tests/rerank_server.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        time.sleep(2)
-
-        # Create provider with auto mode
-        provider = OpenAIEmbeddingProvider(
-            base_url="http://localhost:11434/v1",
-            model="nomic-embed-text",
-            api_key="test-key",
-            rerank_url="http://localhost:8001/rerank",
-            rerank_format="auto",
-        )
-
-        # Initial state: no format detected
-        assert provider._detected_rerank_format is None
-
-        # First request - should detect format
-        test_docs = ["doc1", "doc2", "doc3"]
-        results1 = await provider.rerank("query", test_docs)
-
-        # Check if mock server returned empty results (HTTP parsing issue)
-        if len(results1) == 0:
-            pytest.skip(
-                "Mock server HTTP parsing issue - returned empty results (use vLLM/TEI for full testing)"
-            )
-
-        # After first request: format should be detected and cached
-        detected_format = provider._detected_rerank_format
-        assert detected_format in ["cohere", "tei"], (
-            f"Should detect format, got: {detected_format}"
-        )
-        print(f"✅ Auto-detected format: {detected_format}")
-
-        # Second request - should use cached format
-        results2 = await provider.rerank("another query", test_docs)
-
-        # Format should still be the same (cached)
-        assert provider._detected_rerank_format == detected_format
-        assert len(results2) > 0
-
-        print("✅ Format caching test passed")
-        print(f"   • Detected format: {detected_format}")
-        print("   • Format persisted across requests")
-
-    finally:
-        if server_process:
-            server_process.terminate()
-            server_process.wait(timeout=5)
-
-
-async def test_concurrent_rerank_calls():
-    """Verify concurrent rerank calls don't race on format detection."""
-    import subprocess
-    import time
-
-    # Start mock server
-    server_process = None
-    try:
-        server_process = subprocess.Popen(
-            [sys.executable, "tests/rerank_server.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        time.sleep(2)
-
-        # Create provider with auto mode
-        provider = OpenAIEmbeddingProvider(
-            base_url="http://localhost:11434/v1",
-            model="nomic-embed-text",
-            api_key="test-key",
-            rerank_url="http://localhost:8001/rerank",
-            rerank_format="auto",
-        )
-
-        test_docs = ["doc1", "doc2", "doc3"]
-
-        # Make multiple concurrent requests
-        tasks = [provider.rerank(f"query {i}", test_docs) for i in range(10)]
-
-        results_list = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # All should succeed
-        for i, results in enumerate(results_list):
-            if isinstance(results, Exception):
-                print(f"Request {i} failed: {results}")
-                raise results
-            assert len(results) > 0, f"Request {i} should return results"
-
-        # Format should be detected
-        assert provider._detected_rerank_format is not None
-
-        print("✅ Concurrent rerank test passed")
-        print(f"   • Ran {len(tasks)} concurrent requests")
-        print("   • All requests succeeded")
-        print("   • No race conditions detected")
-
-    finally:
-        if server_process:
-            server_process.terminate()
-            server_process.wait(timeout=5)
-
-
-async def test_malformed_rerank_response():
-    """Test handling of malformed rerank responses."""
+def test_embedding_manager() -> None:
+    """EmbeddingManager should register and return providers."""
+    manager = EmbeddingManager()
     provider = OpenAIEmbeddingProvider(
-        base_url="http://localhost:11434/v1",
-        model="nomic-embed-text",
-        api_key="test-key",
-        rerank_format="tei",
+        api_key="sk-test-key-for-testing", model="text-embedding-3-small"
     )
 
-    # Test 1: Missing 'results' field
-    with pytest.raises(ValueError, match="missing 'results' field"):
-        await provider._parse_rerank_response({"status": "ok"}, "tei", num_documents=3)
+    manager.register_provider(provider, set_default=True)
 
-    # Test 2: 'results' is not a list
-    with pytest.raises(ValueError, match="'results' must be a list"):
-        await provider._parse_rerank_response(
-            {"results": "not a list"}, "tei", num_documents=3
-        )
+    retrieved = manager.get_provider()
+    assert retrieved.name == "openai"
+    assert retrieved.model == "text-embedding-3-small"
+    assert "openai" in manager.list_providers()
 
-    # Test 3: Result missing 'index' field
-    malformed_results = {
-        "results": [{"score": 0.5}]  # Missing 'index'
-    }
-    with pytest.raises(ValueError, match="must have 'index' field"):
-        await provider._parse_rerank_response(malformed_results, "tei", num_documents=3)
 
-    # Test 4: Result missing score field
-    malformed_results = {
-        "results": [{"index": 0}]  # Missing 'score'
-    }
-    with pytest.raises(
-        ValueError, match="must have 'relevance_score' or 'score' field"
-    ):
-        await provider._parse_rerank_response(malformed_results, "tei", num_documents=3)
-
-    # Test 5: Empty results list (should succeed with empty list)
-    empty_results = {"results": []}
-    parsed = await provider._parse_rerank_response(
-        empty_results, "tei", num_documents=3
+@pytest.mark.asyncio
+async def test_mock_embedding_generation() -> None:
+    """embed([]) should short-circuit before any network call."""
+    provider = OpenAIEmbeddingProvider(
+        api_key="sk-test-key-for-testing", model="text-embedding-3-small"
     )
-    assert parsed == []
+    assert await provider.embed([]) == []
 
-    # Test 6: Results with invalid data types (should skip bad entries)
-    mixed_results = {
-        "results": [
-            {"index": 0, "score": 0.9},
-            {"index": "invalid", "score": 0.8},  # Bad index
-            {"index": 2, "score": "invalid"},  # Bad score
-            {"index": 3, "score": 0.7},
-        ]
-    }
-    parsed = await provider._parse_rerank_response(
-        mixed_results, "tei", num_documents=4
+
+def test_provider_integration() -> None:
+    """EmbeddingManager should expose registered providers by name."""
+    manager = EmbeddingManager()
+    provider = OpenAIEmbeddingProvider(
+        api_key="sk-test-key", model="text-embedding-3-small"
     )
-    assert len(parsed) == 2  # Should skip 2 invalid entries
-    assert parsed[0].index == 0
-    assert parsed[1].index == 3
+    manager.register_provider(provider)
 
-    # Test 7: Out-of-bounds indices (should skip)
-    out_of_bounds_results = {
-        "results": [
-            {"index": 0, "score": 0.9},  # Valid
-            {"index": 5, "score": 0.8},  # Out of bounds (only 3 docs)
-            {"index": 2, "score": 0.7},  # Valid
-        ]
-    }
-    parsed = await provider._parse_rerank_response(
-        out_of_bounds_results, "tei", num_documents=3
-    )
-    assert len(parsed) == 2  # Should skip out-of-bounds entry
-    assert parsed[0].index == 0
-    assert parsed[1].index == 2
-
-    # Test 8: Negative indices (should skip)
-    negative_index_results = {
-        "results": [
-            {"index": -1, "score": 0.9},  # Negative index
-            {"index": 0, "score": 0.8},  # Valid
-        ]
-    }
-    parsed = await provider._parse_rerank_response(
-        negative_index_results, "tei", num_documents=3
-    )
-    assert len(parsed) == 1  # Should skip negative index
-    assert parsed[0].index == 0
-
-    print("✅ Malformed response handling test passed")
-    print("   • Missing fields detected")
-    print("   • Invalid data types handled")
-    print("   • Empty results handled")
-    print("   • Out-of-bounds indices rejected")
-    print("   • Negative indices rejected")
+    assert {"openai"}.issubset(set(manager.list_providers()))
+    assert manager.get_provider("openai").name == "openai"
 
 
-def test_relative_rerank_url_requires_base_url():
-    """Verify relative rerank_url requires base_url."""
+def test_relative_rerank_url_requires_base_url() -> None:
+    """Relative rerank URLs need base_url; absolute ones do not."""
     from chunkhound.core.config.embedding_config import EmbeddingConfig
 
-    # Test 1: Relative URL without base_url should fail
     with pytest.raises(ValueError, match="requires base_url or explicit rerank_url"):
-        config = EmbeddingConfig(
+        EmbeddingConfig(
             provider="openai",
             model="text-embedding-3-small",
             rerank_format="tei",
-            # rerank_url defaults to "/rerank" (relative)
-            # No base_url provided
         )
 
-    # Test 2: Relative URL with base_url should succeed
     config = EmbeddingConfig(
         provider="openai",
         model="text-embedding-3-small",
@@ -873,7 +536,6 @@ def test_relative_rerank_url_requires_base_url():
     assert config.rerank_url == "/rerank"
     assert config.base_url == "http://localhost:11434/v1"
 
-    # Test 3: Absolute URL without base_url should succeed
     config = EmbeddingConfig(
         provider="openai",
         model="text-embedding-3-small",
@@ -882,30 +544,24 @@ def test_relative_rerank_url_requires_base_url():
     )
     assert config.rerank_url == "http://localhost:8080/rerank"
 
-    print("✅ Relative URL validation test passed")
-    print("   • Relative URL requires base_url")
-    print("   • Absolute URL works without base_url")
-
 
 @pytest.mark.parametrize(
     "rerank_format, rerank_model",
-    [
-        ("cohere", "rerank-v3"),
-        ("auto", "rerank-v3"),
-        (None, "some-model"),
-    ],
+    [("cohere", "rerank-v3"), ("auto", "rerank-v3"), (None, "some-model")],
     ids=["cohere", "auto", "default-None"],
 )
-def test_rerank_model_with_base_url_auto_sets_rerank_url(rerank_format, rerank_model):
-    """rerank_model + base_url should auto-set rerank_url."""
+def test_rerank_model_with_base_url_auto_sets_rerank_url(
+    rerank_format: str | None, rerank_model: str
+) -> None:
+    """rerank_model + base_url should imply the default rerank path."""
     from chunkhound.core.config.embedding_config import EmbeddingConfig
 
-    kwargs = dict(
-        provider="openai",
-        model="text-embedding-3-small",
-        base_url="http://localhost:11434/v1",
-        rerank_model=rerank_model,
-    )
+    kwargs = {
+        "provider": "openai",
+        "model": "text-embedding-3-small",
+        "base_url": "http://localhost:11434/v1",
+        "rerank_model": rerank_model,
+    }
     if rerank_format is not None:
         kwargs["rerank_format"] = rerank_format
 
