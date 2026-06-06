@@ -192,7 +192,7 @@ def test_embedding_config_rerank_env_vars(monkeypatch, clean_environment):
     Test that reranking environment variables are loaded correctly by load_from_env().
 
     This is a regression test for the bug where CHUNKHOUND_EMBEDDING__RERANK_*
-    env vars were not loaded despite being documented in tests/RERANKING_TEST_SETUP.md.
+    env vars were not loaded despite being part of the supported test/runtime config surface.
     """
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_MODEL", "test-rerank-model")
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_URL", "http://localhost:8080/rerank")
