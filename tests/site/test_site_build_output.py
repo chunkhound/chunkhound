@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
 VERSION_FILE = ROOT / "chunkhound" / "_version.py"
 VERSION_RESOLUTION_FAILURE = "Unable to resolve ChunkHound version for docs build"
+NUMERIC_LANGUAGE_CLAIM = re.compile(r"\b\d+\+?\s+languages\b", re.IGNORECASE)
 
 
 def _clean_dev_suffix(version: str) -> str:
@@ -147,6 +148,12 @@ def _meta_tag_content(html: str, attr_name: str, attr_value: str) -> str | None:
     return None
 
 
+def _title_content(html: str) -> str:
+    match = re.search(r"<title>(.*?)</title>", html, flags=re.DOTALL)
+    assert match is not None, "Missing <title> tag"
+    return match.group(1)
+
+
 def test_site_build_outputs_platform_aware_onboarding() -> None:
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
     getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(
@@ -258,9 +265,56 @@ def test_version_helper_contract(scenario: str, expected_version: str | None) ->
         assert VERSION_RESOLUTION_FAILURE in combined_output
 
 
+def test_homepage_and_readme_use_qualified_locality_and_language_claims() -> None:
+    homepage = (DIST / "index.html").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    combined = f"{homepage}\n{readme}"
+
+    assert "Local-first" in homepage
+    assert "Local-first" in readme
+    assert "Dozens of languages & file types" in homepage
+    assert "Dozens of languages & file types" in readme
+    assert "can run fully local" in homepage
+    assert "Zero code egress" in homepage
+    assert "with local providers" in homepage
+    assert "local-provider option" in homepage
+    assert "Semantic search requires an embedding provider" in readme
+    assert "research requires an LLM provider and an embedding provider with reranking support" in readme
+    assert "zero-code-egress" in readme
+    assert "- [Docs](https://chunkhound.ai/docs/getting-started/)" in readme
+
+    for absolute_claim in (
+        "100% local",
+        "no code leaving your network",
+        "Your code never leaves",
+        "0 bytes sent",
+    ):
+        assert absolute_claim not in combined
+    assert NUMERIC_LANGUAGE_CLAIM.search(combined) is None
+
+
 def test_built_site_has_og_meta_tags() -> None:
     """Built homepage includes correct OG and Twitter Card meta tags."""
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
+    expected_title = "ChunkHound — Deep code research for AI agents"
+    expected_description = (
+        "ChunkHound helps AI agents deeply understand codebases with multi-hop "
+        "retrieval, cross-file architecture research, and cited answers grounded "
+        "in code. Local-first. MIT licensed. Free forever."
+    )
+
+    assert _title_content(homepage) == expected_title
+    assert _meta_tag_content(homepage, "name", "description") == expected_description
+    assert _meta_tag_content(homepage, "property", "og:title") == expected_title
+    assert (
+        _meta_tag_content(homepage, "property", "og:description")
+        == expected_description
+    )
+    assert _meta_tag_content(homepage, "name", "twitter:title") == expected_title
+    assert (
+        _meta_tag_content(homepage, "name", "twitter:description")
+        == expected_description
+    )
 
     # Meta tag checks must ignore serializer attribute order.
     og_image = _meta_tag_content(homepage, "property", "og:image")
@@ -287,6 +341,11 @@ def test_built_site_has_og_meta_tags() -> None:
     tw_card = _meta_tag_content(homepage, "name", "twitter:card")
     assert tw_card is not None, "Missing twitter:card meta tag"
     assert tw_card == "summary_large_image"
+
+
+def test_readme_branding_assets_exist() -> None:
+    assert (ROOT / "site" / "public" / "wordmark-text.svg").exists()
+    assert (ROOT / "site" / "public" / "wordmark-text-dark.svg").exists()
 
 
 def test_built_site_has_changelog_page() -> None:
