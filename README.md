@@ -1,98 +1,146 @@
 <p align="center">
   <a href="https://chunkhound.ai">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="site/public/wordmark-centered-dark.svg">
-      <img src="site/public/wordmark-centered.svg" alt="ChunkHound" width="400">
+      <source media="(prefers-color-scheme: dark)" srcset="site/public/wordmark-text-dark.svg">
+      <img src="site/public/wordmark-text.svg" alt="ChunkHound" width="300">
     </picture>
   </a>
 </p>
 
 <p align="center">
-  <strong>Local-first codebase intelligence</strong>
+  <strong>Your entire codebase, deeply understood.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/chunkhound/chunkhound/actions/workflows/ci.yml"><img src="https://github.com/chunkhound/chunkhound/actions/workflows/ci.yml/badge.svg" alt="Tests"></a>
+  Code research, semantic search, and auto-generated docs for AI agents.
+</p>
+
+<p align="center">
+  Local-first · Dozens of languages & file types · MIT licensed · Free forever
+</p>
+
+<p align="center">
+  <a href="https://github.com/chunkhound/chunkhound/actions/workflows/ci.yml"><img src="https://github.com/chunkhound/chunkhound/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/chunkhound/"><img src="https://img.shields.io/pypi/v/chunkhound.svg" alt="PyPI"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/100%25%20AI-Generated-ff69b4.svg" alt="100% AI Generated">
   <a href="https://discord.gg/BAepHEXXnX"><img src="https://img.shields.io/badge/Discord-Join_Community-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
-Your AI assistant searches code but doesn't understand it. ChunkHound researches your codebase—extracting architecture, patterns, and institutional knowledge at any scale. Integrates via [MCP](https://spec.modelcontextprotocol.io/).
+<p align="center">
+  <a href="https://chunkhound.ai/docs/getting-started/">Getting Started</a>
+  ·
+  <a href="https://chunkhound.ai/docs/configuration/">Configuration</a>
+  ·
+  <a href="https://chunkhound.ai/docs/cli-reference/">CLI Reference</a>
+</p>
 
-## Features
-
-- **[cAST Algorithm](https://arxiv.org/pdf/2506.15655)** - Research-backed semantic code chunking
-- **Multi-Hop Semantic Search** - Discovers interconnected code relationships beyond direct matches
-- **Semantic search** - Natural language queries like "find authentication code"
-- **Regex search** - Pattern matching without API keys
-- **Local-first** - Your code stays on your machine
-- **32 languages** with structured parsing
-  - **Programming** (via [Tree-sitter](https://tree-sitter.github.io/tree-sitter/)): Python, JavaScript, TypeScript, JSX, TSX, Java, Kotlin, Groovy, C, C++, C#, Go, Rust, Haskell, Swift, Bash, MATLAB, Makefile, Objective-C, PHP, Dart, Lua, Vue, Svelte, Zig
-  - **Configuration**: JSON, YAML, TOML, HCL, Markdown
-  - **Text-based** (custom parsers): Text files, PDF
-- **[MCP integration](https://spec.modelcontextprotocol.io/)** - Works with Claude, VS Code, Cursor, Windsurf, Zed, etc
-- **Real-time indexing** - Automatic file watching, smart diffs, seamless branch switching, and explicit backend selection (`watchdog`, `watchman`, `polling`)
-
-## Documentation
-
-**Visit [chunkhound.ai](https://chunkhound.ai) for documentation:**
-- [Configuration Guide](https://chunkhound.ai/docs/configuration/)
+---
 
 ## Requirements
 
-- Python 3.10+
-- [uv package manager](https://docs.astral.sh/uv/)
-- API keys (optional - regex search works without any keys)
-  - **Embeddings**: [VoyageAI](https://dash.voyageai.com/) (recommended) | [OpenAI](https://platform.openai.com/api-keys) | [Local with Ollama](https://ollama.ai/)
-  - **LLM (for Code Research)**: Claude Code CLI or Codex CLI (no API key needed) | [Anthropic](https://console.anthropic.com/) | [OpenAI](https://platform.openai.com/api-keys) | [Grok (xAI)](https://console.x.ai)
+- **Python 3.10+**
+- **uv** — install via `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- **API keys** (optional — regex search works without any):
+  - Embeddings: [VoyageAI](https://dash.voyageai.com/) (recommended) | [OpenAI](https://platform.openai.com/api-keys) | [Ollama](https://ollama.ai/) (local)
+  - LLM: Claude Code CLI or Codex CLI (no key needed) | [Anthropic](https://console.anthropic.com/) | [OpenAI](https://platform.openai.com/api-keys) | [Grok](https://console.x.ai)
 
-## Installation
+---
+
+## AI writes code blind
+
+Agents can search code, but that is not the same as understanding how a system works.
+
+They miss that auth flows through three files, that the utility they need already exists, or that the data model changed in a way that makes the obvious implementation wrong.
+
+ChunkHound gives agents grounded, cross-file understanding of a codebase: where concepts live, how files relate, and which architectural paths matter before code gets written.
+
+## One semantic index, three lenses
+
+ChunkHound parses your code and builds one semantic index. That index powers three different workflows:
+
+- **Search** — drill into exact code with semantic and regex search
+- **Research** — explain how the system works with cited reports that trace behavior across files
+- **Autodoc** — turn that understanding into generated documentation from the code itself
+
+Not three separate tools. Three lenses into one index.
+
+## Why this helps
+
+When an agent lacks context, it tends to loop:
+
+1. search broadly
+2. read partial results
+3. guess
+4. generate
+5. backtrack
+6. search again
+
+That costs time, burns tokens, and pollutes context with failed attempts.
+
+ChunkHound shifts that work earlier. Build the index once, research before editing, then use grounded search and cited answers on top of it. In practice that usually means:
+
+- fewer dead-end searches
+- fewer retries
+- less context pollution
+- better first-pass answers
+
+## What it can do
+
+- cited code research that explains how a system works across files
+- multi-hop semantic search across architectural relationships
+- hybrid semantic + regex workflows for discovery plus exact tracing
+- gap-filling and query expansion during research
+- auto-generated docs from the indexed codebase
+- local-first indexing and search
+- Python, JavaScript, TypeScript, Java, Go, Rust, C/C++, and more via Tree-sitter
+
+## Install
 
 ```bash
-# Install uv if needed
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install ChunkHound
 uv tool install chunkhound
 ```
 
-## Quick Start
+## Try it
 
-1. Create `.chunkhound.json` in project root
+```bash
+chunkhound index .
+chunkhound research "How does authentication work?"
+```
+
+Index once, ask a real architecture question, and get a grounded answer with citations. Semantic search requires an embedding provider; research requires an LLM provider and an embedding provider with reranking support. Choose local providers for zero-code-egress setups.
+
+For a full configurable setup, create `.chunkhound.json` in your project root:
+
 ```json
 {
-  "embedding": {
-    "provider": "voyageai",
-    "api_key": "your-voyageai-key"
-  },
-  "llm": {
-    "provider": "claude-code-cli"
-  }
+  "embedding": { "provider": "voyageai", "api_key": "your-key" },
+  "llm": { "provider": "claude-code-cli" }
 }
 ```
-> **Note:** Use `"codex-cli"` instead if you prefer Codex. Both work equally well and require no API key.
-2. Index your codebase
-```bash
-chunkhound index
-```
 
-**For configuration, IDE setup, and advanced usage, see the [documentation](https://chunkhound.ai).**
+For editor integration, all provider options, and advanced configuration:
 
-## Why ChunkHound?
+**→ [chunkhound.ai/docs/getting-started](https://chunkhound.ai/docs/getting-started/)**
 
-| Approach | Capability | Scale | Maintenance |
-|----------|------------|-------|-------------|
-| Keyword Search | Exact matching | Fast | None |
-| Traditional RAG | Semantic search | Scales | Re-index files |
-| Knowledge Graphs | Relationship queries | Expensive | Continuous sync |
-| **ChunkHound** | Semantic + Regex + Code Research | Automatic | Incremental + realtime |
+## Good fit
 
-**Ideal for:**
-- Large monorepos with cross-team dependencies
-- Security-sensitive codebases (local-only, no cloud)
-- Multi-language projects needing consistent search
-- Offline/air-gapped development environments
+ChunkHound is especially useful for:
+
+- large repos and monorepos
+- multi-language codebases
+- legacy systems
+- local-only or security-sensitive environments
+- agent workflows that need architecture understanding, not just text matches
+
+## Community
+
+ChunkHound is MIT licensed, open source, and community built.
+
+- [Docs](https://chunkhound.ai/docs/getting-started/)
+- [Contributing](https://chunkhound.ai/docs/contributing/)
+- [Discord](https://discord.gg/BAepHEXXnX)
+- [Issues](https://github.com/chunkhound/chunkhound/issues)
 
 ## License
 
