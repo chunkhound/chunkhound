@@ -48,7 +48,7 @@ from chunkhound.utils.windows_constants import IS_WINDOWS  # noqa: E402
 from chunkhound.version import __version__  # noqa: E402
 
 from .base import MCPServerBase  # noqa: E402
-from .common import handle_tool_call  # noqa: E402
+from .common import MCP_PROTOCOL_VERSION, handle_tool_call  # noqa: E402
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
 logging.disable(logging.CRITICAL)
@@ -160,6 +160,27 @@ class StdioMCPServer(MCPServerBase):
             tool_name: str, arguments: dict[str, Any]
         ) -> list[types.TextContent]:
             """Universal tool handler that routes to the unified handler."""
+            token = None
+            session = None
+            try:
+                ctx = self.server.request_context
+                token = ctx.meta.progressToken if ctx.meta else None
+                session = ctx.session
+            except LookupError:
+                pass
+
+            async def emit(progress: int, total: int | None, message: str) -> None:
+                if token is not None and session is not None:
+                    try:
+                        await session.send_progress_notification(
+                            progress_token=token,
+                            progress=progress,
+                            total=total,
+                            message=message,
+                        )
+                    except Exception:
+                        pass  # session closed mid-call; progress is best-effort
+
             return await handle_tool_call(
                 tool_name=tool_name,
                 arguments=arguments,
@@ -170,6 +191,9 @@ class StdioMCPServer(MCPServerBase):
                 scan_progress=self._scan_progress,
                 llm_manager=self.llm_manager,
                 config=self.config,
+                progress_reporter=(
+                    emit if token is not None and session is not None else None
+                ),
             )
 
         self._register_list_tools()
@@ -274,7 +298,7 @@ class StdioMCPServer(MCPServerBase):
                     "jsonrpc": "2.0",
                     "id": request_id,  # Match client's request ID per JSON-RPC spec
                     "result": {
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
                         "serverInfo": {
                             "name": "ChunkHound Code Search",
                             "version": __version__,

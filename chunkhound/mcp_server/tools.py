@@ -14,7 +14,7 @@ import shutil
 import tempfile
 import types
 import urllib.error
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict, Union, cast, get_args, get_origin
@@ -91,6 +91,16 @@ class Tool:
 
 # Tool registry - populated by @register_tool decorator
 TOOL_REGISTRY: dict[str, Tool] = {}
+
+ProgressReporter = Callable[[int, int | None, str], Awaitable[None]]
+
+
+async def _emit(
+    reporter: ProgressReporter | None, progress: int, total: int | None, message: str
+) -> None:
+    """Call reporter if set; no-op otherwise."""
+    if reporter is not None:
+        await reporter(progress, total, message)
 
 
 def _python_type_to_json_schema_type(type_hint: Any) -> dict[str, Any]:
@@ -215,6 +225,7 @@ def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
             "llm_manager",
             "scan_progress",
             "progress",
+            "progress_reporter",
             "config",
         ):
             continue
@@ -500,6 +511,7 @@ async def search_impl(
     path: str | None = None,
     page_size: int = 10,
     offset: int = 0,
+    progress_reporter: ProgressReporter | None = None,
 ) -> SearchResponse:
     """Unified search dispatching to regex or semantic based on type.
 
@@ -545,7 +557,7 @@ async def search_impl(
         except ValueError:
             raise ValueError("No default embedding provider configured.")
 
-        # Perform semantic search
+        await _emit(progress_reporter, 1, 2, "Embedding query…")
         results, pagination = await services.search_service.search_semantic(
             query=query,
             page_size=page_size,
@@ -555,7 +567,7 @@ async def search_impl(
             path_filter=path,
         )
     else:  # regex
-        # Perform regex search
+        await _emit(progress_reporter, 1, 2, "Searching index…")
         results, pagination = await services.search_service.search_regex_async(
             pattern=query,
             page_size=page_size,
@@ -563,6 +575,7 @@ async def search_impl(
             path_filter=path,
         )
 
+    await _emit(progress_reporter, 2, 2, "Formatting results…")
     # Convert file paths to native platform format
     native_results = _convert_paths_to_native(results)
 
@@ -598,6 +611,7 @@ async def deep_research_impl(
     progress: Any = None,
     path: str | None = None,
     config: Config | None = None,
+    progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -644,8 +658,7 @@ async def deep_research_impl(
     if config is None:
         config = Config.from_environment()
 
-    # Create code research service using factory (v1 or v2 based on config)
-    # This ensures followup suggestions automatically update if tool is renamed
+    await _emit(progress_reporter, 1, 2, "Setting up research service…")
     research_service = ResearchServiceFactory.create(
         config=config,
         db_services=services,
@@ -656,6 +669,7 @@ async def deep_research_impl(
         path_filter=path,
     )
 
+    await _emit(progress_reporter, 2, 2, "Running analysis (retrieval + LLM reranking)…")
     return await research_service.deep_research(query)
 
 
@@ -673,6 +687,7 @@ async def websearch_impl(
     query: str,
     limit: int = 30,
     path_filter: str | None = None,
+    progress_reporter: ProgressReporter | None = None,
 ) -> str:
     """Search the web, fetch results, and run deep research over them.
 
@@ -707,6 +722,7 @@ async def websearch_impl(
 
     limit = clamp_limit(limit)
 
+    await _emit(progress_reporter, 1, 3, "Searching web…")
     try:
         results = await asyncio.to_thread(search, query, limit, None)
     except urllib.error.URLError as e:
@@ -719,6 +735,7 @@ async def websearch_impl(
     tmpdir = Path(tempfile.mkdtemp(prefix="chunkhound_websearch_mcp_"))
     proc: asyncio.subprocess.Process | None = None
     try:
+        await _emit(progress_reporter, 2, 3, "Fetching pages…")
         await fetch_and_save(
             [url for _, url, _ in results],
             tmpdir,
@@ -727,6 +744,7 @@ async def websearch_impl(
             mapping=mapping,
         )
 
+        await _emit(progress_reporter, 3, 3, "Researching results…")
         cmd = build_quickresearch_argv_core(query, tmpdir, path_filter, config)
         # Scrub CHUNKHOUND_MCP_MODE so the child's RichOutputFormatter.error()
         # is not silenced — we rely on its stderr output to populate the
@@ -783,6 +801,7 @@ async def execute_tool(
     scan_progress: dict | None = None,
     llm_manager: Any = None,
     config: Config | None = None,
+    progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any] | str:
     """Execute a tool from the registry with proper argument handling.
 
@@ -826,6 +845,8 @@ async def execute_tool(
         elif param_name == "progress":
             # Progress parameter for terminal UI (None for MCP mode)
             kwargs["progress"] = None
+        elif param_name == "progress_reporter":
+            kwargs["progress_reporter"] = progress_reporter
         elif param_name in arguments:
             # Tool-specific parameter from request
             kwargs[param_name] = arguments[param_name]

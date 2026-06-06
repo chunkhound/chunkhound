@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, Any, TypeVar
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
     import mcp.types as types  # noqa: F401
 
-from .tools import TOOL_REGISTRY, execute_tool
+from .tools import TOOL_REGISTRY, ProgressReporter, execute_tool
+
+MCP_PROTOCOL_VERSION = "2025-06-18"
 
 if TYPE_CHECKING:
     from chunkhound.database_factory import DatabaseServices
@@ -153,6 +155,7 @@ async def handle_tool_call(
     scan_progress: dict | None = None,
     llm_manager: LLMManager | None = None,
     config: Any = None,
+    progress_reporter: ProgressReporter | None = None,
 ) -> list[types.TextContent]:
     """Unified tool call handler for all MCP servers.
 
@@ -169,6 +172,7 @@ async def handle_tool_call(
         scan_progress: Optional scan progress from MCPServerBase
         llm_manager: Optional LLM manager for code_research
         config: Optional Config instance for research service factory
+        progress_reporter: Optional async callable for MCP progress notifications
 
     Returns:
         List containing a single TextContent with JSON-formatted response
@@ -211,6 +215,7 @@ async def handle_tool_call(
             scan_progress=scan_progress,
             llm_manager=llm_manager,
             config=config,
+            progress_reporter=progress_reporter,
         )
 
         # Format response based on result type
