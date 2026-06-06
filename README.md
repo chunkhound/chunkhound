@@ -1,10 +1,23 @@
 <p align="center">
-  <a href="https://chunkhound.ai">
+    <a href="https://chunkhound.ai">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="site/public/wordmark-text-dark.svg">
-      <img src="site/public/wordmark-text.svg" alt="ChunkHound" width="300">
+        <source media="(prefers-color-scheme: dark)"
+srcset="site/public/logo-light.svg">
+        <img src="site/public/logo.svg"
+alt="ChunkHound" width="140">
     </picture>
-  </a>
+    </a>
+</p>
+
+<p align="center">
+    <a href="https://chunkhound.ai">
+    <picture>
+        <source media="(prefers-color-scheme: dark)"
+srcset="site/public/wordmark-text-dark.svg">
+        <img src="site/public/wordmark-text.svg"
+alt="ChunkHound" width="300">
+    </picture>
+    </a>
 </p>
 
 <p align="center">
