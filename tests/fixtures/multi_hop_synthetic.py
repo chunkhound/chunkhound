@@ -167,7 +167,7 @@ class SyntheticGraphDatabase:
     ) -> list[dict[str, Any]]:
         if path_filter is None:
             return results
-        return [r for r in results if path_filter in r["file_path"]]
+        return [r for r in results if f"/{path_filter}" in f"/{r['file_path']}"]
 
     def _paginate(
         self, results: list[dict[str, Any]], *, page_size: int, offset: int

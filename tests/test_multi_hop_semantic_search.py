@@ -313,49 +313,163 @@ async def test_multi_hop_expansion_exhausts_naturally() -> None:
 
 @pytest.mark.fast
 @pytest.mark.asyncio
-async def test_multi_hop_respects_path_filter_scope(tmp_path: Path) -> None:
-    """Semantic search with path_filter should not leak out-of-scope chunks."""
+async def test_search_semantic_enforces_path_filter_component_boundary(
+    tmp_path: Path,
+) -> None:
+    """DB semantic search should not leak sibling directories via substring matches."""
     db = DuckDBProvider(":memory:", base_directory=tmp_path)
     db.connect()
 
     embedding_provider = FakeEmbeddingProvider()
     coordinator = _build_python_coordinator(db, tmp_path, embedding_provider)
 
-    for repo in ["repo_a", "repo_b"]:
+    shared_source = '''def shared_scope_boundary_target():
+    """Shared scope boundary sentinel for path-filter regression."""
+    return "shared-scope-boundary-target"
+'''
+    for repo in ["repo_a", "not_repo_a"]:
         repo_dir = tmp_path / repo
         repo_dir.mkdir(parents=True, exist_ok=True)
         file_path = repo_dir / "module.py"
-        file_path.write_text(
-            f"""
-def shared_function_{repo}_one():
-    \"\"\"Shared multi-hop scope test in {repo}.\"\"\"
-    return \"shared-{repo}-one\"
-
-def shared_function_{repo}_two():
-    \"\"\"Shared multi-hop scope test in {repo}.\"\"\"
-    return \"shared-{repo}-two\"
-
-def shared_function_{repo}_three():
-    \"\"\"Shared multi-hop scope test in {repo}.\"\"\"
-    return \"shared-{repo}-three\"
-""",
-            encoding="utf-8",
-        )
+        file_path.write_text(shared_source, encoding="utf-8")
         await coordinator.process_file(file_path)
 
-    search_service = _build_search_service(
-        cast(DatabaseProvider, db),
-        cast(EmbeddingProvider, embedding_provider),
+    regex_results, _ = db.search_regex(
+        pattern="scope boundary sentinel",
+        page_size=20,
     )
-    results, _ = await search_service.search_semantic(
-        query="multi-hop scope test",
-        page_size=10,
-        path_filter="repo_a",
+    repo_a_chunk = next(
+        result
+        for result in regex_results
+        if result.get("file_path", "").startswith("repo_a/")
+    )
+    query_embedding = await embedding_provider.embed_single(repo_a_chunk["content"])
+
+    unscoped_results, _ = db.search_semantic(
+        query_embedding=query_embedding,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        page_size=20,
+    )
+    assert any(
+        result.get("file_path", "").startswith("not_repo_a/")
+        for result in unscoped_results
     )
 
-    assert results
+    scoped_results, _ = db.search_semantic(
+        query_embedding=query_embedding,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        page_size=20,
+        path_filter="repo_a",
+    )
+    assert scoped_results
     assert all(
-        result.get("file_path", "").startswith("repo_a/") for result in results
+        result.get("file_path", "").startswith("repo_a/")
+        for result in scoped_results
+    )
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_search_regex_enforces_path_filter_component_boundary(
+    tmp_path: Path,
+) -> None:
+    """Regex search should not leak sibling directories via substring matches."""
+    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    db.connect()
+
+    embedding_provider = FakeEmbeddingProvider()
+    coordinator = _build_python_coordinator(db, tmp_path, embedding_provider)
+
+    shared_source = '''def shared_scope_boundary_target():
+    """Shared scope boundary sentinel for path-filter regression."""
+    return "shared-scope-boundary-target"
+'''
+    for repo in ["repo_a", "not_repo_a"]:
+        repo_dir = tmp_path / repo
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        file_path = repo_dir / "module.py"
+        file_path.write_text(shared_source, encoding="utf-8")
+        await coordinator.process_file(file_path)
+
+    unscoped_results, _ = db.search_regex(
+        pattern="scope boundary sentinel",
+        page_size=20,
+    )
+    assert any(
+        result.get("file_path", "").startswith("not_repo_a/")
+        for result in unscoped_results
+    )
+
+    scoped_results, _ = db.search_regex(
+        pattern="scope boundary sentinel",
+        page_size=20,
+        path_filter="repo_a",
+    )
+    assert scoped_results
+    assert all(
+        result.get("file_path", "").startswith("repo_a/")
+        for result in scoped_results
+    )
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_search_by_embedding_enforces_path_filter_component_boundary(
+    tmp_path: Path,
+) -> None:
+    """Embedding search should not leak sibling directories via substring matches."""
+    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    db.connect()
+
+    embedding_provider = FakeEmbeddingProvider()
+    coordinator = _build_python_coordinator(db, tmp_path, embedding_provider)
+
+    shared_source = '''def shared_scope_boundary_target():
+    """Shared scope boundary sentinel for path-filter regression."""
+    return "shared-scope-boundary-target"
+'''
+    for repo in ["repo_a", "not_repo_a"]:
+        repo_dir = tmp_path / repo
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        file_path = repo_dir / "module.py"
+        file_path.write_text(shared_source, encoding="utf-8")
+        await coordinator.process_file(file_path)
+
+    regex_results, _ = db.search_regex(
+        pattern="scope boundary sentinel",
+        page_size=20,
+    )
+    repo_a_chunk = next(
+        result
+        for result in regex_results
+        if result.get("file_path", "").startswith("repo_a/")
+    )
+    query_embedding = await embedding_provider.embed_single(repo_a_chunk["content"])
+
+    unscoped_results = db.search_by_embedding(
+        query_embedding=query_embedding,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        limit=20,
+    )
+    assert any(
+        result.get("file_path", "").startswith("not_repo_a/")
+        for result in unscoped_results
+    )
+
+    scoped_results = db.search_by_embedding(
+        query_embedding=query_embedding,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        limit=20,
+        path_filter="repo_a",
+    )
+    assert scoped_results
+    assert all(
+        result.get("file_path", "").startswith("repo_a/")
+        for result in scoped_results
     )
 
 
@@ -369,7 +483,7 @@ async def test_find_similar_chunks_enforces_path_filter(tmp_path: Path) -> None:
     embedding_provider = FakeEmbeddingProvider()
     coordinator = _build_python_coordinator(db, tmp_path, embedding_provider)
 
-    for repo in ["repo_a", "repo_b"]:
+    for repo in ["repo_a", "not_repo_a"]:
         repo_dir = tmp_path / repo
         repo_dir.mkdir(parents=True, exist_ok=True)
         for index in range(2):
@@ -403,7 +517,7 @@ def repo_function_{index}():
     )
     assert neighbors_unscoped
     assert any(
-        neighbor.get("file_path", "").startswith("repo_b/")
+        neighbor.get("file_path", "").startswith("not_repo_a/")
         for neighbor in neighbors_unscoped
     )
 
