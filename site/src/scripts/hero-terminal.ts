@@ -23,32 +23,32 @@ const STEPS: HeroStep[] = [
     },
     {
         type: "output",
-        text: "Indexed 12,847 files · 33 languages · 2.1M LOC",
-    },
-    { type: "blank" },
-    {
-        type: "prompt",
-        segments: [
-            { cls: "cmd", text: "chunkhound search " },
-            { cls: "str", text: '"how does authentication work"' },
-        ],
-    },
-    {
-        type: "output",
-        text: "Found 42 results via 3-hop semantic traversal",
-        dim: true,
+        text: "Indexed 12,847 files · dozens of languages/file types · 2.1M LOC",
     },
     { type: "blank" },
     {
         type: "prompt",
         segments: [
             { cls: "cmd", text: "chunkhound research " },
-            { cls: "str", text: '"authentication architecture"' },
+            { cls: "str", text: '"how does authentication work?"' },
         ],
     },
     {
         type: "output",
-        text: "Generated report · 14 files · 6 components · 23 citations",
+        text: "Traced flow across 14 files · 6 components · 23 citations",
+        dim: true,
+    },
+    { type: "blank" },
+    {
+        type: "prompt",
+        segments: [
+            { cls: "cmd", text: "chunkhound search " },
+            { cls: "str", text: '"auth middleware"' },
+        ],
+    },
+    {
+        type: "output",
+        text: "Found exact symbols and call sites from the research path",
         dim: true,
         cursor: true,
     },
