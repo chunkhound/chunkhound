@@ -1846,12 +1846,11 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> None:
         """Insert one previously snapshotted row back into a table."""
         columns = list(row.keys())
+        quoted_tbl = self._quote_duckdb_identifier(table_name)
+        quoted_cols = ", ".join(self._quote_duckdb_identifier(c) for c in columns)
         placeholders = ", ".join(["?"] * len(columns))
         conn.execute(
-            f"""
-            INSERT INTO {table_name} ({", ".join(columns)})
-            VALUES ({placeholders})
-            """,
+            f"INSERT INTO {quoted_tbl} ({quoted_cols}) VALUES ({placeholders})",
             [row[column] for column in columns],
         )
 
@@ -1863,12 +1862,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             return
 
         columns = list(rows[0].keys())
+        quoted_tbl = self._quote_duckdb_identifier(table_name)
+        quoted_cols = ", ".join(self._quote_duckdb_identifier(c) for c in columns)
         placeholders = ", ".join(["?"] * len(columns))
         conn.executemany(
-            f"""
-            INSERT INTO {table_name} ({", ".join(columns)})
-            VALUES ({placeholders})
-            """,
+            f"INSERT INTO {quoted_tbl} ({quoted_cols}) VALUES ({placeholders})",
             [[row[column] for column in columns] for row in rows],
         )
 
@@ -4225,8 +4223,12 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # that sees the file also sees flag=True — both guards are consistent.
                 self._connection_manager._compaction_in_progress = True
                 flag_set = True
-                with open(lock_file, "x") as f:
-                    f.write(f"{os.getpid()}:{time.time():.0f}")
+                fd = os.open(str(lock_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                try:
+                    os.write(fd, f"{os.getpid()}:{time.time():.0f}".encode())
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
                 lock_acquired = True
             except FileExistsError:
                 raise CompactionError(
@@ -4611,6 +4613,20 @@ class DuckDBProvider(SerialDatabaseProvider):
         for idx in hnsw_indexes:
             index_name = str(idx["index_name"])
             table_name = str(idx["table_name"])
+
+            # Mirror the guard in _executor_recreate_vector_index_from_info: reject
+            # structurally unsafe names so DuckDB doesn't see control chars in DDL.
+            skip = False
+            for _name, _label in ((index_name, "index"), (table_name, "table")):
+                if not self._is_safe_duckdb_identifier(_name):
+                    logger.warning(
+                        f"Skipping HNSW index restore: unsafe identifier {_name!r} "
+                        f"(label={_label}). Expected pattern: [A-Za-z_][A-Za-z0-9_]*"
+                    )
+                    skip = True
+                    break
+            if skip:
+                continue
 
             try:
                 metric = self._normalize_hnsw_metric(str(idx.get("metric", "cosine")))

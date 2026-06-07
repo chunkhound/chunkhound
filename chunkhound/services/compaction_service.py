@@ -23,9 +23,12 @@ def estimate_reclaimable_bytes(stats: dict[str, Any]) -> int:
     """Upper-bound estimate of reclaimable bytes from storage stats.
 
     Takes the larger of free-block space and row-waste projection.
-    Overestimates slightly because used_blocks includes index/metadata
-    blocks — acceptable since this feeds a min-size gate where false
-    positives just trigger a compaction that finds little to reclaim.
+    Overestimates because used_blocks includes HNSW index blocks and
+    metadata blocks in addition to row-group data, while row_waste_ratio
+    is computed from row-group data only. Acceptable for a min-size gate:
+    false positives trigger compaction that finds little to reclaim;
+    false negatives never occur since free-block waste is captured
+    separately via the free_blocks term.
     """
     block_size = stats.get("block_size", 262144)
     free_blocks = stats.get("free_blocks", 0)

@@ -1,6 +1,7 @@
 """Repack command module - performs full database compaction."""
 
 import argparse
+import asyncio
 import shutil
 import sys
 
@@ -126,7 +127,7 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
 
     try:
         formatter.progress_indicator("Compacting database...")
-        completed = provider.optimize()
+        completed = await asyncio.to_thread(provider.optimize)
 
         if not completed:
             formatter.warning("Repack was cancelled before completion")

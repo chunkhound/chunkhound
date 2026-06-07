@@ -759,6 +759,7 @@ class MCPServerBase(ABC):
                         task.cancel()
 
             await self._run_directory_scan(target_path, trigger="initial")
+            await self._trigger_background_compaction()
             if ready_task in done:
                 initial_scan_completed_monotonic = time.monotonic()
                 initial_scan_total_duration = self._duration_seconds(
