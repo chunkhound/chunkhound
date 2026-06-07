@@ -79,12 +79,14 @@ def _fsync_directory(dir_path: Path) -> None:
 
 def _write_intent(path: Path, phase: str) -> None:
     """Write an fsync'd intent file for crash recovery."""
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
     try:
         os.write(fd, phase.encode())
         os.fsync(fd)
     finally:
         os.close(fd)
+    os.replace(str(tmp), str(path))
     _fsync_directory(path.parent)
 
 

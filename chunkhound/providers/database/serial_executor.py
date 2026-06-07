@@ -96,8 +96,11 @@ def reset_thread_local_state() -> None:
 
     Clears session-specific keys (deferred_checkpoint, last_checkpoint_time,
     etc.) and restores default values.  Preserves the dict reference.
+    Preserves deferred_hnsw_indexes across reconnect so HNSW indexes deferred
+    during a compaction window are not silently lost.
     """
     if hasattr(_executor_local, "state"):
+        preserved_hnsw = _executor_local.state.get("deferred_hnsw_indexes")
         _executor_local.state.clear()
         _executor_local.state.update({
             "transaction_active": False,
@@ -105,6 +108,8 @@ def reset_thread_local_state() -> None:
             "operations_since_checkpoint": 0,
             "last_checkpoint_time": time.time(),
         })
+        if preserved_hnsw:
+            _executor_local.state["deferred_hnsw_indexes"] = preserved_hnsw
 
 
 class SerialDatabaseExecutor:

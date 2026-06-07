@@ -79,8 +79,6 @@ class MCPServerBase(ABC):
         self.llm_manager: LLMManager | None = None
         self.realtime_indexing: RealtimeIndexingService | None = None
         self._compaction_service: CompactionService | None = None
-        self._target_path: Path | None = None  # Stored for reindex callback
-
         # Initialization state
         self._initialized = False
         self._init_lock = asyncio.Lock()
@@ -1278,7 +1276,7 @@ class MCPServerBase(ABC):
         resolution is ~100ms-2s).  force_reindex=True ensures every file is
         re-verified.
         """
-        if not self.services or not self._target_path:
+        if not self.services or not self._scan_target_path:
             self.debug_log(
                 "Skipping post-compaction reindex: services or target unavailable"
             )
@@ -1357,7 +1355,7 @@ class MCPServerBase(ABC):
             )
 
             stats = await indexing_service.process_directory(
-                self._target_path, no_embeddings=False
+                self._scan_target_path, no_embeddings=False
             )
 
             self.debug_log(

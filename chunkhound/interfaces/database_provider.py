@@ -1,8 +1,9 @@
 """DatabaseProvider protocol for ChunkHound - abstract interface for database implementations."""
 
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
-from typing import Any, AsyncContextManager, Protocol
+from typing import Any, Protocol
 
 from chunkhound.core.models import Chunk, Embedding, File
 
@@ -444,7 +445,7 @@ class DatabaseProvider(Protocol):
         """Rollback the current transaction (asynchronous)."""
         ...
 
-    def exclusive_transaction_span(self) -> AsyncContextManager[None]:
+    def exclusive_transaction_span(self) -> AbstractAsyncContextManager[None]:
         """Serialize a full transaction span across shared coordinators."""
         ...
 

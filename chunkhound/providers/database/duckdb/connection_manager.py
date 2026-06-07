@@ -133,12 +133,25 @@ class DuckDBConnectionManager:
     ) -> None:
         """Recover from interrupted compaction using intent file."""
         if phase == PHASE_PRE_SWAP:
-            # Crash during pre-swap cleanup. db_path should still exist.
-            # Discard any leftover compact_db and stale old_db.
+            # Crash during pre-swap cleanup. db_path should still exist and be valid.
+            # Discard leftover compact_db unconditionally.
             if compact_db.exists():
                 compact_db.unlink()
+            # Guard old_db deletion: if db_path is corrupt, old_db may be the only valid copy.
             if old_db.exists():
-                old_db.unlink()
+                if self.db_path.exists() and self._probe_db_valid(self.db_path):
+                    old_db.unlink()
+                elif not self.db_path.exists():
+                    logger.warning(
+                        "pre_swap recovery: db_path missing, restoring from backup"
+                    )
+                    os.replace(old_db, self.db_path)
+                else:
+                    logger.warning(
+                        "pre_swap recovery: db_path failed integrity probe, "
+                        "restoring from backup"
+                    )
+                    os.replace(old_db, self.db_path)
         elif phase == PHASE_1:
             # Crash before/during first os.replace (db_path -> old_db).
             # db_path may be missing if the rename completed; restore from old_db.
@@ -316,8 +329,10 @@ class DuckDBConnectionManager:
                             )
                 except (OSError, ValueError):
                     logger.warning(
-                        "Removing compaction lock (unreadable or legacy format)"
+                        "Cannot read compaction lock file; treating as live to prevent data loss"
                     )
+                    lock_is_stale = False
+                    foreign_lock_alive = True
 
                 if lock_is_stale:
                     lock_file.unlink(missing_ok=True)
