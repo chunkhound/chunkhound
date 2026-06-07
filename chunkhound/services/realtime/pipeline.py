@@ -1388,15 +1388,7 @@ class RealtimePipelineMixin:
         while True:
             try:
                 if buffered_mutation is None:
-                    raw = await self.file_queue.get()
-                    # Normal format is (priority, sequence, mutation).
-                    # Tests may inject a 2-tuple (event_type, path) directly
-                    # to bypass debouncing — convert to a change mutation.
-                    if len(raw) == 3:
-                        _, _, queued_mutation = raw
-                    else:
-                        _evt_type, _evt_path = raw
-                        queued_mutation = self._build_mutation("change", _evt_path)
+                    _, _, queued_mutation = await self.file_queue.get()
                     mutation, owned_when_dequeued = self._prepare_dequeued_mutation(
                         queued_mutation
                     )

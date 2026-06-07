@@ -1069,6 +1069,11 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         Does NOT clear _drained_compaction_removals — that shadow set must persist
         until the next compaction begins so late-firing watchdog/inotify events for
         paths already replayed don't land in failed_files.
+
+        Clearing all failed_files is safe here because the post-compaction reindex
+        processes every file under _scan_target_path: files that still fail get
+        re-added during the reindex, so the net result is equivalent to clearing
+        only compaction-caused entries.
         """
         self.failed_files.clear()
 

@@ -73,7 +73,7 @@ def _configure_post_reindex_recovery_daemon(
     )
     daemon.realtime_indexing.restore_compaction_deferred_files = AsyncMock()
     daemon.realtime_indexing.restore_compaction_deferred_removals = AsyncMock()
-    daemon._target_path = tmp_path
+    daemon._scan_target_path = tmp_path
     daemon._compaction_service = CompactionService(tmp_path / "test.db", daemon.config)
     daemon._compaction_service._last_error = RuntimeError("initial failure")
     daemon._scan_progress["background_compaction"].update(

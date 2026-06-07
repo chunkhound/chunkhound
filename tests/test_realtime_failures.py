@@ -337,7 +337,12 @@ class TestRealtimeFailures:
         )
 
         # Put file directly in the queue — bypasses debouncing
-        await service.file_queue.put(("change", test_file))
+        service._queue_sequence += 1
+        await service.file_queue.put((
+            service._mutation_priority("change"),
+            service._queue_sequence,
+            service._build_mutation("change", test_file),
+        ))
 
         # wait_for_file_indexed checks both terminal failure buckets,
         # so it returns as soon as the deferred state is recorded.
@@ -379,7 +384,12 @@ class TestRealtimeFailures:
         await asyncio.to_thread(
             lambda: services.provider.soft_disconnect(skip_checkpoint=True)
         )
-        await service.file_queue.put(("change", test_file))
+        service._queue_sequence += 1
+        await service.file_queue.put((
+            service._mutation_priority("change"),
+            service._queue_sequence,
+            service._build_mutation("change", test_file),
+        ))
         await service.wait_for_file_indexed(test_file, timeout=5.0)
         assert normalized not in service.failed_files
 
@@ -393,7 +403,12 @@ class TestRealtimeFailures:
         # 3. Re-queue the same file. Wait specifically for the success-path
         # update on _indexed_files — wait_for_file_indexed would return
         # immediately because _compaction_deferred_files still contains the entry.
-        await service.file_queue.put(("change", test_file))
+        service._queue_sequence += 1
+        await service.file_queue.put((
+            service._mutation_priority("change"),
+            service._queue_sequence,
+            service._build_mutation("change", test_file),
+        ))
 
         async def _wait_until_indexed() -> None:
             async with service._file_condition:
@@ -440,7 +455,12 @@ class TestRealtimeFailures:
         await asyncio.to_thread(
             lambda: services.provider.soft_disconnect(skip_checkpoint=True)
         )
-        await service.file_queue.put(("change", test_file))
+        service._queue_sequence += 1
+        await service.file_queue.put((
+            service._mutation_priority("change"),
+            service._queue_sequence,
+            service._build_mutation("change", test_file),
+        ))
         await service.wait_for_file_indexed(test_file, timeout=5.0)
         assert normalized not in service.failed_files
 
@@ -517,7 +537,12 @@ class TestRealtimeFailures:
         test_file.write_text("def queued_then_deleted(): pass")
         normalized = normalize_file_path(test_file)
 
-        await service.file_queue.put(("change", test_file))
+        service._queue_sequence += 1
+        await service.file_queue.put((
+            service._mutation_priority("change"),
+            service._queue_sequence,
+            service._build_mutation("change", test_file),
+        ))
         test_file.unlink()
         await service._defer_compaction_removal(test_file)
 

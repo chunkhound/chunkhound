@@ -132,7 +132,7 @@ def server(tmp_path: Path) -> ConcreteMCPServer:
         srv = ConcreteMCPServer(config=config)
 
     srv.services = MagicMock()
-    srv._target_path = tmp_path
+    srv._scan_target_path = tmp_path
     return srv
 
 
@@ -221,10 +221,10 @@ async def test_skips_when_no_services(server: ConcreteMCPServer) -> None:
 
 
 async def test_skips_when_no_target_path(server: ConcreteMCPServer) -> None:
-    """_post_compaction_reindex exits early when _target_path is None."""
+    """_post_compaction_reindex exits early when _scan_target_path is None."""
     coordinator = CaptureCoordinator()
     server.services.indexing_coordinator = coordinator
-    server._target_path = None
+    server._scan_target_path = None
 
     await server._post_compaction_reindex()
 
