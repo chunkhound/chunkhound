@@ -804,7 +804,7 @@ class TestShutdownSafety:
 
         server.services = MagicMock()
         server.services.provider = provider
-        server._target_path = tmp_path
+        server._scan_target_path = tmp_path
         server._scan_progress["background_compaction"].update(
             {
                 "phase": "failed",

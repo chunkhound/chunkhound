@@ -722,7 +722,7 @@ class NewlyAddedClass:
         server = _TestMCPServer(config=compaction_config)
         server.services = services
         server.realtime_indexing = realtime_service
-        server._target_path = watch_dir
+        server._scan_target_path = watch_dir
 
         with patch.object(
             services.provider,
@@ -849,7 +849,7 @@ class NewlyAddedClass:
         server = _TestMCPServer(config=compaction_config)
         server.services = services
         server.realtime_indexing = realtime_service
-        server._target_path = watch_dir
+        server._scan_target_path = watch_dir
 
         with patch.object(
             services.provider,
@@ -980,7 +980,7 @@ class NewlyAddedClass:
         server = _TestMCPServer(config=compaction_config)
         server.services = services
         server.realtime_indexing = realtime_service
-        server._target_path = watch_dir
+        server._scan_target_path = watch_dir
 
         with patch.object(
             services.provider,
@@ -1078,7 +1078,7 @@ class NewlyAddedClass:
         server = _TestMCPServer(config=compaction_config)
         server.services = services
         server.realtime_indexing = realtime_service
-        server._target_path = watch_dir
+        server._scan_target_path = watch_dir
 
         real_process_directory = services.indexing_coordinator.process_directory
         callback_attempts = 0
@@ -1263,7 +1263,7 @@ class NewlyAddedClass:
         server = _TestMCPServer(config=recovery_config)
         server.services = services
         server.realtime_indexing = realtime_service
-        server._target_path = watch_dir
+        server._scan_target_path = watch_dir
         server._compaction_service = MagicMock()
         server._compaction_service.is_compacting = False
         server._compaction_service.last_error = None
