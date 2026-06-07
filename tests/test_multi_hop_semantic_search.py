@@ -90,7 +90,7 @@ async def content_aware_test_data(request, tmp_path):
     # Use the fixture tmp_path instead of creating a separate temp directory
     for filename, content in test_files.items():
         file_path = tmp_path / filename
-        file_path.write_text(content)
+        file_path.write_text(content, encoding='utf-8')
         await coordinator.process_file(file_path)
         
         # Verify we actually created chunks

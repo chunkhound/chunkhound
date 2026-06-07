@@ -371,8 +371,9 @@ class PluggableResearchService:
                 async with semaphore:
                     # Get cluster-specific facts context
                     cluster_files = set(cluster.file_paths)
-                    cluster_facts_context = (
-                        evidence_ledger.get_facts_map_prompt_context(cluster_files)
+                    cluster_facts_context = evidence_ledger.get_facts_map_prompt_context(
+                        cluster_files,
+                        cluster_id=cluster.cluster_id,
                     )
                     return await self._synthesis_engine._map_synthesis_on_cluster(
                         cluster,

@@ -192,6 +192,8 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert "install.ps1" in getting_started
     assert "Expected output" in getting_started
     assert f"chunkhound {_expected_docs_version()}" in getting_started
+    assert 'src="/logo.svg"' in homepage
+    assert 'src="/logo-light.svg"' in homepage
     assert "code-panel" in homepage
     assert getting_started.count("platform-code-block") >= 2
     assert getting_started.index("platform-code-block") < getting_started.index(

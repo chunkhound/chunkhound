@@ -122,19 +122,19 @@ class QuestionGenerator:
         # Simplified system prompt per GPT-5-Nano best practices
         system = prompts.FOLLOWUP_GENERATION_SYSTEM
 
-        # Build code context - from file_contents if available, otherwise from chunks
+        # Build source context - from file_contents if available, otherwise from chunks
         max_tokens_for_context = max_input_tokens
 
         if file_contents:
             # Use file-based context (backwards compatible path)
-            code_context = []
+            source_context = []
             total_tokens = 0
 
             for path, content in file_contents.items():
                 content_tokens = llm.estimate_tokens(content)
                 if total_tokens + content_tokens <= max_tokens_for_context:
-                    code_context.append(
-                        f"File: {path}\n{'=' * 60}\n{content}\n{'=' * 60}"
+                    source_context.append(
+                        f"Source: {path}\n{'=' * 60}\n{content}\n{'=' * 60}"
                     )
                     total_tokens += content_tokens
                 else:
@@ -142,17 +142,17 @@ class QuestionGenerator:
                     remaining_tokens = max_tokens_for_context - total_tokens
                     if remaining_tokens > 500:  # Only include if meaningful
                         chars_to_include = remaining_tokens * 4  # ~4 chars per token
-                        code_context.append(
-                            f"File: {path}\n{'=' * 60}\n{content[:chars_to_include]}...\n{'=' * 60}"
+                        source_context.append(
+                            f"Source: {path}\n{'=' * 60}\n{content[:chars_to_include]}...\n{'=' * 60}"
                         )
                     break
 
             logger.debug(
-                f"LLM input: {total_tokens} tokens from {len(code_context)} files "
+                f"LLM input: {total_tokens} tokens from {len(source_context)} sources "
                 f"(budget: {max_tokens_for_context})"
             )
-            code_section = (
-                "\n\n".join(code_context) if code_context else "No code files loaded"
+            source_content = (
+                "\n\n".join(source_context) if source_context else "No source material loaded"
             )
         elif chunks:
             # Build context from chunks when file_contents not available
@@ -160,11 +160,11 @@ class QuestionGenerator:
                 import_context_service=self._import_context_service,
                 llm_manager=self._llm_manager,
             )
-            code_section = builder.build_code_context_with_imports(
+            source_content = builder.build_code_context_with_imports(
                 chunks, max_tokens_for_context
             )
-            if not code_section:
-                code_section = "No code files loaded"
+            if not source_content:
+                source_content = "No source material loaded"
             logger.debug(
                 f"LLM input: built from {len(chunks)} chunks "
                 f"(budget: {max_tokens_for_context})"
@@ -196,9 +196,9 @@ class QuestionGenerator:
         )
 
         target_instruction = (
-            "NEW code elements (not in explored files above)"
+            "NEW elements (not in already explored sources)"
             if exploration_gist
-            else "specific code elements found"
+            else "specific elements found in source material"
         )
 
         # Build constants section if available
@@ -212,7 +212,7 @@ class QuestionGenerator:
             root_query=context.root_query,
             query=query,
             ancestors=" -> ".join(context.ancestors),
-            code_section=code_section,
+            source_content=source_content,
             chunks_preview=chunks_preview,
             constants_section=constants_section,
             max_questions=MAX_FOLLOWUP_QUESTIONS,

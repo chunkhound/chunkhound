@@ -400,6 +400,10 @@ function handleVOn() {}
         )
         assert refs_found or len(template_chunks) > 0
 
+        # Minimal tight assertion for modifier handling (prevents regression of .prevent leaking into name)
+        event_names = [c.metadata.get("event_name") for c in chunks if c.metadata and c.metadata.get("directive_type") == "event_handler"]
+        assert all(en and "." not in en for en in event_names if en), f"event_name must be clean (no modifiers like 'click.prevent'): {event_names}"
+
     def test_property_bindings(self, parser):
         """Test :prop and v-bind: property binding extraction."""
         content = """
@@ -408,6 +412,8 @@ function handleVOn() {}
     <img :src="imageUrl" :alt="imageAlt" />
     <a :href="linkUrl" :title="linkTitle">Link</a>
     <div :class="dynamicClass" :style="dynamicStyle" />
+    <!-- dotted modifier cases to exercise the .split logic -->
+    <div :class.active="isActive" :foo.bar="baz" />
     <component v-bind:is="componentName" />
   </div>
 </template>
@@ -420,29 +426,35 @@ const linkTitle = ref('Title')
 const dynamicClass = ref('active')
 const dynamicStyle = ref({ color: 'red' })
 const componentName = ref('div')
+const isActive = ref(true)
+const baz = ref(1)
 </script>
 """
         chunks = parser.parse_content(content)
 
-        # Find template chunks with cross-references
+        # Find template chunks
         template_chunks = [
             c for c in chunks
             if c.metadata and c.metadata.get('vue_section') == 'template'
         ]
 
-        # Should have cross-references to bound variables
-        refs = set()
-        for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+        # Should have extracted property binding chunks with metadata
+        binding_chunks = [
+            c for c in template_chunks
+            if c.metadata and c.metadata.get('directive_type') == 'property_binding'
+        ]
 
-        # At least some bindings should be referenced
-        expected_refs = ['imageUrl', 'linkUrl', 'dynamicClass']
-        found_refs = [ref for ref in expected_refs if ref in refs]
-        assert len(found_refs) >= 0  # Some refs should be found
+        # Should have found property bindings
+        assert len(binding_chunks) > 0
+
+        # Assert that modifier stripping works: we have dotted cases in input, and all extracted property_names are clean (no dots)
+        dotted_inputs = [c for c in binding_chunks if c.metadata.get("property_name") in ("class", "foo")]
+        assert len(dotted_inputs) >= 1, "Expected :class.active and :foo.bar to produce clean property_name entries"
+        assert all("." not in (c.metadata.get("property_name") or "") for c in binding_chunks), \
+            "No property_name should contain a modifier suffix after stripping"
 
     def test_v_model_directives(self, parser):
-        """Test v-model two-way binding extraction."""
+        """Test v-model two-way binding extraction including modifiers."""
         content = """
 <template>
   <div>
@@ -467,20 +479,29 @@ const selected = ref('a')
 """
         chunks = parser.parse_content(content)
 
-        # Find template chunks
-        template_chunks = [
+        # Find v-model chunks
+        vmodel_chunks = [
             c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            if c.metadata and c.metadata.get('directive_type') == 'v-model'
         ]
 
-        # Should have references to v-model variables
-        refs = set()
-        for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+        # Should find at least one v-model chunk
+        assert len(vmodel_chunks) >= 1
 
-        # Check for v-model variables
-        assert 'text' in refs or 'description' in refs or len(template_chunks) > 0
+        # Check that v-model chunks have correct metadata
+        for chunk in vmodel_chunks:
+            assert chunk.metadata.get('model_binding') is not None
+            assert chunk.metadata.get('directive_type') == 'v-model'
+            # script_references should be present if model_binding is set
+            if chunk.metadata.get('model_binding'):
+                assert 'script_references' in chunk.metadata
+
+        # - We already assert plain v-model works (above).
+        # - Modified v-model cases (.trim, .number) may or may not produce separate chunks
+        #   depending on chunk splitting, but if any v-model chunk exists its model_binding
+        #   must be clean (no embedded dots from bad parsing).
+        polluted = [c for c in vmodel_chunks if "." in (c.metadata.get("model_binding") or "")]
+        assert not polluted, f"v-model model_binding should not contain modifier suffixes: {polluted}"
 
     def test_component_usage(self, parser):
         """Test component usage detection (PascalCase)."""
@@ -593,6 +614,11 @@ function closeModal() {
             if c.metadata and c.metadata.get('vue_section') == 'template'
         ]
         assert len(template_chunks) > 0
+
+        # Minimal tight assertion for bare named slots (v-slot:header and #footer without =)
+        slot_chunks = [c for c in template_chunks if c.metadata and c.metadata.get("directive_type") == "slot"]
+        has_named_slot = any(c.metadata.get("slot_name") in ("header", "default", "footer") for c in slot_chunks)
+        assert has_named_slot, "Bare v-slot:header / #footer / #default must produce directive_type=slot + slot_name"
 
 
 class TestCrossReferenceLinking:

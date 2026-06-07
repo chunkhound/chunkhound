@@ -7,17 +7,18 @@ from loguru import logger
 from chunkhound.core.config.llm_config import (
     BASE_URL_CAPABLE_LLM_PROVIDERS,
     DEFAULT_LLM_TIMEOUT,
+    NO_DEFAULT_MODEL_PROVIDERS,
     OPENAI_COMPATIBLE_LLM_PROVIDERS,
     REASONING_EFFORT_PROVIDERS,
 )
+from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
-from chunkhound.providers.llm.deepseek_llm_provider import DeepSeekLLMProvider
 from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
-from chunkhound.providers.llm.grok_llm_provider import GrokLLMProvider
 from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
 from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
@@ -37,9 +38,7 @@ class LLMManager:
         "anthropic": AnthropicLLMProvider,
         "claude-code-cli": ClaudeCodeCLIProvider,
         "codex-cli": CodexCLIProvider,
-        "deepseek": DeepSeekLLMProvider,
         "gemini": GeminiLLMProvider,
-        "grok": GrokLLMProvider,
         "opencode-cli": OpenCodeCLIProvider,
     }
 
@@ -75,8 +74,12 @@ class LLMManager:
         """
         provider_name = config.get("provider", "openai")
 
+        # ── OpenAI-compatible providers from registry (data-driven) ──
+        if provider_name in OPENAI_COMPATIBLE_PROVIDERS:
+            return self._create_openai_compatible_provider(provider_name, config)
+
         if provider_name not in self._providers:
-            available = ", ".join(self._providers.keys())
+            available = ", ".join(self.list_providers())
             raise ValueError(
                 f"Unknown LLM provider: {provider_name}. "
                 f"Available providers: {available}"
@@ -88,6 +91,21 @@ class LLMManager:
             # Build provider initialization parameters
             model_name = config.get("model")
             base_url = config.get("base_url")
+            # Note: Registry providers (deepseek, grok) exit at the
+            # OPENAI_COMPATIBLE_PROVIDERS guard above. This check fires
+            # only for native providers without baked-in defaults
+            # (currently only "gemini" — Anthropic has a baked-in CLI
+            # default; OpenAILLMProvider resolves at the config layer).
+            if provider_name in NO_DEFAULT_MODEL_PROVIDERS and not model_name:
+                raise ConfigurationError(
+                    config_key="llm.model",
+                    reason=(
+                        f"Model is required for '{provider_name}'. "
+                        "Set `llm.model` (or the per-role model override) in "
+                        "your configuration."
+                    ),
+                )
+
             if (
                 provider_name in OPENAI_COMPATIBLE_LLM_PROVIDERS
                 and not is_official_openai_endpoint(base_url)
@@ -112,8 +130,7 @@ class LLMManager:
                 provider_kwargs["base_url"] = config.get("base_url")
                 provider_kwargs["ssl_verify"] = config.get("ssl_verify", True)
 
-            # Allow OpenAI-compatible providers without native structured
-            # outputs to opt out (e.g. DeepSeek — use prompt-based fallback)
+            # Forward supports_structured_outputs for OpenAI-compatible providers
             if issubclass(provider_class, OpenAICompatibleProvider):
                 sso = config.get("supports_structured_outputs")
                 if sso is not None:
@@ -146,9 +163,7 @@ class LLMManager:
 
                 # Prompt caching is opt-in; cache writes cost extra and
                 # ChunkHound requests rarely reuse prefixes enough to benefit.
-                provider_kwargs["prompt_caching"] = config.get(
-                    "prompt_caching", False
-                )
+                provider_kwargs["prompt_caching"] = config.get("prompt_caching", False)
                 if cache_ttl := config.get("cache_ttl"):
                     provider_kwargs["cache_ttl"] = cache_ttl
 
@@ -170,11 +185,71 @@ class LLMManager:
                     if (keep := config.get("clear_tool_uses_keep")) is not None:
                         provider_kwargs["clear_tool_uses_keep"] = keep
 
+            elif provider_name == "gemini":
+                if (thinking_level := config.get("thinking_level")) is not None:
+                    provider_kwargs["thinking_level"] = thinking_level
+                if (thinking_budget := config.get("thinking_budget")) is not None:
+                    provider_kwargs["thinking_budget"] = thinking_budget
+
             provider = provider_class(**provider_kwargs)
             return provider
         except Exception as e:
             logger.error(f"Failed to initialize LLM provider {provider_name}: {e}")
             raise
+
+    def _create_openai_compatible_provider(
+        self, name: str, config: dict[str, Any]
+    ) -> OpenAICompatibleProvider:
+        """Create an OpenAI-compatible provider from a registry spec + config.
+
+        Args:
+            name: Provider name key from ``OPENAI_COMPATIBLE_PROVIDERS``.
+            config: Provider configuration dict (from ``LLMConfig``).
+
+        Returns:
+            Configured ``OpenAICompatibleProvider`` instance.
+
+        Raises:
+            ValueError: If required ``model`` is missing.
+        """
+        spec = OPENAI_COMPATIBLE_PROVIDERS[name]
+
+        model_name = config.get("model")
+        if not model_name:
+            raise ValueError(
+                f"Model is required for '{name}'. "
+                f"Set `llm.model` (or per-role model override) in your configuration."
+            )
+
+        base_url = config.get("base_url")
+
+        kwargs: dict[str, Any] = {
+            "provider_name": name,
+            "api_key": config.get("api_key"),
+            "model": model_name,
+            "default_base_url": spec.default_base_url,
+            "base_url": base_url,
+            "ssl_verify": config.get("ssl_verify", True),
+            "timeout": config.get("timeout", DEFAULT_LLM_TIMEOUT),
+            "max_retries": config.get("max_retries", 3),
+            "max_tokens_param_name": spec.max_tokens_param_name,
+            "synthesis_concurrency": spec.synthesis_concurrency,
+        }
+
+        # Structured outputs: config override > spec default > class default
+        sso = config.get("supports_structured_outputs")
+        if sso is not None:
+            kwargs["supports_structured_outputs"] = sso
+        else:
+            kwargs["supports_structured_outputs"] = spec.supports_structured_outputs
+
+        # Reasoning effort: only when the provider supports it
+        if spec.supports_reasoning_effort:
+            if effort := config.get("reasoning_effort"):
+                kwargs["reasoning_effort"] = effort
+
+        provider = OpenAICompatibleProvider(**kwargs)
+        return provider
 
     def create_provider_for_config(self, config: dict[str, Any]) -> LLMProvider:
         """Public factory for constructing an LLM provider from a config dict.
@@ -244,7 +319,11 @@ class LLMManager:
         Returns:
             List of provider names
         """
-        return list(self._providers.keys())
+        return list(
+            dict.fromkeys(
+                [*self._providers.keys(), *OPENAI_COMPATIBLE_PROVIDERS.keys()]
+            )
+        )
 
     @classmethod
     def register_provider(cls, name: str, provider_class: type[LLMProvider]) -> None:
