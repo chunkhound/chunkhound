@@ -4,6 +4,9 @@ Launches a real headless Chrome via zendriver and exercises the production
 HTML and PDF branches end-to-end. Skipped when no Chrome binary is present
 at any of the standard ``_CHROME_PATHS`` locations.
 
+All HTTP traffic is served by the local ``local_fetch_page_server``
+fixture; tests are hermetic and do not depend on external URLs.
+
 Each test gets its own browser (function-scoped fixture) so the PDF
 branch's known one-tab leak cannot bleed into the HTML branch's target
 count, regardless of test execution order.
@@ -35,12 +38,6 @@ from chunkhound.utils.websearch_core import (
 
 if TYPE_CHECKING:
     import zendriver as zd
-
-# A small public PDF used by the spike; same URL keeps test behavior
-# aligned with what the migration was verified against.
-PDF_URL = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
-HTML_URL = "https://example.com/"
-
 
 pytestmark = [
     pytest.mark.integration,
@@ -110,7 +107,10 @@ async def chrome_browser() -> AsyncIterator[zd.Browser]:
             pass
 
 
-async def test_fetch_page_html_branch(chrome_browser: zd.Browser) -> None:
+async def test_fetch_page_html_branch(
+    chrome_browser: zd.Browser,
+    local_fetch_page_server: tuple[str, list[str]],
+) -> None:
     """HTML branch returns rendered DOM and tears down its tab.
 
     Poll (rather than snapshot) because ``browser.targets`` updates only
@@ -119,9 +119,10 @@ async def test_fetch_page_html_branch(chrome_browser: zd.Browser) -> None:
     production close cap by the time we get here, so this budget is for
     event-propagation lag only.
     """
+    base, _ = local_fetch_page_server
     baseline = _page_target_count(chrome_browser)
 
-    ct, body, charset = await _fetch_page(chrome_browser, HTML_URL)
+    ct, body, charset = await _fetch_page(chrome_browser, f"{base}/html")
     assert ct == "text/html"
     assert isinstance(body, bytes) and len(body) > 0
     assert charset == "utf-8"
@@ -131,7 +132,10 @@ async def test_fetch_page_html_branch(chrome_browser: zd.Browser) -> None:
     assert final == baseline
 
 
-async def test_fetch_page_pdf_branch(chrome_browser: zd.Browser) -> None:
+async def test_fetch_page_pdf_branch(
+    chrome_browser: zd.Browser,
+    local_fetch_page_server: tuple[str, list[str]],
+) -> None:
     """PDF branch returns raw bytes; tab close is best-effort.
 
     ``tab.close()`` on the PDF viewer path waits on zendriver's internal
@@ -142,9 +146,10 @@ async def test_fetch_page_pdf_branch(chrome_browser: zd.Browser) -> None:
     no more, so we detect both regressions (multi-tab leak) and
     improvements (future zendriver/Chrome fix that lets the close succeed).
     """
+    base, _ = local_fetch_page_server
     baseline = _page_target_count(chrome_browser)
 
-    ct, body, charset = await _fetch_page(chrome_browser, PDF_URL)
+    ct, body, charset = await _fetch_page(chrome_browser, f"{base}/pdf")
     assert ct == "application/pdf"
     assert isinstance(body, bytes) and body.startswith(b"%PDF-")
     assert charset == "utf-8"
@@ -159,10 +164,20 @@ async def test_fetch_page_pdf_branch(chrome_browser: zd.Browser) -> None:
 # so the body doesn't need to be a structurally complete PDF.
 _MINIMAL_PDF = b"%PDF-1.4\n%minimal\n"
 
+_MINIMAL_HTML = b"<!doctype html><html><body>ok</body></html>"
+
 
 @pytest.fixture
-def cookie_pdf_server() -> Iterator[tuple[str, list[str]]]:
-    """Background HTTP server serving cookie-gated PDF endpoints.
+def local_fetch_page_server() -> Iterator[tuple[str, list[str]]]:
+    """Background HTTP server serving the three routes used by these tests.
+
+    Routes:
+      - GET /html         → 200 text/html, minimal HTML body.
+      - GET /pdf          → 200 application/pdf, ``_MINIMAL_PDF``.
+      - GET /pdf-cookie   → 200 application/pdf when ``session=valid`` is
+                            present; otherwise 302 → /login (so a
+                            cookie-extraction regression yields non-PDF
+                            content and fails the magic-byte assertion).
 
     Uses ``ThreadingHTTPServer`` (not ``HTTPServer``) so HTTP/1.1
     keep-alive connections from Chrome cannot starve the urllib refetch:
@@ -175,16 +190,23 @@ def cookie_pdf_server() -> Iterator[tuple[str, list[str]]]:
     """
     received: list[str] = []
 
-    class _CookieGatedPDFHandler(http.server.BaseHTTPRequestHandler):
-        """Local server: /pdf gates a PDF on the ``session=valid`` cookie.
-
-        Returns the PDF body only when ``session=valid`` is present;
-        otherwise 302s to ``/login`` (so the test fails loudly if
-        redirect-block is reverted).
-        """
-
+    class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 — stdlib API
+            if self.path == "/html":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(_MINIMAL_HTML)))
+                self.end_headers()
+                self.wfile.write(_MINIMAL_HTML)
+                return
             if self.path == "/pdf":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/pdf")
+                self.send_header("Content-Length", str(len(_MINIMAL_PDF)))
+                self.end_headers()
+                self.wfile.write(_MINIMAL_PDF)
+                return
+            if self.path == "/pdf-cookie":
                 cookie = self.headers.get("Cookie", "")
                 received.append(cookie)
                 if "session=valid" in cookie:
@@ -204,9 +226,7 @@ def cookie_pdf_server() -> Iterator[tuple[str, list[str]]]:
         def log_message(self, format: str, *args: object) -> None:
             pass
 
-    server = http.server.ThreadingHTTPServer(
-        ("127.0.0.1", 0), _CookieGatedPDFHandler
-    )
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -220,36 +240,31 @@ def cookie_pdf_server() -> Iterator[tuple[str, list[str]]]:
 
 async def test_fetch_page_pdf_forwards_browser_cookies(
     chrome_browser: zd.Browser,
-    cookie_pdf_server: tuple[str, list[str]],
+    local_fetch_page_server: tuple[str, list[str]],
 ) -> None:
     """PDF refetch carries cookies present in Chrome's jar.
 
-    The cookie is injected directly into Chrome via CDP rather than
-    obtained through a real /auth round-trip — we are testing our
-    contract ("if a cookie is in Chrome's jar, our refetch forwards it"),
-    not Chrome's Set-Cookie handling. Locks in both halves of the
-    contract:
-      - Cookies extracted from Chrome reach the urllib refetch (the tail
-        recorded Cookie header contains ``session=valid``).
-      - Redirects in the cookie-bearing refetch are blocked: without the
-        defense, the cookie-less fallback path (or any reverted refetch)
-        would follow 302 → /login and return non-PDF content, failing
-        the magic-byte assertion.
+    The cookie is injected directly via CDP rather than via a real
+    /auth round-trip — we test our contract ("if a cookie is in
+    Chrome's jar, our refetch forwards it"), not Chrome's Set-Cookie
+    handling. Scope is cookie forwarding only; redirect blocking is
+    not observable here because the server returns 200 directly when
+    the cookie is present.
     """
     from zendriver import cdp
 
-    base, received_cookie_headers = cookie_pdf_server
+    base, received_cookie_headers = local_fetch_page_server
 
     await chrome_browser.cookies.set_all(
         [cdp.network.CookieParam(name="session", value="valid", url=f"{base}/")]
     )
 
-    ct, body, _ = await _fetch_page(chrome_browser, f"{base}/pdf")
+    ct, body, _ = await _fetch_page(chrome_browser, f"{base}/pdf-cookie")
 
     assert ct == "application/pdf"
     assert body.startswith(b"%PDF-")
-    # The urllib refetch is the LAST request hitting /pdf. Asserting on
-    # the tail entry directly proves the cookie traveled via the urllib
+    # The urllib refetch is the LAST request hitting /pdf-cookie. Asserting
+    # on the tail entry directly proves the cookie traveled via the urllib
     # path — not just that Chrome's own navigation succeeded.
-    assert received_cookie_headers, "no /pdf requests recorded"
+    assert received_cookie_headers, "no /pdf-cookie requests recorded"
     assert "session=valid" in received_cookie_headers[-1]
