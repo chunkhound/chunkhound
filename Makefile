@@ -5,7 +5,7 @@
 # Optional: override config file via CONFIG, e.g.:
 #   make bench-lang CONFIG=.chunkhound.json
 
-.PHONY: bench-lang bench-cluster
+.PHONY: bench-lang bench-cluster dev dev-release lint typecheck test
 
 bench-lang:
 	uv run python -m chunkhound.tools.eval_search \
@@ -22,3 +22,18 @@ bench-cluster:
 		--bench-id cluster-stress-dev \
 		$(if $(CONFIG),--config $(CONFIG),) \
 		--output .chunkhound/benches/cluster-stress-dev/cluster_eval.json
+
+dev:
+	cargo check && uv run maturin develop && uv run pytest tests/test_smoke.py -v -n auto
+
+dev-release:
+	rm -rf target/wheels/ && uv run maturin build --release --out target/wheels/ && uv run python scripts/install_native.py && uv run pytest tests/test_smoke.py -v -n auto
+
+lint:
+	uv run ruff check chunkhound
+
+typecheck:
+	uv run mypy chunkhound
+
+test:
+	uv run pytest tests/ -v

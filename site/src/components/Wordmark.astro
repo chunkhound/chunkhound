@@ -6,7 +6,14 @@ const { size = "sm" } = Astro.props;
 ---
 
 <span class:list={["wordmark-brand", size]}>
-    <img src="/logo.svg" alt="" class="wordmark-logo" />
+    <span class="wordmark-logo-stack" aria-hidden="true">
+        <img src="/logo.svg" alt="" class="wordmark-logo wordmark-logo-light" />
+        <img
+            src="/logo-light.svg"
+            alt=""
+            class="wordmark-logo wordmark-logo-dark"
+        />
+    </span>
     <span class="wordmark-text"
         >ChunkHound<span class="wordmark-dot" aria-hidden="true"></span></span
     >
@@ -41,7 +48,7 @@ const { size = "sm" } = Astro.props;
         position: relative;
     }
 
-    .wordmark-brand.lg .wordmark-logo {
+    .wordmark-brand.lg .wordmark-logo-stack {
         position: absolute;
         right: 100%;
         top: 50%;
@@ -58,21 +65,37 @@ const { size = "sm" } = Astro.props;
             gap: var(--space-3);
         }
 
-        .wordmark-brand.lg .wordmark-logo {
+        .wordmark-brand.lg .wordmark-logo-stack {
             position: static;
             transform: none;
             margin-right: 0;
         }
     }
 
-    .wordmark-logo {
+    .wordmark-logo-stack {
+        display: inline-grid;
+        place-items: center;
+        flex-shrink: 0;
         height: 1.4em;
-        width: auto;
-        filter: brightness(0) invert(1);
+        width: calc(1.4em * 194 / 150);
     }
 
-    :global([data-theme="light"]) .wordmark-logo {
-        filter: none;
+    .wordmark-logo {
+        grid-area: 1 / 1;
+        width: 100%;
+        height: 100%;
+    }
+
+    .wordmark-logo-dark {
+        display: none;
+    }
+
+    :global([data-theme="dark"]) .wordmark-logo-light {
+        display: none;
+    }
+
+    :global([data-theme="dark"]) .wordmark-logo-dark {
+        display: block;
     }
 
     .wordmark-text {

@@ -1,8 +1,8 @@
 <p align="center">
   <a href="https://chunkhound.ai">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="public/wordmark-centered-dark.svg">
-      <img src="public/wordmark-centered.svg" alt="ChunkHound" width="400">
+      <source media="(prefers-color-scheme: dark)" srcset="site/public/wordmark-centered-dark.svg">
+      <img src="site/public/wordmark-centered.svg" alt="ChunkHound" width="400">
     </picture>
   </a>
 </p>

@@ -1160,5 +1160,81 @@ def test_search_enum_restricted_without_embeddings():
     )
 
 
+def test_llm_capability_gating_with_registry_provider():
+    """Verify that a registry provider (deepseek) without model hides LLM tools.
+
+    DeepSeek is an OPENAI_COMPATIBLE_PROVIDER with no baked-in default model.
+    When ``llm.provider`` is set to ``"deepseek"`` without an explicit
+    ``llm.model``, ``LLMManager._create_openai_compatible_provider()`` raises
+    ``ValueError`` because model is empty.  The exception is caught in
+    ``MCPServerBase.initialize()``, leaving ``self.llm_manager = None``, which
+    causes ``_build_filtered_tool_dicts`` to skip all ``requires_llm=True``
+    tools (``code_research``, ``websearch``).
+
+    This test validates the gating logic directly, without requiring a full
+    server bootstrap, by constructing the provider config that triggers the
+    failure path.
+    """
+    from chunkhound.core.config.llm_config import LLMConfig
+    from chunkhound.llm_manager import LLMManager
+
+    # ── Without model: ValueError during provider creation ──
+    # Build the config dict directly (bypass ``build_provider_config`` which
+    # would also catch this) to test the runtime factory error path.
+    no_model_cfg = {
+        "provider": "deepseek",
+        "model": "",
+        "api_key": "sk-test",
+    }
+    with pytest.raises(ValueError, match="Model is required for.*deepseek"):
+        LLMManager(no_model_cfg, no_model_cfg)
+
+    # ── With model: provider creation succeeds ──
+    config_with_model = LLMConfig(
+        provider="deepseek", model="deepseek-v4-flash", api_key="sk-test"
+    )
+    util_cfg, synth_cfg = config_with_model.get_provider_configs()
+
+    assert util_cfg["model"] == "deepseek-v4-flash"
+    assert synth_cfg["model"] == "deepseek-v4-flash"
+
+    # Creation should not raise
+    manager = LLMManager(util_cfg, synth_cfg)
+    assert manager.is_configured()
+
+
+def test_filtered_tool_dicts_hides_llm_tools_without_manager():
+    """Verify ``_build_filtered_tool_dicts`` drops LLM-requiring tools when
+    ``llm_manager`` is ``None`` (simulating the silent initialization failure).
+    """
+    from types import SimpleNamespace
+
+    from chunkhound.mcp_server.base import MCPServerBase
+
+    # Stub with no LLM manager and no embedding provider
+    stub = SimpleNamespace(
+        embedding_manager=None,
+        llm_manager=None,
+    )
+    tool_dicts = MCPServerBase._build_filtered_tool_dicts(stub)
+    names = {d["name"] for d in tool_dicts}
+
+    # Tools with requires_llm=True must be absent
+    assert "code_research" not in names
+    assert "websearch" not in names
+
+    # Tools without requires_llm must be present
+    assert "search" in names, "search should be present (no LLM required)"
+    assert "daemon_status" in names, (
+        "daemon_status should be present (no LLM required)"
+    )
+
+    # search should have degraded description
+    search_tool = next(d for d in tool_dicts if d["name"] == "search")
+    assert "research" not in search_tool["description"].lower(), (
+        "search description should be degraded without LLM"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

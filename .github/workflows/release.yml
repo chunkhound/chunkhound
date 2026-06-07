@@ -61,29 +61,80 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+  build-native-wheel:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv  # provides Python 3.12 build interpreter — abi3 wheel runs on Python 3.10+
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build native wheel
+        shell: bash
+        run: |
+          uv pip install maturin
+          VERSION="${GITHUB_REF_NAME#v}"
+          uv run maturin build --release --out dist/ --set-version "$VERSION"
+
+      - name: Smoke test native wheel
+        shell: bash
+        run: |
+          uv pip install dist/chunkhound_native-*.whl
+          python -c "from chunkhound_native import scan_files; r = scan_files('.', ['py']); assert isinstance(r, list)"
+
+      - name: Upload native wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-native-${{ matrix.os }}
+          path: dist/*.whl
+          if-no-files-found: error
+
   publish:
-    needs: [build-sdist, build-runtime-wheels]
+    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
     runs-on: ubuntu-latest
     environment: pypi
     timeout-minutes: 15
 
     steps:
-      - name: Download staged distribution artifacts
+      - name: Download main distribution artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: release-dist-*
+          pattern: release-dist-{sdist,ubuntu-latest,windows-latest}
           path: dist
           merge-multiple: true
 
-      - name: Publish to PyPI
+      - name: Publish chunkhound to PyPI
         id: publish
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-        # No token needed — OIDC Trusted Publishing configured on PyPI project
 
       - name: Cleanup on failure (delete release and tag)
-        if: failure() && steps.publish.outcome == 'failure'
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -91,3 +142,28 @@ jobs:
             --cleanup-tag \
             --yes \
             --repo "${{ github.repository }}"
+
+  publish-native:
+    needs: [publish]
+    runs-on: ubuntu-latest
+    # Separate environment so this job carries an OIDC token scoped to the
+    # chunkhound-native PyPI project (each project needs its own trusted-publisher
+    # entry referencing this environment name). Depends on publish so the main
+    # package is confirmed live before attempting the native publish — avoids
+    # deleting a successfully-published release if only the native wheel fails.
+    environment: pypi-native
+    timeout-minutes: 15
+
+    steps:
+      - name: Download native wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-dist-native-*
+          path: dist-native
+          merge-multiple: true
+
+      - name: Publish chunkhound-native to PyPI
+        id: publish-native
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-native

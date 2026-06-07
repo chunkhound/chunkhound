@@ -5,7 +5,7 @@ Synthesizes multiple research questions into distinct unexplored aspects.
 
 # Direct, unambiguous prompt optimized for GPT-5-Nano instruction adherence
 SYSTEM_MESSAGE = (
-    """Synthesize research questions to explore unexplored aspects of the codebase."""
+    """Synthesize research questions to explore unexplored aspects."""
 )
 
 # User prompt template with variables: root_query, questions_str, target_count
@@ -19,9 +19,9 @@ INPUT QUESTIONS TO SYNTHESIZE:
 REQUIREMENTS:
 - You MUST return at least 1 synthesized question (returning zero is not acceptable)
 - You MAY return up to {target_count} questions if there are that many distinct aspects to explore
-- Each question must explore a DISTINCT architectural aspect not fully covered by the inputs
-- Questions must be specific and reference concrete code elements (function/class/file names where relevant)
-- Focus on architectural angles: component interactions, implementation details, error handling, performance, testing
+- Each question must explore a DISTINCT aspect not fully covered by the inputs
+- Questions must be specific and reference concrete elements from the source material (specific names where relevant)
+- Focus on structural angles: component interactions, how things work, edge cases, performance, verification
 
 EXAMPLE:
 Input: "How is data validated?", "Where is validation defined?", "What validation rules exist?"

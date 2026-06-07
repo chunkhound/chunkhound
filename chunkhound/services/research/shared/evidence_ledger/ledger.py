@@ -1,5 +1,9 @@
 """Evidence Ledger: Unified aggregation of constants and facts for research context.
 
+INTERNAL: The ``get_*_prompt_context()`` and ``get_*_prompt_instruction()``
+methods format evidence for LLM consumption during map-reduce synthesis,
+not for end-user display.
+
 Combines ConstantsLedger and FactsLedger into a single class for:
 1. Providing verified evidence to LLM during synthesis
 2. Constants extraction from chunk metadata
@@ -12,7 +16,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .models import ConfidenceLevel, ConstantEntry, EntityLink, FactConflict, FactEntry
@@ -239,7 +242,9 @@ class EvidenceLedger:
             return []
         return [self.facts[fid] for fid in link.fact_ids if fid in self.facts]
 
-    def get_related_facts(self, file_paths: set[str]) -> list[FactEntry]:
+    def get_related_facts(
+        self, file_paths: set[str], cluster_id: int | None = None
+    ) -> list[FactEntry]:
         """Get facts related via entity links.
 
         Finds facts from files, then expands to include facts
@@ -247,12 +252,22 @@ class EvidenceLedger:
 
         Args:
             file_paths: Set of file paths to start from
+            cluster_id: Optional cluster scope for facts whose normalized URL
+                provenance no longer matches a cluster file key
 
         Returns:
             List of related FactEntry objects
         """
-        # Get direct facts from files
-        direct_facts = self.get_facts_for_files(file_paths)
+        # Map-phase synthesis is cluster-scoped. When URL provenance was
+        # normalized out of `source`, preserve access to facts extracted from
+        # the same cluster even if their file_path no longer matches a file key.
+        direct_fact_ids = {
+            fact.fact_id
+            for fact in self.facts.values()
+            if fact.file_path in file_paths
+            or (cluster_id is not None and fact.cluster_id == cluster_id)
+        }
+        direct_facts = [self.facts[fid] for fid in direct_fact_ids if fid in self.facts]
 
         # Collect all entities mentioned
         entities: set[str] = set()
@@ -260,14 +275,10 @@ class EvidenceLedger:
             entities.update(fact.entities)
 
         # Get facts for all related entities
-        related_ids: set[str] = set()
+        related_ids: set[str] = set(direct_fact_ids)
         for entity in entities:
             for fact in self.get_facts_for_entity(entity):
                 related_ids.add(fact.fact_id)
-
-        # Add direct fact IDs
-        for fact in direct_facts:
-            related_ids.add(fact.fact_id)
 
         return [self.facts[fid] for fid in related_ids if fid in self.facts]
 
@@ -436,6 +447,39 @@ class EvidenceLedger:
     # Facts Prompt Generation
     # =========================================================================
 
+    @staticmethod
+    def _format_fact_location(fact: FactEntry) -> str:
+        """Format fact location for display in prompts and reports.
+
+        Handles URL-backed facts (url ± section), section-only locations
+        (file_path — section), and file:line provenance. Falls back to
+        file name when no structured location is available.
+
+        Args:
+            fact: The fact entry to format
+
+        Returns:
+            Human-readable location string
+        """
+        if fact.url:
+            if fact.source_section:
+                return f"{fact.url} — {fact.source_section}"
+            return fact.url
+
+        fp = fact.file_path or "unknown"
+
+        if fact.source_section:
+            return f"{fp} — {fact.source_section}"
+
+        # Guard against URL values in file_path
+        if fp.lower().startswith(("http://", "https://")):
+            return fp
+
+        if fact.start_line or fact.end_line:
+            return f"{fp}:{fact.start_line}-{fact.end_line}"
+
+        return fp
+
     def _format_facts_simple(self, facts_list: list[FactEntry]) -> str:
         """Format facts as simple markdown list with confidence marker.
 
@@ -467,11 +511,8 @@ class EvidenceLedger:
         lines = []
         for fact in sorted_facts:
             conf = fact.confidence.value[:3].upper()  # DEF, LIK, INF, UNC
-            file_name = Path(fact.file_path).name
-            lines.append(
-                f"- [{conf}] {fact.statement} "
-                f"({file_name}:{fact.start_line}-{fact.end_line})"
-            )
+            loc = self._format_fact_location(fact)
+            lines.append(f"- [{conf}] {fact.statement} ({loc})")
 
         result = "\n".join(lines)
 
@@ -500,7 +541,9 @@ class EvidenceLedger:
             key=lambda f: (confidence_order.get(f.confidence, 4), f.category),
         )
 
-    def get_facts_map_prompt_context(self, cluster_files: set[str]) -> str:
+    def get_facts_map_prompt_context(
+        self, cluster_files: set[str], cluster_id: int | None = None
+    ) -> str:
         """Generate context for map phase synthesis.
 
         Shows facts from cluster files plus related facts via entity links.
@@ -508,11 +551,13 @@ class EvidenceLedger:
 
         Args:
             cluster_files: Files in the current cluster
+            cluster_id: Optional cluster scope for normalized URL facts whose
+                file_path no longer matches cluster file keys
 
         Returns:
             Formatted prompt context, or empty string if no facts
         """
-        related_facts = self.get_related_facts(cluster_files)
+        related_facts = self.get_related_facts(cluster_files, cluster_id=cluster_id)
         if not related_facts:
             return ""
 
@@ -608,10 +653,8 @@ class EvidenceLedger:
                 continue
             lines.append(f"\n#### {confidence.value.title()} Facts")
             for fact in sorted(facts_list, key=lambda f: (f.category, f.file_path)):
-                lines.append(
-                    f"- [F-{fact.fact_id}] {fact.statement} "
-                    f"({fact.file_path}:{fact.start_line})"
-                )
+                loc = self._format_fact_location(fact)
+                lines.append(f"- [F-{fact.fact_id}] {fact.statement} ({loc})")
 
         return "\n".join(lines)
 
@@ -732,6 +775,8 @@ class EvidenceLedger:
                     "confidence": fact.confidence.value,
                     "entities": list(fact.entities),
                     "cluster_id": fact.cluster_id,
+                    "url": fact.url,
+                    "source_section": fact.source_section,
                 }
                 for fact_id, fact in self.facts.items()
             },
@@ -779,6 +824,8 @@ class EvidenceLedger:
                 confidence=ConfidenceLevel(fact_data["confidence"]),
                 entities=tuple(fact_data.get("entities", [])),
                 cluster_id=fact_data.get("cluster_id", 0),
+                url=fact_data.get("url"),
+                source_section=fact_data.get("source_section"),
             )
             ledger.add_fact(fact)
 

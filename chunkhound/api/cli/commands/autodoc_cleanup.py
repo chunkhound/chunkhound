@@ -54,8 +54,10 @@ def _resolve_llm_config_for_cleanup(
     if llm_config is None:
         return None
 
+    # Only check utility and autodoc_cleanup roles — synthesis is intentionally
+    # excluded because autodoc_cleanup has its own dedicated config slot.
     missing_config = llm_config.get_missing_config_for_roles(
-        ("utility", "synthesis", "autodoc_cleanup")
+        ("utility", "autodoc_cleanup")
     )
     if missing_config:
         missing = ", ".join(missing_config)

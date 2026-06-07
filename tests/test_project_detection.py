@@ -1,6 +1,7 @@
 """Test project root detection logic."""
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -171,6 +172,27 @@ class TestProjectRootDetection:
         with tempfile.TemporaryDirectory() as tmpdir:
             empty_dir = Path(tmpdir) / "empty"
             empty_dir.mkdir()
+
+            # Clean any leftover markers from temp directory tree
+            def clean_markers(root_path: Path, current_path: Path):
+                """Remove any chunkhound markers from the directory tree, scoped to root_path."""
+                if not current_path.is_relative_to(root_path):
+                    return  # Don't climb above root_path
+
+                for marker in [".chunkhound.json", ".chunkhound"]:
+                    marker_path = current_path / marker
+                    if marker_path.exists():
+                        if marker_path.is_file():
+                            marker_path.unlink()
+                        elif marker_path.is_dir():
+                            shutil.rmtree(marker_path)
+
+                # Recursively clean subdirectories
+                for child in current_path.iterdir():
+                    if child.is_dir():
+                        clean_markers(root_path, child)
+
+            clean_markers(Path(tmpdir), empty_dir)
 
             # Change to empty directory
             original_cwd = Path.cwd()

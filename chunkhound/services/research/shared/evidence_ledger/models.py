@@ -1,4 +1,4 @@
-"""Evidence Ledger Data Models: Unified facts and constants from code analysis.
+"""Evidence Ledger Data Models: Unified facts and constants from source analysis.
 
 Defines structures for:
 1. Evidence types (constants vs facts)
@@ -54,36 +54,52 @@ class ConstantEntry:
 class FactEntry:
     """Single atomic fact with source provenance.
 
-    Each fact represents one verifiable claim about the codebase,
+    Each fact represents one verifiable claim about the source material,
     linked to its source location and the entities it references.
+    Supports both file-based (file_path + line) and URL-based (url + section) sources.
     """
 
-    fact_id: str  # sha256(statement + file_path + lines)[:12]
+    fact_id: str  # sha256 hash of statement, primary source, and location [:12]
     statement: str  # The atomic fact (one verifiable claim)
-    file_path: str  # Source file
+    file_path: str  # Stable cluster/file lookup key for file-scoped retrieval
     start_line: int  # Line range start
     end_line: int  # Line range end
     category: str  # LLM-determined (architecture, behavior, etc.)
     confidence: ConfidenceLevel
-    entities: tuple[str, ...]  # Code entities referenced (for linking)
+    entities: tuple[str, ...]  # Named entities referenced (for linking)
     cluster_id: int  # Which cluster extracted this
+    url: str | None = None  # Source URL (for web sources)
+    source_section: str | None = (
+        None  # Section within source for non-line-based locations
+    )
 
     @staticmethod
     def generate_id(
-        statement: str, file_path: str, start_line: int, end_line: int
+        statement: str,
+        primary_source: str,
+        start_line: int = 0,
+        end_line: int = 0,
+        section: str | None = None,
     ) -> str:
         """Generate deterministic fact ID from content and location.
 
+        NOTE: The ID formula changed from the old (statement:file_path:start-end)
+        to the new (statement:primary_source:section-or-start-end). All fact IDs
+        from previous versions are invalidated. Old and new ledgers cannot be
+        merged — same logical fact has a different ID.
+
         Args:
             statement: The fact statement
-            file_path: Source file path
-            start_line: Start line number
-            end_line: End line number
+            primary_source: Source file path or URL
+            start_line: Start line number (0 if not applicable)
+            end_line: End line number (0 if not applicable)
+            section: Section within source (for non-line-based locations)
 
         Returns:
             12-character hex hash
         """
-        content = f"{statement}:{file_path}:{start_line}-{end_line}"
+        location = section if section else f"{start_line}-{end_line}"
+        content = f"{statement}:{primary_source}:{location}"
         return sha256(content.encode()).hexdigest()[:12]
 
 

@@ -26,13 +26,7 @@ from tests.fixtures.fake_providers import FakeLLMProvider
 @pytest.fixture
 def fake_llm_provider():
     """Create fake LLM provider for exploration query generation."""
-    return FakeLLMProvider(
-        responses={
-            # Exploration query generation (structured JSON)
-            "different aspects": '{"queries": ["How does initialization work?", "What error handling patterns are used?"]}',
-            "root query": '{"queries": ["What is the data flow?", "How are dependencies managed?"]}',
-        }
-    )
+    return FakeLLMProvider(responses={})
 
 
 @pytest.fixture
@@ -437,21 +431,68 @@ class TestGenerateExplorationQueries:
     """Test LLM-based exploration query generation."""
 
     @pytest.mark.asyncio
-    async def test_returns_queries_from_llm(self, depth_service):
+    async def test_returns_queries_from_llm(self, depth_service, fake_llm_provider):
         """Should return queries from LLM structured response."""
-        file_chunks = [
+        fragments = [
             {"chunk_id": "c1", "content": "def main(): pass", "file_path": "test.py"}
         ]
 
-        queries = await depth_service._generate_exploration_queries(
-            root_query="How does the system work?",
-            file_chunks=file_chunks,
-            file_path="test.py",
-        )
+        original_complete = fake_llm_provider.complete_structured
 
-        # FakeLLMProvider matches "different aspects" (case-insensitive)
-        assert isinstance(queries, list)
-        assert len(queries) <= 2  # exploration_queries_per_file=2
+        async def successful_complete(*args, **kwargs):
+            return {
+                "queries": [
+                    "How does initialization work?",
+                    "What error handling patterns are used?",
+                ]
+            }
+
+        fake_llm_provider.complete_structured = successful_complete
+
+        try:
+            queries = await depth_service._generate_exploration_queries(
+                root_query="How does the system work?",
+                fragments=fragments,
+                file_path="test.py",
+            )
+        finally:
+            fake_llm_provider.complete_structured = original_complete
+
+        assert queries == [
+            "How does initialization work?",
+            "What error handling patterns are used?",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_uses_configured_query_generation_token_budget(
+        self, depth_service, fake_llm_provider
+    ):
+        """Should pass configured completion budget to query-generation LLM call."""
+        depth_service._config.depth_exploration_max_completion_tokens = (
+            12_345
+        )
+        fragments = [
+            {"chunk_id": "c1", "content": "def main(): pass", "file_path": "test.py"}
+        ]
+        captured: dict[str, int] = {}
+        original_complete = fake_llm_provider.complete_structured
+
+        async def capturing_complete(*args, **kwargs):
+            captured["max_completion_tokens"] = kwargs["max_completion_tokens"]
+            return {"queries": ["How does initialization work?"]}
+
+        fake_llm_provider.complete_structured = capturing_complete
+
+        try:
+            await depth_service._generate_exploration_queries(
+                root_query="How does the system work?",
+                fragments=fragments,
+                file_path="test.py",
+            )
+        finally:
+            fake_llm_provider.complete_structured = original_complete
+
+        assert captured["max_completion_tokens"] == 12_345
 
     @pytest.mark.asyncio
     async def test_returns_empty_on_llm_failure(self, depth_service, fake_llm_provider):
@@ -467,7 +508,7 @@ class TestGenerateExplorationQueries:
         try:
             queries = await depth_service._generate_exploration_queries(
                 root_query="test query",
-                file_chunks=[{"chunk_id": "c1", "content": "code"}],
+                fragments=[{"chunk_id": "c1", "content": "code"}],
                 file_path="test.py",
             )
 
@@ -478,14 +519,21 @@ class TestGenerateExplorationQueries:
     @pytest.mark.asyncio
     async def test_handles_empty_queries_response(self, depth_service, fake_llm_provider):
         """Should handle LLM returning empty queries array."""
-        # Override response to return empty queries
-        fake_llm_provider._responses["different aspects"] = '{"queries": []}'
+        original_complete = fake_llm_provider.complete_structured
 
-        queries = await depth_service._generate_exploration_queries(
-            root_query="test query",
-            file_chunks=[{"chunk_id": "c1", "content": "code"}],
-            file_path="test.py",
-        )
+        async def empty_complete(*args, **kwargs):
+            return {"queries": []}
+
+        fake_llm_provider.complete_structured = empty_complete
+
+        try:
+            queries = await depth_service._generate_exploration_queries(
+                root_query="test query",
+                fragments=[{"chunk_id": "c1", "content": "code"}],
+                file_path="test.py",
+            )
+        finally:
+            fake_llm_provider.complete_structured = original_complete
 
         assert queries == []
 

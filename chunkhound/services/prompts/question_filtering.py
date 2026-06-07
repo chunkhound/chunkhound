@@ -13,8 +13,8 @@ Candidate Follow-ups:
 {questions_str}
 
 Select the questions that:
-1. Help understand system architecture (component interactions, data flow)
-2. Are directly related to code elements already found
+1. Help understand system structure (component interactions, information flow)
+2. Are directly related to elements already found
 3. Deepen understanding of the ROOT query (not tangents)
 
 Return ONLY the question numbers (comma-separated, e.g., "1,3") for the most relevant questions.

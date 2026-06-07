@@ -6,8 +6,8 @@ import pytest
 from pydantic import SecretStr
 
 from chunkhound.core.config.llm_config import LLMConfig
+from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.llm_manager import LLMManager
-from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 from tests.helpers import DummyProc
 
 
@@ -203,25 +203,105 @@ def test_opencode_cli_model_convenience_field_sets_both_roles():
     assert synth_conf["model"] == "opencode/gpt-5-nano"
 
 
-def test_deepseek_does_not_forward_structured_outputs_override_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    captured: list[dict[str, object]] = []
-
-    class FakeDeepSeekProvider(OpenAICompatibleProvider):
-        def __init__(self, **kwargs):  # noqa: ANN001
-            captured.append(kwargs)
-            self._model = kwargs["model"]
-
-        def _get_default_base_url(self) -> str | None:
-            return None
-
-        def _get_provider_name(self) -> str:
-            return "deepseek"
-
-    monkeypatch.setitem(LLMManager._providers, "deepseek", FakeDeepSeekProvider)
-
+def test_registry_provider_without_model_is_not_configured():
     cfg = LLMConfig(provider="deepseek", api_key=SecretStr("sk-test"))
+
+    assert cfg.is_provider_configured() is False
+    assert cfg.get_missing_config() == [
+        "explicit model selection required for registry provider roles: "
+        "utility, synthesis, map_hyde, autodoc_cleanup"
+    ]
+
+
+
+def test_registry_provider_missing_model_raises_configuration_error():
+    cfg = LLMConfig(provider="deepseek", api_key=SecretStr("sk-test"))
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        cfg.get_provider_config_for_role("utility")
+
+    assert str(exc_info.value) == (
+        "Configuration error for 'llm.model': Model is required for 'deepseek'. "
+        "Set `llm.model`, CHUNKHOUND_LLM_MODEL, "
+        "or a per-role model override in your configuration."
+    )
+    assert exc_info.value.config_key == "llm.model"
+    assert exc_info.value.reason == (
+        "Model is required for 'deepseek'. "
+        "Set `llm.model`, CHUNKHOUND_LLM_MODEL, "
+        "or a per-role model override in your configuration."
+    )
+
+
+def test_registry_provider_utility_override_with_model():
+    """Per-role utility override to a registry provider with explicit model."""
+    cfg = LLMConfig(
+        provider="openai",
+        utility_provider="deepseek",
+        utility_model="deepseek-v4-flash",
+        api_key=SecretStr("sk-test"),
+    )
+    missing = cfg.get_missing_config()
+    # utility_model is set, so no registry provider role errors
+    assert not any("registry provider role" in m for m in missing), (
+        f"Expected no registry provider role errors, got {missing}"
+    )
+
+
+def test_registry_provider_utility_override_without_model():
+    """Per-role utility override to registry provider without model is caught."""
+    cfg = LLMConfig(
+        provider="openai",
+        utility_provider="deepseek",
+        api_key=SecretStr("sk-test"),
+    )
+    assert cfg.is_provider_configured() is False
+    assert cfg.get_missing_config() == [
+        "explicit model selection required for registry provider roles: utility"
+    ]
+
+
+def test_gemini_build_provider_config_forwards_thinking_options():
+    cfg = LLMConfig(
+        provider="gemini",
+        model="gemini-3.5-flash",
+        gemini_thinking_level="HIGH",
+        gemini_thinking_budget=2048,
+    )
+
+    utility_config, synthesis_config = cfg.get_provider_configs()
+
+    assert utility_config["thinking_level"] == "high"
+    assert utility_config["thinking_budget"] == 2048
+    assert synthesis_config["thinking_level"] == "high"
+    assert synthesis_config["thinking_budget"] == 2048
+
+
+def test_gemini_without_model_raises_configuration_error():
+    """Gemini requires explicit model — no model raises ConfigurationError."""
+    cfg = LLMConfig(provider="gemini")
+
+    with pytest.raises(ConfigurationError, match="Model is required for 'gemini'"):
+        cfg.get_provider_configs()
+
+
+def test_gemini_without_model_shows_in_get_missing_config():
+    """Gemini with no model appears in get_missing_config()."""
+    cfg = LLMConfig(provider="gemini", api_key=SecretStr("sk-test"))
+
+    missing = cfg.get_missing_config()
+    assert missing == [
+        "explicit model selection required for gemini roles: "
+        "utility, synthesis, map_hyde, autodoc_cleanup"
+    ], f"Unexpected missing config: {missing}"
+
+
+def test_deepseek_does_not_forward_structured_outputs_override_by_default():
+    cfg = LLMConfig(
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        api_key=SecretStr("sk-test"),
+    )
     utility_config, synthesis_config = cfg.get_provider_configs()
 
     assert "supports_structured_outputs" not in utility_config
@@ -229,32 +309,11 @@ def test_deepseek_does_not_forward_structured_outputs_override_by_default(
 
     LLMManager(utility_config, synthesis_config)
 
-    assert len(captured) == 2
-    for kwargs in captured:
-        assert kwargs["model"] == "deepseek-v4-flash"
-        assert "supports_structured_outputs" not in kwargs
 
-
-def test_deepseek_forwards_structured_outputs_override(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    captured: list[dict[str, object]] = []
-
-    class FakeDeepSeekProvider(OpenAICompatibleProvider):
-        def __init__(self, **kwargs):  # noqa: ANN001
-            captured.append(kwargs)
-            self._model = kwargs["model"]
-
-        def _get_default_base_url(self) -> str | None:
-            return None
-
-        def _get_provider_name(self) -> str:
-            return "deepseek"
-
-    monkeypatch.setitem(LLMManager._providers, "deepseek", FakeDeepSeekProvider)
-
+def test_deepseek_forwards_structured_outputs_override():
     cfg = LLMConfig(
         provider="deepseek",
+        model="deepseek-v4-flash",
         api_key=SecretStr("sk-test"),
         supports_structured_outputs=True,
     )
@@ -264,10 +323,6 @@ def test_deepseek_forwards_structured_outputs_override(
     assert synthesis_config["supports_structured_outputs"] is True
 
     LLMManager(utility_config, synthesis_config)
-
-    assert len(captured) == 2
-    for kwargs in captured:
-        assert kwargs["supports_structured_outputs"] is True
 
 
 @pytest.mark.asyncio
@@ -445,6 +500,7 @@ def test_grok_config_validation_per_role_synthesis():
     cfg = LLMConfig(
         provider="grok",
         synthesis_provider="grok",
+        utility_model="grok-4-1-fast-reasoning",
         synthesis_model="grok-4-1-fast-reasoning",
         api_key=SecretStr("sk-test-key"),
     )
@@ -577,7 +633,10 @@ def test_opencode_cli_model_validator_per_role_override():
 
 def test_opencode_cli_model_validator_map_hyde_provider_requires_explicit_model():
     """Switching map_hyde providers must not inherit the synthesis model."""
-    with pytest.raises(ValueError, match="map_hyde provider override requires an explicit map_hyde_model"):
+    with pytest.raises(
+        ValueError,
+        match="map_hyde provider override requires an explicit map_hyde_model",
+    ):
         LLMConfig(
             provider="openai",
             synthesis_model="gpt-5",
@@ -599,7 +658,13 @@ def test_opencode_cli_model_validator_map_hyde_provider_requires_explicit_model(
 
 def test_opencode_cli_model_validator_autodoc_provider_requires_explicit_model():
     """Switching autodoc_cleanup providers must not inherit the synthesis model."""
-    with pytest.raises(ValueError, match="autodoc_cleanup provider override requires an explicit autodoc_cleanup_model"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "autodoc_cleanup provider override requires an explicit "
+            "autodoc_cleanup_model"
+        ),
+    ):
         LLMConfig(
             provider="openai",
             synthesis_model="gpt-5",
@@ -632,8 +697,13 @@ def test_opencode_cli_model_validator_valid_models_pass():
 
 
 class TestDeepSeekProviderDefaults:
-    def test_default_models_both_roles(self):
-        cfg = LLMConfig(provider="deepseek", api_key="sk-test")
+    def test_default_models_use_explicit_model(self):
+        """Registry providers require an explicit model — test the forward path."""
+        cfg = LLMConfig(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            api_key="sk-test",
+        )
         utility_cfg, synthesis_cfg = cfg.get_provider_configs()
         assert utility_cfg["model"] == "deepseek-v4-flash"
         assert synthesis_cfg["model"] == "deepseek-v4-flash"
@@ -641,6 +711,7 @@ class TestDeepSeekProviderDefaults:
     def test_supports_structured_outputs_override_is_propagated(self):
         cfg = LLMConfig(
             provider="deepseek",
+            model="deepseek-v4-flash",
             api_key="sk-test",
             supports_structured_outputs=False,
         )
@@ -657,8 +728,7 @@ class TestDeepSeekProviderDefaults:
 
         assert any(
             error.startswith(
-                "explicit model selection required for custom OpenAI-compatible "
-                "endpoint roles:"
+                "explicit model selection required for registry provider roles:"
             )
             for error in missing
         )
@@ -777,29 +847,58 @@ def test_get_provider_config_for_role_propagates_structured_outputs_to_secondary
 
 
 @pytest.mark.parametrize(
-    ("role", "provider", "model"),
+    ("role", "provider", "model", "synth_provider"),
     [
-        ("map_hyde", "openai", "gpt-5-mini"),
-        ("autodoc_cleanup", "openai", "gpt-5-mini"),
+        ("map_hyde", "anthropic", "claude-opus-4-7", "deepseek"),
+        ("autodoc_cleanup", "claude-code-cli", "claude-haiku-4-5", "deepseek"),
     ],
 )
 def test_role_config_does_not_propagate_structured_outputs_across_provider_switch(
     role: str,
     provider: str,
     model: str,
+    synth_provider: str,
 ) -> None:
-    cfg = LLMConfig(
-        provider="deepseek",
-        api_key="sk-test",
-        synthesis_model="deepseek-v4-flash",
-        supports_structured_outputs=False,
-        **{f"{role}_provider": provider, f"{role}_model": model},
-    )
+    """Cross-family override does not inherit supports_structured_outputs."""
+    kwargs: dict[str, object] = {
+        "provider": synth_provider,
+        "api_key": "sk-test",
+        "synthesis_model": "deepseek-v4-flash",
+        "supports_structured_outputs": False,
+    }
+    kwargs[f"{role}_provider"] = provider
+    kwargs[f"{role}_model"] = model
+    cfg = LLMConfig(**kwargs)  # type: ignore[arg-type]
 
     role_cfg = cfg.get_provider_config_for_role(role)
 
     assert role_cfg["provider"] == provider
     assert role_cfg["model"] == model
+    assert "supports_structured_outputs" not in role_cfg
+
+
+def test_role_config_does_not_propagate_structured_outputs_across_registry_providers() -> (
+    None
+):
+    """
+    Registry providers in the same OpenAI-compatible family (e.g., DeepSeek and
+    Grok) must NOT inherit each other's ``supports_structured_outputs`` -- the
+    flag only propagates when the resolved provider exactly matches the synthesis
+    provider, since different registry providers may have different capabilities.
+    """
+    cfg = LLMConfig(
+        provider="deepseek",
+        api_key="sk-test",
+        synthesis_model="deepseek-v4-flash",
+        map_hyde_provider="grok",
+        map_hyde_model="grok-3",
+        supports_structured_outputs=False,
+    )
+
+    role_cfg = cfg.get_provider_config_for_role("map_hyde")
+
+    assert role_cfg["provider"] == "grok"
+    assert role_cfg["model"] == "grok-3"
     assert "supports_structured_outputs" not in role_cfg
 
 
@@ -963,6 +1062,29 @@ def test_get_provider_config_for_role_strips_api_key_for_no_key_provider_switch(
 
 
 
+
+
+def test_provider_family_grouping() -> None:
+    """Verify _provider_family groups registry-based OpenAI-compatible providers together."""
+    cfg = LLMConfig(
+        provider="openai",
+        utility_model="gpt-5-nano",
+        synthesis_model="gpt-5",
+    )
+
+    # Registry-based OpenAI-compatible providers are same family
+    assert cfg._provider_family("deepseek") == cfg._provider_family("grok")
+
+    # Native "openai" is its own family, distinct from registry-based compat
+    assert cfg._provider_family("deepseek") != cfg._provider_family("openai")
+
+    # Non-OpenAI providers are their own family
+    assert cfg._provider_family("anthropic") == "anthropic"
+    assert cfg._provider_family("claude-code-cli") == "claude-code-cli"
+    assert cfg._provider_family("codex-cli") == "codex-cli"
+
+    # Native openai != non-OpenAI
+    assert cfg._provider_family("openai") != cfg._provider_family("anthropic")
 
 
 def test_supports_structured_outputs_not_passed_to_other_providers() -> None:

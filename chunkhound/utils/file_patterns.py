@@ -10,6 +10,7 @@
 # - Early pattern matching avoids expensive directory traversal of excluded subtrees
 """
 
+import logging
 import os
 import re
 from fnmatch import fnmatch, translate
@@ -18,6 +19,40 @@ from pathlib import Path
 from re import Pattern
 
 from chunkhound.core.utils.path_utils import get_relative_path_safe
+
+try:
+    from chunkhound_native import scan_files as _rust_scan_files
+    _RUST_AVAILABLE = True
+except ImportError:
+    _RUST_AVAILABLE = False
+
+_USE_RUST = os.environ.get("CHUNKHOUND_USE_RUST", "1" if _RUST_AVAILABLE else "0") == "1"
+_log = logging.getLogger(__name__)
+
+HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
+
+
+def _fnmatch_to_gitignore(pattern: str) -> str:
+    """Convert a fnmatch-style glob to a gitignore-compatible pattern.
+
+    Patterns ending with '/**' are kept intact. Converting them to a trailing '/'
+    (directory-only gitignore syntax) causes Gitignore::matched(file, is_dir=false)
+    to miss files inside the directory — the trailing '/' only matches the directory
+    node itself, not its contents. Keeping '/**' makes the file-level check work.
+
+    The '**/' prefix is stripped only for simple extension/name patterns (no embedded
+    slash), where bare gitignore patterns already match at any depth.
+    """
+    p = pattern
+    if p.startswith("**/") and not p.endswith("/**"):
+        rest = p[3:]
+        # Only drop the '**/' prefix when the remainder has no embedded slash.
+        # gitignore treats patterns containing '/' as root-anchored; keeping '**/'
+        # ensures multi-segment paths like '**/.yarn/build-state.yml' match at any
+        # depth rather than only at the repo root.
+        if "/" not in rest.rstrip("/"):
+            p = rest
+    return p
 
 
 @lru_cache(maxsize=4096)
@@ -433,6 +468,70 @@ def walk_directory_tree(
     Returns:
         Tuple of (list of file paths found, updated gitignore_patterns dict)
     """
+    # Fast Rust path: ignore crate handles gitignore + exclude_patterns natively.
+    # ignore_engine is applied as a post-filter so Rust handles the expensive I/O walk.
+    if _USE_RUST and _RUST_AVAILABLE:
+        _exts, _names, _has_complex = _summarize_include_patterns(patterns)
+        if (
+            not _has_complex
+            and (_exts or _names)
+            and max_files is None       # Rust path doesn't support max_files cap
+        ):
+            _gitignore_excludes = (
+                [_fnmatch_to_gitignore(p) for p in exclude_patterns]
+                if exclude_patterns
+                else None
+            )
+            _raw = _rust_scan_files(
+                str(start_path),
+                [ext.lstrip(".") for ext in _exts],
+                skip_dirs=list(HEAVY_DIRS),
+                exclude_patterns=_gitignore_excludes,
+                exact_names=list(_names) if _names else None,
+            )
+            _log.debug(
+                "[RUST_SCANNER] scan_files root=%s exts=%s names=%s files=%d",
+                start_path, sorted(_exts), sorted(_names), len(_raw),
+            )
+            # Rust's native gitignore can exclude nested git repos that appear in the
+            # parent .gitignore. Detect such repos via the ignore engine's repo_roots
+            # and re-scan each from its own root (parent gitignore won't apply there).
+            if ignore_engine is not None and hasattr(ignore_engine, "repo_roots"):
+                _raw = list(_raw)
+                _raw_set: set[str] = set(_raw)
+                _start_str = str(start_path.resolve())
+                for _nr in getattr(ignore_engine, "repo_roots", []):
+                    _nr_str = str(_nr)  # already resolved by RepoAwareIgnoreEngine
+                    if _nr_str == _start_str:
+                        continue
+                    if not _nr_str.startswith(_start_str + os.sep):
+                        continue
+                    if not any(p.startswith(_nr_str + os.sep) for p in _raw):
+                        _extra = _rust_scan_files(
+                            _nr_str,
+                            [ext.lstrip(".") for ext in _exts],
+                            skip_dirs=list(HEAVY_DIRS),
+                            exclude_patterns=_gitignore_excludes,
+                            exact_names=list(_names) if _names else None,
+                        )
+                        _log.debug(
+                            "[RUST_SCANNER] nested-repo boundary re-scan: root=%s files=%d",
+                            _nr_str, len(_extra),
+                        )
+                        for _p in _extra:
+                            if _p not in _raw_set:
+                                _raw_set.add(_p)
+                                _raw.append(_p)
+            results = [Path(p) for p in _raw]
+            # ignore_engine is applied as a file-level post-filter only — it does not
+            # prune directory subtrees the way the Python path does. The ignore crate's
+            # native .gitignore handling and skip_dirs cover the common heavy directories;
+            # any additional engine rules that would prune directories are still correct
+            # (files inside are filtered here) but incur the cost of descending into them.
+            if ignore_engine is not None and hasattr(ignore_engine, "matches"):
+                results = [p for p in results if not ignore_engine.matches(p, is_dir=False)]
+            return results, parent_gitignores.copy()
+
     files = []
     gitignore_patterns: dict[Path, list[str]] = parent_gitignores.copy()
     pattern_cache: dict[str, Pattern[str]] = {}  # Local pattern cache
@@ -450,7 +549,6 @@ def walk_directory_tree(
         patterns
     )
     include_prefixes = _extract_include_prefixes(patterns)
-    HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
 
     for dirpath, dirnames, filenames in walk_iter:
         current_dir = Path(dirpath)
