@@ -1,6 +1,7 @@
 """Utilities for VoyageAI API endpoint detection."""
 
 OFFICIAL_VOYAGEAI_BASE = "https://api.voyageai.com"
+OFFICIAL_VOYAGEAI_BASE_V1 = f"{OFFICIAL_VOYAGEAI_BASE}/v1"
 
 
 def is_official_voyageai_endpoint(base_url: str | None) -> bool:

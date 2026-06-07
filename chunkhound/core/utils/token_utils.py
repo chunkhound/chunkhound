@@ -28,8 +28,10 @@ def _encoding_for_model_safe(model: str) -> "tiktoken.Encoding | None":
     retries and stalls on the connect timeout. functools.cache ensures the
     body runs once per unique model, so the warning fires once per model.
 
-    MODULE INVARIANT: tiktoken (>=0.4) eagerly loads the BPE file inside
-    Encoding.__init__, so a blocked download surfaces here — NOT from a
+    MODULE INVARIANT: tiktoken's encoding constructor functions (e.g.
+    cl100k_base() in tiktoken_ext.openai_public) eagerly call
+    load_tiktoken_bpe() before Encoding.__init__ runs, so a blocked
+    download surfaces from this encoding_for_model() call — NOT from a
     later enc.encode() call. If a future tiktoken version defers BPE
     loading to first encode(), this wrapper will return a non-None
     encoding and the network error will leak past enc.encode(text) in

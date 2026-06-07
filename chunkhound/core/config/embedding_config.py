@@ -20,9 +20,9 @@ from chunkhound.core.utils.openai_utils import (
     is_azure_openai_endpoint,
     is_official_openai_endpoint,
 )
+from chunkhound.core.utils.voyageai_utils import is_official_voyageai_endpoint
 
 from ._utils import _parse_env_bool
-from .voyageai_utils import is_official_voyageai_endpoint
 
 # Error message constants for consistent messaging across config and provider
 RERANK_MODEL_REQUIRED_COHERE = (
