@@ -192,7 +192,7 @@ class Config(BaseModel):
         if target_dir and target_dir.exists():
             local_config_path = target_dir / ".chunkhound.json"
             if local_config_path.exists() and local_config_path != config_file:
-                config_data["local_config_file"] = local_config_path
+                config_data["local_config_file"] = local_config_path.resolve()
                 try:
                     with open(local_config_path) as f:
                         local_config = json.load(f)
@@ -357,6 +357,19 @@ class Config(BaseModel):
             # Ensure target_dir is resolved to canonical path (handles symlinks)
             # Use object.__setattr__ to avoid Pydantic validation recursion
             object.__setattr__(self, "target_dir", self.target_dir.resolve())
+
+        # Ensure the tracked config file paths are also resolved to canonical form.
+        # This handles Windows short names (8.3 like RUNNER~1), symlinks, and
+        # any differences in how temp dirs / constructed Paths are represented
+        # before vs after .resolve().
+        for field_name in ("local_config_file", "global_config_file", "config_file"):
+            val = getattr(self, field_name, None)
+            if val is not None:
+                try:
+                    object.__setattr__(self, field_name, val.resolve())
+                except Exception:
+                    # Best effort; leave as-is if resolve is not possible.
+                    pass
 
         # Ensure database path is set
         if not self.database.path:

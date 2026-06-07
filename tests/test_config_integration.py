@@ -19,7 +19,12 @@ from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 from chunkhound.registry import configure_registry, get_registry
-from tests.utils.windows_compat import database_cleanup_context, cleanup_database_resources, windows_safe_tempdir
+from tests.utils.windows_compat import (
+    cleanup_database_resources,
+    database_cleanup_context,
+    paths_equal,
+    windows_safe_tempdir,
+)
 
 
 def _cleanup_registry_and_connections():
@@ -549,8 +554,8 @@ def test_global_config_provides_defaults_and_is_overridden_by_local(monkeypatch,
         monkeypatch.setenv("CHUNKHOUND_GLOBAL_CONFIG_FILE", str(global_cfg))
 
         c = Config(target_dir=td)
-        assert c.global_config_file == global_cfg.resolve()
-        assert c.local_config_file == local_cfg.resolve()
+        assert paths_equal(c.global_config_file, global_cfg)
+        assert paths_equal(c.local_config_file, local_cfg)
         assert c.embedding is not None
         assert c.embedding.api_key.get_secret_value() == "lkey"  # local overrides
         assert c.embedding.model == "gmodel"  # from global
@@ -652,5 +657,5 @@ def test_global_local_deep_merge_partial_overrides_and_list_replacement(
         )
 
         # global_config_file / local_config_file still recorded
-        assert c.global_config_file == global_cfg.resolve()
-        assert c.local_config_file == local_cfg.resolve()
+        assert paths_equal(c.global_config_file, global_cfg)
+        assert paths_equal(c.local_config_file, local_cfg)
