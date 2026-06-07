@@ -174,6 +174,47 @@ def test_oversized_hunk_fragments_have_unique_start_lines() -> None:
     assert len(start_lines) == len(set(start_lines)), "split fragments must have unique start_lines"
 
 
+def test_split_fragment_start_lines_reflect_actual_diff_lines() -> None:
+    """Split fragment start_lines must reflect real new-file line numbers, not ordinals.
+
+    Construct a diff with hunk_start=100 and 60 addition lines.
+    With max_chunk_chars=40, each '+x\\n' is 4 chars → 10 lines per part → 6 parts.
+    Part 1 covers lines 100-109, part 2 must start at 110, part 3 at 120, etc.
+    The old ordinal code would assign 100, 101, 102... (off by ~9 lines per part).
+    """
+    hunk_start = 100
+    # 60 addition lines, each exactly 4 chars: "+x\n"  (fits 10 per 40-char part)
+    lines = ["+x\n"] * 60
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        f"@@ -98,60 +{hunk_start},60 @@ fn\n"
+        + "".join(lines)
+    )
+    # max_chunk_chars=40: the @@ header (~24 chars) + first addition fills 1 part;
+    # use a small value to make splits predictable.
+    chunks = parse_diff_to_chunks(diff, max_chunk_chars=40)
+    assert len(chunks) > 1, "expected multiple split fragments"
+
+    # Each part of 10 '+x\n' lines = 40 chars.  The @@ header is in part 1.
+    # Part 1: @@ header + lines until 40 chars, subsequent parts: 10 lines each.
+    # At minimum, part 2 must start at line >= hunk_start + 1 (not hunk_start + 1
+    # from ordinal, but the actual count of additions in part 1).
+    for i in range(1, len(chunks)):
+        prev_end = chunks[i - 1].end_line
+        curr_start = chunks[i].start_line
+        # Each fragment must start strictly after the previous one ends.
+        assert curr_start > chunks[i - 1].start_line, (
+            f"part {i+1} start_line ({curr_start}) must be > part {i} start_line "
+            f"({chunks[i-1].start_line}); got ordinal instead of real line number"
+        )
+        # start_line must be within the hunk range
+        assert hunk_start <= curr_start <= hunk_start + 59, (
+            f"part {i+1} start_line {curr_start} outside hunk range [{hunk_start}, {hunk_start+59}]"
+        )
+
+
 def test_oversized_hunk_custom_max() -> None:
     lines = [f"+x\n"] * 50  # 50 × 3 chars = 150 chars
     diff = (

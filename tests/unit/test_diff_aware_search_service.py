@@ -1,9 +1,7 @@
 """Unit tests for DiffAwareSearchService and SearchServiceProtocol."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import numpy as np
 import pytest
 
 from chunkhound.core.models.chunk import Chunk
@@ -225,23 +223,49 @@ async def test_both_mode_deduplicates_on_file_and_start_line():
 @pytest.mark.asyncio
 async def test_split_hunk_fragments_survive_both_mode_dedup():
     """Split fragments from same hunk (same file, different start_line) must not be
-    collapsed by (file_path, start_line) dedupe — regression for oversized hunk splitting."""
+    collapsed by (file_path, start_line) dedupe in both mode — regression for oversized
+    hunk splitting where ordinal line numbers could fabricate collisions."""
     chunk_part1 = make_chunk("fn (part 1)", file_path="src/big.json", start_line=1)
     chunk_part2 = make_chunk("fn (part 2)", file_path="src/big.json", start_line=500)
     diff_embeddings = [[1.0, 0.0, 0.0], [0.9, 0.1, 0.0]]
 
-    original = make_original()
+    # Use "both" mode with an empty DB so the merge path is exercised
+    original = make_original(semantic_results=[])
     manager = make_embedding_manager([[1.0, 0.0, 0.0]])
 
     svc = DiffAwareSearchService(
-        original, [chunk_part1, chunk_part2], diff_embeddings, "diff", manager
+        original, [chunk_part1, chunk_part2], diff_embeddings, "both", manager
     )
-    results, _ = await svc.search_semantic("query")
+    results, _ = await svc.search_semantic("query", page_size=10)
 
     file_results = [r for r in results if r["file_path"] == "src/big.json"]
     assert len(file_results) == 2, "both split fragments must survive — neither dropped by dedup"
     start_lines = {r["start_line"] for r in file_results}
     assert start_lines == {1, 500}
+
+
+# ---------------------------------------------------------------------------
+# Hybrid search: diff chunks must survive combine_search_results
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_diff_chunks_survive_hybrid_merge():
+    """Diff chunks must appear in search_hybrid() output.
+
+    ResultEnhancer.combine_search_results keyed on chunk_id/id — if _chunk_to_dict
+    omits these fields, diff results are silently dropped.
+    """
+    chunk = make_chunk("fn", file_path="src/lib.py", start_line=10)
+    diff_embeddings = [[1.0, 0.0, 0.0]]
+    manager = make_embedding_manager([[1.0, 0.0, 0.0]])
+    original = make_original(semantic_results=[], regex_results=[])
+
+    svc = DiffAwareSearchService(original, [chunk], diff_embeddings, "diff", manager)
+    results, _ = await svc.search_hybrid("query", page_size=10)
+
+    assert any(r.get("file_path") == "src/lib.py" for r in results), (
+        "diff chunk must survive ResultEnhancer.combine_search_results — chunk_id field required"
+    )
 
 
 # ---------------------------------------------------------------------------

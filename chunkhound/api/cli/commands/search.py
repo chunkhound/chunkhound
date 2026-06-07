@@ -90,6 +90,18 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
         )
         sys.exit(1)
 
+    # Warn when --regex is combined with git diff flags (regex ignores diff injection)
+    _diff_flags = [
+        ("--commit-range", getattr(args, "commit_range", None)),
+        ("--commit-hash", getattr(args, "commit_hash", None)),
+        ("--last-n", getattr(args, "last_n_commits", None)),
+    ]
+    if args.regex and any(v for _, v in _diff_flags):
+        used = ", ".join(f for f, v in _diff_flags if v)
+        formatter.warning(
+            f"--regex ignores git diff flags ({used}); diff search requires semantic mode."
+        )
+
     try:
         search_type = "regex" if args.regex else "semantic"
 
@@ -148,6 +160,10 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
                 force_strategy=force_strategy,
             )
             result_dict = {"results": results, "pagination": pagination}
+
+        # Surface any warnings from diff injection (e.g. truncation)
+        for w in result_dict.get("warnings", []):
+            formatter.warning(w)
 
         # Format and display results
         _format_search_results(formatter, result_dict, args.query, args.regex)

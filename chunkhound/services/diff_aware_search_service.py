@@ -112,6 +112,7 @@ class DiffAwareSearchService:
     def _chunk_to_dict(self, chunk: Any, score: float) -> dict[str, Any]:
         """Convert a Chunk domain object to a search result dict."""
         return {
+            "chunk_id": f"diff:{chunk.file_path}:{chunk.start_line}",
             "file_path": chunk.file_path,
             "content": chunk.code,
             "start_line": chunk.start_line,

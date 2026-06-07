@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.embeddings import EmbeddingManager, LocalEmbeddingResult
 from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
 

@@ -47,31 +47,50 @@ def parse_diff_to_chunks(raw_diff: str, max_chunk_chars: int = 10_000) -> list[C
                 # Split large hunks at line boundaries to avoid token limit errors.
                 # JSON/HTML diffs can be nearly 1:1 chars-to-tokens, so 10k chars is
                 # the safe upper bound for a 16384-token embedding model.
+                #
+                # Track the cumulative new-file line offset so each fragment gets
+                # the real start_line it represents, not a fabricated ordinal.
                 parts: list[str] = []
+                part_line_starts: list[int] = []
+                running_line: int = 0      # new-file lines consumed so far
+                part_line_offset: int = 0  # new-file offset at start of current part
                 current_part: list[str] = []
                 current_len = 0
                 for ln in hunk_lines:
+                    # '+' (addition) and ' ' (context) lines advance the new-file
+                    # line counter; '-' (deletion) and '@@' headers do not.
+                    advances = bool(ln) and ln[0] in ("+", " ")
                     if len(ln) > max_chunk_chars:
                         # Single line exceeds limit (e.g. minified SVG/JS): flush
                         # current part, then split the line at char boundaries.
                         if current_part:
+                            part_line_starts.append(part_line_offset)
                             parts.append("".join(current_part))
+                            part_line_offset = running_line
                             current_part = []
                             current_len = 0
                         for i in range(0, len(ln), max_chunk_chars):
-                            parts.append(ln[i:i + max_chunk_chars])
+                            part_line_starts.append(running_line)
+                            parts.append(ln[i : i + max_chunk_chars])
+                        if advances:
+                            running_line += 1
                         continue
                     if current_len + len(ln) > max_chunk_chars and current_part:
+                        part_line_starts.append(part_line_offset)
                         parts.append("".join(current_part))
+                        part_line_offset = running_line
                         current_part = []
                         current_len = 0
                     current_part.append(ln)
                     current_len += len(ln)
+                    if advances:
+                        running_line += 1
                 if current_part:
+                    part_line_starts.append(part_line_offset)
                     parts.append("".join(current_part))
-                for n, part in enumerate(parts, 1):
+                for n, (part, line_start) in enumerate(zip(parts, part_line_starts), 1):
                     part_symbol = f"{symbol} (part {n})" if len(parts) > 1 else symbol
-                    part_start = max(1, hunk_start + (n - 1))
+                    part_start = max(1, hunk_start + line_start)
                     chunks.append(Chunk(
                         symbol=part_symbol,
                         start_line=LineNumber(part_start),
