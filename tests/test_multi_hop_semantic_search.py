@@ -407,9 +407,13 @@ async def test_multi_hop_score_drop_fixture_is_repeatable_across_searches() -> N
 @pytest.mark.fast
 @pytest.mark.asyncio
 async def test_multi_hop_terminates_on_score_drop_threshold_boundary() -> None:
-    """A score drop equal to the threshold should still terminate expansion."""
+    """A score drop slightly above the threshold should terminate expansion.
+
+    Uses round_two_chunk_one_score=0.79 so 0.95 - 0.79 = 0.16 is safely above
+    SCORE_DROP_THRESHOLD=0.15 in floating point (avoiding 0.95-0.80 precision).
+    """
     scenario = build_score_drop_termination_scenario(
-        round_two_chunk_one_score=0.80,
+        round_two_chunk_one_score=0.79,
         query="score drop threshold boundary",
     )
     search_service = _build_search_service(scenario.db, scenario.provider)
