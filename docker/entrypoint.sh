@@ -14,7 +14,7 @@ echo "[entrypoint] Database: ${DB_DIR}" >&2
 echo "[entrypoint] Port: ${PORT:-8080}" >&2
 
 exec npx -y supergateway \
-    --stdio "chunkhound mcp --db ${DB_DIR} --no-daemon" \
+    --stdio "chunkhound mcp --db ${DB_DIR}" \
     --port "${PORT:-8080}" \
     --cors \
     --outputTransport streamableHttp
