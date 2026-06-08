@@ -2,8 +2,6 @@
 
 from pathlib import Path
 from typing import cast
-from unittest.mock import AsyncMock, patch
-
 import pytest
 
 from chunkhound.core.types.common import Language
@@ -16,6 +14,7 @@ from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.search_service import SearchService
 from tests.fixtures.fake_providers import FakeEmbeddingProvider
 from tests.fixtures.multi_hop_synthetic import (
+    build_graph_exhaustion_scenario,
     build_insufficient_candidates_scenario,
     build_min_score_termination_scenario,
     build_multi_hop_scenario,
@@ -46,56 +45,32 @@ def _build_python_coordinator(
 
 @pytest.mark.fast
 @pytest.mark.asyncio
-async def test_search_service_selects_expected_semantic_strategy() -> None:
-    """SearchService should route requests by reranking capability and override."""
-    reranking_scenario = build_multi_hop_scenario()
-    reranking_service = _build_search_service(
-        reranking_scenario.db,
-        reranking_scenario.provider,
+async def test_search_service_selects_single_hop_when_provider_lacks_reranking(
+) -> None:
+    """Without reranking, search should not expand beyond initial results."""
+    scenario = build_multi_hop_scenario(supports_reranking=False)
+    search_service = _build_search_service(scenario.db, scenario.provider)
+    query = "security validation mechanisms"
+
+    results, pagination = await search_service.search_semantic(query, page_size=10)
+
+    # Single-hop: only initial results (chunks 1,5,6,7,8), no bridge expansion
+    assert pagination["total"] == 5, (
+        f"non-reranking provider should return only initial results (5), "
+        f"got {pagination['total']}"
     )
-    reranking_multi = AsyncMock(return_value=([], {}))
-    reranking_single = AsyncMock(return_value=([], {}))
 
-    with patch.object(
-        reranking_service._multi_hop_strategy,
-        "search",
-        reranking_multi,
-    ), patch.object(
-        reranking_service._single_hop_strategy,
-        "search",
-        reranking_single,
-    ):
-        await reranking_service.search_semantic("strategy query", page_size=5)
-
-    reranking_multi.assert_awaited_once()
-    reranking_single.assert_not_awaited()
-
-    non_reranking_scenario = build_multi_hop_scenario(supports_reranking=False)
-    non_reranking_service = _build_search_service(
-        non_reranking_scenario.db,
-        non_reranking_scenario.provider,
+    # force_strategy="multi_hop" should also fallback to single-hop
+    results_forced, pagination_forced = await search_service.search_semantic(
+        query,
+        page_size=10,
+        force_strategy="multi_hop",
     )
-    non_reranking_multi = AsyncMock(return_value=([], {}))
-    non_reranking_single = AsyncMock(return_value=([], {}))
-
-    with patch.object(
-        non_reranking_service._multi_hop_strategy,
-        "search",
-        non_reranking_multi,
-    ), patch.object(
-        non_reranking_service._single_hop_strategy,
-        "search",
-        non_reranking_single,
-    ):
-        await non_reranking_service.search_semantic("strategy query", page_size=5)
-        await non_reranking_service.search_semantic(
-            "strategy query",
-            page_size=5,
-            force_strategy="multi_hop",
-        )
-
-    non_reranking_multi.assert_not_awaited()
-    assert non_reranking_single.await_count == 2
+    assert pagination_forced["total"] == 5, (
+        f"force_strategy multi_hop on non-reranking provider should fallback "
+        f"to single-hop (5), got {pagination_forced['total']}"
+    )
+    assert {r["chunk_id"] for r in results_forced} == {r["chunk_id"] for r in results}
 
 
 @pytest.mark.fast
