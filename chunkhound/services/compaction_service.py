@@ -83,11 +83,13 @@ class CompactionService:
         (e.g. reindex after swap window). ``compact_blocking`` propagates
         exceptions directly and does not update this field.
         """
-        return self._last_error
+        with self._lock:
+            return self._last_error
 
     def clear_last_error(self) -> None:
         """Forget the previous background compaction error after recovery."""
-        self._last_error = None
+        with self._lock:
+            self._last_error = None
 
     def _is_eligible(
         self, provider: "DuckDBProvider"
@@ -245,7 +247,8 @@ class CompactionService:
     ) -> None:
         """Wrapper that invokes callback after successful compaction."""
         try:
-            self._last_error = None
+            with self._lock:
+                self._last_error = None
             result = await self._do_compaction(provider)
 
             if result and on_complete is not None:
@@ -255,14 +258,16 @@ class CompactionService:
                     )
                     await on_complete()
                 except Exception as cb_err:
-                    self._last_error = cb_err
+                    with self._lock:
+                        self._last_error = cb_err
                     logger.error(f"Post-compaction callback failed: {cb_err}")
 
         except asyncio.CancelledError:
             logger.info("Background compaction cancelled")
             raise
         except Exception as e:
-            self._last_error = e
+            with self._lock:
+                self._last_error = e
             logger.error(f"Background compaction failed: {e}")
         finally:
             # Thread may outlive a cancelled asyncio task —

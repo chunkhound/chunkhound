@@ -1218,7 +1218,8 @@ class MCPServerBase(ABC):
         try:
             await self._post_compaction_reindex(is_recovery_retry=True)
         except Exception:
-            pass  # state updated by _post_compaction_reindex's except handler
+            pass  # _post_compaction_reindex's except handler always calls
+                  # _mark_background_compaction_failure, even if restore_* raises
         finally:
             self._recovery_event = None
             event.set()
@@ -1399,18 +1400,21 @@ class MCPServerBase(ABC):
                 else non_removal_deferred_files | retryable_removals
             )
 
-            if retryable_directories:
-                await self.realtime_indexing.restore_compaction_deferred_directories(
-                    retryable_directories
-                )
-            if restore_files:
-                await self.realtime_indexing.restore_compaction_deferred_files(
-                    restore_files
-                )
-            if retryable_removals:
-                await self.realtime_indexing.restore_compaction_deferred_removals(
-                    retryable_removals
-                )
+            try:
+                if retryable_directories:
+                    await self.realtime_indexing.restore_compaction_deferred_directories(
+                        retryable_directories
+                    )
+                if restore_files:
+                    await self.realtime_indexing.restore_compaction_deferred_files(
+                        restore_files
+                    )
+                if retryable_removals:
+                    await self.realtime_indexing.restore_compaction_deferred_removals(
+                        retryable_removals
+                    )
+            except Exception as restore_exc:
+                failure_detail += f"; restore also failed: {restore_exc}"
             self._mark_background_compaction_failure(
                 e,
                 pending_recovery=True,
