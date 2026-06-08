@@ -459,10 +459,14 @@ def build_score_drop_termination_scenario(
 ) -> SyntheticMultiHopScenario:
     """Build a graph where expansion can terminate via tracked score-drop.
 
-    Topology: chunks 1->5 initial, 1 has neighbor 6, 6 has neighbor 7, 7 has neighbor 8.
+    Topology: chunks 1->5 initial, 1 has neighbor 6, 6->7->8 chain.
     Initial rerank gives top-5 high scores [0.95, 0.90, 0.85, 0.80, 0.75].
-    After expansion, chunk 1 reranks to ``round_two_chunk_one_score`` so tests can
-    exercise threshold edges around SCORE_DROP_THRESHOLD.
+    ``_rerank_scores_after_expansion`` assigns ch6=0.82 and ch7=0.78 so both
+    enter the top-5 and continue expanding neighbors.
+    Chunk 1 reranks to ``round_two_chunk_one_score`` (default 0.70, drop 0.25)
+    so the score-drop check terminates at total=6. Without the check,
+    expansion continues through ch7->ch8 to total=8, making the test
+    branch-discriminating.
     """
     chunks = [
         SyntheticChunk(1, "top result one", "repo_a/one.py", 0.95),
@@ -481,9 +485,9 @@ def build_score_drop_termination_scenario(
             chunks[2].content: 0.85,  # ch3 -- stable
             chunks[3].content: 0.80,  # ch4 -- stable
             chunks[4].content: 0.75,  # ch5 -- stable
-            chunks[5].content: 0.60,  # ch6 (unchanged)
-            chunks[6].content: 0.50,  # ch7
-            chunks[7].content: 0.40,  # ch8
+            chunks[5].content: 0.82,  # ch6 -- boosted so it enters top-5
+            chunks[6].content: 0.78,  # ch7 -- boosted so it enters top-5 in round 3
+            chunks[7].content: 0.40,  # ch8 -- stays below top-5
         }
     }
     return _build_scenario(
