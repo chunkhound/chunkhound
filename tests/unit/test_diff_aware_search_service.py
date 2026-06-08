@@ -244,6 +244,56 @@ async def test_split_hunk_fragments_survive_both_mode_dedup():
     assert start_lines == {1, 500}
 
 
+@pytest.mark.asyncio
+async def test_single_line_split_fragments_all_survive_both_mode_dedup():
+    """Char-split fragments of a single overlong line all share the same start_line.
+
+    The (file_path, start_line) dedup key collapses them to one.  The dedup must use
+    a fragment-unique identity (chunk_id includes symbol) so all three survive.
+    """
+    chunk_p1 = make_chunk("big.js:1 (part 1)", file_path="big.js", start_line=1, end_line=1)
+    chunk_p2 = make_chunk("big.js:1 (part 2)", file_path="big.js", start_line=1, end_line=1)
+    chunk_p3 = make_chunk("big.js:1 (part 3)", file_path="big.js", start_line=1, end_line=1)
+    diff_embeddings = [[1.0, 0.0, 0.0], [0.9, 0.1, 0.0], [0.8, 0.2, 0.0]]
+
+    original = make_original(semantic_results=[])
+    manager = make_embedding_manager([[1.0, 0.0, 0.0]])
+
+    svc = DiffAwareSearchService(
+        original, [chunk_p1, chunk_p2, chunk_p3], diff_embeddings, "both", manager
+    )
+    results, _ = await svc.search_semantic("query", page_size=10)
+
+    file_results = [r for r in results if r["file_path"] == "big.js"]
+    assert len(file_results) == 3, (
+        f"all 3 char-split fragments must survive both-mode dedup, got {len(file_results)}; "
+        "dedup must key on fragment identity (chunk_id), not (file_path, start_line)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_line_split_fragments_survive_hybrid_merge():
+    """Char-split fragments of a single overlong line must all appear in search_hybrid output."""
+    chunk_p1 = make_chunk("big.js:1 (part 1)", file_path="big.js", start_line=1, end_line=1)
+    chunk_p2 = make_chunk("big.js:1 (part 2)", file_path="big.js", start_line=1, end_line=1)
+    chunk_p3 = make_chunk("big.js:1 (part 3)", file_path="big.js", start_line=1, end_line=1)
+    diff_embeddings = [[1.0, 0.0, 0.0], [0.9, 0.1, 0.0], [0.8, 0.2, 0.0]]
+
+    original = make_original(semantic_results=[], regex_results=[])
+    manager = make_embedding_manager([[1.0, 0.0, 0.0]])
+
+    svc = DiffAwareSearchService(
+        original, [chunk_p1, chunk_p2, chunk_p3], diff_embeddings, "diff", manager
+    )
+    results, _ = await svc.search_hybrid("query", page_size=10)
+
+    file_results = [r for r in results if r.get("file_path") == "big.js"]
+    assert len(file_results) == 3, (
+        f"all 3 char-split fragments must survive hybrid merge, got {len(file_results)}; "
+        "ResultEnhancer.combine_search_results must see unique chunk_id per fragment"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Hybrid search: diff chunks must survive combine_search_results
 # ---------------------------------------------------------------------------

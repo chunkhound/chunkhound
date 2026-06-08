@@ -112,7 +112,7 @@ class DiffAwareSearchService:
     def _chunk_to_dict(self, chunk: Any, score: float) -> dict[str, Any]:
         """Convert a Chunk domain object to a search result dict."""
         return {
-            "chunk_id": f"diff:{chunk.file_path}:{chunk.start_line}",
+            "chunk_id": f"diff:{chunk.file_path}:{chunk.start_line}:{chunk.symbol}",
             "file_path": chunk.file_path,
             "content": chunk.code,
             "start_line": chunk.start_line,
@@ -296,14 +296,25 @@ class DiffAwareSearchService:
         all_results = list(diff_results) + normalised_db
         all_results.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
 
-        # Deduplicate on (file_path, start_line) — keep first (highest score)
-        seen: set[tuple[Any, Any]] = set()
+        # Deduplicate: diff fragments key on chunk_id (unique per split part via symbol);
+        # DB results key on (file_path, start_line) and are dropped if a diff result
+        # already covers that location (diff wins on overlap).
+        seen_ids: set[Any] = set()
+        diff_locations: set[tuple[Any, Any]] = set()
         deduped: list[dict[str, Any]] = []
         for r in all_results:
-            key = (r.get("file_path"), r.get("start_line"))
-            if key not in seen:
-                seen.add(key)
-                deduped.append(r)
+            cid = r.get("chunk_id")
+            is_diff = cid is not None and str(cid).startswith("diff:")
+            if is_diff:
+                if cid not in seen_ids:
+                    seen_ids.add(cid)
+                    diff_locations.add((r.get("file_path"), r.get("start_line")))
+                    deduped.append(r)
+            else:
+                loc = (r.get("file_path"), r.get("start_line"))
+                if loc not in diff_locations and loc not in seen_ids:
+                    seen_ids.add(loc)
+                    deduped.append(r)
 
         # Apply threshold
         if threshold is not None:
