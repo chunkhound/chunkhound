@@ -70,9 +70,9 @@ test.db*
 correct.db*
 chunkhound.db*
 
-# Docker files
-Dockerfile*
-docker-compose*.yml
+# Docker files (anchored to root so docker/Dockerfile is included in build context)
+/Dockerfile*
+/docker-compose*.yml
 .dockerignore
 
 # CI/CD

@@ -1,0 +1,32 @@
+# systemd unit for the ChunkHound MCP Docker Compose stack.
+#
+# Copy to /etc/systemd/system/chunkhound-mcp.service on the host VM,
+# then update WorkingDirectory to the actual repo path, and run:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable docker            # Docker daemon starts on boot
+#   sudo systemctl enable chunkhound-mcp    # compose stack starts on boot
+#   sudo systemctl start chunkhound-mcp     # start now without rebooting
+#
+# Combined with `restart: unless-stopped` in docker-compose.yml this gives
+# two layers of protection:
+#   1. systemd starts the stack on every VM boot (including the very first one)
+#   2. Docker restart policy revives individual crashed containers between boots
+
+[Unit]
+Description=ChunkHound MCP Load Balanced Deployment
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# ← Update this to the absolute path of the chunkhound repository on this VM.
+WorkingDirectory=/opt/chunkhound
+ExecStart=/usr/bin/docker compose up -d --build
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

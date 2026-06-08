@@ -1,0 +1,74 @@
+version: "3.9"
+
+# Shared config applied to every chunkhound replica.
+x-chunkhound-common: &chunkhound-common
+  image: chunkhound-mcp:latest
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  restart: unless-stopped
+  env_file:
+    - .env.docker
+  environment:
+    # Disable background compaction — replicas serve read-only search traffic.
+    CHUNKHOUND_DATABASE__COMPACTION_ENABLED: "false"
+  networks:
+    - mcp-net
+  healthcheck:
+    test: ["CMD-SHELL", "nc -z localhost 8080 || exit 1"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 20s
+
+services:
+  # ── ChunkHound MCP replicas ─────────────────────────────────────────────────
+  # Each replica mounts its own copy of the database.
+  # DuckDB takes an exclusive write-lock on chunks.db at open time; sharing one
+  # file across containers would cause all but the first to fail at startup.
+  # Run scripts/prepare-db-replicas.sh once to populate each replica directory.
+  #
+  # NOTE: volumes are NOT :ro — DuckDB needs write access for WAL and lock files
+  # even during read-only queries. The source database is protected because
+  # replicas use independent copies, not the original.
+
+  chunkhound-1:
+    <<: *chunkhound-common
+    container_name: chunkhound-mcp-1
+    volumes:
+      - /opt/chunkhound/db/replica1:/data/db
+
+  chunkhound-2:
+    <<: *chunkhound-common
+    container_name: chunkhound-mcp-2
+    volumes:
+      - /opt/chunkhound/db/replica2:/data/db
+
+  chunkhound-3:
+    <<: *chunkhound-common
+    container_name: chunkhound-mcp-3
+    volumes:
+      - /opt/chunkhound/db/replica3:/data/db
+
+  # ── nginx reverse proxy ─────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: chunkhound-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # Uncomment to add TLS termination (provide certs via additional volume):
+      # - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/mcp_upstream.conf:/etc/nginx/conf.d/mcp_upstream.conf:ro
+    networks:
+      - mcp-net
+    depends_on:
+      - chunkhound-1
+      - chunkhound-2
+      - chunkhound-3
+
+networks:
+  mcp-net:
+    driver: bridge
