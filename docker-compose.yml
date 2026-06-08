@@ -41,6 +41,8 @@ services:
       - ./.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica1:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
+      - /home/e120400/.claude/settings.json:/home/chunkhound/.claude/settings.json:ro
 
   chunkhound-2:
     <<: *chunkhound-common
@@ -49,6 +51,8 @@ services:
       - ./.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica2:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
+      - /home/e120400/.claude/settings.json:/home/chunkhound/.claude/settings.json:ro
 
   chunkhound-3:
     <<: *chunkhound-common
@@ -57,6 +61,8 @@ services:
       - ./.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica3:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
+      - /home/e120400/.claude/settings.json:/home/chunkhound/.claude/settings.json:ro
 
   # ── nginx reverse proxy ─────────────────────────────────────────────────────
   nginx:
