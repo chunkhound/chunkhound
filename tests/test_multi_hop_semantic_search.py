@@ -193,6 +193,13 @@ async def test_multi_hop_handles_partial_rerank_results() -> None:
         "all results should have valid non-negative scores"
     )
 
+    # Verify fallback: ch2 (expansion index 5) is omitted from expansion rerank
+    # via partial_rerank, so it should retain its original similarity score.
+    ch2_result = next(r for r in results if r["chunk_id"] == 2)
+    assert ch2_result.get("score", 0.0) == pytest.approx(0.70, rel=1e-3), (
+        "ch2 should retain similarity score when omitted from partial rerank"
+    )
+
 
 @pytest.mark.fast
 @pytest.mark.asyncio
