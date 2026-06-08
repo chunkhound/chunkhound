@@ -7,20 +7,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install chunkhound from PyPI (no source code in image).
-# Python 3.14 is within chunkhound's supported range (>=3.10,<3.15).
-# If native dependency wheels (duckdb, tree-sitter) are not yet published for 3.14,
-# add build deps before this step: apt-get install -y build-essential cmake
-ARG CHUNKHOUND_VERSION=latest
-RUN if [ "$CHUNKHOUND_VERSION" = "latest" ]; then \
-        pip install --no-cache-dir chunkhound; \
-    else \
-        pip install --no-cache-dir "chunkhound==${CHUNKHOUND_VERSION}"; \
-    fi
+# Install chunkhound from a pre-built wheel (built on the host with `uv build`).
+# The wheel is built outside Docker so hatch-vcs can read the git tags.
+# Run `uv build --wheel` before `docker compose build` to refresh the wheel.
+COPY dist/*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl
 
 # Pre-warm supergateway in the npx cache (avoids ~5-10s download on first container start).
-# If the npm registry is unreachable at build time, this line is safe to remove;
-# the container will download supergateway on first startup instead.
 RUN npx -y supergateway --version 2>/dev/null || true
 
 RUN useradd --create-home --shell /bin/bash chunkhound

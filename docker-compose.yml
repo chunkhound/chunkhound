@@ -10,12 +10,12 @@ x-chunkhound-common: &chunkhound-common
   env_file:
     - .env.docker
   environment:
-    # Disable background compaction — replicas serve read-only search traffic.
+    # Replicas serve read-only search traffic.
     CHUNKHOUND_DATABASE__COMPACTION_ENABLED: "false"
   networks:
     - mcp-net
   healthcheck:
-    test: ["CMD-SHELL", "curl -sf http://localhost:8080/mcp -X POST -H 'Content-Type: application/json' -d '{}' -o /dev/null || exit 1"]
+    test: ["CMD-SHELL", "curl -sf http://localhost:8080/mcp -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{}' -o /dev/null || exit 1"]
     interval: 30s
     timeout: 10s
     retries: 3

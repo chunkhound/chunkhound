@@ -8,7 +8,8 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+# dist/ is intentionally included: the pre-built wheel (from `uv build`) is
+# COPYed into the image. Do not add dist/ back to this ignore list.
 downloads/
 eggs/
 .eggs/
