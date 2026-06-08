@@ -292,29 +292,31 @@ class DiffAwareSearchService:
                 r["score"] = r["similarity"]
             normalised_db.append(r)
 
-        # Merge and sort by score descending
-        all_results = list(diff_results) + normalised_db
-        all_results.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
-
-        # Deduplicate: diff fragments key on chunk_id (unique per split part via symbol);
-        # DB results key on (file_path, start_line) and are dropped if a diff result
-        # already covers that location (diff wins on overlap).
-        seen_ids: set[Any] = set()
+        # Two-pass dedup with type-safe, ownership-explicit sets.
+        #
+        # Pass 1 — diff results, keyed by chunk_id (unique per split fragment via
+        # symbol suffix).  Diff always wins at a given location; collect covered
+        # locations so pass 2 can skip DB results that overlap.
+        seen_diff_ids: set[str] = set()
         diff_locations: set[tuple[Any, Any]] = set()
         deduped: list[dict[str, Any]] = []
-        for r in all_results:
-            cid = r.get("chunk_id")
-            is_diff = cid is not None and str(cid).startswith("diff:")
-            if is_diff:
-                if cid not in seen_ids:
-                    seen_ids.add(cid)
-                    diff_locations.add((r.get("file_path"), r.get("start_line")))
-                    deduped.append(r)
-            else:
-                loc = (r.get("file_path"), r.get("start_line"))
-                if loc not in diff_locations and loc not in seen_ids:
-                    seen_ids.add(loc)
-                    deduped.append(r)
+        for r in sorted(diff_results, key=lambda x: float(x.get("score", 0.0)), reverse=True):
+            cid = str(r.get("chunk_id", ""))
+            if cid not in seen_diff_ids:
+                seen_diff_ids.add(cid)
+                diff_locations.add((r.get("file_path"), r.get("start_line")))
+                deduped.append(r)
+
+        # Pass 2 — DB results: skip if a diff result already covers this location,
+        # or if a duplicate DB result for the same location was already kept.
+        seen_db_locs: set[tuple[Any, Any]] = set()
+        for r in sorted(normalised_db, key=lambda x: float(x.get("score", 0.0)), reverse=True):
+            loc = (r.get("file_path"), r.get("start_line"))
+            if loc not in diff_locations and loc not in seen_db_locs:
+                seen_db_locs.add(loc)
+                deduped.append(r)
+
+        deduped.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
 
         # Apply threshold
         if threshold is not None:

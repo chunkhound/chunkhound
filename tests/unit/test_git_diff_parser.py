@@ -290,14 +290,17 @@ def test_single_overlong_line_fragments_end_line_equals_start_line() -> None:
 
 
 def test_multi_line_split_intermediate_fragments_have_per_part_end_lines() -> None:
-    """Intermediate split fragments must NOT claim hunk_end as their end_line.
+    """Intermediate split fragments must NOT claim hunk_end as their end_line,
+    and adjacent fragments must be strictly contiguous (no gaps, no overlaps).
 
-    10 addition lines at hunk_start=100, max_chunk_chars=30 forces a ~5+5 split.
-    Each '+x\\n' is 3 chars; 10 such lines = 30 chars exactly, so the @@ header line
-    (included in part 1) pushes it over. Use lines long enough to force a clear split.
+    @@ header is 26 chars; each '+xxxxxxx\\n' is 9 chars; max_chunk_chars=30.
+    The flush guard requires at least one advancing line in each part, so the
+    header stays with line1 (26+9=35 chars, flushed when line2 arrives):
+      part 0: header + line1  → start_line=100, end_line=100
+      part 1: lines 2-4       → start_line=101, end_line=103
+      part 2: lines 5-7       → start_line=104, end_line=106
+      part 3: lines 8-10      → start_line=107, end_line=109
     """
-    # Each '+xxxxxxx\n' = 9 chars; 4 lines = 36 > 30 → flush after 3 lines per part.
-    # 10 lines total → part 1: lines 100–102, part 2: lines 103–105, etc.
     lines = ["+xxxxxxx\n"] * 10
     diff = (
         "diff --git a/a.py b/a.py\n"
@@ -309,7 +312,12 @@ def test_multi_line_split_intermediate_fragments_have_per_part_end_lines() -> No
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=30)
     assert len(chunks) >= 2, "expected at least 2 split fragments"
 
+    hunk_start = 100
     hunk_end = 109  # hunk_start=100, new_count=10 → end=109
+
+    assert chunks[0].start_line == hunk_start, (
+        f"first fragment start_line={chunks[0].start_line}, expected {hunk_start}"
+    )
     # Every intermediate fragment must end strictly before hunk_end.
     for i, c in enumerate(chunks[:-1]):
         assert c.end_line < hunk_end, (
@@ -320,6 +328,12 @@ def test_multi_line_split_intermediate_fragments_have_per_part_end_lines() -> No
     assert chunks[-1].end_line == hunk_end, (
         f"last fragment end_line={chunks[-1].end_line} should equal hunk_end={hunk_end}"
     )
+    # Adjacent fragments must be strictly contiguous: prev.end_line + 1 == next.start_line
+    for i in range(len(chunks) - 1):
+        assert chunks[i].end_line + 1 == chunks[i + 1].start_line, (
+            f"gap/overlap between part {i+1} (end={chunks[i].end_line}) "
+            f"and part {i+2} (start={chunks[i+1].start_line})"
+        )
 
 
 def test_split_fragments_cover_full_hunk_range_contiguously() -> None:
@@ -329,8 +343,8 @@ def test_split_fragments_cover_full_hunk_range_contiguously() -> None:
     fits alongside the first addition lines — no header-only parts that would share
     the same start_line as the following fragment.
     """
-    # Each "+xxxxxxxxxxxxxxxxxx\n" = 20 chars; @@ header ≈27 chars.
-    # 27+60=87 ≤ 90, 27+80=107 > 90 → 3 addition lines per part after first break.
+    # Each "+xxxxxxxxxxxxxxxxxx\n" = 20 chars; @@ header is exactly 24 chars.
+    # 24+60=84 ≤ 90, 24+80=104 > 90 → 3 addition lines per part after first break.
     lines = ["+xxxxxxxxxxxxxxxxxx\n"] * 10  # 20 chars each, 10 lines
     diff = (
         "diff --git a/a.py b/a.py\n"

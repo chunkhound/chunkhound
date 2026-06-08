@@ -75,7 +75,7 @@ def parse_diff_to_chunks(raw_diff: str, max_chunk_chars: int = 10_000) -> list[C
                         if advances:
                             running_line += 1
                         continue
-                    if current_len + len(ln) > max_chunk_chars and current_part:
+                    if current_len + len(ln) > max_chunk_chars and current_part and running_line > part_line_offset:
                         part_line_starts.append(part_line_offset)
                         parts.append("".join(current_part))
                         part_line_offset = running_line
