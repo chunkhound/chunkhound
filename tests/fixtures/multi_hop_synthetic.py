@@ -180,9 +180,11 @@ class SyntheticGraphDatabase:
     def _apply_path_filter(
         self, results: list[dict[str, Any]], path_filter: str | None
     ) -> list[dict[str, Any]]:
-        if path_filter is None:
-            return results
-        return [r for r in results if f"/{path_filter}" in f"/{r['file_path']}"]
+        assert path_filter is None, (
+            "synthetic graph does not support path_filter; "
+            "use DuckDB-backed tests to exercise this code path"
+        )
+        return results
 
     def _paginate(
         self, results: list[dict[str, Any]], *, page_size: int, offset: int
@@ -193,9 +195,7 @@ class SyntheticGraphDatabase:
             "offset": offset,
             "page_size": page_size,
             "has_more": offset + page_size < total,
-            "next_offset": (
-                offset + page_size if offset + page_size < total else None
-            ),
+            "next_offset": (offset + page_size if offset + page_size < total else None),
             "total": total,
         }
 

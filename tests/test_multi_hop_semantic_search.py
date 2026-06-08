@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import cast
+
 import pytest
 
 from chunkhound.core.types.common import Language
@@ -188,9 +189,83 @@ async def test_multi_hop_handles_partial_rerank_results() -> None:
         "documents without rerank rows"
     )
     assert pagination["total"] == 6
+    assert all(result.get("score", 0.0) >= 0.0 for result in results), (
+        "all results should have valid non-negative scores"
+    )
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_search_regex_normalizes_path_filter_inputs(
+    tmp_path: Path,
+) -> None:
+    """Equivalent path filter inputs should scope identically.
+
+    Covers whitespace-only, backslash, leading-slash, and trailing-slash variants.
+    """
+    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    db.connect()
+
+    embedding_provider = FakeEmbeddingProvider()
+    coordinator = _build_python_coordinator(db, tmp_path, embedding_provider)
+
+    shared_source = '''def shared_scope_boundary_target():
+    """Shared scope boundary sentinel for path-filter regression."""
+    return "shared-scope-boundary-target"
+'''
+    for repo in ["repo_a", "not_repo_a"]:
+        repo_dir = tmp_path / repo
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        file_path = repo_dir / "module.py"
+        file_path.write_text(shared_source, encoding="utf-8")
+        await coordinator.process_file(file_path)
+
+    unscoped_results, _ = db.search_regex(
+        pattern="scope boundary sentinel",
+        page_size=20,
+    )
+    unscoped_ids = {result["chunk_id"] for result in unscoped_results}
+    assert len(unscoped_ids) == 2
+
+    repo_a_results, _ = db.search_regex(
+        pattern="scope boundary sentinel",
+        page_size=20,
+        path_filter="repo_a",
+    )
+    repo_a_ids = {result["chunk_id"] for result in repo_a_results}
+    assert len(repo_a_ids) == 1
     assert all(
-        result.get("score", 0.0) >= 0.0 for result in results
-    ), "all results should have valid non-negative scores"
+        result.get("file_path", "").startswith("repo_a/") for result in repo_a_results
+    )
+
+    # Whitespace-only filter is equivalent to no filter
+    whitespace_results, _ = db.search_regex(
+        pattern="scope boundary sentinel",
+        page_size=20,
+        path_filter="   ",
+    )
+    assert {result["chunk_id"] for result in whitespace_results} == unscoped_ids
+
+    # All non-whitespace variants targeting the same directory should be equivalent
+    scoped_variants = {
+        "backslash": "  \\repo_a\\  ",
+        "leading_slash": "/repo_a",
+        "trailing_slash": "repo_a/",
+    }
+    for variant in scoped_variants.values():
+        scoped_results, _ = db.search_regex(
+            pattern="scope boundary sentinel",
+            page_size=20,
+            path_filter=variant,
+        )
+        scoped_ids = {result["chunk_id"] for result in scoped_results}
+        assert scoped_ids == repo_a_ids, (
+            f"variant {variant!r} should match canonical repo_a scope, got {scoped_ids}"
+        )
+        assert all(
+            result.get("file_path", "").startswith("repo_a/")
+            for result in scoped_results
+        )
 
 
 @pytest.mark.fast
@@ -451,8 +526,7 @@ async def test_search_semantic_enforces_path_filter_component_boundary(
     )
     assert scoped_results
     assert all(
-        result.get("file_path", "").startswith("repo_a/")
-        for result in scoped_results
+        result.get("file_path", "").startswith("repo_a/") for result in scoped_results
     )
 
 
@@ -495,8 +569,7 @@ async def test_search_regex_enforces_path_filter_component_boundary(
     )
     assert scoped_results
     assert all(
-        result.get("file_path", "").startswith("repo_a/")
-        for result in scoped_results
+        result.get("file_path", "").startswith("repo_a/") for result in scoped_results
     )
 
 
