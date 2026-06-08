@@ -394,7 +394,9 @@ Output JSON with queries array."""
             result = await llm.complete_structured(
                 prompt=prompt,
                 json_schema=schema,
-                max_completion_tokens=512,
+                max_completion_tokens=(
+                    self._config.depth_exploration_max_completion_tokens
+                ),
             )
 
             queries: list[str] = result.get("queries", [])
