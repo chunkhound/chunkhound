@@ -15,6 +15,7 @@ from tests.rerank_server import MockRerankResult, MockRerankScenario
 sys.path.insert(0, str(Path(__file__).parent))
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_official_openai_validation() -> None:
     """Official OpenAI must require an API key."""
@@ -28,6 +29,7 @@ async def test_official_openai_validation() -> None:
         await provider._ensure_client()
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_custom_endpoint_validation() -> None:
     """Custom endpoints may omit an API key."""
@@ -79,6 +81,7 @@ def test_url_detection_logic() -> None:
         assert not is_official
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_custom_endpoint_mock_behavior() -> None:
     """Client setup for custom endpoints must not fail on missing API key."""
@@ -92,6 +95,7 @@ async def test_custom_endpoint_mock_behavior() -> None:
         assert "API key" not in str(exc)
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_ollama_style_rerank_configuration_uses_mock_server() -> None:
     """OpenAI provider should rerank against a separate deterministic HTTP service."""
@@ -141,6 +145,7 @@ async def test_ollama_style_rerank_configuration_uses_mock_server() -> None:
         ]
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_tei_reranking_format_with_model_uses_texts_payload() -> None:
     """TEI format should send texts and parse score fields."""
@@ -183,6 +188,7 @@ async def test_tei_reranking_format_with_model_uses_texts_payload() -> None:
         assert manager.requests == [{"query": query, "texts": documents}]
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_tei_reranking_format_without_model_is_supported() -> None:
     """TEI deployments may fix the model server-side and omit it from config."""
@@ -212,6 +218,7 @@ async def test_tei_reranking_format_without_model_is_supported() -> None:
         assert manager.requests == [{"query": query, "texts": documents}]
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_tei_bare_array_response_format() -> None:
     """Bare-array TEI responses should normalize into ChunkHound rerank results."""
@@ -245,6 +252,7 @@ async def test_tei_bare_array_response_format() -> None:
         ]
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_auto_format_detection_caches_format() -> None:
     """Auto mode should detect response shape once and reuse that format."""
@@ -290,6 +298,7 @@ async def test_auto_format_detection_caches_format() -> None:
         ]
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_concurrent_rerank_calls_share_auto_detected_format_without_races() -> (
     None
@@ -331,6 +340,7 @@ async def test_concurrent_rerank_calls_share_auto_detected_format_without_races(
         assert all(request["texts"] == documents for request in manager.requests)
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_malformed_rerank_response() -> None:
     """Malformed responses should fail loudly or skip invalid rows."""
@@ -495,6 +505,7 @@ def test_embedding_manager() -> None:
     assert "openai" in manager.list_providers()
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_mock_embedding_generation() -> None:
     """embed([]) should short-circuit before any network call."""

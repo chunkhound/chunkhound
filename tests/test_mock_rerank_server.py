@@ -7,6 +7,7 @@ from tests.fixtures.rerank_server_manager import RerankServerManager
 from tests.rerank_server import MockRerankResult, MockRerankScenario
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_mock_rerank_server_health_reports_identity() -> None:
     """Health should prove the deterministic mock is the process under test."""
@@ -29,6 +30,7 @@ async def test_mock_rerank_server_health_reports_identity() -> None:
         }
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_mock_rerank_server_matches_exact_cohere_request_and_records_it() -> None:
     """Cohere requests should match exact fixtures and keep request capture."""
@@ -79,6 +81,7 @@ async def test_mock_rerank_server_matches_exact_cohere_request_and_records_it() 
         ]
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_mock_rerank_server_supports_tei_and_bare_array_formats() -> None:
     """The mock should cover both wrapped and bare-array TEI contracts."""
@@ -114,6 +117,7 @@ async def test_mock_rerank_server_supports_tei_and_bare_array_formats() -> None:
         assert bare.json() == [{"index": 0, "score": 0.77}]
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_rerank_server_manager_stops_cleanly() -> None:
     """Manager should expose a live server only inside its async context."""
@@ -125,6 +129,7 @@ async def test_rerank_server_manager_stops_cleanly() -> None:
     assert not await manager.is_running()
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_mock_rerank_server_rejects_unmatched_requests() -> None:
     """Exact matching keeps tests deterministic by failing unexpected requests."""
