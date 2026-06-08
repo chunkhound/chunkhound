@@ -10,7 +10,7 @@ from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector, Bat
 from chunkhound.core.types.common import ChunkId
 from chunkhound.core.utils import DEFAULT_CHARS_PER_TOKEN, estimate_tokens
 from chunkhound.interfaces.database_provider import DatabaseProvider
-from chunkhound.interfaces.embedding_provider import EmbeddingProvider
+from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
 
 from .base_service import BaseService
 
@@ -21,7 +21,7 @@ class EmbeddingService(BaseService):
     def __init__(
         self,
         database_provider: DatabaseProvider,
-        embedding_provider: EmbeddingProvider | None = None,
+        embedding_provider: APIEmbeddingProvider | None = None,
         embedding_batch_size: int = 1000,
         db_batch_size: int = 5000,
         max_concurrent_batches: int | None = None,
@@ -78,7 +78,7 @@ class EmbeddingService(BaseService):
 
         self.progress = progress
 
-    def set_embedding_provider(self, provider: EmbeddingProvider) -> None:
+    def set_embedding_provider(self, provider: APIEmbeddingProvider) -> None:
         """Set or update the embedding provider.
 
         Args:
@@ -756,7 +756,10 @@ class EmbeddingService(BaseService):
             # Use accurate provider-specific token estimation
             if self._embedding_provider:
                 text_tokens = estimate_tokens(
-                    text, self._embedding_provider.name, self._embedding_provider.model
+                    text,
+                    self._embedding_provider.name,
+                    self._embedding_provider.model,
+                    base_url=self._embedding_provider.base_url,
                 )
             else:
                 # Fallback for no provider (conservative default)
