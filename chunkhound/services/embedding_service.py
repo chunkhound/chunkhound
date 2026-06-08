@@ -250,7 +250,7 @@ class EmbeddingService(BaseService):
             # Load chunk content and generate embeddings
             chunks_data = self._get_chunks_by_ids(chunk_ids_without_embeddings)
             chunk_id_list = [chunk["id"] for chunk in chunks_data]
-            chunk_texts = [chunk["code"] for chunk in chunks_data]
+            chunk_texts = [self._format_chunk_text(chunk) for chunk in chunks_data]
 
             generated_count = await self.generate_embeddings_for_chunks(
                 chunk_id_list, chunk_texts, show_progress=True
@@ -321,7 +321,7 @@ class EmbeddingService(BaseService):
             )
 
             # Generate new embeddings
-            chunk_texts = [chunk["code"] for chunk in chunks_to_regenerate]
+            chunk_texts = [self._format_chunk_text(chunk) for chunk in chunks_to_regenerate]
             regenerated_count = await self.generate_embeddings_for_chunks(
                 chunk_ids_to_regenerate, chunk_texts
             )
@@ -897,6 +897,21 @@ class EmbeddingService(BaseService):
             return self._get_chunks_by_ids(chunk_ids)
         return []
 
+    def _format_chunk_text(self, chunk: dict[str, Any]) -> str:
+        """Format chunk text consistently with indexing-time embeddings."""
+        from chunkhound.core.utils import format_chunk_for_embedding
+        from chunkhound.utils.normalization import normalize_content
+
+        metadata = chunk.get("metadata") or {}
+        return format_chunk_for_embedding(
+            code=normalize_content(chunk.get("code", "")),
+            file_path=chunk.get("file_path") or chunk.get("path"),
+            language=chunk.get("language"),
+            constants=metadata.get("constants"),
+            rule_target=metadata.get("rule_target"),
+            doc_metadata=metadata,
+        )
+
     def _get_chunks_by_ids(self, chunk_ids: list[ChunkId]) -> list[dict[str, Any]]:
         """Get chunk data for specific chunk IDs."""
         if not chunk_ids:
@@ -925,6 +940,9 @@ class EmbeddingService(BaseService):
                         "name", chunk.get("symbol", "")
                     ),  # LanceDB uses 'name'
                     "path": chunk.get("file_path", ""),
+                    "file_path": chunk.get("file_path", ""),
+                    "language": chunk.get("language", ""),
+                    "metadata": chunk.get("metadata") or {},
                 }
                 filtered_chunks.append(filtered_chunk)
 
@@ -933,14 +951,31 @@ class EmbeddingService(BaseService):
     def _get_chunks_by_file_path(self, file_path: str) -> list[dict[str, Any]]:
         """Get all chunks for a specific file path."""
         query = """
-            SELECT c.id, c.code, c.symbol, f.path
+            SELECT
+                c.id,
+                c.code,
+                c.symbol,
+                f.path,
+                f.path AS file_path,
+                f.language,
+                c.metadata
             FROM chunks c
             JOIN files f ON c.file_id = f.id
             WHERE f.path = ?
             ORDER BY c.id
         """
 
-        return self._db.execute_query(query, [file_path])
+        chunks = self._db.execute_query(query, [file_path])
+        for chunk in chunks:
+            metadata = chunk.get("metadata")
+            if isinstance(metadata, str):
+                try:
+                    import json
+
+                    chunk["metadata"] = json.loads(metadata)
+                except json.JSONDecodeError:
+                    chunk["metadata"] = {}
+        return chunks
 
     def _delete_embeddings_for_chunks(
         self, chunk_ids: list[ChunkId], provider: str, model: str

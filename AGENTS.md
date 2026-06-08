@@ -111,6 +111,27 @@ PyPI trusted publisher required for `release-rc.yml`:
 - Project-local `.chunkhound.json` with relative `"path": ".chunkhound"` resolves to CWD, not the project dir — use `--db` with absolute paths when indexing remote projects
 - `--config` does NOT override a project-local `.chunkhound.json` for DB path — always use explicit `--db` when the target project has its own config
 
+## ELEIRIS_LOCAL_BRANCH_POLICY
+This checkout carries Eleiris-local ChunkHound changes that are not yet merged upstream.
+
+- Keep working on local branch: `fix-overlapping-chunk-merge`.
+- `origin` is upstream: `https://github.com/chunkhound/chunkhound.git`.
+- `john-fork` is the writable fork: `https://github.com/jtac/chunkhound.git`.
+- The local branch tracks `john-fork/fix-overlapping-chunk-merge`, not upstream `origin/main`.
+- When upstream ChunkHound changes land, merge them into the Eleiris local branch before continuing substantial work:
+  ```bash
+  git fetch origin main
+  git merge --no-edit origin/main
+  git push
+  ```
+- A local convenience alias is configured for this checkout:
+  ```bash
+  git sync-origin-main
+  ```
+  It runs the fetch/merge/push sequence above.
+- If conflicts occur, resolve them on `fix-overlapping-chunk-merge`, run smoke tests, then push to `john-fork`.
+- Do not assume direct push or merge access to `chunkhound/chunkhound`; upstream PRs may require maintainer/merge-queue permissions.
+
 ## PROJECT_MAINTENANCE
 - Smoke tests are mandatory guardrails
 - Run `uv run mypy chunkhound` during reviews to catch Optional/type boundary issues

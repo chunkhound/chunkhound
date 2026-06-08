@@ -65,6 +65,7 @@ class SearchService(BaseService):
         force_strategy: str | None = None,
         time_limit: float | None = None,
         result_limit: int | None = None,
+        metadata_filters: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform semantic search using vector similarity.
 
@@ -129,6 +130,11 @@ class SearchService(BaseService):
                     )
                     use_multi_hop = False
 
+            if metadata_filters:
+                # Metadata filters are currently applied in the DB-backed
+                # single-hop query so doc frontmatter filters remain exact.
+                use_multi_hop = False
+
             if use_multi_hop:
                 logger.debug(f"Using multi-hop search with reranking for: '{query}'")
                 assert self._multi_hop_strategy is not None
@@ -154,6 +160,7 @@ class SearchService(BaseService):
                     provider=search_provider,
                     model=search_model,
                     path_filter=path_filter,
+                    metadata_filters=metadata_filters,
                 )
 
             # Enhance results with additional metadata

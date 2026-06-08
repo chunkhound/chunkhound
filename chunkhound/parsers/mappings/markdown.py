@@ -5,6 +5,7 @@ for mapping Markdown AST nodes to semantic chunks. Supports CommonMark syntax
 and GitHub Flavored Markdown extensions.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.mappings.base import BaseMapping
-from chunkhound.parsers.universal_engine import UniversalConcept
+from chunkhound.parsers.universal_engine import UniversalChunk, UniversalConcept
 
 
 class MarkdownMapping(BaseMapping):
@@ -680,7 +681,7 @@ class MarkdownMapping(BaseMapping):
         def_node = self._find_definition_node(captures)
         source = content.decode("utf-8", errors="replace")
 
-        metadata = {
+        metadata: dict[str, Any] = {
             "concept": concept.value,
             "language": self.language.value,
             "capture_names": list(captures.keys()),
@@ -741,6 +742,177 @@ class MarkdownMapping(BaseMapping):
             return list(captures.values())[0]
 
         return None
+
+    def extract_universal_chunks(
+        self, content: str, file_path: Path | None = None
+    ) -> list[UniversalChunk]:
+        """Extract knowledgebase-aware Markdown section chunks.
+
+        Markdown is most useful to semantic search when each embedded chunk
+        carries its frontmatter, heading path, and stable section identity. The
+        generic tree-sitter extraction sees headings and paragraphs separately;
+        this section extractor keeps the body attached to its heading context
+        and stores typed-document metadata for filtered doc retrieval.
+        """
+        frontmatter, body_start_line = self._parse_frontmatter(content)
+        lines = content.splitlines()
+        heading_matches = list(self._iter_heading_matches(lines, body_start_line))
+        doc_title = self._doc_title(frontmatter, heading_matches, file_path)
+        base_metadata = self._doc_metadata(frontmatter, doc_title)
+        chunks: list[UniversalChunk] = []
+
+        if body_start_line <= len(lines) and (
+            not heading_matches or heading_matches[0][0] > body_start_line
+        ):
+            preamble_end = heading_matches[0][0] - 1 if heading_matches else len(lines)
+            preamble = "\n".join(lines[body_start_line - 1 : preamble_end]).strip()
+            if preamble:
+                chunks.append(
+                    UniversalChunk(
+                        concept=UniversalConcept.BLOCK,
+                        name="preamble",
+                        content=preamble,
+                        start_line=body_start_line,
+                        end_line=preamble_end,
+                        metadata={
+                            **base_metadata,
+                            "chunk_type_hint": "paragraph",
+                            "heading_path": [],
+                            "section_anchor": "preamble",
+                            "markdown_section": True,
+                            "prevent_merge_across_concepts": True,
+                        },
+                        language_node_type="markdown_section",
+                    )
+                )
+
+        heading_stack: list[tuple[int, str, str]] = []
+        for idx, (line_no, level, title) in enumerate(heading_matches):
+            next_line = (
+                heading_matches[idx + 1][0]
+                if idx + 1 < len(heading_matches)
+                else len(lines) + 1
+            )
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            anchor = self._slugify(title)
+            heading_stack.append((level, title, anchor))
+            section_lines = lines[line_no - 1 : next_line - 1]
+            section_content = "\n".join(section_lines).strip()
+            if not section_content:
+                continue
+            heading_path = [item[1] for item in heading_stack]
+            chunks.append(
+                UniversalChunk(
+                    concept=UniversalConcept.DEFINITION,
+                    name=f"heading_{anchor or line_no}",
+                    content=section_content,
+                    start_line=line_no,
+                    end_line=next_line - 1,
+                    metadata={
+                        **base_metadata,
+                        "chunk_type_hint": f"header_{level}",
+                        "heading_level": level,
+                        "heading_title": title,
+                        "heading_path": heading_path,
+                        "section_anchor": anchor,
+                        "markdown_section": True,
+                        "prevent_merge_across_concepts": True,
+                    },
+                    language_node_type="markdown_section",
+                )
+            )
+        return chunks
+
+    def _parse_frontmatter(self, content: str) -> tuple[dict[str, Any], int]:
+        lines = content.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return {}, 1
+        end_idx = None
+        for idx, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                end_idx = idx
+                break
+        if end_idx is None:
+            return {}, 1
+        return self._parse_frontmatter_lines(lines[1:end_idx]), end_idx + 2
+
+    def _parse_frontmatter_lines(self, lines: list[str]) -> dict[str, Any]:
+        data: dict[str, Any] = {}
+        current_key: str | None = None
+        for raw in lines:
+            line = raw.rstrip()
+            if not line.strip():
+                continue
+            if line.startswith("  - ") and current_key:
+                existing = data.setdefault(current_key, [])
+                if isinstance(existing, list):
+                    existing.append(self._parse_scalar(line[4:].strip()))
+                continue
+            if ":" not in line or line.startswith(" "):
+                continue
+            key, value = line.split(":", 1)
+            current_key = key.strip()
+            value = value.strip()
+            data[current_key] = [] if not value else self._parse_scalar(value)
+        return data
+
+    def _parse_scalar(self, value: str) -> Any:
+        value = value.strip().strip('"').strip("'")
+        if value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1].strip()
+            if not inner:
+                return []
+            return [item.strip().strip('"').strip("'") for item in inner.split(",")]
+        return value
+
+    def _iter_heading_matches(
+        self, lines: list[str], start_line: int
+    ) -> list[tuple[int, int, str]]:
+        matches: list[tuple[int, int, str]] = []
+        for idx, line in enumerate(lines[start_line - 1 :], start=start_line):
+            match = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line)
+            if not match:
+                continue
+            title = match.group(2).strip()
+            matches.append((idx, len(match.group(1)), title))
+        return matches
+
+    def _doc_title(
+        self,
+        frontmatter: dict[str, Any],
+        headings: list[tuple[int, int, str]],
+        file_path: Path | None,
+    ) -> str:
+        summary = frontmatter.get("title") or frontmatter.get("summary")
+        if isinstance(summary, str) and summary:
+            return summary
+        for _, level, title in headings:
+            if level == 1:
+                return title
+        return file_path.stem if file_path else "document"
+
+    def _doc_metadata(self, frontmatter: dict[str, Any], doc_title: str) -> dict[str, Any]:
+        relationship_keys = [
+            key for key in frontmatter if key.startswith("related_") or key in {"supersedes", "superseded_by"}
+        ]
+        metadata: dict[str, Any] = {
+            "concept": "structure",
+            "language": self.language.value,
+            "doc_title": doc_title,
+            "frontmatter": frontmatter,
+            "relationship_keys": relationship_keys,
+        }
+        for key in ("type", "status", "owner", "summary", "tags"):
+            if key in frontmatter:
+                metadata[f"doc_{key}"] = frontmatter[key]
+        for key in relationship_keys:
+            metadata[key] = frontmatter.get(key)
+        return metadata
+
+    def _slugify(self, text: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+        return slug or "section"
 
     def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path

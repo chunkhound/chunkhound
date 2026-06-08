@@ -210,6 +210,24 @@ class UniversalParser:
         if not content.strip():
             return []
 
+        # Some mappings have domain-specific semantic section extractors that
+        # provide better retrieval units than generic tree-sitter captures. For
+        # Markdown this preserves frontmatter and heading-path context in every
+        # chunk so documentation embeddings behave like knowledgebase sections.
+        if (
+            hasattr(self.base_mapping, "extract_universal_chunks")
+            and getattr(self.base_mapping, "language", None) == Language.MARKDOWN
+        ):
+            universal_chunks = self.base_mapping.extract_universal_chunks(
+                content, file_path
+            )
+            chunks = self._apply_cast_and_convert(
+                universal_chunks, None, content, file_path, file_id
+            )
+            self._total_files_parsed += 1
+            self._total_chunks_created += len(chunks)
+            return chunks
+
         # Special handling for non-tree-sitter parsers (no tree-sitter parsing)
         if self.engine is None:
             # Check if this is PDF content by looking at language mapping
@@ -657,6 +675,21 @@ class UniversalParser:
                 current_chunk = next_chunk
                 continue
 
+            # Don't merge chunks whose line ranges overlap. Overlapping chunks often
+            # come from nested language constructs extracted as separate concepts
+            # (for example an inner function and a nested object declaration). If
+            # those chunks are concatenated, the shared source lines appear twice in
+            # search results and embeddings. Boundary-touching ranges remain
+            # mergeable for parsers that model adjacent chunks with end == start.
+            line_ranges_overlap = (
+                next_chunk.start_line < current_chunk.end_line
+                and next_chunk.end_line > current_chunk.start_line
+            )
+            if line_ranges_overlap:
+                result.append(current_chunk)
+                current_chunk = next_chunk
+                continue
+
             # Don't merge if either chunk explicitly prevents merging.
             # This respects language-specific metadata that marks chunks as
             # semantically independent (e.g., HCL attributes and blocks).
@@ -888,6 +921,14 @@ class UniversalParser:
                 "namespace": ChunkType.NAMESPACE,
                 "embedded_sql": ChunkType.EMBEDDED_SQL,
                 "import": ChunkType.IMPORT,
+                "header_1": ChunkType.HEADER_1,
+                "header_2": ChunkType.HEADER_2,
+                "header_3": ChunkType.HEADER_3,
+                "header_4": ChunkType.HEADER_4,
+                "header_5": ChunkType.HEADER_5,
+                "header_6": ChunkType.HEADER_6,
+                "paragraph": ChunkType.PARAGRAPH,
+                "code_block": ChunkType.CODE_BLOCK,
             }
             if chunk_type_hint in hint_map:
                 return hint_map[chunk_type_hint]

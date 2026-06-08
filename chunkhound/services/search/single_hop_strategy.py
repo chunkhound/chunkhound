@@ -45,6 +45,7 @@ class SingleHopStrategy:
         provider: str,
         model: str,
         path_filter: str | None,
+        metadata_filters: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform standard single-hop semantic search.
 
@@ -76,6 +77,7 @@ class SingleHopStrategy:
             offset=offset,
             threshold=threshold,
             path_filter=path_filter,
+            metadata_filters=metadata_filters,
         )
 
         logger.info(f"Standard semantic search completed: {len(results)} results found")

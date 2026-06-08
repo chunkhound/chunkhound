@@ -500,6 +500,9 @@ async def search_impl(
     path: str | None = None,
     page_size: int = 10,
     offset: int = 0,
+    doc_type: str | None = None,
+    status: str | None = None,
+    owner: str | None = None,
 ) -> SearchResponse:
     """Unified search dispatching to regex or semantic based on type.
 
@@ -511,6 +514,9 @@ async def search_impl(
         path: Optional relative subdirectory to restrict search scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         page_size: Number of results per page (1-100)
         offset: Starting offset for pagination
+        doc_type: Optional Markdown frontmatter type filter for docs
+        status: Optional Markdown frontmatter status filter for docs
+        owner: Optional Markdown frontmatter owner filter for docs
 
     Returns:
         Dict with 'results' and 'pagination' keys
@@ -527,6 +533,11 @@ async def search_impl(
     # Validate and constrain parameters
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
+    metadata_filters = {
+        key: value
+        for key, value in {"type": doc_type, "status": status, "owner": owner}.items()
+        if value
+    }
 
     if type == "semantic":
         # Validate embedding manager for semantic search
@@ -553,6 +564,7 @@ async def search_impl(
             provider=provider_name,
             model=model_name,
             path_filter=path,
+            metadata_filters=metadata_filters or None,
         )
     else:  # regex
         # Perform regex search
