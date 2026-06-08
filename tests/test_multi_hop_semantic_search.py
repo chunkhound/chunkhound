@@ -255,8 +255,33 @@ async def test_multi_hop_terminates_on_insufficient_high_scoring_candidates() ->
 
 @pytest.mark.fast
 @pytest.mark.asyncio
-async def test_multi_hop_terminates_on_score_drop_signal() -> None:
-    """Expansion should stop when tracked chunk scores degrade sharply."""
+async def test_multi_hop_terminates_when_no_new_candidates() -> None:
+    """Multi-hop should stop once no new top candidates remain."""
+    scenario = build_graph_exhaustion_scenario()
+    search_service = _build_search_service(scenario.db, scenario.provider)
+
+    results, pagination = await search_service.search_semantic(
+        "graph exhaustion",
+        page_size=10,
+    )
+
+    assert pagination["total"] == 6, (
+        f"graph exhaustion should stop at 6, got {pagination['total']}"
+    )
+    result_ids = {result["chunk_id"] for result in results}
+    assert 6 in result_ids, "chunk 6 should be discovered via expansion"
+    assert 7 not in result_ids, (
+        "chunk 7 should not be discovered when no new candidates"
+    )
+    assert 8 not in result_ids, (
+        "chunk 8 should not be discovered when no new candidates"
+    )
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_multi_hop_terminates_on_score_drop() -> None:
+    """Expansion should stop on a tracked score drop of at least 0.15."""
     scenario = build_score_drop_termination_scenario()
     search_service = _build_search_service(scenario.db, scenario.provider)
 
@@ -266,12 +291,61 @@ async def test_multi_hop_terminates_on_score_drop_signal() -> None:
     )
 
     assert pagination["total"] == 6, (
-        f"score-drop should stop expansion at 6, not continue to 8, got {pagination['total']}"
+        f"score-drop should stop expansion at 6, got {pagination['total']}"
     )
-    # Chunks 7 and 8 should NOT be discovered (they'd be found if loop continued past score-drop)
     result_ids = {result["chunk_id"] for result in results}
-    assert 7 not in result_ids, "chunk 7 should not be discovered if score-drop termination fires"
-    assert 8 not in result_ids, "chunk 8 should not be discovered if score-drop termination fires"
+    assert 6 in result_ids, "chunk 6 should be discovered via expansion"
+    assert 7 not in result_ids, (
+        "chunk 7 should not be discovered when score-drop termination fires"
+    )
+    assert 8 not in result_ids, (
+        "chunk 8 should not be discovered when score-drop termination fires"
+    )
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_multi_hop_score_drop_fixture_is_repeatable_across_searches() -> None:
+    """Repeated searches on one scenario should not inherit rerank state."""
+    scenario = build_score_drop_termination_scenario()
+    search_service = _build_search_service(scenario.db, scenario.provider)
+    query = "score drop termination"
+
+    first_results, first_pagination = await search_service.search_semantic(
+        query,
+        page_size=10,
+    )
+    second_results, second_pagination = await search_service.search_semantic(
+        query,
+        page_size=10,
+    )
+
+    assert first_pagination == second_pagination
+    assert [result["chunk_id"] for result in first_results] == [
+        result["chunk_id"] for result in second_results
+    ]
+    assert [result["score"] for result in first_results] == [
+        result["score"] for result in second_results
+    ]
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_multi_hop_terminates_on_score_drop_threshold_boundary() -> None:
+    """A score drop equal to the threshold should still terminate expansion."""
+    scenario = build_score_drop_termination_scenario(
+        round_two_chunk_one_score=0.80,
+        query="score drop threshold boundary",
+    )
+    search_service = _build_search_service(scenario.db, scenario.provider)
+
+    results, pagination = await search_service.search_semantic(
+        "score drop threshold boundary",
+        page_size=10,
+    )
+
+    assert pagination["total"] == 6
+    assert 7 not in {result["chunk_id"] for result in results}
 
 
 @pytest.mark.fast
@@ -287,14 +361,19 @@ async def test_multi_hop_terminates_on_low_top_five_floor() -> None:
     )
 
     assert pagination["total"] == 6, (
-        f"min-score should stop expansion at 6, not continue to 8, got {pagination['total']}"
+        "min-score should stop expansion at 6, "
+        f"not continue to 8, got {pagination['total']}"
     )
     top_five_scores = [result["score"] for result in results[:5]]
     assert min(top_five_scores) < 0.3
     # Chunks 7 and 8 should NOT be discovered
     result_ids = {result["chunk_id"] for result in results}
-    assert 7 not in result_ids, "chunk 7 should not be discovered if min-score termination fires"
-    assert 8 not in result_ids, "chunk 8 should not be discovered if min-score termination fires"
+    assert 7 not in result_ids, (
+        "chunk 7 should not be discovered if min-score termination fires"
+    )
+    assert 8 not in result_ids, (
+        "chunk 8 should not be discovered if min-score termination fires"
+    )
 
 
 @pytest.mark.fast
