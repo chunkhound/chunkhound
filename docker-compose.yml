@@ -12,6 +12,8 @@ x-chunkhound-common: &chunkhound-common
   environment:
     # Replicas serve read-only search traffic.
     CHUNKHOUND_DATABASE__COMPACTION_ENABLED: "false"
+    # Mount the host .chunkhound.json as the config source of truth.
+    CHUNKHOUND_CONFIG_FILE: /etc/chunkhound/config.json
   networks:
     - mcp-net
   healthcheck:
@@ -36,19 +38,25 @@ services:
     <<: *chunkhound-common
     container_name: chunkhound-mcp-1
     volumes:
+      - ./.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica1:/data/db
+      - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
 
   chunkhound-2:
     <<: *chunkhound-common
     container_name: chunkhound-mcp-2
     volumes:
+      - ./.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica2:/data/db
+      - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
 
   chunkhound-3:
     <<: *chunkhound-common
     container_name: chunkhound-mcp-3
     volumes:
+      - ./.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica3:/data/db
+      - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
 
   # ── nginx reverse proxy ─────────────────────────────────────────────────────
   nginx:

@@ -16,6 +16,13 @@ RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl
 # Pre-warm supergateway in the npx cache (avoids ~5-10s download on first container start).
 RUN npx -y supergateway --version 2>/dev/null || true
 
+# Claude Code CLI is mounted from the host at runtime (see docker-compose volumes).
+# This wrapper calls node on the mounted module so no npm install is needed.
+RUN mkdir -p /usr/local/lib/node_modules/@anthropic-ai/claude-code && \
+    printf '#!/bin/sh\nexec node /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/run.js "$@"\n' \
+        > /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude
+
 RUN useradd --create-home --shell /bin/bash chunkhound
 USER chunkhound
 WORKDIR /home/chunkhound
