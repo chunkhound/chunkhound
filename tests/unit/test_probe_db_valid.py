@@ -47,6 +47,35 @@ class TestProbeDbValidCountQueries:
 
         assert result is False
 
+    def test_probe_db_valid_returns_false_when_count_query_fails(self, tmp_path: Path) -> None:
+        """Probe returns False when COUNT(*) queries raise even though connect succeeds."""
+        db_file = tmp_path / "test.db"
+        conn = duckdb.connect(str(db_file))
+        conn.execute("CREATE TABLE files (id INTEGER, path TEXT)")
+        conn.execute("CREATE TABLE chunks (id INTEGER, file_id INTEGER)")
+        conn.close()
+
+        mgr = DuckDBConnectionManager(db_file)
+
+        real_connect = duckdb.connect
+
+        def patched_connect(path, read_only=False):
+            real_conn = real_connect(path, read_only=read_only)
+            original_execute = real_conn.execute
+
+            def failing_execute(sql, *args, **kwargs):
+                if "COUNT" in sql:
+                    raise RuntimeError("simulated data read failure")
+                return original_execute(sql, *args, **kwargs)
+
+            real_conn.execute = failing_execute
+            return real_conn
+
+        with patch("duckdb.connect", side_effect=patched_connect):
+            result = mgr._probe_db_valid(db_file)
+
+        assert result is False
+
 
 class TestEscapePathForSql:
     """_escape_path_for_sql must escape safe chars and reject dangerous ones."""
