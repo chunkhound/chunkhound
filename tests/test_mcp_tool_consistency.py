@@ -144,7 +144,10 @@ def test_websearch_schema():
     props = tool.parameters["properties"]
     assert "query" in props, "websearch should have 'query' parameter"
     assert "limit" in props, "websearch should have 'limit' parameter"
-    assert "path_filter" in props, "websearch should have 'path_filter' parameter"
+    assert "path_filter" not in props, (
+        "websearch must not expose 'path_filter' — fetched pages live in a flat "
+        "tmpdir, so a subdirectory filter would silently zero out results"
+    )
 
     # limit default matches spec §4.2
     assert props["limit"].get("default") == 30
@@ -152,9 +155,6 @@ def test_websearch_schema():
     required = tool.parameters.get("required", [])
     assert "query" in required, "'query' should be required for websearch"
     assert "limit" not in required, "'limit' should not be required (has default)"
-    assert "path_filter" not in required, (
-        "'path_filter' should not be required (optional)"
-    )
 
 
 def test_websearch_hidden_without_capabilities():

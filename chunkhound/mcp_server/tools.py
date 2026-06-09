@@ -672,9 +672,11 @@ async def websearch_impl(
     config: Config | None,
     query: str,
     limit: int = 30,
-    path_filter: str | None = None,
 ) -> str:
     """Search the web, fetch results, and run deep research over them.
+
+    No path_filter parameter: fetched pages live in a flat tmpdir, so a
+    subdirectory filter would silently match zero chunks.
 
     Args:
         embedding_manager: Present solely for capability gating
@@ -686,7 +688,6 @@ async def websearch_impl(
             source file (if any) is forwarded to the subprocess as --config.
         query: Natural-language or keyword query for DuckDuckGo.
         limit: Number of results to fetch. Clamped to [1, 100]. Default 30.
-        path_filter: Optional scope restriction forwarded to the research stage.
 
     Returns:
         Markdown: research answer (with tmpdir paths rewritten to source URLs)
@@ -727,7 +728,7 @@ async def websearch_impl(
             mapping=mapping,
         )
 
-        cmd = build_quickresearch_argv_core(query, tmpdir, path_filter, config)
+        cmd = build_quickresearch_argv_core(query, tmpdir, config)
         # Scrub CHUNKHOUND_MCP_MODE so the child's RichOutputFormatter.error()
         # is not silenced — we rely on its stderr output to populate the
         # MCPError tail on subprocess failure.
@@ -763,9 +764,12 @@ async def websearch_impl(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     answer = replace_paths_with_urls(answer, mapping).rstrip()
+    # Warnings may be multi-line; prefix every line to keep the blockquote.
     warn_block = (
         "\n\n> **Fetch warnings:**\n"
-        + "\n".join(f"> - {w}" for w in warnings)
+        + "\n".join(
+            "> - " + w.replace("\n", "\n> ") for w in warnings
+        )
     ) if warnings else ""
     return f"{answer}{warn_block}"
 

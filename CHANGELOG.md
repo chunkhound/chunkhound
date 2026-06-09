@@ -14,17 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-role model override) explicitly for these providers.
 
 ### Added
-- **Claude Opus 4.8 support**: the Anthropic provider now gives Opus 4.8 full Opus 4.7 capability
-  parity: adaptive-only extended thinking (an explicit `manual` request auto-resolves to adaptive),
-  effort levels `low`/`medium`/`high`/`xhigh`/`max`, and the task-budgets beta. The pinned
-  `claude-opus` offline fallback was bumped to `claude-opus-4-8`. Fixes a `400 "thinking.type.enabled
-  is not supported for this model"` error when targeting `claude-opus-4-8` with thinking enabled.
+- **Claude Opus 4.8 support**: the Anthropic provider now gives Opus 4.8 full Opus 4.7 capability parity: adaptive-only extended thinking (an explicit `manual` request auto-resolves to adaptive), effort levels `low`/`medium`/`high`/`xhigh`/`max`, and the task-budgets beta. The pinned `claude-opus` offline fallback was bumped to `claude-opus-4-8`. Fixes a `400 "thinking.type.enabled is not supported for this model"` error when targeting `claude-opus-4-8` with thinking enabled.
+- **Websearch CLI command and MCP tool** — New `chunkhound websearch "<query>"` CLI subcommand and matching `websearch` MCP tool let coding agents pull external context into the loop without leaving it. Searches DuckDuckGo, fetches the top results, converts them to Markdown, runs `code_research` over a transient in-memory index of the fetched pages, and returns a single cited answer with local tmpdir paths rewritten back to source URLs. Per-request timeout configurable via `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` (default 600s). `markdownify` and `zendriver==0.15.3` are new core dependencies.
+  - **System Chrome via zendriver over CDP** — Rich page fetches drive the system-installed Google Chrome directly through zendriver's raw CDP bindings. No Node runtime, no bundled Chromium download, no `playwright install` step, and no `chunkhound[browser]` extra to opt into — it works out of the box when Chrome ≥124 is present. Chrome resolution probes known install paths and version-checks the binary (zendriver's CDP binding requires `Response.charset`, which only Chrome ≥124 emits); any verification failure (missing binary, too old, unparseable `--version`) collapses to a warning and the urllib fallback rather than raising.
+  - **Robust PDF handling** — PDF detection inspects real response headers before Chrome's PDF viewer engages, verifies the `%PDF-` magic bytes (so endpoints returning HTML under an `application/pdf` Content-Type fall through to HTML→markdown instead of corrupting the result set), and refetches PDFs via urllib with Chrome's cookies forwarded so cookie-gated PDFs (signed URLs, session-protected docs) still work — redirects on the cookie-bearing request are blocked to prevent cross-origin credential leakage. Fetches whose rendered markdown is whitespace-only fail explicitly instead of writing zero-byte files into the result set.
 
 ### Changed
 - **DeepSeek/Grok refactored to data-driven registry** — Per-provider
   subclasses replaced with a unified `OpenAICompatibleSpec` registry.
   Adding a new OpenAI-compatible provider is now a data entry + a few
   type annotations instead of a full subclass. Net: -527 lines.
+- **Vue template metadata schema for v-model directives** — The shape of metadata produced for `v-model` (and `v-model:arg`) directives has changed:
+  - Old: `model_modifier` (string)
+  - New: `modifiers` (list of strings) + `model_argument` (optional string for `v-model:foo` style bindings)
+
+  The previous `model_modifier` field was already semantically incorrect on many real cases (it was derived from the tree-sitter `directive_argument` node and could not properly distinguish arguments from modifiers or represent multiple modifiers). The new fields are more correct and consistent with how `parse_vue_directive` works. This is a breaking change for any code or LLM prompts that directly inspected `chunk.metadata["model_modifier"]` on Vue chunks. Most other Vue directive metadata keys (`event_name`, `property_name`, `slot_name`, etc.) are unchanged in meaning.
 
 ### Fixed
 - **Multi-source URL provenance in fact extraction** — URL-backed facts in
@@ -38,13 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP string return passthrough** — Tools returning raw strings (e.g.
   websearch results) now pass through as markdown instead of being wrapped
   in JSON objects.
-
-### Changed
-- **Vue template metadata schema for v-model directives** — The shape of metadata produced for `v-model` (and `v-model:arg`) directives has changed:
-  - Old: `model_modifier` (string)
-  - New: `modifiers` (list of strings) + `model_argument` (optional string for `v-model:foo` style bindings)
-
-  The previous `model_modifier` field was already semantically incorrect on many real cases (it was derived from the tree-sitter `directive_argument` node and could not properly distinguish arguments from modifiers or represent multiple modifiers). The new fields are more correct and consistent with how `parse_vue_directive` works. This is a breaking change for any code or LLM prompts that directly inspected `chunk.metadata["model_modifier"]` on Vue chunks. Most other Vue directive metadata keys (`event_name`, `property_name`, `slot_name`, etc.) are unchanged in meaning.
 
 ## [5.1.0] - 2026-05-20
 

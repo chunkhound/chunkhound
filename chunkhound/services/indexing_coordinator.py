@@ -34,7 +34,7 @@ from chunkhound.core.types.common import FilePath, Language
 from chunkhound.core.utils import estimate_tokens_chunking
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.interfaces.database_provider import DatabaseProvider
-from chunkhound.interfaces.embedding_provider import EmbeddingProvider
+from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
 from chunkhound.parsers.chunk_splitter import (
     CASTConfig,
     ChunkMetrics,
@@ -178,7 +178,7 @@ class IndexingCoordinator(BaseService):
         self,
         database_provider: DatabaseProvider,
         base_directory: Path,
-        embedding_provider: EmbeddingProvider | None = None,
+        embedding_provider: APIEmbeddingProvider | None = None,
         language_parsers: dict[Language, UniversalParser] | None = None,
         progress: Progress | None = None,
         config: Any | None = None,

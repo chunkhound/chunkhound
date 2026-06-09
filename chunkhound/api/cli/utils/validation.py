@@ -66,7 +66,7 @@ def validate_provider_args(
 
     if provider == "openai":
         # Only require API key for official OpenAI endpoints
-        from chunkhound.core.config.openai_utils import is_official_openai_endpoint
+        from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
 
         if is_official_openai_endpoint(base_url) and not api_key:
             logger.error(
@@ -75,7 +75,7 @@ def validate_provider_args(
             )
             return False
     elif provider == "voyageai":
-        from chunkhound.core.config.voyageai_utils import is_official_voyageai_endpoint
+        from chunkhound.core.utils.voyageai_utils import is_official_voyageai_endpoint
 
         if is_official_voyageai_endpoint(base_url) and not api_key:
             logger.error(
