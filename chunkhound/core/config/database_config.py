@@ -51,6 +51,19 @@ class DatabaseConfig(BaseModel):
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
     )
 
+    # Read-only mode. The --read-only flag is registered only on the mcp
+    # subparser; Config.validate_for_command rejects read_only=True for any
+    # non-mcp subcommand and for any provider other than DuckDB, so JSON/env
+    # config cannot silently break writers or open an unsupported provider.
+    read_only: bool = Field(
+        default=False,
+        description=(
+            "Open DB read-only; reject all writes. MCP + DuckDB only "
+            "(validator rejects other commands/providers). The CLI --read-only "
+            "flag only sets True; remove from JSON config to disable."
+        ),
+    )
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""
@@ -181,6 +194,8 @@ class DatabaseConfig(BaseModel):
             overrides["provider"] = args.database_provider
         if hasattr(args, "max_disk_usage_gb") and args.max_disk_usage_gb is not None:
             overrides["max_disk_usage_mb"] = args.max_disk_usage_gb * 1024.0
+        if getattr(args, "read_only", False):
+            overrides["read_only"] = True
         return overrides
 
     def __repr__(self) -> str:

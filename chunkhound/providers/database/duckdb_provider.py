@@ -241,7 +241,10 @@ class DuckDBProvider(SerialDatabaseProvider):
         """
         # Create a NEW connection for the executor thread
         # This ensures thread safety - only this thread will use this connection
-        conn = duckdb.connect(str(self._connection_manager.db_path))
+        conn = duckdb.connect(
+            str(self._connection_manager.db_path),
+            read_only=self._connection_manager.is_read_only,
+        )
 
         # Load required extensions
         conn.execute("INSTALL vss")
@@ -375,6 +378,16 @@ class DuckDBProvider(SerialDatabaseProvider):
         Note: The connection is already created by _get_thread_local_connection,
         so this method just ensures schema and indexes are created.
         """
+        # Read-only opens reject all DDL — schema must already exist on disk.
+        if self._connection_manager.is_read_only:
+            if self._executor_table_exists(conn, state, "embeddings"):
+                logger.warning(
+                    "Legacy 'embeddings' table present; read-only mode cannot "
+                    "migrate it. Reopen without --read-only to migrate, or "
+                    "queries against embeddings may behave unexpectedly."
+                )
+            return
+
         try:
             # Perform WAL cleanup once with synchronization
             with self._wal_cleanup_lock:
@@ -451,14 +464,26 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> None:
         """Executor method for disconnect - runs in DB thread."""
         try:
-            if not skip_checkpoint and not self._connection_manager.is_memory_db:
+            if (
+                not skip_checkpoint
+                and not self._connection_manager.is_memory_db
+                and not self._connection_manager.is_read_only
+            ):
                 # Force checkpoint before close to ensure durability
                 conn.execute("CHECKPOINT")
                 if not os.environ.get("CHUNKHOUND_MCP_MODE"):
                     logger.debug("Database checkpoint completed before disconnect")
             else:
                 if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.debug("Skipping checkpoint before disconnect (already done)")
+                    if self._connection_manager.is_read_only:
+                        reason = "read-only"
+                    elif self._connection_manager.is_memory_db:
+                        reason = "memory db"
+                    else:
+                        reason = "already done"
+                    logger.debug(
+                        f"Skipping checkpoint before disconnect ({reason})"
+                    )
         except Exception as e:
             if not os.environ.get("CHUNKHOUND_MCP_MODE"):
                 logger.error(f"Checkpoint failed during disconnect: {e}")

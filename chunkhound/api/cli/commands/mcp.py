@@ -62,6 +62,12 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
         or os.getenv("CHUNKHOUND_DAEMON_MODE", "").lower() == "false"
     )
 
+    if config.database.read_only:
+        # Read-only implies single-process stdio: the daemon path coordinates
+        # multi-client writes, which is meaningless when the process never writes.
+        # Resolved from the merged config so JSON config sources work, not just CLI.
+        no_daemon = True
+
     if no_daemon:
         # Direct path: run StdioMCPServer in this process (single-client mode)
         from chunkhound.mcp_server.stdio import main

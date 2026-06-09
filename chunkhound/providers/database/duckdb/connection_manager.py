@@ -46,6 +46,13 @@ class DuckDBConnectionManager:
         self._db_path = db_path
         self.connection: Any | None = None
         self.config = config
+        # :memory: DBs cannot meaningfully be opened read-only — there is
+        # nothing to read. Dropping the flag here keeps callers that inherit a
+        # project-level read_only setting (e.g. _quickresearch under --config)
+        # from asking DuckDB for an impossible open.
+        self._read_only = bool(
+            config and config.read_only and str(db_path) != ":memory:"
+        )
 
         # Note: Thread safety is now handled by DuckDBProvider's executor pattern
         # All database operations are serialized to a single thread
@@ -59,6 +66,11 @@ class DuckDBConnectionManager:
     def is_memory_db(self) -> bool:
         """Whether this is an in-memory database."""
         return str(self._db_path) == ":memory:"
+
+    @property
+    def is_read_only(self) -> bool:
+        """Whether the database was opened in read-only mode."""
+        return self._read_only
 
     @property
     def is_connected(self) -> bool:
@@ -79,7 +91,8 @@ class DuckDBConnectionManager:
 
             # Connect to database with WAL validation
             # Thread safety is now handled by DuckDBProvider's executor pattern
-            self._preemptive_wal_cleanup()
+            if not self._read_only:
+                self._preemptive_wal_cleanup()
             self._connect_with_wal_validation()
 
             logger.info("DuckDB connection established")
@@ -99,11 +112,30 @@ class DuckDBConnectionManager:
         """Connect to DuckDB with WAL corruption detection and automatic cleanup."""
         try:
             # Attempt initial connection
-            self.connection = duckdb.connect(str(self.db_path))
+            self.connection = duckdb.connect(
+                str(self.db_path), read_only=self._read_only
+            )
             logger.debug("DuckDB connection successful")
 
         except duckdb.Error as e:
             error_msg = str(e)
+            # Recovery rewrites files on disk; never run that under read-only.
+            if self._read_only:
+                if not self.is_memory_db and self._is_wal_corruption_error(error_msg):
+                    db_path = Path(self.db_path)
+                    wal_file = db_path.with_suffix(db_path.suffix + ".wal")
+                    if wal_file.exists():
+                        hint = (
+                            f"WAL file {wal_file} needs replay. Reopen without "
+                            f"--read-only to recover, or remove the WAL file "
+                            f"if you know it is stale."
+                        )
+                    else:
+                        hint = f"No WAL file present. Underlying error: {error_msg}"
+                    raise RuntimeError(
+                        f"Cannot open {self.db_path} read-only: {hint}"
+                    ) from e
+                raise
 
             # Check for WAL corruption patterns
             if self._is_wal_corruption_error(error_msg):
@@ -276,7 +308,11 @@ class DuckDBConnectionManager:
         """
         if self.connection is not None:
             try:
-                if not skip_checkpoint and not self.is_memory_db:
+                if (
+                    not skip_checkpoint
+                    and not self.is_memory_db
+                    and not self._read_only
+                ):
                     # Force checkpoint before close to ensure durability
                     self.connection.execute("CHECKPOINT")
                     # Only log in non-MCP mode to avoid JSON-RPC interference

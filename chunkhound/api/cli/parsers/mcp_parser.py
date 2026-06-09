@@ -38,6 +38,15 @@ def add_mcp_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Run MCP server directly without daemon (single client mode)",
     )
 
+    mcp_parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help=(
+            "Open the database read-only; disables indexing/watcher and "
+            "runs without the daemon (DuckDB only)"
+        ),
+    )
+
     # Add common arguments
     add_common_arguments(mcp_parser)
 

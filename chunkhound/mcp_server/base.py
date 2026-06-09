@@ -504,6 +504,12 @@ class MCPServerBase(ABC):
             await self._connect_provider()
             self._complete_startup_phase("db_connect")
 
+            if self.config.database.read_only:
+                self.debug_log(
+                    "Read-only mode: skipping realtime indexing and initial scan"
+                )
+                return
+
             # Start real-time indexing service
             self.debug_log("Starting real-time indexing service (deferred)")
             self._start_startup_phase("realtime_start")
