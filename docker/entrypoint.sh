@@ -14,10 +14,10 @@ fi
 export NPM_CONFIG_CACHE=/tmp/.npm-cache
 
 # Pre-warm the OS page cache so chunkhound mcp doesn't cold-start on the first
-# connection after a container restart. Reads the DB file sequentially without
-# opening a DuckDB connection (no locking side effects).
+# connection after a container restart. Runs at idle I/O priority so it doesn't
+# compete with DuckDB when the first MCP session opens the database.
 if [ -f "${DB_DIR}/chunks.db" ]; then
-    dd if="${DB_DIR}/chunks.db" of=/dev/null bs=4M 2>/dev/null &
+    ionice -c 3 dd if="${DB_DIR}/chunks.db" of=/dev/null bs=4M 2>/dev/null &
 fi
 
 echo "[entrypoint] Starting supergateway wrapping chunkhound mcp" >&2
@@ -31,7 +31,7 @@ if [ -n "${CONFIG_FILE}" ]; then
 fi
 
 exec npx -y supergateway \
-    --stdio "chunkhound mcp --db ${DB_DIR} ${CONFIG_ARG} --no-daemon" \
+    --stdio "chunkhound-mcp-wrapper --db ${DB_DIR} ${CONFIG_ARG} --no-daemon" \
     --port "${PORT:-8080}" \
     --cors \
     --outputTransport streamableHttp \
