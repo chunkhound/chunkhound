@@ -63,6 +63,11 @@ def get_compaction_lock_path(db_path: Path) -> Path:
     return Path(str(db_path) + ".compaction.lock")
 
 
+def _escape_path_for_sql(path: Path) -> str:
+    """Escape path for embedding in a single-quoted DuckDB SQL literal."""
+    return path.as_posix().replace("'", "''")
+
+
 class DuckDBConnectionManager:
     """Manages DuckDB connections, schema creation, and database operations."""
 
@@ -117,6 +122,8 @@ class DuckDBConnectionManager:
                 if not _REQUIRED_TABLES.issubset(tables):
                     logger.debug(f"Integrity probe: missing tables (found: {tables})")
                     return False
+                conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+                conn.execute("SELECT COUNT(*) FROM files").fetchone()
                 return True
             finally:
                 conn.close()
@@ -498,7 +505,8 @@ class DuckDBConnectionManager:
                 test_conn.execute("SET hnsw_enable_experimental_persistence = true")
             except Exception:
                 pass  # If VSS unavailable, ATTACH may still work for non-HNSW DBs
-            test_conn.execute(f"ATTACH '{self.db_path}' AS validation_db")
+            escaped = _escape_path_for_sql(Path(self.db_path))
+            test_conn.execute(f"ATTACH '{escaped}' AS validation_db")
             test_conn.execute("SELECT 1").fetchone()
             test_conn.execute("DETACH validation_db")
             logger.debug("WAL file validation passed")
@@ -549,7 +557,8 @@ class DuckDBConnectionManager:
 
             # Now attach the database file - this will trigger WAL replay
             # with extension loaded
-            recovery_conn.execute(f"ATTACH '{db_path}' AS recovery_db")
+            escaped_db = _escape_path_for_sql(db_path)
+            recovery_conn.execute(f"ATTACH '{escaped_db}' AS recovery_db")
 
             # Verify tables are accessible
             recovery_conn.execute("SELECT COUNT(*) FROM recovery_db.files").fetchone()
