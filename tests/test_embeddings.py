@@ -250,6 +250,8 @@ async def test_tei_bare_array_response_format() -> None:
             (0, 0.95),
             (1, 0.42),
         ]
+        # Verify the provider sent the correct TEI-shaped request, not Cohere-shaped.
+        assert manager.requests == [{"query": query, "texts": documents}]
 
 
 @pytest.mark.fast
