@@ -2,7 +2,7 @@
 
 import pytest
 
-from chunkhound.core.config.openai_utils import (
+from chunkhound.core.utils.openai_utils import (
     is_azure_openai_endpoint,
     is_official_openai_endpoint,
 )

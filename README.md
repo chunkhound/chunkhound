@@ -136,6 +136,31 @@ For editor integration, all provider options, and advanced configuration:
 
 **→ [chunkhound.ai/docs/getting-started](https://chunkhound.ai/docs/getting-started/)**
 
+---
+
+## Search git history
+
+In addition to searching your indexed codebase, ChunkHound can search
+code changes across git history — useful for understanding what changed
+in a PR, a release, or since a specific commit.
+
+```bash
+# Last N commits
+chunkhound search "authentication changes" --last-n 20
+
+# Changes introduced by a specific commit
+chunkhound search "database migration" --commit-hash abc1234
+
+# Custom git range
+chunkhound search "API changes" --commit-range v2.0..HEAD
+
+# Deep research over recent changes
+chunkhound research "what changed in the auth module?" --last-n 50
+```
+
+> `--vector-source` controls scope: `diff` (default, changed code only),
+> `both` (merges diff + DB), `db` (ignore diff).
+
 ## Good fit
 
 ChunkHound is especially useful for:

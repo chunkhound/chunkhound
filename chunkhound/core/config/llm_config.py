@@ -17,9 +17,9 @@ from typing_extensions import assert_never
 from chunkhound.core.config.claude_model_resolution import (
     CLAUDE_HAIKU_SENTINEL,
 )
-from chunkhound.core.config.openai_utils import is_official_openai_endpoint
 from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
 from chunkhound.core.exceptions.core import ConfigurationError
+from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
 
 from ._utils import _parse_env_bool
 

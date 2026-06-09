@@ -269,6 +269,7 @@ debug_test_file.py
 
 # Claude
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # ChunkHound project config (may contain API keys)
 .chunkhound.json

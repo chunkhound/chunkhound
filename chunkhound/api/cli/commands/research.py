@@ -71,6 +71,10 @@ async def run_research(
     path_filter: str | None,
     config: Config,
     formatter: RichOutputFormatter,
+    commit_range: str | None = None,
+    commit_hash: str | None = None,
+    last_n_commits: int | None = None,
+    vector_source: str = "diff",
 ) -> None:
     """Run deep_research_impl with TreeProgressDisplay and print result."""
     progress_output = (
@@ -86,6 +90,10 @@ async def run_research(
                 progress=tree_progress,
                 path=path_filter,
                 config=config,
+                commit_range=commit_range,
+                commit_hash=commit_hash,
+                last_n_commits=last_n_commits,
+                vector_source=vector_source,
             )
             print("\n")
             print(
@@ -130,5 +138,9 @@ async def research_command(args: argparse.Namespace, config: Config) -> None:
 
     await run_research(
         services, embedding_manager, llm_manager,
-        args.query, args.path_filter, config, formatter
+        args.query, args.path_filter, config, formatter,
+        commit_range=getattr(args, "commit_range", None),
+        commit_hash=getattr(args, "commit_hash", None),
+        last_n_commits=getattr(args, "last_n_commits", None),
+        vector_source=getattr(args, "vector_source", "diff"),
     )
