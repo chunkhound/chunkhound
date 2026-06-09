@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 from typing import Any, cast
 
-from .common_arguments import add_common_arguments, add_config_arguments
+from .common_arguments import add_common_arguments, add_config_arguments, add_git_diff_arguments
 
 
 def add_search_subparser(subparsers: Any) -> argparse.ArgumentParser:
@@ -78,6 +78,9 @@ def add_search_subparser(subparsers: Any) -> argparse.ArgumentParser:
         type=str,
         help="Optional path filter (e.g., 'src/', 'tests/')",
     )
+
+    # Git diff / commit-range arguments
+    add_git_diff_arguments(search_parser)
 
     # Add common arguments
     add_common_arguments(search_parser)

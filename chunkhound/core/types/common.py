@@ -204,9 +204,16 @@ class Language(Enum):
     # Generic/unknown
     UNKNOWN = "unknown"
 
+    # Diff types
+    GIT_DIFF = "git_diff"
+
     @classmethod
     def from_file_extension(cls, file_path: str | Path) -> "Language":
-        """Determine language from file extension and filename."""
+        """Determine language from file extension and filename.
+
+        Note: Language.GIT_DIFF is intentionally absent — it is in-memory-only
+        and never produced from a file path.
+        """
         if isinstance(file_path, str):
             file_path = Path(file_path)
 

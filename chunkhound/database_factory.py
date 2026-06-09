@@ -30,6 +30,7 @@ from chunkhound.registry import configure_registry, get_registry
 if TYPE_CHECKING:
     from chunkhound.database import Database
     from chunkhound.interfaces.database_provider import DatabaseProvider
+    from chunkhound.services.diff_aware_search_service import SearchServiceProtocol
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
     from chunkhound.services.search_service import SearchService
@@ -40,7 +41,7 @@ class DatabaseServices(NamedTuple):
 
     provider: "DatabaseProvider"
     indexing_coordinator: "IndexingCoordinator"
-    search_service: "SearchService"
+    search_service: "SearchServiceProtocol"
     embedding_service: "EmbeddingService"
 
 
