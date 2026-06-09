@@ -20,8 +20,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.mcp_server.base import MCPServerBase
 from chunkhound.mcp_server.common import compaction_error_response, handle_tool_call
 from chunkhound.version import __version__
@@ -393,17 +393,32 @@ class ChunkHoundDaemon(MCPServerBase):
                 },
             }
 
-        text_contents = await handle_tool_call(
-            tool_name=tool_name,
-            arguments=arguments,
-            services=services,
-            embedding_manager=self.embedding_manager,
-            initialization_complete=self._initialization_complete,
-            debug_mode=self.debug_mode,
-            scan_progress=self._scan_progress,
-            llm_manager=self.llm_manager,
-            config=self.config,
-        )
+        try:
+            text_contents = await handle_tool_call(
+                tool_name=tool_name,
+                arguments=arguments,
+                services=services,
+                embedding_manager=self.embedding_manager,
+                initialization_complete=self._initialization_complete,
+                debug_mode=self.debug_mode,
+                scan_progress=self._scan_progress,
+                llm_manager=self.llm_manager,
+                config=self.config,
+            )
+        except CompactionError as exc:
+            return {
+                "jsonrpc": "2.0",
+                "id": msg.get("id"),
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(compaction_error_response(exc)),
+                        }
+                    ],
+                    "isError": True,
+                },
+            }
 
         content = [{"type": tc.type, "text": tc.text} for tc in text_contents]
 

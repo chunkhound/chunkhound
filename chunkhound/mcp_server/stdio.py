@@ -45,13 +45,12 @@ if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps at import
     from mcp.server.models import InitializationOptions  # noqa: F401
 
 from chunkhound.core.config.config import Config  # noqa: E402
-from chunkhound.utils.windows_constants import IS_WINDOWS  # noqa: E402
 from chunkhound.core.exceptions import CompactionError  # noqa: E402
+from chunkhound.utils.windows_constants import IS_WINDOWS  # noqa: E402
 from chunkhound.version import __version__  # noqa: E402
 
 from .base import MCPServerBase  # noqa: E402
 from .common import compaction_error_response, handle_tool_call  # noqa: E402
-
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
 logging.disable(logging.CRITICAL)
@@ -170,17 +169,23 @@ class StdioMCPServer(MCPServerBase):
                     type="text",
                     text=json.dumps(compaction_error_response(exc)),
                 )]
-            return await handle_tool_call(
-                tool_name=tool_name,
-                arguments=arguments,
-                services=services,
-                embedding_manager=self.embedding_manager,
-                initialization_complete=self._initialization_complete,
-                debug_mode=self.debug_mode,
-                scan_progress=self._scan_progress,
-                llm_manager=self.llm_manager,
-                config=self.config,
-            )
+            try:
+                return await handle_tool_call(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    services=services,
+                    embedding_manager=self.embedding_manager,
+                    initialization_complete=self._initialization_complete,
+                    debug_mode=self.debug_mode,
+                    scan_progress=self._scan_progress,
+                    llm_manager=self.llm_manager,
+                    config=self.config,
+                )
+            except CompactionError as exc:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps(compaction_error_response(exc)),
+                )]
 
         self._register_list_tools()
 
