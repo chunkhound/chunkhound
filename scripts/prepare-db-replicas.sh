@@ -36,11 +36,14 @@ for i in $(seq 1 "$REPLICAS"); do
     echo "  Replica ${i}: ${DEST}/chunks.db"
 done
 
-# Container user must own the DB files. HOST_UID/HOST_GID are the build args
-# passed to docker-compose.yml — set them to match your host user.
-HOST_UID="${HOST_UID:-1000}"
-HOST_GID="${HOST_GID:-1000}"
-echo "Setting ownership to ${HOST_UID}:${HOST_GID} (override with HOST_UID/HOST_GID env vars)..."
+# Resolve the UID/GID the container actually runs as, so ownership is correct
+# on any machine regardless of local user mapping.
+if [ -z "${HOST_UID:-}" ] || [ -z "${HOST_GID:-}" ]; then
+    IMAGE=$(docker inspect chunkhound-mcp-1 --format '{{.Config.Image}}' 2>/dev/null || echo "chunkhound-mcp:latest")
+    HOST_UID=$(docker run --rm "$IMAGE" id -u)
+    HOST_GID=$(docker run --rm "$IMAGE" id -g)
+fi
+echo "Setting ownership to ${HOST_UID}:${HOST_GID} (from container image)..."
 sudo chown -R "${HOST_UID}:${HOST_GID}" "$DEST_BASE"
 
 echo ""
