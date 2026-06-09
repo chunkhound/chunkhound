@@ -2,7 +2,7 @@ FROM python:3.14-slim-bookworm
 
 # System deps: Node 20 (for npx/supergateway) + curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl gnupg ca-certificates \
+        curl gnupg ca-certificates procps \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
