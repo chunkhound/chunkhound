@@ -249,6 +249,8 @@ async def handle_tool_call(
             response_text = format_tool_response(result, format_type="json")
         return [types.TextContent(type="text", text=response_text)]
 
+    except CompactionError:
+        raise  # propagate to daemon/server.py and stdio.py handlers
     except Exception as e:
         error_response = format_error_response(e, include_traceback=debug_mode)
         return [types.TextContent(type="text", text=json.dumps(error_response))]
