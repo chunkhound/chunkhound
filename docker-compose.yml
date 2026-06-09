@@ -49,6 +49,7 @@ services:
       - ./.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica1:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - ${CHUNKHOUND_SOURCE_PATH}:/home/chunkhound
       - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
       - /home/e120400/.claude:/home/chunkhound/.claude:ro
 
@@ -59,6 +60,7 @@ services:
       - ./.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica2:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - ${CHUNKHOUND_SOURCE_PATH}:/home/chunkhound
       - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
       - /home/e120400/.claude:/home/chunkhound/.claude:ro
 
@@ -69,6 +71,7 @@ services:
       - ./.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica3:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - ${CHUNKHOUND_SOURCE_PATH}:/home/chunkhound
       - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
       - /home/e120400/.claude:/home/chunkhound/.claude:ro
 
