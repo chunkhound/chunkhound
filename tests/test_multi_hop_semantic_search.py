@@ -586,6 +586,112 @@ async def test_search_regex_enforces_path_filter_component_boundary(
 
 @pytest.mark.fast
 @pytest.mark.asyncio
+async def test_path_filter_like_patterns_against_duckdb(tmp_path: Path) -> None:
+    """LIKE patterns from path_filter must be correct against real DuckDB.
+
+    Covers two scenarios the refactoring fixed:
+      1. Directory boundary: path_filter="src/lib" must match src/lib/ but NOT
+         src/lib2/ (the pattern %/src/lib/% is bounded on the right).
+      2. Right-anchored file patterns: path_filter="module.py" must match
+         module.py but NOT module.py.bak.
+
+    Exercises both search_regex and search_semantic to cover all 4 executor
+    methods that call _build_path_like_pattern.
+    """
+    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    db.connect()
+
+    embedding_provider = FakeEmbeddingProvider()
+    coordinator = _build_python_coordinator(db, tmp_path, embedding_provider)
+
+    shared_source = '''def path_filter_like_target():
+    """Sentinel for LIKE pattern correctness tests."""
+    return "path-filter-like-target"
+'''
+
+    # Directory boundary test: create files under lib/ vs lib2/
+    (tmp_path / "src/lib").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src/lib2").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src/module").mkdir(parents=True, exist_ok=True)
+
+    lib_file = tmp_path / "src/lib/util.py"
+    lib_file.write_text(shared_source, encoding="utf-8")
+    lib2_file = tmp_path / "src/lib2/util.py"
+    lib2_file.write_text(shared_source, encoding="utf-8")
+    await coordinator.process_file(lib_file)
+    await coordinator.process_file(lib2_file)
+
+    # Right-anchored file pattern test: module.py vs module.py.bak
+    py_file = tmp_path / "src/module/module.py"
+    py_file.write_text(shared_source, encoding="utf-8")
+    bak_file = tmp_path / "src/module/module.py.bak"
+    bak_file.write_text(shared_source, encoding="utf-8")
+    await coordinator.process_file(py_file)
+    await coordinator.process_file(bak_file)
+
+    # ── Directory boundary: path_filter="src/lib" ──
+    lib_regex_results, _ = db.search_regex(
+        pattern="path-filter-like-target",
+        page_size=20,
+        path_filter="src/lib",
+    )
+    assert all(
+        result.get("file_path", "").startswith("src/lib/")
+        for result in lib_regex_results
+    ), f"src/lib filter matched wrong paths: {[r['file_path'] for r in lib_regex_results]}"
+    assert any(
+        result.get("file_path", "") == "src/lib/util.py" for result in lib_regex_results
+    ), "src/lib filter should match src/lib/util.py"
+
+    # ── Right-anchored file pattern: path_filter="module.py" ──
+    py_regex_results, _ = db.search_regex(
+        pattern="path-filter-like-target",
+        page_size=20,
+        path_filter="module.py",
+    )
+    # Must NOT match module.py.bak
+    assert not any(
+        result.get("file_path", "").endswith(".bak") for result in py_regex_results
+    ), (
+        "path_filter='module.py' matched .bak file: "
+        f"{[r['file_path'] for r in py_regex_results]}"
+    )
+    assert any(
+        result.get("file_path", "") == "src/module/module.py"
+        for result in py_regex_results
+    ), "path_filter='module.py' should match module.py"
+
+    # ── Also verify via search_semantic (exercises a different executor) ──
+    query_embedding = await embedding_provider.embed_single(
+        "path-filter-like-target"
+    )
+
+    lib_sem_results, _ = db.search_semantic(
+        query_embedding=query_embedding,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        page_size=20,
+        path_filter="src/lib",
+    )
+    assert all(
+        result.get("file_path", "").startswith("src/lib/")
+        for result in lib_sem_results
+    ), f"semantic src/lib filter leaked: {[r['file_path'] for r in lib_sem_results]}"
+
+    py_sem_results, _ = db.search_semantic(
+        query_embedding=query_embedding,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        page_size=20,
+        path_filter="module.py",
+    )
+    assert not any(
+        result.get("file_path", "").endswith(".bak") for result in py_sem_results
+    ), "semantic path_filter='module.py' matched .bak file"
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
 async def test_search_by_embedding_enforces_path_filter_component_boundary(
     tmp_path: Path,
 ) -> None:
