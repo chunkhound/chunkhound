@@ -64,8 +64,23 @@ def get_compaction_lock_path(db_path: Path) -> Path:
 
 
 def _escape_path_for_sql(path: Path) -> str:
-    """Escape path for embedding in a single-quoted DuckDB SQL literal."""
-    return path.as_posix().replace("'", "''")
+    """Escape path for embedding in a single-quoted DuckDB SQL literal.
+
+    Raises CompactionError if the path contains characters that cannot be
+    safely embedded in a SQL single-quoted literal (null bytes, control
+    characters, double-quote, backtick, semicolon, backslash, newlines).
+    """
+    path_str = path.as_posix()
+    forbidden = {"\x00", "\n", "\r", '"', "`", ";", "\\"}
+    if any(c in path_str for c in forbidden) or any(
+        ord(c) < 0x20 for c in path_str
+    ):
+        raise CompactionError(
+            f"Database path contains forbidden characters for SQL "
+            f"interpolation: {path_str!r}",
+            operation="preflight",
+        )
+    return path_str.replace("'", "''")
 
 
 class DuckDBConnectionManager:
