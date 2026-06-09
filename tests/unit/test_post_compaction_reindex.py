@@ -804,3 +804,31 @@ async def test_concurrent_ensure_services_retries_only_once(
     assert status["phase"] == "idle"
     assert status["pending_recovery"] is False
     assert status["retry_attempted"] is False
+
+
+def test_refresh_background_compaction_status_transitions_to_failed_when_last_error_set(
+    server: ConcreteMCPServer,
+) -> None:
+    """Idle-transition checks last_error: if set, phase becomes 'failed' not 'idle'.
+
+    When compaction finishes (is_compacting flips to False) but last_error is
+    non-None (e.g. the optimize callback threw), the status must transition to
+    'failed' rather than 'idle'. This test protects the check added in PR review.
+    """
+    # Arrange: simulate in-flight compaction state in the stored dict
+    server._scan_progress["background_compaction"]["phase"] = "compacting"
+    server._scan_progress["background_compaction"]["in_progress"] = True
+
+    # Service reports finished but with an error
+    mock_service = MagicMock()
+    mock_service.is_compacting = False
+    mock_service.last_error = RuntimeError("optimize failed")
+    server._compaction_service = mock_service
+
+    # Act
+    status = server.get_background_compaction_status()
+
+    # Assert
+    assert status["phase"] == "failed"
+    assert status["in_progress"] is False
+    assert "optimize failed" in status["last_error"]

@@ -195,3 +195,59 @@ async def test_daemon_tools_call_allows_normal_tool_execution_after_successful_r
     assert status["phase"] == "idle"
     assert status["pending_recovery"] is False
     assert status["retry_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_daemon_tools_call_sets_is_error_when_tool_raises_compaction_error(
+    tmp_path: Path,
+) -> None:
+    """When handle_tool_call raises CompactionError, daemon wraps it with isError=True.
+
+    This tests the second try/except block in _handle_tools_call: after ensure_services
+    succeeds, if handle_tool_call itself raises CompactionError, the response must still
+    carry isError=True with a structured error payload.
+    """
+    from chunkhound.core.exceptions import CompactionError
+
+    config = MagicMock()
+    config.debug = False
+
+    with patch("chunkhound.mcp_server.base.create_services"), patch(
+        "chunkhound.mcp_server.base.EmbeddingManager"
+    ):
+        daemon = ChunkHoundDaemon(
+            config=config,
+            args=MagicMock(),
+            socket_path="tcp://127.0.0.1:0",
+            project_dir=tmp_path,
+        )
+
+    # Arrange: daemon is healthy — ensure_services will succeed
+    daemon._initialization_complete.set()
+    daemon.services = MagicMock()
+    daemon.services.provider.is_connected = True
+    daemon._scan_target_path = tmp_path
+    daemon._compaction_service = MagicMock()
+    daemon._compaction_service.is_compacting = False
+    daemon._compaction_service.last_error = None
+
+    # Act: handle_tool_call raises CompactionError (DB suspended mid-call)
+    with patch(
+        "chunkhound.daemon.server.handle_tool_call",
+        new_callable=AsyncMock,
+        side_effect=CompactionError("DB suspended", operation="connection"),
+    ):
+        result = await daemon._handle_tools_call(
+            {
+                "id": 42,
+                "params": {
+                    "name": "search",
+                    "arguments": {"type": "regex", "query": "test"},
+                },
+            }
+        )
+
+    assert result["result"]["isError"] is True
+    payload = json.loads(result["result"]["content"][0]["text"])
+    assert payload["error"]["type"] == "CompactionError"
+    assert "retry_hint" in payload["error"]
