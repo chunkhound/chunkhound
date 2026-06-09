@@ -41,7 +41,11 @@ def add_repack_subparser(subparsers: Any) -> argparse.ArgumentParser:
     repack_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show storage stats and estimated reclaimable space without repacking",
+        help=(
+            "Show compaction stats without running repack "
+            "(opens database read-only for stats; exits with error "
+            "if database does not exist)"
+        ),
     )
 
     repack_parser.add_argument(
