@@ -23,7 +23,10 @@ RUN mkdir -p /usr/local/lib/node_modules/@anthropic-ai/claude-code && \
         > /usr/local/bin/claude && \
     chmod +x /usr/local/bin/claude
 
-RUN useradd --create-home --shell /bin/bash chunkhound
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+RUN groupadd --gid ${HOST_GID} chunkhound 2>/dev/null || true && \
+    useradd --uid ${HOST_UID} --gid ${HOST_GID} --create-home --shell /bin/bash chunkhound
 USER chunkhound
 WORKDIR /home/chunkhound
 

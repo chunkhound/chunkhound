@@ -275,6 +275,18 @@ class VoyageAIEmbeddingProvider:
             key = "base_url" if "base_url" in self._client._params else "api_base"
             self._client._params[key] = base_url  # per-instance, not global
 
+        # The voyageai SDK ignores its own verify_ssl_certs flag ("always verifies").
+        # When a custom base_url is used with ssl_verify=False, inject an unverified
+        # requests.Session via the SDK's requestssession hook so the embed path also
+        # skips certificate verification.
+        if base_url and not ssl_verify:
+            import requests as _requests
+            import urllib3 as _urllib3
+            _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)
+            _session = _requests.Session()
+            _session.verify = False
+            voyageai.requestssession = _session
+
         # Model dimension mapping - built from configuration
         self._dimensions_map = {
             model_name: config["default_dimension"]

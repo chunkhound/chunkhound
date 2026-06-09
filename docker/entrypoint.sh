@@ -10,6 +10,16 @@ if [ ! -f "${DB_DIR}/chunks.db" ]; then
     echo "[entrypoint] Regex search will work once the DB is present; semantic search also requires embedding config." >&2
 fi
 
+# Redirect npm cache away from bind-mounted home directory.
+export NPM_CONFIG_CACHE=/tmp/.npm-cache
+
+# Pre-warm the OS page cache so chunkhound mcp doesn't cold-start on the first
+# connection after a container restart. Reads the DB file sequentially without
+# opening a DuckDB connection (no locking side effects).
+if [ -f "${DB_DIR}/chunks.db" ]; then
+    dd if="${DB_DIR}/chunks.db" of=/dev/null bs=4M 2>/dev/null &
+fi
+
 echo "[entrypoint] Starting supergateway wrapping chunkhound mcp" >&2
 echo "[entrypoint] Database: ${DB_DIR}" >&2
 echo "[entrypoint] Config:   ${CONFIG_FILE:-<none>}" >&2
@@ -26,5 +36,5 @@ exec npx -y supergateway \
     --cors \
     --outputTransport streamableHttp \
     --stateful \
-    --sessionTimeout 120000 \
+    --sessionTimeout "${SESSION_TIMEOUT:-120000}" \
     --protocolVersion 2025-11-25

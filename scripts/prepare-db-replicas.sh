@@ -36,6 +36,13 @@ for i in $(seq 1 "$REPLICAS"); do
     echo "  Replica ${i}: ${DEST}/chunks.db"
 done
 
+# Container user must own the DB files. HOST_UID/HOST_GID are the build args
+# passed to docker-compose.yml — set them to match your host user.
+HOST_UID="${HOST_UID:-1000}"
+HOST_GID="${HOST_GID:-1000}"
+echo "Setting ownership to ${HOST_UID}:${HOST_GID} (override with HOST_UID/HOST_GID env vars)..."
+sudo chown -R "${HOST_UID}:${HOST_GID}" "$DEST_BASE"
+
 echo ""
 echo "Done. Start the stack with:"
 echo "  docker compose up -d --build"

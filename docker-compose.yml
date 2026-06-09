@@ -6,6 +6,9 @@ x-chunkhound-common: &chunkhound-common
   build:
     context: .
     dockerfile: docker/Dockerfile
+    args:
+      HOST_UID: "333408069"
+      HOST_GID: "2080"
   restart: unless-stopped
   env_file:
     - .env.docker
@@ -17,9 +20,14 @@ x-chunkhound-common: &chunkhound-common
   networks:
     - mcp-net
   healthcheck:
-    test: ["CMD-SHELL", "curl -sf http://localhost:8080/mcp -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{}' -o /dev/null || exit 1"]
+    # Liveness-only: verify supergateway is listening without creating an MCP
+    # session. Omitting -f so curl exits 0 for any HTTP response (even 400);
+    # it only fails on connection errors. Sending an initialize request here
+    # would spawn a chunkhound child, hold the DuckDB exclusive lock for the
+    # full sessionTimeout, and block the real MCP client.
+    test: ["CMD-SHELL", "curl --max-time 3 --connect-timeout 3 -s -o /dev/null http://localhost:8080/mcp || exit 1"]
     interval: 30s
-    timeout: 10s
+    timeout: 5s
     retries: 3
     start_period: 20s
 
@@ -42,7 +50,7 @@ services:
       - /opt/chunkhound/db/replica1:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
       - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
-      - /home/e120400/.claude/settings.json:/home/chunkhound/.claude/settings.json:ro
+      - /home/e120400/.claude:/home/chunkhound/.claude:ro
 
   chunkhound-2:
     <<: *chunkhound-common
@@ -52,7 +60,7 @@ services:
       - /opt/chunkhound/db/replica2:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
       - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
-      - /home/e120400/.claude/settings.json:/home/chunkhound/.claude/settings.json:ro
+      - /home/e120400/.claude:/home/chunkhound/.claude:ro
 
   chunkhound-3:
     <<: *chunkhound-common
@@ -62,7 +70,7 @@ services:
       - /opt/chunkhound/db/replica3:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
       - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
-      - /home/e120400/.claude/settings.json:/home/chunkhound/.claude/settings.json:ro
+      - /home/e120400/.claude:/home/chunkhound/.claude:ro
 
   # ── nginx reverse proxy ─────────────────────────────────────────────────────
   nginx:
