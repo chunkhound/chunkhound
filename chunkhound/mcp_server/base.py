@@ -1178,7 +1178,9 @@ class MCPServerBase(ABC):
     def _refresh_background_compaction_status(self) -> None:
         """Sync stored status with live CompactionService state.
 
-        Only updates compacting/idle transition — does not clear failure state.
+        Updates compacting/idle/failed transition — when the service finishes
+        compacting, checks ``last_error`` to decide whether to transition to
+        "failed" (error recorded) or "idle" (clean finish).
         """
         s = self._background_compaction_status()
         if self._compaction_service is None:
@@ -1188,7 +1190,17 @@ class MCPServerBase(ABC):
         if self._compaction_service.is_compacting:
             s.update({"phase": "compacting", "in_progress": True})
         elif s["phase"] == "compacting":
-            s.update({"phase": "idle", "in_progress": False})
+            last_err = self._compaction_service.last_error
+            if last_err is not None:
+                s.update(
+                    {
+                        "phase": "failed",
+                        "in_progress": False,
+                        "last_error": str(last_err),
+                    }
+                )
+            else:
+                s.update({"phase": "idle", "in_progress": False})
 
     def get_background_compaction_status(self) -> dict[str, Any]:
         """Return a snapshot of background compaction status reflecting live state."""
