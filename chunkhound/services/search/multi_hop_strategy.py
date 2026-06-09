@@ -113,6 +113,16 @@ class MultiHopStrategy:
         else:
             cap = INITIAL_LIMIT_CAP_NORMAL  # 100 for normal mode
         initial_limit = min(page_size * 3, cap)
+        # Honor result_limit even for the initial fetch — the config promises
+        # "Maximum chunks accumulated" so the initial search must not exceed it.
+        if effective_result_limit < initial_limit:
+            logger.debug(
+                "result_limit=%d caps initial fetch from %d to %d",
+                effective_result_limit,
+                initial_limit,
+                effective_result_limit,
+            )
+        initial_limit = min(initial_limit, effective_result_limit)
         initial_results, _ = await self._single_hop_search(
             query=query,
             page_size=initial_limit,

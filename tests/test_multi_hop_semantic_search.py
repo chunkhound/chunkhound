@@ -292,8 +292,11 @@ async def test_multi_hop_terminates_on_result_limit() -> None:
     assert chunk_ids <= {1, 5, 6, 7, 8}, (
         f"result_limit=2 should prevent expansion, got chunks {sorted(chunk_ids)}"
     )
-    assert pagination["total"] == 5, (
-        f"total should reflect only initial results (5), got {pagination['total']}"
+    assert len(results) == 2, (
+        f"result_limit=2 should cap returned count to 2, got {len(results)}"
+    )
+    assert pagination["total"] == 2, (
+        f"result_limit=2 should cap total to 2, got {pagination['total']}"
     )
 
 
