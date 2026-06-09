@@ -73,7 +73,7 @@ class MockRerankServer:
             query = body.get("query", "")
             top_n = body.get("top_n")
 
-            scenario = self._match_scenario(query=query, documents=documents)
+            scenario = self._match_scenario(query=query, documents=documents, request_format=request_format)
             if scenario is None:
                 return web.json_response(
                     {
@@ -103,11 +103,18 @@ class MockRerankServer:
             return web.json_response({"error": str(exc)}, status=400)
 
     def _match_scenario(
-        self, *, query: str, documents: list[str]
+        self, *, query: str, documents: list[str], request_format: str
     ) -> MockRerankScenario | None:
         for scenario in self.scenarios:
             if scenario.query == query and scenario.documents == documents:
-                return scenario
+                # Strip -bare suffix for format matching (tei-bare → tei).
+                # Use removesuffix (not rstrip) — rstrip treats its argument as
+                # a character set and would strip 'e', 'r', 'e' from 'cohere'.
+                scenario_format = scenario.response_format
+                if scenario_format.endswith("-bare"):
+                    scenario_format = scenario_format[:-5]
+                if scenario_format == request_format:
+                    return scenario
         return None
 
     def _build_response_payload(
