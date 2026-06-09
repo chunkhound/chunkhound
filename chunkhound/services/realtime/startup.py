@@ -9,6 +9,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
+from watchdog.events import (
+    DirCreatedEvent,
+    DirDeletedEvent,
+    DirMovedEvent,
+    FileCreatedEvent,
+    FileDeletedEvent,
+    FileModifiedEvent,
+    FileMovedEvent,
+)
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
@@ -739,10 +748,22 @@ class RealtimeStartupMixin:
 
         # Use recursive=True to ensure all directory events are captured
         # This is necessary for proper real-time monitoring of new directories
+        # Restrict to actionable event types so inotify never registers IN_OPEN /
+        # IN_CLOSE_NOWRITE — prevents the scanner's own file reads from flooding
+        # the event queue with no-op "opened" events and triggering overflow.
         observer.schedule(
             event_handler,
             str(watch_path),
-            recursive=True,  # Use recursive for complete event coverage
+            recursive=True,
+            event_filter=[
+                FileCreatedEvent,
+                FileModifiedEvent,
+                FileDeletedEvent,
+                FileMovedEvent,
+                DirCreatedEvent,
+                DirDeletedEvent,
+                DirMovedEvent,
+            ],
         )
         observer.start()
 
