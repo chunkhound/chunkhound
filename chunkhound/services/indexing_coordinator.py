@@ -1230,7 +1230,7 @@ class IndexingCoordinator(BaseService):
             _t1 = _t.perf_counter() if _t0 is not None else None
 
             if not files:
-                return {"status": "no_files", "files_processed": 0, "total_chunks": 0}
+                return {"status": "no_files", "files_processed": 0, "total_chunks": 0, "db_optimized": False}
 
             # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files
             cleaned_files = 0
@@ -1589,9 +1589,11 @@ class IndexingCoordinator(BaseService):
 
             # FINAL: Unified optimization (CHECKPOINT + HNSW compact + full compaction)
             # Only run if fragmentation warrants it
+            _db_optimized = False
             if self._db.has_reclaimable_space(operation="post-indexing"):
                 logger.info("Running final database optimization...")
                 self._db.optimize_tables()
+                _db_optimized = True
 
             # Check for disk limit exceeded errors
             for error in agg_errors:
@@ -1601,6 +1603,7 @@ class IndexingCoordinator(BaseService):
                         "current_size_mb": error["current_size_mb"],
                         "limit_mb": error["limit_mb"],
                         "error": error["error"],
+                        "db_optimized": _db_optimized,
                     }
 
             return {
@@ -1611,6 +1614,7 @@ class IndexingCoordinator(BaseService):
                 "skipped_due_to_timeout": skipped_due_to_timeout,
                 "skipped_unchanged": skipped_unchanged,
                 "skipped_filtered": skipped_filtered,
+                "db_optimized": _db_optimized,
             }
 
         except Exception as e:

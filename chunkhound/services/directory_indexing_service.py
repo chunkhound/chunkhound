@@ -28,6 +28,7 @@ class IndexingStats:
     skipped_due_to_timeout: list[str] = field(default_factory=list)
     skipped_unchanged: int = 0
     skipped_filtered: int = 0
+    db_optimized: bool = False
 
 
 class DirectoryIndexingService:
@@ -171,3 +172,4 @@ class DirectoryIndexingService:
         cleanup = result.get("cleanup", {})
         stats.cleanup_deleted_files = cleanup.get("deleted_files", 0)
         stats.cleanup_deleted_chunks = cleanup.get("deleted_chunks", 0)
+        stats.db_optimized = bool(result.get("db_optimized", False))
