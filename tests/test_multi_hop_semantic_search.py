@@ -23,10 +23,35 @@ from tests.fixtures.multi_hop_synthetic import (
 )
 
 
-def _build_search_service(db: object, provider: object) -> SearchService:
+class _StubResearchConfig:
+    def __init__(
+        self,
+        *,
+        exhaustive_mode: bool,
+        time_limit: float = 5.0,
+        result_limit: int | None = 500,
+    ) -> None:
+        self.exhaustive_mode = exhaustive_mode
+        self._time_limit = time_limit
+        self._result_limit = result_limit
+
+    def get_effective_time_limit(self) -> float:
+        return self._time_limit
+
+    def get_effective_result_limit(self) -> int | None:
+        return self._result_limit
+
+
+def _build_search_service(
+    db: object,
+    provider: object,
+    *,
+    config: object | None = None,
+) -> SearchService:
     return SearchService(
         cast(DatabaseProvider, db),
         cast(EmbeddingProvider, provider),
+        config=config,
     )
 
 
@@ -298,6 +323,45 @@ async def test_multi_hop_terminates_on_result_limit() -> None:
     assert pagination["total"] == 2, (
         f"result_limit=2 should cap total to 2, got {pagination['total']}"
     )
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_multi_hop_exhaustive_mode_allows_unlimited_results() -> None:
+    """Exhaustive mode should not treat None result_limit as an int cap."""
+    scenario = build_multi_hop_scenario()
+    config = _StubResearchConfig(exhaustive_mode=True, result_limit=None)
+    search_service = _build_search_service(
+        scenario.db,
+        scenario.provider,
+        config=config,
+    )
+
+    results, pagination = await search_service.search_semantic(
+        "security validation mechanisms",
+        page_size=10,
+    )
+
+    assert pagination["total"] == 8
+    assert {result["chunk_id"] for result in results} == {1, 2, 3, 4, 5, 6, 7, 8}
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_multi_hop_truncates_expansion_to_remaining_result_budget() -> None:
+    """Expansion should honor result_limit before extending the candidate pool."""
+    scenario = build_multi_hop_scenario()
+    search_service = _build_search_service(scenario.db, scenario.provider)
+
+    results, pagination = await search_service.search_semantic(
+        "security validation mechanisms",
+        page_size=10,
+        result_limit=6,
+    )
+
+    assert len(results) == 6
+    assert pagination["total"] == 6
+    assert {result["chunk_id"] for result in results} == {1, 2, 5, 6, 7, 8}
 
 
 @pytest.mark.fast
