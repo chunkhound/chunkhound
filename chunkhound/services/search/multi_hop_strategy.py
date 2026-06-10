@@ -115,14 +115,15 @@ class MultiHopStrategy:
         initial_limit = min(page_size * 3, cap)
         # Honor result_limit even for the initial fetch — the config promises
         # "Maximum chunks accumulated" so the initial search must not exceed it.
-        if effective_result_limit < initial_limit:
-            logger.debug(
-                "result_limit=%d caps initial fetch from %d to %d",
-                effective_result_limit,
-                initial_limit,
-                effective_result_limit,
-            )
-        initial_limit = min(initial_limit, effective_result_limit)
+        if effective_result_limit is not None:
+            if effective_result_limit < initial_limit:
+                logger.debug(
+                    "result_limit=%d caps initial fetch from %d to %d",
+                    effective_result_limit,
+                    initial_limit,
+                    effective_result_limit,
+                )
+            initial_limit = min(initial_limit, effective_result_limit)
         initial_results, _ = await self._single_hop_search(
             query=query,
             page_size=initial_limit,
@@ -213,6 +214,7 @@ class MultiHopStrategy:
 
             # Expand using find_similar_chunks for each top candidate
             new_candidates = []
+            new_candidate_ids = set()
             for candidate in top_candidates:
                 try:
                     # Debug aid kept disabled to avoid log noise during expansion.
@@ -231,11 +233,13 @@ class MultiHopStrategy:
                         path_filter=path_filter,
                     )
 
-                    # Filter out already seen chunks
+                    # Filter out already seen chunks.
                     for neighbor in neighbors:
-                        if neighbor["chunk_id"] not in seen_chunk_ids:
-                            new_candidates.append(neighbor)
-                            seen_chunk_ids.add(neighbor["chunk_id"])
+                        chunk_id = neighbor["chunk_id"]
+                        if chunk_id in seen_chunk_ids or chunk_id in new_candidate_ids:
+                            continue
+                        new_candidates.append(neighbor)
+                        new_candidate_ids.add(chunk_id)
 
                     # Debug aid kept disabled to avoid per-candidate neighbor spam.
 
@@ -248,6 +252,25 @@ class MultiHopStrategy:
             if not new_candidates:
                 logger.debug("Dynamic expansion terminated: no new candidates found")
                 break
+
+            if effective_result_limit is not None:
+                remaining_budget = effective_result_limit - len(all_results)
+                if remaining_budget <= 0:
+                    logger.debug(
+                        "Dynamic expansion terminated: %d result limit reached",
+                        effective_result_limit,
+                    )
+                    break
+                if len(new_candidates) > remaining_budget:
+                    logger.debug(
+                        "result_limit=%d truncates expansion from %d to %d",
+                        effective_result_limit,
+                        len(new_candidates),
+                        remaining_budget,
+                    )
+                    new_candidates = new_candidates[:remaining_budget]
+
+            seen_chunk_ids.update(nc["chunk_id"] for nc in new_candidates)
 
             # Add new candidates and rerank all results
             all_results.extend(new_candidates)
