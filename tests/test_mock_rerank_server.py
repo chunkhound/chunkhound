@@ -153,3 +153,32 @@ async def test_mock_rerank_server_rejects_unmatched_requests() -> None:
 
         assert response.status_code == 400
         assert response.json()["error"] == "No mock rerank scenario matched request"
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_mock_rerank_server_rejects_mixed_payload_shapes() -> None:
+    """Requests must use either TEI texts or Cohere documents, never both."""
+    scenario = MockRerankScenario(
+        name="mixed-shape",
+        query="expected",
+        documents=["doc"],
+        results=[MockRerankResult(index=0, score=1.0)],
+    )
+
+    async with RerankServerManager(scenarios=[scenario]) as manager:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.post(
+                f"{manager.base_url}/rerank",
+                json={
+                    "query": "expected",
+                    "texts": ["doc"],
+                    "documents": ["doc"],
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "error": "Mixed rerank payload shape is invalid",
+            "error_type": "MockValidationError",
+        }

@@ -68,12 +68,27 @@ class MockRerankServer:
             body = await request.json()
             self.requests.append(body)
 
-            request_format = "tei" if "texts" in body else "cohere"
+            has_texts = "texts" in body
+            has_documents = "documents" in body
+            if has_texts and has_documents:
+                return web.json_response(
+                    {
+                        "error": "Mixed rerank payload shape is invalid",
+                        "error_type": "MockValidationError",
+                    },
+                    status=400,
+                )
+
+            request_format = "tei" if has_texts else "cohere"
             documents = body.get("texts" if request_format == "tei" else "documents", [])
             query = body.get("query", "")
             top_n = body.get("top_n")
 
-            scenario = self._match_scenario(query=query, documents=documents, request_format=request_format)
+            scenario = self._match_scenario(
+                query=query,
+                documents=documents,
+                request_format=request_format,
+            )
             if scenario is None:
                 return web.json_response(
                     {
