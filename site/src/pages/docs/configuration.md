@@ -497,6 +497,10 @@ No `rerank_url` is needed — it is auto-derived from `base_url`.
 
 LLM config:
 
+> **Migration note:** Do not set `llm.provider` to `"ollama"`.
+> ChunkHound treats Ollama as an OpenAI-compatible endpoint, so use
+> `provider: "openai"` with the Ollama `base_url` and an explicit `model`.
+
 ```json
 {
   "llm": {
