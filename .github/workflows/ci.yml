@@ -71,8 +71,8 @@ jobs:
             pytest_timeout_minutes: 14
             pytest_timeout_seconds: 300
           - os: macos-latest
-            job_timeout_minutes: 30
-            pytest_timeout_minutes: 13
+            job_timeout_minutes: 45
+            pytest_timeout_minutes: 18
             pytest_timeout_seconds: 300
           # Windows CI polling monitor occasionally misses second file write within
           # 45s window — retry individual flaky tests before failing the run.

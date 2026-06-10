@@ -450,31 +450,28 @@ class TestRealtimeFailures:
         test_file.write_text("def deferred(): pass")
         normalized = normalize_file_path(test_file)
 
-        # 1. Force CompactionError — file lands in deferred tracking only.
-        services.provider._connection_allowed.clear()
-        await asyncio.to_thread(
-            lambda: services.provider.soft_disconnect(skip_checkpoint=True)
-        )
-        service._queue_sequence += 1
-        await service.file_queue.put((
-            service._mutation_priority("change"),
-            service._queue_sequence,
-            service._build_mutation("change", test_file),
-        ))
-        await service.wait_for_file_indexed(test_file, timeout=5.0)
+        # Wait for the background watcher to index the file so the queue is
+        # drained before we manipulate internal state directly.  Without this
+        # drain the background consumer can race with remove_file() after we
+        # open the connection gate, starting a transaction that causes a
+        # DuckDBTransactionConflictError.
+        await service.wait_for_file_indexed(test_file, timeout=10.0)
+
+        # Simulate the precondition: a previous CompactionError during indexing
+        # has left this path in the deferred-retry bucket.  Inject directly to
+        # avoid any further races with the live file monitor.
+        async with service._file_condition:
+            service._compaction_deferred_files.add(normalized)
+            service._file_condition.notify_all()
+
         assert normalized not in service.failed_files
 
-        # 2. Reopen gate so remove_file()'s provider call can succeed.
-        services.provider._connection_allowed.set()
-        await asyncio.to_thread(services.provider.connect)
-
-        # 3. Delete on disk and call remove_file() directly. This exercises
-        # the method-level contract without depending on the filesystem
-        # event pipeline.
+        # Delete on disk and call remove_file() directly.  This exercises the
+        # method-level contract without depending on the filesystem event pipeline.
         test_file.unlink()
         await service.remove_file(test_file)
 
-        # 4. remove_file() must discard the entry from both tracking buckets.
+        # remove_file() must discard the entry from both tracking buckets.
         assert normalized not in service.failed_files, (
             "remove_file() must discard entry from failed_files"
         )
