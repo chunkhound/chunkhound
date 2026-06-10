@@ -3194,13 +3194,22 @@ class IndexingCoordinator(BaseService):
                                 f"batch_count={len(batch_paths)}): {e}"
                             ) from e
 
-                        if deleted_count != len(batch_paths):
+                        if deleted_count == 0 and len(batch_paths) > 0:
                             raise RuntimeError(
-                                "orphan/excluded cleanup delete returned false "
-                                f"for {batch_paths[0]} "
+                                "orphan/excluded cleanup delete failed entirely "
+                                f"for batch starting at {batch_paths[0]} "
                                 f"(reason={cleanup_reason}, "
-                                f"deleted_count={deleted_count}, "
                                 f"batch_count={len(batch_paths)})"
+                            )
+                        elif deleted_count != len(batch_paths):
+                            logger.warning(
+                                "Partial orphan cleanup: {}/{} entries deleted "
+                                "(starting: {}, reason={}). "
+                                "Remaining entries already absent from DB — skipping.",
+                                deleted_count,
+                                len(batch_paths),
+                                batch_paths[0],
+                                cleanup_reason,
                             )
 
                         orphaned_count += len(batch_paths)
