@@ -6,9 +6,11 @@ Covers:
 - Model whitelist validation
 - Dimension boundary testing
 - Dimension discovery for unknown models
+- Matryoshka truncation in _embed_batch_internal
 """
 
 import argparse
+import math
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -229,7 +231,9 @@ class TestConfigIntegration:
         # Verify config table agrees with constant
         default_model = EmbeddingConfig(provider="openai").get_default_model()
         assert default_model in OPENAI_MODEL_CONFIG
-        assert OPENAI_MODEL_CONFIG[default_model]["native_dims"] == 1536  # type: ignore[index]
+        assert (
+            OPENAI_MODEL_CONFIG[default_model]["native_dims"] == 1536
+        )  # type: ignore[index]
 
         # Verify provider resolves correctly
         provider = OpenAIEmbeddingProvider(api_key="test-key")
@@ -358,7 +362,7 @@ class TestVoyageOutputDimsValidation:
     """Test VoyageAI output_dims validation at provider construction."""
 
     def test_output_dims_not_supported_raises_config_error(self):
-        """output_dims not in model's supported dimensions raises EmbeddingConfigurationError."""
+        """Unsupported output_dims raises EmbeddingConfigurationError."""
         from chunkhound.providers.embeddings.voyageai_provider import (
             VoyageAIEmbeddingProvider,
         )
@@ -632,7 +636,10 @@ class TestSharedMatryoshkaUtils:
             build_dimension_request_param,
         )
 
-        result = build_dimension_request_param(output_dims=512, client_side_truncation=False)
+        result = build_dimension_request_param(
+            output_dims=512,
+            client_side_truncation=False,
+        )
         assert result == 512
 
     def test_build_dimension_request_param_client_side(self):
@@ -641,7 +648,10 @@ class TestSharedMatryoshkaUtils:
             build_dimension_request_param,
         )
 
-        result = build_dimension_request_param(output_dims=512, client_side_truncation=True)
+        result = build_dimension_request_param(
+            output_dims=512,
+            client_side_truncation=True,
+        )
         assert result is None
 
     def test_build_dimension_request_param_no_output_dims(self):
@@ -650,10 +660,16 @@ class TestSharedMatryoshkaUtils:
             build_dimension_request_param,
         )
 
-        result = build_dimension_request_param(output_dims=None, client_side_truncation=False)
+        result = build_dimension_request_param(
+            output_dims=None,
+            client_side_truncation=False,
+        )
         assert result is None
 
-        result = build_dimension_request_param(output_dims=None, client_side_truncation=True)
+        result = build_dimension_request_param(
+            output_dims=None,
+            client_side_truncation=True,
+        )
         assert result is None
 
 
@@ -718,12 +734,16 @@ class TestFakeProviderMatryoshka:
         assert len(vecs[0]) == 512
 
     def test_client_side_truncation_returns_normalized_vectors(self):
-        """FakeEmbeddingProvider with client_side_truncation returns truncated L2-normalized vectors."""
+        """FakeEmbeddingProvider returns truncated, L2-normalized vectors."""
         import asyncio
 
         from tests.fixtures.fake_providers import FakeEmbeddingProvider
 
-        p = FakeEmbeddingProvider(dims=1536, output_dims=512, client_side_truncation=True)
+        p = FakeEmbeddingProvider(
+            dims=1536,
+            output_dims=512,
+            client_side_truncation=True,
+        )
         assert p.dims == 512
         assert p.native_dims == 1536
         assert p.client_side_truncation is True
@@ -851,3 +871,74 @@ class TestOpenAIDimensionDiscovery:
         assert dims == 1536
         mock_warn.assert_called_once()
         assert "Unknown model" in mock_warn.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# Mocked embed() with matryoshka settings
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAIMatryoshkaEmbed:
+    """Test _embed_batch_internal with output_dims / client_side_truncation."""
+
+    @pytest.mark.asyncio
+    async def test_server_side_truncation_embed(self):
+        """Server-side truncation sends dimensions param to API."""
+        provider, _, _ = _bare_provider(
+            output_dims=512,
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=512)
+        )
+
+        result = await provider._embed_batch_internal(["hello"])
+
+        assert len(result) == 1
+        assert len(result[0]) == 512
+        # Verify dimensions param was sent
+        call_kwargs = provider._client.embeddings.create.call_args
+        assert call_kwargs.kwargs.get("dimensions") == 512
+
+    @pytest.mark.asyncio
+    async def test_client_side_truncation_embed(self):
+        """Client-side truncation truncates + L2-normalizes locally."""
+        provider, _, _ = _bare_provider(
+            output_dims=512,
+            client_side_truncation=True,
+        )
+        provider._client = MagicMock()
+        # API returns full-dimension vectors
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=1536)
+        )
+
+        result = await provider._embed_batch_internal(["hello"])
+
+        assert len(result) == 1
+        assert len(result[0]) == 512
+        # Verify no dimensions param was sent
+        call_kwargs = provider._client.embeddings.create.call_args
+        assert "dimensions" not in call_kwargs.kwargs
+        # Verify L2-normalization
+        magnitude = math.sqrt(sum(x * x for x in result[0]))
+        assert abs(magnitude - 1.0) < 1e-9
+
+    @pytest.mark.asyncio
+    async def test_inv1_violation_raises(self):
+        """API returning wrong dims raises EmbeddingDimensionError."""
+        from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
+
+        provider, _, _ = _bare_provider(
+            output_dims=512,
+        )
+        provider._client = MagicMock()
+        # API returns wrong dims despite output_dims=512
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=768)
+        )
+
+        with pytest.raises(EmbeddingDimensionError, match="got 768, expected 512"):
+            await provider._embed_batch_internal(["hello"])
+
+
