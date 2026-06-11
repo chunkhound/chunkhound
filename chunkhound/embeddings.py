@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from loguru import logger
 
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as InterfaceEmbeddingProvider,
 )
@@ -183,11 +184,13 @@ class EmbeddingManager:
 def create_openai_provider(
     api_key: str | None = None,
     base_url: str | None = None,
-    model: str = "text-embedding-3-small",
+    model: str = OPENAI_DEFAULT_MODEL,
     rerank_model: str | None = None,
     rerank_url: str = "/rerank",
     rerank_format: str = "auto",
     rerank_batch_size: int | None = None,
+    output_dims: int | None = None,
+    client_side_truncation: bool = False,
     ssl_verify: bool = True,
     rerank_ssl_verify: bool | None = None,
     api_version: str | None = None,
@@ -209,6 +212,9 @@ def create_openai_provider(
             'cohere', 'tei', or 'auto' (default: 'auto')
         rerank_batch_size: Max documents per rerank batch
             (overrides model defaults, bounded by model caps)
+        output_dims: Output embedding dimension (for matryoshka models)
+        client_side_truncation: Truncate embeddings client-side
+            instead of using API dimensions parameter
         ssl_verify: Verify TLS certificates for requests sent via base_url
         rerank_ssl_verify: Verify TLS certificates for rerank requests.
             Defaults to ssl_verify when unset.
@@ -230,6 +236,8 @@ def create_openai_provider(
         rerank_url=rerank_url,
         rerank_format=rerank_format,
         rerank_batch_size=rerank_batch_size,
+        output_dims=output_dims,
+        client_side_truncation=client_side_truncation,
         ssl_verify=ssl_verify,
         rerank_ssl_verify=rerank_ssl_verify,
         api_version=api_version,
