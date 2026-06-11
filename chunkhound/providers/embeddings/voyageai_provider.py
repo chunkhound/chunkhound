@@ -2,8 +2,8 @@
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterator, Sequence
+from typing import Any, cast
 
 import httpx
 from loguru import logger
@@ -16,10 +16,15 @@ from chunkhound.core.utils.voyageai_utils import (
 )
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
+from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
+
 from .shared_utils import (
+    apply_client_side_truncation,
+    build_dimension_request_param,
     chunk_text_by_words,
     get_dimensions_for_model,
     get_usage_stats_dict,
+    validate_embedding_dims,
     validate_text_input,
 )
 
@@ -184,6 +189,8 @@ class VoyageAIEmbeddingProvider:
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        output_dims: int | None = None,
+        client_side_truncation: bool = False,
         base_url: str | None = None,
         rerank_url: str | None = None,
         rerank_format: str = "auto",
@@ -250,6 +257,19 @@ class VoyageAIEmbeddingProvider:
         self._rerank_format = rerank_format
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
+
+        # Validate output_dims if specified
+        if output_dims is not None:
+            default_dim = model_config.get("default_dimension", 1024)
+            supported = model_config.get("dimensions", [default_dim])
+            if output_dims not in supported:
+                raise EmbeddingConfigurationError(
+                    f"output_dims {output_dims} not in supported dimensions "
+                    f"{supported} for model {model}"
+                )
+        self._output_dims = output_dims
+        self._client_side_truncation = client_side_truncation
+
         self._ssl_verify_enabled = ssl_verify
         self._rerank_ssl_verify_enabled = (
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
@@ -328,10 +348,40 @@ class VoyageAIEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
+        """Actual output dimension (reflects matryoshka config if set)."""
+        if self._output_dims is not None:
+            return self._output_dims
         return get_dimensions_for_model(
             self._model, self._dimensions_map, default_dims=1024
         )
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension."""
+        dims_list = self._model_config.get("dimensions", [1024])
+        return max(dims_list)
+
+    @property
+    def supported_dimensions(self) -> Sequence[int]:
+        """List of valid output dimensions for this model."""
+        return cast(
+            list[int], self._model_config.get("dimensions", [self.native_dims])
+        )
+
+    def supports_matryoshka(self) -> bool:
+        """True if model supports variable output dimensions."""
+        dims = self._model_config.get("dimensions", [])
+        return len(dims) > 1
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        return self._output_dims
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
+        return self._client_side_truncation
 
     @property
     def distance(self) -> str:
@@ -398,19 +448,47 @@ class VoyageAIEmbeddingProvider:
         # Retry loop for transient network errors
         for attempt in range(self._retry_attempts):
             try:
+                embed_kwargs: dict[str, Any] = {
+                    "texts": texts,
+                    "model": self._model,
+                    "input_type": "document",
+                    "truncation": True,
+                }
+                dim_param = build_dimension_request_param(
+                    self._output_dims, self._client_side_truncation
+                )
+                if dim_param is not None and self.supports_matryoshka():
+                    embed_kwargs["output_dimension"] = dim_param
                 result = await asyncio.to_thread(
-                    self._client.embed,
-                    texts=texts,
-                    model=self._model,
-                    input_type="document",
-                    truncation=True,
+                    self._client.embed, **embed_kwargs
                 )
 
                 self._requests_made += 1
                 self._tokens_used += result.total_tokens
                 self._embeddings_generated += len(texts)
 
-                return [embedding for embedding in result.embeddings]
+                embeddings = [embedding for embedding in result.embeddings]
+
+                # Validate raw API response dims before any client-side truncation
+                expected_raw_dims = (
+                    self.native_dims if self._client_side_truncation else self.dims
+                )
+                if embeddings:
+                    validate_embedding_dims(
+                        len(embeddings[0]), expected_raw_dims, model=self._model
+                    )
+
+                # Apply client-side truncation when server doesn't support dim param
+                if self._client_side_truncation and self._output_dims is not None:
+                    embeddings = apply_client_side_truncation(embeddings, self._output_dims)
+
+                # Validate final embedding dimension (INV-1) after all truncation
+                if embeddings:
+                    validate_embedding_dims(
+                        len(embeddings[0]), self.dims, model=self._model
+                    )
+
+                return embeddings
 
             except Exception as e:
                 error_type = type(e).__name__
