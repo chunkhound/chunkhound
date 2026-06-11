@@ -1,6 +1,10 @@
 """Base class for database providers requiring single-threaded execution."""
 
+import asyncio
+import threading
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -66,6 +70,26 @@ class SerialDatabaseProvider(ABC):
         # Base directory for path normalization (immutable after initialization)
         self._base_directory: Path = base_directory
 
+        # Connection gate: set = connections allowed, clear = suspended
+        # during compaction.  "Ungate" (.set()) resumes accepting connections.
+        # Initially set; subclasses clear() it around file-swap operations.
+        self._connection_allowed = threading.Event()
+        self._connection_allowed.set()
+
+        # Shared across all coordinators using this provider instance so full
+        # BEGIN -> work -> COMMIT/ROLLBACK spans cannot interleave.
+        self._transaction_span_lock = asyncio.Lock()
+
+        # Terminal lifecycle state entered only when MCP cleanup gives up
+        # waiting for a stuck compaction thread and reclaims the executor.
+        self._terminal_after_stuck_cleanup = False
+        self._executor_available = True
+
+    @property
+    def is_accepting_connections(self) -> bool:
+        """True when accepting connections, False during compaction."""
+        return self._connection_allowed.is_set()
+
     @abstractmethod
     def _create_connection(self) -> Any:
         """Create and return a database connection.
@@ -96,7 +120,7 @@ class SerialDatabaseProvider(ABC):
     def is_connected(self) -> bool:
         """Check if database connection is active."""
         # For serial providers, we consider it connected if executor exists
-        return self._executor is not None
+        return self._executor is not None and self._executor_available
 
     @property
     def last_activity_time(self) -> float | None:
@@ -111,6 +135,7 @@ class SerialDatabaseProvider(ABC):
 
     def connect(self) -> None:
         """Establish database connection and initialize schema."""
+        self.ensure_usable("connect provider")
         try:
             # Execute connection in DB thread to ensure proper initialization
             self._execute_in_db_thread_sync("connect")
@@ -133,21 +158,83 @@ class SerialDatabaseProvider(ABC):
 
     def disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close database connection with optional checkpointing."""
+        if self._terminal_after_stuck_cleanup:
+            if self._executor_available:
+                try:
+                    self._executor.execute_sync(self, "disconnect", skip_checkpoint)
+                finally:
+                    self._executor.shutdown(wait=True)
+                    self._executor_available = False
+            return
         try:
             # Perform final operations in DB thread
             self._execute_in_db_thread_sync("disconnect", skip_checkpoint)
         finally:
-            # Clear thread-local storage
-            self._executor.clear_thread_local()
-            # Shutdown executor with Windows-specific handling
+            # Shutdown destroys the thread pool, making thread-local state
+            # unreachable — no explicit clear_thread_local() needed.
             self._executor.shutdown(wait=True)
+            self._executor_available = False
+
+    def shutdown_executor(self) -> None:
+        """Shut down executor thread pool without closing DB connection.
+
+        Used during stuck-compaction cleanup where the DB handle must stay
+        open but the executor thread should be reclaimed.
+        """
+        self._executor_available = False
+        self._executor.shutdown(wait=False)
+
+    @property
+    def terminal_after_stuck_cleanup(self) -> bool:
+        """True once cleanup has given up waiting for a stuck compaction thread."""
+        return self._terminal_after_stuck_cleanup
+
+    def mark_terminal_after_stuck_cleanup(self) -> None:
+        """Enter terminal lifecycle state after stuck-compaction cleanup."""
+        self._terminal_after_stuck_cleanup = True
+        self._executor_available = False
+        self._connection_allowed.clear()
+
+    @property
+    def executor_available(self) -> bool:
+        """True when database work can still be submitted to the executor."""
+        return self._executor_available
+
+    def ensure_usable(self, operation_name: str = "use provider") -> None:
+        """Raise a clear error when cleanup has made this provider unusable."""
+        if self._terminal_after_stuck_cleanup:
+            raise RuntimeError(
+                f"Cannot {operation_name}: provider entered terminal cleanup state "
+                "after stuck compaction"
+            )
+        if not self._executor_available:
+            raise RuntimeError(
+                f"Cannot {operation_name}: database executor is unavailable"
+            )
+
+    def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
+        """Close DB connection without shutting down executor.
+
+        Use for temporary disconnections (e.g., compaction) where reconnection
+        will happen soon. For final cleanup, use disconnect() instead.
+
+        Note: thread-local state is reset on disconnect for session safety.
+        The connection is cleared by _executor_disconnect, and state fields
+        like transaction_active and deferred_checkpoint are reset to defaults.
+
+        Args:
+            skip_checkpoint: If True, skip final checkpoint (faster but less safe)
+        """
+        self._execute_in_db_thread_sync("disconnect", skip_checkpoint)
 
     def _execute_in_db_thread_sync(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation synchronously in DB thread."""
+        self.ensure_usable(f"execute database operation '{operation_name}'")
         return self._executor.execute_sync(self, operation_name, *args, **kwargs)
 
     async def _execute_in_db_thread(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation asynchronously in DB thread."""
+        self.ensure_usable(f"execute database operation '{operation_name}'")
         return await self._executor.execute_async(self, operation_name, *args, **kwargs)
 
     def get_base_directory(self) -> Path:
@@ -215,7 +302,15 @@ class SerialDatabaseProvider(ABC):
         """Default executor method for disconnect - runs in DB thread.
 
         Subclasses should override to add provider-specific cleanup.
+        Must always clear the thread-local connection attribute so the
+        connection gate in get_thread_local_connection() blocks reconnection
+        during compaction.
         """
+        from chunkhound.providers.database.serial_executor import (
+            _executor_local,
+            reset_thread_local_state,
+        )
+
         try:
             # Close connection
             if conn:
@@ -223,6 +318,12 @@ class SerialDatabaseProvider(ABC):
             logger.info("Database connection closed in executor thread")
         except Exception as e:
             logger.error(f"Error closing connection: {e}")
+        finally:
+            # Always clear the cached connection so the is_accepting_connections
+            # gate prevents stale reconnections during compaction.
+            if hasattr(_executor_local, "connection"):
+                delattr(_executor_local, "connection")
+            reset_thread_local_state()
 
     # Common capability detection pattern using hasattr()
 
@@ -315,6 +416,13 @@ class SerialDatabaseProvider(ABC):
                 deleted_count += 1
         return deleted_count
 
+    async def get_scope_file_paths_async(self, scope_prefix: str | None) -> list[str]:
+        """Async variant of get_scope_file_paths if supported."""
+        if not hasattr(self, "_executor_get_scope_file_paths"):
+            logger.debug("get_scope_file_paths not supported by this provider")
+            return []
+        return await self._execute_in_db_thread("get_scope_file_paths", scope_prefix)
+
     async def begin_transaction_async(self) -> None:
         """Async variant of begin_transaction."""
         if not hasattr(self, "_executor_begin_transaction"):
@@ -335,6 +443,12 @@ class SerialDatabaseProvider(ABC):
             logger.debug("rollback_transaction not supported by this provider")
             return
         await self._execute_in_db_thread("rollback_transaction")
+
+    @asynccontextmanager
+    async def exclusive_transaction_span(self):
+        """Serialize full transaction spans across all users of this provider."""
+        async with self._transaction_span_lock:
+            yield
 
     async def get_file_by_path_async(
         self, path: str, as_model: bool = False
@@ -634,12 +748,51 @@ class SerialDatabaseProvider(ABC):
             f"{self.__class__.__name__} must implement get_connection_info"
         )
 
+    def create_deferred_indexes(self) -> None:
+        """Create any deferred vector indexes. No-op for providers without deferred indexes."""
+        pass
+
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes."""
         # Default no-op implementation
         pass
 
-    def should_optimize(self, operation: str = "") -> bool:
+    def optimize(self, cancel_check: Callable[[], bool] | None = None) -> bool:
+        """Optimize database storage. Provider-specific implementation.
+
+        This is the unified entry point for all database optimization:
+        - Lightweight operations (CHECKPOINT, index maintenance)
+        - Deep compaction when fragmentation exceeds threshold
+
+        Args:
+            cancel_check: If provided, called between steps; returns True to cancel.
+
+        Returns:
+            True if optimization was performed, False if skipped.
+        """
+        return False  # Default: no-op for providers without optimization
+
+    def get_storage_stats(self) -> dict[str, Any]:
+        """Get storage statistics.
+
+        Override in subclasses for provider-specific metrics.
+        """
+        return {
+            "total_blocks": 0,
+            "used_blocks": 0,
+            "free_blocks": 0,
+            "block_size": 0,
+            "free_ratio": 0.0,
+            "row_waste_ratio": 0.0,
+            "effective_waste": 0.0,
+            "_raw_fragmentation_ratio": 0.0,
+        }
+
+    def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
+        """Check if compaction is needed. Override in subclasses."""
+        return False, self.get_storage_stats()
+
+    def has_reclaimable_space(self, operation: str = "") -> bool:
         """Check if optimization is warranted.
 
         Default returns False: assumes database self-manages optimization

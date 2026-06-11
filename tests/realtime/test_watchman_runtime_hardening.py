@@ -186,6 +186,7 @@ def _recording_watchman_adapter(
             "realtime_backend": "watchman",
             "include": ["**/*.py"],
             "exclude": [],
+            "index_unknown_files": False,
         },
     )
     path_filter = RealtimePathFilter(config=config, root_path=tmp_path)

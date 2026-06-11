@@ -246,6 +246,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
         # Display results
         _print_completion_summary(stats, formatter)
+        if getattr(stats, "db_optimized", False):
+            formatter.info("Database checkpoint completed (reclaimed fragmented space)")
 
         # Emit startup profiling timings if requested
         if getattr(args, "profile_startup", False):

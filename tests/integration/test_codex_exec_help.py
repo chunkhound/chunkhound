@@ -8,6 +8,31 @@ import pytest
 from chunkhound.providers.llm.codex_cli_provider import CODEX_DEFAULT_SYNTHESIS_MODEL, CodexCLIProvider
 
 
+def _should_xfail_codex_env_limitation(stderr: str, *, explicit_model_requested: bool) -> bool:
+    err = stderr.lower()
+    auth_hints = ("login", "authenticate", "not logged in", "sign in", "unauthorized")
+    if any(h in err for h in auth_hints):
+        return True
+    if not explicit_model_requested and (
+        "model is not supported when using codex with a chatgpt account" in err
+        or "not supported when using codex with a chatgpt account" in err
+    ):
+        return True
+    return False
+
+
+def _xfail_reason(stderr: str, *, explicit_model_requested: bool) -> str:
+    err = stderr.lower()
+    if any(h in err for h in ("login", "authenticate", "not logged in", "sign in", "unauthorized")):
+        return "Codex CLI not authenticated in this environment."
+    if not explicit_model_requested and (
+        "model is not supported when using codex with a chatgpt account" in err
+        or "not supported when using codex with a chatgpt account" in err
+    ):
+        return "Codex CLI provider-default model is not available for this authenticated account."
+    return "Codex CLI environment limitation."
+
+
 @pytest.mark.integration
 def test_codex_exec_help_available():
     """Smoke-check that `codex exec --help` runs successfully.
@@ -77,6 +102,7 @@ def test_codex_exec_simple_prompt():
     base_home = provider._get_base_codex_home()
     if not base_home:
         pytest.xfail("No base CODEX_HOME found to inherit auth from.")
+    explicit_model_requested = bool(os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL"))
 
     # Dynamically discover the cheapest available model
     cheapest_model = CodexCLIProvider.get_highest_priority_available_model()
@@ -101,7 +127,6 @@ def test_codex_exec_simple_prompt():
             "Overlay config.toml must set model_reasoning_effort to low."
         )
 
-        # Try explicit model/effort flags first; gracefully remove if unsupported
         base = [codex_bin, "exec", prompt]
         flags = ["--model", cheapest_model, "--model-reasoning-effort", "low", "--skip-git-repo-check"]
 
@@ -124,10 +149,13 @@ def test_codex_exec_simple_prompt():
             # Last resort: no flags at all
             proc, out, err = try_exec(base)
 
-        # If not authenticated, xfail instead of failing the suite
-        auth_hints = ("login", "authenticate", "not logged in", "sign in", "unauthorized")
-        if proc.returncode != 0 and any(h in err for h in auth_hints):
-            pytest.xfail("Codex CLI not authenticated in this environment.")
+        if proc.returncode != 0 and _should_xfail_codex_env_limitation(
+            err,
+            explicit_model_requested=explicit_model_requested,
+        ):
+            pytest.xfail(
+                _xfail_reason(err, explicit_model_requested=explicit_model_requested)
+            )
 
         account_hints = ("not supported", "invalid_request_error", "chatgpt account", "subscription required")
         if proc.returncode != 0 and any(h in err for h in account_hints):
@@ -148,7 +176,7 @@ def test_codex_exec_simple_prompt():
 
 @pytest.mark.integration
 def test_codex_exec_status_reports_overlay_model(monkeypatch):
-    """Ensure `codex exec` sees the overlay model/effort configuration.
+    """Ensure `codex exec` sees the overlay effort configuration.
 
     Runs `codex exec "/status"` against a provider-built overlay and asserts
     that the reported model and reasoning effort match the overlay configuration.
@@ -174,6 +202,7 @@ def test_codex_exec_status_reports_overlay_model(monkeypatch):
     base_home = provider._get_base_codex_home()
     if not base_home:
         pytest.xfail("No base CODEX_HOME found to inherit auth from.")
+    explicit_model_requested = bool(os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL"))
 
     overlay = provider._build_overlay_home()
     try:
@@ -197,9 +226,13 @@ def test_codex_exec_status_reports_overlay_model(monkeypatch):
         out = proc.stdout.decode("utf-8", errors="ignore")
         err = proc.stderr.decode("utf-8", errors="ignore").lower()
 
-        auth_hints = ("login", "authenticate", "not logged in", "sign in", "unauthorized")
-        if proc.returncode != 0 and any(h in err for h in auth_hints):
-            pytest.xfail("Codex CLI not authenticated in this environment.")
+        if proc.returncode != 0 and _should_xfail_codex_env_limitation(
+            err,
+            explicit_model_requested=explicit_model_requested,
+        ):
+            pytest.xfail(
+                _xfail_reason(err, explicit_model_requested=explicit_model_requested)
+            )
 
         combined = f"{out}\n{err}".lower()
         # `/status` should report the effective model and reasoning effort

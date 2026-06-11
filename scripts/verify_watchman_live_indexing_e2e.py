@@ -177,12 +177,23 @@ class SubprocessJsonRpcClient:
             while True:
                 raw_line = await self._process.stdout.readline()
                 if not raw_line:
-                    self._fail_pending(
-                        RuntimeError(
-                            "JSON-RPC subprocess terminated unexpectedly "
-                            f"(rc={self._process.returncode})"
-                        )
+                    await self._process.wait()
+                    stderr_snippet = ""
+                    if self._process.stderr is not None:
+                        try:
+                            raw_err = await asyncio.wait_for(
+                                self._process.stderr.read(4096), timeout=2.0
+                            )
+                            stderr_snippet = raw_err.decode("utf-8", errors="replace").strip()
+                        except Exception:
+                            pass
+                    msg = (
+                        "JSON-RPC subprocess terminated unexpectedly "
+                        f"(rc={self._process.returncode})"
                     )
+                    if stderr_snippet:
+                        msg += f"\nstderr: {stderr_snippet}"
+                    self._fail_pending(RuntimeError(msg))
                     return
 
                 line = raw_line.decode("utf-8", errors="replace").strip()

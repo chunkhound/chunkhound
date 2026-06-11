@@ -364,6 +364,13 @@ async def test_index_with_stuck_daemon_kills_and_retries(
         # Dummy process should be dead (use zombie-aware check — psutil.pid_exists
         # returns True for zombie processes, which appear after kill() before wait())
         from chunkhound.daemon.process import pid_alive
+        import time
+
+        # Poll up to 1s: SIGKILL delivery and OS reaping has a small race window
+        # that is tighter on Python 3.14/macOS due to asyncio scheduling changes.
+        deadline = time.monotonic() + 1.0
+        while pid_alive(daemon_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
 
         assert not pid_alive(daemon_pid), (
             f"Expected dummy process (pid={daemon_pid}) to be killed after "

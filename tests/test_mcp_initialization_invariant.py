@@ -9,11 +9,16 @@ import textwrap
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+from chunkhound.providers.database.serial_database_provider import (
+    SerialDatabaseProvider,
+)
 
 
 class ConcreteMCPServer(MCPServerBase):
@@ -24,6 +29,16 @@ class ConcreteMCPServer(MCPServerBase):
 
     async def run(self) -> None:
         pass
+
+
+class MinimalSerialProvider(SerialDatabaseProvider):
+    """Concrete stub of SerialDatabaseProvider for terminal-state unit tests."""
+
+    def _create_connection(self):  # type: ignore[override]
+        return None
+
+    def _get_schema_sql(self) -> list[str] | None:
+        return None
 
 
 class CloseOnlyProvider:
@@ -164,6 +179,12 @@ class TestNonBlockingInitialization:
                 assert "chunks_created" in progress
                 assert "scan_started_at" in progress
                 assert "scan_completed_at" in progress
+                assert "background_compaction" in progress
+
+                background_compaction = progress["background_compaction"]
+                assert background_compaction["phase"] == "idle"
+                assert background_compaction["pending_recovery"] is False
+                assert background_compaction["retry_attempted"] is False
 
                 await server.cleanup()
 
@@ -469,3 +490,356 @@ class TestCleanup:
         assert provider.disconnect_calls == 0
         assert not server._initialized
         assert "Database close failed: close exploded" in debug_file.read_text()
+
+class TestShutdownSafety:
+    """Verify cleanup() skips provider disconnect when compaction thread is stuck."""
+
+    @pytest.mark.asyncio
+    async def test_stuck_compaction_skips_provider_disconnect(self, tmp_path: Path):
+        """When compaction thread won't stop, provider.close() must not be called."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+            mock_provider.mark_terminal_after_stuck_cleanup = MagicMock()
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+                assert server._initialized
+
+                # Simulate a compaction service whose thread never finishes.
+                stuck_event = threading.Event()  # never set
+                mock_compaction = MagicMock()
+                mock_compaction.compaction_thread_done = stuck_event
+                mock_compaction.shutdown = AsyncMock()
+                server._compaction_service = mock_compaction
+
+                # Patch asyncio.to_thread so the 5s wait returns immediately.
+                with patch("asyncio.to_thread", new_callable=AsyncMock):
+                    await server.cleanup()
+
+                # Provider must NOT have been closed/disconnected.
+                mock_provider.close.assert_not_called()
+                mock_provider.disconnect.assert_not_called()
+                mock_provider.mark_terminal_after_stuck_cleanup.assert_called_once_with()
+                mock_provider.shutdown_executor.assert_called_once_with()
+
+                # _initialized stays True (cleanup is terminal, no reconnection).
+                assert server._initialized
+
+    @pytest.mark.asyncio
+    async def test_stuck_compaction_cleans_non_provider_resources_before_executor_shutdown(
+        self, tmp_path: Path
+    ) -> None:
+        """Cleanup must cancel server-managed work before killing the DB executor."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            call_order: list[str] = []
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+            mock_provider.mark_terminal_after_stuck_cleanup.side_effect = (
+                lambda: call_order.append("mark_terminal")
+            )
+            mock_provider.shutdown_executor.side_effect = lambda: call_order.append(
+                "shutdown_executor"
+            )
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+
+                stuck_event = MagicMock()
+                stuck_event.is_set.return_value = False
+                stuck_event.wait.return_value = False
+
+                mock_compaction = MagicMock()
+                mock_compaction.compaction_thread_done = stuck_event
+                mock_compaction.shutdown = AsyncMock()
+                server._compaction_service = mock_compaction
+
+                async def fake_cleanup_non_provider_resources() -> None:
+                    call_order.append("cleanup_non_provider")
+
+                server._cleanup_non_provider_resources = (
+                    fake_cleanup_non_provider_resources
+                )
+
+                await server.cleanup()
+
+                assert call_order == [
+                    "cleanup_non_provider",
+                    "mark_terminal",
+                    "shutdown_executor",
+                ]
+
+    @pytest.mark.asyncio
+    async def test_cleanup_is_idempotent_after_stuck_compaction(
+        self, tmp_path: Path
+    ) -> None:
+        """A second cleanup() after a stuck-thread path must not race the thread.
+
+        After the stuck-thread early-return, _compaction_service is cleared but
+        the provider is still connected. A second cleanup() must not fall
+        through to provider.close() — the compaction thread may still be alive.
+
+        The contract is expressed as a ``side_effect`` on ``close``/
+        ``disconnect``: deleting the ``_cleanup_done`` idempotency guard
+        causes the second call to fall through and trip the AssertionError.
+        """
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+            mock_provider.mark_terminal_after_stuck_cleanup = MagicMock()
+            # Contract: while the compaction thread is stuck alive, the
+            # provider must NEVER be closed or disconnected. Any invocation
+            # of either method is a correctness violation.
+            mock_provider.close.side_effect = AssertionError(
+                "MUST NOT close provider while compaction thread is alive"
+            )
+            mock_provider.disconnect.side_effect = AssertionError(
+                "MUST NOT disconnect provider while compaction thread is alive"
+            )
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+
+                # Event-like mock: reports "not set" forever, but wait()
+                # returns immediately so the real asyncio.to_thread call
+                # inside cleanup() completes without a 5-second delay.
+                stuck_event = MagicMock()
+                stuck_event.is_set.return_value = False
+                stuck_event.wait.return_value = False
+
+                mock_compaction = MagicMock()
+                mock_compaction.compaction_thread_done = stuck_event
+                mock_compaction.shutdown = AsyncMock()
+                server._compaction_service = mock_compaction
+
+                # First call hits the stuck-thread early-return branch.
+                await server.cleanup()
+                # Second call must be a no-op guarded by _cleanup_done. If
+                # the guard is removed, this call falls through to
+                # provider.close() and the side_effect fires.
+                await server.cleanup()
+
+                # Provider must never have been closed across both calls
+                assert mock_provider.close.call_count == 0
+                assert mock_provider.disconnect.call_count == 0
+                mock_provider.mark_terminal_after_stuck_cleanup.assert_called_once_with()
+                mock_provider.shutdown_executor.assert_called_once_with()
+
+    def test_terminal_cleanup_provider_rejects_subsequent_db_work(
+        self, tmp_path: Path
+    ) -> None:
+        """Provider operations must fail explicitly after terminal cleanup."""
+        provider = MinimalSerialProvider(
+            db_path=tmp_path / "test.db",
+            base_directory=tmp_path,
+        )
+        provider.mark_terminal_after_stuck_cleanup()
+        provider.shutdown_executor()
+
+        with pytest.raises(RuntimeError, match="terminal cleanup state"):
+            provider._execute_in_db_thread_sync("ping")
+
+    @pytest.mark.asyncio
+    async def test_connect_provider_rejects_terminal_provider_even_if_marked_connected(
+        self, tmp_path: Path
+    ) -> None:
+        """_connect_provider must fail fast on a terminal provider state."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+            mock_provider.ensure_usable.side_effect = RuntimeError(
+                "Cannot connect provider: provider entered terminal cleanup "
+                "state after stuck compaction"
+            )
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+
+                with pytest.raises(RuntimeError, match="terminal cleanup state"):
+                    await server._connect_provider()
+
+                mock_provider.connect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cleanup_serializes_via_lock(self, tmp_path: Path) -> None:
+        """Two parallel cleanup() tasks must serialize and only close once.
+
+        Without ``_cleanup_lock``, two concurrent callers can both pass the
+        ``_cleanup_done`` guard before the ``finally`` clause flips the flag,
+        causing a double provider close. Asserts that only one call reaches
+        the provider teardown path.
+        """
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+
+                await asyncio.gather(server.cleanup(), server.cleanup())
+
+                # Provider closed exactly once across both concurrent calls
+                close_calls = (
+                    mock_provider.close.call_count + mock_provider.disconnect.call_count
+                )
+                assert close_calls == 1
+
+    def test_serial_provider_operations_fail_explicitly_after_terminal_cleanup(
+        self, tmp_path: Path
+    ) -> None:
+        """Post-terminal DB calls must fail before touching the dead executor."""
+        provider = MinimalSerialProvider(
+            db_path=tmp_path / "test.db",
+            base_directory=tmp_path,
+        )
+        provider.mark_terminal_after_stuck_cleanup()
+
+        with pytest.raises(RuntimeError, match="terminal cleanup state"):
+            provider._execute_in_db_thread_sync("connect")
+
+    def test_duckdb_provider_connect_rejects_terminal_state_before_manager_connect(
+        self, tmp_path: Path
+    ) -> None:
+        """Terminal cleanup must block reconnect before manager connect runs."""
+        provider = DuckDBProvider(db_path=tmp_path / "db", base_directory=tmp_path)
+        provider._connection_manager = MagicMock()
+        provider.mark_terminal_after_stuck_cleanup()
+
+        with pytest.raises(RuntimeError, match="terminal cleanup state"):
+            provider.connect()
+
+        provider._connection_manager.connect.assert_not_called()
+
+    def test_restore_connection_after_compaction_fails_terminal_provider(
+        self, tmp_path: Path
+    ) -> None:
+        """Late compaction reconnect must fail explicitly after terminal cleanup."""
+        provider = DuckDBProvider(db_path=tmp_path / "db", base_directory=tmp_path)
+        provider._connection_manager = MagicMock()
+        provider.mark_terminal_after_stuck_cleanup()
+
+        with pytest.raises(
+            CompactionError, match="terminal stuck-cleanup state"
+        ) as exc_info:
+            provider._restore_connection_after_compaction()
+
+        assert exc_info.value.operation == "compaction"
+        assert exc_info.value.recoverable is False
+
+    @pytest.mark.asyncio
+    async def test_ensure_services_surfaces_terminal_recovery_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Recovery retry must surface terminal reconnect failures explicitly."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with (
+            patch("chunkhound.mcp_server.base.create_services"),
+            patch("chunkhound.mcp_server.base.EmbeddingManager"),
+        ):
+            server = ConcreteMCPServer(config=config)
+
+        provider = DuckDBProvider(db_path=tmp_path / "db", base_directory=tmp_path)
+        provider._connection_manager = MagicMock()
+        provider.mark_terminal_after_stuck_cleanup()
+
+        server.services = MagicMock()
+        server.services.provider = provider
+        server._scan_target_path = tmp_path
+        server._scan_progress["background_compaction"].update(
+            {
+                "phase": "failed",
+                "pending_recovery": True,
+                "retry_attempted": False,
+                "last_error": "stale recovery failure",
+            }
+        )
+
+        async def retry_with_terminal_provider(
+            *, is_recovery_retry: bool = False
+        ) -> None:
+            try:
+                provider._restore_connection_after_compaction()
+            except Exception as exc:
+                server._mark_background_compaction_failure(
+                    exc,
+                    pending_recovery=True,
+                    retry_attempted=is_recovery_retry,
+                )
+                raise
+
+        server._post_compaction_reindex = AsyncMock(
+            side_effect=retry_with_terminal_provider
+        )
+
+        with pytest.raises(
+            CompactionError, match="terminal stuck-cleanup state"
+        ) as exc_info:
+            await server.ensure_services()
+
+        assert exc_info.value.operation == "post_reindex"
+        provider._connection_manager.connect.assert_not_called()
+        status = server.get_background_compaction_status()
+        assert status["phase"] == "failed"
+        assert status["pending_recovery"] is True
+        assert status["retry_attempted"] is True
+        assert "terminal stuck-cleanup state" in status["last_error"]

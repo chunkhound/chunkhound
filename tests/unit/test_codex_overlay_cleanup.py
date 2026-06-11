@@ -26,7 +26,7 @@ async def test_codex_overlay_cleanup(monkeypatch, tmp_path: Path):
     # Monkeypatch build to return our overlay path
     requested_model = {}
 
-    def _fake_overlay_home(self, model_override=None):
+    def _fake_overlay_home(self, model_override=None, **kwargs):
         requested_model["value"] = model_override
         return str(overlay_dir)
 

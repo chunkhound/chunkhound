@@ -275,6 +275,9 @@ debug_test_file.py
 .chunkhound.json
 config.json
 
+# OpenCode project config
+opencode.json
+
 # ChunkHound database directories
 .chunkhound/
 *.lancedb/
@@ -334,3 +337,4 @@ site/public/og-image-light.png
 # AI review artifacts (from PR reviews, agent task plans)
 plan.txt
 AGENT_REVIEW.md
+compaction_comparison_report.html

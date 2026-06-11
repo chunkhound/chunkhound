@@ -309,7 +309,7 @@ class RealtimeStartupMixin:
             return
         self._service_state = "running"
     def _resolve_configured_backend(self) -> str:
-        backend = getattr(self.config.indexing, "realtime_backend", None)
+        backend = getattr(getattr(self.config, "indexing", None), "realtime_backend", None)
         self._configured_backend_raw = backend
         if backend in {"watchman", "watchdog", "polling"}:
             self._configured_backend_resolution = "explicit"

@@ -35,7 +35,7 @@ class TestDaemonStartupOrder:
         return Config(
             target_dir=tmp_path,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={},
+            indexing={"index_unknown_files": False},
         )
 
     @pytest.mark.asyncio

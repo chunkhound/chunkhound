@@ -1,5 +1,7 @@
 """DatabaseProvider protocol for ChunkHound - abstract interface for database implementations."""
 
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -22,6 +24,10 @@ class ScopeAggregationProvider(Protocol):
         Returned paths should be normalized to forward slashes and be comparable
         to `metadata.sources.files` entries.
         """
+        ...
+
+    async def get_scope_file_paths_async(self, scope_prefix: str | None) -> list[str]:
+        """Async variant of get_scope_file_paths."""
         ...
 
 
@@ -57,6 +63,17 @@ class DatabaseProvider(Protocol):
 
     def disconnect(self) -> None:
         """Close database connection and cleanup resources."""
+        ...
+
+    def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
+        """Close connection temporarily without shutting down executor.
+
+        Use for temporary disconnections (e.g., compaction) where reconnection
+        will happen soon. For final cleanup, use disconnect() instead.
+
+        Args:
+            skip_checkpoint: If True, skip final checkpoint (faster but less safe)
+        """
         ...
 
     # Schema Management
@@ -428,6 +445,10 @@ class DatabaseProvider(Protocol):
         """Rollback the current transaction (asynchronous)."""
         ...
 
+    def exclusive_transaction_span(self) -> AbstractAsyncContextManager[None]:
+        """Serialize a full transaction span across shared coordinators."""
+        ...
+
     # File Processing Integration
     async def process_file(
         self, file_path: Path, skip_embeddings: bool = False
@@ -446,10 +467,53 @@ class DatabaseProvider(Protocol):
 
     # Health and Diagnostics
     def optimize_tables(self) -> None:
-        """Optimize tables by compacting fragments and rebuilding indexes (provider-specific)."""
+        """Optimize tables by compacting fragments and rebuilding indexes.
+
+        For DuckDB: CHECKPOINT to sync WAL and reclaim space
+        For LanceDB: Fragment compaction via table.optimize()
+        """
         ...
 
-    def should_optimize(self, operation: str = "") -> bool:
+    def create_deferred_indexes(self) -> None:
+        """Create any deferred vector indexes.
+
+        Called at end of indexing to create HNSW indexes that were deferred
+        during first-time indexing for performance.
+        """
+        ...
+
+    def optimize(self, cancel_check: Callable[[], bool] | None = None) -> bool:
+        """Optimize database storage via compaction.
+
+        Args:
+            cancel_check: Optional callable returning True to abort.
+
+        Returns:
+            True if optimization was performed.
+        """
+        ...
+
+    def get_storage_stats(self) -> dict[str, Any]:
+        """Get storage statistics for monitoring and compaction decisions.
+
+        Returns dict with keys: total_blocks, used_blocks, free_blocks,
+        block_size, free_ratio, row_waste_ratio, effective_waste,
+        accounted_blocks, orphaned_blocks, _raw_fragmentation_ratio.
+        """
+        ...
+
+    def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
+        """Check if compaction is needed based on storage waste.
+
+        Uses the stronger of row-group utilization (detects partially-deleted
+        row groups) and free-blocks ratio (detects block-level fragmentation).
+
+        Returns:
+            Tuple of (should_compact, storage_stats).
+        """
+        ...
+
+    def has_reclaimable_space(self, operation: str = "") -> bool:
         """Check if optimization is warranted.
 
         Args:

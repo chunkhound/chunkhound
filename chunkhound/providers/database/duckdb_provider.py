@@ -14,6 +14,7 @@
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import duckdb
 from loguru import logger
 
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
@@ -31,7 +33,13 @@ from chunkhound.core.utils import normalize_path_for_lookup
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.providers.database.duckdb.chunk_repository import DuckDBChunkRepository
 from chunkhound.providers.database.duckdb.connection_manager import (
+    _COMPACTING_PATHS,
+    _COMPACTING_PATHS_LOCK,
+    PHASE_1,
+    PHASE_2,
+    PHASE_PRE_SWAP,
     DuckDBConnectionManager,
+    get_compaction_lock_path,
 )
 from chunkhound.providers.database.duckdb.embedding_repository import (
     DuckDBEmbeddingRepository,
@@ -43,12 +51,43 @@ from chunkhound.providers.database.serial_database_provider import (
 )
 from chunkhound.providers.database.serial_executor import (
     _executor_local,
+    reset_thread_local_state,
     track_operation,
 )
+from chunkhound.utils.windows_constants import IS_WINDOWS
 
 # Type hinting only
 if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
+
+
+def _fsync_directory(dir_path: Path) -> None:
+    """Fsync a directory so that new/renamed entries are durable on ext4.
+
+    No-op on Windows: NTFS metadata journaling provides sufficient
+    consistency for the intent-file recovery protocol, and os.open()
+    on a directory raises PermissionError on Windows anyway.
+    """
+    if IS_WINDOWS:
+        return
+    fd = os.open(str(dir_path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_intent(path: Path, phase: str) -> None:
+    """Write an fsync'd intent file for crash recovery."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    try:
+        os.write(fd, phase.encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+    _fsync_directory(path.parent)
 
 
 class DuckDBTransactionConflictError(RuntimeError):
@@ -102,9 +141,7 @@ def _read_indexed_root_sidecar(sidecar: Path) -> str:
             f"Indexed-root sidecar {sidecar} is not valid JSON: {error}"
         ) from error
     if not isinstance(data, dict):
-        raise RuntimeError(
-            f"Indexed-root sidecar {sidecar} must be a JSON object"
-        )
+        raise RuntimeError(f"Indexed-root sidecar {sidecar} must be a JSON object")
     version = data.get("version")
     if version != _INDEXED_ROOT_SIDECAR_VERSION:
         raise RuntimeError(
@@ -287,6 +324,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
+        self.ensure_usable("connect provider")
         try:
             # Validate stored indexed-root identity before any file-backed DB
             # open, WAL replay, extension load, or schema touch happens.
@@ -446,6 +484,32 @@ class DuckDBProvider(SerialDatabaseProvider):
                 skip_checkpoint=True
             )  # Skip checkpoint since we did it in executor
 
+    def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
+        """Close DB connection without shutting down executor.
+
+        Use for temporary disconnections (e.g., compaction) where reconnection
+        will happen soon. For final cleanup, use disconnect() instead.
+
+        Safety: super().soft_disconnect() routes through _execute_in_db_thread_sync,
+        which submits to the single-threaded serial executor (max_workers=1) and
+        blocks on future.result().  This implicitly drains any in-flight database
+        operation before executing the disconnect — concurrent MCP requests already
+        queued in the executor complete first.  Do NOT bypass the executor here;
+        the implicit drain is the serialization mechanism.
+
+        Args:
+            skip_checkpoint: If True, skip final checkpoint (faster but less safe)
+        """
+        try:
+            super().soft_disconnect(skip_checkpoint)
+        finally:
+            # Connection manager holds separate file locks that must also be released
+            # for compaction to get exclusive access to the database file
+            self._connection_manager.disconnect(skip_checkpoint=True)
+            # Reset WAL cleanup flag so it runs again on reconnect
+            # This is critical for compaction where we swap to a fresh database file
+            self._wal_cleanup_done = False
+
     def _executor_disconnect(
         self, conn: Any, state: dict[str, Any], skip_checkpoint: bool
     ) -> None:
@@ -468,6 +532,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Clear thread-local connection
             if hasattr(_executor_local, "connection"):
                 delattr(_executor_local, "connection")
+            reset_thread_local_state()
             if not os.environ.get("CHUNKHOUND_MCP_MODE"):
                 logger.info("DuckDB connection closed in executor thread")
 
@@ -528,9 +593,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         if self._executor_index_exists(conn, table_name, index_name):
             return
 
-        conn.execute(
-            f"CREATE INDEX {index_name} ON {table_name}(provider, model)"
-        )
+        conn.execute(f"CREATE INDEX {index_name} ON {table_name}(provider, model)")
 
     def _executor_create_embedding_unique_index(
         self, conn: Any, table_name: str, dims: int
@@ -608,22 +671,19 @@ class DuckDBProvider(SerialDatabaseProvider):
                 conn.execute("SET preserve_insertion_order = false")
 
             for index_info in existing_indexes:
-                self._executor_drop_vector_index_by_name(
-                    conn, index_info["index_name"]
-                )
+                self._executor_drop_vector_index_by_name(conn, index_info["index_name"])
 
             result = mutation_func()
 
-            # Commit data changes before recreating HNSW indexes. DuckDB VSS HNSW indexes
-            # do not support CreateDeltaIndex, so committing a transaction that contains an
-            # HNSW CREATE triggers a BoundIndex::CreateDeltaIndex assertion failure.
+            # Commit data changes before recreating HNSW indexes.
+            # DuckDB VSS HNSW indexes do not support CreateDeltaIndex,
+            # so committing a transaction that contains an HNSW CREATE
+            # triggers a BoundIndex::CreateDeltaIndex assertion failure.
             if transactional:
                 self._executor_commit_transaction(conn, state, False)
 
             for index_info in existing_indexes:
-                self._executor_recreate_vector_index_from_info(
-                    conn, state, index_info
-                )
+                self._executor_recreate_vector_index_from_info(conn, state, index_info)
 
             self._executor_maybe_checkpoint(conn, state, True)
             return result
@@ -633,7 +693,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                     self._executor_rollback_transaction(conn, state)
                 except Exception as rollback_error:
                     raise RuntimeError(
-                        f"{mutation_label} failed: {e}; rollback failed: {rollback_error}"
+                        f"{mutation_label} failed: {e}; "
+                        f"rollback failed: {rollback_error}"
                     ) from rollback_error
             else:
                 restore_failures: list[str] = []
@@ -697,7 +758,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         table_name = f"embeddings_{dims}"
 
         if self._executor_table_exists(conn, state, table_name):
-            self._executor_ensure_embedding_upsert_contract(conn, state, table_name, dims)
+            self._executor_ensure_embedding_upsert_contract(
+                conn, state, table_name, dims
+            )
             return table_name
 
         logger.info(f"Creating embedding table for {dims} dimensions: {table_name}")
@@ -716,15 +779,33 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
             """)
 
-            # Create HNSW index for performance
-            hnsw_index_name = f"idx_hnsw_{dims}"
-            conn.execute(f"""
-                CREATE INDEX {hnsw_index_name} ON {table_name}
-                USING HNSW (embedding)
-                WITH (metric = 'cosine')
-            """)
+            # Check if this is first indexing (no HNSW indexes exist yet)
+            # If so, defer HNSW index creation until end of indexing for performance
+            existing_hnsw = conn.execute("""
+                SELECT COUNT(*) FROM duckdb_indexes()
+                WHERE table_name LIKE 'embeddings_%'
+                AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
+            """).fetchone()[0]
 
-            # Create regular indexes for fast lookups
+            hnsw_index_name = f"idx_hnsw_{dims}"
+            if existing_hnsw == 0:
+                # First indexing: defer HNSW index creation for bulk performance
+                logger.debug(
+                    f"Deferring HNSW index creation for {table_name} "
+                    "(first indexing detected)"
+                )
+                if "deferred_hnsw_indexes" not in state:
+                    state["deferred_hnsw_indexes"] = set()
+                state["deferred_hnsw_indexes"].add((table_name, dims))
+            else:
+                # Indexes exist: create HNSW index immediately
+                conn.execute(f"""
+                    CREATE INDEX "{hnsw_index_name}" ON "{table_name}"
+                    USING HNSW (embedding)
+                    WITH (metric = 'cosine')
+                """)
+
+            # Create regular indexes for fast lookups (always create these)
             conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_{dims}_chunk_id "
                 f"ON {table_name}(chunk_id)"
@@ -735,61 +816,329 @@ class DuckDBProvider(SerialDatabaseProvider):
             )
             self._executor_create_embedding_unique_index(conn, table_name, dims)
 
-            logger.info(
-                f"Created {table_name} with HNSW index {hnsw_index_name} "
-                "and regular indexes"
-            )
+            if existing_hnsw > 0:
+                logger.info(
+                    f"Created {table_name} with HNSW index {hnsw_index_name} "
+                    "and regular indexes"
+                )
+            else:
+                logger.info(
+                    f"Created {table_name} with regular indexes (HNSW index deferred)"
+                )
             return table_name
 
         except Exception as e:
             logger.error(f"Failed to create embedding table for {dims} dimensions: {e}")
             raise
 
-    def _maybe_checkpoint(self, force: bool = False) -> None:
-        """Perform checkpoint if needed - delegate to connection manager."""
-        self._execute_in_db_thread_sync("maybe_checkpoint", force)
+    def has_reclaimable_space(self, operation: str = "") -> bool:
+        """Check if a lightweight CHECKPOINT optimization is warranted.
 
-    def _executor_maybe_checkpoint(
-        self, conn: Any, state: dict[str, Any], force: bool
-    ) -> None:
-        """Executor method for _maybe_checkpoint - runs in DB thread."""
-        if self._connection_manager.is_memory_db:
-            return
+        Only checks free_blocks > 0 — intentionally ignores row_waste_ratio.
+        Used by IndexingCoordinator/EmbeddingService as a fast post-operation
+        gate. For the full compaction decision (EXPORT/IMPORT) that considers
+        row waste and min-size gates, see CompactionService.check_should_compact().
 
-        # Defer checkpoint if we're in a transaction
-        if state.get("transaction_active", False):
-            state["deferred_checkpoint"] = True
-            if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                logger.debug("Deferring checkpoint until transaction completes")
-            return
+        Args:
+            operation: Optional context string for logging (e.g., 'post-chunking')
 
-        current_time = time.time()
-        time_since_checkpoint = current_time - state.get(
-            "last_checkpoint_time", current_time
-        )
-        operations_since_checkpoint = state.get("operations_since_checkpoint", 0)
+        Returns:
+            True if optimization would reclaim space, False if database is optimal
+        """
+        try:
+            stats = self.get_storage_stats()
+            free_blocks = stats.get("free_blocks", 0)
+            op_desc = f" ({operation})" if operation else ""
 
-        # Checkpoint if forced, operations threshold reached (default 100), or 5 minutes elapsed
-        threshold = state.get("checkpoint_threshold", 100)
-        should_checkpoint = (
-            force
-            or operations_since_checkpoint >= threshold
-            or time_since_checkpoint >= 300  # 5 minutes
-        )
+            if free_blocks == 0:
+                logger.debug(f"Optimization check{op_desc}: skipping (no free blocks)")
+                return False
 
-        if should_checkpoint:
+            logger.debug(
+                f"Optimization check{op_desc}: recommended ({free_blocks} free blocks)"
+            )
+            return True
+        except Exception as e:
+            # If we can't check, err on the side of optimizing
+            logger.debug(f"Optimization check failed, defaulting to True: {e}")
+            return True
+
+    def optimize_tables(self) -> None:
+        """Optimize tables by checkpointing the WAL.
+
+        Performs:
+        1. Emit bulk-insert metrics for visibility
+        2. CHECKPOINT - sync WAL to main database, reclaim deleted row space
+        """
+        # Emit metrics (no DB connection needed)
+        if not os.environ.get("CHUNKHOUND_MCP_MODE"):
             try:
-                conn.execute("CHECKPOINT")
-                state["operations_since_checkpoint"] = 0
-                state["last_checkpoint_time"] = current_time
-                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.debug(
-                        f"Checkpoint completed (operations: {operations_since_checkpoint}, "
-                        f"time: {time_since_checkpoint:.1f}s)"
+                m = self._metrics.get("chunks", {})
+                files = int(m.get("files", 0))
+                rows = int(m.get("rows", 0))
+                batches = int(m.get("batches", 0))
+                t_temp = float(m.get("temp_create_s", 0.0))
+                t_clear = float(m.get("temp_clear_s", 0.0))
+                t_tins = float(m.get("temp_insert_s", 0.0))
+                t_main = float(m.get("main_insert_s", 0.0))
+                if files or rows:
+                    logger.info(
+                        "DuckDB chunks bulk metrics: "
+                        "files={} rows={} batches={} "
+                        "t_temp={:.2f}s t_temp_clear={:.2f}s "
+                        "t_temp_insert={:.2f}s t_main_insert={:.2f}s",
+                        files,
+                        rows,
+                        batches,
+                        t_temp,
+                        t_clear,
+                        t_tins,
+                        t_main,
                     )
+            except Exception:
+                pass
+
+        try:
+            self._execute_in_db_thread_sync("optimize_tables")
+        except CompactionError:
+            raise
+        except Exception as e:
+            logger.warning(f"optimize_tables: checkpoint/compact skipped: {e}")
+
+    def _executor_optimize_tables(self, conn: Any, state: dict[str, Any]) -> None:
+        """Executor method for optimize_tables - runs in DB thread."""
+        try:
+            # Checkpoint for WAL durability and space reclamation
+            # NOTE: HNSW compact (PRAGMA hnsw_compact_index) was removed here
+            # because the DuckDB VSS extension segfaults when compacting after
+            # bulk deletions on Linux.
+            # The DuckDB HNSW index is being replaced entirely by PR #146
+            # (https://github.com/chunkhound/chunkhound/pull/146).
+            logger.debug("Running CHECKPOINT for optimization...")
+            conn.execute("CHECKPOINT")
+            logger.debug("CHECKPOINT completed")
+
+        except Exception as e:
+            logger.warning(f"Optimization failed: {e}")
+
+    def get_storage_stats(self) -> dict[str, Any]:
+        """Get DuckDB storage statistics including fragmentation.
+
+        Returns block-level metrics and row-group utilization. The key metric
+        for compaction decisions is ``effective_waste`` (max of ``free_ratio``
+        and ``row_waste_ratio``). ``row_waste_ratio`` detects partially-deleted
+        row groups that CHECKPOINT cannot reclaim but EXPORT/IMPORT will
+        rebuild. ``free_blocks`` only reflects blocks freed at the allocator
+        level (e.g. after DROP INDEX + CHECKPOINT).
+
+        Returns:
+            Dict with keys: total_blocks, used_blocks, free_blocks,
+            accounted_blocks, orphaned_blocks, block_size, free_ratio,
+            row_waste_ratio, effective_waste, _raw_fragmentation_ratio
+        """
+        return cast(
+            dict[str, Any], self._execute_in_db_thread_sync("get_storage_stats")
+        )
+
+    def _executor_get_storage_stats(
+        self, conn: Any, state: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Executor: Calculate storage metrics.
+
+        Two complementary signals for compaction:
+
+        1. ``free_blocks / total_blocks`` — captures block-level fragmentation
+           from DROP INDEX + CHECKPOINT cycles.
+
+        2. ``row_waste_ratio`` (1 - live_rows / storage_rows) — captures
+           partially-deleted row groups. DuckDB's CHECKPOINT only frees
+           entirely-empty row groups; rows deleted within a row group still
+           occupy their blocks. EXPORT/IMPORT rebuilds tight row groups with
+           only live rows, reclaiming this space.
+
+        ``_raw_fragmentation_ratio`` (block-level orphan detection) is kept
+        for diagnostics but NOT used for trigger decisions because it cannot
+        distinguish active HNSW index blocks from genuinely orphaned ones.
+        """
+        # Get database-level metrics
+        db_result = conn.execute("""
+            SELECT
+                block_size,
+                total_blocks,
+                used_blocks,
+                free_blocks
+            FROM pragma_database_size()
+        """).fetchone()
+
+        block_size = db_result[0]
+        total_blocks = db_result[1]
+        used_blocks = db_result[2]
+        free_blocks = db_result[3]
+
+        # Get all user tables (reused for both block and row metrics)
+        tables = conn.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_type = 'BASE TABLE'
+        """).fetchall()
+
+        # --- Block-level: accounted blocks via pragma_storage_info ---
+        accounted_blocks = 0
+        try:
+            for (table_name,) in tables:
+                result = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT block_id)
+                    FROM pragma_storage_info(?)
+                    WHERE block_id >= 0
+                """,
+                    [table_name],
+                ).fetchone()
+                if result and result[0]:
+                    accounted_blocks += int(result[0])
+        except Exception as e:
+            logger.debug(f"pragma_storage_info() failed, using fallback: {e}")
+            accounted_blocks = used_blocks
+
+        orphaned_blocks = max(0, used_blocks - accounted_blocks)
+
+        if used_blocks > 0:
+            fragmentation = max(0.0, min(1.0, 1.0 - (accounted_blocks / used_blocks)))
+        else:
+            fragmentation = 0.0
+
+        # --- Row-group utilization: live rows vs storage-level rows ---
+        # Compares SELECT COUNT(*) (live) to SUM(count) from
+        # pragma_storage_info on a scalar column (storage-allocated slots).
+        # Partially-deleted row groups still report their full slot count,
+        # making this the most reliable signal for deletion-based bloat.
+        total_live_rows = 0
+        total_storage_rows = 0
+        try:
+            for (table_name,) in tables:
+                live = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[
+                    0
+                ]
+                total_live_rows += live
+
+                # Pick the first non-list column to avoid FLOAT[N] inflation
+                col = conn.execute(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'main' AND table_name = ?
+                    AND data_type NOT LIKE '%[%' AND data_type NOT LIKE 'LIST%'
+                    ORDER BY ordinal_position
+                    LIMIT 1
+                """,
+                    [table_name],
+                ).fetchone()
+
+                if col:
+                    storage = conn.execute(
+                        """
+                        SELECT COALESCE(SUM(count), 0)
+                        FROM pragma_storage_info(?)
+                        WHERE column_name = ?
+                          AND segment_type != 'VALIDITY'  -- exclude null bitmasks
+                    """,
+                        [table_name, col[0]],
+                    ).fetchone()[0]
+                    total_storage_rows += max(int(storage), live)
+                else:
+                    total_storage_rows += live
+        except Exception as e:
+            logger.debug(f"Row utilization query failed: {e}")
+            total_storage_rows = total_live_rows  # Fallback: assume no waste
+
+        if total_storage_rows > 0:
+            row_waste = 1.0 - (total_live_rows / total_storage_rows)
+            row_waste = max(0.0, min(1.0, row_waste))
+        else:
+            row_waste = 0.0
+
+        free_ratio = free_blocks / total_blocks if total_blocks > 0 else 0.0
+
+        return {
+            "total_blocks": total_blocks,
+            "used_blocks": used_blocks,
+            "free_blocks": free_blocks,
+            "accounted_blocks": accounted_blocks,
+            "orphaned_blocks": orphaned_blocks,
+            "block_size": block_size,
+            "free_ratio": free_ratio,
+            "row_waste_ratio": row_waste,
+            "effective_waste": max(free_ratio, row_waste),
+            "_raw_fragmentation_ratio": fragmentation,
+        }
+
+    def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
+        """Check if compaction is warranted.
+
+        Uses the stronger of two complementary signals:
+
+        - ``row_waste_ratio``: detects partially-deleted row groups that
+          CHECKPOINT cannot reclaim (the dominant bloat source after
+          re-indexing).
+        - ``free_blocks / total_blocks``: detects block-level fragmentation
+          from DROP INDEX + CHECKPOINT cycles.
+
+        Returns:
+            Tuple of (should_compact, storage_stats) to avoid duplicate queries.
+        """
+        stats = self.get_storage_stats()
+        return stats.get("effective_waste", 0.0) >= threshold, stats
+
+    def create_deferred_indexes(self) -> None:
+        """Create any deferred vector indexes.
+
+        Called at end of indexing to create HNSW indexes that were deferred
+        during first-time indexing for performance.
+        """
+        self._execute_in_db_thread_sync("create_deferred_indexes")
+
+    def _executor_create_deferred_indexes(
+        self, conn: Any, state: dict[str, Any]
+    ) -> None:
+        """Executor method for create_deferred_indexes - runs in DB thread."""
+        if not state.get("deferred_hnsw_indexes"):
+            logger.debug("No deferred HNSW indexes to create")
+            return
+
+        deferred_tables = state.get("deferred_hnsw_indexes", set())
+        logger.info(
+            f"Creating deferred HNSW indexes for {len(deferred_tables)} table(s)"
+        )
+
+        for table_name, dims in deferred_tables:
+            try:
+                hnsw_index_name = f"idx_hnsw_{dims}"
+
+                # Check if index already exists
+                existing = conn.execute(
+                    """
+                    SELECT index_name FROM duckdb_indexes()
+                    WHERE table_name = ?
+                    AND index_name = ?
+                """,
+                    [table_name, hnsw_index_name],
+                ).fetchone()
+
+                if existing:
+                    logger.debug(f"Index {hnsw_index_name} already exists, skipping")
+                    continue
+
+                logger.info(f"Creating HNSW index {hnsw_index_name} on {table_name}")
+                conn.execute(f"""
+                    CREATE INDEX "{hnsw_index_name}" ON "{table_name}"
+                    USING HNSW (embedding)
+                    WITH (metric = 'cosine')
+                """)
+                logger.info(f"Created deferred HNSW index {hnsw_index_name}")
+
             except Exception as e:
-                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.warning(f"Checkpoint failed: {e}")
+                logger.error(f"Failed to create deferred index on {table_name}: {e}")
+
+        # Clear the deferred list
+        state["deferred_hnsw_indexes"] = set()
 
     def create_schema(self) -> None:
         """Create database schema for files, chunks, and embeddings - delegate to connection manager."""
@@ -918,9 +1267,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         try:
             # Check if 'size' and 'signature' columns exist and drop them
             columns_info = conn.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'chunks' 
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'chunks'
                 AND column_name IN ('size', 'signature')
             """).fetchall()
 
@@ -1355,7 +1704,15 @@ class DuckDBProvider(SerialDatabaseProvider):
     def _extract_custom_hnsw_identity(
         self, index_name: str
     ) -> tuple[str | None, str | None]:
-        """Best-effort provider/model extraction from custom HNSW index names."""
+        """Best-effort provider/model extraction from custom HNSW index names.
+
+        Format: hnsw_{provider}_{model}_{dims}_{metric}
+        Both provider and model are underscore-sanitized so splitting on the
+        last underscore of the provider_model segment is ambiguous for compound
+        model names (e.g. text_embedding_3_large).  The returned values are
+        metadata-only and are never used for SQL generation; index recreation
+        relies on index_name and table_name verbatim.
+        """
         if not index_name.startswith("hnsw_"):
             return None, None
 
@@ -1444,15 +1801,22 @@ class DuckDBProvider(SerialDatabaseProvider):
         dims = int(index_info["dims"])
         self._executor_ensure_embedding_table_exists(conn, state, dims)
         index_name = str(index_info["index_name"])
-        if not self._is_safe_duckdb_identifier(index_name):
-            logger.warning(
-                "Skipping HNSW index restore for unsafe identifier "
-                f"{index_name!r} on {table_name}"
-            )
-            return
+
+        # Reject structurally unsafe names. Double-quoting (via _quote_duckdb_identifier)
+        # prevents SQL injection, but names with control characters or path separators
+        # could still misbehave in some DuckDB VSS code paths.
+        for _name, _label in ((index_name, "index"), (table_name, "table")):
+            if not self._is_safe_duckdb_identifier(_name):
+                logger.warning(
+                    f"Skipping HNSW index restore: unsafe identifier {_name!r} "
+                    f"(label={_label}). Expected pattern: [A-Za-z_][A-Za-z0-9_]*"
+                )
+                return
 
         try:
-            metric = self._normalize_hnsw_metric(str(index_info.get("metric", "cosine")))
+            metric = self._normalize_hnsw_metric(
+                str(index_info.get("metric", "cosine"))
+            )
         except ValueError as error:
             logger.warning(
                 "Skipping HNSW index restore for "
@@ -1484,12 +1848,11 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> None:
         """Insert one previously snapshotted row back into a table."""
         columns = list(row.keys())
+        quoted_tbl = self._quote_duckdb_identifier(table_name)
+        quoted_cols = ", ".join(self._quote_duckdb_identifier(c) for c in columns)
         placeholders = ", ".join(["?"] * len(columns))
         conn.execute(
-            f"""
-            INSERT INTO {table_name} ({", ".join(columns)})
-            VALUES ({placeholders})
-            """,
+            f"INSERT INTO {quoted_tbl} ({quoted_cols}) VALUES ({placeholders})",
             [row[column] for column in columns],
         )
 
@@ -1501,12 +1864,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             return
 
         columns = list(rows[0].keys())
+        quoted_tbl = self._quote_duckdb_identifier(table_name)
+        quoted_cols = ", ".join(self._quote_duckdb_identifier(c) for c in columns)
         placeholders = ", ".join(["?"] * len(columns))
         conn.executemany(
-            f"""
-            INSERT INTO {table_name} ({", ".join(columns)})
-            VALUES ({placeholders})
-            """,
+            f"INSERT INTO {quoted_tbl} ({quoted_cols}) VALUES ({placeholders})",
             [[row[column] for column in columns] for row in rows],
         )
 
@@ -1652,12 +2014,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
         chunk_rows = self._executor_fetch_rows_as_dicts(
             conn,
-            """
+            f"""
             SELECT *
             FROM chunks
             WHERE file_id IN ({placeholders})
             ORDER BY id
-            """.format(placeholders=placeholders),
+            """,
             unique_file_ids,
         )
         chunk_ids = [int(row["id"]) for row in chunk_rows]
@@ -1759,9 +2121,10 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             result = mutation_func()
 
-            # Commit data changes before recreating HNSW indexes. DuckDB VSS HNSW indexes
-            # do not support CreateDeltaIndex, so committing a transaction that contains an
-            # HNSW CREATE triggers a BoundIndex::CreateDeltaIndex assertion failure.
+            # Commit data changes before recreating HNSW indexes.
+            # DuckDB VSS HNSW indexes do not support CreateDeltaIndex,
+            # so committing a transaction that contains an HNSW CREATE
+            # triggers a BoundIndex::CreateDeltaIndex assertion failure.
             if transactional:
                 self._executor_commit_transaction(conn, state, False)
 
@@ -1921,9 +2284,6 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
                 return file_id
 
-            # Track operation for checkpoint management
-            track_operation(state)
-
             # No existing file, insert new one
             result = conn.execute(
                 """
@@ -2060,9 +2420,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         content_hash: str | None,
     ) -> None:
         """Executor method for update_file - runs in DB thread."""
-        # Track operation for checkpoint management
-        track_operation(state)
-
         # Build update query dynamically
         updates = []
         params = []
@@ -2254,9 +2611,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Executor method for insert_chunks_batch - runs in DB thread."""
         if not chunks:
             return []
-
-        # Track operation for checkpoint management
-        track_operation(state)
 
         # Prepare data for bulk insert
         chunk_data = []
@@ -2458,9 +2812,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], chunk: Chunk
     ) -> int:
         """Executor method for insert_chunk - runs in DB thread."""
-        # Track operation for checkpoint management
-        track_operation(state)
-
         result = conn.execute(
             """
             INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
@@ -2547,8 +2898,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], chunk_id: int, query: str, values: list
     ) -> None:
         """Executor method for update_chunk query - runs in DB thread."""
-        # Track operation for checkpoint management
-        track_operation(state)
         conn.execute(query, values)
 
     def _executor_get_all_chunks_with_metadata_query(
@@ -2767,7 +3116,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Use parameterized placeholders for chunk IDs
             placeholders = ", ".join(["?" for _ in chunk_ids])
             query = f"""
-                SELECT DISTINCT chunk_id 
+                SELECT DISTINCT chunk_id
                 FROM {table_name}
                 WHERE chunk_id IN ({placeholders})
                 AND provider = ? AND model = ?
@@ -3308,7 +3657,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                         break
                 else:
                     # Debug what's actually in this table for this chunk
-                    all_for_chunk = conn.execute(
+                    conn.execute(
                         f"""
                         SELECT provider, model, chunk_id
                         FROM {table}
@@ -3344,7 +3693,6 @@ class DuckDBProvider(SerialDatabaseProvider):
             embedding_type = f"FLOAT[{dims}]"
 
             # Use the embedding to find similar chunks
-            similarity_metric = "cosine"  # Default for semantic search
             threshold_condition = (
                 f"AND distance <= {threshold}" if threshold is not None else ""
             )
@@ -3478,7 +3826,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # Query for similar chunks using the provided embedding
             query = f"""
-                SELECT 
+                SELECT
                     c.id as chunk_id,
                     c.symbol as name,
                     c.code as content,
@@ -3703,9 +4051,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._execute_in_db_thread_sync("execute_query", query, params),
         )
 
-    def list_file_paths_under_directory(
-        self, directory_prefix: str
-    ) -> list[str]:
+    def list_file_paths_under_directory(self, directory_prefix: str) -> list[str]:
         escaped_prefix = escape_like_pattern(directory_prefix)
         rows = self.execute_query(
             "SELECT path FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'",
@@ -3742,6 +4088,40 @@ class DuckDBProvider(SerialDatabaseProvider):
         conn.execute("BEGIN TRANSACTION")
         state["transaction_active"] = True
 
+    def _executor_maybe_checkpoint(
+        self, conn: Any, state: dict[str, Any], force: bool
+    ) -> None:
+        """Executor method for _maybe_checkpoint - runs in DB thread."""
+        if self._connection_manager.is_memory_db:
+            return
+
+        # Defer checkpoint if we're in a transaction
+        if state.get("transaction_active", False):
+            state["deferred_checkpoint"] = True
+            if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                logger.debug("Deferring checkpoint until transaction completes")
+            return
+
+        current_time = time.time()
+        time_since_checkpoint = current_time - state.get(
+            "last_checkpoint_time", current_time
+        )
+
+        # Checkpoint if forced or 60 seconds elapsed
+        should_checkpoint = force or time_since_checkpoint >= 60
+
+        if should_checkpoint:
+            try:
+                conn.execute("CHECKPOINT")
+                state["last_checkpoint_time"] = current_time
+                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                    logger.debug(
+                        f"Checkpoint completed (time: {time_since_checkpoint:.1f}s)"
+                    )
+            except Exception as e:
+                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                    logger.warning(f"Checkpoint failed: {e}")
+
     def _executor_commit_transaction(
         self, conn: Any, state: dict[str, Any], force_checkpoint: bool
     ) -> None:
@@ -3771,36 +4151,513 @@ class DuckDBProvider(SerialDatabaseProvider):
         # it from firing on the next unrelated commit.
         state["deferred_checkpoint"] = False
 
-    def optimize_tables(self) -> None:
-        """Optimize tables by compacting fragments and rebuilding indexes (provider-specific).
+    def optimize(self, cancel_check: Callable[[], bool] | None = None) -> bool:
+        """Optimize DuckDB storage: CHECKPOINT and full compaction.
 
-        # DUCKDB_OPTIMIZATION: Automatic via WAL and MVCC
-        # CHECKPOINT: Happens at 1GB WAL size
-        # MANUAL: Not needed - DuckDB self-optimizes
+        Always runs compaction when called. Callers are responsible for deciding
+        whether compaction is warranted before calling this method.
+
+        Args:
+            cancel_check: Optional callable returning True if compaction
+                should be cancelled.
+
+        Returns:
+            True if compaction was performed, False if cancelled.
+
+        Raises:
+            CompactionError: If compaction fails.
         """
-        # DuckDB automatically manages table optimization. Emit metrics for visibility.
-        if os.environ.get("CHUNKHOUND_MCP_MODE"):
-            return
+        if cancel_check and cancel_check():
+            return False
+
+        # Step 1: Always run CHECKPOINT + HNSW compact (lightweight)
+        self.optimize_tables()
+
+        if cancel_check and cancel_check():
+            return False
+
+        # Step 2: Run full compaction
+        logger.info("Running full database compaction...")
+        return self._run_blocking_compaction(cancel_check=cancel_check)
+
+    def _run_blocking_compaction(
+        self, cancel_check: Callable[[], bool] | None = None
+    ) -> bool:
+        """Run full EXPORT/IMPORT/SWAP compaction cycle.
+
+        DuckDB requires exclusive access for export (no mixing read-only and
+        read-write connections), so we soft_disconnect before the export step.
+
+        Args:
+            cancel_check: Optional callable returning True if cancelled.
+
+        Returns:
+            True if compaction succeeded, False if cancelled.
+
+        Raises:
+            CompactionError: If compaction fails.
+        """
+        db_path = Path(self._connection_manager.db_path)
+
+        export_dir = db_path.parent / ".chunkhound_compaction_export"
+        new_db_path = db_path.with_suffix(".compact.duckdb")
+        old_db_path = db_path.with_suffix(".duckdb.old")
+        wal_file = db_path.with_suffix(db_path.suffix + ".wal")
+        lock_file = get_compaction_lock_path(db_path)
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        lock_acquired = False
+        flag_set = False
+        path_registered = False
         try:
-            m = self._metrics.get("chunks", {})
-            files = int(m.get("files", 0))
-            rows = int(m.get("rows", 0))
-            batches = int(m.get("batches", 0))
-            t_temp = float(m.get("temp_create_s", 0.0))
-            t_clear = float(m.get("temp_clear_s", 0.0))
-            t_tins = float(m.get("temp_insert_s", 0.0))
-            t_main = float(m.get("main_insert_s", 0.0))
-            if files or rows:
-                logger.info(
-                    "DuckDB chunks bulk metrics: files={} rows={} batches={} "
-                    "t_temp={:.2f}s t_temp_clear={:.2f}s t_temp_insert={:.2f}s t_main_insert={:.2f}s",
-                    files,
-                    rows,
-                    batches,
-                    t_temp,
-                    t_clear,
-                    t_tins,
-                    t_main,
+            # Atomic lock acquisition (matches daemon PID lock pattern)
+            try:
+                # Pre-register in process-wide set BEFORE creating the lock file so
+                # any concurrent same-process connect() that sees the file also sees
+                # the path as live. lock_acquired tracks the on-disk file;
+                # path_registered tracks the in-memory registry — they are cleaned
+                # up independently in finally.
+                with _COMPACTING_PATHS_LOCK:
+                    _COMPACTING_PATHS.add(str(db_path))
+                path_registered = True
+                # Instance flag for the reconnect fast-path in connect().
+                # Set before the on-disk lock so a concurrent same-process connect()
+                # that sees the file also sees flag=True — both guards are consistent.
+                self._connection_manager._compaction_in_progress = True
+                flag_set = True
+                fd = os.open(str(lock_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                try:
+                    os.write(fd, f"{os.getpid()}:{time.time():.0f}".encode())
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                lock_acquired = True
+            except FileExistsError:
+                raise CompactionError(
+                    "Compaction already in progress (lock file exists)",
+                    operation="lock",
+                ) from None
+
+            # Peak footprint during IMPORT: original DB (1x) + exported
+            # parquet (~1x) + new compact DB (~1x) = 3x worst case. Parquet
+            # compression typically yields less, but compaction failing
+            # mid-IMPORT is catastrophic — stay conservative.
+            self._has_sufficient_disk_space(db_path, multiplier=3.0)
+
+            # Suspend auto-reconnect before soft_disconnect so concurrent MCP
+            # requests get CompactionError instead of opening stale connections.
+            # Safe: the executor is single-threaded, so any in-flight request
+            # completes before soft_disconnect's disconnect task runs.
+            self._connection_allowed.clear()
+
+            # Soft disconnect before export — DuckDB doesn't allow mixing
+            # read-only and read-write connections to the same file
+            self.soft_disconnect(skip_checkpoint=False)
+
+            # 1. Export from original database (opens its own read-only connection)
+            logger.info("Exporting database for compaction...")
+            hnsw_indexes = self._export_database_for_compaction(db_path, export_dir)
+
+            if cancel_check and cancel_check():
+                self._restore_connection_after_compaction()
+                return False
+
+            # 2. Import into fresh database (connects to new file)
+            logger.info("Importing into compacted database...")
+            self._import_database_for_compaction(
+                export_dir, new_db_path, hnsw_indexes=hnsw_indexes
+            )
+
+            if cancel_check and cancel_check():
+                # Clean up the compacted DB since we won't swap
+                if new_db_path.exists():
+                    new_db_path.unlink()
+                self._restore_connection_after_compaction()
+                return False
+
+            # 3. Atomic swap
+            logger.info("Performing atomic swap...")
+
+            _write_intent(intent_path, PHASE_PRE_SWAP)
+
+            # Explicitly delete orphaned WAL before swap
+            if wal_file.exists():
+                wal_file.unlink()
+                logger.debug(f"Removed pre-swap WAL: {wal_file}")
+
+            # Clean up any previous old file
+            if old_db_path.exists():
+                old_db_path.unlink()
+
+            # os.replace is atomic on POSIX; on Windows the two-step
+            # rename is NOT atomic — crash recovery in connect() handles this
+            _write_intent(intent_path, PHASE_1)
+            os.replace(db_path, old_db_path)
+
+            _write_intent(intent_path, PHASE_2)
+            os.replace(new_db_path, db_path)
+
+            intent_path.unlink(missing_ok=True)
+
+            if cancel_check and cancel_check():
+                # Swap succeeded but shutdown requested — skip connect().
+                # cleanup() will handle provider teardown. Ungate so cleanup
+                # can proceed without CompactionError.
+                self._connection_allowed.set()
+                if self._connection_manager._probe_db_valid(db_path):
+                    old_db_path.unlink(missing_ok=True)
+                    return True
+                else:
+                    logger.warning(
+                        "Swapped DB failed integrity probe on cancel path; "
+                        "keeping backup %s for recovery",
+                        old_db_path,
+                    )
+                    return False
+
+            # Reconnect to swapped database
+            self._restore_connection_after_compaction()
+
+            # Clean up old file
+            try:
+                old_db_path.unlink(missing_ok=True)
+            except OSError as exc:
+                # Compaction succeeded and new DB is connected —
+                # cleanup failure is non-fatal.
+                # Recovery on next startup will handle the stale file.
+                logger.warning(
+                    "Could not remove old database after compaction: %s", exc
                 )
-        except Exception:
-            pass
+
+            logger.info(f"Compaction complete: {db_path}")
+            return True
+
+        except CompactionError:
+            raise
+        except Exception as e:
+            logger.error(f"Compaction failed: {e}")
+            # Attempt recovery: restore original if possible
+            if old_db_path.exists() and not db_path.exists():
+                logger.warning("Restoring original database from backup...")
+                os.replace(old_db_path, db_path)
+            elif not db_path.exists():
+                logger.critical(
+                    "No database file found after compaction failure. "
+                    "The database was renamed during swap but could not be restored. "
+                    "Manual recovery required."
+                )
+                raise CompactionError(
+                    "No database file found after compaction failure. "
+                    "Manual recovery required.",
+                    operation="compaction",
+                ) from e
+            # Reconnect (we disconnected for export, need to restore connection)
+            if not self.is_connected:
+                try:
+                    self._restore_connection_after_compaction()
+                except Exception as err:
+                    logger.error(
+                        f"Reconnect after compaction failed: {err}. "
+                        "The database may be in an inconsistent state. "
+                        "Restart the process to recover."
+                    )
+            # Clean up temp database on failure
+            if new_db_path.exists():
+                try:
+                    new_db_path.unlink()
+                except OSError:
+                    pass
+            raise CompactionError(
+                f"Compaction failed: {e}", operation="compaction"
+            ) from e
+        finally:
+            # Always clean up export directory and lock file
+            if export_dir.exists():
+                shutil.rmtree(export_dir, ignore_errors=True)
+            # Cleanup order: unlink the on-disk lock first, then discard from
+            # _COMPACTING_PATHS. Discard is gated on lock_acquired (not
+            # path_registered alone) so Provider B (which failed at lock
+            # acquisition with lock_acquired=False) cannot remove Provider A's
+            # valid registry entry. Since _COMPACTING_PATHS is a set and both
+            # A and B register the same path string, A's discard implicitly
+            # covers B's registration — no stale entry persists past A's
+            # completion.
+            if lock_acquired:
+                lock_file.unlink(missing_ok=True)
+            if flag_set:
+                self._connection_manager._compaction_in_progress = False
+            if path_registered and lock_acquired:
+                with _COMPACTING_PATHS_LOCK:
+                    _COMPACTING_PATHS.discard(str(db_path))
+            intent_path.unlink(missing_ok=True)
+            # Only restore connection gate if provider is actually connected.
+            # Success/cancel paths already set() explicitly above.
+            # If error recovery failed to reconnect, leave gate closed so
+            # MCP requests get CompactionError instead of hitting broken provider.
+            if self.is_connected:
+                self._connection_allowed.set()
+
+    def _restore_connection_after_compaction(self) -> None:
+        """Reconnect after compaction unless cleanup has made the provider terminal."""
+        if self.terminal_after_stuck_cleanup:
+            raise CompactionError(
+                "Compaction cannot restore the database connection after terminal "
+                "stuck-cleanup state",
+                operation="compaction",
+                recoverable=False,
+            )
+        self._connection_allowed.set()
+        self.connect()
+
+    def _has_sufficient_disk_space(
+        self, db_path: Path, multiplier: float = 3.0
+    ) -> None:
+        """Check if sufficient disk space exists for compaction.
+
+        Raises:
+            CompactionError: If insufficient disk space.
+        """
+        try:
+            db_size = db_path.stat().st_size
+            required = int(db_size * multiplier)
+            available = shutil.disk_usage(db_path.parent).free
+
+            if available < required:
+                raise CompactionError(
+                    f"Insufficient disk space for compaction: "
+                    f"need {required / 1024 / 1024:.1f}MB, "
+                    f"have {available / 1024 / 1024:.1f}MB",
+                    operation="preflight",
+                )
+        except OSError as e:
+            raise CompactionError(
+                f"Cannot verify disk space for compaction: {e}. "
+                "Resolve the issue and retry.",
+                operation="preflight",
+            ) from e
+
+    @staticmethod
+    def _sql_literal_path(path: Path) -> str:
+        """Escape a path for embedding inside a single-quoted DuckDB SQL literal.
+
+        DuckDB's EXPORT/IMPORT DATABASE don't support parameterized paths, so
+        callers interpolate the result inside f"... '{x}' ...". This function:
+          1. Rejects characters that can break SQL string literals or embed
+             commands (denylist), allowing arbitrary Unicode for accented
+             usernames and CJK paths.
+          2. Escapes embedded single quotes by doubling them (DuckDB SQL
+             literal convention).
+
+        Callers MUST wrap the return in single quotes. The result is NOT safe
+        for embedding in double-quoted identifiers or raw paths.
+        """
+        path_str = path.as_posix()
+        # Characters that can break SQL string literals or embed commands.
+        # Backslash is rejected for cross-platform safety: as_posix() has
+        # already normalised Windows separators to '/', so any backslash
+        # reaching here would be an unusual filename char.
+        forbidden = {"\x00", "\n", "\r", '"', "`", ";", "\\"}
+        if any(c in path_str for c in forbidden) or any(
+            ord(c) < 0x20 for c in path_str
+        ):
+            raise CompactionError(
+                f"Database path contains forbidden characters for SQL "
+                f"interpolation: {path_str!r}",
+                operation="validation",
+            )
+        # Escape single quotes by doubling (DuckDB SQL literal convention).
+        return path_str.replace("'", "''")
+
+    def _export_database_for_compaction(
+        self, db_path: Path, export_dir: Path
+    ) -> list[dict[str, Any]]:
+        """Export database to Parquet files for compaction.
+
+        Returns HNSW index snapshot captured before EXPORT so the caller can
+        recreate the indexes after IMPORT DATABASE on the compacted file.
+        """
+        # Clean up any leftover export directory
+        if export_dir.exists():
+            shutil.rmtree(export_dir)
+
+        # Direct connection (bypasses serial executor) because the provider is
+        # soft-disconnected and DuckDB needs exclusive file access for compaction.
+        conn = duckdb.connect(str(db_path), read_only=True)
+        try:
+            conn.execute("LOAD vss")
+            hnsw_indexes = self._capture_hnsw_indexes_from_conn(conn)
+            safe_path = self._sql_literal_path(export_dir)
+            conn.execute(f"EXPORT DATABASE '{safe_path}' (FORMAT PARQUET)")
+            return hnsw_indexes
+        finally:
+            conn.close()
+
+    def _import_database_for_compaction(
+        self,
+        export_dir: Path,
+        new_db_path: Path,
+        hnsw_indexes: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Import Parquet files into fresh database.
+
+        If hnsw_indexes is provided, recreates them after IMPORT DATABASE and
+        before CHECKPOINT so they are persisted in the compacted file.
+        """
+        if new_db_path.exists():
+            new_db_path.unlink()
+
+        # Direct connection (bypasses serial executor) because the provider is
+        # soft-disconnected and DuckDB needs exclusive file access for compaction.
+        conn = duckdb.connect(str(new_db_path))
+        try:
+            conn.execute("LOAD vss")
+            self._enable_hnsw_persistence_on_conn(conn)
+            safe_path = self._sql_literal_path(export_dir)
+            conn.execute(f"IMPORT DATABASE '{safe_path}'")
+            if hnsw_indexes:
+                self._recreate_hnsw_indexes_in_conn(conn, hnsw_indexes)
+            # CRITICAL: Checkpoint to persist imported data before closing
+            # Without this, the imported data may not be written to disk
+            conn.execute("CHECKPOINT")
+        finally:
+            conn.close()
+
+    def _enable_hnsw_persistence_on_conn(self, conn: Any) -> None:
+        """Enable HNSW index persistence."""
+        try:
+            conn.execute("SET hnsw_enable_experimental_persistence = true")
+        except duckdb.Error as e:
+            if "unrecognized" not in str(e).lower():
+                raise
+            logger.warning(
+                "HNSW persistence flag not available. "
+                "Vector indexes will rebuild on first query after compaction."
+            )
+
+    def _capture_hnsw_indexes_from_conn(self, conn: Any) -> list[dict[str, Any]]:
+        """Snapshot HNSW index definitions from an open DB connection.
+
+        Called on the read-only export connection before EXPORT DATABASE so
+        that index metadata survives the Parquet round-trip.  Returns an empty
+        list (and logs a warning) on any failure so compaction still proceeds —
+        indexes will just rebuild on the next reindex pass.
+        """
+        try:
+            rows = conn.execute("""
+                SELECT index_name, table_name, sql
+                FROM duckdb_indexes()
+                WHERE table_name LIKE 'embeddings_%'
+            """).fetchall()
+        except Exception as e:
+            logger.warning(
+                f"HNSW snapshot query failed, indexes will rebuild post-compaction: {e}"
+            )
+            return []
+
+        indexes: list[dict[str, Any]] = []
+        for index_name, table_name, create_sql in rows:
+            if not self._is_hnsw_index_definition(index_name, create_sql):
+                continue
+            try:
+                dims = int(table_name[11:])
+            except ValueError:
+                logger.warning(
+                    "Cannot parse dims from HNSW index %s on %s, skipping",
+                    index_name,
+                    table_name,
+                )
+                continue
+            provider: str | None = None
+            model: str | None = None
+            if index_name.startswith("hnsw_"):
+                provider, model = self._extract_custom_hnsw_identity(index_name)
+            elif index_name.startswith("idx_hnsw_"):
+                provider = "generic"
+                model = "generic"
+            indexes.append(
+                {
+                    "index_name": index_name,
+                    "table_name": table_name,
+                    "provider": provider,
+                    "model": model,
+                    "dims": dims,
+                    "metric": self._extract_hnsw_metric(create_sql),
+                }
+            )
+
+        if indexes:
+            logger.info(
+                "Captured %d HNSW index snapshot(s) before compaction export",
+                len(indexes),
+            )
+        else:
+            logger.debug("No HNSW indexes found to snapshot before compaction export")
+        return indexes
+
+    def _recreate_hnsw_indexes_in_conn(
+        self, conn: Any, hnsw_indexes: list[dict[str, Any]]
+    ) -> None:
+        """Recreate HNSW indexes in a connection after IMPORT DATABASE.
+
+        Called on the import connection before CHECKPOINT so indexes are
+        persisted in the compacted file.  Individual index failures are logged
+        and skipped — a partially-rebuilt set is better than aborting compaction.
+
+        Tables must already exist (guaranteed by IMPORT DATABASE having run).
+        """
+        if not hnsw_indexes:
+            return
+
+        logger.info(
+            f"Recreating {len(hnsw_indexes)} HNSW index(es) in compacted database..."
+        )
+        succeeded = 0
+        for idx in hnsw_indexes:
+            index_name = str(idx["index_name"])
+            table_name = str(idx["table_name"])
+
+            # Mirror the guard in _executor_recreate_vector_index_from_info: reject
+            # structurally unsafe names so DuckDB doesn't see control chars in DDL.
+            skip = False
+            for _name, _label in ((index_name, "index"), (table_name, "table")):
+                if not self._is_safe_duckdb_identifier(_name):
+                    logger.warning(
+                        f"Skipping HNSW index restore: unsafe identifier {_name!r} "
+                        f"(label={_label}). Expected pattern: [A-Za-z_][A-Za-z0-9_]*"
+                    )
+                    skip = True
+                    break
+            if skip:
+                continue
+
+            try:
+                metric = self._normalize_hnsw_metric(str(idx.get("metric", "cosine")))
+            except ValueError as e:
+                logger.warning(f"Skipping {index_name!r}: {e}")
+                continue
+
+            try:
+                quoted_idx = self._quote_duckdb_identifier(index_name)
+                quoted_tbl = self._quote_duckdb_identifier(table_name)
+                conn.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {quoted_idx}
+                    ON {quoted_tbl}
+                    USING HNSW (embedding)
+                    WITH (metric = '{metric}')
+                """)
+                logger.info(
+                    "Recreated HNSW index %r on %r (metric=%s)",
+                    index_name,
+                    table_name,
+                    metric,
+                )
+                succeeded += 1
+            except Exception as e:
+                logger.error(f"Failed to recreate HNSW index {index_name!r}: {e}")
+
+        conn.commit()
+        logger.info(
+            "HNSW recreation complete: %d/%d index(es) restored",
+            succeeded,
+            len(hnsw_indexes),
+        )

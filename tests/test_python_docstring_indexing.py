@@ -31,7 +31,7 @@ def test_services(temp_db_dir):
         args=fake_args,
         database={"path": str(db_path), "provider": "duckdb"},
         embedding=None,
-        indexing={"include": ["*.py"], "exclude": []}
+        indexing={"include": ["*.py"], "exclude": [], "index_unknown_files": False}
     )
 
     services = create_services(db_path, config, embedding_manager=None)

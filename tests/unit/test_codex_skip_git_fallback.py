@@ -21,7 +21,7 @@ async def test_codex_skip_git_required_flag_retry(monkeypatch, tmp_path: Path) -
     overlay_dir = tmp_path / "overlay-home-required"
     overlay_dir.mkdir(parents=True, exist_ok=True)
 
-    def _fake_overlay_home(self, model_override=None):
+    def _fake_overlay_home(self, model_override=None, **kwargs):
         return str(overlay_dir)
 
     monkeypatch.setattr(
@@ -86,7 +86,7 @@ async def test_codex_skip_git_unknown_flag_fallback(
     overlay_dir = tmp_path / "overlay-home"
     overlay_dir.mkdir(parents=True, exist_ok=True)
 
-    def _fake_overlay_home(self, model_override=None):
+    def _fake_overlay_home(self, model_override=None, **kwargs):
         return str(overlay_dir)
 
     monkeypatch.setattr(

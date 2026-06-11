@@ -30,6 +30,7 @@ from chunkhound.watchman_runtime.loader import (
     listener_path_is_filesystem,
     resolve_packaged_watchman_runtime,
 )
+from tests.utils.realtime_test_helpers import write_and_index_file
 from tests.utils.windows_compat import (
     create_windows_directory_junction,
     realtime_backend_for_tests,
@@ -97,7 +98,7 @@ class TestRealtimeFunctional:
     """Functional tests for real-time indexing - test what really matters."""
 
     @pytest.fixture
-    async def realtime_setup(self):
+    async def realtime_setup(self, watcher_mode):
         """Setup real service with temp database and project directory."""
         # Resolve immediately to handle symlinks (/var -> /private/var on macOS)
         # and Windows 8.3 short path names
@@ -119,6 +120,7 @@ class TestRealtimeFunctional:
             indexing={
                 "include": ["*.py", "*.js"],
                 "exclude": ["*.log"],
+                "index_unknown_files": False,
                 "realtime_backend": realtime_backend_for_tests(),
             },
         )
@@ -144,6 +146,7 @@ class TestRealtimeFunctional:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_service_can_start_and_stop(self, realtime_setup):
         """Test basic service lifecycle - start and stop without crashing."""
         service, watch_dir, _, _ = realtime_setup
@@ -189,6 +192,7 @@ class TestRealtimeFunctional:
             indexing={
                 "include": ["*.py"],
                 "exclude": [],
+                "index_unknown_files": False,
                 "realtime_backend": "watchman",
             },
         )
@@ -1433,35 +1437,31 @@ class TestRealtimeFunctional:
             await service.stop()
 
     @pytest.mark.asyncio
-    async def test_deleted_directory_cleanup_queues_child_deletes(
+    async def test_deleted_directory_cleanup_deletes_child_files(
         self, realtime_setup, monkeypatch
     ):
-        """Deleted-directory cleanup should only expand into queued delete work."""
+        """Deleted-directory cleanup must delete all child files directly."""
         service, watch_dir, _, _ = realtime_setup
         deleted_dir = watch_dir / "deleted_dir"
         first_file = deleted_dir / "first.py"
         second_file = deleted_dir / "second.py"
-        direct_delete_calls = 0
+        deleted_paths: list[str] = []
 
-        def fake_list_file_paths_under_directory(
-            directory_prefix: str,
-        ) -> list[str]:
+        async def fake_scope_paths(scope_prefix: str) -> list[str]:
             return [str(first_file), str(second_file)]
 
-        async def unexpected_direct_delete(_file_path: str) -> bool:
-            nonlocal direct_delete_calls
-            direct_delete_calls += 1
-            raise AssertionError("directory cleanup should not delete directly")
+        async def fake_delete(file_path: str) -> None:
+            deleted_paths.append(file_path)
 
         monkeypatch.setattr(
             service.services.provider,
-            "list_file_paths_under_directory",
-            fake_list_file_paths_under_directory,
+            "get_scope_file_paths_async",
+            fake_scope_paths,
         )
         monkeypatch.setattr(
             service.services.provider,
             "delete_file_completely_async",
-            unexpected_direct_delete,
+            fake_delete,
         )
 
         service._service_state = "running"
@@ -1479,23 +1479,7 @@ class TestRealtimeFunctional:
             )
         )
 
-        queued_mutations = []
-        while not service.file_queue.empty():
-            _, _, mutation = await service.file_queue.get()
-            queued_mutations.append(mutation)
-
-        assert direct_delete_calls == 0
-        assert [mutation.operation for mutation in queued_mutations] == [
-            "delete",
-            "delete",
-        ]
-        assert {mutation.path for mutation in queued_mutations} == {
-            first_file.resolve(),
-            second_file.resolve(),
-        }
-        assert {mutation.source_generation for mutation in queued_mutations} == {
-            dir_delete_generation
-        }
+        assert set(deleted_paths) == {str(first_file), str(second_file)}
 
     @pytest.mark.asyncio
     async def test_ready_delete_mutations_are_coalesced_into_one_batch(
@@ -1755,7 +1739,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -1805,7 +1789,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -1862,7 +1846,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -1921,7 +1905,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -1974,7 +1958,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -2043,7 +2027,7 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
 
         services = create_services(db_path, config)
@@ -2252,7 +2236,7 @@ class TestRealtimeFunctional:
                 "path": str(watch_dir / ".chunkhound" / "test.db"),
                 "provider": "duckdb",
             },
-            indexing={"realtime_backend": "watchman"},
+            indexing={"realtime_backend": "watchman", "index_unknown_files": False},
         )
         Path(config.database.path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -2624,6 +2608,7 @@ class TestRealtimeFunctional:
         assert priority == service._mutation_priority("change")
         assert queued_mutation == mutation
 
+    @pytest.mark.native_watcher
     @pytest.mark.asyncio
     async def test_filesystem_monitoring_detects_changes(self, realtime_setup):
         """Test that filesystem changes are detected and processed."""
@@ -2657,6 +2642,7 @@ class TestRealtimeFunctional:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_multiple_rapid_changes_handling(self, realtime_setup):
         """Test handling multiple rapid file changes - stress test for concurrency."""
         service, watch_dir, _, _ = realtime_setup
@@ -2732,53 +2718,71 @@ class TestRealtimeFunctional:
         await service.stop()
 
     @pytest.mark.asyncio
-    async def test_file_type_filtering_works(self, realtime_setup):
-        """Test that only supported file types are processed."""
-        service, watch_dir, _, services = realtime_setup
-        await service.start(watch_dir)
+    async def test_file_type_filtering_works_in_direct_indexing(self, realtime_setup):
+        """Direct indexing should skip unsupported file types."""
+        _, watch_dir, _, services = realtime_setup
 
         # Create supported file
         py_file = watch_dir / "supported.py"
-        py_file.write_text("def supported(): pass")
+        await write_and_index_file(services, py_file, "def supported(): pass")
 
         # Create unsupported file
         bin_file = watch_dir / "unsupported.xyz"
-        bin_file.write_text("unsupported content")
-
-        await asyncio.sleep(1.5)
+        bin_result = await write_and_index_file(services, bin_file, "unsupported content")
 
         # Check processing results
-        bin_record = services.provider.get_file_by_path(str(bin_file))
+        py_record = services.provider.get_file_by_path(str(py_file))
 
         # Python file may still fail for unrelated reasons, but the unsupported
-        # file should definitely be ignored.
-        # Binary file should definitely be ignored
-        assert bin_record is None, "Unsupported file types should be ignored"
+        # file should definitely be skipped with zero chunks.
+        assert py_record is not None, "Supported file types should be indexed"
+        assert bin_result.get("status") == "skipped", "Unsupported file types should be skipped"
+        assert bin_result.get("chunks", 0) == 0, "Unsupported file types should produce no chunks"
+
+    @pytest.mark.asyncio
+    @pytest.mark.native_watcher
+    async def test_realtime_watcher_filters_unsupported_files(self, realtime_setup):
+        """Native watcher should queue supported files and ignore unsupported ones."""
+        service, watch_dir, _, services = realtime_setup
+        await service.start(watch_dir)
+
+        ignored_file = watch_dir / "ignored.xyz"
+        ignored_file.write_text("unsupported content")
+
+        tracked_file = watch_dir / "tracked.py"
+        tracked_file.write_text("def tracked(): pass")
+
+        found = await service.wait_for_file_indexed(tracked_file)
+        assert found, "Supported files should still be detected by realtime monitoring"
+
+        tracked_record = services.provider.get_file_by_path(str(tracked_file))
+        ignored_record = services.provider.get_file_by_path(str(ignored_file))
+        assert tracked_record is not None, "Supported file should be indexed"
+        assert ignored_record is None, "Unsupported file should be ignored by the watcher"
 
         await service.stop()
 
     @pytest.mark.asyncio
-    async def test_background_vs_realtime_processing(self, realtime_setup):
-        """Test interaction between initial scan and real-time processing."""
+    @pytest.mark.native_watcher
+    async def test_realtime_processing_only_tracks_post_start_changes(
+        self, realtime_setup
+    ):
+        """Direct watcher tests should only require post-start realtime behavior."""
         service, watch_dir, _, services = realtime_setup
 
-        # Create files before starting service (will be found by initial scan)
-        initial_file = watch_dir / "initial.py"
-        initial_file.write_text("def initial(): pass")
+        preexisting_file = watch_dir / "preexisting.py"
+        preexisting_file.write_text("def preexisting(): pass")
 
         await service.start(watch_dir)
+        assert await service.wait_for_monitoring_ready(timeout=10.0)
 
-        # Create file after service started (real-time processing)
         realtime_file = watch_dir / "realtime.py"
-        await asyncio.sleep(0.5)  # Let initial scan start
+        service.reset_file_tracking(realtime_file)
         realtime_file.write_text("def realtime(): pass")
+        found = await service.wait_for_file_indexed(realtime_file)
 
-        # Wait for both initial scan and real-time processing
-        await asyncio.sleep(3.0)
-
-        # Both files should eventually be processed
-        initial_record = services.provider.get_file_by_path(str(initial_file))
         realtime_record = services.provider.get_file_by_path(str(realtime_file))
+        initial_record = services.provider.get_file_by_path(str(preexisting_file))
 
         # At least one should work (helps identify which path is broken)
         processed_count = sum(

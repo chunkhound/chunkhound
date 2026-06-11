@@ -71,6 +71,7 @@ def _build_config(
         indexing={
             "include": ["**/*.py"],
             "exclude": [],
+            "index_unknown_files": False,
             "exclude_sentinel": ".gitignore",
             "realtime_backend": realtime_backend,
         },
@@ -144,6 +145,7 @@ async def test_watchdog_delete_admits_previously_indexed_excluded_file(
         indexing={
             "include": ["**/*.keep"],
             "exclude": [],
+            "index_unknown_files": False,
             "realtime_backend": "watchdog",
         },
     )
@@ -246,6 +248,7 @@ async def test_watchman_delete_admits_previously_indexed_excluded_file(
         indexing={
             "include": ["**/*.keep"],
             "exclude": [],
+            "index_unknown_files": False,
             "realtime_backend": "watchman",
         },
     )
@@ -454,19 +457,18 @@ async def test_cleanup_deleted_directory_enumerates_chunkless_files(
         service = RealtimeIndexingService(services, config)
         service.watch_path = root
 
-        queued: list[str] = []
+        deleted: list[str] = []
 
-        async def fake_enqueue(mutation: object) -> bool:
-            queued.append(str(getattr(mutation, "path", "")))
-            return True
+        async def fake_delete(file_path: str) -> None:
+            deleted.append(file_path)
 
-        service._enqueue_mutation = fake_enqueue  # type: ignore[assignment]
+        services.provider.delete_file_completely_async = fake_delete  # type: ignore[assignment]
 
         await service._cleanup_deleted_directory(str(root / "sub"))
 
-        absolute_paths = {str(root / "sub" / "empty.bin"), str(root / "sub" / "code.py")}
-        assert set(queued) == absolute_paths
-        assert str(root / "other" / "keep.py") not in queued
+        assert any("empty.bin" in p for p in deleted), f"chunkless file not deleted: {deleted}"
+        assert any("code.py" in p for p in deleted), f"chunked file not deleted: {deleted}"
+        assert not any("keep.py" in p for p in deleted), f"sibling file wrongly deleted: {deleted}"
     finally:
         services.provider.disconnect()
 

@@ -21,12 +21,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from loguru import logger
 
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
@@ -34,6 +35,7 @@ from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as EmbeddingProviderProtocol,
 )
 from chunkhound.llm_manager import LLMManager
+from chunkhound.services.compaction_service import CompactionService
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime import RealtimeStartupStatusTracker
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
@@ -76,12 +78,21 @@ class MCPServerBase(ABC):
         self.embedding_manager: EmbeddingManager | None = None
         self.llm_manager: LLMManager | None = None
         self.realtime_indexing: RealtimeIndexingService | None = None
-
+        self._compaction_service: CompactionService | None = None
         # Initialization state
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
         self._provider_close_future: asyncio.Future[None] | None = None
+        self._cleanup_lock = asyncio.Lock()
+        # One-shot cleanup guard. cleanup() may leave _initialized=True and
+        # the provider still connected on the stuck-compaction-thread path
+        # (to avoid racing the foreign DuckDB handle), so we can't use
+        # _initialized as an idempotency signal. See cleanup() docstring.
+        self._cleanup_done = False
+        self._compaction_retry_lock = asyncio.Lock()
+        # Guards concurrent post-compaction recovery attempts in ensure_services()
+        self._recovery_event: asyncio.Event | None = None
 
         # Background tasks
         self._deferred_start_task: asyncio.Task | None = None
@@ -110,6 +121,13 @@ class MCPServerBase(ABC):
                 config,
                 startup_mode=self._realtime_startup_mode(),
             ),
+            "background_compaction": {
+                "phase": "idle",
+                "in_progress": False,
+                "pending_recovery": False,
+                "retry_attempted": False,
+                "last_error": None,
+            },
         }
 
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
@@ -427,6 +445,11 @@ class MCPServerBase(ABC):
                     embedding_manager=self.embedding_manager,
                 )
 
+                # Initialize compaction service for background compaction (MCP mode)
+                if self.config.database and self.config.database.provider == "duckdb":
+                    self._compaction_service = CompactionService(db_path, self.config)
+                    self.debug_log("CompactionService initialized for background mode")
+
                 # Determine target path for scanning and watching
                 if self.args and hasattr(self.args, "path"):
                     target_path = Path(self.args.path)
@@ -734,6 +757,7 @@ class MCPServerBase(ABC):
                         task.cancel()
 
             await self._run_directory_scan(target_path, trigger="initial")
+            await self._trigger_background_compaction()
             if ready_task in done:
                 initial_scan_completed_monotonic = time.monotonic()
                 initial_scan_total_duration = self._duration_seconds(
@@ -1095,73 +1119,430 @@ class MCPServerBase(ABC):
         self._provider_close_future = future
         return future
 
-    async def cleanup(self) -> None:
-        """Clean up resources and start at most one provider close attempt.
+    # ------------------------------------------------------------------
+    # Background compaction state helpers
+    # ------------------------------------------------------------------
 
-        The timeout only bounds how long each cleanup call waits. A blocking
-        synchronous provider close keeps running on its daemon thread, and later
-        cleanup calls reuse that same in-flight attempt instead of starting a
-        second one.
+    def _background_compaction_status(self) -> dict[str, Any]:
+        """Return the mutable background-compaction status sub-dict."""
+        return self._scan_progress["background_compaction"]
+
+    def _mark_background_compaction_started(self) -> None:
+        """Record that background compaction has begun."""
+        self._background_compaction_status().update(
+            {
+                "phase": "compacting",
+                "in_progress": True,
+                "pending_recovery": False,
+                "retry_attempted": False,
+                "last_error": None,
+            }
+        )
+
+    def _mark_background_compaction_success(self) -> None:
+        """Record that background compaction (and post-reindex) completed cleanly."""
+        self._background_compaction_status().update(
+            {
+                "phase": "idle",
+                "in_progress": False,
+                "pending_recovery": False,
+                "retry_attempted": False,
+                "last_error": None,
+            }
+        )
+        if self._compaction_service is not None:
+            self._compaction_service.clear_last_error()
+
+    def _mark_background_compaction_failure(
+        self,
+        exc: Exception,
+        *,
+        pending_recovery: bool,
+        retry_attempted: bool,
+    ) -> None:
+        """Record that background compaction or post-reindex failed."""
+        self._background_compaction_status().update(
+            {
+                "phase": "failed",
+                "in_progress": False,
+                "pending_recovery": pending_recovery,
+                "retry_attempted": retry_attempted,
+                "last_error": str(exc),
+            }
+        )
+
+    def _mark_post_compaction_reindex_running(self) -> None:
+        """Mark that post-compaction reindex is actively running."""
+        self._background_compaction_status()["in_progress"] = True
+
+    def _refresh_background_compaction_status(self) -> None:
+        """Sync stored status with live CompactionService state.
+
+        Updates compacting/idle/failed transition — when the service finishes
+        compacting, checks ``last_error`` to decide whether to transition to
+        "failed" (error recorded) or "idle" (clean finish).
         """
-        if (
-            self._deferred_start_task is not None
-            and not self._deferred_start_task.done()
-        ):
-            self.debug_log("Cancelling deferred realtime startup task")
-            self._deferred_start_task.cancel()
-            try:
-                await self._deferred_start_task
-            except asyncio.CancelledError:
-                pass
+        s = self._background_compaction_status()
+        if self._compaction_service is None:
+            if s["phase"] == "compacting":
+                s.update({"phase": "idle", "in_progress": False})
+            return
+        if self._compaction_service.is_compacting:
+            s.update({"phase": "compacting", "in_progress": True})
+        elif s["phase"] == "compacting":
+            last_err = self._compaction_service.last_error
+            if last_err is not None:
+                s.update(
+                    {
+                        "phase": "failed",
+                        "in_progress": False,
+                        "last_error": str(last_err),
+                    }
+                )
+            else:
+                s.update({"phase": "idle", "in_progress": False})
 
-        if (
-            self._realtime_start_task is not None
-            and not self._realtime_start_task.done()
-        ):
-            self.debug_log("Cancelling realtime start task")
-            self._realtime_start_task.cancel()
-            try:
-                await self._realtime_start_task
-            except asyncio.CancelledError:
-                pass
+    def get_background_compaction_status(self) -> dict[str, Any]:
+        """Return a snapshot of background compaction status reflecting live state."""
+        self._refresh_background_compaction_status()
+        return dict(self._background_compaction_status())
 
-        # Cancel background scan task if still running
-        if self._scan_task is not None and not self._scan_task.done():
-            self.debug_log("Cancelling background scan task")
-            self._scan_task.cancel()
-            try:
-                await self._scan_task
-            except asyncio.CancelledError:
-                pass
+    async def _attempt_post_compaction_recovery(self) -> None:
+        """Retry post-compaction reindex once; concurrent callers share one attempt.
 
-        # Stop real-time indexing
+        Exceptions from the retry are swallowed here — the except block inside
+        ``_post_compaction_reindex`` updates the status dict, and the caller
+        (``ensure_services``) inspects ``pending_recovery`` afterwards and
+        raises ``CompactionError`` if recovery did not succeed.
+        """
+        if self._recovery_event is not None:
+            # Another concurrent ensure_services() is already running recovery.
+            # Wait for it to finish rather than starting a second attempt.
+            await self._recovery_event.wait()
+            return
+        status = self._background_compaction_status()
+        if status["retry_attempted"]:
+            # Already retried once in a previous call — don't retry again.
+            return
+        event = asyncio.Event()
+        self._recovery_event = event
+        status["retry_attempted"] = True
+        try:
+            await self._post_compaction_reindex(is_recovery_retry=True)
+        except Exception:
+            pass  # _post_compaction_reindex's except handler always calls
+                  # _mark_background_compaction_failure, even if restore_* raises
+        finally:
+            self._recovery_event = None
+            event.set()
+
+    async def _trigger_background_compaction(self) -> None:
+        """Trigger background compaction if warranted.
+
+        Uses non-blocking compaction with a callback that triggers
+        incremental reindexing after the database swap completes.
+        """
+        if self._compaction_service is None:
+            return
+
+        if not self.services:
+            return
+
+        try:
+            from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+
+            if not isinstance(self.services.provider, DuckDBProvider):
+                self.debug_log(
+                    f"Expected DuckDBProvider, got "
+                    f"{type(self.services.provider).__name__}"
+                )
+                return
+            db_provider = self.services.provider
+            started = await self._compaction_service.compact_background(
+                provider=db_provider,
+                on_complete=self._post_compaction_reindex,
+            )
+            if started:
+                self._mark_background_compaction_started()
+                self.debug_log("Background compaction started")
+        except Exception as e:
+            self._mark_background_compaction_failure(
+                e,
+                pending_recovery=False,
+                retry_attempted=False,
+            )
+            self.debug_log(f"Background compaction failed to start: {e}", always=True)
+
+    async def _post_compaction_reindex(self, is_recovery_retry: bool = False) -> None:
+        """Callback after compaction — replays deferred work then reindexes.
+
+        Execution order:
+        1. Replay deferred directory cleanups (must run first — affects file existence)
+        2. Replay deferred file removals (deletes stale DB entries)
+        3. Full directory reindex (force, mtime skip unreliable post-compaction)
+
+        On any failure, only unresolved work is restored — successfully processed
+        items are never re-added to deferred sets.
+
+        Post-compaction the DB was rebuilt from a Parquet export, so stored
+        mtimes may not reflect reality (especially on Windows where mtime
+        resolution is ~100ms-2s).  force_reindex=True ensures every file is
+        re-verified.
+        """
+        if not self.services or not self._scan_target_path:
+            self.debug_log(
+                "Skipping post-compaction reindex: services or target unavailable"
+            )
+            return
+        if not self.realtime_indexing:
+            self.debug_log(
+                "Skipping post-compaction reindex: realtime indexing unavailable"
+            )
+            return
+
+        self._mark_post_compaction_reindex_running()
+        try:
+            if is_recovery_retry:
+                self.debug_log(
+                    "Retrying failed post-compaction reindex...", always=True
+                )
+            else:
+                self.debug_log("Starting post-compaction reindex...")
+            drained_deferred_files: set[str] = set()
+            drained_deferred_removals: set[str] = set()
+            drained_deferred_directories: set[str] = set()
+            non_removal_deferred_files: set[str] = set()
+            remaining_unattempted_removals: set[str] = set()
+            remaining_unattempted_directories: set[str] = set()
+            current_removal: str | None = None
+            current_directory: str | None = None
+
+            # Clear only stale compaction deferrals before reindex.
+            # Genuine realtime failures remain visible until they are resolved.
+            drained_deferred_directories = (
+                await self.realtime_indexing.drain_compaction_deferred_directories()
+            )
+            remaining_unattempted_directories = set(
+                drained_deferred_directories
+            )
+            for path in sorted(drained_deferred_directories):
+                current_directory = path
+                remaining_unattempted_directories.discard(path)
+                await self.realtime_indexing.replay_compaction_deferred_directory(
+                    path
+                )
+                current_directory = None
+
+            (
+                drained_deferred_files,
+                drained_deferred_removals,
+            ) = await self.realtime_indexing.drain_compaction_deferred_file_work()
+            remaining_unattempted_removals = set(drained_deferred_removals)
+            non_removal_deferred_files = (
+                drained_deferred_files - drained_deferred_removals
+            )
+
+            if drained_deferred_removals:
+                for path in sorted(drained_deferred_removals):
+                    current_removal = path
+                    remaining_unattempted_removals.discard(path)
+                    await self.realtime_indexing.replay_compaction_deferred_removal(
+                        path
+                    )
+                    current_removal = None
+
+            # Force reindex: the DB was rebuilt from export, mtime-based
+            # skip logic is unreliable after compaction.
+            reindex_config = self.config.model_copy(
+                update={
+                    "indexing": self.config.indexing.model_copy(
+                        update={"force_reindex": True}
+                    )
+                }
+            )
+
+            indexing_service = DirectoryIndexingService(
+                indexing_coordinator=self.services.indexing_coordinator,
+                config=reindex_config,
+                progress_callback=lambda msg: self.debug_log(f"[reindex] {msg}"),
+            )
+
+            stats = await indexing_service.process_directory(
+                self._scan_target_path, no_embeddings=False
+            )
+
+            self.debug_log(
+                f"Post-compaction reindex complete: {stats.files_processed} files, "
+                f"{stats.chunks_created} chunks"
+            )
+            # Force-reindex just reprocessed every file — clear stale failure state
+            # so monitoring no longer reports phantom failures from pre-compaction runs.
+            self.realtime_indexing.clear_post_compaction_state()
+            self._mark_background_compaction_success()
+
+        except Exception as e:
+            failure_details: list[str] = [str(e)]
+            retryable_directories = set(remaining_unattempted_directories)
+            if current_directory is not None:
+                retryable_directories.add(current_directory)
+                if isinstance(e, CompactionError):
+                    failure_details.append(
+                        f"deferred directory cleanup blocked by compaction for "
+                        f"{current_directory}: {e}"
+                    )
+                else:
+                    failure_details.append(
+                        "deferred directory cleanup failed for "
+                        f"{current_directory}: {e}"
+                    )
+
+            retryable_removals = set(remaining_unattempted_removals)
+            if current_removal is not None:
+                failure_details.append(
+                    f"deferred removal replay failed for {current_removal}: {e}"
+                )
+                retryable_removals.add(current_removal)
+            failure_detail = "; ".join(d for d in failure_details if d)
+            # If no removals were drained, all deferred files are legitimate
+            # indexing work. Otherwise, restore only non-removal files plus
+            # retryable removals — never restore a successfully deleted file.
+            restore_files = (
+                drained_deferred_files
+                if not drained_deferred_removals
+                else non_removal_deferred_files | retryable_removals
+            )
+
+            try:
+                if retryable_directories:
+                    await self.realtime_indexing.restore_compaction_deferred_directories(
+                        retryable_directories
+                    )
+                if restore_files:
+                    await self.realtime_indexing.restore_compaction_deferred_files(
+                        restore_files
+                    )
+                if retryable_removals:
+                    await self.realtime_indexing.restore_compaction_deferred_removals(
+                        retryable_removals
+                    )
+            except Exception as restore_exc:
+                failure_detail += f"; restore also failed: {restore_exc}"
+            self._mark_background_compaction_failure(
+                e,
+                pending_recovery=True,
+                retry_attempted=is_recovery_retry,
+            )
+            self._background_compaction_status()["last_error"] = failure_detail
+            self.debug_log(
+                f"Post-compaction reindex failed: {failure_detail}",
+                always=True,
+            )
+            raise
+
+    async def _cleanup_non_provider_resources(self) -> None:
+        """Cancel background tasks and stop realtime indexing before DB close.
+
+        Called by ``cleanup()`` once the compaction service has been stopped,
+        immediately before the DB connection is closed.
+        """
+        for task_attr, label in [
+            ("_deferred_start_task", "deferred realtime startup task"),
+            ("_realtime_start_task", "realtime start task"),
+            ("_scan_task", "background scan task"),
+        ]:
+            task: asyncio.Task | None = getattr(self, task_attr, None)
+            if task is not None and not task.done():
+                self.debug_log(f"Cancelling {label}")
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         if self.realtime_indexing:
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
 
-        if self.services and (
-            self.services.provider.is_connected
-            or self._provider_close_future is not None
-        ):
-            self.debug_log("Closing database connection")
-            # Run sync provider cleanup on a dedicated daemon thread so cleanup()
-            # never depends on asyncio's default executor shutdown behavior.
+    async def cleanup(self) -> None:
+        """Clean up resources and start at most one provider close attempt.
+
+        Idempotent and concurrent-safe — multiple callers awaiting cleanup()
+        in parallel will serialize through _cleanup_lock; only the first runs
+        the teardown, subsequent callers see _cleanup_done=True and return.
+        """
+        async with self._cleanup_lock:
+            if self._cleanup_done:
+                return
+
             try:
-                await asyncio.wait_for(
-                    asyncio.shield(self._close_provider_in_background()),
-                    timeout=_DATABASE_CLOSE_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                self.debug_log(
-                    "Database close exceeded "
-                    f"{_DATABASE_CLOSE_TIMEOUT_SECONDS:.1f}s and will continue in "
-                    "the background daemon thread",
-                    always=True,
-                )
-            except Exception as e:
-                self.debug_log(f"Database close failed: {e}", always=True)
+                # Stop compaction service first (cancels any in-progress compaction).
+                # shutdown() signals the thread and waits for it via threading.Event.
+                # We also do a secondary check here as defense-in-depth: the compaction
+                # thread bypasses the serial executor (direct duckdb.connect()), so we
+                # must not disconnect the provider while the thread is still alive.
+                if self._compaction_service:
+                    self.debug_log("Stopping compaction service")
+                    await self._compaction_service.shutdown()
+                    if not self._compaction_service.compaction_thread_done.is_set():
+                        self.debug_log(
+                            "WARNING: compaction thread still alive after "
+                            "shutdown, waiting..."
+                        )
+                        await asyncio.to_thread(
+                            self._compaction_service.compaction_thread_done.wait,
+                            timeout=5.0,
+                        )
+                        if not self._compaction_service.compaction_thread_done.is_set():
+                            self.debug_log(
+                                "Compaction thread still alive after secondary wait — "
+                                "skipping provider disconnect to avoid corruption",
+                                always=True,
+                            )
+                            await self._cleanup_non_provider_resources()
+                            if self.services and hasattr(
+                                self.services.provider,
+                                "mark_terminal_after_stuck_cleanup",
+                            ):
+                                self.services.provider.mark_terminal_after_stuck_cleanup()
+                            if self.services and hasattr(
+                                self.services.provider, "shutdown_executor"
+                            ):
+                                self.services.provider.shutdown_executor()
+                            self._compaction_service = None
+                            # _initialized intentionally stays True: cleanup() is terminal
+                            # (process exits after this), so no reconnection will follow.
+                            return
+                    self._compaction_service = None
+
+                await self._cleanup_non_provider_resources()
+
+                if self.services and (
+                    self.services.provider.is_connected
+                    or self._provider_close_future is not None
+                ):
+                    self.debug_log("Closing database connection")
+                    # Run sync provider cleanup on a dedicated daemon thread so cleanup()
+                    # never depends on asyncio's default executor shutdown behavior.
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(self._close_provider_in_background()),
+                            timeout=_DATABASE_CLOSE_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        self.debug_log(
+                            "Database close exceeded "
+                            f"{_DATABASE_CLOSE_TIMEOUT_SECONDS:.1f}s and will continue in "
+                            "the background daemon thread",
+                            always=True,
+                        )
+                    except Exception as e:
+                        self.debug_log(f"Database close failed: {e}", always=True)
+                    finally:
+                        self._initialized = False
             finally:
-                self._initialized = False
+                # Mark cleanup done even on exception paths. cleanup() is terminal
+                # (process exits after) and a second call from an outer finally
+                # must not re-enter an already-half-torn-down provider.
+                self._cleanup_done = True
 
     async def ensure_services(self) -> DatabaseServices:
         """Ensure services are initialized and return them.
@@ -1175,7 +1556,19 @@ class MCPServerBase(ABC):
         if not self.services:
             raise RuntimeError("Services not initialized. Call initialize() first.")
 
+        self._refresh_background_compaction_status()
+        if self._background_compaction_status()["pending_recovery"]:
+            await self._attempt_post_compaction_recovery()
+            self._refresh_background_compaction_status()
+            status = self._background_compaction_status()
+            if status["pending_recovery"]:
+                raise CompactionError(
+                    status["last_error"] or "Post-compaction catch-up failed",
+                    operation="post_reindex",
+                )
+
         await self._connect_provider()
+        self._refresh_background_compaction_status()
         return self.services
 
     async def _connect_provider(self) -> None:
@@ -1184,12 +1577,17 @@ class MCPServerBase(ABC):
         Uses a lock to prevent concurrent connect() calls which would
         leak a DuckDB connection handle.
         """
-        if self.services.provider.is_connected:
+        provider = self.services.provider
+        if hasattr(provider, "ensure_usable"):
+            provider.ensure_usable("connect provider")
+        if provider.is_connected:
             return
         async with self._connect_lock:
-            if not self.services.provider.is_connected:
+            if hasattr(provider, "ensure_usable"):
+                provider.ensure_usable("connect provider")
+            if not provider.is_connected:
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self.services.provider.connect)
+                await loop.run_in_executor(None, provider.connect)
 
     def ensure_embedding_manager(self) -> EmbeddingManager:
         """Ensure embedding manager is available and has providers.

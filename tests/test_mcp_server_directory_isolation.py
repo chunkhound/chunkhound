@@ -545,7 +545,7 @@ def quicksort(arr):
             config = Config(
                 database={"path": str(db_path), "provider": "duckdb"},
                 embedding=embedding_config,
-                indexing={"include": ["*.py"]}
+                indexing={"include": ["*.py"], "index_unknown_files": False}
             )
 
             # Create embedding manager using centralized helper
