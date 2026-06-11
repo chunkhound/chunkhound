@@ -2950,15 +2950,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         normalized = normalized.lstrip("/")
 
         # Ensure trailing slash for directory patterns.
-        # A leading dot (e.g., .github) is a hidden directory, not a file extension.
-        # Hidden files (.env, .gitignore) are conservatively classified as directories
-        # — acceptable since source code indexing rarely targets dotfiles, and
-        # directory scoping is the primary use case.
-        # Only skip the trailing slash if the final component has a file extension
-        # (a dot that is not the first character).
+        # A file extension is a dot that appears AFTER the first character.
+        # Leading-dot names without a second dot (.github, .env) are directories.
+        # Leading-dot names with an extension (.eslintrc.js, .babelrc.js) are files.
         if normalized and not normalized.endswith("/"):
             last = normalized.split("/")[-1]
-            has_file_extension = "." in last and not last.startswith(".")
+            has_file_extension = "." in last[1:]
             if not has_file_extension:
                 normalized += "/"
 

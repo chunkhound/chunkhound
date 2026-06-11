@@ -77,11 +77,25 @@ class TestNormalizeClassifiesFiles:
     def test_multi_dot_file(self) -> None:
         assert _normalize("my.file.tar.gz") == "my.file.tar.gz"
 
+    def test_hidden_file_with_known_extension(self) -> None:
+        """Hidden files with a recognized extension get file treatment."""
+        assert _normalize(".eslintrc.js") == ".eslintrc.js"
 
-class TestNormalizeHiddenFiles:
-    """Hidden files (.env, .gitignore) start with a dot and are conservatively
-    classified as directories. This is a documented trade-off: the primary use
-    case is directory scoping, and source code indexing rarely targets dotfiles."""
+    def test_hidden_json_file(self) -> None:
+        assert _normalize(".eslintrc.json") == ".eslintrc.json"
+
+    def test_hidden_yml_file(self) -> None:
+        assert _normalize(".yamllint.yml") == ".yamllint.yml"
+
+    def test_hidden_file_in_subdirectory(self) -> None:
+        assert _normalize("config/.secret.toml") == "config/.secret.toml"
+
+
+class TestNormalizeHiddenFilesWithoutExtension:
+    """Hidden files WITHOUT an extension (.env, .gitignore) start with a dot
+    but have no second dot, so they are conservatively classified as directories.
+    This is a documented trade-off: the primary use case is directory scoping,
+    and source code indexing rarely targets bare dotfiles."""
 
     def test_env_file_classified_as_directory(self) -> None:
         assert _normalize(".env") == ".env/"
@@ -152,6 +166,13 @@ class TestBuildLikeFilePatterns:
 
     def test_multi_dot_file(self) -> None:
         assert _like("my.file.tar.gz") == "%/my.file.tar.gz"
+
+    def test_hidden_file_with_extension(self) -> None:
+        """Hidden files with an extension get right-anchored LIKE patterns."""
+        assert _like(".eslintrc.js") == "%/.eslintrc.js"
+
+    def test_hidden_file_in_directory(self) -> None:
+        assert _like("config/.secret.toml") == "%/config/.secret.toml"
 
 
 class TestBuildLikeSpecialChars:
