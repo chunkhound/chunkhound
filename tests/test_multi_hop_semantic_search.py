@@ -756,6 +756,41 @@ async def test_path_filter_like_patterns_against_duckdb(tmp_path: Path) -> None:
         result.get("file_path", "").endswith(".bak") for result in py_sem_results
     ), "semantic path_filter='module.py' matched .bak file"
 
+    # ── Hidden .py file: path_filter=".test_config.py" ──
+    # Regression guard: hidden files with recognized extensions (.py, .js,
+    # .json, .yml — indexed by default) must be findable via path_filter.
+    hidden_py_file = tmp_path / "src/module/.test_config.py"
+    hidden_py_file.write_text(shared_source, encoding="utf-8")
+    await coordinator.process_file(hidden_py_file)
+
+    hid_regex_results, _ = db.search_regex(
+        pattern="path-filter-like-target",
+        page_size=20,
+        path_filter=".test_config.py",
+    )
+    assert any(
+        result.get("file_path", "").endswith(".test_config.py")
+        for result in hid_regex_results
+    ), "path_filter='.test_config.py' should find .test_config.py"
+
+    hid_sem_results, _ = db.search_semantic(
+        query_embedding=query_embedding,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        page_size=20,
+        path_filter=".test_config.py",
+    )
+    assert any(
+        result.get("file_path", "").endswith(".test_config.py")
+        for result in hid_sem_results
+    ), "semantic path_filter='.test_config.py' should find .test_config.py"
+
+    # ── Hidden file without extension (.env, .gitignore) ──
+    # These are conservatively classified as directories — a documented
+    # trade-off covered by unit tests in test_path_filter_normalization.py.
+    # Integration-level path_filter tests for bare dotfiles require
+    # index_unknown_files=True, which is out of scope for this test.
+
 
 @pytest.mark.fast
 @pytest.mark.asyncio
