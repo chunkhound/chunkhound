@@ -57,6 +57,11 @@ def _make_provider(retry_attempts: int = 3, retry_delay: float = 1.0):
     provider._azure_endpoint = None
     provider._azure_deployment = None
     provider._timeout = 30
+    provider._output_dims = None
+    provider._client_side_truncation = False
+    provider._discovered_dims = None
+    provider._warned_default_dims = False
+    provider._model_config = mod.OPENAI_MODEL_CONFIG
     provider._usage_stats = {
         "requests_made": 0,
         "embeddings_generated": 0,
@@ -71,8 +76,10 @@ def _make_provider(retry_attempts: int = 3, retry_delay: float = 1.0):
 
 
 def _ok_response(embedding: list[float] | None = None):
+    # Must match text-embedding-3-small dims (1536) for INV-1 validation
     result = MagicMock()
-    result.data = [MagicMock(index=0, embedding=embedding or [0.1, 0.2])]
+    vec = embedding if embedding is not None else [0.1] * 1536
+    result.data = [MagicMock(index=0, embedding=vec)]
     result.usage = MagicMock(total_tokens=10)
     return result
 
