@@ -210,6 +210,7 @@ class OpenAIEmbeddingProvider:
         api_version: str | None = None,
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
+        dimensions: int | None = None,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -264,6 +265,7 @@ class OpenAIEmbeddingProvider:
         self._rerank_ssl_verify: bool = (
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
         )
+        self._dimensions = dimensions
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -477,6 +479,8 @@ class OpenAIEmbeddingProvider:
     @property
     def dims(self) -> int:
         """Embedding dimensions."""
+        if self._dimensions is not None:
+            return self._dimensions
         if self._model in self._model_config:
             return self._model_config[self._model]["dims"]
         return 1536  # Default for most OpenAI models
@@ -716,11 +720,14 @@ class OpenAIEmbeddingProvider:
                     f"Generating embeddings for {len(texts)} texts (attempt {attempt + 1})"
                 )
 
-                response = await self._client.embeddings.create(
-                    model=self._get_deployment_model(),
-                    input=texts,
-                    timeout=self._timeout,
-                )
+                embed_kwargs: dict = {
+                    "model": self._get_deployment_model(),
+                    "input": texts,
+                    "timeout": self._timeout,
+                }
+                if self._dimensions is not None and self._model != "text-embedding-ada-002":
+                    embed_kwargs["dimensions"] = self._dimensions
+                response = await self._client.embeddings.create(**embed_kwargs)
 
                 # Extract embeddings from response, sorted by original input order
                 # OpenAI API does not guarantee response order - each data object

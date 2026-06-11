@@ -190,6 +190,7 @@ class VoyageAIEmbeddingProvider:
         max_concurrent_batches: int | None = None,
         ssl_verify: bool = True,
         rerank_ssl_verify: bool | None = None,
+        dimensions: int | None = None,
     ):
         """Initialize VoyageAI embedding provider.
 
@@ -251,6 +252,23 @@ class VoyageAIEmbeddingProvider:
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
         self._ssl_verify_enabled = ssl_verify
+
+        # Validate and store requested output dimensions
+        _variable_dim_models = {
+            m for m, cfg in VOYAGE_MODEL_CONFIG.items() if len(cfg["dimensions"]) > 1
+        }
+        if dimensions is not None and model in VOYAGE_MODEL_CONFIG:
+            supported = VOYAGE_MODEL_CONFIG[model]["dimensions"]
+            if dimensions not in supported:
+                raise ValueError(
+                    f"VoyageAI model {model!r} does not support {dimensions} dims. "
+                    f"Supported: {supported}"
+                )
+        # Only pass output_dimension to models that actually support variable dims;
+        # silently ignore for fixed-dim models rather than causing an API error.
+        self._dimensions = dimensions if (
+            dimensions is not None and model in _variable_dim_models
+        ) else None
         self._rerank_ssl_verify_enabled = (
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
         )
@@ -329,6 +347,8 @@ class VoyageAIEmbeddingProvider:
     @property
     def dims(self) -> int:
         """Embedding dimensions."""
+        if self._dimensions is not None:
+            return self._dimensions
         return get_dimensions_for_model(
             self._model, self._dimensions_map, default_dims=1024
         )
@@ -398,12 +418,17 @@ class VoyageAIEmbeddingProvider:
         # Retry loop for transient network errors
         for attempt in range(self._retry_attempts):
             try:
+                embed_kwargs: dict = {
+                    "texts": texts,
+                    "model": self._model,
+                    "input_type": "document",
+                    "truncation": True,
+                }
+                if self._dimensions is not None:
+                    embed_kwargs["output_dimension"] = self._dimensions
                 result = await asyncio.to_thread(
                     self._client.embed,
-                    texts=texts,
-                    model=self._model,
-                    input_type="document",
-                    truncation=True,
+                    **embed_kwargs,
                 )
 
                 self._requests_made += 1

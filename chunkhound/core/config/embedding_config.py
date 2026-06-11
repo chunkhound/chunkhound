@@ -186,6 +186,16 @@ class EmbeddingConfig(BaseSettings):
         description="Internal concurrency (auto-detected from provider if not set)",
     )
 
+    dimensions: int | None = Field(
+        default=256,
+        description=(
+            "Output embedding dimensions. Enables Matryoshka truncation (client-side "
+            "for OpenAI-compatible servers) or server-side truncation (VoyageAI). "
+            "Set to None to use the model's full default dimensions. "
+            "Env: CHUNKHOUND_EMBEDDING__DIMENSIONS"
+        ),
+    )
+
     @field_validator("rerank_batch_size")
     def validate_rerank_batch_size(cls, v: int | None) -> int | None:  # noqa: N805
         """Validate rerank batch size is positive."""
@@ -331,6 +341,8 @@ class EmbeddingConfig(BaseSettings):
             base_config["rerank_batch_size"] = self.rerank_batch_size
         if self.max_concurrent_batches is not None:
             base_config["max_concurrent_batches"] = self.max_concurrent_batches
+        if self.dimensions is not None:
+            base_config["dimensions"] = self.dimensions
 
         return base_config
 
