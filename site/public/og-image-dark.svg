@@ -16,5 +16,5 @@
     <text x="119" y="68" font-family="Inter, system-ui, sans-serif" font-size="72" font-weight="700" fill="#f4f6f1">ChunkHound</text>
     <circle cx="597" cy="64" r="8" fill="#0891b2"/>
   </g>
-  <text x="600" y="373" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="28" font-weight="400" fill="#9a9d93">Your entire codebase, deeply understood</text>
+  <text x="600" y="373" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="28" font-weight="400" fill="#9a9d93">Your entire engineering context, deeply understood</text>
 </svg>

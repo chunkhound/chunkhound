@@ -21,15 +21,16 @@ alt="ChunkHound" width="300">
 </p>
 
 <p align="center">
-  <strong>Your entire codebase, deeply understood.</strong>
+  <strong>Your entire engineering context, deeply understood.</strong>
 </p>
 
 <p align="center">
-  Code research, semantic search, and auto-generated docs for AI agents.
+  Open-source codebase intelligence that gives agents and teams cited context across current code, git history, and technical web research.
 </p>
 
+<!-- Keep in sync with site/src/components/Hero.astro amplifier line -->
 <p align="center">
-  Local-first · Dozens of languages & file types · MIT licensed · Free forever
+  Local-first · Dozens of languages & file types · Cited answers · Git history research · Pinpoint web research
 </p>
 
 <p align="center">
@@ -62,51 +63,81 @@ alt="ChunkHound" width="300">
 
 ## AI writes code blind
 
-Agents can search code, but that is not the same as understanding how a system works.
+Agents can generate code, but they still miss the context that makes software safe to change: how behavior flows across files, what changed across a branch or release, and which external constraints matter.
 
-They miss that auth flows through three files, that the utility they need already exists, or that the data model changed in a way that makes the obvious implementation wrong.
+Reviewers, support, and product teams hit the same wall when large PRs, merge conflicts, bugs, and release notes need implementation-backed explanation instead of guesses.
 
-ChunkHound gives agents grounded, cross-file understanding of a codebase: where concepts live, how files relate, and which architectural paths matter before code gets written.
+ChunkHound turns current code, git history, and technical web research into cited context before anyone edits, reviews, debugs, or explains software.
 
-## One semantic index, three lenses
+## Deep understanding for four context-heavy jobs
 
-ChunkHound parses your code and builds one semantic index. That index powers three different workflows:
+ChunkHound applies codebase understanding to the workflows where missing context hurts most.
 
-- **Search** — drill into exact code with semantic and regex search
-- **Research** — explain how the system works with cited reports that trace behavior across files
-- **Autodoc** — turn that understanding into generated documentation from the code itself
+### Research before editing
 
-Not three separate tools. Three lenses into one index.
+Give coding agents grounded architecture context, relevant files, recent changes, and external constraints before they write code.
 
-## Why this helps
+### Understand large PRs and releases
 
-When an agent lacks context, it tends to loop:
+Turn branch diffs, commit ranges, tags, and specific commits into cited engineering briefs for review, release notes, and changelog drafts.
 
-1. search broadly
-2. read partial results
-3. guess
-4. generate
-5. backtrack
-6. search again
+### Trace bugs and incidents
 
-That costs time, burns tokens, and pollutes context with failed attempts.
+Turn symptoms, stack traces, and customer reports into likely code paths, recent changes, and external constraints.
 
-ChunkHound shifts that work earlier. Build the index once, research before editing, then use grounded search and cited answers on top of it. In practice that usually means:
+### Reconcile code with external docs
 
-- fewer dead-end searches
-- fewer retries
-- less context pollution
-- better first-pass answers
+Pinpoint the technical docs, APIs, issues, and articles your implementation depends on, then connect that external evidence to local code research.
 
-## What it can do
+## What you can ask
 
-- cited code research that explains how a system works across files
-- multi-hop semantic search across architectural relationships
-- hybrid semantic + regex workflows for discovery plus exact tracing
-- gap-filling and query expansion during research
-- auto-generated docs from the indexed codebase
-- local-first indexing and search
-- Python, JavaScript, TypeScript, Java, Go, Rust, C/C++, and more via Tree-sitter
+### Ground an agent before edits
+
+```bash
+chunkhound research "How does authentication work?"
+chunkhound search "JWT refresh token validation"
+chunkhound research "What changed in auth recently?" --last-n 20
+```
+
+### Understand a large PR or release
+
+```bash
+chunkhound research "Summarize the behavior changes on this branch for reviewers" --commit-range main..HEAD
+chunkhound research "Draft changelog bullets for billing since v2.4" --commit-range v2.4..HEAD
+chunkhound search "database migration" --commit-hash abc1234
+```
+
+### Get context before resolving conflicts
+
+```bash
+chunkhound research "Why did auth session handling change on each side?" --commit-range main..feature/auth
+chunkhound search "session refresh conflict" --last-n 50
+```
+
+### Trace a bug with external constraints
+
+```bash
+chunkhound research "why would webhook retries fail?"
+chunkhound research "what changed in webhook handling this week?" --last-n 30
+chunkhound websearch "Stripe webhook retry schedule"
+```
+
+### Explain product behavior
+
+```bash
+chunkhound research "What happens when a user cancels a subscription?"
+chunkhound research "What changed in billing since v2.4?" --commit-range v2.4..HEAD
+```
+
+## What powers deep understanding
+
+- **Semantic code search** — find relevant code by meaning, not only exact text
+- **Cited code research** — explain behavior across files with source citations
+- **Git history research** — ask by last N commits, commit hash, tag, branch, or range to understand large PRs and releases
+- **Pinpoint web research** — bring cited external docs, APIs, issues, and articles into the same workflow as local code research
+- **Autodoc** — generate shareable docs from code-backed research
+- **Local-first indexing** — keep code search and indexing under your control
+- **Python, JavaScript, TypeScript, Java, Go, Rust, C/C++, and more** via Tree-sitter
 
 ## Install
 
@@ -121,7 +152,7 @@ chunkhound index .
 chunkhound research "How does authentication work?"
 ```
 
-Index once, ask a real architecture question, and get a grounded answer with citations. Semantic search requires an embedding provider; research requires an LLM provider and an embedding provider with reranking support. Choose local providers for zero-code-egress setups.
+Index once, ask a real architecture question, and get a grounded answer with citations. Regex search works without providers. Semantic search requires an embedding provider. Deep research requires an LLM provider and an embedding provider with reranking support; web research uses the same provider stack. Choose local providers for zero-code-egress setups.
 
 For a full configurable setup, create `.chunkhound.json` in your project root:
 
@@ -169,7 +200,7 @@ ChunkHound is especially useful for:
 - multi-language codebases
 - legacy systems
 - local-only or security-sensitive environments
-- agent workflows that need architecture understanding, not just text matches
+- engineering teams that want agents, support, and product questions grounded in the same code index
 
 ## Community
 

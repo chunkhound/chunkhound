@@ -147,8 +147,9 @@ console.log(JSON.stringify({ transcript: textOf(container) }));
     transcript = rendered["transcript"]
 
     assert "chunkhound index ." in transcript
-    assert 'chunkhound research "how does authentication work?"' in transcript
-    assert 'chunkhound search "auth middleware"' in transcript
+    assert 'chunkhound research "How does authentication work?"' in transcript
+    assert 'chunkhound research "Summarize auth changes for reviewers" --commit-range main..HEAD' in transcript
+    assert 'chunkhound websearch "OAuth refresh token rotation best practices"' in transcript
     assert "dozens of languages/file types" in transcript
     assert NUMERIC_LANGUAGE_CLAIM.search(transcript) is None
 

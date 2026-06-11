@@ -30,25 +30,39 @@ const STEPS: HeroStep[] = [
         type: "prompt",
         segments: [
             { cls: "cmd", text: "chunkhound research " },
-            { cls: "str", text: '"how does authentication work?"' },
+            { cls: "str", text: '"How does authentication work?"' },
         ],
     },
     {
         type: "output",
-        text: "Traced flow across 14 files · 6 components · 23 citations",
+        text: "Cited report · 14 files · 6 components · 23 citations",
         dim: true,
     },
     { type: "blank" },
     {
         type: "prompt",
         segments: [
-            { cls: "cmd", text: "chunkhound search " },
-            { cls: "str", text: '"auth middleware"' },
+            { cls: "cmd", text: "chunkhound research " },
+            { cls: "str", text: '"Summarize auth changes for reviewers"' },
+            { cls: "cmd", text: " --commit-range main..HEAD" },
         ],
     },
     {
         type: "output",
-        text: "Found exact symbols and call sites from the research path",
+        text: "Branch diff analyzed · reviewer brief generated",
+        dim: true,
+    },
+    { type: "blank" },
+    {
+        type: "prompt",
+        segments: [
+            { cls: "cmd", text: "chunkhound websearch " },
+            { cls: "str", text: '"OAuth refresh token rotation best practices"' },
+        ],
+    },
+    {
+        type: "output",
+        text: "External docs pinpointed · cited answer generated",
         dim: true,
         cursor: true,
     },

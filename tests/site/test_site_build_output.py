@@ -184,6 +184,12 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     ), "Umami analytics script missing from getting_started"
     assert "platform-code-block" in getting_started
     assert "code-header" in getting_started
+    # Wordmark-text SVGs (stacked variant in hero)
+    assert "/wordmark-text.svg" in homepage
+    assert "/wordmark-text-dark.svg" in homepage
+    # UseCases component present
+    assert 'id="use-cases"' in homepage
+    assert "Research before editing" in homepage
     # Astro still emits Shiki's light/dark CSS variables even though the site
     # stylesheet intentionally renders code blocks with the dark token set.
     platform_code_block = _extract_astro_code_block_after_marker(
@@ -291,16 +297,20 @@ def test_homepage_and_readme_use_qualified_locality_and_language_claims() -> Non
     ):
         assert absolute_claim not in combined
     assert NUMERIC_LANGUAGE_CLAIM.search(combined) is None
+    assert "Your entire engineering context, deeply understood" in homepage
+    assert "Your entire engineering context, deeply understood." in readme
+    assert "Cited answers · Git history research · Pinpoint web research" in homepage
+    assert "Cited answers · Git history research · Pinpoint web research" in readme
 
 
 def test_built_site_has_og_meta_tags() -> None:
     """Built homepage includes correct OG and Twitter Card meta tags."""
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
-    expected_title = "ChunkHound — Deep code research for AI agents"
+    expected_title = "ChunkHound — Your engineering context, deeply understood"
     expected_description = (
-        "ChunkHound helps AI agents deeply understand codebases with multi-hop "
-        "retrieval, cross-file architecture research, and cited answers grounded "
-        "in code. Local-first. MIT licensed. Free forever."
+        "ChunkHound gives AI agents cited context across current code, git history, "
+        "and technical web research — for safer edits, clearer reviews, and "
+        "release-ready summaries. Local-first. MIT licensed."
     )
 
     assert _title_content(homepage) == expected_title
@@ -346,6 +356,10 @@ def test_built_site_has_og_meta_tags() -> None:
 def test_readme_branding_assets_exist() -> None:
     assert (ROOT / "site" / "public" / "wordmark-text.svg").exists()
     assert (ROOT / "site" / "public" / "wordmark-text-dark.svg").exists()
+    for name in ("og-image-dark.svg", "og-image-light.svg"):
+        assert "Your entire engineering context, deeply understood" in (
+            ROOT / "site" / "public" / name
+        ).read_text(encoding="utf-8")
 
 
 def test_built_site_has_changelog_page() -> None:
@@ -355,6 +369,48 @@ def test_built_site_has_changelog_page() -> None:
 
     assert version in changelog
     assert section in changelog
+
+
+def test_built_docs_pages_render_toc_links_server_side() -> None:
+    for page, anchors in {
+        "getting-started": (
+            "#install",
+            "#index-and-verify",
+            "#use-it-from-your-agent",
+            "#example-prompts",
+            "#mcp",
+            "#where-to-next",
+        ),
+        "contributing": (
+            "#getting-started",
+            "#development-workflow",
+            "#the-review-process",
+            "#what-makes-a-good-pr",
+        ),
+        "configuration": (
+            "#configuration-file",
+            "#configuration-precedence",
+            "#embedding-providers",
+            "#advanced-routing",
+        ),
+        "cli-reference": (
+            "#chunkhound-index",
+            "#chunkhound-search",
+            "#chunkhound-research",
+            "#common-flags",
+        ),
+        "changelog": (
+            "#unreleased",
+            "#breaking-changes",
+            "#added",
+            "#changed",
+        ),
+    }.items():
+        html = (DIST / "docs" / page / "index.html").read_text(encoding="utf-8")
+
+        assert '<nav class="toc-list" data-toc>' in html
+        for anchor in anchors:
+            assert f'href="{anchor}"' in html, f"Missing TOC anchor {anchor} on {page}"
 
 
 def test_built_site_has_og_png_assets() -> None:

@@ -40,6 +40,18 @@ const capabilities = [
     tag: "Hybrid search",
   },
   {
+    icon: "ph-clock-counter-clockwise",
+    title: "Git History Research",
+    description: "Asks by last N commits, commit hash, tag, branch, or range to explain large PRs, release ranges, and why behavior changed.",
+    tag: "--last-n · --commit-range",
+  },
+  {
+    icon: "ph-globe-hemisphere-west",
+    title: "Pinpoint Web Research",
+    description: "Finds the cited external docs, APIs, issues, and articles your implementation depends on, then brings them into agent context.",
+    tag: "Cited URL research",
+  },
+  {
     icon: "ph-book-open-text",
     title: "Auto-Documentation",
     description: "Turns research-backed understanding into a searchable documentation site generated directly from the codebase.",
@@ -51,7 +63,7 @@ const capabilities = [
 <section id="capabilities" class="capabilities">
   <div class="container">
     <p class="eyebrow">CAPABILITIES</p>
-    <h2 class="heading">How ChunkHound reaches grounded answers</h2>
+    <h2 class="heading">Capabilities behind deep codebase understanding</h2>
 
     <div class="grid">
       {capabilities.map((cap) => {
@@ -76,9 +88,11 @@ const capabilities = [
 
 <script>
   import "@phosphor-icons/webcomponents/PhBookOpenText";
+  import "@phosphor-icons/webcomponents/PhClockCounterClockwise";
   import "@phosphor-icons/webcomponents/PhCompass";
   import "@phosphor-icons/webcomponents/PhDetective";
   import "@phosphor-icons/webcomponents/PhFileMagnifyingGlass";
+  import "@phosphor-icons/webcomponents/PhGlobeHemisphereWest";
   import "@phosphor-icons/webcomponents/PhGraph";
   import "@phosphor-icons/webcomponents/PhIntersectThree";
   import "@phosphor-icons/webcomponents/PhTreeStructure";
