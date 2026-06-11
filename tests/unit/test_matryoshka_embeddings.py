@@ -5,9 +5,11 @@ Covers:
 - Provider protocol properties (native_dims, supported_dimensions, supports_matryoshka)
 - Model whitelist validation
 - Dimension boundary testing
+- Dimension discovery for unknown models
 """
 
 import argparse
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -15,6 +17,7 @@ from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.interfaces.embedding_provider import EmbeddingConfigurationError
 from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
+from tests.unit.provider_test_helpers import _bare_provider, _ok_response
 
 
 class TestOutputDimsConfig:
@@ -773,3 +776,78 @@ class TestApplyClientSideTruncationShortVector:
             )
 
 
+# ---------------------------------------------------------------------------
+# Dimension discovery for unknown models
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAIDimensionDiscovery:
+    """Test unknown-model fallback behavior in OpenAIEmbeddingProvider."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_discovers_dims_after_first_embed(self):
+        """Unknown model learns native dims from an untruncated API response."""
+        provider, _, _ = _bare_provider(model="my-custom-embed-v1")
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=768)
+        )
+
+        result = await provider._embed_batch_internal(["hello"])
+
+        assert len(result) == 1
+        assert len(result[0]) == 768
+        assert provider.dims == 768
+        assert provider.native_dims == 768
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_server_side_truncation_keeps_output_contract(self):
+        """Unknown models still return requested output dims with API truncation."""
+        provider, _, _ = _bare_provider(
+            model="my-custom-embed-v1",
+            output_dims=256,
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=256)
+        )
+
+        result = await provider._embed_batch_internal(["hello"])
+
+        assert len(result) == 1
+        assert len(result[0]) == 256
+        assert provider.dims == 256
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_client_side_truncation_discovers_native_dims(
+        self,
+    ):
+        """Client-side truncation keeps output dims and discovers native dims."""
+        provider, _, _ = _bare_provider(
+            model="my-custom-embed-v1",
+            output_dims=256,
+            client_side_truncation=True,
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=768)
+        )
+
+        result = await provider._embed_batch_internal(["hello"])
+
+        assert len(result) == 1
+        assert len(result[0]) == 256
+        assert provider.dims == 256
+        assert provider.native_dims == 768
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_warns_default_dims(self):
+        """First access of dims for an unknown model logs a warning."""
+        provider, _, mod = _bare_provider(model="my-custom-embed-v1")
+
+        with patch.object(mod.logger, "warning") as mock_warn:
+            dims = provider.dims
+
+        assert dims == 1536
+        mock_warn.assert_called_once()
+        assert "Unknown model" in mock_warn.call_args[0][0]
