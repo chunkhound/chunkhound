@@ -24,6 +24,7 @@ jobs:
         with:
           name: portable-test-db
           path: .chunkhound/
+          include-hidden-files: true
 
   verify-portable-db:
     needs: create-portable-db
