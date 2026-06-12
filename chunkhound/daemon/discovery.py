@@ -337,6 +337,24 @@ async def _terminate_startup_handle(startup: DaemonStartupHandle) -> None:
     await asyncio.to_thread(_terminate_startup_handle_sync, startup)
 
 
+def _startup_process_state(process: subprocess.Popen[Any]) -> str:
+    """Return a compact process-state string for startup diagnostics."""
+    details: list[str] = []
+    pid = getattr(process, "pid", None)
+    if isinstance(pid, int):
+        details.append(f"pid={pid}")
+    try:
+        returncode = process.poll()
+    except Exception as error:
+        details.append(f"process_state=poll_error {error!r}")
+    else:
+        if returncode is None:
+            details.append("process_state=running")
+        else:
+            details.append(f"process_state=exited rc={returncode}")
+    return ", ".join(details) or "process_state=unknown"
+
+
 class DaemonDiscovery:
     """Locate or start the daemon for a given project directory."""
 
@@ -711,7 +729,8 @@ class DaemonDiscovery:
         message = prefix
         if returncode is not None:
             message = f"{message} (exit code {returncode})"
-        startup_context = self._startup_failure_context(log_path)
+        effective_log_path = log_path or self.get_daemon_log_path()
+        startup_context = self._startup_failure_context(effective_log_path)
         if startup_context is not None:
             context_lines: list[str] = []
             if startup_context.get("startup_completed") is True:
@@ -730,10 +749,11 @@ class DaemonDiscovery:
                     context_lines.append(f"Last startup error: {last_error}")
             if context_lines:
                 message = f"{message}\n" + "\n".join(context_lines)
-        log_tail = self._tail_daemon_log(log_path)
+        log_tail = self._tail_daemon_log(effective_log_path)
+        log_context = f"Daemon log path: {effective_log_path}"
         if log_tail:
-            return f"{message}\nRecent daemon log output:\n{log_tail}"
-        return message
+            return f"{message}\n{log_context}\nRecent daemon log output:\n{log_tail}"
+        return f"{message}\n{log_context}\nDaemon log was empty or unavailable"
 
     def write_registry_entry(self, pid: int, socket_path: str) -> None:
         """Publish this daemon in the user-scoped registry."""
@@ -1245,7 +1265,8 @@ class DaemonDiscovery:
                                     self.format_startup_failure(
                                         prefix=(
                                             "ChunkHound daemon exited before it became "
-                                            f"reachable (address: {startup_address})"
+                                            f"reachable (address: {startup_address}, "
+                                            f"{_startup_process_state(startup.process)})"
                                         ),
                                         log_path=startup.log_path,
                                         returncode=returncode,
@@ -1272,7 +1293,8 @@ class DaemonDiscovery:
                                                 prefix=(
                                                     "ChunkHound daemon crashed after "
                                                     "publishing lock "
-                                                    f"(address: {startup_address})"
+                                                    f"(address: {startup_address}, "
+                                                    f"{_startup_process_state(startup.process)})"
                                                 ),
                                                 log_path=startup.log_path,
                                                 returncode=returncode,
@@ -1305,12 +1327,14 @@ class DaemonDiscovery:
                                 min(_STARTUP_POLL_INTERVAL, max(sleep_for, 0.0))
                             )
 
+                        process_state = _startup_process_state(startup.process)
                         await _terminate_startup_handle(startup)
                         raise RuntimeError(
                             self.format_startup_failure(
                                 prefix=(
                                     f"ChunkHound daemon did not start within "
-                                    f"{_STARTUP_TIMEOUT}s (address: {startup_address})"
+                                    f"{_STARTUP_TIMEOUT}s (address: {startup_address}, "
+                                    f"{process_state})"
                                 ),
                                 log_path=startup.log_path,
                             )
