@@ -7,9 +7,9 @@ import socket
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
-from unittest.mock import AsyncMock
 
 import chunkhound.daemon.discovery as discovery_module
 from chunkhound.daemon.discovery import (
@@ -101,7 +101,7 @@ def test_unix_ipc_address_uses_runtime_scoped_socket_dir(
     tmp_path: Path,
 ) -> None:
     """Unix IPC should live under the active runtime-scoped socket directory."""
-    runtime_dir = _set_runtime_dir_env(monkeypatch, tmp_path)
+    _set_runtime_dir_env(monkeypatch, tmp_path)
     monkeypatch.setattr(discovery_module.sys, "platform", "linux")
 
     project_dir = tmp_path / "repo"
@@ -202,7 +202,7 @@ def test_windows_ipc_address_changes_with_runtime_dir(
     assert address_a != address_b
 
 
-def test_windows_startup_ipc_address_avoids_live_sibling_port_collision_without_registry(
+def test_windows_startup_ipc_avoids_live_sibling_port_without_registry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -755,7 +755,9 @@ async def test_ensure_daemon_running_publishes_registry_entry_authoritatively(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.touch()
 
-    def fake_start(args: object, *, socket_path: str | None = None) -> DaemonStartupHandle:
+    def fake_start(
+        args: object, *, socket_path: str | None = None
+    ) -> DaemonStartupHandle:
         # Publish an authoritative runtime-scoped lock file the way a real
         # daemon would — but deliberately never publish a registry entry, so
         # the proxy-side write is the only thing that can close the gap.
@@ -833,7 +835,9 @@ async def test_find_or_start_daemon_terminates_child_when_registry_publish_fails
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.touch()
 
-    def fake_start(args: object, *, socket_path: str | None = None) -> DaemonStartupHandle:
+    def fake_start(
+        args: object, *, socket_path: str | None = None
+    ) -> DaemonStartupHandle:
         del args, socket_path
         discovery.write_lock(os.getpid(), fake_address, auth_token="token")
         return DaemonStartupHandle(process=fake_process, log_path=log_path)  # type: ignore[arg-type]
@@ -1092,6 +1096,48 @@ def test_write_json_atomically_retries_transient_windows_replace_error(
     assert json.loads(target_path.read_text()) == {"value": 1}
 
 
+def test_format_startup_failure_treats_completed_startup_as_historical_context(
+    tmp_path: Path,
+) -> None:
+    """Post-startup failures should not present old startup breadcrumbs as active."""
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+    log_path = project_dir / ".chunkhound" / "daemon.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    started_at = (datetime.now() - timedelta(seconds=1178)).isoformat()
+    completed_at = (datetime.now() - timedelta(seconds=1174)).isoformat()
+    log_path.write_text(
+        "\n".join(
+            [
+                f"[{started_at}] [startup] startup: startup tracking began mode=daemon",
+                (
+                    f"[{completed_at}] [startup] startup: phase completed: "
+                    "startup_barrier duration=3.741s"
+                ),
+                (
+                    f"[{completed_at}] [startup] startup: startup completed "
+                    "duration=4.153s"
+                ),
+                (
+                    "08:55:33 | WARNING  | Watchman event translation warning: "
+                    "Skipping unexpected Watchman file type '?'"
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    message = discovery.format_startup_failure(
+        prefix="ChunkHound daemon died during registration handshake",
+        log_path=log_path,
+    )
+
+    assert "Daemon startup status: completed" in message
+    assert "Elapsed startup duration so far" not in message
+    assert "Last known startup phase: startup_barrier" not in message
+
+
 def test_format_startup_failure_includes_phase_elapsed_and_error(
     tmp_path: Path,
 ) -> None:
@@ -1141,7 +1187,10 @@ def test_format_startup_failure_parses_prefixed_breadcrumbs_and_keeps_legacy_sup
             [
                 f"[{started_at}] [startup] startup: startup tracking began mode=daemon",
                 f"[{started_at}] [startup] phase completed: db_connect duration=0.125s",
-                f"[{started_at}] [startup] startup: phase started: watchman_watch_project",
+                (
+                    f"[{started_at}] [startup] startup: phase started: "
+                    "watchman_watch_project"
+                ),
                 (
                     f"[{started_at}] [startup] startup: startup failed duration=12.0s "
                     "error=watchman session bootstrap exploded"

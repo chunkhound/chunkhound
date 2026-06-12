@@ -284,6 +284,16 @@ def _normalize_startup_breadcrumb_message(message: str) -> str:
     return normalized
 
 
+def _startup_duration_seconds(message: str) -> float | None:
+    if " duration=" not in message:
+        return None
+    duration_fragment = message.split(" duration=", 1)[1].split("s", 1)[0]
+    try:
+        return float(duration_fragment)
+    except ValueError:
+        return None
+
+
 def _normalize_started_at(raw: object) -> float:
     """Coerce a started_at metadata field to float, defaulting on garbage.
 
@@ -612,6 +622,8 @@ class DaemonDiscovery:
         last_phase: str | None = None
         last_error: str | None = None
         total_duration_seconds: float | None = None
+        startup_completed = False
+        completed_duration_seconds: float | None = None
 
         for raw_line in log_tail.splitlines():
             if "[startup]" not in raw_line:
@@ -621,18 +633,29 @@ class DaemonDiscovery:
             timestamp = _parse_startup_log_timestamp(raw_line)
             if message.startswith("startup tracking began"):
                 startup_started_at = timestamp
+                last_phase = None
+                last_error = None
+                total_duration_seconds = None
+                startup_completed = False
+                completed_duration_seconds = None
                 continue
             if message.startswith("phase started: "):
+                startup_completed = False
+                completed_duration_seconds = None
                 phase_name = message.removeprefix("phase started: ").strip()
                 last_phase = phase_name or last_phase
                 continue
             if message.startswith("phase completed: "):
+                startup_completed = False
+                completed_duration_seconds = None
                 phase_name, _, _ = message.removeprefix("phase completed: ").partition(
                     " duration="
                 )
                 last_phase = phase_name.strip() or last_phase
                 continue
             if message.startswith("phase failed: "):
+                startup_completed = False
+                completed_duration_seconds = None
                 details = message.removeprefix("phase failed: ")
                 phase_name, _, remainder = details.partition(" duration=")
                 last_phase = phase_name.strip() or last_phase
@@ -641,15 +664,13 @@ class DaemonDiscovery:
                     if error_text:
                         last_error = error_text
                 continue
+            if message.startswith("startup completed"):
+                startup_completed = True
+                completed_duration_seconds = _startup_duration_seconds(message)
+                continue
             if message.startswith("startup failed"):
-                if " duration=" in message:
-                    duration_fragment = message.split(" duration=", 1)[1].split("s", 1)[
-                        0
-                    ]
-                    try:
-                        total_duration_seconds = float(duration_fragment)
-                    except ValueError:
-                        total_duration_seconds = None
+                startup_completed = False
+                total_duration_seconds = _startup_duration_seconds(message)
                 if " error=" in message:
                     error_text = message.split(" error=", 1)[1].strip()
                     if error_text:
@@ -661,17 +682,22 @@ class DaemonDiscovery:
             and last_error is None
             and total_duration_seconds is None
             and startup_started_at is None
+            and not startup_completed
         ):
             return None
 
         elapsed_seconds = total_duration_seconds
-        if elapsed_seconds is None and startup_started_at is not None:
+        if startup_completed:
+            elapsed_seconds = completed_duration_seconds
+        elif elapsed_seconds is None and startup_started_at is not None:
             elapsed_seconds = _startup_elapsed_seconds(startup_started_at)
 
         return {
             "last_phase": last_phase,
             "elapsed_seconds": elapsed_seconds,
             "last_error": last_error,
+            "startup_completed": startup_completed,
+            "completed_duration_seconds": completed_duration_seconds,
         }
 
     def format_startup_failure(
@@ -688,17 +714,20 @@ class DaemonDiscovery:
         startup_context = self._startup_failure_context(log_path)
         if startup_context is not None:
             context_lines: list[str] = []
-            last_phase = startup_context.get("last_phase")
-            if isinstance(last_phase, str) and last_phase:
-                context_lines.append(f"Last known startup phase: {last_phase}")
-            elapsed_seconds = startup_context.get("elapsed_seconds")
-            if isinstance(elapsed_seconds, float):
-                context_lines.append(
-                    f"Elapsed startup duration so far: {elapsed_seconds:.3f}s"
-                )
-            last_error = startup_context.get("last_error")
-            if isinstance(last_error, str) and last_error:
-                context_lines.append(f"Last startup error: {last_error}")
+            if startup_context.get("startup_completed") is True:
+                context_lines.append("Daemon startup status: completed")
+            else:
+                last_phase = startup_context.get("last_phase")
+                if isinstance(last_phase, str) and last_phase:
+                    context_lines.append(f"Last known startup phase: {last_phase}")
+                elapsed_seconds = startup_context.get("elapsed_seconds")
+                if isinstance(elapsed_seconds, float):
+                    context_lines.append(
+                        f"Elapsed startup duration so far: {elapsed_seconds:.3f}s"
+                    )
+                last_error = startup_context.get("last_error")
+                if isinstance(last_error, str) and last_error:
+                    context_lines.append(f"Last startup error: {last_error}")
             if context_lines:
                 message = f"{message}\n" + "\n".join(context_lines)
         log_tail = self._tail_daemon_log(log_path)
