@@ -66,15 +66,7 @@ class EmbeddingProvider(Protocol):
 
     @property
     def supported_dimensions(self) -> Sequence[int]:
-        """Valid output dimensions for this model.
-
-        Returns single-element list [native_dims] for non-matryoshka models.
-        Returns list of valid dimensions for matryoshka models.
-        """
-        ...
-
-    def supports_matryoshka(self) -> bool:
-        """True if model supports variable output dimensions."""
+        """Known-valid output dimensions for this model."""
         ...
 
     @property

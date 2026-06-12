@@ -2,7 +2,7 @@
 
 Covers:
 - output_dims configuration validation
-- Provider protocol properties (native_dims, supported_dimensions, supports_matryoshka)
+- Provider protocol properties (native_dims, supported_dimensions)
 - Model whitelist validation
 - Dimension boundary testing
 - Dimension discovery for unknown models
@@ -84,10 +84,10 @@ class TestEmbeddingCliAliases:
 
 
 class TestOpenAIProviderMatryoshka:
-    """Test OpenAI provider matryoshka support."""
+    """Test OpenAI provider dimension support."""
 
     def test_matryoshka_model_supports(self):
-        """text-embedding-3-* models support matryoshka."""
+        """text-embedding-3-* models have multiple supported dimensions."""
         from chunkhound.providers.embeddings.openai_provider import (
             OpenAIEmbeddingProvider,
         )
@@ -95,12 +95,11 @@ class TestOpenAIProviderMatryoshka:
         provider = OpenAIEmbeddingProvider(
             api_key="test-key", model="text-embedding-3-small"
         )
-        assert provider.supports_matryoshka() is True
         assert provider.native_dims == 1536
         assert 512 in provider.supported_dimensions
 
     def test_ada_model_no_matryoshka(self):
-        """text-embedding-ada-002 does not support matryoshka."""
+        """text-embedding-ada-002 has a single supported dimension."""
         from chunkhound.providers.embeddings.openai_provider import (
             OpenAIEmbeddingProvider,
         )
@@ -108,7 +107,6 @@ class TestOpenAIProviderMatryoshka:
         provider = OpenAIEmbeddingProvider(
             api_key="test-key", model="text-embedding-ada-002"
         )
-        assert provider.supports_matryoshka() is False
         assert provider.supported_dimensions == [1536]
 
     def test_output_dims_changes_dims_property(self):
@@ -132,7 +130,6 @@ class TestOpenAIProviderMatryoshka:
         provider = OpenAIEmbeddingProvider(
             api_key="test-key", model="text-embedding-3-large"
         )
-        assert provider.supports_matryoshka() is True
         assert provider.native_dims == 3072
         assert provider.dims == 3072
         # Continuous range support
@@ -148,8 +145,8 @@ class TestVoyageModelConfigProperties:
     via trivial dict lookups.
     """
 
-    def test_voyage_35_supports_matryoshka(self):
-        """voyage-3.5 config has multiple dimensions (matryoshka)."""
+    def test_voyage_35_has_multiple_dimensions(self):
+        """voyage-3.5 config has multiple supported dimensions."""
 
         dims = VOYAGE_MODEL_CONFIG["voyage-3.5"]["dimensions"]
         assert len(dims) > 1
@@ -420,7 +417,7 @@ class TestFactoryRouting:
 
 
 class TestOpenAIProviderRuntimeBehavior:
-    """Test OpenAI matryoshka request and validation behavior."""
+    """Test known OpenAI model init-time output_dims validation."""
 
     def test_known_non_matryoshka_model_rejects_invalid_output_dims(self):
         """Known non-matryoshka models must reject incompatible output_dims."""
@@ -428,7 +425,9 @@ class TestOpenAIProviderRuntimeBehavior:
             OpenAIEmbeddingProvider,
         )
 
-        with pytest.raises(EmbeddingConfigurationError, match="does not support"):
+        with pytest.raises(
+            EmbeddingConfigurationError, match="does not support"
+        ):
             OpenAIEmbeddingProvider(
                 api_key="test-key",
                 model="text-embedding-ada-002",
@@ -441,13 +440,14 @@ class TestOpenAIProviderRuntimeBehavior:
             OpenAIEmbeddingProvider,
         )
 
-        with pytest.raises(EmbeddingConfigurationError, match="range 1-1536"):
+        with pytest.raises(
+            EmbeddingConfigurationError, match="range 1-1536"
+        ):
             OpenAIEmbeddingProvider(
                 api_key="test-key",
                 model="text-embedding-3-small",
                 output_dims=1537,
             )
-
 
 
 class TestMeanPoolEmbeddings:
@@ -727,7 +727,6 @@ class TestFakeProviderMatryoshka:
         p = FakeEmbeddingProvider(dims=1536, output_dims=512)
         assert p.dims == 512
         assert p.native_dims == 1536
-        assert p.supports_matryoshka() is True
 
         vecs = asyncio.run(p.embed(["test text"]))
         assert len(vecs) == 1
@@ -764,7 +763,6 @@ class TestFakeProviderMatryoshka:
         p = FakeEmbeddingProvider(dims=1536)
         assert p.dims == 1536
         assert p.native_dims == 1536
-        assert p.supports_matryoshka() is False
 
         vecs = asyncio.run(p.embed(["test text"]))
         assert len(vecs[0]) == 1536

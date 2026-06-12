@@ -264,10 +264,6 @@ class FakeEmbeddingProvider:
             return [self._dims, self._output_dims]
         return [self._dims]
 
-    def supports_matryoshka(self) -> bool:
-        """True if model supports variable output dimensions."""
-        return self._output_dims is not None
-
     @property
     def output_dims(self) -> int | None:
         """Configured output dimension override, or None for native."""

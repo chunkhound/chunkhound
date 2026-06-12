@@ -334,6 +334,10 @@ class OpenAIEmbeddingProvider:
 
         # Model-specific configuration for OpenAI models
         self._model_config = OPENAI_MODEL_CONFIG
+
+        # Known models get fail-fast output_dims validation at init. Unknown/custom
+        # models defer to runtime — validate_embedding_dims in _embed_batch_internal
+        # catches any mismatch after the first API response.
         self._validate_output_dims_config()
 
         # Usage statistics
@@ -505,20 +509,21 @@ class OpenAIEmbeddingProvider:
         return self._model
 
     def _validate_output_dims_config(self) -> None:
-        """Reject impossible output_dims for known OpenAI models."""
+        """Reject impossible output_dims for known OpenAI models at init."""
         if self._output_dims is None or self._model not in self._model_config:
             return
 
-        native_dims = self.native_dims
-        if not self.supports_matryoshka():
+        cfg = cast(dict[str, Any], self._model_config[self._model])
+        native_dims = cfg.get("native_dims", 1536)
+        if not cfg.get("matryoshka", False):
             if self._output_dims != native_dims:
                 raise EmbeddingConfigurationError(
-                    f"Model '{self._model}' does not support output_dims={self._output_dims}. "
-                    f"Use the native dimension {native_dims}."
+                    f"Model '{self._model}' does not support output_dims="
+                    f"{self._output_dims}. Use the native dimension {native_dims}."
                 )
             return
 
-        min_dims = self._model_config[self._model].get("min_dims", 1)
+        min_dims = cfg.get("min_dims", 1)
         if not isinstance(min_dims, int):
             min_dims = 1
         if not min_dims <= self._output_dims <= native_dims:
@@ -585,12 +590,6 @@ class OpenAIEmbeddingProvider:
                 native = cfg.get("native_dims", 1536)
                 return list(range(min_dims, native + 1))
         return [self.native_dims]
-
-    def supports_matryoshka(self) -> bool:
-        """True if model supports variable output dimensions."""
-        if self._model in self._model_config:
-            return bool(self._model_config[self._model].get("matryoshka", False))
-        return False
 
     @property
     def output_dims(self) -> int | None:
