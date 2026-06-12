@@ -124,14 +124,20 @@ class TestValidateRerankConfiguration:
 
 
 class TestSupportsReranking:
-    def test_official_api_always_true(self, provider_official):
+    def test_official_api_with_rerank_model_is_true(self, provider_official):
         assert provider_official.supports_reranking() is True
+
+    def test_official_api_without_rerank_model_is_false(self):
+        p = _make_provider(api_key="test-key", rerank_model=None)
+        assert p.supports_reranking() is False
 
     def test_custom_endpoint_without_rerank_url_is_false(self, provider_custom):
         assert provider_custom.supports_reranking() is False
 
     def test_custom_endpoint_with_rerank_url_is_true(self, provider_with_rerank_url):
         assert provider_with_rerank_url.supports_reranking() is True
+
+    def test_http_cohere_without_rerank_model_is_false(self):
         p = _make_provider(
             api_key="test-key",
             rerank_url="http://localhost:8001/rerank",
@@ -1007,6 +1013,20 @@ class TestRerankSdkRetry:
     caught by a failing test, not a production stack trace."""
 
     @pytest.mark.asyncio
+    async def test_missing_rerank_model_fails_fast(self):
+        p = _make_provider(api_key="test-key", rerank_model=None)
+
+        with pytest.raises(RuntimeError, match="requires rerank_model"):
+            await p._rerank_via_sdk("q", ["d1"], top_k=None)
+
+    @pytest.mark.asyncio
+    async def test_missing_rerank_model_fails_fast_through_public_api(self):
+        p = _make_provider(api_key="test-key", rerank_model=None)
+
+        with pytest.raises(RuntimeError, match="requires rerank_model"):
+            await p.rerank("q", ["d1"], top_k=None)
+
+    @pytest.mark.asyncio
     async def test_rate_limit_error_retried_with_30s_base_delay(self):
         p = _make_provider(api_key="test-key", retry_attempts=2, retry_delay=0.0)
         call_count = 0
@@ -1107,6 +1127,15 @@ class TestRerankSdkRetry:
 # ===========================================================================
 # 10. Factory — relative rerank_url resolution
 # ===========================================================================
+
+
+class TestHttpRerankGuards:
+    @pytest.mark.asyncio
+    async def test_missing_rerank_url_fails_fast(self):
+        p = _make_provider(api_key="test-key")
+
+        with pytest.raises(RuntimeError, match="requires rerank_url"):
+            await p._rerank_http_batch("q", ["d1"], top_k=None)
 
 
 class TestUnknownVoyageModelConfig:
@@ -1229,6 +1258,10 @@ class TestGetModelInfo:
     def test_official_api_supports_reranking_true(self, provider_official):
         info = provider_official.get_model_info()
         assert info["supports_reranking"] is True
+
+    def test_official_api_without_rerank_model_reports_false(self):
+        info = _make_provider(api_key="test-key", rerank_model=None).get_model_info()
+        assert info["supports_reranking"] is False
 
     def test_custom_endpoint_without_rerank_url_is_false(self, provider_custom):
         info = provider_custom.get_model_info()

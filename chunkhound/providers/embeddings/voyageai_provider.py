@@ -802,15 +802,24 @@ class VoyageAIEmbeddingProvider:
 
     # Reranking Operations
     def supports_reranking(self) -> bool:
-        """Return True if reranking is available with the current configuration.
+        """Return True if reranking can run with the current configuration."""
+        try:
+            validate_rerank_configuration(
+                provider="voyageai",
+                rerank_format=self._rerank_format,
+                rerank_model=self._rerank_model,
+                rerank_url=self._rerank_url,
+                base_url=self._base_url,
+            )
+        except ValueError:
+            return False
 
-        - Custom base_url (e.g. Azure ML): only supported when rerank_url is
-          explicitly configured, since the embedding endpoint does not expose /rerank.
-        - Official VoyageAI API (no base_url): always supported via SDK.
-        """
-        if self._base_url:
-            return self._rerank_url is not None
-        return True
+        if self._rerank_url is not None:
+            return True
+        if self._base_url is not None:
+            return False
+
+        return self._rerank_model is not None
 
     async def rerank(
         self, query: str, documents: list[str], top_k: int | None = None
@@ -832,17 +841,21 @@ class VoyageAIEmbeddingProvider:
         self, query: str, documents: list[str], top_k: int | None
     ) -> list[RerankResult]:
         """Rerank using the VoyageAI SDK (official API)."""
+        rerank_model = self._rerank_model
+        if rerank_model is None:
+            raise RuntimeError("VoyageAI SDK reranking requires rerank_model")
+
         for attempt in range(self._retry_attempts):
             try:
                 logger.debug(
-                    f"VoyageAI reranking {len(documents)} documents with model {self._rerank_model}"
+                    f"VoyageAI reranking {len(documents)} documents with model {rerank_model}"
                 )
 
                 result = await asyncio.to_thread(
                     self._client.rerank,
                     query=query,
                     documents=documents,
-                    model=self._rerank_model,
+                    model=rerank_model,
                     top_k=top_k,
                 )
 
@@ -871,6 +884,8 @@ class VoyageAIEmbeddingProvider:
             except AttributeError as e:
                 logger.error(f"VoyageAI rerank response format error: {e}")
                 raise ValueError(f"Invalid rerank response format: {e}") from e
+            except EmbeddingProviderError:
+                raise
             except Exception as e:
                 error_type = type(e).__name__
                 error_module = type(e).__module__
@@ -932,9 +947,12 @@ class VoyageAIEmbeddingProvider:
     ) -> list[RerankResult]:
         """Send one batch to the HTTP reranker and return parsed results."""
         payload = self._build_rerank_payload(query, documents, top_k)
+        rerank_url = self._rerank_url
+        if rerank_url is None:
+            raise RuntimeError("HTTP reranking requires rerank_url")
 
         logger.debug(
-            f"HTTP reranking {len(documents)} documents at {self._rerank_url} "
+            f"HTTP reranking {len(documents)} documents at {rerank_url} "
             f"(format={self._rerank_format})"
         )
 
@@ -945,9 +963,7 @@ class VoyageAIEmbeddingProvider:
             if self._api_key:
                 headers["Authorization"] = f"Bearer {self._api_key}"
 
-            response = await client.post(
-                self._rerank_url, json=payload, headers=headers
-            )
+            response = await client.post(rerank_url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
 
