@@ -139,9 +139,7 @@ def _meta_tag_content(html: str, attr_name: str, attr_value: str) -> str | None:
     Returns the first match if multiple tags share the same identifier.
     """
     for match in re.finditer(r"<meta\s+[^>]*>", html):
-        attributes = dict(
-            re.findall(r'([^\s=/>]+)\s*=\s*"([^"]*)"', match.group(0))
-        )
+        attributes = dict(re.findall(r'([^\s=/>]+)\s*=\s*"([^"]*)"', match.group(0)))
         if attributes.get(attr_name) == attr_value:
             return attributes.get("content")
     return None
@@ -156,6 +154,9 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
         encoding="utf-8"
     )
     configuration = (DIST / "docs" / "configuration" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    contributing = (DIST / "docs" / "contributing" / "index.html").read_text(
         encoding="utf-8"
     )
     docs_home = (DIST / "docs" / "getting-started" / "index.html").read_text(
@@ -203,7 +204,9 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert "chunkhound autodoc --assets-only --out-dir docs-site/" in cli_reference
     assert "chunkhound autodoc --out-dir site/" not in cli_reference
     assert "Complete reference for all ChunkHound CLI commands" in cli_reference
-    assert "embedding providers, database backends, and indexing behavior" in configuration
+    assert (
+        "embedding providers, database backends, and indexing behavior" in configuration
+    )
     assert '<nav class="nav-tabs"' not in homepage
     sidebar_tag = re.search(r'<aside class="docs-sidebar"[^>]*>', docs_home)
     assert sidebar_tag is not None
@@ -212,6 +215,15 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert 'tabindex="-1"' not in sidebar_tag.group(0)
     assert "cdn.jsdelivr.net" not in getting_started
     assert "cdn.jsdelivr.net" not in configuration
+    assert "uv run python scripts/pre_commit.py install" in contributing
+    assert "make install-hooks" in contributing
+    assert "uv run python scripts/pre_commit.py run-staged" in contributing
+    assert "--overwrite-hook" in contributing
+    assert ".py</code>" in contributing
+    assert ".pyi</code>" in contributing
+    assert "Re-stage the" in contributing
+    assert "fixed files and commit again" in contributing
+    assert "--no-verify" in contributing
 
 
 @pytest.mark.parametrize(
