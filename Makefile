@@ -33,7 +33,7 @@ install-hooks:
 	uv run python scripts/pre_commit.py install
 
 lint:
-	uv run ruff check chunkhound
+	uv run ruff check chunkhound scripts tests
 
 typecheck:
 	uv run mypy chunkhound
