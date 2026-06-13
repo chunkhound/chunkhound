@@ -129,3 +129,64 @@ async def test_sdk_structured_success(mock_antigravity_agent):
     # Verify pydantic class or dict is passed as response_schema
     assert config_passed.response_schema is not None
 
+
+# --- CLI Provider Tests ---
+
+@pytest.mark.asyncio
+async def test_cli_complete_success(mock_subprocess):
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+    
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"Hello from CLI!", b"")
+    mock_subprocess.return_value = mock_process
+
+    # Set some test env vars to verify scrubbing
+    with patch.dict(os.environ, {"CHUNKHOUND_TEST": "1", "SDLAIC_TEST": "2", "GOOGLE_APPLICATION_CREDENTIALS": "abc"}):
+        result = await provider.complete("CLI prompt")
+
+    assert isinstance(result, LLMResponse)
+    assert result.content == "Hello from CLI!"
+    assert result.model == "gemini-3.5-flash"
+    assert result.tokens_used > 0
+
+    # Assert subprocess call arguments
+    mock_subprocess.assert_called_once()
+    cmd_args = mock_subprocess.call_args.args
+    assert "agy" in cmd_args or "antigravity" in cmd_args
+    assert "chat" in cmd_args
+    assert "--print" in cmd_args
+    assert "--sandbox" in cmd_args
+    assert cmd_args[cmd_args.index("--sandbox") + 1] == "read-only"
+    assert "--model" in cmd_args
+    assert cmd_args[cmd_args.index("--model") + 1] == "gemini-3.5-flash"
+
+    # Assert subprocess run CWD and env isolation
+    call_kwargs = mock_subprocess.call_args.kwargs
+    assert call_kwargs.get("cwd") == tempfile.gettempdir()
+    
+    env_passed = call_kwargs.get("env")
+    assert env_passed is not None
+    assert "CHUNKHOUND_TEST" not in env_passed
+    assert "SDLAIC_TEST" not in env_passed
+    assert env_passed.get("GOOGLE_APPLICATION_CREDENTIALS") == "abc"
+
+
+@pytest.mark.asyncio
+async def test_cli_complete_failure(mock_subprocess):
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+    
+    mock_process = AsyncMock()
+    mock_process.returncode = 1
+    mock_process.communicate.return_value = (b"", b"Command not found or permission denied")
+    mock_subprocess.return_value = mock_process
+
+    with pytest.raises(RuntimeError, match="Command not found or permission denied"):
+        await provider.complete("CLI prompt")
+
+
+def test_cli_synthesis_concurrency():
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+    assert provider.get_synthesis_concurrency() == 1
+
+
