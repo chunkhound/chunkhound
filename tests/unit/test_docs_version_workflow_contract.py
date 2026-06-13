@@ -458,9 +458,7 @@ class TestDocsVersionWorkflowContract:
         assert resolve_index < consumer_index
 
     def test_workflows_do_not_inline_docs_version_resolution(self) -> None:
-        contents = (ROOT / ".github/workflows/ci.yml").read_text(
-            encoding="utf-8"
-        )
+        contents = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         assert INLINE_RESOLVE_SNIPPET not in contents
 
@@ -511,9 +509,7 @@ class TestDocsVersionWorkflowContract:
     def test_tests_job_matrix_uses_pytest_timeout_minutes_consistently(self) -> None:
         matrix = cast(
             list[dict[str, Any]],
-            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"][
-                "include"
-            ],
+            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"]["include"],
         )
 
         assert all("pytest_timeout_minutes" in entry for entry in matrix)
@@ -553,6 +549,7 @@ class TestDocsVersionWorkflowContract:
         permissions = cast(dict[str, Any], job.get("permissions", {}))
 
         assert job["needs"] == [
+            "lint-changed-python",
             "site-build",
             "tests",
             "site-build-validation",
@@ -568,9 +565,12 @@ class TestDocsVersionWorkflowContract:
         workflow = _load_workflow(".github/workflows/ci.yml")
         concurrency = cast(dict[str, Any], workflow.get("concurrency", {}))
 
-        assert concurrency["group"] == (
-            "${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}"
+        expected_group = (
+            "${{ github.ref == 'refs/heads/main' && "
+            "'ch-test-deploy' || github.run_id }}"
         )
+
+        assert concurrency["group"] == expected_group
         assert concurrency["cancel-in-progress"] is False
 
     def test_deploy_job_contract(self) -> None:
@@ -583,3 +583,44 @@ class TestDocsVersionWorkflowContract:
         assert permissions["contents"] == "read"
         assert permissions["pages"] == "write"
         assert permissions["id-token"] == "write"
+
+    def test_changed_python_lint_job_contract(self) -> None:
+        workflow = _load_workflow(".github/workflows/ci.yml")
+        triggers = cast(dict[str, Any], workflow.get("on", workflow.get(True, {})))
+        job = _job(".github/workflows/ci.yml", "lint-changed-python")
+        steps = cast(list[dict[str, Any]], job["steps"])
+
+        assert "pull_request" in triggers
+        assert "push" in triggers
+        assert "merge_group" in triggers
+        assert "workflow_dispatch" in triggers
+        assert job["runs-on"] == "ubuntu-latest"
+        assert job["timeout-minutes"] == 10
+
+        _assert_checkout_uses_full_history(steps)
+
+        pre_commit_index = _find_step_index(
+            steps,
+            "changed python pre-commit step",
+            lambda step: step.get("name") == "Run pre-commit on changed Python files",
+        )
+        pre_commit_step = steps[pre_commit_index]
+        pre_commit_env = cast(dict[str, str], pre_commit_step["env"])
+
+        assert pre_commit_step["run"] == (
+            "python scripts/pre_commit.py run-changed --github-actions"
+        )
+        assert pre_commit_env["CHUNKHOUND_GITHUB_EVENT_NAME"] == (
+            "${{ github.event_name }}"
+        )
+        assert pre_commit_env["CHUNKHOUND_GITHUB_BASE_SHA"] == (
+            "${{ github.event.pull_request.base.sha || "
+            "github.event.merge_group.base_sha || github.event.before || '' }}"
+        )
+        assert pre_commit_env["CHUNKHOUND_GITHUB_HEAD_SHA"] == (
+            "${{ github.event.pull_request.head.sha || "
+            "github.event.merge_group.head_sha || github.sha }}"
+        )
+        assert pre_commit_env["CHUNKHOUND_GITHUB_DEFAULT_BRANCH"] == (
+            "${{ github.event.repository.default_branch || '' }}"
+        )
