@@ -458,6 +458,7 @@ class TestPreCommitScript:
                 RUFF_PACKAGE,
                 "ruff",
                 "check",
+                "--fix",
                 "--",
                 "added.pyi",
                 "kept.py",
