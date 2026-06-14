@@ -2,7 +2,10 @@
 
 from typing import Any
 
-from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
+from chunkhound.core.exceptions.embedding import (
+    EmbeddingConfigurationError,
+    EmbeddingDimensionError,
+)
 from chunkhound.core.utils.token_utils import LLM_CHARS_PER_TOKEN
 
 
@@ -176,18 +179,10 @@ def validate_positive_output_dims(
         EmbeddingConfigurationError: If output_dims is set but not a
             positive integer.
     """
-    from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
-
     if output_dims is None:
         return None
     # bool is a subclass of int in Python — reject explicitly
-    if isinstance(output_dims, bool) or not isinstance(output_dims, int):
-        prefix = f"Model '{model}' uses " if model else ""
-        raise EmbeddingConfigurationError(
-            f"{prefix}output_dims={output_dims!r}, but "
-            "output_dims must be a positive integer."
-        )
-    if output_dims <= 0:
+    if isinstance(output_dims, bool) or not isinstance(output_dims, int) or output_dims <= 0:
         prefix = f"Model '{model}' uses " if model else ""
         raise EmbeddingConfigurationError(
             f"{prefix}output_dims={output_dims!r}, but "

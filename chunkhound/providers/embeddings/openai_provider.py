@@ -513,25 +513,14 @@ class OpenAIEmbeddingProvider:
             return self._azure_deployment or self._model
         return self._model
 
-    def _validate_output_dims_positive_int(self) -> int | None:
-        """Return validated positive int, or None if output_dims is unset.
-
-        Delegates to shared validation in shared_utils.
-
-        Raises:
-            EmbeddingConfigurationError: If output_dims is set but not a
-                positive integer.
-        """
-        return validate_positive_output_dims(
-            self._output_dims, model=self._model
-        )
-
     def _validate_output_dims_config(self) -> None:
         """Reject invalid known-model output_dims at init."""
         if self._model not in self._model_config:
             return
 
-        output_dims = self._validate_output_dims_positive_int()
+        output_dims = validate_positive_output_dims(
+            self._output_dims, model=self._model
+        )
         if output_dims is None:
             if self._client_side_truncation:
                 raise EmbeddingConfigurationError(
@@ -567,7 +556,9 @@ class OpenAIEmbeddingProvider:
         validation turns invalid configs into EmbeddingConfigurationError
         before request dispatch.
         """
-        output_dims = self._validate_output_dims_positive_int()
+        output_dims = validate_positive_output_dims(
+            self._output_dims, model=self._model
+        )
         if output_dims is None:
             if self._client_side_truncation:
                 raise EmbeddingConfigurationError(
