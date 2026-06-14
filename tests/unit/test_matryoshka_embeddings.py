@@ -5,8 +5,8 @@ Covers:
 - Provider protocol properties (native_dims, supported_dimensions)
 - Model whitelist validation
 - Dimension boundary testing
-- Dimension discovery for unknown models
-- Matryoshka truncation in _embed_batch_internal
+- Public embed() truncation/runtime contracts
+- Selected _embed_batch_internal invariants
 """
 
 import argparse
@@ -514,23 +514,23 @@ class TestOpenAIProviderRuntimeBehavior:
         assert provider.client_side_truncation is True
 
     @pytest.mark.asyncio
-    async def test_unknown_model_runtime_uses_dimensions_param_for_server_side(
+    async def test_unknown_model_embed_uses_dimensions_param_for_server_side(
         self,
     ):
-        """Unknown models send dimensions when using server-side truncation."""
+        """Unknown models expose server-side truncation through the public embed API."""
         provider = self._unknown_model_provider(output_dims=256)
 
-        result = await provider._embed_batch_internal(["hello"])
+        result = await provider.embed(["hello"])
 
         assert len(result[0]) == 256
         call_kwargs = provider._client.embeddings.create.call_args.kwargs
         assert call_kwargs["dimensions"] == 256
 
     @pytest.mark.asyncio
-    async def test_unknown_model_runtime_omits_dimensions_param_for_client_side(
+    async def test_unknown_model_embed_omits_dimensions_param_for_client_side(
         self,
     ):
-        """Unknown models omit dimensions when truncating client-side."""
+        """Unknown models expose client-side truncation through the public embed API."""
         provider = self._unknown_model_provider(
             output_dims=256,
             client_side_truncation=True,
@@ -539,7 +539,7 @@ class TestOpenAIProviderRuntimeBehavior:
             return_value=_ok_response(dim=768)
         )
 
-        result = await provider._embed_batch_internal(["hello"])
+        result = await provider.embed(["hello"])
 
         assert len(result[0]) == 256
         call_kwargs = provider._client.embeddings.create.call_args.kwargs
@@ -547,7 +547,7 @@ class TestOpenAIProviderRuntimeBehavior:
         assert provider.native_dims == 768
 
     @pytest.mark.asyncio
-    async def test_unknown_model_runtime_rejects_output_dims_exceeding_api_dims(
+    async def test_unknown_model_embed_rejects_output_dims_exceeding_api_dims(
         self,
     ):
         """Unknown model + client truncation rejects output_dims > API dims."""
@@ -563,10 +563,10 @@ class TestOpenAIProviderRuntimeBehavior:
             EmbeddingConfigurationError,
             match="but the API returned",
         ):
-            await provider._embed_batch_internal(["hello"])
+            await provider.embed(["hello"])
 
     @pytest.mark.asyncio
-    async def test_unknown_model_runtime_rejects_non_positive_output_dims(self):
+    async def test_unknown_model_embed_rejects_non_positive_output_dims(self):
         """Embed-time validation rejects non-positive output_dims cleanly."""
         provider = self._unknown_model_provider(output_dims=0)
 
@@ -574,12 +574,12 @@ class TestOpenAIProviderRuntimeBehavior:
             EmbeddingConfigurationError,
             match="positive integer",
         ):
-            await provider._embed_batch_internal(["hello"])
+            await provider.embed(["hello"])
 
         provider._client.embeddings.create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unknown_model_runtime_rejects_non_int_output_dims(self):
+    async def test_unknown_model_embed_rejects_non_int_output_dims(self):
         """Embed-time validation rejects non-int output_dims cleanly."""
         provider = self._unknown_model_provider(output_dims="256")
 
@@ -587,12 +587,12 @@ class TestOpenAIProviderRuntimeBehavior:
             EmbeddingConfigurationError,
             match="positive integer",
         ):
-            await provider._embed_batch_internal(["hello"])
+            await provider.embed(["hello"])
 
         provider._client.embeddings.create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unknown_model_runtime_rejects_bool_output_dims(self):
+    async def test_unknown_model_embed_rejects_bool_output_dims(self):
         """Embed-time validation rejects bool output_dims cleanly."""
         provider = self._unknown_model_provider(output_dims=True)
 
@@ -600,12 +600,12 @@ class TestOpenAIProviderRuntimeBehavior:
             EmbeddingConfigurationError,
             match="positive integer",
         ):
-            await provider._embed_batch_internal(["hello"])
+            await provider.embed(["hello"])
 
         provider._client.embeddings.create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unknown_model_runtime_rejects_missing_output_dims_for_client_truncation(
+    async def test_unknown_model_embed_rejects_missing_output_dims_for_client_truncation(
         self,
     ):
         """Embed-time validation rejects client truncation without output_dims."""
@@ -615,7 +615,7 @@ class TestOpenAIProviderRuntimeBehavior:
             EmbeddingConfigurationError,
             match="runtime truncation requires",
         ):
-            await provider._embed_batch_internal(["hello"])
+            await provider.embed(["hello"])
 
         provider._client.embeddings.create.assert_not_called()
 
@@ -989,46 +989,6 @@ class TestOpenAIDimensionDiscovery:
         assert provider.native_dims == 768
 
     @pytest.mark.asyncio
-    async def test_unknown_model_server_side_truncation_keeps_output_contract(self):
-        """Unknown models still return requested output dims with API truncation."""
-        provider, _, _ = _bare_provider(
-            model="my-custom-embed-v1",
-            output_dims=256,
-        )
-        provider._client = MagicMock()
-        provider._client.embeddings.create = AsyncMock(
-            return_value=_ok_response(dim=256)
-        )
-
-        result = await provider._embed_batch_internal(["hello"])
-
-        assert len(result) == 1
-        assert len(result[0]) == 256
-        assert provider.dims == 256
-
-    @pytest.mark.asyncio
-    async def test_unknown_model_client_side_truncation_discovers_native_dims(
-        self,
-    ):
-        """Client-side truncation keeps output dims and discovers native dims."""
-        provider, _, _ = _bare_provider(
-            model="my-custom-embed-v1",
-            output_dims=256,
-            client_side_truncation=True,
-        )
-        provider._client = MagicMock()
-        provider._client.embeddings.create = AsyncMock(
-            return_value=_ok_response(dim=768)
-        )
-
-        result = await provider._embed_batch_internal(["hello"])
-
-        assert len(result) == 1
-        assert len(result[0]) == 256
-        assert provider.dims == 256
-        assert provider.native_dims == 768
-
-    @pytest.mark.asyncio
     async def test_unknown_model_warns_default_dims(self):
         """First access of dims for an unknown model logs a warning."""
         provider, _, mod = _bare_provider(model="my-custom-embed-v1")
@@ -1047,7 +1007,7 @@ class TestOpenAIDimensionDiscovery:
 
 
 class TestOpenAIMatryoshkaEmbed:
-    """Test _embed_batch_internal with output_dims / client_side_truncation."""
+    """Test low-level _embed_batch_internal invariants kept outside public embed()."""
 
     @pytest.mark.asyncio
     async def test_server_side_truncation_embed(self):
