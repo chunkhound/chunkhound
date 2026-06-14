@@ -718,6 +718,9 @@ class VoyageAIEmbeddingProvider:
             "model": self._model,
             "rerank_model": self._rerank_model,
             "dimensions": self.dims,
+            "native_dims": self.native_dims,
+            "output_dims": self.output_dims,
+            "client_side_truncation": self.client_side_truncation,
             "max_tokens": self._max_tokens,
             "supports_reranking": self.supports_reranking(),
         }

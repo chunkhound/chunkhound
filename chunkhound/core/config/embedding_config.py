@@ -701,6 +701,10 @@ class EmbeddingConfig(BaseSettings):
             f"model={self.get_default_model()}",
             f"api_key={api_key_display}",
         ]
+        if self.output_dims is not None:
+            parts.append(f"output_dims={self.output_dims}")
+        if self.client_side_truncation:
+            parts.append("client_side_truncation=True")
         if self.azure_endpoint:
             parts.append(f"azure_endpoint={self.azure_endpoint}")
             parts.append(f"api_version={self.api_version}")
