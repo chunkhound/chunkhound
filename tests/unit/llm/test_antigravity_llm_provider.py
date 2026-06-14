@@ -126,8 +126,30 @@ async def test_sdk_structured_success(mock_antigravity_agent):
     mock_antigravity_agent.assert_called_once()
     config_passed = mock_antigravity_agent.call_args[1].get("config")
     
-    # Verify pydantic class or dict is passed as response_schema
-    assert config_passed.response_schema is not None
+    # Verify pydantic class is compiled and passed as response_schema
+    assert isinstance(config_passed.response_schema, str)
+    assert "DynamicResponseModel" in config_passed.response_schema
+
+
+@pytest.mark.asyncio
+async def test_sdk_complete_token_estimation_includes_thoughts(mock_antigravity_agent):
+    provider = AntigravityLLMProvider(api_key="test-api-key", model="gemini-3.5-flash")
+    
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    resp_mock, conv_mock = _make_sdk_response("Hello from Antigravity!", thoughts="Thinking deeply...")
+    
+    # Simulate failed token usage retrieval by setting conversation to None
+    agent_mock.chat = AsyncMock(return_value=resp_mock)
+    agent_mock.conversation = None
+
+    result = await provider.complete("Test prompt", system="Test system")
+
+    # Estimated tokens: len(prompt + content + thoughts) // 4
+    # prompt = "Test prompt" (11 chars)
+    # content = "Hello from Antigravity!" (23 chars)
+    # thoughts = "Thinking deeply..." (18 chars)
+    # Total chars = 11 + 23 + 18 = 52. 52 // 4 = 13 tokens.
+    assert result.tokens_used == 13
 
 
 # --- CLI Provider Tests ---

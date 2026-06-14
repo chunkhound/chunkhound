@@ -96,6 +96,9 @@ class AntigravityLLMProvider(LLMProvider):
                 
                 content = await response.text()
                 
+                # Extract thoughts/reasoning tokens
+                thoughts = getattr(response, "thoughts", "")
+                
                 # Retrieve token usage from agent conversation
                 tokens_used = 0
                 try:
@@ -105,8 +108,10 @@ class AntigravityLLMProvider(LLMProvider):
                             tokens_used = getattr(total_usage, "total_token_count", 0)
                 except Exception as e:
                     logger.warning(f"Failed to extract token count from SDK agent context: {e}")
-                    # Estimate tokens based on prompt + response length
-                    tokens_used = len(prompt + content) // 4
+                    
+                if not tokens_used:
+                    # Estimate tokens based on prompt + response length + thoughts length
+                    tokens_used = len(prompt + content + thoughts) // 4
 
                 logger.debug(f"Antigravity SDK complete. Content length: {len(content)}, tokens: {tokens_used}")
                 return LLMResponse(
@@ -119,6 +124,54 @@ class AntigravityLLMProvider(LLMProvider):
             logger.error(f"Antigravity SDK call failed: {e}")
             raise RuntimeError(f"Antigravity SDK call failed: {e}") from e
 
+    def _compile_schema_to_pydantic(self, schema: dict[str, Any], name: str = "DynamicResponseModel") -> Any:
+        """Dynamically compile JSON schema to a Pydantic model class using create_model."""
+        from pydantic import create_model, Field
+        from typing import Any, List, Dict, Union, Optional
+        
+        type_mapping = {
+            "string": str,
+            "integer": int,
+            "number": float,
+            "boolean": bool,
+            "array": list,
+            "object": dict,
+        }
+        
+        if not isinstance(schema, dict):
+            return schema
+            
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        
+        fields = {}
+        for field_name, prop in properties.items():
+            prop_type = prop.get("type")
+            python_type = Any
+            
+            if prop_type == "object":
+                python_type = self._compile_schema_to_pydantic(prop, name=f"{name}_{field_name}")
+            elif prop_type == "array":
+                items = prop.get("items")
+                if isinstance(items, dict) and items.get("type") == "object":
+                    item_type = self._compile_schema_to_pydantic(items, name=f"{name}_{field_name}_item")
+                    python_type = List[item_type]
+                elif isinstance(items, dict) and items.get("type") in type_mapping:
+                    python_type = List[type_mapping[items.get("type")]]
+                else:
+                    python_type = List
+            elif prop_type in type_mapping:
+                python_type = type_mapping[prop_type]
+                
+            description = prop.get("description", "")
+            
+            if field_name in required:
+                fields[field_name] = (python_type, Field(..., description=description))
+            else:
+                fields[field_name] = (Optional[python_type], Field(default=None, description=description))
+                
+        return create_model(name, **fields)
+
     async def complete_structured(
         self,
         prompt: str,
@@ -130,11 +183,14 @@ class AntigravityLLMProvider(LLMProvider):
         """Generate a structured JSON completion conforming to the given schema."""
         request_timeout = timeout if timeout is not None else self._timeout
 
+        # Compile JSON schema to Pydantic model class
+        pydantic_schema = self._compile_schema_to_pydantic(json_schema)
+
         # Build config with response_schema
         config_kwargs = {
             "model": self._model,
             "api_key": self._api_key,
-            "response_schema": json_schema,
+            "response_schema": pydantic_schema,
         }
         if system:
             config_kwargs["system_instructions"] = system
