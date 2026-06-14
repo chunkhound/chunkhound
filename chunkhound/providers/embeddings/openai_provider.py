@@ -568,6 +568,45 @@ class OpenAIEmbeddingProvider:
                 f"{min_dims}-{native_dims}, got {self._output_dims}."
             )
 
+    def _validate_runtime_output_dims_config(self) -> int | None:
+        """Validate embed-time output_dims config for paths that skip init checks.
+
+        Unknown/custom OpenAI models intentionally skip init-time validation
+        so advanced users can point at compatible endpoints. Embed-time
+        validation turns invalid configs into EmbeddingConfigurationError
+        before request dispatch.
+        """
+        output_dims = self._validate_output_dims_positive_int()
+        if output_dims is None:
+            if self._client_side_truncation:
+                raise EmbeddingConfigurationError(
+                    f"Model '{self._model}' uses client_side_truncation=True but "
+                    "output_dims is not set. runtime truncation requires "
+                    "a positive integer output_dims explicitly."
+                )
+            return None
+        return output_dims
+
+    def _validate_client_side_truncation_runtime_config(
+        self, raw_dim: int, output_dims: int
+    ) -> int:
+        """Return a validated output_dims for runtime client-side truncation.
+
+        Args:
+            raw_dim: Native dimension from the API response.
+            output_dims: Positive validated target dimension from embed-time config.
+
+        Raises:
+            EmbeddingConfigurationError: If output_dims exceeds the API-returned
+                raw dimension.
+        """
+        if output_dims > raw_dim:
+            raise EmbeddingConfigurationError(
+                f"Model '{self._model}' uses client_side_truncation=True with "
+                f"output_dims={output_dims}, but the API returned {raw_dim} dims."
+            )
+        return output_dims
+
     def _build_embedding_request_kwargs(
         self, texts: list[str], timeout: int
     ) -> dict[str, Any]:
@@ -577,7 +616,10 @@ class OpenAIEmbeddingProvider:
             "input": texts,
             "timeout": timeout,
         }
-        dim_param = build_dimension_request_param(self._output_dims, self._client_side_truncation)
+        output_dims = self._validate_runtime_output_dims_config()
+        dim_param = build_dimension_request_param(
+            output_dims, self._client_side_truncation
+        )
         if dim_param is not None:
             embed_kwargs["dimensions"] = dim_param
         return embed_kwargs
@@ -894,12 +936,20 @@ class OpenAIEmbeddingProvider:
                         f"OpenAI API returned incomplete embeddings, missing indices: {missing}"
                     )
 
-                # Apply client-side truncation + L2 normalization (after confirming no None values)
+                # Client-side truncation is the escape hatch for custom endpoints
+                # that ignore/don't support OpenAI's dimensions param, so validate
+                # the runtime config explicitly instead of relying on cast()/TypeError.
                 if self._client_side_truncation:
-                    logger.debug(
-                        f"Applying client-side truncation: {cast(int, raw_dim)}→{cast(int, self._output_dims)}"
+                    output_dims = self._validate_client_side_truncation_runtime_config(
+                        cast(int, raw_dim),
+                        cast(int, self._output_dims),  # already init-time validated; runtime path still defends bypassed state
                     )
-                    embeddings = apply_client_side_truncation(cast(list[list[float]], embeddings), cast(int, self._output_dims))
+                    logger.debug(
+                        f"Applying client-side truncation: {cast(int, raw_dim)}→{output_dims}"
+                    )
+                    embeddings = apply_client_side_truncation(
+                        cast(list[list[float]], embeddings), output_dims
+                    )
 
                 # Update usage statistics
                 self._usage_stats["requests_made"] += 1
