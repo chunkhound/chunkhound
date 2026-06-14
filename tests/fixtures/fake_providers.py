@@ -12,8 +12,8 @@ from typing import Any
 
 import xxhash
 
-from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
@@ -527,7 +527,6 @@ class ConstantEmbeddingProvider(FakeEmbeddingProvider):
         """Return constant unit vector (all components equal)."""
         value = 1.0 / (self._dims**0.5)
         return [value] * self._dims
-
 
 
 class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
