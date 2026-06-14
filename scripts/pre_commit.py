@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 PRE_COMMIT_PACKAGE = "pre-commit==4.2.0"
+# Keep in sync with .pre-commit-config.yaml ruff-pre-commit rev tag
+RUFF_PACKAGE = "ruff==0.13.3"
 GITHUB_EVENT_NAME_ENV = "CHUNKHOUND_GITHUB_EVENT_NAME"
 GITHUB_BASE_SHA_ENV = "CHUNKHOUND_GITHUB_BASE_SHA"
 GITHUB_HEAD_SHA_ENV = "CHUNKHOUND_GITHUB_HEAD_SHA"
@@ -26,10 +28,14 @@ def _git_output(*args: str, check: bool = True, stdin: str | None = None) -> str
     return result.stdout.strip()
 
 
-def _pre_commit_command(*args: str) -> list[str]:
+def _uv_tool_command(package: str, executable: str, *args: str) -> list[str]:
     # Resolve to absolute path; respects PATHEXT on Windows for .cmd/.bat
     uv = shutil.which("uv") or "uv"
-    return [uv, "tool", "run", "--from", PRE_COMMIT_PACKAGE, "pre-commit", *args]
+    return [uv, "tool", "run", "--from", package, executable, *args]
+
+
+def _pre_commit_command(*args: str) -> list[str]:
+    return _uv_tool_command(PRE_COMMIT_PACKAGE, "pre-commit", *args)
 
 
 def _managed_hook_path() -> Path:
@@ -179,12 +185,57 @@ def _github_actions_diff_range() -> tuple[str, str, str]:
     )
 
 
-def _run_changed(event_name: str, base: str, head: str) -> int:
-    files = _changed_python_files(event_name, base, head)
+def _resolve_changed_files(args: argparse.Namespace, command: str) -> list[str]:
+    if args.github_actions:
+        event_name, base, head = _github_actions_diff_range()
+    else:
+        if args.event_name is None or args.base is None or args.head is None:
+            raise RuntimeError(
+                f"{command} requires --event-name, --base, and --head "
+                "unless --github-actions is used"
+            )
+        event_name, base, head = args.event_name, args.base, args.head
+    return _changed_python_files(event_name, base, head)
+
+
+def _ruff_command(*args: str) -> list[str]:
+    return _uv_tool_command(RUFF_PACKAGE, "ruff", *args)
+
+
+def _run_ruff_command(*args: str) -> int:
+    result = subprocess.run(_ruff_command(*args), check=False)
+    if result.returncode in (0, 1):
+        return result.returncode
+    raise subprocess.CalledProcessError(result.returncode, result.args)
+
+
+def _run_ruff_direct(files: list[str]) -> int:
+    """Run ruff lint and format checks directly, not via pre-commit.
+
+    Exit 0 if all checks pass, 1 if any violations or formatting issues found.
+    """
     if not files:
-        print("No changed Python files found.")
         return 0
-    return _run_files(files)
+
+    exit_code = 0
+
+    if _run_ruff_command("check", "--", *files) != 0:
+        exit_code = 1
+
+    if _run_ruff_command("format", "--check", "--", *files) != 0:
+        exit_code = 1
+
+    return exit_code
+
+
+def _add_diff_range_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--event-name",
+        choices=["pull_request", "merge_group", "push", "workflow_dispatch"],
+    )
+    parser.add_argument("--base")
+    parser.add_argument("--head")
+    parser.add_argument("--github-actions", action="store_true")
 
 
 def main() -> int:
@@ -200,13 +251,10 @@ def main() -> int:
     subparsers.add_parser("run-staged")
 
     run_changed = subparsers.add_parser("run-changed")
-    run_changed.add_argument(
-        "--event-name",
-        choices=["pull_request", "merge_group", "push", "workflow_dispatch"],
-    )
-    run_changed.add_argument("--base")
-    run_changed.add_argument("--head")
-    run_changed.add_argument("--github-actions", action="store_true")
+    _add_diff_range_arguments(run_changed)
+
+    run_ruff = subparsers.add_parser("run-ruff")
+    _add_diff_range_arguments(run_ruff)
 
     args = parser.parse_args()
 
@@ -218,16 +266,17 @@ def main() -> int:
         if args.command == "run-staged":
             return _run_staged()
         if args.command == "run-changed":
-            if args.github_actions:
-                event_name, base, head = _github_actions_diff_range()
-            else:
-                if args.event_name is None or args.base is None or args.head is None:
-                    raise RuntimeError(
-                        "run-changed requires --event-name, --base, and --head "
-                        "unless --github-actions is used"
-                    )
-                event_name, base, head = args.event_name, args.base, args.head
-            return _run_changed(event_name, base, head)
+            files = _resolve_changed_files(args, "run-changed")
+            if not files:
+                print("No changed Python files found.")
+                return 0
+            return _run_files(files)
+        if args.command == "run-ruff":
+            files = _resolve_changed_files(args, "run-ruff")
+            if not files:
+                print("No changed Python files found.")
+                return 0
+            return _run_ruff_direct(files)
     except RuntimeError as error:
         print(str(error), file=sys.stderr)
         return 1

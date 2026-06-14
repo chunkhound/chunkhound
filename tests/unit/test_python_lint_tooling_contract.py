@@ -17,15 +17,17 @@ ROOT = Path(__file__).resolve().parents[2]
 PRE_COMMIT_SCRIPT = ROOT / "scripts" / "pre_commit.py"
 
 
-def _load_pre_commit_package_version() -> str:
+def _load_pre_commit_module() -> Any:
     spec = importlib.util.spec_from_file_location("_pre_commit_mod", PRE_COMMIT_SCRIPT)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.PRE_COMMIT_PACKAGE  # type: ignore[attr-defined]
+    return mod
 
 
-PRE_COMMIT_PACKAGE = _load_pre_commit_package_version()
+_PRE_COMMIT_MODULE = _load_pre_commit_module()
+PRE_COMMIT_PACKAGE = _PRE_COMMIT_MODULE.PRE_COMMIT_PACKAGE
+RUFF_PACKAGE = _PRE_COMMIT_MODULE.RUFF_PACKAGE
 HOOK_MARKER = "chunkhound-managed-pre-commit-hook"
 _SUBPROCESS_ENV_ALLOWLIST = (
     "PATH",
@@ -90,19 +92,34 @@ def _current_branch(repo_dir: Path) -> str:
     return result.stdout.strip()
 
 
-def _fake_uv_dir(tmp_path: Path, *, exit_code: int = 0) -> tuple[Path, Path]:
+def _fake_uv_dir(
+    tmp_path: Path, *, exit_codes: tuple[int, ...] = (0,)
+) -> tuple[Path, Path]:
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     log_path = tmp_path / "uv.log"
+    count_path = tmp_path / "uv.count"
     python = sys.executable.replace("\\", "\\\\")
     script = "\n".join(
         [
             "import pathlib, sys",
-            (
-                f"pathlib.Path({str(log_path)!r}).write_text("
-                "'\\n'.join(sys.argv[1:]) + '\\n', encoding='utf-8')"
-            ),
-            f"raise SystemExit({exit_code})",
+            f"log_path = pathlib.Path({str(log_path)!r})",
+            f"count_path = pathlib.Path({str(count_path)!r})",
+            f"exit_codes = {list(exit_codes)!r}",
+            "count = (",
+            "    int(count_path.read_text(encoding='utf-8'))",
+            "    if count_path.exists()",
+            "    else 0",
+            ")",
+            "with log_path.open('a', encoding='utf-8') as handle:",
+            "    if count:",
+            "        handle.write('<<<UV-CALL>>>\\n')",
+            "    handle.write('\\n'.join(sys.argv[1:]) + '\\n')",
+            "count_path.write_text(str(count + 1), encoding='utf-8')",
+            "exit_code = exit_codes[count] if count < len(exit_codes) else (",
+            "    exit_codes[-1]",
+            ")",
+            "raise SystemExit(exit_code)",
             "",
         ]
     )
@@ -122,6 +139,15 @@ def _fake_uv_dir(tmp_path: Path, *, exit_code: int = 0) -> tuple[Path, Path]:
         uv_path.chmod(0o755)
 
     return bin_dir, log_path
+
+
+def _uv_log_calls(log_path: Path) -> list[list[str]]:
+    contents = log_path.read_text(encoding="utf-8")
+    return [
+        call.strip().splitlines()
+        for call in contents.split("<<<UV-CALL>>>")
+        if call.strip()
+    ]
 
 
 def _script_env(bin_dir: Path) -> dict[str, str]:
@@ -170,6 +196,54 @@ def _copy_pre_commit_script(repo_dir: Path) -> None:
     shutil.copy2(PRE_COMMIT_SCRIPT, script_path)
 
 
+def _create_changed_python_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _create_repo(repo_dir)
+    (repo_dir / "kept.py").write_text("print('old')\n", encoding="utf-8")
+    (repo_dir / "deleted.py").write_text("print('delete')\n", encoding="utf-8")
+    (repo_dir / "notes.md").write_text("old\n", encoding="utf-8")
+    base = _commit_all(repo_dir, "base")
+
+    (repo_dir / "kept.py").write_text("print('new')\n", encoding="utf-8")
+    (repo_dir / "added.pyi").write_text("value: int\n", encoding="utf-8")
+    (repo_dir / "notes.md").write_text("new\n", encoding="utf-8")
+    (repo_dir / "deleted.py").unlink()
+    head = _commit_all(repo_dir, "head")
+    return repo_dir, base, head
+
+
+def _create_non_python_change_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _create_repo(repo_dir)
+    (repo_dir / "notes.md").write_text("old\n", encoding="utf-8")
+    base = _commit_all(repo_dir, "base")
+
+    (repo_dir / "notes.md").write_text("new\n", encoding="utf-8")
+    (repo_dir / "data.json").write_text("{}", encoding="utf-8")
+    head = _commit_all(repo_dir, "head")
+    return repo_dir, base, head
+
+
+def _run_diff_command(
+    repo_dir: Path,
+    command: str,
+    *,
+    env: dict[str, str],
+    base: str | None = None,
+    head: str | None = None,
+    github_actions: bool = False,
+    timeout: int = 10,
+) -> subprocess.CompletedProcess[str]:
+    args = [command]
+    if github_actions:
+        args.append("--github-actions")
+    elif base is not None and head is not None:
+        args.extend(["--event-name", "push", "--base", base, "--head", head])
+    return _run_pre_commit_script(repo_dir, *args, env=env, timeout=timeout)
+
+
 def test_pre_commit_ruff_hook_contract() -> None:
     config = cast(
         dict[str, Any],
@@ -180,6 +254,7 @@ def test_pre_commit_ruff_hook_contract() -> None:
     assert len(repos) == 1
     repo = repos[0]
     assert repo["repo"] == "https://github.com/astral-sh/ruff-pre-commit"
+    assert repo["rev"] == f"v{RUFF_PACKAGE.removeprefix('ruff==')}"
 
     hooks = cast(list[dict[str, Any]], repo["hooks"])
     assert [hook["id"] for hook in hooks] == ["ruff-check", "ruff-format"]
@@ -346,49 +421,64 @@ class TestPreCommitScript:
             "tracked.py",
         ]
 
-    def test_run_changed_uses_only_changed_python_paths(self, tmp_path: Path) -> None:
-        repo_dir = tmp_path / "repo"
-        repo_dir.mkdir()
-        _create_repo(repo_dir)
-        (repo_dir / "kept.py").write_text("print('old')\n", encoding="utf-8")
-        (repo_dir / "deleted.py").write_text("print('delete')\n", encoding="utf-8")
-        (repo_dir / "notes.md").write_text("old\n", encoding="utf-8")
-        base = _commit_all(repo_dir, "base")
-
-        (repo_dir / "kept.py").write_text("print('new')\n", encoding="utf-8")
-        (repo_dir / "added.pyi").write_text("value: int\n", encoding="utf-8")
-        (repo_dir / "notes.md").write_text("new\n", encoding="utf-8")
-        (repo_dir / "deleted.py").unlink()
-        head = _commit_all(repo_dir, "head")
-
+    @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
+    def test_diff_commands_use_only_changed_python_paths(
+        self, tmp_path: Path, command: str
+    ) -> None:
+        repo_dir, base, head = _create_changed_python_repo(tmp_path)
         bin_dir, log_path = _fake_uv_dir(tmp_path)
-        result = _run_pre_commit_script(
+
+        result = _run_diff_command(
             repo_dir,
-            "run-changed",
-            "--event-name",
-            "push",
-            "--base",
-            base,
-            "--head",
-            head,
+            command,
+            base=base,
+            head=head,
             env=_script_env(bin_dir),
         )
 
         assert result.returncode == 0
-        assert log_path.read_text(encoding="utf-8").splitlines() == [
-            "tool",
-            "run",
-            "--from",
-            PRE_COMMIT_PACKAGE,
-            "pre-commit",
-            "run",
-            "--files",
-            "added.pyi",
-            "kept.py",
+        if command == "run-changed":
+            assert log_path.read_text(encoding="utf-8").splitlines() == [
+                "tool",
+                "run",
+                "--from",
+                PRE_COMMIT_PACKAGE,
+                "pre-commit",
+                "run",
+                "--files",
+                "added.pyi",
+                "kept.py",
+            ]
+            return
+        assert _uv_log_calls(log_path) == [
+            [
+                "tool",
+                "run",
+                "--from",
+                RUFF_PACKAGE,
+                "ruff",
+                "check",
+                "--",
+                "added.pyi",
+                "kept.py",
+            ],
+            [
+                "tool",
+                "run",
+                "--from",
+                RUFF_PACKAGE,
+                "ruff",
+                "format",
+                "--check",
+                "--",
+                "added.pyi",
+                "kept.py",
+            ],
         ]
 
-    def test_run_changed_merge_group_uses_base_sha_directly(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
+    def test_diff_commands_merge_group_use_base_sha_directly(
+        self, tmp_path: Path, command: str
     ) -> None:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
@@ -403,7 +493,7 @@ class TestPreCommitScript:
         bin_dir, log_path = _fake_uv_dir(tmp_path)
         result = _run_pre_commit_script(
             repo_dir,
-            "run-changed",
+            command,
             "--event-name",
             "merge_group",
             "--base",
@@ -414,41 +504,37 @@ class TestPreCommitScript:
         )
 
         assert result.returncode == 0
-        log_lines = log_path.read_text(encoding="utf-8").splitlines()
+        log_lines = (
+            log_path.read_text(encoding="utf-8").splitlines()
+            if command == "run-changed"
+            else _uv_log_calls(log_path)[0]
+        )
         assert "new.py" in log_lines
         assert "old.py" in log_lines
 
-    def test_run_changed_returns_zero_when_no_python_files_changed(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
+    def test_diff_commands_return_zero_when_no_python_files_changed(
+        self, tmp_path: Path, command: str
     ) -> None:
-        repo_dir = tmp_path / "repo"
-        repo_dir.mkdir()
-        _create_repo(repo_dir)
-        (repo_dir / "notes.md").write_text("old\n", encoding="utf-8")
-        base = _commit_all(repo_dir, "base")
+        repo_dir, base, head = _create_non_python_change_repo(tmp_path)
+        bin_dir, log_path = _fake_uv_dir(tmp_path)
 
-        (repo_dir / "notes.md").write_text("new\n", encoding="utf-8")
-        (repo_dir / "data.json").write_text("{}", encoding="utf-8")
-        head = _commit_all(repo_dir, "head")
-
-        bin_dir, _ = _fake_uv_dir(tmp_path)
-        result = _run_pre_commit_script(
+        result = _run_diff_command(
             repo_dir,
-            "run-changed",
-            "--event-name",
-            "push",
-            "--base",
-            base,
-            "--head",
-            head,
+            command,
+            base=base,
+            head=head,
             env=_script_env(bin_dir),
         )
 
         assert result.returncode == 0
         assert "No changed Python files found" in result.stdout
+        if command == "run-ruff":
+            assert not log_path.exists()
 
-    def test_run_changed_pull_request_uses_merge_base_diff(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
+    def test_diff_commands_pull_request_use_merge_base_diff(
+        self, tmp_path: Path, command: str
     ) -> None:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
@@ -469,7 +555,7 @@ class TestPreCommitScript:
         bin_dir, log_path = _fake_uv_dir(tmp_path)
         result = _run_pre_commit_script(
             repo_dir,
-            "run-changed",
+            command,
             "--event-name",
             "pull_request",
             "--base",
@@ -480,11 +566,17 @@ class TestPreCommitScript:
         )
 
         assert result.returncode == 0
-        assert log_path.read_text(encoding="utf-8").splitlines()[-1] == "feature.py"
-        assert "base_only.py" not in log_path.read_text(encoding="utf-8")
+        log_lines = (
+            log_path.read_text(encoding="utf-8").splitlines()
+            if command == "run-changed"
+            else _uv_log_calls(log_path)[0]
+        )
+        assert log_lines[-1] == "feature.py"
+        assert "base_only.py" not in log_lines
 
-    def test_workflow_dispatch_uses_default_branch_merge_base(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
+    def test_diff_commands_use_github_actions_diff_range(
+        self, tmp_path: Path, command: str
     ) -> None:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
@@ -526,17 +618,23 @@ class TestPreCommitScript:
                 "CHUNKHOUND_GITHUB_DEFAULT_BRANCH": main_branch,
             }
         )
-        result = _run_pre_commit_script(
+        result = _run_diff_command(
             repo_dir,
-            "run-changed",
-            "--github-actions",
+            command,
+            github_actions=True,
             env=env,
         )
 
         assert result.returncode == 0
-        assert log_path.read_text(encoding="utf-8").splitlines()[-1] == "feature.py"
+        if command == "run-changed":
+            assert log_path.read_text(encoding="utf-8").splitlines()[-1] == "feature.py"
+            return
+        assert _uv_log_calls(log_path)[0][-1] == "feature.py"
 
-    def test_run_changed_surfaces_git_failures(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
+    def test_diff_commands_surface_git_failures(
+        self, tmp_path: Path, command: str
+    ) -> None:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
         _create_repo(repo_dir)
@@ -544,7 +642,7 @@ class TestPreCommitScript:
 
         result = _run_pre_commit_script(
             repo_dir,
-            "run-changed",
+            command,
             "--event-name",
             "push",
             "--base",
@@ -558,8 +656,23 @@ class TestPreCommitScript:
         assert "Command failed: git diff" in result.stderr
         assert "ambiguous argument" in result.stderr or "bad revision" in result.stderr
 
-    def test_run_changed_fails_when_github_actions_missing_base_sha(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
+    def test_diff_commands_require_explicit_range_without_github_actions(
+        self, tmp_path: Path, command: str
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        bin_dir, _ = _fake_uv_dir(tmp_path)
+
+        result = _run_pre_commit_script(repo_dir, command, env=_script_env(bin_dir))
+
+        assert result.returncode != 0
+        assert f"{command} requires --event-name, --base, and --head" in result.stderr
+
+    @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
+    def test_diff_commands_fail_when_github_actions_missing_base_sha(
+        self, tmp_path: Path, command: str
     ) -> None:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
@@ -573,18 +686,19 @@ class TestPreCommitScript:
         env["CHUNKHOUND_GITHUB_BASE_SHA"] = ""
         env["CHUNKHOUND_GITHUB_HEAD_SHA"] = head
 
-        result = _run_pre_commit_script(
+        result = _run_diff_command(
             repo_dir,
-            "run-changed",
-            "--github-actions",
+            command,
+            github_actions=True,
             env=env,
         )
 
         assert result.returncode != 0
         assert "CHUNKHOUND_GITHUB_BASE_SHA" in result.stderr
 
-    def test_run_changed_fails_when_workflow_dispatch_missing_default_branch(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
+    def test_diff_commands_fail_when_workflow_dispatch_missing_default_branch(
+        self, tmp_path: Path, command: str
     ) -> None:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
@@ -599,15 +713,139 @@ class TestPreCommitScript:
         env["CHUNKHOUND_GITHUB_HEAD_SHA"] = head
         env["CHUNKHOUND_GITHUB_DEFAULT_BRANCH"] = ""
 
-        result = _run_pre_commit_script(
+        result = _run_diff_command(
             repo_dir,
-            "run-changed",
-            "--github-actions",
+            command,
+            github_actions=True,
             env=env,
         )
 
         assert result.returncode != 0
         assert "CHUNKHOUND_GITHUB_DEFAULT_BRANCH" in result.stderr
+
+    def test_run_ruff_returns_nonzero_when_ruff_check_fails(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "bad.py").write_text("print('old')\n", encoding="utf-8")
+        base = _commit_all(repo_dir, "base")
+        (repo_dir / "bad.py").write_text("print('new')\n", encoding="utf-8")
+        head = _commit_all(repo_dir, "head")
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(1, 0))
+        result = _run_diff_command(
+            repo_dir,
+            "run-ruff",
+            base=base,
+            head=head,
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_ruff_returns_nonzero_when_ruff_format_check_fails(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "bad.py").write_text("print('old')\n", encoding="utf-8")
+        base = _commit_all(repo_dir, "base")
+        (repo_dir / "bad.py").write_text("print('new')\n", encoding="utf-8")
+        head = _commit_all(repo_dir, "head")
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(0, 1))
+        result = _run_diff_command(
+            repo_dir,
+            "run-ruff",
+            base=base,
+            head=head,
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_ruff_surfaces_runtime_failures(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "bad.py").write_text("print('old')\n", encoding="utf-8")
+        base = _commit_all(repo_dir, "base")
+        (repo_dir / "bad.py").write_text("print('new')\n", encoding="utf-8")
+        head = _commit_all(repo_dir, "head")
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(2,))
+        result = _run_diff_command(
+            repo_dir,
+            "run-ruff",
+            base=base,
+            head=head,
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 2
+        assert "Command failed:" in result.stderr
+        assert "ruff check" in result.stderr
+        assert len(_uv_log_calls(log_path)) == 1
+
+    def test_run_ruff_surfaces_runtime_failures_from_format_check(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "bad.py").write_text("print('old')\n", encoding="utf-8")
+        base = _commit_all(repo_dir, "base")
+        (repo_dir / "bad.py").write_text("print('new')\n", encoding="utf-8")
+        head = _commit_all(repo_dir, "head")
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(0, 2))
+        result = _run_diff_command(
+            repo_dir,
+            "run-ruff",
+            base=base,
+            head=head,
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 2
+        assert "Command failed:" in result.stderr
+        assert "ruff format --check" in result.stderr
+        assert len(_uv_log_calls(log_path)) == 2
+
+    @pytest.mark.skipif(
+        os.environ.get("CHUNKHOUND_RUN_RUFF_INTEGRATION") != "1",
+        reason=(
+            "Set CHUNKHOUND_RUN_RUFF_INTEGRATION=1 to run "
+            "real uv+ruff integration coverage."
+        ),
+    )
+    def test_run_ruff_with_real_ruff_fails_on_formatting_violation(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "good.py").write_text("x = 1\n", encoding="utf-8")
+        base = _commit_all(repo_dir, "base")
+        (repo_dir / "good.py").write_text("x=1\n", encoding="utf-8")
+        head = _commit_all(repo_dir, "head")
+
+        result = _run_diff_command(
+            repo_dir,
+            "run-ruff",
+            base=base,
+            head=head,
+            env=_repo_env(tmp_path),
+            timeout=120,
+        )
+
+        assert result.returncode != 0
+        assert "good.py" in f"{result.stdout}\n{result.stderr}"
 
     def test_install_hook_rewrites_file_and_blocks_commit(self, tmp_path: Path) -> None:
         repo_dir = tmp_path / "repo"
