@@ -16,7 +16,6 @@ import pytest
 
 from chunkhound.core.utils.path_utils import normalize_path_for_lookup
 
-
 # ---------------------------------------------------------------------------
 # normalize_path_for_lookup: relative paths
 # ---------------------------------------------------------------------------

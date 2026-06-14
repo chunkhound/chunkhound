@@ -219,7 +219,8 @@ def _run_ruff_direct(files: list[str]) -> int:
 
     exit_code = 0
 
-    if _run_ruff_command("check", "--", *files) != 0:
+    # Must keep in sync with .pre-commit-config.yaml ruff-check hook args
+    if _run_ruff_command("check", "--fix", "--", *files) != 0:
         exit_code = 1
 
     if _run_ruff_command("format", "--check", "--", *files) != 0:
