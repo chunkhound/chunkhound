@@ -36,7 +36,7 @@ class TestStorageContract:
         )
         provider.connect()
         try:
-            file_id = provider.insert_file(
+            provider.insert_file(
                 File(
                     path="src/utils/helpers.py",
                     mtime=1.0,
