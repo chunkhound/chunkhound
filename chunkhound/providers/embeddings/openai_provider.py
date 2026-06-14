@@ -22,7 +22,10 @@ from chunkhound.core.exceptions.embedding import (
     EmbeddingDimensionError,
 )
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
-from chunkhound.core.utils.openai_utils import is_azure_openai_endpoint
+from chunkhound.core.utils.openai_utils import (
+    is_azure_openai_endpoint,
+    is_official_openai_endpoint,
+)
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.providers.embeddings.shared_utils import (
     apply_client_side_truncation,
@@ -266,10 +269,11 @@ class OpenAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
-            output_dims: Output embedding dimension. Known OpenAI models get
-                fail-fast validation here. Unknown/custom models defer all
-                output_dims validation to embed-time so advanced users can try
-                compatible custom endpoints and get descriptive runtime errors.
+            output_dims: Output embedding dimension. Official OpenAI endpoints
+                use documented model semantics for fail-fast validation. Custom
+                OpenAI-compatible endpoints are trusted instead, even under
+                known OpenAI model names, so runtime behavior decides whether
+                the configuration is actually compatible.
             client_side_truncation: Truncate embeddings client-side instead of
                 using the API dimensions parameter. Requires output_dims.
             ssl_verify: Verify TLS certificates for requests sent via base_url
@@ -425,8 +429,6 @@ class OpenAIEmbeddingProvider:
             return
 
         # Only require API key for official OpenAI API
-        from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
-
         is_openai_official = is_official_openai_endpoint(self._base_url)
         if is_openai_official and not self._api_key:
             raise ValueError("OpenAI API key is required for official OpenAI API")
@@ -513,11 +515,18 @@ class OpenAIEmbeddingProvider:
             return self._azure_deployment or self._model
         return self._model
 
-    def _validate_output_dims_config(self) -> None:
-        """Reject invalid known-model output_dims at init."""
-        if self._model not in self._model_config:
-            return
+    def _trust_runtime_output_dims(self) -> bool:
+        """Return True when runtime behavior should override static model semantics.
 
+        Custom OpenAI-compatible endpoints may legally repurpose known OpenAI
+        model names while supporting different truncation behavior. For those
+        endpoints we validate only generic shape constraints here and let the
+        live response prove compatibility.
+        """
+        return not is_official_openai_endpoint(self._base_url)
+
+    def _validate_output_dims_config(self) -> None:
+        """Reject invalid output_dims only when official model semantics apply."""
         output_dims = validate_positive_output_dims(
             self._output_dims, model=self._model
         )
@@ -527,6 +536,9 @@ class OpenAIEmbeddingProvider:
                     f"Model '{self._model}' uses client_side_truncation=True but "
                     "output_dims is not set. output_dims must be a positive integer."
                 )
+            return
+
+        if self._trust_runtime_output_dims() or self._model not in self._model_config:
             return
 
         cfg = cast(dict[str, Any], self._model_config[self._model])
@@ -547,6 +559,38 @@ class OpenAIEmbeddingProvider:
                 f"Model '{self._model}' supports output_dims in the range "
                 f"{min_dims}-{native_dims}, got {self._output_dims}."
             )
+
+    def _build_embedding_request_kwargs(
+        self, texts: list[str], timeout: int
+    ) -> dict[str, Any]:
+        """Build embedding request kwargs for the current truncation mode.
+
+        Official OpenAI endpoints only get ``dimensions`` when the published
+        model contract supports server-side truncation. Custom endpoints are
+        trusted instead: if users ask for server-side truncation, pass it
+        through and let the live response validate the contract.
+        """
+        embed_kwargs: dict[str, Any] = {
+            "model": self._get_deployment_model(),
+            "input": texts,
+            "timeout": timeout,
+        }
+        output_dims = self._validate_runtime_output_dims_config()
+        dim_param = build_dimension_request_param(
+            output_dims, self._client_side_truncation
+        )
+        if (
+            dim_param is not None
+            and not self._trust_runtime_output_dims()
+            and self._model in self._model_config
+            and not cast(dict[str, Any], self._model_config[self._model]).get(
+                "matryoshka", False
+            )
+        ):
+            dim_param = None
+        if dim_param is not None:
+            embed_kwargs["dimensions"] = dim_param
+        return embed_kwargs
 
     def _validate_runtime_output_dims_config(self) -> int | None:
         """Validate embed-time output_dims config for paths that skip init checks.
@@ -588,23 +632,6 @@ class OpenAIEmbeddingProvider:
                 f"API response dimension {raw_dim} for model '{self._model}'"
             )
         return output_dims
-
-    def _build_embedding_request_kwargs(
-        self, texts: list[str], timeout: int
-    ) -> dict[str, Any]:
-        """Build embedding request kwargs for the current truncation mode."""
-        embed_kwargs: dict[str, Any] = {
-            "model": self._get_deployment_model(),
-            "input": texts,
-            "timeout": timeout,
-        }
-        output_dims = self._validate_runtime_output_dims_config()
-        dim_param = build_dimension_request_param(
-            output_dims, self._client_side_truncation
-        )
-        if dim_param is not None:
-            embed_kwargs["dimensions"] = dim_param
-        return embed_kwargs
 
     def _expected_validation_response_dims(self) -> int:
         """Expected API response dimension for validate_api_key()."""
