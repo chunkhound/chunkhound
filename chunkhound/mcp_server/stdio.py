@@ -163,7 +163,7 @@ class StdioMCPServer(MCPServerBase):
             return await handle_tool_call(
                 tool_name=tool_name,
                 arguments=arguments,
-                services=await self.ensure_services(),
+                services=await self.ensure_tool_services(tool_name),
                 embedding_manager=self.embedding_manager,
                 initialization_complete=self._initialization_complete,
                 debug_mode=self.debug_mode,

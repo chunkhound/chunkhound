@@ -40,6 +40,8 @@ from chunkhound.services.realtime_indexing_service import RealtimeIndexingServic
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
 )
+from chunkhound.providers.database.serial_executor import DatabaseCompactionInProgressError
+from chunkhound.mcp_server.tools import tool_requires_services
 
 _DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
 
@@ -1164,7 +1166,7 @@ class MCPServerBase(ABC):
                 self._initialized = False
 
     async def ensure_services(self) -> DatabaseServices:
-        """Ensure services are initialized and return them.
+        """Ensure DB-backed services are ready and return them.
 
         Returns:
             DatabaseServices instance
@@ -1178,18 +1180,45 @@ class MCPServerBase(ABC):
         await self._connect_provider()
         return self.services
 
+    async def ensure_tool_services(self, tool_name: str) -> DatabaseServices:
+        """Return services for one tool without conflating daemon and DB lifecycles.
+
+        Non-DB tools must not trigger provider reconnect/open work. The daemon
+        can serve multiple MCP clients while one authoritative provider instance
+        owns the database lifecycle.
+        """
+        if not self.services:
+            raise RuntimeError("Services not initialized. Call initialize() first.")
+        if tool_requires_services(tool_name):
+            await self._connect_provider()
+        return self.services
+
     async def _connect_provider(self) -> None:
         """Connect the database provider if not already connected.
 
         Uses a lock to prevent concurrent connect() calls which would
         leak a DuckDB connection handle.
+
+        During DuckDB compaction the connection is temporarily closed
+        (is_connected \u2192 False).  Non-DB tools (daemon_status, websearch,
+        git history diff search) are needlessly blocked by an eager
+        reconnect attempt that hits the compaction guard.  We silently
+        skip reconnect during compaction \u2014 _compact_finalize() restores
+        the connection when compaction finishes.
         """
         if self.services.provider.is_connected:
             return
         async with self._connect_lock:
             if not self.services.provider.is_connected:
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self.services.provider.connect)
+                try:
+                    await loop.run_in_executor(None, self.services.provider.connect)
+                except DatabaseCompactionInProgressError:
+                    logger.info(
+                        "Database compaction in progress \u2014 DB-backed MCP tools will be "
+                        "unavailable until compaction finishes. "
+                        "Non-DB tools (daemon_status, websearch) are unaffected."
+                    )
 
     def ensure_embedding_manager(self) -> EmbeddingManager:
         """Ensure embedding manager is available and has providers.
