@@ -1,16 +1,13 @@
 """Embedding providers for ChunkHound - pluggable vector embedding generation."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as InterfaceEmbeddingProvider,
-)
-from chunkhound.interfaces.embedding_provider import (
-    RerankResult,
 )
 
 if TYPE_CHECKING:
@@ -20,65 +17,6 @@ if TYPE_CHECKING:
 
 # OpenAI and tiktoken imports have been moved to the specific provider implementations
 # that need them. This reduces unnecessary dependencies in the core module.
-
-
-class EmbeddingProvider(Protocol):
-    """Protocol for embedding providers."""
-
-    @property
-    def name(self) -> str:
-        """Provider name (e.g., 'openai')."""
-        ...
-
-    @property
-    def model(self) -> str:
-        """Model name (e.g., 'text-embedding-3-small')."""
-        ...
-
-    @property
-    def dims(self) -> int:
-        """Embedding dimensions."""
-        ...
-
-    @property
-    def distance(self) -> str:
-        """Distance metric ('cosine' | 'l2')."""
-        ...
-
-    @property
-    def batch_size(self) -> int:
-        """Maximum batch size for embedding requests."""
-        ...
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for a list of texts.
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            List of embedding vectors (one per input text)
-        """
-        ...
-
-    def supports_reranking(self) -> bool:
-        """Return True if this provider supports reranking."""
-        ...
-
-    async def rerank(
-        self, query: str, documents: list[str], top_k: int | None = None
-    ) -> list[RerankResult]:
-        """Rerank documents by relevance to query.
-
-        Args:
-            query: Query text to rank against
-            documents: List of document texts to rank
-            top_k: Optional limit on number of results
-
-        Returns:
-            List of RerankResult with original index and relevance score
-        """
-        ...
 
 
 @dataclass
