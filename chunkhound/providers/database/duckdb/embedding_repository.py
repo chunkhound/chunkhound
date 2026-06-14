@@ -9,6 +9,13 @@ from chunkhound.core.models import Embedding
 from chunkhound.providers.database.duckdb.connection_manager import (
     DuckDBConnectionManager,
 )
+from chunkhound.providers.database.duckdb.schema_constants import (
+    _create_embedding_table_sql,
+    _embedding_chunk_id_index_name,
+    _embedding_provider_model_index_name,
+    _embedding_table_name,
+    _embedding_unique_index_name,
+)
 
 
 class DuckDBEmbeddingRepository:
@@ -156,9 +163,7 @@ class DuckDBEmbeddingRepository:
             indexes.append({"index_name": index_name, "create_sql": create_sql})
         return indexes
 
-    def _get_fallback_duplicate_row_ids(
-        self, conn: Any, table_name: str
-    ) -> list[int]:
+    def _get_fallback_duplicate_row_ids(self, conn: Any, table_name: str) -> list[int]:
         """Return duplicate row ids that block the unique upsert contract."""
         rows = conn.execute(
             f"""
@@ -178,7 +183,9 @@ class DuckDBEmbeddingRepository:
         ).fetchall()
         return [int(row[0]) for row in rows]
 
-    def _delete_rows_by_id(self, conn: Any, table_name: str, row_ids: list[int]) -> None:
+    def _delete_rows_by_id(
+        self, conn: Any, table_name: str, row_ids: list[int]
+    ) -> None:
         """Delete specific rows from one embedding table by primary key."""
         if not row_ids:
             return
@@ -195,13 +202,13 @@ class DuckDBEmbeddingRepository:
         manage_transaction: bool = True,
     ) -> None:
         """Upgrade an existing fallback embedding table before using ON CONFLICT."""
-        provider_model_index = f"idx_{dims}_provider_model"
+        provider_model_index = _embedding_provider_model_index_name(dims)
         if not self._fallback_index_exists(conn, table_name, provider_model_index):
             conn.execute(
                 f"CREATE INDEX {provider_model_index} ON {table_name}(provider, model)"
             )
 
-        unique_index_name = f"idx_{dims}_chunk_provider_model_unique"
+        unique_index_name = _embedding_unique_index_name(dims)
         if self._fallback_index_exists(conn, table_name, unique_index_name):
             return
 
@@ -257,7 +264,7 @@ class DuckDBEmbeddingRepository:
         manage_transaction: bool = True,
     ) -> str:
         """Create the dimension-specific embedding table when no provider is available."""
-        table_name = f"embeddings_{dims}"
+        table_name = _embedding_table_name(dims)
         result = conn.execute(
             "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
             [table_name],
@@ -271,24 +278,19 @@ class DuckDBEmbeddingRepository:
             )
             return table_name
 
-        conn.execute(f"""
-            CREATE TABLE {table_name} (
-                id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
-                chunk_id INTEGER REFERENCES chunks(id),
-                provider TEXT NOT NULL,
-                model TEXT NOT NULL,
-                embedding FLOAT[{dims}],
-                dims INTEGER NOT NULL DEFAULT {dims},
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{dims}_chunk_id ON {table_name}(chunk_id)")
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
+        conn.execute(_create_embedding_table_sql(dims))
         conn.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_{dims}_provider_model ON {table_name}(provider, model)"
+            f"CREATE INDEX IF NOT EXISTS {_embedding_chunk_id_index_name(dims)} "
+            f"ON {table_name}(chunk_id)"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {_embedding_provider_model_index_name(dims)} "
+            f"ON {table_name}(provider, model)"
         )
         conn.execute(
             f"""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
+            CREATE UNIQUE INDEX IF NOT EXISTS {_embedding_unique_index_name(dims)}
             ON {table_name}(chunk_id, provider, model)
             """
         )
