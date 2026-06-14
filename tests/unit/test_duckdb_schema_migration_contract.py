@@ -53,12 +53,19 @@ class TestSchemaAutoCreate:
             conn.execute("""
                 INSERT INTO files (
                     id, path, name, extension, size, modified_time, language
-                ) VALUES (1, 'helper.py', 'helper.py', '.py', 10, CURRENT_TIMESTAMP, 'python')
+                ) VALUES (
+                    1, 'helper.py', 'helper.py', '.py',
+                    10, CURRENT_TIMESTAMP, 'python'
+                )
             """)
             conn.execute("""
                 INSERT INTO chunks (
-                    id, file_id, symbol, start_line, end_line, code, chunk_type, language
-                ) VALUES (1, 1, 'helper', 1, 1, 'def helper(): pass', 'function', 'python')
+                    id, file_id, symbol, start_line, end_line,
+                    code, chunk_type, language
+                ) VALUES (
+                    1, 1, 'helper', 1, 1,
+                    'def helper(): pass', 'function', 'python'
+                )
             """)
         finally:
             conn.close()
