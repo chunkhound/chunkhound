@@ -31,7 +31,7 @@ format:    uv run ruff format chunkhound
 # Running
 index:     uv run chunkhound index [directory]
 mcp_stdio: uv run chunkhound mcp
-mcp_http:  uv run chunkhound mcp http --port 5173
+mcp_http:  uv run chunkhound mcp --transport http --port 5173
 ```
 
 ## VERSION_MANAGEMENT

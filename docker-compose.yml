@@ -19,7 +19,7 @@ x-chunkhound-common: &chunkhound-common
     # Mount the host .chunkhound.json as the config source of truth.
     CHUNKHOUND_CONFIG_FILE: /etc/chunkhound/config.json
     # Match nginx proxy_read_timeout so long-running tools (code_research) don't get killed.
-    SESSION_TIMEOUT: "300000"
+    SESSION_TIMEOUT: "1200000"
   networks:
     - mcp-net
   healthcheck:

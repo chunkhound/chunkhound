@@ -38,6 +38,25 @@ def add_mcp_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Run MCP server directly without daemon (single client mode)",
     )
 
+    # HTTP transport mode
+    mcp_parser.add_argument(
+        "--transport",
+        choices=["http"],
+        default=None,
+        help="Transport mode: 'http' starts a Streamable HTTP MCP server",
+    )
+    mcp_parser.add_argument(
+        "--port",
+        type=int,
+        default=5173,
+        help="Port for HTTP transport (default: 5173)",
+    )
+    mcp_parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Host for HTTP transport (default: 0.0.0.0)",
+    )
+
     # Add common arguments
     add_common_arguments(mcp_parser)
 
