@@ -45,10 +45,50 @@ from chunkhound.providers.database.serial_executor import (
     _executor_local,
     track_operation,
 )
+from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
+
+
+def _atomic_replace(src: Path | str, dst: Path | str) -> None:
+    """Atomically replace dst with src, with retry on Windows.
+
+    On POSIX ``os.replace`` is atomic (rename(2)). On Windows we retry
+    briefly because antivirus / delayed handle release can make a valid
+    same-volume replace fail transiently.
+    """
+    if IS_WINDOWS:
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                os.replace(str(src), str(dst))
+                return
+            except OSError:
+                if attempt == max_attempts - 1:
+                    raise
+                time.sleep(WINDOWS_FILE_HANDLE_DELAY * (2**attempt))
+    else:
+        os.replace(str(src), str(dst))
+
 
 # Type hinting only
 if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
+
+from chunkhound.providers.database.duckdb.schema_constants import (
+    _CHUNKS_COLUMN_NAMES,
+    _CHUNKS_TABLE_COLUMNS,
+    _FILES_COLUMN_NAMES,
+    _FILES_TABLE_COLUMNS,
+    _SCHEMA_VERSION_TABLE_COLUMNS,
+    _create_embedding_table_sql,
+    _embedding_chunk_id_index_name,
+    _embedding_dims_from_table_name,
+    _embedding_hnsw_index_name,
+    _embedding_provider_model_index_name,
+    _embedding_table_columns,
+    _embedding_table_name,
+    _embedding_unique_index_name,
+    _embeddings_column_names,
+)
 
 
 class DuckDBTransactionConflictError(RuntimeError):
@@ -102,9 +142,7 @@ def _read_indexed_root_sidecar(sidecar: Path) -> str:
             f"Indexed-root sidecar {sidecar} is not valid JSON: {error}"
         ) from error
     if not isinstance(data, dict):
-        raise RuntimeError(
-            f"Indexed-root sidecar {sidecar} must be a JSON object"
-        )
+        raise RuntimeError(f"Indexed-root sidecar {sidecar} must be a JSON object")
     version = data.get("version")
     if version != _INDEXED_ROOT_SIDECAR_VERSION:
         raise RuntimeError(
@@ -217,7 +255,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
         self._embedding_repository.set_provider_instance(self)
 
-        # Lightweight performance metrics for chunk writes (per-provider lifecycle)
         self._metrics: dict[str, dict[str, float | int]] = {
             "chunks": {
                 "files": 0,
@@ -251,6 +288,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         logger.debug(
             f"Created new DuckDB connection in executor thread {threading.get_ident()}"
         )
+        return conn
+
+    def _create_connection_manager_connection(self) -> Any:
+        """Create the public health/compatibility connection."""
+        conn = duckdb.connect(str(self._connection_manager.db_path))
+        conn.execute("INSTALL vss")
+        conn.execute("LOAD vss")
+        conn.execute("SET hnsw_enable_experimental_persistence = true")
         return conn
 
     def _get_schema_sql(self) -> list[str] | None:
@@ -376,11 +421,16 @@ class DuckDBProvider(SerialDatabaseProvider):
         so this method just ensures schema and indexes are created.
         """
         try:
-            # Perform WAL cleanup once with synchronization
+            # Perform WAL cleanup once with synchronization.
+            # _perform_wal_cleanup_in_executor may close `conn` and create a
+            # new one (stored in _executor_local.connection) — always re-read
+            # from thread-local so subsequent operations use the live connection.
             with self._wal_cleanup_lock:
                 if not self._wal_cleanup_done:
                     self._perform_wal_cleanup_in_executor(conn)
                     self._wal_cleanup_done = True
+                    # Re-read in case WAL cleanup replaced the connection
+                    conn = _executor_local.connection
 
             # Create schema
             self._executor_create_schema(conn, state)
@@ -432,8 +482,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             conn.close()
             wal_file.unlink(missing_ok=True)
             # Recreate connection after WAL cleanup
-            conn = self._create_connection()
-            _executor_local.connection = conn
+            _executor_local.connection = self._create_connection()
 
     def disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close database connection with optional checkpointing - delegate to connection manager."""
@@ -483,6 +532,23 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Check if a table exists in the database - delegate to connection manager."""
         return self._execute_in_db_thread_sync("table_exists", table_name)
 
+    def _executor_table_has_primary_key(self, conn: Any, table_name: str) -> bool:
+        """Check if the given table has a PRIMARY KEY constraint.
+
+        Compaction historically used CREATE TABLE AS SELECT which strips all
+        constraints, so we verify PK presence independently of CREATE TABLE
+        IF NOT EXISTS.  This is now a one-time migration path — after the DDL
+        refactor compaction preserves constraints.
+        """
+        result = conn.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.table_constraints
+            WHERE table_name = ? AND constraint_type = 'PRIMARY KEY'
+            """,
+            [table_name],
+        ).fetchone()
+        return result is not None and result[0] > 0
+
     def _executor_table_exists(
         self, conn: Any, state: dict[str, Any], table_name: str
     ) -> bool:
@@ -495,15 +561,137 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _get_table_name_for_dimensions(self, dims: int) -> str:
         """Get table name for given embedding dimensions."""
-        return f"embeddings_{dims}"
+        return _embedding_table_name(dims)
 
     def _get_embedding_provider_model_index_name(self, dims: int) -> str:
         """Return the standard provider/model lookup index name."""
-        return f"idx_{dims}_provider_model"
+        return _embedding_provider_model_index_name(dims)
 
     def _get_embedding_unique_index_name(self, dims: int) -> str:
         """Return the schema-backed unique index name for embedding upserts."""
-        return f"idx_{dims}_chunk_provider_model_unique"
+        return _embedding_unique_index_name(dims)
+
+    def _executor_get_column_default(
+        self, conn: Any, table_name: str, column_name: str
+    ) -> str | None:
+        """Return one column default expression from information_schema."""
+        result = conn.execute(
+            """
+            SELECT column_default
+            FROM information_schema.columns
+            WHERE table_name = ? AND column_name = ?
+            """,
+            [table_name, column_name],
+        ).fetchone()
+        if result is None:
+            return None
+        default = result[0]
+        return str(default) if default is not None else None
+
+    def _executor_table_has_foreign_key(
+        self,
+        conn: Any,
+        table_name: str,
+        column_name: str,
+        referenced_table: str,
+        referenced_column: str,
+    ) -> bool:
+        """Return True when one specific foreign-key contract exists."""
+        result = conn.execute(
+            """
+            SELECT 1
+            FROM duckdb_constraints()
+            WHERE table_name = ?
+              AND constraint_type = 'FOREIGN KEY'
+              AND constraint_column_names = [?]
+              AND referenced_table = ?
+              AND referenced_column_names = [?]
+            LIMIT 1
+            """,
+            [table_name, column_name, referenced_table, referenced_column],
+        ).fetchone()
+        return result is not None
+
+    def _executor_reseed_sequence(
+        self, conn: Any, table_name: str, sequence_name: str
+    ) -> None:
+        """Advance one sequence so the next implicit id is above MAX(id)."""
+        max_result = conn.execute(
+            f"SELECT COALESCE(MAX(id), 0) FROM {self._quote_duckdb_identifier(table_name)}"
+        ).fetchone()
+        max_id = int(max_result[0]) if max_result is not None else 0
+        if max_id <= 0:
+            return
+
+        current_value_result = conn.execute(
+            """
+            SELECT last_value
+            FROM duckdb_sequences()
+            WHERE sequence_name = ?
+            """,
+            [sequence_name],
+        ).fetchone()
+        current_value = current_value_result[0] if current_value_result else None
+        if current_value is None:
+            current_value = conn.execute(
+                f"SELECT nextval('{sequence_name}')"
+            ).fetchone()[0]
+
+        advance_by = max_id - int(current_value)
+        if advance_by <= 0:
+            return
+
+        conn.execute(f"SELECT nextval('{sequence_name}') FROM range({advance_by})")
+
+    def _executor_recreate_sequence(
+        self, conn: Any, sequence_name: str, next_value: int
+    ) -> None:
+        """Recreate one sequence with an explicit next value."""
+        conn.execute(
+            f"DROP SEQUENCE IF EXISTS {self._quote_duckdb_identifier(sequence_name)}"
+        )
+        conn.execute(
+            f"CREATE SEQUENCE {self._quote_duckdb_identifier(sequence_name)} START {next_value}"
+        )
+
+    def _executor_get_max_embedding_id(self, conn: Any) -> int:
+        """Return the global max embedding id across all embeddings_* tables."""
+        rows = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema='main' AND table_name LIKE 'embeddings_%'"
+        ).fetchall()
+        max_id = 0
+        for (table_name,) in rows:
+            table_max = conn.execute(
+                f"SELECT COALESCE(MAX(id), 0) FROM {self._quote_duckdb_identifier(table_name)}"
+            ).fetchone()[0]
+            max_id = max(max_id, int(table_max))
+        return max_id
+
+    def _executor_rebuild_table_from_canonical_schema(
+        self,
+        conn: Any,
+        table_name: str,
+        columns_sql: str,
+        copy_columns: list[str],
+    ) -> None:
+        """Rebuild one table from canonical DDL and copy rows back explicitly."""
+        backup_table = f"{table_name}_schema_rebuild_backup"
+        quoted_backup = self._quote_duckdb_identifier(backup_table)
+        quoted_table = self._quote_duckdb_identifier(table_name)
+        column_list = ", ".join(copy_columns)
+        conn.execute(f"DROP TABLE IF EXISTS {quoted_backup}")
+        conn.execute(
+            f"CREATE TEMP TABLE {quoted_backup} AS "
+            f"SELECT {column_list} FROM {quoted_table}"
+        )
+        conn.execute(f"DROP TABLE {quoted_table}")
+        conn.execute(f"CREATE TABLE {quoted_table} ({columns_sql})")
+        conn.execute(
+            f"INSERT INTO {quoted_table} ({column_list}) "
+            f"SELECT {column_list} FROM {quoted_backup}"
+        )
+        conn.execute(f"DROP TABLE {quoted_backup}")
 
     def _executor_index_exists(
         self, conn: Any, table_name: str, index_name: str
@@ -528,9 +716,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         if self._executor_index_exists(conn, table_name, index_name):
             return
 
-        conn.execute(
-            f"CREATE INDEX {index_name} ON {table_name}(provider, model)"
-        )
+        conn.execute(f"CREATE INDEX {index_name} ON {table_name}(provider, model)")
 
     def _executor_create_embedding_unique_index(
         self, conn: Any, table_name: str, dims: int
@@ -608,9 +794,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 conn.execute("SET preserve_insertion_order = false")
 
             for index_info in existing_indexes:
-                self._executor_drop_vector_index_by_name(
-                    conn, index_info["index_name"]
-                )
+                self._executor_drop_vector_index_by_name(conn, index_info["index_name"])
 
             result = mutation_func()
 
@@ -621,9 +805,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 self._executor_commit_transaction(conn, state, False)
 
             for index_info in existing_indexes:
-                self._executor_recreate_vector_index_from_info(
-                    conn, state, index_info
-                )
+                self._executor_recreate_vector_index_from_info(conn, state, index_info)
 
             self._executor_maybe_checkpoint(conn, state, True)
             return result
@@ -686,6 +868,97 @@ class DuckDBProvider(SerialDatabaseProvider):
             transactional=manage_transaction,
         )
 
+    def _executor_create_embedding_table_indexes(
+        self, conn: Any, state: dict[str, Any], table_name: str, dims: int
+    ) -> None:
+        """Restore the canonical non-table DDL for one embedding table."""
+        hnsw_index_name = _embedding_hnsw_index_name(dims)
+        try:
+            conn.execute(f"""
+                CREATE INDEX IF NOT EXISTS {hnsw_index_name} ON {table_name}
+                USING HNSW (embedding)
+                WITH (metric = 'cosine')
+            """)
+        except Exception as e:
+            logger.warning(f"Failed to create HNSW index for {table_name}: {e}")
+
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {_embedding_chunk_id_index_name(dims)} "
+            f"ON {table_name}(chunk_id)"
+        )
+        self._executor_ensure_embedding_upsert_contract(conn, state, table_name, dims)
+
+    def _executor_embedding_table_needs_rebuild(
+        self, conn: Any, table_name: str, dims: int
+    ) -> bool:
+        """Return True when one embedding table no longer matches canonical DDL."""
+        id_default = self._executor_get_column_default(conn, table_name, "id")
+        if id_default != "nextval('embeddings_id_seq')":
+            return True
+        dims_default = self._executor_get_column_default(conn, table_name, "dims")
+        return dims_default != str(dims)
+
+    def _executor_rebuild_embedding_tables(
+        self, conn: Any, state: dict[str, Any], dims_values: list[int]
+    ) -> None:
+        """Rebuild all embedding tables together so the shared sequence can be reseeded."""
+        copy_columns = _embeddings_column_names(dims_values[0])
+        column_list = ", ".join(copy_columns)
+        next_value = 1
+        backup_tables: list[tuple[int, str, str]] = []
+        for dims in dims_values:
+            table_name = _embedding_table_name(dims)
+            backup_table = f"{table_name}_schema_rebuild_backup"
+            quoted_backup = self._quote_duckdb_identifier(backup_table)
+            quoted_table = self._quote_duckdb_identifier(table_name)
+            conn.execute(f"DROP TABLE IF EXISTS {quoted_backup}")
+            conn.execute(
+                f"CREATE TEMP TABLE {quoted_backup} AS "
+                f"SELECT {column_list} FROM {quoted_table}"
+            )
+            table_next_value = conn.execute(
+                f"SELECT COALESCE(MAX(id), 0) + 1 FROM {quoted_table}"
+            ).fetchone()[0]
+            next_value = max(next_value, int(table_next_value))
+            backup_tables.append((dims, table_name, backup_table))
+
+        for _, table_name, _ in backup_tables:
+            conn.execute(f"DROP TABLE {self._quote_duckdb_identifier(table_name)}")
+
+        self._executor_recreate_sequence(conn, "embeddings_id_seq", next_value)
+
+        for dims, table_name, backup_table in backup_tables:
+            quoted_backup = self._quote_duckdb_identifier(backup_table)
+            quoted_table = self._quote_duckdb_identifier(table_name)
+            conn.execute(
+                f"CREATE TABLE {quoted_table} ({_embedding_table_columns(dims)})"
+            )
+            conn.execute(
+                f"INSERT INTO {quoted_table} ({column_list}) "
+                f"SELECT {column_list} FROM {quoted_backup}"
+            )
+            conn.execute(f"DROP TABLE {quoted_backup}")
+            self._executor_create_embedding_table_indexes(conn, state, table_name, dims)
+
+    def _executor_materialize_embedding_table(
+        self, conn: Any, state: dict[str, Any], dims: int
+    ) -> str:
+        """Create or repair one embedding table from the canonical schema."""
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
+        table_name = _embedding_table_name(dims)
+        if not self._executor_table_exists(conn, state, table_name):
+            logger.info(f"Creating embedding table for {dims} dimensions: {table_name}")
+            conn.execute(_create_embedding_table_sql(dims))
+            self._executor_create_embedding_table_indexes(conn, state, table_name, dims)
+            return table_name
+
+        self._executor_reseed_sequence(conn, table_name, "embeddings_id_seq")
+        # Indexes are already in place from initial table creation
+        # (CREATE INDEX IF NOT EXISTS ensures idempotency). Do NOT recreate
+        # here -- that would resurrect indexes the caller deliberately dropped
+        # (e.g., custom HNSW indexes replacing the canonical one).
+        return table_name
+
     def _ensure_embedding_table_exists(self, dims: int) -> str:
         """Ensure embedding table exists for given dimensions - delegate to connection manager."""
         return self._execute_in_db_thread_sync("ensure_embedding_table_exists", dims)
@@ -694,53 +967,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], dims: int
     ) -> str:
         """Executor method for _ensure_embedding_table_exists - runs in DB thread."""
-        table_name = f"embeddings_{dims}"
-
-        if self._executor_table_exists(conn, state, table_name):
-            self._executor_ensure_embedding_upsert_contract(conn, state, table_name, dims)
-            return table_name
-
-        logger.info(f"Creating embedding table for {dims} dimensions: {table_name}")
-
         try:
-            # Create table with fixed dimensions for HNSW compatibility
-            conn.execute(f"""
-                CREATE TABLE {table_name} (
-                    id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
-                    chunk_id INTEGER NOT NULL,
-                    provider TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    embedding FLOAT[{dims}],
-                    dims INTEGER NOT NULL DEFAULT {dims},
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            # Create HNSW index for performance
-            hnsw_index_name = f"idx_hnsw_{dims}"
-            conn.execute(f"""
-                CREATE INDEX {hnsw_index_name} ON {table_name}
-                USING HNSW (embedding)
-                WITH (metric = 'cosine')
-            """)
-
-            # Create regular indexes for fast lookups
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_{dims}_chunk_id "
-                f"ON {table_name}(chunk_id)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_{dims}_provider_model "
-                f"ON {table_name}(provider, model)"
-            )
-            self._executor_create_embedding_unique_index(conn, table_name, dims)
-
-            logger.info(
-                f"Created {table_name} with HNSW index {hnsw_index_name} "
-                "and regular indexes"
-            )
-            return table_name
-
+            return self._executor_materialize_embedding_table(conn, state, dims)
         except Exception as e:
             logger.error(f"Failed to create embedding table for {dims} dimensions: {e}")
             raise
@@ -787,9 +1015,479 @@ class DuckDBProvider(SerialDatabaseProvider):
                         f"Checkpoint completed (operations: {operations_since_checkpoint}, "
                         f"time: {time_since_checkpoint:.1f}s)"
                     )
+
             except Exception as e:
                 if not os.environ.get("CHUNKHOUND_MCP_MODE"):
                     logger.warning(f"Checkpoint failed: {e}")
+
+    def _executor_measure_fragmentation(
+        self, conn: Any, state: dict[str, Any]
+    ) -> float:
+        """Return fragmentation ratio using DuckDB block-level metadata.
+
+        Uses pragma_storage_info (block allocation metadata, not row data)
+        to count blocks holding actual table data, then compares
+        used_blocks against the estimated minimum.
+
+        By definition, HNSW indexes are smaller than the embeddings tables
+        they index (vectors + graph links only, not full rows).  B-tree
+        indexes are also smaller than their tables.  So total live index
+        storage is bounded by data_blocks (INDEX_FACTOR=1.0).
+
+        System/catalog/sequence overhead is a small fixed number of blocks
+        (SYSTEM_BLOCKS=4).
+
+        Returns ratio where:
+          < 1.5  = healthy
+          > 3.0  = fragmented
+          > 5.0  = significantly fragmented
+        """
+        if self._connection_manager.is_memory_db:
+            return 0.0
+
+        row = conn.execute("PRAGMA database_size").fetchone()
+        block_size: int = row[2]
+
+        if block_size <= 0:
+            return 0.0
+
+        try:
+            current_size = os.path.getsize(cast(str, self._connection_manager.db_path))
+        except OSError:
+            return 0.0
+
+        # Count blocks holding table data via block allocation metadata.
+        # pragma_storage_info reads block-level allocation pages, not row
+        # data — no full table scan, very fast.
+        tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema='main' AND table_type='BASE TABLE'"
+        ).fetchall()
+
+        data_blocks = 0
+        for (t,) in tables:
+            escaped = t.replace("'", "''")
+            count = conn.execute(
+                f"SELECT COUNT(DISTINCT block_id) FROM pragma_storage_info('{escaped}') "
+                f"WHERE block_id >= 0"
+            ).fetchone()[0]
+            data_blocks += count
+
+        # Fixed overhead for system metadata: catalog pages, sequences,
+        # DuckDB internal bookkeeping, schema_version table.
+        system_blocks = 4
+
+        # Index overhead: HNSW + b-tree indexes. Since HNSW is smaller
+        # than the embedding table (vectors + graph links, not full rows)
+        # and b-tree indexes are smaller than their tables, total index
+        # overhead is safely bounded by data_blocks.
+        index_factor = 1.0
+
+        expected_min = system_blocks + data_blocks + int(data_blocks * index_factor)
+
+        if expected_min <= 0:
+            return 0.0
+
+        # Return ratio of current size to expected minimum size.
+        # This catches both MVCC stale data and HNSW drop/recreate bloat
+        # because used_blocks includes index blocks while pragma_storage_info
+        # only counts table data blocks, leaving the waste visible.
+        live = expected_min * block_size
+        return current_size / live
+
+    def _fragmentation_exceeds_threshold(
+        self, ratio: float, threshold: float | None
+    ) -> bool:
+        """Return True when the fragmentation ratio exceeds the configured threshold."""
+        if threshold is None or threshold < 0:
+            return False
+        return (ratio - 1.0) * 100.0 > threshold
+
+    def _executor_compact_if_needed(self, conn: Any, state: dict[str, Any]) -> bool:
+        """Executor method — checks fragmentation, compacts if needed.
+
+        Runs entirely in the executor thread.  Calls _executor_measure_fragmentation
+        and _executor_compact_database directly (no _execute_in_db_thread_sync
+        round-trips, which would deadlock the single executor thread).
+        """
+        if state.get("transaction_active", False):
+            return False
+        if self._connection_manager.is_memory_db:
+            return False
+        threshold = self.config.fragmentation_threshold_pct if self.config else 30.0
+        ratio = self._executor_measure_fragmentation(conn, state)
+        if not self._fragmentation_exceeds_threshold(ratio, threshold):
+            logger.debug(
+                f"Fragmentation ratio={ratio:.2f} below threshold={threshold}% — "
+                "skipping auto-compaction"
+            )
+            return False
+        logger.info(
+            f"Fragmentation ratio={ratio:.2f} (threshold={threshold}%) — compacting"
+        )
+        self._executor_compact_database(conn, state)
+        return True
+
+    def _compact_prepare(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        db_path: Path,
+        backup_path: Path,
+        compacted_path: Path,
+    ) -> int:
+        """Step 1-2: Flush WAL, close connections, move live → backup.
+
+        Caller provides the three filesystem paths so they are computed
+        exactly once (in ``_executor_compact_database``).
+
+        Returns original file size in bytes.
+        """
+        conn.execute("CHECKPOINT")
+        original_size = os.path.getsize(db_path)
+
+        conn.close()
+        if hasattr(_executor_local, "connection"):
+            delattr(_executor_local, "connection")
+        if self._connection_manager.connection is not None:
+            self._connection_manager.connection.close()
+            self._connection_manager.connection = None
+
+        backup_path.unlink(missing_ok=True)
+        compacted_path.unlink(missing_ok=True)
+        _atomic_replace(db_path, backup_path)
+        return original_size
+
+    def _compact_copy_data(
+        self, backup_path: Path, compacted_path: Path, state: dict[str, Any]
+    ) -> tuple[list[tuple[str]], list[dict[str, Any]]]:
+        """Step 3: rebuild the compacted DB from ChunkHound-owned canonical tables.
+
+        Compaction intentionally preserves only the canonical ChunkHound schema:
+        schema_version, files, chunks, and embeddings_*. Unknown tables are
+        dropped by design so the compacted file is a clean ChunkHound-owned DB,
+        not a generic DuckDB passthrough.
+
+        Returns (embedding_table_names, hnsw_index_snapshot) captured from the
+        source database before closing. The HNSW snapshot preserves custom
+        (non-canonical) HNSW indexes that would otherwise be lost.
+        """
+        tgt_conn = duckdb.connect(str(compacted_path))
+        try:
+            tgt_conn.execute("INSTALL vss")
+            tgt_conn.execute("LOAD vss")
+            tgt_conn.execute("SET hnsw_enable_experimental_persistence = true")
+
+            for seq in ["files_id_seq", "chunks_id_seq", "embeddings_id_seq"]:
+                tgt_conn.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq}")
+
+            tgt_conn.execute(f"CREATE TABLE files ({_FILES_TABLE_COLUMNS})")
+            tgt_conn.execute(f"CREATE TABLE chunks ({_CHUNKS_TABLE_COLUMNS})")
+
+            escaped_backup = str(backup_path).replace("'", "''")
+            tgt_conn.execute(f"ATTACH '{escaped_backup}' AS src")
+
+            # Snapshot HNSW indexes from the source before any schema mutation
+            hnsw_snapshot = self._executor_get_existing_vector_indexes_from_catalog(
+                tgt_conn, "src"
+            )
+
+            tgt_conn.execute(
+                f"CREATE TABLE schema_version ({_SCHEMA_VERSION_TABLE_COLUMNS})"
+            )
+            tgt_conn.execute(
+                "INSERT INTO schema_version SELECT * FROM src.schema_version"
+            )
+
+            flist = ", ".join(_FILES_COLUMN_NAMES)
+            tgt_conn.execute(
+                f"INSERT INTO files ({flist}) SELECT {flist} FROM src.files"
+            )
+
+            clist = ", ".join(_CHUNKS_COLUMN_NAMES)
+            tgt_conn.execute(
+                f"INSERT INTO chunks ({clist}) SELECT {clist} FROM src.chunks"
+            )
+
+            emb_tables = tgt_conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_catalog='src' AND table_name LIKE 'embeddings_%%'"
+            ).fetchall()
+
+            for (tname,) in emb_tables:
+                dims = _embedding_dims_from_table_name(tname)
+                if dims is None:
+                    tgt_conn.execute(
+                        f"CREATE TABLE {tname} AS SELECT * FROM src.{tname} LIMIT 0"
+                    )
+                    tgt_conn.execute(f"INSERT INTO {tname} SELECT * FROM src.{tname}")
+                else:
+                    tgt_conn.execute(
+                        f"CREATE TABLE {tname} ({_embedding_table_columns(dims)})"
+                    )
+                    elist = ", ".join(_embeddings_column_names(dims))
+                    tgt_conn.execute(
+                        f"INSERT INTO {tname} ({elist}) SELECT {elist} FROM src.{tname}"
+                    )
+
+            known = {"schema_version", "files", "chunks"}
+            known.update(t[0] for t in emb_tables)
+            all_src = tgt_conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_catalog='src' AND table_type='BASE TABLE'"
+            ).fetchall()
+            dropped_tables = sorted(tname for (tname,) in all_src if tname not in known)
+            if dropped_tables:
+                logger.warning(
+                    "DuckDB compaction dropped non-ChunkHound tables by design: "
+                    f"{', '.join(dropped_tables[:5])}"
+                    + (
+                        f" (+{len(dropped_tables) - 5} more)"
+                        if len(dropped_tables) > 5
+                        else ""
+                    )
+                )
+
+            tgt_conn.execute("DETACH src")
+
+            for (tname,) in emb_tables:
+                dims = _embedding_dims_from_table_name(tname)
+                if dims is not None:
+                    self._executor_create_embedding_table_indexes(
+                        tgt_conn, state, tname, dims
+                    )
+
+            tgt_conn.execute("CHECKPOINT")
+            return emb_tables, hnsw_snapshot
+        finally:
+            tgt_conn.close()
+
+    def _compact_finalize(
+        self,
+        state: dict[str, Any],
+        db_path: Path,
+        compacted_path: Path,
+        backup_path: Path,
+        original_size: int,
+        hnsw_snapshot: list[dict[str, Any]],
+        _t0: float,
+    ) -> int:
+        """Steps 4-8: atomic swap, reconnect, reseed, restore indexes, cleanup."""
+        _atomic_replace(compacted_path, db_path)
+
+        new_conn = self._create_connection()
+        _executor_local.connection = new_conn
+        self._connection_manager.connection = (
+            self._create_connection_manager_connection()
+        )
+
+        for seq, table in [
+            ("files_id_seq", "files"),
+            ("chunks_id_seq", "chunks"),
+            ("embeddings_id_seq", None),
+        ]:
+            try:
+                max_id = (
+                    int(
+                        new_conn.execute(
+                            f"SELECT COALESCE(MAX(id), 0) FROM {table}"
+                        ).fetchone()[0]
+                    )
+                    if table is not None
+                    else self._executor_get_max_embedding_id(new_conn)
+                )
+            except Exception:
+                continue
+            if max_id > 0:
+                new_conn.execute(f"SELECT nextval('{seq}') FROM range({max_id})")
+
+        self._executor_create_indexes(new_conn, state)
+
+        # Restore non-canonical HNSW indexes that were snapshotted before compaction
+        for index_info in hnsw_snapshot:
+            index_name = str(index_info["index_name"])
+            if index_name.startswith("idx_hnsw_"):
+                continue
+            self._executor_recreate_vector_index_from_info(new_conn, state, index_info)
+
+        backup_path.unlink(missing_ok=True)
+
+        compacted_size = os.path.getsize(db_path)
+        reduction = (
+            (1.0 - compacted_size / original_size) * 100.0
+            if original_size > 0
+            else 0.0
+        )
+        logger.info(
+            f"Compaction complete: {original_size:,} → {compacted_size:,} bytes "
+            f"({reduction:.1f}% reduction, {time.monotonic() - _t0:.1f}s)"
+        )
+        return compacted_size
+
+    def _close_live_compaction_connections(self) -> None:
+        """Close any live handles before filesystem-level restore/swap work."""
+        thread_conn = getattr(_executor_local, "connection", None)
+        if thread_conn is not None:
+            try:
+                thread_conn.close()
+            finally:
+                delattr(_executor_local, "connection")
+
+        manager_conn = self._connection_manager.connection
+        if manager_conn is not None:
+            try:
+                manager_conn.close()
+            finally:
+                self._connection_manager.connection = None
+
+    def _compact_restore(
+        self,
+        backup_path: Path,
+        compacted_path: Path,
+        db_path: Path,
+        state: dict[str, Any],
+    ) -> None:
+        """Restore original DB from backup after a compaction failure."""
+        if not db_path or not backup_path:
+            logger.warning("Cannot restore: compaction paths not initialized")
+            return
+        self._close_live_compaction_connections()
+        if backup_path.exists():
+            _atomic_replace(backup_path, db_path)
+        compacted_path.unlink(missing_ok=True)
+        restored_conn = self._create_connection()
+        self._executor_create_schema(restored_conn, state)
+        self._executor_create_indexes(restored_conn, state)
+        _executor_local.connection = restored_conn
+        self._connection_manager.connection = (
+            self._create_connection_manager_connection()
+        )
+
+    def _executor_compact_database(self, conn: Any, state: dict[str, Any]) -> int:
+        """Compact the database file via canonical rebuild + atomic swap.
+
+        The live DB is checkpointed, moved aside to a backup path, rebuilt into
+        a fresh DuckDB file from ChunkHound-owned canonical tables, then swapped
+        back into place atomically. Unknown/non-canonical tables are dropped by
+        design during rebuild.
+
+        Must be called with no active transaction.
+        """
+        if self._connection_manager.is_memory_db:
+            return 0
+        if state.get("transaction_active", False):
+            raise RuntimeError("Cannot compact database while a transaction is active")
+
+        self._executor.set_compaction_in_progress(True)
+        _t0 = time.monotonic()
+        db_path = Path(cast(str, self._connection_manager.db_path))
+        backup_path = db_path.with_suffix(db_path.suffix + ".compact_backup")
+        compacted_path = db_path.with_suffix(db_path.suffix + ".compact_new")
+        original_size = 0
+
+        try:
+            original_size = self._compact_prepare(
+                conn, state, db_path, backup_path, compacted_path
+            )
+            _, hnsw_snapshot = self._compact_copy_data(
+                backup_path, compacted_path, state
+            )
+            return self._compact_finalize(
+                state,
+                db_path,
+                compacted_path,
+                backup_path,
+                original_size,
+                hnsw_snapshot,
+                _t0,
+            )
+        except Exception as e:
+            logger.error(f"Compaction failed: {e}")
+            try:
+                self._compact_restore(backup_path, compacted_path, db_path, state)
+            except Exception as restore_err:
+                logger.error(
+                    f"Compaction failed AND restore failed: {restore_err}. "
+                    f"Backup at: {backup_path}"
+                )
+            raise
+        finally:
+            self._executor.set_compaction_in_progress(False)
+
+    def _executor_files_table_needs_rebuild(self, conn: Any) -> bool:
+        """Return True when files no longer matches canonical DDL."""
+        if not self._executor_table_has_primary_key(conn, "files"):
+            return True
+        return self._executor_get_column_default(conn, "files", "id") != (
+            "nextval('files_id_seq')"
+        )
+
+    def _executor_chunks_table_needs_rebuild(self, conn: Any) -> bool:
+        """Return True when chunks no longer matches canonical DDL."""
+        if not self._executor_table_has_primary_key(conn, "chunks"):
+            return True
+        if self._executor_get_column_default(conn, "chunks", "id") != (
+            "nextval('chunks_id_seq')"
+        ):
+            return True
+        return not self._executor_table_has_foreign_key(
+            conn, "chunks", "file_id", "files", "id"
+        )
+
+    def _executor_materialize_files_table(
+        self, conn: Any, state: dict[str, Any]
+    ) -> None:
+        """Create or rebuild files from canonical shared DDL."""
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS files_id_seq")
+        if not self._executor_table_exists(conn, state, "files"):
+            conn.execute(f"CREATE TABLE files ({_FILES_TABLE_COLUMNS})")
+            return
+
+        conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT")
+        conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS skip_reason TEXT")
+
+        if self._executor_files_table_needs_rebuild(conn):
+            logger.warning("Rebuilding non-canonical files table from shared DDL")
+            next_value = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM files"
+            ).fetchone()[0]
+            self._executor_recreate_sequence(conn, "files_id_seq", int(next_value))
+            self._executor_rebuild_table_from_canonical_schema(
+                conn,
+                "files",
+                _FILES_TABLE_COLUMNS,
+                _FILES_COLUMN_NAMES,
+            )
+            return
+
+        self._executor_reseed_sequence(conn, "files", "files_id_seq")
+
+    def _executor_materialize_chunks_table(
+        self, conn: Any, state: dict[str, Any]
+    ) -> None:
+        """Create or rebuild chunks from canonical shared DDL."""
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS chunks_id_seq")
+        if not self._executor_table_exists(conn, state, "chunks"):
+            conn.execute(f"CREATE TABLE chunks ({_CHUNKS_TABLE_COLUMNS})")
+            return
+
+        conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata TEXT")
+
+        if self._executor_chunks_table_needs_rebuild(conn):
+            logger.warning("Rebuilding non-canonical chunks table from shared DDL")
+            next_value = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM chunks"
+            ).fetchone()[0]
+            self._executor_recreate_sequence(conn, "chunks_id_seq", int(next_value))
+            self._executor_rebuild_table_from_canonical_schema(
+                conn,
+                "chunks",
+                _CHUNKS_TABLE_COLUMNS,
+                _CHUNKS_COLUMN_NAMES,
+            )
+            return
+
+        self._executor_reseed_sequence(conn, "chunks", "chunks_id_seq")
 
     def create_schema(self) -> None:
         """Create database schema for files, chunks, and embeddings - delegate to connection manager."""
@@ -800,103 +1498,44 @@ class DuckDBProvider(SerialDatabaseProvider):
         logger.info("Creating DuckDB schema")
 
         try:
-            # Create schema_version table for tracking schema versions
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS schema_version (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    description TEXT
-                )
-            """)
-
-            # Create sequence for files table
-            conn.execute("CREATE SEQUENCE IF NOT EXISTS files_id_seq")
-
-            # Files table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS files (
-                    id INTEGER PRIMARY KEY DEFAULT nextval('files_id_seq'),
-                    path TEXT UNIQUE NOT NULL,
-                    name TEXT NOT NULL,
-                    extension TEXT,
-                    size INTEGER,
-                    modified_time TIMESTAMP,
-                    content_hash TEXT,
-                    language TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            # Ensure content_hash and skip_reason exist for existing DBs
-            conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT")
-            conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS skip_reason TEXT")
-
-            # Create sequence for chunks table
-            conn.execute("CREATE SEQUENCE IF NOT EXISTS chunks_id_seq")
-
-            # Chunks table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS chunks (
-                    id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
-                    file_id INTEGER REFERENCES files(id),
-                    chunk_type TEXT NOT NULL,
-                    symbol TEXT,
-                    code TEXT NOT NULL,
-                    start_line INTEGER,
-                    end_line INTEGER,
-                    start_byte INTEGER,
-                    end_byte INTEGER,
-                    language TEXT,
-                    metadata TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            # Create sequence for embeddings table
-            conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
-
-            # Embeddings table (1536 dimensions as default)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS embeddings_1536 (
-                    id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
-                    chunk_id INTEGER NOT NULL,
-                    provider TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    embedding FLOAT[1536],
-                    dims INTEGER NOT NULL DEFAULT 1536,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            # Create indexes for 1536-dimensional embeddings
-            try:
-                conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_hnsw_1536 ON embeddings_1536
-                    USING HNSW (embedding)
-                    WITH (metric = 'cosine')
-                """)
-                logger.info(
-                    "HNSW index for 1536-dimensional embeddings created successfully"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to create HNSW index for 1536-dimensional embeddings: {e}"
-                )
-
-            # Create index on chunk_id for efficient deletions
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_embeddings_1536_chunk_id ON embeddings_1536(chunk_id)
-            """)
-            self._executor_create_embedding_provider_model_index(
-                conn, "embeddings_1536", 1536
+            conn.execute(
+                f"CREATE TABLE IF NOT EXISTS schema_version "
+                f"({_SCHEMA_VERSION_TABLE_COLUMNS})"
             )
 
-            # Handle schema migrations for existing databases
+            self._executor_materialize_files_table(conn, state)
+            self._executor_materialize_chunks_table(conn, state)
+            conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
+
             self._executor_migrate_schema(conn, state)
 
-            # Track schema version
+            embedding_dims: list[int] = []
+            for (table_name,) in conn.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'main' AND table_name LIKE 'embeddings_%'
+                ORDER BY table_name
+                """
+            ).fetchall():
+                dims = _embedding_dims_from_table_name(table_name)
+                if dims is not None:
+                    embedding_dims.append(dims)
+
+            if embedding_dims and any(
+                self._executor_embedding_table_needs_rebuild(
+                    conn, _embedding_table_name(dims), dims
+                )
+                for dims in embedding_dims
+            ):
+                logger.warning(
+                    "Rebuilding non-canonical embedding tables from shared DDL"
+                )
+                self._executor_rebuild_embedding_tables(conn, state, embedding_dims)
+            else:
+                for dims in embedding_dims:
+                    self._executor_materialize_embedding_table(conn, state, dims)
+
             current_version = self._get_schema_version(conn)
             if current_version == 0:
                 conn.execute("""
@@ -948,23 +1587,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     conn.execute("DROP TABLE chunks")
 
                     # Create the new table with correct schema
-                    conn.execute("""
-                        CREATE TABLE chunks (
-                            id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
-                            file_id INTEGER REFERENCES files(id),
-                            chunk_type TEXT NOT NULL,
-                            symbol TEXT,
-                            code TEXT NOT NULL,
-                            start_line INTEGER,
-                            end_line INTEGER,
-                            start_byte INTEGER,
-                            end_byte INTEGER,
-                            language TEXT,
-                            metadata TEXT,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """)
+                    conn.execute(f"CREATE TABLE chunks ({_CHUNKS_TABLE_COLUMNS})")
 
                     # Copy data back with explicit column list for safety
                     conn.execute("""
@@ -1011,12 +1634,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                 ORDER BY table_name
                 """
             ).fetchall():
-                try:
-                    dims = int(table_name[11:])
-                except ValueError:
-                    logger.warning(
-                        f"Skipping embedding upsert migration for unexpected table {table_name}"
-                    )
+                dims = _embedding_dims_from_table_name(table_name)
+                if dims is None:
                     continue
                 self._executor_ensure_embedding_upsert_contract(
                     conn, state, table_name, dims
@@ -1095,6 +1714,30 @@ class DuckDBProvider(SerialDatabaseProvider):
         except Exception as e:
             logger.error(f"Failed to create DuckDB indexes: {e}")
             raise
+
+    def optimize_tables(self) -> None:
+        """Emit DuckDB batch-write metrics for diagnostics.
+
+        DuckDB self-manages table optimization via WAL checkpointing and MVCC,
+        so this method only logs bulk-insert metrics for observability.
+        Actual physical compaction is handled separately via
+        ``compact_database()`` / ``compact_if_needed()``.
+        """
+        if os.environ.get("CHUNKHOUND_MCP_MODE"):
+            return
+        metrics = self._metrics.get("chunks", {})
+        rows = int(metrics.get("rows", 0))
+        if rows == 0:
+            return
+        logger.info(
+            "DuckDB chunks bulk metrics: "
+            f"files={int(metrics.get('files', 0))} "
+            f"rows={rows} "
+            f"batches={int(metrics.get('batches', 0))} "
+            f"temp_create_s={float(metrics.get('temp_create_s', 0.0)):.3f} "
+            f"temp_insert_s={float(metrics.get('temp_insert_s', 0.0)):.3f} "
+            f"main_insert_s={float(metrics.get('main_insert_s', 0.0)):.3f}"
+        )
 
     def _executor_migrate_legacy_embeddings_table(
         self, conn: Any, state: dict[str, Any]
@@ -1397,9 +2040,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                 if not self._is_hnsw_index_definition(index_name, create_sql):
                     continue
 
-                try:
-                    dims = int(table_name[11:])  # Remove 'embeddings_' prefix
-                except ValueError:
+                dims = _embedding_dims_from_table_name(table_name)
+                if dims is None:
                     logger.warning(
                         f"Could not parse dims from HNSW index {index_name} on {table_name}"
                     )
@@ -1430,6 +2072,68 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.error(f"Failed to get existing vector indexes: {e}")
             return []
 
+    def _executor_get_existing_vector_indexes_from_catalog(
+        self, conn: Any, catalog: str = "main"
+    ) -> list[dict[str, Any]]:
+        """Return HNSW vector indexes from a specific catalog (e.g. "main" or "src").
+
+        During compaction the source database is ATTACHed as catalog "src",
+        and its indexes must be discovered by filtering on ``database_name``.
+        Returns the same list-of-dicts shape as
+        ``_executor_get_existing_vector_indexes`` but for an arbitrary
+        attached catalog.
+        """
+        try:
+            results = conn.execute(
+                f"""
+                SELECT index_name, table_name, sql
+                FROM duckdb_indexes()
+                WHERE database_name = '{catalog}'
+                  AND table_name LIKE 'embeddings_%%'
+                """
+            ).fetchall()
+
+            indexes = []
+            for result in results:
+                index_name = result[0]
+                table_name = result[1]
+                create_sql = result[2]
+                if not self._is_hnsw_index_definition(index_name, create_sql):
+                    continue
+
+                dims = _embedding_dims_from_table_name(table_name)
+                if dims is None:
+                    logger.warning(
+                        f"Could not parse dims from HNSW index {index_name} on {table_name}"
+                    )
+                    continue
+
+                provider = None
+                model = None
+                if index_name.startswith("hnsw_"):
+                    provider, model = self._extract_custom_hnsw_identity(index_name)
+                elif index_name.startswith("idx_hnsw_"):
+                    provider = "generic"
+                    model = "generic"
+
+                indexes.append(
+                    {
+                        "index_name": index_name,
+                        "table_name": table_name,
+                        "provider": provider,
+                        "model": model,
+                        "dims": dims,
+                        "metric": self._extract_hnsw_metric(create_sql),
+                    }
+                )
+
+            return indexes
+        except Exception as e:
+            logger.error(
+                f"Failed to get existing vector indexes from catalog {catalog}: {e}"
+            )
+            return []
+
     def _executor_drop_vector_index_by_name(self, conn: Any, index_name: str) -> None:
         """Drop a specific HNSW index by its current name."""
         conn.execute(
@@ -1452,7 +2156,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             return
 
         try:
-            metric = self._normalize_hnsw_metric(str(index_info.get("metric", "cosine")))
+            metric = self._normalize_hnsw_metric(
+                str(index_info.get("metric", "cosine"))
+            )
         except ValueError as error:
             logger.warning(
                 "Skipping HNSW index restore for "
@@ -2082,7 +2788,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         if updates:
             # Clear skip_reason whenever a file is successfully re-indexed
             updates.append("skip_reason = NULL")
-            updates.append("updated_at = now()")  # CURRENT_TIMESTAMP parses as a column name in SET clauses; use now() instead
+            updates.append(
+                "updated_at = now()"
+            )  # CURRENT_TIMESTAMP parses as a column name in SET clauses; use now() instead
             query = f"UPDATE files SET {', '.join(updates)} WHERE id = ?"
             params.append(file_id)
             conn.execute(query, params)
@@ -2101,7 +2809,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Upsert a file record with skip_reason to prevent re-scanning on next run."""
         self._execute_in_db_thread_sync(
             "record_skipped_file",
-            path, name, extension, size, mtime, language, content_hash, skip_reason,
+            path,
+            name,
+            extension,
+            size,
+            mtime,
+            language,
+            content_hash,
+            skip_reason,
         )
 
     def _executor_record_skipped_file(
@@ -3713,9 +4428,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._execute_in_db_thread_sync("execute_query", query, params),
         )
 
-    def list_file_paths_under_directory(
-        self, directory_prefix: str
-    ) -> list[str]:
+    def list_file_paths_under_directory(self, directory_prefix: str) -> list[str]:
         escaped_prefix = escape_like_pattern(directory_prefix)
         rows = self.execute_query(
             "SELECT path FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'",
@@ -3781,36 +4494,33 @@ class DuckDBProvider(SerialDatabaseProvider):
         # it from firing on the next unrelated commit.
         state["deferred_checkpoint"] = False
 
-    def optimize_tables(self) -> None:
-        """Optimize tables by compacting fragments and rebuilding indexes (provider-specific).
+    # --- Public compaction / fragmentation interface ---
 
-        # DUCKDB_OPTIMIZATION: Automatic via WAL and MVCC
-        # CHECKPOINT: Happens at 1GB WAL size
-        # MANUAL: Not needed - DuckDB self-optimizes
+    def measure_fragmentation(self) -> float:
+        """Return fragmentation ratio. Fully stateless.
+
+        Uses PRAGMA database_size, pragma_storage_info (block allocation
+        metadata), and os.path.getsize to compare actual file size against
+        the estimated minimum live data size.
+        < 1.5 = healthy, > 3.0 = fragmented, > 5.0 = significantly fragmented.
         """
-        # DuckDB automatically manages table optimization. Emit metrics for visibility.
-        if os.environ.get("CHUNKHOUND_MCP_MODE"):
-            return
-        try:
-            m = self._metrics.get("chunks", {})
-            files = int(m.get("files", 0))
-            rows = int(m.get("rows", 0))
-            batches = int(m.get("batches", 0))
-            t_temp = float(m.get("temp_create_s", 0.0))
-            t_clear = float(m.get("temp_clear_s", 0.0))
-            t_tins = float(m.get("temp_insert_s", 0.0))
-            t_main = float(m.get("main_insert_s", 0.0))
-            if files or rows:
-                logger.info(
-                    "DuckDB chunks bulk metrics: files={} rows={} batches={} "
-                    "t_temp={:.2f}s t_temp_clear={:.2f}s t_temp_insert={:.2f}s t_main_insert={:.2f}s",
-                    files,
-                    rows,
-                    batches,
-                    t_temp,
-                    t_clear,
-                    t_tins,
-                    t_main,
-                )
-        except Exception:
-            pass
+        return cast(float, self._execute_in_db_thread_sync("measure_fragmentation"))
+
+    def compact_database(self) -> int:
+        """Compact the database, returns compacted size in bytes."""
+        return cast(int, self._execute_in_db_thread_sync("compact_database"))
+
+    async def compact_database_async(self) -> int:
+        """Async variant of compact_database."""
+        return cast(int, await self._execute_in_db_thread("compact_database"))
+
+    def should_optimize(self, operation: str = "") -> bool:
+        """Return True if fragmentation exceeds threshold. Fully stateless.
+
+        Uses PRAGMA database_size + file stat. No sidecars or baselines.
+        """
+        if self._connection_manager.is_memory_db:
+            return False
+        threshold = self.config.fragmentation_threshold_pct if self.config else 30.0
+        ratio = cast(float, self._execute_in_db_thread_sync("measure_fragmentation"))
+        return self._fragmentation_exceeds_threshold(ratio, threshold)
