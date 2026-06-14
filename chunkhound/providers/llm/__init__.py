@@ -1,6 +1,8 @@
 """LLM providers for ChunkHound deep research."""
 
 from .anthropic_llm_provider import AnthropicLLMProvider
+from .antigravity_cli_provider import AntigravityCLIProvider
+from .antigravity_llm_provider import AntigravityLLMProvider
 from .base_cli_provider import BaseCLIProvider
 from .claude_code_cli_provider import ClaudeCodeCLIProvider
 from .codex_cli_provider import CodexCLIProvider
@@ -16,4 +18,6 @@ __all__ = [
     "GeminiLLMProvider",
     "OpenAILLMProvider",
     "OpenCodeCLIProvider",
+    "AntigravityLLMProvider",
+    "AntigravityCLIProvider",
 ]
