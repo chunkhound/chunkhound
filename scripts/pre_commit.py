@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -209,22 +210,51 @@ def _run_ruff_command(*args: str) -> int:
     raise subprocess.CalledProcessError(result.returncode, result.args)
 
 
+def _file_digests(files: list[str]) -> dict[str, str | None]:
+    digests: dict[str, str | None] = {}
+    for file in files:
+        path = Path(file)
+        if not path.exists():
+            digests[file] = None
+            continue
+        digests[file] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return digests
+
+
+def _rewritten_files(
+    before: dict[str, str | None], after: dict[str, str | None]
+) -> list[str]:
+    return [file for file, digest in after.items() if digest != before.get(file)]
+
+
 def _run_ruff_direct(files: list[str]) -> int:
     """Run ruff lint and format checks directly, not via pre-commit.
 
     Exit 0 if all checks pass, 1 if any violations or formatting issues found.
+    CI intentionally treats Ruff auto-fixes as failures because the pushed diff
+    must already be lint-clean.
     """
     if not files:
         return 0
 
     exit_code = 0
 
-    # --fix matches .pre-commit-config.yaml hook args so local pre-commit and
-    # CI use the same check. In CI the fix isn't committed; only unfixable
-    # violations produce exit code 1. Ruff prints which files were fixed, so CI
-    # logs still show what changed. The real purpose is catching violations,
-    # not committing auto-fixes.
+    # --fix matches .pre-commit-config.yaml so CI and local hooks use the same
+    # lint rules. CI still fails if Ruff rewrites tracked files because the PR
+    # contents, not the ephemeral workspace after auto-fix, must be clean.
+    before_fix = _file_digests(files)
     if _run_ruff_command("check", "--fix", "--", *files) != 0:
+        exit_code = 1
+
+    changed_files = _rewritten_files(before_fix, _file_digests(files))
+    if changed_files:
+        print(
+            "Ruff rewrote changed Python files in CI. "
+            "Run the formatter locally, re-stage, and commit the fixes:",
+            file=sys.stderr,
+        )
+        for path in changed_files:
+            print(f"  {path}", file=sys.stderr)
         exit_code = 1
 
     if _run_ruff_command("format", "--check", "--", *files) != 0:
