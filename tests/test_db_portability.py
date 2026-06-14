@@ -83,9 +83,7 @@ def dummy_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _index_all(
-    coordinator: IndexingCoordinator, repo: Path
-) -> dict[str, Any]:
+def _index_all(coordinator: IndexingCoordinator, repo: Path) -> dict[str, Any]:
     """Run full indexing — discover, chunk, then generate embeddings."""
     import asyncio
 
@@ -169,7 +167,8 @@ def _assert_native_format(results: list[dict[str, Any]]) -> None:
         )
         # Must not raise — PurePath(fp) parses on all platforms
         from pathlib import PurePosixPath, PureWindowsPath
-        PurePosixPath(fp)   # forward-slash parse must succeed
+
+        PurePosixPath(fp)  # forward-slash parse must succeed
         PureWindowsPath(fp)  # Windows parse must not raise
         # On Windows, Path(fp) must not produce a drive-absolute path
         assert not str(native).startswith("\\"), (
@@ -527,14 +526,10 @@ def test_case_sensitivity_contract(
     upper = repo / "File.py"
     lower = repo / "file.py"
     upper.write_text(
-        "def uppercase_start():\n"
-        '    """Function in uppercase file."""\n'
-        "    return 1\n"
+        'def uppercase_start():\n    """Function in uppercase file."""\n    return 1\n'
     )
     lower.write_text(
-        "def lowercase_start():\n"
-        '    """Function in lowercase file."""\n'
-        "    return 2\n"
+        'def lowercase_start():\n    """Function in lowercase file."""\n    return 2\n'
     )
     fs_visible_paths = sorted(p.name for p in repo.glob("*.py"))
     assert fs_visible_paths in (["File.py"], ["File.py", "file.py"], ["file.py"])
@@ -581,14 +576,10 @@ def test_unicode_path_contract(
     repo = tmp_path / "repo_unicode"
     repo.mkdir()
     (repo / "données.py").write_text(
-        "def analyser():\n"
-        '    """Analyse des données."""\n'
-        "    return \"données\"\n"
+        'def analyser():\n    """Analyse des données."""\n    return "données"\n'
     )
     (repo / "engine.py").write_text(
-        "def run():\n"
-        '    """Run the engine."""\n'
-        "    return \"engine\"\n"
+        'def run():\n    """Run the engine."""\n    return "engine"\n'
     )
 
     db_file = tmp_path / "db" / "chunks_unicode.db"
@@ -611,9 +602,7 @@ def test_unicode_path_contract(
         )
 
         # Verify search works with unicode files
-        results, _ = provider.search_regex(
-            pattern="def", page_size=100, offset=0
-        )
+        results, _ = provider.search_regex(pattern="def", page_size=100, offset=0)
         assert len(results) >= 2
 
         # All paths must be forward-slash relative
@@ -642,9 +631,7 @@ def test_deeply_nested_path_contract(
     (repo / "src").mkdir(exist_ok=True)
     (deep / "__init__.py").write_text("")
     (deep / "assistants.py").write_text(
-        "def deep_function():\n"
-        '    """A deeply nested function."""\n'
-        "    return 42\n"
+        'def deep_function():\n    """A deeply nested function."""\n    return 42\n'
     )
 
     db_file = tmp_path / "db" / "chunks_deep.db"
@@ -667,9 +654,7 @@ def test_deeply_nested_path_contract(
         assert deep_paths[0] == "src/lib/core/utils/helpers/assistants.py"
 
         # Verify search works
-        results, _ = provider.search_regex(
-            pattern="def", page_size=100, offset=0
-        )
+        results, _ = provider.search_regex(pattern="def", page_size=100, offset=0)
         assert len(results) >= 1
         for r in results:
             assert "\\" not in r["file_path"]

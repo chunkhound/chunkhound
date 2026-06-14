@@ -19,9 +19,7 @@ pytest.importorskip("duckdb")
 class TestSchemaAutoCreate:
     """A DB without embeddings tables gets one created on connect."""
 
-    def test_missing_embeddings_table_creates_on_connect(
-        self, tmp_path: Path
-    ) -> None:
+    def test_missing_embeddings_table_creates_on_connect(self, tmp_path: Path) -> None:
         """DB with no embeddings table gets one created on connect."""
         db_path = tmp_path / "no_embeddings.duckdb"
 
@@ -78,9 +76,9 @@ class TestSchemaAutoCreate:
                 "WHERE table_name LIKE 'embeddings%'"
             )
             table_names = [r["table_name"] for r in tables]
-            assert any(
-                t.startswith("embeddings_") for t in table_names
-            ), f"Expected embeddings_N table, got: {table_names}"
+            assert any(t.startswith("embeddings_") for t in table_names), (
+                f"Expected embeddings_N table, got: {table_names}"
+            )
 
             provider.insert_embedding(
                 Embedding(

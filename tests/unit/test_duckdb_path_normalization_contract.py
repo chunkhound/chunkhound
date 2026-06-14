@@ -90,9 +90,7 @@ class TestStorageContract:
             )
 
             # Verify path in search results
-            results, _ = provider.search_regex(
-                pattern="class", page_size=10, offset=0
-            )
+            results, _ = provider.search_regex(pattern="class", page_size=10, offset=0)
             assert len(results) > 0
             for r in results:
                 assert "\\" not in r["file_path"]
@@ -100,9 +98,7 @@ class TestStorageContract:
         finally:
             provider.disconnect()
 
-    def test_multiple_files_all_use_forward_slash(
-        self, tmp_path: Path
-    ) -> None:
+    def test_multiple_files_all_use_forward_slash(self, tmp_path: Path) -> None:
         """Multiple files all stored with forward-slash paths."""
         provider = DuckDBProvider(
             db_path=tmp_path / "db.duckdb", base_directory=tmp_path
@@ -196,9 +192,7 @@ class TestLookupContract:
 class TestSearchContract:
     """Search results return paths exactly as stored."""
 
-    def test_regex_search_returns_relative_paths(
-        self, tmp_path: Path
-    ) -> None:
+    def test_regex_search_returns_relative_paths(self, tmp_path: Path) -> None:
         """Regex search returns relative forward-slash paths."""
         provider = DuckDBProvider(
             db_path=tmp_path / "db.duckdb", base_directory=tmp_path
@@ -225,9 +219,7 @@ class TestSearchContract:
                 )
             )
 
-            results, _ = provider.search_regex(
-                pattern="def", page_size=10, offset=0
-            )
+            results, _ = provider.search_regex(pattern="def", page_size=10, offset=0)
             assert len(results) > 0
             for r in results:
                 fp = r["file_path"]
@@ -246,9 +238,7 @@ class TestSearchContract:
 class TestInvariants:
     """Invariants that must hold for all paths in DuckDB."""
 
-    def test_all_stored_paths_are_relative_forward_slash(
-        self, tmp_path: Path
-    ) -> None:
+    def test_all_stored_paths_are_relative_forward_slash(self, tmp_path: Path) -> None:
         """All paths inserted via insert_file are relative with forward slashes."""
         provider = DuckDBProvider(
             db_path=tmp_path / "db.duckdb", base_directory=tmp_path
@@ -275,9 +265,7 @@ class TestInvariants:
         finally:
             provider.disconnect()
 
-    def test_search_results_are_relative_forward_slash(
-        self, tmp_path: Path
-    ) -> None:
+    def test_search_results_are_relative_forward_slash(self, tmp_path: Path) -> None:
         """All search results have relative forward-slash paths."""
         provider = DuckDBProvider(
             db_path=tmp_path / "db.duckdb", base_directory=tmp_path
@@ -304,9 +292,7 @@ class TestInvariants:
                 )
             )
 
-            results, _ = provider.search_regex(
-                pattern="def", page_size=100, offset=0
-            )
+            results, _ = provider.search_regex(pattern="def", page_size=100, offset=0)
             for r in results:
                 fp = r["file_path"]
                 assert not Path(fp).is_absolute(), f"Absolute path: {fp}"
