@@ -86,9 +86,11 @@ import DocsLayout from "../../layouts/DocsLayout.astro";
     <DocsCallout title="Commit flow with hooks" variant="info">
         <p>
             Hooks are fast local guardrails, not the final authority. You can
-            always rerun them manually with <code>uv run python scripts/pre_commit.py run-files &lt;paths&gt;</code>,
-            but CI re-checks every PR with the same <code>pre-commit</code> config and blocks merges when changed <code>.py</code>
-            or <code>.pyi</code> files still fail Ruff. In an emergency,
+            always rerun them manually with <code>uv run python scripts/pre_commit.py run-files &lt;paths&gt;</code>.
+            CI re-checks every PR with the same Ruff rules and requires the
+            committed <code>.py</code> and <code>.pyi</code> files to already be
+            clean. If Ruff would rewrite a pushed file, CI fails and tells you
+            to commit the fix locally. In an emergency,
             <code>git commit --no-verify</code> skips hooks entirely — but CI will still catch any issues.
         </p>
     </DocsCallout>
