@@ -26,15 +26,11 @@ def main() -> None:
     (repo / "src" / "utils").mkdir(parents=True)
     (repo / "lib" / "core").mkdir(parents=True)
     (repo / "src" / "utils" / "helpers.py").write_text(
-        "def helper() -> str:\n"
-        '    """Portable helper."""\n'
-        '    return "ok"\n',
+        'def helper() -> str:\n    """Portable helper."""\n    return "ok"\n',
         encoding="utf-8",
     )
     (repo / "lib" / "core" / "engine.py").write_text(
-        "class Engine:\n"
-        "    def run(self) -> str:\n"
-        '        return "running"\n',
+        'class Engine:\n    def run(self) -> str:\n        return "running"\n',
         encoding="utf-8",
     )
 
@@ -75,7 +71,9 @@ def main() -> None:
         sidecar.unlink()
 
     shutil.rmtree(repo)
-    print("Portable test database created successfully from real indexing without sidecar")
+    print(
+        "Portable test database created successfully from real indexing without sidecar"
+    )
 
 
 if __name__ == "__main__":

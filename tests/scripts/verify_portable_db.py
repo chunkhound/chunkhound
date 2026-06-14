@@ -29,7 +29,9 @@ try:
         assert "\\" not in path, f"Backslash in path: {path}"
         assert not Path(path).is_absolute(), f"Absolute path: {path}"
 
-    regex_results, _ = provider.search_regex(pattern="def|class", page_size=10, offset=0)
+    regex_results, _ = provider.search_regex(
+        pattern="def|class", page_size=10, offset=0
+    )
     assert len(regex_results) >= 2, (
         f"Expected regex results from both files, got {len(regex_results)}"
     )
