@@ -1093,3 +1093,42 @@ class TestOpenAIMatryoshkaEmbed:
             await provider._embed_batch_internal(["hello"])
 
 
+class TestOpenAINonRetryableErrors:
+    """Contract: EmbeddingProviderError subclasses propagate without retry."""
+
+    @pytest.mark.asyncio
+    async def test_embedding_dimension_error_propagates_without_retry(self):
+        """EmbeddingDimensionError must propagate immediately, not retry."""
+        from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
+
+        provider, _, _ = _bare_provider(retry_attempts=3)
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            side_effect=EmbeddingDimensionError(
+                "dimension mismatch: got 768, expected 512"
+            )
+        )
+
+        with pytest.raises(EmbeddingDimensionError, match="dimension mismatch"):
+            await provider._embed_batch_internal(["hello"])
+
+        # Must fail on first attempt, not retry 3 times
+        assert provider._client.embeddings.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_embedding_configuration_error_propagates_without_retry(self):
+        """EmbeddingConfigurationError must propagate immediately, not retry."""
+        provider, _, _ = _bare_provider(retry_attempts=3)
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            side_effect=EmbeddingConfigurationError(
+                "output_dims 999 not in supported dimensions"
+            )
+        )
+
+        with pytest.raises(
+            EmbeddingConfigurationError, match="not in supported dimensions"
+        ):
+            await provider._embed_batch_internal(["hello"])
+
+        assert provider._client.embeddings.create.call_count == 1
