@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  lint-changed-python:
+  lint-changed-ruff:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -32,13 +32,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v3
 
-      - name: Run pre-commit on changed Python files
+      - name: Run ruff on changed Python files
         env:
           CHUNKHOUND_GITHUB_EVENT_NAME: ${{ github.event_name }}
           CHUNKHOUND_GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
           CHUNKHOUND_GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           CHUNKHOUND_GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch || '' }}
-        run: python scripts/pre_commit.py run-changed --github-actions
+        run: python scripts/pre_commit.py run-ruff --github-actions
 
   site-build:
     runs-on: ubuntu-latest
@@ -196,7 +196,7 @@ jobs:
         run: uv run python scripts/check_flaky_annotations.py test-results.xml
 
   pages-artifact:
-    needs: [lint-changed-python, site-build, tests, site-build-validation, watchman-rollout-gate]
+    needs: [lint-changed-ruff, site-build, tests, site-build-validation, watchman-rollout-gate]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

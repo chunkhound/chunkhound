@@ -549,7 +549,7 @@ class TestDocsVersionWorkflowContract:
         permissions = cast(dict[str, Any], job.get("permissions", {}))
 
         assert job["needs"] == [
-            "lint-changed-python",
+            "lint-changed-ruff",
             "site-build",
             "tests",
             "site-build-validation",
@@ -587,7 +587,7 @@ class TestDocsVersionWorkflowContract:
     def test_changed_python_lint_job_contract(self) -> None:
         workflow = _load_workflow(".github/workflows/ci.yml")
         triggers = cast(dict[str, Any], workflow.get("on", workflow.get(True, {})))
-        job = _job(".github/workflows/ci.yml", "lint-changed-python")
+        job = _job(".github/workflows/ci.yml", "lint-changed-ruff")
         steps = cast(list[dict[str, Any]], job["steps"])
 
         assert "pull_request" in triggers
@@ -599,28 +599,38 @@ class TestDocsVersionWorkflowContract:
 
         _assert_checkout_uses_full_history(steps)
 
-        pre_commit_index = _find_step_index(
+        python_index = _find_step_index(
             steps,
-            "changed python pre-commit step",
-            lambda step: step.get("name") == "Run pre-commit on changed Python files",
+            "setup-python step",
+            lambda step: str(step.get("uses", "")).startswith("actions/setup-python@"),
         )
-        pre_commit_step = steps[pre_commit_index]
-        pre_commit_env = cast(dict[str, str], pre_commit_step["env"])
+        uv_index = _find_step_index(
+            steps,
+            "setup-uv step",
+            lambda step: str(step.get("uses", "")).startswith("astral-sh/setup-uv@"),
+        )
+        ruff_index = _find_step_index(
+            steps,
+            "changed python ruff step",
+            lambda step: step.get("run")
+            == "python scripts/pre_commit.py run-ruff --github-actions",
+        )
+        ruff_step = steps[ruff_index]
+        ruff_env = cast(dict[str, str], ruff_step["env"])
 
-        assert pre_commit_step["run"] == (
-            "python scripts/pre_commit.py run-changed --github-actions"
+        assert python_index < uv_index < ruff_index
+        assert ruff_step["run"] == (
+            "python scripts/pre_commit.py run-ruff --github-actions"
         )
-        assert pre_commit_env["CHUNKHOUND_GITHUB_EVENT_NAME"] == (
-            "${{ github.event_name }}"
-        )
-        assert pre_commit_env["CHUNKHOUND_GITHUB_BASE_SHA"] == (
+        assert ruff_env["CHUNKHOUND_GITHUB_EVENT_NAME"] == ("${{ github.event_name }}")
+        assert ruff_env["CHUNKHOUND_GITHUB_BASE_SHA"] == (
             "${{ github.event.pull_request.base.sha || "
             "github.event.merge_group.base_sha || github.event.before || '' }}"
         )
-        assert pre_commit_env["CHUNKHOUND_GITHUB_HEAD_SHA"] == (
+        assert ruff_env["CHUNKHOUND_GITHUB_HEAD_SHA"] == (
             "${{ github.event.pull_request.head.sha || "
             "github.event.merge_group.head_sha || github.sha }}"
         )
-        assert pre_commit_env["CHUNKHOUND_GITHUB_DEFAULT_BRANCH"] == (
+        assert ruff_env["CHUNKHOUND_GITHUB_DEFAULT_BRANCH"] == (
             "${{ github.event.repository.default_branch || '' }}"
         )
