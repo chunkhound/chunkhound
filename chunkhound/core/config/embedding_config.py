@@ -15,7 +15,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 from chunkhound.core.utils.openai_utils import (
     is_azure_openai_endpoint,
     is_official_openai_endpoint,
@@ -100,7 +100,8 @@ class EmbeddingConfig(BaseSettings):
 
     # Provider Selection
     provider: Literal["openai", "voyageai"] = Field(
-        default="openai", description="Embedding provider (openai, voyageai)"
+        default="openai",
+        description="Embedding provider (openai, voyageai)",
     )
 
     # Common Configuration
@@ -170,6 +171,22 @@ class EmbeddingConfig(BaseSettings):
         ),
     )
 
+    output_dims: int | None = Field(
+        default=None,
+        description="Output embedding dimension. If None, uses model default. "
+        "Validated against model's supported dimensions when known; "
+        "for custom models, validated at runtime after dimension discovery.",
+    )
+
+    client_side_truncation: bool = Field(
+        default=False,
+        description=(
+            "Truncate embeddings client-side instead of using API dimensions "
+            "parameter. Requires output_dims. Use for APIs that don't support "
+            "the dimensions parameter."
+        ),
+    )
+
     # Internal settings - not exposed to users
     batch_size: int = Field(default=100, description="Internal batch size")
     rerank_batch_size: int | None = Field(
@@ -192,6 +209,20 @@ class EmbeddingConfig(BaseSettings):
         if v is not None and v <= 0:
             raise ValueError("rerank_batch_size must be positive")
         return v
+
+    @field_validator("output_dims")
+    def validate_output_dims(cls, v: int | None) -> int | None:  # noqa: N805
+        """Validate output_dims is positive."""
+        if v is not None and v <= 0:
+            raise ValueError("output_dims must be positive")
+        return v
+
+    @model_validator(mode="after")
+    def validate_client_side_truncation(self) -> Self:
+        """Validate client_side_truncation requires output_dims."""
+        if self.client_side_truncation and self.output_dims is None:
+            raise ValueError("client_side_truncation requires output_dims to be set")
+        return self
 
     @field_validator("model")
     def validate_model(cls, v: str | None) -> str | None:  # noqa: N805
@@ -332,6 +363,12 @@ class EmbeddingConfig(BaseSettings):
         if self.max_concurrent_batches is not None:
             base_config["max_concurrent_batches"] = self.max_concurrent_batches
 
+        # Add matryoshka configuration if set
+        if self.output_dims is not None:
+            base_config["output_dims"] = self.output_dims
+        if self.client_side_truncation:
+            base_config["client_side_truncation"] = True
+
         return base_config
 
     def get_default_model(self) -> str:
@@ -348,7 +385,7 @@ class EmbeddingConfig(BaseSettings):
         if self.provider == "voyageai":
             return VOYAGE_DEFAULT_MODEL
         else:  # openai
-            return "text-embedding-3-small"
+            return OPENAI_DEFAULT_MODEL
 
     def is_provider_configured(self) -> bool:
         """
@@ -415,7 +452,7 @@ class EmbeddingConfig(BaseSettings):
             "--provider",
             "--embedding-provider",
             choices=["openai", "voyageai"],
-            help="Embedding provider (openai or voyageai)",
+            help="Embedding provider (openai, voyageai)",
         )
 
         parser.add_argument(
@@ -478,6 +515,20 @@ class EmbeddingConfig(BaseSettings):
             "--azure-deployment",
             "--embedding-azure-deployment",
             help="Azure OpenAI deployment name",
+        )
+
+        parser.add_argument(
+            "--output-dims",
+            "--embedding-output-dims",
+            type=int,
+            help="Output embedding dimension for Matryoshka models",
+        )
+
+        parser.add_argument(
+            "--client-side-truncation",
+            action="store_true",
+            default=None,
+            help="Truncate embeddings client-side instead of using API dimensions parameter",
         )
 
     @classmethod
@@ -547,13 +598,28 @@ class EmbeddingConfig(BaseSettings):
         if rerank_ssl_verify_raw := os.getenv(
             "CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY"
         ):
-            if (rerank_ssl_verify := _parse_env_bool(rerank_ssl_verify_raw)) is not None:
+            if (
+                rerank_ssl_verify := _parse_env_bool(rerank_ssl_verify_raw)
+            ) is not None:
                 config["rerank_ssl_verify"] = rerank_ssl_verify
         if rerank_batch_size := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE"):
             try:
                 config["rerank_batch_size"] = int(rerank_batch_size)
             except ValueError:
                 pass
+
+        # Matryoshka configuration
+        if output_dims_raw := os.getenv("CHUNKHOUND_EMBEDDING__OUTPUT_DIMS"):
+            try:
+                config["output_dims"] = int(output_dims_raw)
+            except ValueError:
+                pass
+        if client_side_truncation_raw := os.getenv(
+            "CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION"
+        ):
+            parsed = _parse_env_bool(client_side_truncation_raw)
+            if parsed is not None:
+                config["client_side_truncation"] = parsed
 
         return config
 
@@ -607,6 +673,20 @@ class EmbeddingConfig(BaseSettings):
         ):
             overrides["azure_deployment"] = args.embedding_azure_deployment
 
+        # Handle matryoshka arguments
+        if hasattr(args, "output_dims") and args.output_dims is not None:
+            overrides["output_dims"] = args.output_dims
+        if (
+            hasattr(args, "embedding_output_dims")
+            and args.embedding_output_dims is not None
+        ):
+            overrides["output_dims"] = args.embedding_output_dims
+        if (
+            hasattr(args, "client_side_truncation")
+            and args.client_side_truncation is not None
+        ):
+            overrides["client_side_truncation"] = args.client_side_truncation
+
         # Handle no-embeddings flag (special case - disables embeddings)
         if hasattr(args, "no_embeddings") and args.no_embeddings:
             return {"disabled": True}  # This will be handled specially in main Config
@@ -621,6 +701,10 @@ class EmbeddingConfig(BaseSettings):
             f"model={self.get_default_model()}",
             f"api_key={api_key_display}",
         ]
+        if self.output_dims is not None:
+            parts.append(f"output_dims={self.output_dims}")
+        if self.client_side_truncation:
+            parts.append("client_side_truncation=True")
         if self.azure_endpoint:
             parts.append(f"azure_endpoint={self.azure_endpoint}")
             parts.append(f"api_version={self.api_version}")
