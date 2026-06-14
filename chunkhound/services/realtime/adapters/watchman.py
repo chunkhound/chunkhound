@@ -368,8 +368,13 @@ class WatchmanRealtimeAdapter:
     ) -> tuple[str, Path] | None:
         file_type = entry.get("type")
         if file_type not in {None, "f", "d"}:
+            name = entry.get("name")
+            exists = entry.get("exists")
+            is_new = entry.get("new")
             self._warn_translation_issue(
-                f"Skipping unexpected Watchman file type {file_type!r}"
+                "Skipping unexpected Watchman file type "
+                f"{file_type!r} for entry "
+                f"name={name!r}, exists={exists!r}, new={is_new!r}"
             )
             return None
 
@@ -579,7 +584,9 @@ class WatchmanRealtimeAdapter:
             )
             await self._context.start_polling_backend(
                 watch_path,
-                reason=f"Watchman sidecar {phase} failed: {error}; fell back to polling",
+                reason=(
+                    f"Watchman sidecar {phase} failed: {error}; fell back to polling"
+                ),
             )
             self._context.set_effective_backend("polling")
             return

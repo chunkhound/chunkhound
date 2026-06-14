@@ -32,6 +32,7 @@ from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.types.common import Language
 
 if TYPE_CHECKING:
+    from chunkhound.services.diff_aware_search_service import SearchServiceProtocol
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
     from chunkhound.services.search_service import SearchService
@@ -65,7 +66,7 @@ class Database:
         embedding_manager: EmbeddingManager | None = None,
         config: DatabaseConfig | None = None,
         indexing_coordinator: "IndexingCoordinator | None" = None,
-        search_service: "SearchService | None" = None,
+        search_service: "SearchServiceProtocol | None" = None,
         embedding_service: "EmbeddingService | None" = None,
         provider: Any | None = None,
     ):
