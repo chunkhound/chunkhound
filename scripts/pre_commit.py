@@ -219,7 +219,11 @@ def _run_ruff_direct(files: list[str]) -> int:
 
     exit_code = 0
 
-    # Must keep in sync with .pre-commit-config.yaml ruff-check hook args
+    # --fix matches .pre-commit-config.yaml hook args so local pre-commit and
+    # CI use the same check. In CI the fix isn't committed; only unfixable
+    # violations produce exit code 1. Ruff prints which files were fixed, so CI
+    # logs still show what changed. The real purpose is catching violations,
+    # not committing auto-fixes.
     if _run_ruff_command("check", "--fix", "--", *files) != 0:
         exit_code = 1
 
