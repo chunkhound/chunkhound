@@ -223,6 +223,9 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert ".pyi</code>" in contributing
     assert "Re-stage the" in contributing
     assert "fixed files and commit again" in contributing
+    assert "already be" in contributing
+    assert "clean. If Ruff would rewrite a pushed file" in contributing
+    assert "commit the fix locally" in contributing
     assert "--no-verify" in contributing
 
 
