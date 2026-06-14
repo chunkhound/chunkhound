@@ -2,7 +2,6 @@ import asyncio
 import os
 import subprocess
 import tempfile
-from typing import Any
 
 from loguru import logger
 
@@ -40,6 +39,7 @@ class AntigravityCLIProvider(BaseCLIProvider):
         request_timeout = timeout if timeout is not None else self._timeout
 
         import shutil
+
         binary = "agy"
         if not shutil.which("agy") and shutil.which("antigravity"):
             binary = "antigravity"
@@ -55,14 +55,17 @@ class AntigravityCLIProvider(BaseCLIProvider):
         # Clone and sanitize environment variables to prevent plugin hijacking
         env = os.environ.copy()
         keys_to_remove = [
-            k for k in env 
-            if k.startswith("CHUNKHOUND_") or k.startswith("SDLAIC_") or k.startswith("ENFORCER_")
+            k
+            for k in env
+            if k.startswith("CHUNKHOUND_")
+            or k.startswith("SDLAIC_")
+            or k.startswith("ENFORCER_")
         ]
         for k in keys_to_remove:
             env.pop(k, None)
 
         logger.debug(f"Executing CLI command: {' '.join(cmd)} in sandboxed mode")
-        
+
         process = None
         try:
             # Create subprocess with neutral CWD to prevent local config scans
@@ -75,19 +78,25 @@ class AntigravityCLIProvider(BaseCLIProvider):
                 cwd=tempfile.gettempdir(),
             )
 
-            # Wait for completion and stream prompt via stdin (bypasses OS arg length limits)
+            # Wait for completion and stream prompt via stdin
+            # (bypasses OS arg length limits)
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(input=merged_prompt.encode("utf-8")),
                 timeout=request_timeout,
             )
 
             if process.returncode != 0:
-                raw_err = (stderr or stdout or b"").decode("utf-8", errors="ignore").strip()
-                logger.error(f"Antigravity CLI command failed (exit code {process.returncode}): {raw_err}")
+                raw_err = (
+                    (stderr or stdout or b"").decode("utf-8", errors="ignore").strip()
+                )
+                logger.error(
+                    "Antigravity CLI command failed "
+                    f"(exit code {process.returncode}): {raw_err}"
+                )
                 raise RuntimeError(raw_err or f"Exit code {process.returncode}")
 
             return stdout.decode("utf-8", errors="ignore")
-            
+
         except FileNotFoundError as fnf:
             logger.error(f"Antigravity CLI binary not found: {fnf}")
             raise RuntimeError(
@@ -101,8 +110,12 @@ class AntigravityCLIProvider(BaseCLIProvider):
                     process.kill()
                     await process.wait()
                 except Exception as kill_err:
-                    logger.warning(f"Failed to kill timed out Antigravity CLI process: {kill_err}")
-            raise RuntimeError(f"Antigravity CLI command timed out after {request_timeout}s") from te
+                    logger.warning(
+                        f"Failed to kill timed out Antigravity CLI process: {kill_err}"
+                    )
+            raise RuntimeError(
+                f"Antigravity CLI command timed out after {request_timeout}s"
+            ) from te
         except Exception as e:
             if not isinstance(e, RuntimeError):
                 logger.error(f"Antigravity CLI execution failed: {e}")
