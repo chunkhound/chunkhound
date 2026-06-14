@@ -13,12 +13,11 @@ import pytest
 import voyageai
 
 from chunkhound.core.config.embedding_config import validate_rerank_configuration
+from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.core.exceptions.embedding import (
     EmbeddingConfigurationError,
     EmbeddingDimensionError,
-    EmbeddingProviderError,
 )
-from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.providers.embeddings.voyageai_provider import (
     _CATEGORY_BACKOFFS,
     VoyageAIEmbeddingProvider,
@@ -1179,7 +1178,7 @@ class TestUnknownVoyageModelConfig:
 
     def test_unknown_model_rejects_non_positive_output_dims(self):
         with pytest.raises(
-            EmbeddingConfigurationError, match="output_dims must be positive"
+            EmbeddingConfigurationError, match="must be a positive integer"
         ):
             _make_provider(
                 api_key="test-key",

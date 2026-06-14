@@ -8,19 +8,18 @@ from typing import Any, TypedDict, cast
 import httpx
 from loguru import logger
 
+from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
+from chunkhound.core.exceptions.embedding import (
+    EmbeddingConfigurationError,
+    EmbeddingProviderError,
+)
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.core.utils.voyageai_utils import (
     OFFICIAL_VOYAGEAI_BASE_V1,
     is_official_voyageai_endpoint,
 )
-from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
-
-from chunkhound.core.exceptions.embedding import (
-    EmbeddingConfigurationError,
-    EmbeddingProviderError,
-)
 
 from .shared_utils import (
     apply_client_side_truncation,
@@ -29,6 +28,7 @@ from .shared_utils import (
     get_dimensions_for_model,
     get_usage_stats_dict,
     validate_embedding_dims,
+    validate_positive_output_dims,
     validate_text_input,
 )
 
@@ -291,8 +291,7 @@ class VoyageAIEmbeddingProvider:
         # models accept any positive output_dims and validate against real runtime
         # responses instead of the temporary 1024 introspection fallback.
         if output_dims is not None:
-            if output_dims <= 0:
-                raise EmbeddingConfigurationError("output_dims must be positive")
+            validate_positive_output_dims(output_dims, model=model)
             if self._is_known_model:
                 default_dim = model_config.get("default_dimension", 1024)
                 supported = model_config.get("dimensions", [default_dim])

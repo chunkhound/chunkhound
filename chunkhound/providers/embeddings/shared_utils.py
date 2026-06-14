@@ -155,6 +155,47 @@ def build_dimension_request_param(
     return None
 
 
+def validate_positive_output_dims(
+    output_dims: int | None,
+    *,
+    model: str | None = None,
+) -> int | None:
+    """Validate output_dims is a positive integer, or return None if unset.
+
+    Shared validation for type and range, used by both providers at
+    init-time and embed-time.
+
+    Args:
+        output_dims: The value to validate.
+        model: Optional model name for error messages.
+
+    Returns:
+        Validated positive int, or None if output_dims is None.
+
+    Raises:
+        EmbeddingConfigurationError: If output_dims is set but not a
+            positive integer.
+    """
+    from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
+
+    if output_dims is None:
+        return None
+    # bool is a subclass of int in Python — reject explicitly
+    if isinstance(output_dims, bool) or not isinstance(output_dims, int):
+        prefix = f"Model '{model}' uses " if model else ""
+        raise EmbeddingConfigurationError(
+            f"{prefix}output_dims={output_dims!r}, but "
+            "output_dims must be a positive integer."
+        )
+    if output_dims <= 0:
+        prefix = f"Model '{model}' uses " if model else ""
+        raise EmbeddingConfigurationError(
+            f"{prefix}output_dims={output_dims!r}, but "
+            "output_dims must be a positive integer."
+        )
+    return output_dims
+
+
 def validate_embedding_dims(
     actual_dims: int,
     expected_dims: int,

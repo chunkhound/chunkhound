@@ -16,16 +16,20 @@ from chunkhound.core.config.embedding_config import (
     validate_rerank_configuration,
 )
 from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
-from chunkhound.core.utils.openai_utils import is_azure_openai_endpoint
 from chunkhound.core.exceptions.core import ValidationError
-from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
+from chunkhound.core.exceptions.embedding import (
+    EmbeddingConfigurationError,
+    EmbeddingDimensionError,
+)
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
+from chunkhound.core.utils.openai_utils import is_azure_openai_endpoint
+from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.providers.embeddings.shared_utils import (
-    validate_embedding_dims,
     apply_client_side_truncation,
     build_dimension_request_param,
+    validate_embedding_dims,
+    validate_positive_output_dims,
 )
-from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .batch_utils import handle_token_limit_error
 
@@ -512,28 +516,15 @@ class OpenAIEmbeddingProvider:
     def _validate_output_dims_positive_int(self) -> int | None:
         """Return validated positive int, or None if output_dims is unset.
 
-        Shared validation for type and range, called from both init-time
-        and embed-time validation methods.
+        Delegates to shared validation in shared_utils.
 
         Raises:
             EmbeddingConfigurationError: If output_dims is set but not a
                 positive integer.
         """
-        output_dims = self._output_dims
-        if output_dims is None:
-            return None
-        # bool is a subclass of int in Python — reject explicitly
-        if isinstance(output_dims, bool) or not isinstance(output_dims, int):
-            raise EmbeddingConfigurationError(
-                f"Model '{self._model}' uses output_dims={output_dims!r}, but "
-                "output_dims must be a positive integer."
-            )
-        if output_dims <= 0:
-            raise EmbeddingConfigurationError(
-                f"Model '{self._model}' uses output_dims={output_dims!r}, but "
-                "output_dims must be a positive integer."
-            )
-        return output_dims
+        return validate_positive_output_dims(
+            self._output_dims, model=self._model
+        )
 
     def _validate_output_dims_config(self) -> None:
         """Reject invalid known-model output_dims at init."""
