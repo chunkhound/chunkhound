@@ -50,19 +50,26 @@ from chunkhound.version import __version__  # noqa: E402
 from .base import MCPServerBase  # noqa: E402
 from .common import handle_tool_call  # noqa: E402
 
-# CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
+# CRITICAL: Disable Python logging at import to prevent JSON-RPC corruption.
+# Loguru is silenced separately in main() — see _silence_loguru below.
 logging.disable(logging.CRITICAL)
 for logger_name in ["", "mcp", "server", "fastmcp"]:
     logging.getLogger(logger_name).setLevel(logging.CRITICAL + 1)
 
-# Disable loguru logger
-try:
-    from loguru import logger as loguru_logger
 
+def _silence_loguru() -> None:
+    """Remove all loguru sinks so nothing leaks to stdout during JSON-RPC.
+
+    Deferred until ``main()`` runs (not import time) so callers that only
+    import the module — including tests that patch ``main`` — keep their
+    own loguru sinks intact.
+    """
+    try:
+        from loguru import logger as loguru_logger
+    except ImportError:
+        return
     loguru_logger.remove()
     loguru_logger.add(lambda _: None, level="CRITICAL")
-except ImportError:
-    pass
 
 
 class StdioMCPServer(MCPServerBase):
@@ -390,6 +397,9 @@ async def main(args: Any = None) -> None:
     Args:
         args: Pre-parsed arguments. If None, will parse from sys.argv.
     """
+    # Silence loguru before any import that could emit a log record.
+    _silence_loguru()
+
     import argparse
 
     from chunkhound.api.cli.utils.config_factory import create_validated_config
