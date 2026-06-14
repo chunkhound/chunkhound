@@ -43,7 +43,8 @@ def add_mcp_subparser(subparsers: Any) -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Open the database read-only; disables indexing/watcher and "
-            "runs without the daemon (DuckDB only)"
+            "runs without the daemon (DuckDB only). See database.read_only "
+            "for env/JSON equivalents."
         ),
     )
 

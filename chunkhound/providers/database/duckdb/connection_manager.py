@@ -81,8 +81,9 @@ class DuckDBConnectionManager:
         """Establish database connection and initialize schema with WAL validation."""
         logger.info(f"Connecting to DuckDB database: {self.db_path}")
 
-        # Ensure parent directory exists for file-based databases
-        if isinstance(self.db_path, Path):
+        # Ensure parent directory exists for file-based databases. Skipped in
+        # read-only mode so a shared / immutable DB path is never written to.
+        if isinstance(self.db_path, Path) and not self._read_only:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:

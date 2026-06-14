@@ -59,8 +59,10 @@ class DatabaseConfig(BaseModel):
         default=False,
         description=(
             "Open DB read-only; reject all writes. MCP + DuckDB only "
-            "(validator rejects other commands/providers). The CLI --read-only "
-            "flag only sets True; remove from JSON config to disable."
+            "(validator rejects other commands/providers). Precedence: "
+            "CLI --read-only > CHUNKHOUND_DATABASE__READ_ONLY > JSON. "
+            "CLI can only set True; use the env var (false) or edit JSON "
+            "to disable a persisted setting."
         ),
     )
 
@@ -110,10 +112,11 @@ class DatabaseConfig(BaseModel):
             # Path ends with a known DB extension (.db / .duckdb) — treat as an explicit
             # database file rather than a directory layout. Create the parent and return as-is.
             if self.path.suffix.lower() in _EXPLICIT_DB_SUFFIXES:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
+                if not self.read_only:
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
                 return self.path
 
-        if not is_memory:
+        if not is_memory and not self.read_only:
             # For directory-style layouts, ensure the base path exists.
             self.path.mkdir(parents=True, exist_ok=True)
 
@@ -180,6 +183,8 @@ class DatabaseConfig(BaseModel):
             except ValueError:
                 # Invalid value - silently ignore
                 pass
+        if read_only := os.getenv("CHUNKHOUND_DATABASE__READ_ONLY"):
+            config["read_only"] = read_only.lower() in ("true", "1", "yes")
         return config
 
     @classmethod
