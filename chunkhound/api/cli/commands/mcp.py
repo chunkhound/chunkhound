@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from loguru import logger
+
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
 
@@ -61,6 +63,17 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
         or getattr(args, "stdio", False)
         or os.getenv("CHUNKHOUND_DAEMON_MODE", "").lower() == "false"
     )
+
+    if config.database.read_only:
+        # Read-only implies single-process stdio: the daemon path coordinates
+        # multi-client writes, which is meaningless when the process never writes.
+        # Resolved from the merged config so JSON config sources work, not just CLI.
+        if not no_daemon:
+            logger.warning(
+                "chunkhound mcp: read-only mode forces single-process stdio "
+                "(daemon coordination is for writers)."
+            )
+        no_daemon = True
 
     if no_daemon:
         # Direct path: run StdioMCPServer in this process (single-client mode)
