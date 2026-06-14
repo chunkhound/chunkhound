@@ -561,6 +561,25 @@ class TestRerankViaHttpBatching:
 
 class TestVoyageOutputDimsRuntimeBehavior:
     @pytest.mark.asyncio
+    async def test_client_side_truncation_without_output_dims_fails_before_request(
+        self,
+    ):
+        p = _make_provider(
+            api_key="test-key",
+            model="acme-voyage-compatible",
+            client_side_truncation=True,
+        )
+        p._client.embed = MagicMock()
+
+        with pytest.raises(
+            EmbeddingConfigurationError,
+            match="output_dims is not set",
+        ):
+            await p.embed(["hello"])
+
+        p._client.embed.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_unknown_model_without_output_dims_discovers_runtime_native_dims(
         self,
     ):

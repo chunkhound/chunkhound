@@ -238,11 +238,14 @@ class VoyageAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides default of 1000)
-            output_dims: Optional server-side output dimension override. For
-                unknown/custom Voyage-compatible models we accept any positive
-                value and defer validation to runtime behavior.
+            output_dims: Optional server-side output dimension override. Known
+                official Voyage models keep their whitelist. Unknown/custom
+                Voyage-compatible endpoints are trusted instead and prove
+                compatibility at runtime.
             client_side_truncation: If True, request full native vectors and
-                truncate locally instead of sending output_dimension.
+                truncate locally instead of sending output_dimension. Direct
+                provider construction may defer the missing-output_dims failure
+                until the first embed() call, but it will fail explicitly.
             base_url: Custom API base URL (overrides https://api.voyageai.com/v1)
             rerank_url: Separate reranker endpoint URL (absolute http/https).
                 When set, reranking uses HTTP instead of the VoyageAI SDK.
@@ -496,6 +499,24 @@ class VoyageAIEmbeddingProvider:
         async with self._embed_semaphore:
             return await self._embed_single_batch_locked(texts)
 
+    def _validate_runtime_output_dims_config(self) -> int | None:
+        """Validate runtime truncation config before dispatching a request.
+
+        This provider intentionally trusts custom Voyage-compatible endpoints,
+        but missing or invalid local truncation settings are our bug to catch
+        before the request leaves the process.
+        """
+        output_dims = validate_positive_output_dims(self._output_dims, model=self._model)
+        if output_dims is None:
+            if self._client_side_truncation:
+                raise EmbeddingConfigurationError(
+                    f"Model '{self._model}' uses client_side_truncation=True but "
+                    "output_dims is not set. Set output_dims to the desired "
+                    "truncated dimension before calling embed()."
+                )
+            return None
+        return output_dims
+
     async def _embed_single_batch_locked(self, texts: list[str]) -> list[list[float]]:
         """Inner embed implementation, called while holding the semaphore."""
         # Retry loop for transient network errors
@@ -507,8 +528,9 @@ class VoyageAIEmbeddingProvider:
                     "input_type": "document",
                     "truncation": True,
                 }
+                output_dims = self._validate_runtime_output_dims_config()
                 dim_param = build_dimension_request_param(
-                    self._output_dims, self._client_side_truncation
+                    output_dims, self._client_side_truncation
                 )
                 # User configured output_dims — they know what they're doing.
                 # Pass through; the API rejects unsupported dimensions on its own.
@@ -562,9 +584,9 @@ class VoyageAIEmbeddingProvider:
                     )
 
                 # Apply client-side truncation when server doesn't support dim param
-                if self._client_side_truncation and self._output_dims is not None:
+                if self._client_side_truncation:
                     embeddings = apply_client_side_truncation(
-                        embeddings, self._output_dims
+                        embeddings, cast(int, output_dims)
                     )
 
                 # Validate final embedding dimension (INV-1) after all truncation
