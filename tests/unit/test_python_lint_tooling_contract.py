@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml  # type: ignore[import-untyped]
 
 from tests.utils.windows_subprocess import get_safe_subprocess_env
@@ -107,8 +108,12 @@ def _fake_uv_dir(tmp_path: Path, *, exit_code: int = 0) -> tuple[Path, Path]:
     )
 
     if os.name == "nt":
+        # Write the implementation as a standalone Python script referenced
+        # by the batch file — avoids multi-line quoting issues in CMD.
+        impl_path = bin_dir / "_uv_fake.py"
+        impl_path.write_text(script, encoding="utf-8")
         (bin_dir / "uv.cmd").write_text(
-            f'@"{sys.executable}" -c "{script}" %*\r\n',
+            f'@"{sys.executable}" "%~dp0_uv_fake.py" %*\n',
             encoding="utf-8",
         )
     else:
@@ -186,6 +191,36 @@ def test_pre_commit_ruff_hook_contract() -> None:
 def test_install_hooks_make_target_contract() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "install-hooks:\n\tuv run python scripts/pre_commit.py install\n" in makefile
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="Windows PATHEXT resolution only applies on Windows",
+)
+def test_run_files_finds_uv_cmd_via_pathext_on_windows(tmp_path: Path) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _create_repo(repo_dir)
+    bin_dir, log_path = _fake_uv_dir(tmp_path)
+
+    result = _run_pre_commit_script(
+        repo_dir,
+        "run-files",
+        "chunkhound/app.py",
+        env=_script_env(bin_dir),
+    )
+
+    assert result.returncode == 0
+    assert log_path.read_text(encoding="utf-8").splitlines() == [
+        "tool",
+        "run",
+        "--from",
+        PRE_COMMIT_PACKAGE,
+        "pre-commit",
+        "run",
+        "--files",
+        "chunkhound/app.py",
+    ]
 
 
 class TestPreCommitScript:

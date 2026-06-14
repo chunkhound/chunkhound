@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +27,9 @@ def _git_output(*args: str, check: bool = True, stdin: str | None = None) -> str
 
 
 def _pre_commit_command(*args: str) -> list[str]:
-    return ["uv", "tool", "run", "--from", PRE_COMMIT_PACKAGE, "pre-commit", *args]
+    # Resolve to absolute path; respects PATHEXT on Windows for .cmd/.bat
+    uv = shutil.which("uv") or "uv"
+    return [uv, "tool", "run", "--from", PRE_COMMIT_PACKAGE, "pre-commit", *args]
 
 
 def _managed_hook_path() -> Path:
