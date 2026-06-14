@@ -42,6 +42,12 @@ class AntigravityLLMProvider(LLMProvider):
         self._timeout = timeout
         self._max_retries = max_retries
         self._extra_kwargs = kwargs
+        
+        # Usage statistics tracking
+        self._requests_made = 0
+        self._tokens_used = 0
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
 
     @property
     def name(self) -> str:
@@ -58,28 +64,14 @@ class AntigravityLLMProvider(LLMProvider):
         """Request timeout in seconds."""
         return self._timeout
 
-    async def complete(
+    def _build_agent_config(
         self,
-        prompt: str,
         system: str | None = None,
-        max_completion_tokens: int = 4096,
-        timeout: int | None = None,
-    ) -> LLMResponse:
-        """Generate a completion for the given prompt.
-
-        Args:
-            prompt: User prompt
-            system: Optional system message
-            max_completion_tokens: Maximum completion tokens to generate
-            timeout: Optional timeout override
-
-        Returns:
-            LLMResponse with content and metadata
-        """
-        request_timeout = timeout if timeout is not None else self._timeout
-
+        response_schema: Any = None,
+    ) -> Any:
+        """Build the LocalAgentConfig for the SDK agent."""
         import os
-        from google.antigravity import CapabilitiesConfig
+        from google.antigravity import CapabilitiesConfig, LocalAgentConfig
         from google.antigravity.types import BuiltinTools
         from google.antigravity.hooks import policy
 
@@ -103,7 +95,6 @@ class AntigravityLLMProvider(LLMProvider):
             policy.allow("finish"),
         ]
 
-        # Build config
         config_kwargs = {
             "model": self._model,
             "api_key": self._api_key,
@@ -113,8 +104,37 @@ class AntigravityLLMProvider(LLMProvider):
         }
         if system:
             config_kwargs["system_instructions"] = system
+        if response_schema is not None:
+            config_kwargs["response_schema"] = response_schema
 
-        config = LocalAgentConfig(**config_kwargs)
+        return LocalAgentConfig(**config_kwargs)
+
+    async def complete(
+        self,
+        prompt: str,
+        system: str | None = None,
+        max_completion_tokens: int = 4096,
+        timeout: int | None = None,
+    ) -> LLMResponse:
+        """Generate a completion for the given prompt.
+
+        Args:
+            prompt: User prompt
+            system: Optional system message
+            max_completion_tokens: Maximum completion tokens to generate (Note: Unsupported by the underlying SDK and ignored)
+            timeout: Optional timeout override
+
+        Returns:
+            LLMResponse with content and metadata
+        """
+        if max_completion_tokens != 4096:
+            logger.warning(
+                "Antigravity SDK does not support limiting output tokens via max_completion_tokens. "
+                f"Requested limit of {max_completion_tokens} is ignored."
+            )
+
+        request_timeout = timeout if timeout is not None else self._timeout
+        config = self._build_agent_config(system=system)
 
         try:
             logger.debug(f"Starting Antigravity SDK Agent session with model: {self._model}")
@@ -128,23 +148,38 @@ class AntigravityLLMProvider(LLMProvider):
                 thoughts = getattr(response, "thoughts", "")
                 
                 # Retrieve token usage from agent conversation
-                tokens_used = 0
+                prompt_tokens = 0
+                completion_tokens = 0
+                total_tokens = 0
                 try:
                     if hasattr(agent, "conversation") and agent.conversation is not None:
                         total_usage = getattr(agent.conversation, "total_usage", None)
                         if total_usage is not None:
-                            tokens_used = getattr(total_usage, "total_token_count", 0)
+                            total_tokens = getattr(total_usage, "total_token_count", 0) or 0
+                            prompt_tokens = getattr(total_usage, "prompt_token_count", 0) or 0
+                            candidates = getattr(total_usage, "candidates_token_count", 0) or 0
+                            thoughts_tokens = getattr(total_usage, "thoughts_token_count", 0) or 0
+                            completion_tokens = candidates + thoughts_tokens
                 except Exception as e:
                     logger.warning(f"Failed to extract token count from SDK agent context: {e}")
                     
-                if not tokens_used:
+                if not total_tokens:
                     # Estimate tokens based on prompt + response length + thoughts length
-                    tokens_used = len(prompt + content + thoughts) // 4
+                    prompt_tokens = len(prompt) // 4
+                    if system:
+                        prompt_tokens += len(system) // 4
+                    completion_tokens = len(content + thoughts) // 4
+                    total_tokens = prompt_tokens + completion_tokens
 
-                logger.debug(f"Antigravity SDK complete. Content length: {len(content)}, tokens: {tokens_used}")
+                self._requests_made += 1
+                self._tokens_used += total_tokens
+                self._prompt_tokens += prompt_tokens
+                self._completion_tokens += completion_tokens
+
+                logger.debug(f"Antigravity SDK complete. Content length: {len(content)}, tokens: {total_tokens}")
                 return LLMResponse(
                     content=content,
-                    tokens_used=tokens_used,
+                    tokens_used=total_tokens,
                     model=self._model,
                     finish_reason="stop",
                 )
@@ -208,50 +243,29 @@ class AntigravityLLMProvider(LLMProvider):
         max_completion_tokens: int = 4096,
         timeout: int | None = None,
     ) -> dict[str, Any]:
-        """Generate a structured JSON completion conforming to the given schema."""
+        """Generate a structured JSON completion conforming to the given schema.
+
+        Args:
+            prompt: User prompt
+            json_schema: JSON Schema definition for structured output
+            system: Optional system message
+            max_completion_tokens: Maximum completion tokens to generate (Note: Unsupported by the underlying SDK and ignored)
+            timeout: Optional timeout override
+
+        Returns:
+            Parsed JSON object conforming to schema
+        """
+        if max_completion_tokens != 4096:
+            logger.warning(
+                "Antigravity SDK does not support limiting output tokens via max_completion_tokens. "
+                f"Requested limit of {max_completion_tokens} is ignored."
+            )
+
         request_timeout = timeout if timeout is not None else self._timeout
 
         # Compile JSON schema to Pydantic model class
         pydantic_schema = self._compile_schema_to_pydantic(json_schema)
-
-        import os
-        from google.antigravity import CapabilitiesConfig
-        from google.antigravity.types import BuiltinTools
-        from google.antigravity.hooks import policy
-
-        capabilities = CapabilitiesConfig(
-            enabled_tools=[
-                BuiltinTools.LIST_DIR,
-                BuiltinTools.SEARCH_DIR,
-                BuiltinTools.FIND_FILE,
-                BuiltinTools.VIEW_FILE,
-                BuiltinTools.FINISH,
-            ],
-            enable_subagents=False,
-        )
-
-        policies = [
-            policy.deny_all(),
-            policy.allow("list_directory"),
-            policy.allow("search_directory"),
-            policy.allow("find_file"),
-            policy.allow("view_file"),
-            policy.allow("finish"),
-        ]
-
-        # Build config with response_schema
-        config_kwargs = {
-            "model": self._model,
-            "api_key": self._api_key,
-            "response_schema": pydantic_schema,
-            "capabilities": capabilities,
-            "workspaces": [os.getcwd()],
-            "policies": policies,
-        }
-        if system:
-            config_kwargs["system_instructions"] = system
-
-        config = LocalAgentConfig(**config_kwargs)
+        config = self._build_agent_config(system=system, response_schema=pydantic_schema)
 
         try:
             logger.debug("Starting Antigravity SDK Agent session for structured completion")
@@ -259,6 +273,40 @@ class AntigravityLLMProvider(LLMProvider):
                 logger.debug(f"Executing chat prompt for structured completion (timeout: {request_timeout}s)")
                 response = await asyncio.wait_for(agent.chat(prompt), timeout=request_timeout)
                 
+                # Retrieve token usage from agent conversation
+                prompt_tokens = 0
+                completion_tokens = 0
+                total_tokens = 0
+                try:
+                    if hasattr(agent, "conversation") and agent.conversation is not None:
+                        total_usage = getattr(agent.conversation, "total_usage", None)
+                        if total_usage is not None:
+                            total_tokens = getattr(total_usage, "total_token_count", 0) or 0
+                            prompt_tokens = getattr(total_usage, "prompt_token_count", 0) or 0
+                            candidates = getattr(total_usage, "candidates_token_count", 0) or 0
+                            thoughts_tokens = getattr(total_usage, "thoughts_token_count", 0) or 0
+                            completion_tokens = candidates + thoughts_tokens
+                except Exception as e:
+                    logger.warning(f"Failed to extract token count from SDK agent context in complete_structured: {e}")
+                
+                if not total_tokens:
+                    prompt_tokens = len(prompt) // 4
+                    if system:
+                        prompt_tokens += len(system) // 4
+                    thoughts = getattr(response, "thoughts", "")
+                    content = ""
+                    try:
+                        content = await response.text()
+                    except Exception:
+                        pass
+                    completion_tokens = len(content + thoughts) // 4
+                    total_tokens = prompt_tokens + completion_tokens
+
+                self._requests_made += 1
+                self._tokens_used += total_tokens
+                self._prompt_tokens += prompt_tokens
+                self._completion_tokens += completion_tokens
+
                 # Extract structured output if supported
                 if hasattr(response, "structured_output"):
                     result = await response.structured_output()
@@ -269,17 +317,11 @@ class AntigravityLLMProvider(LLMProvider):
 
                 # Fallback to parsing text output
                 content = await response.text()
-                import json
-                try:
-                    from chunkhound.utils.json_extraction import parse_and_validate_structured_json
-                    return parse_and_validate_structured_json(content, json_schema)
-                except Exception as parse_err:
-                    logger.warning(f"Failed to parse structured output: {parse_err}")
-                    return json.loads(content)
+                from chunkhound.utils.json_extraction import parse_and_validate_structured_json
+                return parse_and_validate_structured_json(content, json_schema)
         except Exception as e:
             logger.error(f"Antigravity SDK structured call failed: {e}")
             raise RuntimeError(f"Antigravity SDK structured call failed: {e}") from e
-
 
     async def batch_complete(
         self,
@@ -305,14 +347,28 @@ class AntigravityLLMProvider(LLMProvider):
     async def health_check(self) -> dict[str, Any]:
         """Perform health check."""
         try:
-            await self.complete("ping", max_completion_tokens=5)
-            return {"status": "ok"}
+            response = await self.complete("ping", max_completion_tokens=5)
+            return {
+                "status": "healthy",
+                "provider": self.name,
+                "model": self._model,
+                "test_response": response.content[:50],
+            }
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {
+                "status": "unhealthy",
+                "provider": self.name,
+                "error": str(e),
+            }
 
     def get_usage_stats(self) -> dict[str, Any]:
         """Get usage statistics."""
-        return {}
+        return {
+            "requests_made": self._requests_made,
+            "total_tokens": self._tokens_used,
+            "prompt_tokens": self._prompt_tokens,
+            "completion_tokens": self._completion_tokens,
+        }
 
     def get_synthesis_concurrency(self) -> int:
         """Get recommended concurrency for parallel synthesis operations."""

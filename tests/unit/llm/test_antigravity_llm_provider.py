@@ -144,12 +144,14 @@ async def test_sdk_complete_token_estimation_includes_thoughts(mock_antigravity_
 
     result = await provider.complete("Test prompt", system="Test system")
 
-    # Estimated tokens: len(prompt + content + thoughts) // 4
-    # prompt = "Test prompt" (11 chars)
+    # Estimated tokens: len(prompt) // 4 + len(system) // 4 + len(content + thoughts) // 4
+    # prompt = "Test prompt" (11 chars) -> 2 tokens
+    # system = "Test system" (11 chars) -> 2 tokens
     # content = "Hello from Antigravity!" (23 chars)
     # thoughts = "Thinking deeply..." (18 chars)
-    # Total chars = 11 + 23 + 18 = 52. 52 // 4 = 13 tokens.
-    assert result.tokens_used == 13
+    # content + thoughts = 41 chars -> 10 tokens
+    # Total estimated = 2 + 2 + 10 = 14 tokens.
+    assert result.tokens_used == 14
 
 
 # --- CLI Provider Tests ---
@@ -317,5 +319,112 @@ async def test_sdk_structured_validation(mock_antigravity_agent):
 def test_cli_synthesis_concurrency():
     provider = AntigravityCLIProvider(model="gemini-3.5-flash")
     assert provider.get_synthesis_concurrency() == 1
+
+
+@pytest.mark.asyncio
+async def test_sdk_structured_fallback_validation_failure(mock_antigravity_agent):
+    provider = AntigravityLLMProvider(api_key="test-api-key", model="gemini-3.5-flash")
+    
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    
+    response = MagicMock()
+    # Remove structured_output attribute to trigger fallback path
+    if hasattr(response, "structured_output"):
+        delattr(response, "structured_output")
+    
+    # Mock text() returning schema-invalid JSON
+    response.text = AsyncMock(return_value='{"confidence": 2.0}')
+    response.thoughts = ""
+    agent_mock.chat = AsyncMock(return_value=response)
+    agent_mock.conversation = MagicMock()
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+        },
+        "required": ["confidence"]
+    }
+
+    # Verify that the schema validation error propagates out as a RuntimeError
+    with pytest.raises(RuntimeError, match="validation failed|exceeds|maximum|greater than|is greater than"):
+        await provider.complete_structured("Structured prompt", json_schema=schema)
+
+
+@pytest.mark.asyncio
+async def test_sdk_usage_stats_tracking(mock_antigravity_agent):
+    provider = AntigravityLLMProvider(api_key="test-api-key", model="gemini-3.5-flash")
+    
+    # Check initial stats
+    initial_stats = provider.get_usage_stats()
+    assert initial_stats == {
+        "requests_made": 0,
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+    }
+
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    resp_mock, conv_mock = _make_sdk_response("Hello!", prompt_tokens=50, candidates_tokens=100, thoughts_tokens=25)
+    agent_mock.chat = AsyncMock(return_value=resp_mock)
+    agent_mock.conversation = conv_mock
+
+    # Complete request
+    await provider.complete("Prompt")
+
+    # Check updated stats
+    updated_stats = provider.get_usage_stats()
+    assert updated_stats == {
+        "requests_made": 1,
+        "total_tokens": 175,
+        "prompt_tokens": 50,
+        "completion_tokens": 125, # candidates (100) + thoughts (25)
+    }
+
+
+@pytest.mark.asyncio
+async def test_sdk_health_check_healthy(mock_antigravity_agent):
+    provider = AntigravityLLMProvider(api_key="test-api-key", model="gemini-3.5-flash")
+    
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    resp_mock, conv_mock = _make_sdk_response("pong")
+    agent_mock.chat = AsyncMock(return_value=resp_mock)
+    agent_mock.conversation = conv_mock
+
+    health = await provider.health_check()
+    assert health == {
+        "status": "healthy",
+        "provider": "antigravity-sdk",
+        "model": "gemini-3.5-flash",
+        "test_response": "pong",
+    }
+
+
+@pytest.mark.asyncio
+async def test_sdk_health_check_unhealthy(mock_antigravity_agent):
+    provider = AntigravityLLMProvider(api_key="test-api-key", model="gemini-3.5-flash")
+    
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    agent_mock.chat = AsyncMock(side_effect=Exception("Connection failed"))
+
+    health = await provider.health_check()
+    assert health["status"] == "unhealthy"
+    assert health["provider"] == "antigravity-sdk"
+    assert "Connection failed" in health["error"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_max_completion_tokens_warning(mock_antigravity_agent):
+    provider = AntigravityLLMProvider(api_key="test-api-key", model="gemini-3.5-flash")
+    
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    resp_mock, conv_mock = _make_sdk_response("Hello!")
+    agent_mock.chat = AsyncMock(return_value=resp_mock)
+    agent_mock.conversation = conv_mock
+
+    with patch("chunkhound.providers.llm.antigravity_llm_provider.logger.warning") as mock_warn:
+        await provider.complete("Prompt", max_completion_tokens=100)
+        mock_warn.assert_called_once()
+        assert "max_completion_tokens" in mock_warn.call_args[0][0]
 
 
