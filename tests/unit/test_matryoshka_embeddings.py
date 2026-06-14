@@ -566,6 +566,24 @@ class TestOpenAIProviderRuntimeBehavior:
             await provider.embed(["hello"])
 
     @pytest.mark.asyncio
+    async def test_unknown_model_embed_raises_dimension_error_when_server_truncation_is_ignored(
+        self,
+    ):
+        """Unknown model server-side truncation still enforces the returned-dims contract."""
+        from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
+
+        provider = self._unknown_model_provider(output_dims=256)
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=768)
+        )
+
+        with pytest.raises(
+            EmbeddingDimensionError,
+            match="got 768, expected 256",
+        ):
+            await provider.embed(["hello"])
+
+    @pytest.mark.asyncio
     async def test_unknown_model_embed_rejects_non_positive_output_dims(self):
         """Embed-time validation rejects non-positive output_dims cleanly."""
         provider = self._unknown_model_provider(output_dims=0)
