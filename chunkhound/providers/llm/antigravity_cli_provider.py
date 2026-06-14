@@ -39,8 +39,13 @@ class AntigravityCLIProvider(BaseCLIProvider):
         """
         request_timeout = timeout if timeout is not None else self._timeout
 
+        import shutil
+        binary = "agy"
+        if not shutil.which("agy") and shutil.which("antigravity"):
+            binary = "antigravity"
+
         # Build CLI command
-        cmd = ["agy", "chat", "--print", "--sandbox", "read-only"]
+        cmd = [binary, "chat", "--print", "--sandbox", "read-only"]
         if self._model:
             cmd.extend(["--model", self._model])
 
@@ -58,6 +63,7 @@ class AntigravityCLIProvider(BaseCLIProvider):
 
         logger.debug(f"Executing CLI command: {' '.join(cmd)} in sandboxed mode")
         
+        process = None
         try:
             # Create subprocess with neutral CWD to prevent local config scans
             process = await asyncio.create_subprocess_exec(
@@ -90,6 +96,12 @@ class AntigravityCLIProvider(BaseCLIProvider):
             ) from fnf
         except asyncio.TimeoutError as te:
             logger.error(f"Antigravity CLI command timed out after {request_timeout}s")
+            if process:
+                try:
+                    process.kill()
+                    await process.wait()
+                except Exception as kill_err:
+                    logger.warning(f"Failed to kill timed out Antigravity CLI process: {kill_err}")
             raise RuntimeError(f"Antigravity CLI command timed out after {request_timeout}s") from te
         except Exception as e:
             if not isinstance(e, RuntimeError):

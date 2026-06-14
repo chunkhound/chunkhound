@@ -78,10 +78,38 @@ class AntigravityLLMProvider(LLMProvider):
         """
         request_timeout = timeout if timeout is not None else self._timeout
 
+        import os
+        from google.antigravity import CapabilitiesConfig
+        from google.antigravity.types import BuiltinTools
+        from google.antigravity.hooks import policy
+
+        capabilities = CapabilitiesConfig(
+            enabled_tools=[
+                BuiltinTools.LIST_DIR,
+                BuiltinTools.SEARCH_DIR,
+                BuiltinTools.FIND_FILE,
+                BuiltinTools.VIEW_FILE,
+                BuiltinTools.FINISH,
+            ],
+            enable_subagents=False,
+        )
+
+        policies = [
+            policy.deny_all(),
+            policy.allow("list_directory"),
+            policy.allow("search_directory"),
+            policy.allow("find_file"),
+            policy.allow("view_file"),
+            policy.allow("finish"),
+        ]
+
         # Build config
         config_kwargs = {
             "model": self._model,
             "api_key": self._api_key,
+            "capabilities": capabilities,
+            "workspaces": [os.getcwd()],
+            "policies": policies,
         }
         if system:
             config_kwargs["system_instructions"] = system
@@ -92,7 +120,7 @@ class AntigravityLLMProvider(LLMProvider):
             logger.debug(f"Starting Antigravity SDK Agent session with model: {self._model}")
             async with Agent(config=config) as agent:
                 logger.debug(f"Executing chat prompt (timeout: {request_timeout}s)")
-                response = await agent.chat(prompt)
+                response = await asyncio.wait_for(agent.chat(prompt), timeout=request_timeout)
                 
                 content = await response.text()
                 
@@ -186,11 +214,39 @@ class AntigravityLLMProvider(LLMProvider):
         # Compile JSON schema to Pydantic model class
         pydantic_schema = self._compile_schema_to_pydantic(json_schema)
 
+        import os
+        from google.antigravity import CapabilitiesConfig
+        from google.antigravity.types import BuiltinTools
+        from google.antigravity.hooks import policy
+
+        capabilities = CapabilitiesConfig(
+            enabled_tools=[
+                BuiltinTools.LIST_DIR,
+                BuiltinTools.SEARCH_DIR,
+                BuiltinTools.FIND_FILE,
+                BuiltinTools.VIEW_FILE,
+                BuiltinTools.FINISH,
+            ],
+            enable_subagents=False,
+        )
+
+        policies = [
+            policy.deny_all(),
+            policy.allow("list_directory"),
+            policy.allow("search_directory"),
+            policy.allow("find_file"),
+            policy.allow("view_file"),
+            policy.allow("finish"),
+        ]
+
         # Build config with response_schema
         config_kwargs = {
             "model": self._model,
             "api_key": self._api_key,
             "response_schema": pydantic_schema,
+            "capabilities": capabilities,
+            "workspaces": [os.getcwd()],
+            "policies": policies,
         }
         if system:
             config_kwargs["system_instructions"] = system
@@ -201,13 +257,15 @@ class AntigravityLLMProvider(LLMProvider):
             logger.debug("Starting Antigravity SDK Agent session for structured completion")
             async with Agent(config=config) as agent:
                 logger.debug(f"Executing chat prompt for structured completion (timeout: {request_timeout}s)")
-                response = await agent.chat(prompt)
+                response = await asyncio.wait_for(agent.chat(prompt), timeout=request_timeout)
                 
                 # Extract structured output if supported
                 if hasattr(response, "structured_output"):
                     result = await response.structured_output()
                     if isinstance(result, dict):
-                        return result
+                        import json
+                        from chunkhound.utils.json_extraction import parse_and_validate_structured_json
+                        return parse_and_validate_structured_json(json.dumps(result), json_schema)
 
                 # Fallback to parsing text output
                 content = await response.text()

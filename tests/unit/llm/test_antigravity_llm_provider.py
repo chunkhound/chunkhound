@@ -207,6 +207,113 @@ async def test_cli_complete_failure(mock_subprocess):
         await provider.complete("CLI prompt")
 
 
+@pytest.mark.asyncio
+async def test_cli_binary_fallback(mock_subprocess):
+    with patch("shutil.which") as mock_which:
+        def side_effect(cmd):
+            if cmd == "agy":
+                return None
+            if cmd == "antigravity":
+                return "/usr/local/bin/antigravity"
+            return None
+        mock_which.side_effect = side_effect
+
+        provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"Hello from fallback CLI!", b"")
+        mock_subprocess.return_value = mock_process
+
+        result = await provider.complete("CLI prompt")
+
+        assert isinstance(result, LLMResponse)
+        assert result.content == "Hello from fallback CLI!"
+        mock_subprocess.assert_called_once()
+        cmd_args = mock_subprocess.call_args.args
+        assert cmd_args[0] == "antigravity"
+
+
+@pytest.mark.asyncio
+async def test_cli_timeout_cleanup(mock_subprocess):
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash", timeout=2)
+    
+    mock_process = AsyncMock()
+    mock_process.kill = MagicMock()
+    mock_process.wait = AsyncMock()
+    mock_subprocess.return_value = mock_process
+
+    with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError()):
+        with pytest.raises(RuntimeError, match="timed out after 2s"):
+            await provider.complete("CLI prompt")
+
+    mock_process.kill.assert_called_once()
+    mock_process.wait.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_sdk_timeout(mock_antigravity_agent):
+    provider = AntigravityLLMProvider(api_key="test-api-key", model="gemini-3.5-flash", timeout=10)
+    
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    
+    with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError()) as mock_wait_for:
+        with pytest.raises(RuntimeError, match="Antigravity SDK call failed:"):
+            await provider.complete("Test prompt", timeout=5)
+
+        mock_wait_for.assert_called_once()
+        assert mock_wait_for.call_args.kwargs["timeout"] == 5
+
+
+@pytest.mark.asyncio
+async def test_sdk_security_constraints(mock_antigravity_agent):
+    provider = AntigravityLLMProvider(api_key="test-api-key", model="gemini-3.5-flash")
+    
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    resp_mock, conv_mock = _make_sdk_response("Hello!")
+    
+    agent_mock.chat = AsyncMock(return_value=resp_mock)
+    agent_mock.conversation = conv_mock
+
+    await provider.complete("Test prompt")
+
+    mock_antigravity_agent.assert_called_once()
+    config_passed = mock_antigravity_agent.call_args[1].get("config")
+    
+    assert config_passed.capabilities is not None
+    assert not config_passed.capabilities.enable_subagents
+    enabled_tools = config_passed.capabilities.enabled_tools
+    assert enabled_tools is not None
+    from google.antigravity.types import BuiltinTools
+    assert BuiltinTools.LIST_DIR in enabled_tools
+    assert BuiltinTools.CREATE_FILE not in enabled_tools
+    
+    assert config_passed.workspaces == [os.getcwd()]
+    assert len(config_passed.policies) > 0
+
+
+@pytest.mark.asyncio
+async def test_sdk_structured_validation(mock_antigravity_agent):
+    provider = AntigravityLLMProvider(api_key="test-api-key", model="gemini-3.5-flash")
+    
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    
+    response = MagicMock()
+    response.structured_output = AsyncMock(return_value={"confidence": 2.0})
+    agent_mock.chat = AsyncMock(return_value=response)
+    agent_mock.conversation = MagicMock()
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+        },
+        "required": ["confidence"]
+    }
+
+    with pytest.raises(RuntimeError, match="validation failed|exceeds|maximum|greater than|is greater than"):
+        await provider.complete_structured("Structured prompt", json_schema=schema)
+
+
 def test_cli_synthesis_concurrency():
     provider = AntigravityCLIProvider(model="gemini-3.5-flash")
     assert provider.get_synthesis_concurrency() == 1
