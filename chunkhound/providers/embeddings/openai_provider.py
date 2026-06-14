@@ -588,13 +588,13 @@ class OpenAIEmbeddingProvider:
             output_dims: Positive validated target dimension from embed-time config.
 
         Raises:
-            EmbeddingConfigurationError: If output_dims exceeds the API-returned
+            EmbeddingDimensionError: If output_dims exceeds the API-returned
                 raw dimension.
         """
         if output_dims > raw_dim:
-            raise EmbeddingConfigurationError(
-                f"Model '{self._model}' uses client_side_truncation=True with "
-                f"output_dims={output_dims}, but the API returned {raw_dim} dims."
+            raise EmbeddingDimensionError(
+                f"client_side_truncation output_dims={output_dims} exceeds "
+                f"API response dimension {raw_dim} for model '{self._model}'"
             )
         return output_dims
 

@@ -551,6 +551,8 @@ class TestOpenAIProviderRuntimeBehavior:
         self,
     ):
         """Unknown model + client truncation rejects output_dims > API dims."""
+        from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
+
         provider = self._unknown_model_provider(
             output_dims=1024,
             client_side_truncation=True,
@@ -560,8 +562,8 @@ class TestOpenAIProviderRuntimeBehavior:
         )
 
         with pytest.raises(
-            EmbeddingConfigurationError,
-            match="but the API returned",
+            EmbeddingDimensionError,
+            match="exceeds API response dimension",
         ):
             await provider.embed(["hello"])
 
