@@ -584,9 +584,12 @@ class TestOpenAIProviderRuntimeBehavior:
             await provider.embed(["hello"])
 
     @pytest.mark.asyncio
-    async def test_unknown_model_embed_rejects_non_positive_output_dims(self):
+    @pytest.mark.parametrize("output_dims", [0, -1])
+    async def test_unknown_model_embed_rejects_non_positive_output_dims(
+        self, output_dims
+    ):
         """Embed-time validation rejects non-positive output_dims cleanly."""
-        provider = self._unknown_model_provider(output_dims=0)
+        provider = self._unknown_model_provider(output_dims=output_dims)
 
         with pytest.raises(
             EmbeddingConfigurationError,
