@@ -117,13 +117,16 @@ def apply_client_side_truncation(
 
     Args:
         embeddings: Full-dimension embedding vectors from API
-        output_dims: Target dimension after truncation
+        output_dims: Positive validated target dimension after truncation
 
     Returns:
         Truncated and L2-normalized embedding vectors.
 
     Raises:
         EmbeddingDimensionError: If a vector is shorter than output_dims.
+
+    Contract:
+        Callers must validate output_dims before reaching this helper.
     """
     for v in embeddings:
         if len(v) < output_dims:

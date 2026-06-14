@@ -262,9 +262,10 @@ class OpenAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
-            output_dims: Output embedding dimension. Known OpenAI models are
-                validated here; unknown/custom models are validated after the
-                first response reveals their actual dimension.
+            output_dims: Output embedding dimension. Known OpenAI models get
+                fail-fast validation here. Unknown/custom models defer all
+                output_dims validation to embed-time so advanced users can try
+                compatible custom endpoints and get descriptive runtime errors.
             client_side_truncation: Truncate embeddings client-side instead of
                 using the API dimensions parameter. Requires output_dims.
             ssl_verify: Verify TLS certificates for requests sent via base_url
@@ -335,9 +336,9 @@ class OpenAIEmbeddingProvider:
         # Model-specific configuration for OpenAI models
         self._model_config = OPENAI_MODEL_CONFIG
 
-        # Known models get fail-fast output_dims validation at init. Unknown/custom
-        # models defer to runtime — validate_embedding_dims in _embed_batch_internal
-        # catches any mismatch after the first API response.
+        # Known models get fail-fast init validation. Unknown/custom models
+        # skip all output_dims validation here so advanced users can point at
+        # compatible endpoints and get descriptive embed-time errors instead.
         self._validate_output_dims_config()
 
         # Usage statistics
@@ -508,9 +509,44 @@ class OpenAIEmbeddingProvider:
             return self._azure_deployment or self._model
         return self._model
 
+    def _validate_output_dims_positive_int(self) -> int | None:
+        """Return validated positive int, or None if output_dims is unset.
+
+        Shared validation for type and range, called from both init-time
+        and embed-time validation methods.
+
+        Raises:
+            EmbeddingConfigurationError: If output_dims is set but not a
+                positive integer.
+        """
+        output_dims = self._output_dims
+        if output_dims is None:
+            return None
+        # bool is a subclass of int in Python — reject explicitly
+        if isinstance(output_dims, bool) or not isinstance(output_dims, int):
+            raise EmbeddingConfigurationError(
+                f"Model '{self._model}' uses output_dims={output_dims!r}, but "
+                "output_dims must be a positive integer."
+            )
+        if output_dims <= 0:
+            raise EmbeddingConfigurationError(
+                f"Model '{self._model}' uses output_dims={output_dims!r}, but "
+                "output_dims must be a positive integer."
+            )
+        return output_dims
+
     def _validate_output_dims_config(self) -> None:
-        """Reject impossible output_dims for known OpenAI models at init."""
-        if self._output_dims is None or self._model not in self._model_config:
+        """Reject invalid known-model output_dims at init."""
+        if self._model not in self._model_config:
+            return
+
+        output_dims = self._validate_output_dims_positive_int()
+        if output_dims is None:
+            if self._client_side_truncation:
+                raise EmbeddingConfigurationError(
+                    f"Model '{self._model}' uses client_side_truncation=True but "
+                    "output_dims is not set. output_dims must be a positive integer."
+                )
             return
 
         cfg = cast(dict[str, Any], self._model_config[self._model])
