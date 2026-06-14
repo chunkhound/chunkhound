@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
+from chunkhound.services.indexing_coordinator import _run_batch_compaction_boundary
 from chunkhound.utils.file_patterns import normalize_include_patterns
 
 
@@ -28,6 +29,7 @@ class IndexingStats:
     skipped_due_to_timeout: list[str] = field(default_factory=list)
     skipped_unchanged: int = 0
     skipped_filtered: int = 0
+    db_compactions: int = 0
 
 
 class DirectoryIndexingService:
@@ -92,11 +94,15 @@ class DirectoryIndexingService:
             # Update stats from processing result
             self._update_stats_from_process_result(stats, process_result)
 
+            await self._run_batch_compaction(stats)
+
             # Embedding generation (extracted from run.py:85-88, 287-312)
             if not no_embeddings:
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 stats.embeddings_generated = embed_result.get("generated", 0)
+
+            await self._run_batch_compaction(stats)
 
             stats.processing_time = time.time() - start_time
 
@@ -105,6 +111,10 @@ class DirectoryIndexingService:
             raise
 
         return stats
+
+    async def _run_batch_compaction(self, stats: IndexingStats) -> None:
+        """Run one mandatory batch-compaction boundary."""
+        await _run_batch_compaction_boundary(self.indexing_coordinator, stats)
 
     def _resolve_file_patterns(self) -> tuple[list[str], list[str]]:
         """Extracted from run.py:152-175 - file pattern resolution logic."""
