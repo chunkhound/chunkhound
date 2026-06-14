@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.ref == 'refs/heads/main' && 'ch-portability-deploy' || github.run_id }}
