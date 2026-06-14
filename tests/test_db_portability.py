@@ -602,7 +602,7 @@ def test_unicode_path_contract(
             base_directory=repo,
             embedding_provider=fake_embedding,
         )
-        stats = _index_all(coordinator, repo)
+        _index_all(coordinator, repo)
 
         # Verify unicode path is stored
         stored_paths = _all_stored_paths(provider)
@@ -658,7 +658,7 @@ def test_deeply_nested_path_contract(
             base_directory=repo,
             embedding_provider=fake_embedding,
         )
-        stats = _index_all(coordinator, repo)
+        _index_all(coordinator, repo)
 
         # Verify deep path is stored correctly
         stored_paths = _all_stored_paths(provider)
