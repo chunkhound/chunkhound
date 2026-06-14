@@ -657,7 +657,7 @@ class OpenAIEmbeddingProvider:
             if cfg.get("matryoshka", False):
                 min_dims = cfg.get("min_dims", 1)
                 native = cfg.get("native_dims", 1536)
-                return list(range(min_dims, native + 1))
+                return range(min_dims, native + 1)
         return [self.native_dims]
 
     @property
