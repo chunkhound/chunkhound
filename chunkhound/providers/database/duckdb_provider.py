@@ -3109,26 +3109,22 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         # Get all embedding tables
         embedding_tables = self._executor_get_all_embedding_tables(conn, state)
-        existing_chunks = set()
+        all_existing: set[int] = set()
 
-        # Check each dimension-specific table
+        # Fetch all chunk_ids that have embeddings for this provider/model, then
+        # intersect with the requested set in Python.  Using a WHERE chunk_id IN
+        # (N placeholders) query with millions of IDs builds an enormous SQL
+        # string and exhausts the 30-second serial-executor timeout on large repos.
         for table_name in embedding_tables:
-            # Use parameterized placeholders for chunk IDs
-            placeholders = ", ".join(["?" for _ in chunk_ids])
             query = f"""
                 SELECT DISTINCT chunk_id
                 FROM {table_name}
-                WHERE chunk_id IN ({placeholders})
-                AND provider = ? AND model = ?
+                WHERE provider = ? AND model = ?
             """
+            results = conn.execute(query, [provider, model]).fetchall()
+            all_existing.update(row[0] for row in results)
 
-            params = chunk_ids + [provider, model]
-            results = conn.execute(query, params).fetchall()
-
-            for row in results:
-                existing_chunks.add(row[0])
-
-        return existing_chunks
+        return all_existing & set(chunk_ids)
 
     def delete_embeddings_by_chunk_id(self, chunk_id: int) -> None:
         """Delete all embeddings for a specific chunk - delegate to embedding repository."""
@@ -3140,6 +3136,23 @@ class DuckDBProvider(SerialDatabaseProvider):
             list[dict[str, Any]],
             self._execute_in_db_thread_sync("get_all_chunks_with_metadata"),
         )
+
+    def get_chunk_ids_and_file_paths(self) -> list[dict[str, Any]]:
+        """Get minimal (chunk_id, file_path) pairs without loading code or metadata."""
+        return cast(
+            list[dict[str, Any]],
+            self._execute_in_db_thread_sync("get_chunk_ids_and_file_paths"),
+        )
+
+    def _executor_get_chunk_ids_and_file_paths(
+        self, conn: Any, state: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Executor method — runs in DB thread. Returns only chunk_id + file_path."""
+        results = conn.execute(
+            "SELECT c.id AS chunk_id, f.path AS file_path"
+            " FROM chunks c JOIN files f ON c.file_id = f.id"
+        ).fetchall()
+        return [{"chunk_id": row[0], "file_path": row[1]} for row in results]
 
     def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
         """Return (total_files, total_chunks) under an optional scope prefix.
