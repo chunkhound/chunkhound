@@ -93,7 +93,10 @@ def _current_branch(repo_dir: Path) -> str:
 
 
 def _fake_uv_dir(
-    tmp_path: Path, *, exit_codes: tuple[int, ...] = (0,)
+    tmp_path: Path,
+    *,
+    exit_codes: tuple[int, ...] = (0,),
+    file_updates: tuple[tuple[int, str, str], ...] = (),
 ) -> tuple[Path, Path]:
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
@@ -106,6 +109,7 @@ def _fake_uv_dir(
             f"log_path = pathlib.Path({str(log_path)!r})",
             f"count_path = pathlib.Path({str(count_path)!r})",
             f"exit_codes = {list(exit_codes)!r}",
+            f"file_updates = {list(file_updates)!r}",
             "count = (",
             "    int(count_path.read_text(encoding='utf-8'))",
             "    if count_path.exists()",
@@ -115,6 +119,10 @@ def _fake_uv_dir(
             "    if count:",
             "        handle.write('<<<UV-CALL>>>\\n')",
             "    handle.write('\\n'.join(sys.argv[1:]) + '\\n')",
+            "for update_count, relative_path, contents in file_updates:",
+            "    if update_count == count:",
+            "        path = pathlib.Path(relative_path)",
+            "        path.write_text(contents, encoding='utf-8')",
             "count_path.write_text(str(count + 1), encoding='utf-8')",
             "exit_code = exit_codes[count] if count < len(exit_codes) else (",
             "    exit_codes[-1]",
@@ -770,6 +778,60 @@ class TestPreCommitScript:
         assert result.returncode == 1
         assert len(_uv_log_calls(log_path)) == 2
 
+    def test_run_ruff_returns_nonzero_when_ruff_check_rewrites_files(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "bad.py").write_text("print('old')\n", encoding="utf-8")
+        base = _commit_all(repo_dir, "base")
+        (repo_dir / "bad.py").write_text("print('new')\n", encoding="utf-8")
+        head = _commit_all(repo_dir, "head")
+
+        bin_dir, log_path = _fake_uv_dir(
+            tmp_path,
+            exit_codes=(0, 0),
+            file_updates=((0, str(repo_dir / "bad.py"), "print('rewritten')\n"),),
+        )
+        result = _run_diff_command(
+            repo_dir,
+            "run-ruff",
+            base=base,
+            head=head,
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        assert "Ruff rewrote changed Python files in CI" in result.stderr
+        assert "bad.py" in result.stderr
+        assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_ruff_ignores_preexisting_dirty_file_when_ruff_does_not_rewrite_it(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "bad.py").write_text("print('old')\n", encoding="utf-8")
+        base = _commit_all(repo_dir, "base")
+        (repo_dir / "bad.py").write_text("print('new')\n", encoding="utf-8")
+        head = _commit_all(repo_dir, "head")
+        (repo_dir / "bad.py").write_text("print('already-dirty')\n", encoding="utf-8")
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(0, 0))
+        result = _run_diff_command(
+            repo_dir,
+            "run-ruff",
+            base=base,
+            head=head,
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 0
+        assert "Ruff rewrote changed Python files in CI" not in result.stderr
+        assert len(_uv_log_calls(log_path)) == 2
+
     def test_run_ruff_surfaces_runtime_failures(self, tmp_path: Path) -> None:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
@@ -847,6 +909,37 @@ class TestPreCommitScript:
 
         assert result.returncode != 0
         assert "good.py" in f"{result.stdout}\n{result.stderr}"
+
+    @pytest.mark.skipif(
+        os.environ.get("CHUNKHOUND_RUN_RUFF_INTEGRATION") != "1",
+        reason=(
+            "Set CHUNKHOUND_RUN_RUFF_INTEGRATION=1 to run "
+            "real uv+ruff integration coverage."
+        ),
+    )
+    def test_run_ruff_with_real_ruff_fails_when_check_auto_fixes_file(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "bad.py").write_text("x = 1\n", encoding="utf-8")
+        base = _commit_all(repo_dir, "base")
+        (repo_dir / "bad.py").write_text("import os\n", encoding="utf-8")
+        head = _commit_all(repo_dir, "head")
+
+        result = _run_diff_command(
+            repo_dir,
+            "run-ruff",
+            base=base,
+            head=head,
+            env=_repo_env(tmp_path),
+            timeout=120,
+        )
+
+        assert result.returncode != 0
+        assert "Ruff rewrote changed Python files in CI" in result.stderr
+        assert "bad.py" in result.stderr
 
     def test_install_hook_rewrites_file_and_blocks_commit(self, tmp_path: Path) -> None:
         repo_dir = tmp_path / "repo"
