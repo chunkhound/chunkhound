@@ -162,7 +162,36 @@ class SerialDatabaseExecutor:
 
             # Execute operation - look for method named _executor_{operation_name}
             op_func = getattr(provider, f"_executor_{operation_name}")
-            return op_func(conn, state, *args, **kwargs)
+            try:
+                return op_func(conn, state, *args, **kwargs)
+            except Exception as exc:
+                err_str = str(exc)
+                _is_disk_full = "No space left on device" in err_str
+                _is_invalidated = "database has been invalidated" in err_str
+                if (
+                    "Out of Memory" in err_str
+                    or "unsuccessful or closed pending query" in err_str
+                    or _is_invalidated
+                    or _is_disk_full
+                ):
+                    # DuckDB connection is corrupt — drop it so the next call reconnects cleanly
+                    try:
+                        getattr(_executor_local.connection, "close", lambda: None)()
+                    except Exception:
+                        pass
+                    if hasattr(_executor_local, "connection"):
+                        del _executor_local.connection
+                    reset_thread_local_state()
+                    if _is_disk_full or _is_invalidated:
+                        logger.error(
+                            f"DuckDB connection reset after fatal error in '{operation_name}' "
+                            f"(disk full or invalidated — free disk space and retry): {exc}"
+                        )
+                    else:
+                        logger.warning(
+                            f"DuckDB connection reset after corrupting error in '{operation_name}': {exc}"
+                        )
+                raise
 
         # Run in executor synchronously with timeout (env override)
         future = self._db_executor.submit(executor_operation)
@@ -212,7 +241,35 @@ class SerialDatabaseExecutor:
 
             # Execute operation - look for method named _executor_{operation_name}
             op_func = getattr(provider, f"_executor_{operation_name}")
-            return op_func(conn, state, *args, **kwargs)
+            try:
+                return op_func(conn, state, *args, **kwargs)
+            except Exception as exc:
+                err_str = str(exc)
+                _is_disk_full = "No space left on device" in err_str
+                _is_invalidated = "database has been invalidated" in err_str
+                if (
+                    "Out of Memory" in err_str
+                    or "unsuccessful or closed pending query" in err_str
+                    or _is_invalidated
+                    or _is_disk_full
+                ):
+                    try:
+                        getattr(_executor_local.connection, "close", lambda: None)()
+                    except Exception:
+                        pass
+                    if hasattr(_executor_local, "connection"):
+                        del _executor_local.connection
+                    reset_thread_local_state()
+                    if _is_disk_full or _is_invalidated:
+                        logger.error(
+                            f"DuckDB connection reset after fatal error in '{operation_name}' "
+                            f"(disk full or invalidated — free disk space and retry): {exc}"
+                        )
+                    else:
+                        logger.warning(
+                            f"DuckDB connection reset after corrupting error in '{operation_name}': {exc}"
+                        )
+                raise
 
         # Capture context for async compatibility
         ctx = contextvars.copy_context()
