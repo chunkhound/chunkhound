@@ -74,8 +74,7 @@ def get_thread_local_state() -> dict[str, Any]:
     This function should ONLY be called from within the executor thread.
 
     Returns the actual dict reference (not a copy) intentionally: executor
-    methods mutate the state dict in-place (e.g. incrementing
-    ``operations_since_checkpoint``, toggling ``transaction_active``), and
+    methods mutate the state dict in-place (e.g. toggling ``transaction_active``), and
     those mutations must be visible on the next call.
 
     Returns:
@@ -84,27 +83,9 @@ def get_thread_local_state() -> dict[str, Any]:
     if not hasattr(_executor_local, "state"):
         _executor_local.state = {
             "transaction_active": False,
-            "operations_since_checkpoint": 0,
-            "last_checkpoint_time": time.time(),
             "last_activity_time": time.time(),  # Track last database activity
-            "deferred_checkpoint": False,
-            "checkpoint_threshold": 100,  # Checkpoint every N operations
         }
     return _executor_local.state
-
-
-def track_operation(state: dict[str, Any]) -> None:
-    """Track a database operation for checkpoint management.
-
-    This function should ONLY be called from within the executor thread.
-    The auto-compaction check lives in execute_sync / execute_async
-    (post-operation dispatch), not here — internal executor methods call
-    track_operation directly during checkpoint forwarding.
-
-    Args:
-        state: Thread-local state dictionary
-    """
-    state["operations_since_checkpoint"] += 1
 
 
 # Write-operation prefixes — only mutations cause fragmentation, so only

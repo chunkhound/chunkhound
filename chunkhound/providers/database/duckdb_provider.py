@@ -43,7 +43,6 @@ from chunkhound.providers.database.serial_database_provider import (
 )
 from chunkhound.providers.database.serial_executor import (
     _executor_local,
-    track_operation,
 )
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 
@@ -782,7 +781,6 @@ class DuckDBProvider(SerialDatabaseProvider):
                 f"{mutation_label} cannot run while another DuckDB transaction is active"
             )
 
-        track_operation(state)
         existing_indexes = self._executor_get_vector_indexes_for_table(
             conn, state, table_name
         )
@@ -807,7 +805,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             for index_info in existing_indexes:
                 self._executor_recreate_vector_index_from_info(conn, state, index_info)
 
-            self._executor_maybe_checkpoint(conn, state, True)
+            if not state.get("transaction_active", False):
+                conn.execute("CHECKPOINT")
             return result
         except Exception as e:
             if transactional and state.get("transaction_active", False):
@@ -973,52 +972,17 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.error(f"Failed to create embedding table for {dims} dimensions: {e}")
             raise
 
-    def _maybe_checkpoint(self, force: bool = False) -> None:
-        """Perform checkpoint if needed - delegate to connection manager."""
-        self._execute_in_db_thread_sync("maybe_checkpoint", force)
-
     def _executor_maybe_checkpoint(
         self, conn: Any, state: dict[str, Any], force: bool
     ) -> None:
-        """Executor method for _maybe_checkpoint - runs in DB thread."""
-        if self._connection_manager.is_memory_db:
-            return
+        """Checkpoint dispatch stub — kept for serial-executor dispatch compatibility.
 
-        # Defer checkpoint if we're in a transaction
-        if state.get("transaction_active", False):
-            state["deferred_checkpoint"] = True
-            if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                logger.debug("Deferring checkpoint until transaction completes")
-            return
-
-        current_time = time.time()
-        time_since_checkpoint = current_time - state.get(
-            "last_checkpoint_time", current_time
-        )
-        operations_since_checkpoint = state.get("operations_since_checkpoint", 0)
-
-        # Checkpoint if forced, operations threshold reached (default 100), or 5 minutes elapsed
-        threshold = state.get("checkpoint_threshold", 100)
-        should_checkpoint = (
-            force
-            or operations_since_checkpoint >= threshold
-            or time_since_checkpoint >= 300  # 5 minutes
-        )
-
-        if should_checkpoint:
-            try:
-                conn.execute("CHECKPOINT")
-                state["operations_since_checkpoint"] = 0
-                state["last_checkpoint_time"] = current_time
-                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.debug(
-                        f"Checkpoint completed (operations: {operations_since_checkpoint}, "
-                        f"time: {time_since_checkpoint:.1f}s)"
-                    )
-
-            except Exception as e:
-                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.warning(f"Checkpoint failed: {e}")
+        DuckDB's native auto-checkpoint (checkpoint_threshold=16MB) handles
+        periodic checkpointing. This stub only runs a manual CHECKPOINT when
+        explicitly forced and no transaction is active.
+        """
+        if force and not state.get("transaction_active", False):
+            conn.execute("CHECKPOINT")
 
     def _executor_measure_fragmentation(
         self, conn: Any, state: dict[str, Any]
@@ -2285,7 +2249,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         if not unique_chunk_ids:
             return
 
-        track_operation(state)
         chunk_placeholders = ", ".join(["?"] * len(unique_chunk_ids))
         row_ids_by_table = self._executor_get_embedding_row_ids_by_chunk_ids(
             conn, state, unique_chunk_ids
@@ -2444,7 +2407,6 @@ class DuckDBProvider(SerialDatabaseProvider):
                 f"{mutation_label} cannot run while another DuckDB transaction is active"
             )
 
-        track_operation(state)
         existing_indexes = self._executor_get_existing_vector_indexes(conn, state)
         indexes_recreated = False
 
@@ -2627,9 +2589,6 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
                 return file_id
 
-            # Track operation for checkpoint management
-            track_operation(state)
-
             # No existing file, insert new one
             result = conn.execute(
                 """
@@ -2766,9 +2725,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         content_hash: str | None,
     ) -> None:
         """Executor method for update_file - runs in DB thread."""
-        # Track operation for checkpoint management
-        track_operation(state)
-
         # Build update query dynamically
         updates = []
         params = []
@@ -2833,7 +2789,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         skip_reason: str,
     ) -> None:
         """Executor method for record_skipped_file - runs in DB thread."""
-        track_operation(state)
         conn.execute(
             """
             INSERT INTO files
@@ -2969,9 +2924,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Executor method for insert_chunks_batch - runs in DB thread."""
         if not chunks:
             return []
-
-        # Track operation for checkpoint management
-        track_operation(state)
 
         # Prepare data for bulk insert
         chunk_data = []
@@ -3173,9 +3125,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], chunk: Chunk
     ) -> int:
         """Executor method for insert_chunk - runs in DB thread."""
-        # Track operation for checkpoint management
-        track_operation(state)
-
         result = conn.execute(
             """
             INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
@@ -3263,7 +3212,6 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> None:
         """Executor method for update_chunk query - runs in DB thread."""
         # Track operation for checkpoint management
-        track_operation(state)
         conn.execute(query, values)
 
     def _executor_get_all_chunks_with_metadata_query(
@@ -3317,8 +3265,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], embedding: Embedding
     ) -> int:
         """Executor method for insert_embedding - runs in the DB thread."""
-        track_operation(state)
-
         table_name = self._executor_ensure_embedding_table_exists(
             conn, state, embedding.dims
         )
@@ -3384,7 +3330,6 @@ class DuckDBProvider(SerialDatabaseProvider):
             return 0
 
         # Track operation for checkpoint management
-        track_operation(state)
         transaction_started = False
         if not state.get("transaction_active", False):
             self._executor_begin_transaction(conn, state)
@@ -4469,18 +4414,10 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], force_checkpoint: bool
     ) -> None:
         """Executor method for commit_transaction - runs in DB thread."""
-        committed = False
-        try:
-            conn.execute("COMMIT")
-            committed = True
-        finally:
-            state["transaction_active"] = False
-            deferred = state.get("deferred_checkpoint", False)
-            state["deferred_checkpoint"] = False
-        if committed:
-            self._executor_maybe_checkpoint(
-                conn, state, force=force_checkpoint or deferred
-            )
+        conn.execute("COMMIT")
+        state["transaction_active"] = False
+        if force_checkpoint:
+            conn.execute("CHECKPOINT")
 
     def _executor_rollback_transaction(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for rollback_transaction - runs in DB thread."""
@@ -4490,9 +4427,6 @@ class DuckDBProvider(SerialDatabaseProvider):
             # No active transaction — defensive rollback in except handlers is safe.
             logger.warning("Rollback skipped (no active transaction)")
         state["transaction_active"] = False
-        # Rolled-back work is discarded; clear deferred checkpoint to prevent
-        # it from firing on the next unrelated commit.
-        state["deferred_checkpoint"] = False
 
     # --- Public compaction / fragmentation interface ---
 

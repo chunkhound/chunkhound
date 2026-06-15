@@ -948,9 +948,7 @@ def test_provider_batch_failure_rolls_back_without_hnsw(
             provider._executor_insert_embeddings_batch(
                 FailingConnection(provider.connection),
                 {
-                    "operations_since_checkpoint": 0,
                     "transaction_active": False,
-                    "deferred_checkpoint": False,
                 },
                 [
                     {
@@ -996,9 +994,7 @@ def test_provider_batch_joins_existing_transaction_without_committing(
     provider.connect()
     try:
         state = {
-            "operations_since_checkpoint": 0,
             "transaction_active": False,
-            "deferred_checkpoint": False,
         }
         provider._executor_begin_transaction(provider.connection, state)
         try:
@@ -1057,9 +1053,7 @@ def test_provider_batch_failure_leaves_outer_transaction_open(
     provider.connect()
     try:
         state = {
-            "operations_since_checkpoint": 0,
             "transaction_active": False,
-            "deferred_checkpoint": False,
         }
 
         class FailingConnection:
@@ -1162,9 +1156,7 @@ def test_provider_legacy_embedding_upgrade_joins_existing_transaction(
 
         # Start an outer transaction and upsert a replacement embedding
         state = {
-            "operations_since_checkpoint": 0,
             "transaction_active": False,
-            "deferred_checkpoint": False,
         }
         provider._executor_begin_transaction(provider.connection, state)
         try:
