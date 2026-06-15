@@ -634,8 +634,38 @@ class OpenAIEmbeddingProvider:
         return output_dims
 
     def _expected_validation_response_dims(self) -> int:
-        """Expected API response dimension for validate_api_key()."""
+        """Expected API response dimension when not in the trusted-runtime path.
+
+        Returns native_dims for client-side truncation, else dims
+        (which reflects output_dims if configured, or model-native dims).
+        """
         return self.native_dims if self._client_side_truncation else self.dims
+
+    def _validation_probe_matches_runtime_contract(self, response: Any) -> bool:
+        """Validate probe responses using the same dims rules as embed()."""
+        if len(response.data) != 1:
+            return False
+
+        actual_dims = len(response.data[0].embedding)
+        server_side_truncation = (
+            self._output_dims is not None and not self._client_side_truncation
+        )
+
+        if self._client_side_truncation:
+            output_dims = self._validate_runtime_output_dims_config()
+            self._validate_client_side_truncation_runtime_config(
+                actual_dims, output_dims
+            )
+            # Side effect: cache discovered native dims for subsequent embed() calls
+            if self._model not in self._model_config:
+                self._discovered_dims = actual_dims
+            if self._trust_runtime_output_dims():
+                return True
+            return actual_dims == self.native_dims
+
+        if self._model not in self._model_config and not server_side_truncation:
+            self._discovered_dims = actual_dims
+        return actual_dims == self._expected_validation_response_dims()
 
     @property
     def dims(self) -> int:
@@ -1255,10 +1285,13 @@ class OpenAIEmbeddingProvider:
             response = await self._client.embeddings.create(
                 **self._build_embedding_request_kwargs(["test"], 5)
             )
-            return len(response.data) == 1 and (
-                len(response.data[0].embedding)
-                == self._expected_validation_response_dims()
-            )
+            return self._validation_probe_matches_runtime_contract(response)
+        except EmbeddingDimensionError as e:
+            logger.error(f"API key validation failed (dimension mismatch): {e}")
+            return False
+        except EmbeddingConfigurationError as e:
+            logger.error(f"API key validation failed (configuration error): {e}")
+            return False
         except Exception as e:
             logger.error(f"API key validation failed: {e}")
             return False

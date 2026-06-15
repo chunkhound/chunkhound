@@ -459,6 +459,26 @@ class TestOpenAIProviderRuntimeBehavior:
         provider._ensure_client = AsyncMock()
         return provider
 
+    @staticmethod
+    def _custom_endpoint_provider(**kwargs):
+        """Create a provider for a non-official trust-runtime endpoint."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            base_url="http://localhost:8000",
+            model="my-custom-embed-v1",
+            **kwargs,
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=512)
+        )
+        provider._ensure_client = AsyncMock()
+        return provider
+
     def test_known_non_matryoshka_model_rejects_invalid_output_dims(self):
         """Official OpenAI endpoints reject incompatible output_dims for ada-002."""
         from chunkhound.providers.embeddings.openai_provider import (
@@ -592,7 +612,7 @@ class TestOpenAIProviderRuntimeBehavior:
         assert call_kwargs["dimensions"] == 512
 
     @pytest.mark.asyncio
-    async def test_known_non_matryoshka_official_endpoint_omits_dimensions_for_native_dims(
+    async def test_known_ada_official_endpoint_omits_dimensions_at_native_dims(
         self,
     ):
         """Official OpenAI no-op native dims must not send unsupported dimensions."""
@@ -659,10 +679,153 @@ class TestOpenAIProviderRuntimeBehavior:
             await provider.embed(["hello"])
 
     @pytest.mark.asyncio
-    async def test_unknown_model_embed_raises_dimension_error_when_server_truncation_is_ignored(
+    async def test_validate_api_key_returns_false_without_api_key(self):
+        """Missing API key is a silent False, not an exception."""
+        provider, _, _ = _bare_provider()
+        provider._api_key = None
+        assert await provider.validate_api_key() is False
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_validate_api_key_discovers_runtime_dims(self):
+        """Probe should discover native dims for unknown models without truncation."""
+        provider = self._unknown_model_provider()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=768)
+        )
+
+        assert await provider.validate_api_key() is True
+        assert provider.native_dims == 768
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_validate_api_key_accepts_client_side_runtime_dims(
         self,
     ):
-        """Unknown model server-side truncation still enforces the returned-dims contract."""
+        """Validation should accept custom runtime native dims for client truncation."""
+        provider = self._unknown_model_provider(
+            output_dims=256,
+            client_side_truncation=True,
+        )
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=768)
+        )
+
+        assert await provider.validate_api_key() is True
+        assert provider.native_dims == 768
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_validate_api_key_rejects_oversized_client_dims(
+        self,
+    ):
+        """Validation should fail when runtime native dims are too small."""
+        provider = self._unknown_model_provider(
+            output_dims=1024,
+            client_side_truncation=True,
+        )
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=768)
+        )
+
+        assert await provider.validate_api_key() is False
+
+    @pytest.mark.asyncio
+    async def test_known_model_validate_api_key_success(self):
+        """Known model with native dims passes validation."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="text-embedding-3-small",
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=1536)
+        )
+        provider._ensure_client = AsyncMock()
+
+        assert await provider.validate_api_key() is True
+
+    @pytest.mark.asyncio
+    async def test_known_model_validate_api_key_server_side_truncation(self):
+        """Known model with output_dims passes validation when API truncates."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="text-embedding-3-small",
+            output_dims=512,
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=512)
+        )
+        provider._ensure_client = AsyncMock()
+
+        assert await provider.validate_api_key() is True
+
+    @pytest.mark.asyncio
+    async def test_validate_api_key_handles_api_error_gracefully(self):
+        """API errors during probe return False, not propagate."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="text-embedding-3-small",
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            side_effect=RuntimeError("Connection failed")
+        )
+        provider._ensure_client = AsyncMock()
+
+        assert await provider.validate_api_key() is False
+
+    @pytest.mark.asyncio
+    async def test_custom_endpoint_validate_api_key_trusts_runtime_dims(self):
+        """Custom endpoint + client_side_truncation exercises trust-runtime path."""
+        provider = self._custom_endpoint_provider(
+            output_dims=256,
+            client_side_truncation=True,
+        )
+
+        assert await provider.validate_api_key() is True
+        assert provider.native_dims == 512
+
+    @pytest.mark.asyncio
+    async def test_validate_api_key_rejects_malformed_probe_response(self):
+        """Probe must reject responses that do not contain exactly one embedding."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="text-embedding-3-small",
+        )
+        malformed_response = MagicMock()
+        malformed_response.data = [
+            MagicMock(index=0, embedding=[0.1] * 1536),
+            MagicMock(index=1, embedding=[0.1] * 1536),
+        ]
+        malformed_response.usage = MagicMock(total_tokens=10)
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=malformed_response
+        )
+        provider._ensure_client = AsyncMock()
+
+        assert await provider.validate_api_key() is False
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_embed_rejects_ignored_server_truncation(
+        self,
+    ):
+        """Unknown model server-side truncation still enforces returned dims."""
         from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
 
         provider = self._unknown_model_provider(output_dims=256)
