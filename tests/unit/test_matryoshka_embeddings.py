@@ -35,6 +35,28 @@ class TestOutputDimsConfig:
         config = EmbeddingConfig(output_dims=512)
         assert config.output_dims == 512
 
+    @pytest.mark.parametrize("output_dims", [True, False, 1.0, "256"])
+    def test_output_dims_rejects_coerced_non_int_values(self, output_dims):
+        """Config must reject implicit coercion for output_dims."""
+        with pytest.raises(ValueError, match="positive integer"):
+            EmbeddingConfig(output_dims=output_dims)
+
+    def test_load_from_env_parses_output_dims_string(self, monkeypatch):
+        """Env loader parses numeric strings into explicit ints."""
+        monkeypatch.setenv("CHUNKHOUND_EMBEDDING__OUTPUT_DIMS", "256")
+
+        config = EmbeddingConfig.load_from_env()
+
+        assert config["output_dims"] == 256
+
+    @pytest.mark.parametrize("output_dims", ["abc", "12.5", "", "0xff", "0", "-1"])
+    def test_load_from_env_rejects_invalid_output_dims(self, monkeypatch, output_dims):
+        """Invalid env values must fail explicitly instead of being ignored."""
+        monkeypatch.setenv("CHUNKHOUND_EMBEDDING__OUTPUT_DIMS", output_dims)
+
+        with pytest.raises(ValueError, match="CHUNKHOUND_EMBEDDING__OUTPUT_DIMS"):
+            EmbeddingConfig.load_from_env()
+
     def test_output_dims_zero_invalid(self):
         """output_dims=0 raises ValueError."""
         with pytest.raises(ValueError, match="positive"):
@@ -666,7 +688,7 @@ class TestOpenAIProviderRuntimeBehavior:
             self._unknown_model_provider(output_dims=output_dims)
 
     def test_unknown_model_rejects_non_int_output_dims_at_init(self):
-        """String output_dims is a local config error, not a runtime compatibility probe."""
+        """String output_dims is a local config error, not a runtime probe."""
         with pytest.raises(
             EmbeddingConfigurationError,
             match="positive integer",

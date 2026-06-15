@@ -210,10 +210,20 @@ class EmbeddingConfig(BaseSettings):
             raise ValueError("rerank_batch_size must be positive")
         return v
 
-    @field_validator("output_dims")
-    def validate_output_dims(cls, v: int | None) -> int | None:  # noqa: N805
-        """Validate output_dims is positive."""
-        if v is not None and v <= 0:
+    @field_validator("output_dims", mode="before")
+    def validate_output_dims(cls, v: object) -> int | None:  # noqa: N805
+        """Validate output_dims is an explicit positive integer.
+
+        String parsing belongs to CLI/env loaders so config construction rejects
+        implicit coercion from bools, strings, and floats uniformly.
+        """
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ValueError(
+                f"output_dims must be a positive integer, got {type(v).__name__}({v!r})"
+            )
+        if v <= 0:
             raise ValueError("output_dims must be positive")
         return v
 
@@ -528,7 +538,10 @@ class EmbeddingConfig(BaseSettings):
             "--client-side-truncation",
             action="store_true",
             default=None,
-            help="Truncate embeddings client-side instead of using API dimensions parameter",
+            help=(
+                "Truncate embeddings client-side instead of using API "
+                "dimensions parameter"
+            ),
         )
 
     @classmethod
@@ -577,7 +590,8 @@ class EmbeddingConfig(BaseSettings):
         if azure_deployment := os.getenv("CHUNKHOUND_EMBEDDING__AZURE_DEPLOYMENT"):
             config["azure_deployment"] = azure_deployment
 
-        # Fallback: provider-specific env vars (lower priority than CHUNKHOUND_EMBEDDING__ vars)
+        # Fallback: provider-specific env vars
+        # (lower priority than CHUNKHOUND_EMBEDDING__ vars)
         if "api_key" not in config:
             provider_hint = (
                 config.get("provider")
@@ -609,11 +623,16 @@ class EmbeddingConfig(BaseSettings):
                 pass
 
         # Matryoshka configuration
-        if output_dims_raw := os.getenv("CHUNKHOUND_EMBEDDING__OUTPUT_DIMS"):
+        output_dims_raw = os.getenv("CHUNKHOUND_EMBEDDING__OUTPUT_DIMS")
+        if output_dims_raw is not None:
             try:
-                config["output_dims"] = int(output_dims_raw)
-            except ValueError:
-                pass
+                output_dims = int(output_dims_raw)
+                config["output_dims"] = cls.validate_output_dims(output_dims)
+            except ValueError as exc:
+                raise ValueError(
+                    "CHUNKHOUND_EMBEDDING__OUTPUT_DIMS must be a positive integer, "
+                    f"got {output_dims_raw!r}"
+                ) from exc
         if client_side_truncation_raw := os.getenv(
             "CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION"
         ):
