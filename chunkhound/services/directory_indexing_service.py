@@ -82,6 +82,11 @@ class DirectoryIndexingService:
         stats = IndexingStats()
 
         try:
+            # === Drop HNSW indexes before bulk indexing ===
+            # Eliminates per-batch index maintenance overhead during
+            # large embedding inserts and compaction steps.
+            await self._drop_hnsw_indexes()
+
             # File pattern resolution (extracted from run.py:61-65)
             include_patterns, exclude_patterns = self._resolve_file_patterns()
 
@@ -104,6 +109,12 @@ class DirectoryIndexingService:
 
             await self._run_batch_compaction(stats)
 
+            # === Rebuild HNSW indexes as final step ===
+            # Must be last: compaction produces a clean DB file, and HNSW
+            # is built once on the clean DB instead of being rewritten on
+            # every checkpoint.
+            await self._ensure_hnsw_indexes()
+
             stats.processing_time = time.time() - start_time
 
         except Exception as e:
@@ -115,6 +126,18 @@ class DirectoryIndexingService:
     async def _run_batch_compaction(self, stats: IndexingStats) -> None:
         """Run one mandatory batch-compaction boundary."""
         await _run_batch_compaction_boundary(self.indexing_coordinator, stats)
+
+    async def _drop_hnsw_indexes(self) -> None:
+        """Drop HNSW indexes before bulk indexing."""
+        db = getattr(self.indexing_coordinator, "_db", None)
+        if db is not None and hasattr(db, "drop_all_hnsw_indexes"):
+            db.drop_all_hnsw_indexes()
+
+    async def _ensure_hnsw_indexes(self) -> None:
+        """Rebuild HNSW indexes after bulk indexing completes."""
+        db = getattr(self.indexing_coordinator, "_db", None)
+        if db is not None and hasattr(db, "ensure_all_hnsw_indexes"):
+            db.ensure_all_hnsw_indexes()
 
     def _resolve_file_patterns(self) -> tuple[list[str], list[str]]:
         """Extracted from run.py:152-175 - file pattern resolution logic."""

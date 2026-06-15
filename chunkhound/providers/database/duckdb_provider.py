@@ -868,18 +868,20 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
 
     def _executor_create_embedding_table_indexes(
-        self, conn: Any, state: dict[str, Any], table_name: str, dims: int
+        self, conn: Any, state: dict[str, Any], table_name: str, dims: int,
+        *, create_hnsw: bool = True,
     ) -> None:
         """Restore the canonical non-table DDL for one embedding table."""
-        hnsw_index_name = _embedding_hnsw_index_name(dims)
-        try:
-            conn.execute(f"""
-                CREATE INDEX IF NOT EXISTS {hnsw_index_name} ON {table_name}
-                USING HNSW (embedding)
-                WITH (metric = 'cosine')
-            """)
-        except Exception as e:
-            logger.warning(f"Failed to create HNSW index for {table_name}: {e}")
+        if create_hnsw:
+            hnsw_index_name = _embedding_hnsw_index_name(dims)
+            try:
+                conn.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {hnsw_index_name} ON {table_name}
+                    USING HNSW (embedding)
+                    WITH (metric = 'cosine')
+                """)
+            except Exception as e:
+                logger.warning(f"Failed to create HNSW index for {table_name}: {e}")
 
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS {_embedding_chunk_id_index_name(dims)} "
@@ -1124,7 +1126,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _compact_copy_data(
         self, backup_path: Path, compacted_path: Path, state: dict[str, Any]
-    ) -> tuple[list[tuple[str]], list[dict[str, Any]]]:
+    ) -> tuple[list[tuple[str]], bool]:
         """Step 3: rebuild the compacted DB from ChunkHound-owned canonical tables.
 
         Compaction intentionally preserves only the canonical ChunkHound schema:
@@ -1132,9 +1134,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         dropped by design so the compacted file is a clean ChunkHound-owned DB,
         not a generic DuckDB passthrough.
 
-        Returns (embedding_table_names, hnsw_index_snapshot) captured from the
-        source database before closing. The HNSW snapshot preserves custom
-        (non-canonical) HNSW indexes that would otherwise be lost.
+        HNSW indexes are NOT created during copy — they are rebuilt eagerly
+        after the atomic swap in ``_compact_finalize`` only if the original DB
+        had HNSW indexes before compaction began (``had_hnsw`` flag).
+
+        Returns (embedding_table_names, had_hnsw).
         """
         tgt_conn = duckdb.connect(str(compacted_path))
         try:
@@ -1151,10 +1155,17 @@ class DuckDBProvider(SerialDatabaseProvider):
             escaped_backup = str(backup_path).replace("'", "''")
             tgt_conn.execute(f"ATTACH '{escaped_backup}' AS src")
 
-            # Snapshot HNSW indexes from the source before any schema mutation
-            hnsw_snapshot = self._executor_get_existing_vector_indexes_from_catalog(
-                tgt_conn, "src"
-            )
+            # Check whether the original DB had any HNSW indexes. Compaction
+            # only rebuilds HNSW if the original had one — this prevents HNSW
+            # from being wrongly created mid-pipeline between the batch CLI
+            # bookends (drop_all → … → ensure_all).
+            had_hnsw_result = tgt_conn.execute("""
+                SELECT COUNT(*) FROM duckdb_indexes()
+                WHERE database_name = 'src'
+                  AND table_name LIKE 'embeddings_%'
+                  AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
+            """).fetchone()
+            had_hnsw = bool(had_hnsw_result and had_hnsw_result[0] > 0)
 
             tgt_conn.execute(
                 f"CREATE TABLE schema_version ({_SCHEMA_VERSION_TABLE_COLUMNS})"
@@ -1218,11 +1229,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                 dims = _embedding_dims_from_table_name(tname)
                 if dims is not None:
                     self._executor_create_embedding_table_indexes(
-                        tgt_conn, state, tname, dims
+                        tgt_conn, state, tname, dims, create_hnsw=False,
                     )
 
             tgt_conn.execute("CHECKPOINT")
-            return emb_tables, hnsw_snapshot
+            return emb_tables, had_hnsw
         finally:
             tgt_conn.close()
 
@@ -1233,7 +1244,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         compacted_path: Path,
         backup_path: Path,
         original_size: int,
-        hnsw_snapshot: list[dict[str, Any]],
+        had_hnsw: bool,
         _t0: float,
     ) -> int:
         """Steps 4-8: atomic swap, reconnect, reseed, restore indexes, cleanup."""
@@ -1267,12 +1278,11 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         self._executor_create_indexes(new_conn, state)
 
-        # Restore non-canonical HNSW indexes that were snapshotted before compaction
-        for index_info in hnsw_snapshot:
-            index_name = str(index_info["index_name"])
-            if index_name.startswith("idx_hnsw_"):
-                continue
-            self._executor_recreate_vector_index_from_info(new_conn, state, index_info)
+        # Only recreate HNSW if the original DB had it before compaction.
+        # During batch CLI indexing, HNSW is dropped at the start (bookends)
+        # and intermediate compactions must not recreate it mid-pipeline.
+        if had_hnsw:
+            self._executor_ensure_all_hnsw_indexes(new_conn, state)
 
         backup_path.unlink(missing_ok=True)
 
@@ -1310,6 +1320,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         compacted_path: Path,
         db_path: Path,
         state: dict[str, Any],
+        *,
+        had_hnsw: bool = False,
     ) -> None:
         """Restore original DB from backup after a compaction failure."""
         if not db_path or not backup_path:
@@ -1322,6 +1334,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         restored_conn = self._create_connection()
         self._executor_create_schema(restored_conn, state)
         self._executor_create_indexes(restored_conn, state)
+        # Restore HNSW only if the backup DB had it.  During batch CLI
+        # indexing the backup won't have HNSW (dropped at start), so
+        # intermediate compaction failures won't recreate it.
+        if had_hnsw:
+            self._executor_ensure_all_hnsw_indexes(restored_conn, state)
         _executor_local.connection = restored_conn
         self._connection_manager.connection = (
             self._create_connection_manager_connection()
@@ -1348,12 +1365,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         backup_path = db_path.with_suffix(db_path.suffix + ".compact_backup")
         compacted_path = db_path.with_suffix(db_path.suffix + ".compact_new")
         original_size = 0
+        had_hnsw = False
 
         try:
             original_size = self._compact_prepare(
                 conn, state, db_path, backup_path, compacted_path
             )
-            _, hnsw_snapshot = self._compact_copy_data(
+            _, had_hnsw = self._compact_copy_data(
                 backup_path, compacted_path, state
             )
             return self._compact_finalize(
@@ -1362,13 +1380,16 @@ class DuckDBProvider(SerialDatabaseProvider):
                 compacted_path,
                 backup_path,
                 original_size,
-                hnsw_snapshot,
+                had_hnsw,
                 _t0,
             )
         except Exception as e:
             logger.error(f"Compaction failed: {e}")
             try:
-                self._compact_restore(backup_path, compacted_path, db_path, state)
+                self._compact_restore(
+                    backup_path, compacted_path, db_path, state,
+                    had_hnsw=had_hnsw,
+                )
             except Exception as restore_err:
                 logger.error(
                     f"Compaction failed AND restore failed: {restore_err}. "
@@ -1985,6 +2006,22 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Get list of existing HNSW vector indexes on all embedding tables."""
         return self._execute_in_db_thread_sync("get_existing_vector_indexes")
 
+    def drop_all_hnsw_indexes(self) -> None:
+        """Drop every HNSW index on all embedding tables.
+
+        Called at the start of batch indexing to eliminate per-batch
+        index maintenance overhead.
+        """
+        self._execute_in_db_thread_sync("drop_all_hnsw_indexes")
+
+    def ensure_all_hnsw_indexes(self) -> None:
+        """Ensure canonical HNSW indexes exist on all embedding tables.
+
+        Called at the end of batch indexing / compaction to rebuild HNSW
+        indexes on the clean DB.
+        """
+        self._execute_in_db_thread_sync("ensure_all_hnsw_indexes")
+
     def _executor_get_existing_vector_indexes(
         self, conn: Any, state: dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -2103,6 +2140,76 @@ class DuckDBProvider(SerialDatabaseProvider):
         conn.execute(
             f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(index_name)}"
         )
+
+    def _executor_hnsw_index_exists(
+        self, conn: Any, table_name: str
+    ) -> bool:
+        """Return True when any HNSW index exists on the given table."""
+        result = conn.execute(
+            """
+            SELECT 1 FROM duckdb_indexes()
+            WHERE table_name = ?
+              AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
+            LIMIT 1
+            """,
+            [table_name],
+        ).fetchone()
+        return result is not None
+
+    def _executor_drop_all_hnsw_indexes(
+        self, conn: Any, state: dict[str, Any]
+    ) -> None:
+        """Drop every HNSW index on all embedding tables."""
+        tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_name LIKE 'embeddings_%'"
+        ).fetchall()
+        dropped = 0
+        for (table_name,) in tables:
+            indexes = conn.execute(
+                "SELECT index_name FROM duckdb_indexes() "
+                "WHERE table_name = ? "
+                "AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')",
+                [table_name],
+            ).fetchall()
+            for (index_name,) in indexes:
+                conn.execute(
+                    f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(index_name)}"
+                )
+                dropped += 1
+        if dropped:
+            logger.info(f"Dropped {dropped} HNSW index(es) before bulk indexing")
+
+    def _executor_ensure_all_hnsw_indexes(
+        self, conn: Any, state: dict[str, Any]
+    ) -> None:
+        """Create canonical HNSW indexes on all embedding tables that have data."""
+        tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_name LIKE 'embeddings_%'"
+        ).fetchall()
+        created = 0
+        for (table_name,) in tables:
+            row_count = conn.execute(
+                f"SELECT COUNT(*) FROM {self._quote_duckdb_identifier(table_name)}"
+            ).fetchone()[0]
+            if row_count == 0:
+                continue
+            if self._executor_hnsw_index_exists(conn, table_name):
+                continue
+            dims = _embedding_dims_from_table_name(table_name)
+            if dims is None:
+                continue
+            hnsw_name = _embedding_hnsw_index_name(dims)
+            conn.execute(f"""
+                CREATE INDEX {hnsw_name} ON {self._quote_duckdb_identifier(table_name)}
+                USING HNSW (embedding)
+                WITH (metric = 'cosine')
+            """)
+            created += 1
+        if created:
+            conn.execute("CHECKPOINT")
+            logger.info(f"Created {created} HNSW index(es)")
 
     def _executor_recreate_vector_index_from_info(
         self, conn: Any, state: dict[str, Any], index_info: dict[str, Any]
@@ -2388,7 +2495,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         for index_info in original_indexes:
             self._executor_recreate_vector_index_from_info(conn, state, index_info)
 
-        self._executor_maybe_checkpoint(conn, state, True)
+        if not state.get("transaction_active", False):
+            conn.execute("CHECKPOINT")
 
     def _executor_run_hnsw_guarded_mutation(
         self,
@@ -2443,7 +2551,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                     )
                 indexes_recreated = True
 
-            self._executor_maybe_checkpoint(conn, state, True)
+            if not state.get("transaction_active", False):
+                conn.execute("CHECKPOINT")
             logger.info(f"{mutation_label} completed successfully with HNSW safety")
             return result
         except Exception as e:
@@ -3125,6 +3234,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], chunk: Chunk
     ) -> int:
         """Executor method for insert_chunk - runs in DB thread."""
+
         result = conn.execute(
             """
             INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
@@ -3211,7 +3321,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], chunk_id: int, query: str, values: list
     ) -> None:
         """Executor method for update_chunk query - runs in DB thread."""
-        # Track operation for checkpoint management
         conn.execute(query, values)
 
     def _executor_get_all_chunks_with_metadata_query(
@@ -3265,6 +3374,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], embedding: Embedding
     ) -> int:
         """Executor method for insert_embedding - runs in the DB thread."""
+
         table_name = self._executor_ensure_embedding_table_exists(
             conn, state, embedding.dims
         )
@@ -3329,7 +3439,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         if not embeddings_data:
             return 0
 
-        # Track operation for checkpoint management
         transaction_started = False
         if not state.get("transaction_active", False):
             self._executor_begin_transaction(conn, state)
@@ -3696,6 +3805,19 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "has_more": False,
                     "total": 0,
                 }
+
+            # Lazy HNSW rebuild: crash recovery from a failed/mid-crash indexing run.
+            # DuckDB will brute-force scan without an index — correct but slow.
+            if not self._executor_hnsw_index_exists(conn, table_name):
+                hnsw_name = _embedding_hnsw_index_name(query_dims)
+                logger.info(
+                    f"No HNSW index on {table_name}, rebuilding (crash recovery)"
+                )
+                conn.execute(f"""
+                    CREATE INDEX {hnsw_name} ON {table_name}
+                    USING HNSW (embedding)
+                    WITH (metric = 'cosine')
+                """)
 
             # Build query with dimension-specific table
             query = f"""

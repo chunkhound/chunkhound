@@ -80,6 +80,20 @@ class DatabaseProvider(Protocol):
         """Drop vector index for specific provider/model/dims combination."""
         ...
 
+    def drop_all_hnsw_indexes(self) -> None:
+        """Drop every HNSW index on all embedding tables.
+
+        No-op for providers without HNSW support (LanceDB).
+        """
+        ...
+
+    def ensure_all_hnsw_indexes(self) -> None:
+        """Ensure canonical HNSW indexes exist on all embedding tables.
+
+        No-op for providers without HNSW support (LanceDB).
+        """
+        ...
+
     # File Operations
     def insert_file(self, file: File) -> int:
         """Insert file record and return file ID."""
