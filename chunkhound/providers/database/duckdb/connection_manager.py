@@ -32,6 +32,8 @@ warnings.filterwarnings(
 import duckdb
 from loguru import logger
 
+from chunkhound.utils.windows_constants import _unlink_compacted
+
 
 class DuckDBConnectionManager:
     """Manages DuckDB connections, schema creation, and database operations."""
@@ -184,7 +186,7 @@ class DuckDBConnectionManager:
             staged_path,
             staged_path.with_suffix(staged_path.suffix + ".wal"),
         ):
-            stale_path.unlink(missing_ok=True)
+            _unlink_compacted(stale_path)
 
     def _preemptive_wal_cleanup(self) -> None:
         """Proactively check for and clean up potentially corrupted WAL files.

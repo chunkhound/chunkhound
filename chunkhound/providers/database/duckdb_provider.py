@@ -44,7 +44,11 @@ from chunkhound.providers.database.serial_database_provider import (
 from chunkhound.providers.database.serial_executor import (
     _executor_local,
 )
-from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
+from chunkhound.utils.windows_constants import (
+    IS_WINDOWS,
+    WINDOWS_FILE_HANDLE_DELAY,
+    _unlink_compacted,
+)
 
 
 def _atomic_replace(src: Path | str, dst: Path | str) -> None:
@@ -55,7 +59,7 @@ def _atomic_replace(src: Path | str, dst: Path | str) -> None:
     same-volume replace fail transiently.
     """
     if IS_WINDOWS:
-        max_attempts = 3
+        max_attempts = 5
         for attempt in range(max_attempts):
             try:
                 os.replace(str(src), str(dst))
@@ -1129,7 +1133,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._connection_manager.connection = None
 
         backup_path.unlink(missing_ok=True)
-        compacted_path.unlink(missing_ok=True)
+        _unlink_compacted(compacted_path)
         _atomic_replace(db_path, backup_path)
         return original_size
 
@@ -1257,6 +1261,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         _t0: float,
     ) -> int:
         """Steps 4-8: atomic swap, reconnect, reseed, restore indexes, cleanup."""
+        # Let DuckDB release the OS file handle before renaming (Windows)
+        if IS_WINDOWS:
+            time.sleep(WINDOWS_FILE_HANDLE_DELAY)
         _atomic_replace(compacted_path, db_path)
 
         new_conn = self._create_connection()
@@ -1349,7 +1356,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         self._close_live_compaction_connections()
         if backup_path.exists():
             _atomic_replace(backup_path, db_path)
-        compacted_path.unlink(missing_ok=True)
+        _unlink_compacted(compacted_path)
         restored_conn = self._create_connection()
         self._executor_create_schema(restored_conn, state)
         self._executor_create_indexes(restored_conn, state)

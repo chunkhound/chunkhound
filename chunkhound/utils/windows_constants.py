@@ -5,6 +5,7 @@ environment variables to ensure consistent behavior across the codebase.
 """
 
 import platform
+from pathlib import Path
 
 # Platform detection (cached for performance)
 IS_WINDOWS = platform.system() == "Windows"
@@ -20,6 +21,23 @@ WINDOWS_UTF8_ENV: dict[str, str] = {
     "PYTHONLEGACYWINDOWSSTDIO": "1",
     "PYTHONUTF8": "1",
 }
+
+
+def _unlink_compacted(path: Path) -> None:
+    """Remove a .compact_new file, ignoring Windows handle-lock errors.
+
+    On Windows the OS handle may still be held by DuckDB's internal
+    cleanup threads after the connection closes.  A PermissionError at
+    this point is expected and harmless -- the stale file will be
+    overwritten on the next compaction cycle.
+    """
+    if IS_WINDOWS:
+        try:
+            path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+    else:
+        path.unlink(missing_ok=True)
 
 
 def is_windows() -> bool:

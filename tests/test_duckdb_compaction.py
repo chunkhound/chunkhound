@@ -5,6 +5,7 @@ in the suite.
 """
 
 import os
+import pathlib
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from chunkhound.providers.database.serial_executor import (
 )
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
+from chunkhound.utils import windows_constants
 from tests.fixtures.fake_providers import (
     ConstantEmbeddingProvider,
     FakeEmbeddingProvider,
@@ -2021,13 +2023,13 @@ class TestConcurrentCompactionGuard:
 def test_atomic_replace_retries_transient_windows_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Windows atomic replace retries transient handle-release failures."""
+    """Windows atomic replace retries up to max_attempts=5 with backoff."""
     attempts: list[tuple[str, str]] = []
     sleeps: list[float] = []
 
     def _flaky_replace(src: str, dst: str) -> None:
         attempts.append((src, dst))
-        if len(attempts) < 3:
+        if len(attempts) < 5:  # fail first 4, succeed on 5th
             raise OSError("busy")
 
     monkeypatch.setattr(duckdb_provider_module, "IS_WINDOWS", True)
@@ -2040,11 +2042,102 @@ def test_atomic_replace_retries_transient_windows_failures(
         ("src.duckdb", "dst.duckdb"),
         ("src.duckdb", "dst.duckdb"),
         ("src.duckdb", "dst.duckdb"),
+        ("src.duckdb", "dst.duckdb"),
+        ("src.duckdb", "dst.duckdb"),
     ]
     assert sleeps == [
         duckdb_provider_module.WINDOWS_FILE_HANDLE_DELAY,
         duckdb_provider_module.WINDOWS_FILE_HANDLE_DELAY * 2,
+        duckdb_provider_module.WINDOWS_FILE_HANDLE_DELAY * 4,
+        duckdb_provider_module.WINDOWS_FILE_HANDLE_DELAY * 8,
     ]
+
+
+def test_atomic_replace_raises_after_exhausting_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows atomic replace raises OSError when all attempts fail."""
+
+    def _always_fail(src: str, dst: str) -> None:
+        raise OSError("busy")
+
+    monkeypatch.setattr(duckdb_provider_module, "IS_WINDOWS", True)
+    monkeypatch.setattr(duckdb_provider_module.os, "replace", _always_fail)
+    monkeypatch.setattr(duckdb_provider_module.time, "sleep", lambda _: None)
+
+    with pytest.raises(OSError, match="busy"):
+        duckdb_provider_module._atomic_replace("src.duckdb", "dst.duckdb")
+
+
+def test_unlink_compacted_windows_permission_error_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PermissionError on Windows is swallowed by _unlink_compacted."""
+    monkeypatch.setattr(windows_constants, "IS_WINDOWS", True)
+    compacted = tmp_path / "stale.compact_new"
+    compacted.touch()
+
+    def _locked_unlink(self, *args, **kwargs):
+        raise PermissionError("file locked")
+
+    monkeypatch.setattr(pathlib.Path, "unlink", _locked_unlink)
+    # Must not raise
+    duckdb_provider_module._unlink_compacted(compacted)
+
+
+def test_unlink_compacted_windows_other_oserror_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-Permission OSError still propagates on Windows."""
+    monkeypatch.setattr(windows_constants, "IS_WINDOWS", True)
+    compacted = tmp_path / "stale.compact_new"
+    compacted.touch()
+
+    def _io_error_unlink(self, *args, **kwargs):
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(pathlib.Path, "unlink", _io_error_unlink)
+    with pytest.raises(OSError):
+        duckdb_provider_module._unlink_compacted(compacted)
+
+
+def test_unlink_compacted_posix_propagates_all_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On POSIX, _unlink_compacted lets all OSError propagate."""
+    monkeypatch.setattr(windows_constants, "IS_WINDOWS", False)
+    compacted = tmp_path / "stale.compact_new"
+    compacted.touch()
+
+    def _locked_unlink(self, *args, **kwargs):
+        raise PermissionError("file locked")
+
+    monkeypatch.setattr(pathlib.Path, "unlink", _locked_unlink)
+    with pytest.raises(PermissionError):
+        duckdb_provider_module._unlink_compacted(compacted)
+
+
+def test_compaction_succeeds_with_windows_flag(
+    file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full compaction succeeds when IS_WINDOWS=True (drain delay + resilient cleanup)."""
+    db_path = Path(cast(str, file_backed_db.db_path))
+    monkeypatch.setattr(duckdb_provider_module, "IS_WINDOWS", True)
+
+    file_backed_db._execute_in_db_thread_sync(
+        "insert_file",
+        File(
+            path="windows_compact.py",
+            mtime=0.0,
+            language=Language.PYTHON,
+            size_bytes=50,
+        ),
+    )
+
+    result = file_backed_db.compact_database()
+    assert result > 0
+    _assert_db_integrity(db_path)
+    assert file_backed_db.get_stats()["files"] == 1
 
 
 def test_live_file_is_valid_after_compaction(populated_db: DuckDBProvider) -> None:
