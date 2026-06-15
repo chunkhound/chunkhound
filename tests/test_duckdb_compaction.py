@@ -1386,12 +1386,49 @@ class TestCompactionDataIntegrity:
         )
 
     def test_sequences_continue_above_max(self, populated_db: DuckDBProvider) -> None:
-        """nextval for each sequence returns a value above the current max."""
+        """nextval for each sequence returns a value above the current max.
+
+        Verifies all three canonical sequences (files, chunks, embeddings) are
+        correctly reseeded after compaction.  Previously the embeddings_id_seq
+        was left at START 1 after compaction restore, causing PRIMARY KEY
+        violations on the next embedding insert.
+        """
         populated_db.compact_database()
-        for table, seq in [("files", "files_id_seq"), ("chunks", "chunks_id_seq")]:
-            max_id = _fetch_scalar(populated_db.db_path, f"SELECT MAX(id) FROM {table}")
+        db_path = populated_db.db_path
+        entries = [
+            ("files", "files_id_seq"),
+            ("chunks", "chunks_id_seq"),
+        ]
+        # Add embeddings_id_seq if any embedding tables exist
+        emb_names = _fetch_scalar(
+            db_path,
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_name LIKE 'embeddings_%' "
+            "LIMIT 1",
+        )
+        if emb_names:
+            entries.append(("embeddings", "embeddings_id_seq"))
+
+        for table, seq in entries:
+            if table == "embeddings":
+                conn = duckdb.connect(str(db_path))
+                try:
+                    rows = conn.execute(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_name LIKE 'embeddings_%'"
+                    ).fetchall()
+                    max_id = 0
+                    for (tn,) in rows:
+                        m = conn.execute(
+                            f"SELECT COALESCE(MAX(id), 0) FROM {tn}"
+                        ).fetchone()[0]
+                        max_id = max(max_id, int(m))
+                finally:
+                    conn.close()
+            else:
+                max_id = _fetch_scalar(db_path, f"SELECT MAX(id) FROM {table}")
             # Advance the sequence by one
-            next_id = _fetch_scalar(populated_db.db_path, f"SELECT nextval('{seq}')")
+            next_id = _fetch_scalar(db_path, f"SELECT nextval('{seq}')")
             assert next_id is not None
             assert next_id > max_id, (
                 f"{seq}: nextval={next_id} should be > MAX(id)={max_id}"

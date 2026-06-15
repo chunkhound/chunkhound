@@ -614,7 +614,16 @@ class DuckDBProvider(SerialDatabaseProvider):
     def _executor_reseed_sequence(
         self, conn: Any, table_name: str, sequence_name: str
     ) -> None:
-        """Advance one sequence so the next implicit id is above MAX(id)."""
+        """Advance one sequence so the next implicit id is above MAX(id).
+
+        DuckDB 1.4 does not support ``ALTER SEQUENCE ... RESTART WITH`` or
+        ``setval()``.  We keep the ``SELECT nextval FROM range(N)`` approach.
+        "duckdb_sequences().last_value" is a binary flag (NULL = never used,
+        1 = used at least once), NOT the actual counter.  For a freshly-created
+        sequence (last_value = NULL) the advance is correct.  For an
+        already-existing sequence (last_value = 1) this over-advances by
+        roughly ``max_id`` — safe (no duplicates), just a gap.
+        """
         max_result = conn.execute(
             f"SELECT COALESCE(MAX(id), 0) FROM {self._quote_duckdb_identifier(table_name)}"
         ).fetchone()
@@ -1274,7 +1283,17 @@ class DuckDBProvider(SerialDatabaseProvider):
             except Exception:
                 continue
             if max_id > 0:
-                new_conn.execute(f"SELECT nextval('{seq}') FROM range({max_id})")
+                if table is not None:
+                    self._executor_reseed_sequence(new_conn, table, seq)
+                else:
+                    # Embeddings: sequence is freshly created in the compacted
+                    # file (start=1, last_value=NULL).  Calling nextval max_id
+                    # times advances it from 1 to max_id, so the next call
+                    # returns max_id + 1.  Can't use ALTER / setval / DROP
+                    # due to DuckDB 1.4 limitations.
+                    new_conn.execute(
+                        f"SELECT nextval('{seq}') FROM range({max_id})"
+                    )
 
         self._executor_create_indexes(new_conn, state)
 
@@ -1491,6 +1510,29 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._executor_materialize_files_table(conn, state)
             self._executor_materialize_chunks_table(conn, state)
             conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
+
+            # Reseed embeddings_id_seq to match existing data.  The sequence
+            # was created above (start=1).  If embedding tables already have
+            # rows (e.g. after compaction restore), advance the sequence so
+            # the nextval call returns max(id)+1.  Missing this reseed causes
+            # PRIMARY KEY violations — the sequence starts at 1 while restored
+            # rows have IDs up to millions.
+            max_eid = self._executor_get_max_embedding_id(conn)
+            if max_eid > 0:
+                cur = conn.execute(
+                    "SELECT last_value FROM duckdb_sequences() "
+                    "WHERE sequence_name = 'embeddings_id_seq'"
+                ).fetchone()
+                cv = cur[0] if cur else None
+                if cv is None:
+                    cv = conn.execute(
+                        "SELECT nextval('embeddings_id_seq')"
+                    ).fetchone()[0]
+                adv = max_eid - int(cv)
+                if adv > 0:
+                    conn.execute(
+                        f"SELECT nextval('embeddings_id_seq') FROM range({adv})"
+                    )
 
             self._executor_migrate_schema(conn, state)
 
