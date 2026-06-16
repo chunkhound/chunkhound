@@ -313,7 +313,7 @@ class OpenAIEmbeddingProvider:
         self._rerank_batch_size = rerank_batch_size
         self._output_dims = output_dims
         self._client_side_truncation = client_side_truncation
-        self._discovered_dims: int | None = None
+        self._discovered_native_dims: int | None = None
         self._warned_default_dims = False
         self._ssl_verify = ssl_verify
         self._rerank_ssl_verify: bool = (
@@ -654,13 +654,13 @@ class OpenAIEmbeddingProvider:
             )
             # Side effect: cache discovered native dims for subsequent embed() calls
             if self._model not in self._model_config:
-                self._discovered_dims = actual_dims
+                self._discovered_native_dims = actual_dims
             if self._trust_runtime_output_dims():
                 return True
             return actual_dims == self.native_dims
 
         if self._model not in self._model_config and not server_side_truncation:
-            self._discovered_dims = actual_dims
+            self._discovered_native_dims = actual_dims
         return actual_dims == self._expected_validation_response_dims()
 
     @property
@@ -674,8 +674,8 @@ class OpenAIEmbeddingProvider:
             return self._output_dims
         if self._model in self._model_config:
             return self._model_config[self._model]["dims"]
-        if self._discovered_dims is not None:
-            return self._discovered_dims
+        if self._discovered_native_dims is not None:
+            return self._discovered_native_dims
         if not self._warned_default_dims:
             self._warned_default_dims = True
             logger.warning(
@@ -689,8 +689,8 @@ class OpenAIEmbeddingProvider:
         """Model's full/native embedding dimension."""
         if self._model in self._model_config:
             return self._model_config[self._model].get("native_dims", 1536)
-        if self._discovered_dims is not None:
-            return self._discovered_dims
+        if self._discovered_native_dims is not None:
+            return self._discovered_native_dims
         return 1536
 
     @property
@@ -1005,13 +1005,13 @@ class OpenAIEmbeddingProvider:
                     self._output_dims is not None and not self._client_side_truncation
                 )
                 if (
-                    self._discovered_dims is None
+                    self._discovered_native_dims is None
                     and self._model not in self._model_config
                     and not server_side_truncation
                 ):
-                    self._discovered_dims = cast(int, raw_dim)
+                    self._discovered_native_dims = cast(int, raw_dim)
                     logger.debug(
-                        f"Discovered native embedding dimension: {self._discovered_dims}"
+                        f"Discovered native embedding dimension: {self._discovered_native_dims}"
                     )
                 validate_embedding_dims(actual_dims, self.dims, model=self._model)
 

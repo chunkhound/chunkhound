@@ -575,7 +575,7 @@ class TestOpenAIProviderRuntimeBehavior:
     async def test_unknown_model_embed_uses_dimensions_param_for_server_side(
         self,
     ):
-        """Unknown models expose server-side truncation through the public embed API."""
+        """Server-side-truncated responses must not be cached as native dims."""
         provider = self._unknown_model_provider(output_dims=256)
 
         result = await provider.embed(["hello"])
@@ -583,6 +583,8 @@ class TestOpenAIProviderRuntimeBehavior:
         assert len(result[0]) == 256
         call_kwargs = provider._client.embeddings.create.call_args.kwargs
         assert call_kwargs["dimensions"] == 256
+        assert provider._discovered_native_dims is None
+        assert provider.native_dims == 1536
 
     @pytest.mark.asyncio
     async def test_known_model_on_custom_endpoint_uses_dimensions_param_at_runtime(

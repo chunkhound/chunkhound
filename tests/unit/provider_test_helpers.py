@@ -67,7 +67,7 @@ def _bare_provider(
     provider._timeout = 30
     provider._output_dims = output_dims
     provider._client_side_truncation = client_side_truncation
-    provider._discovered_dims = None
+    provider._discovered_native_dims = None
     provider._warned_default_dims = False
     provider._model_config = OPENAI_MODEL_CONFIG
     provider._usage_stats = {

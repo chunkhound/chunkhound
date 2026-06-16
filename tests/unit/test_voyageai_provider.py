@@ -678,6 +678,8 @@ class TestVoyageOutputDimsRuntimeBehavior:
         _, kwargs = p._client.embed.call_args
         assert kwargs["output_dimension"] == 2
         assert p.dims == 2
+        assert p._discovered_native_dims is None
+        assert p.native_dims == 1024  # fallback, not truncated dims
 
     @pytest.mark.asyncio
     async def test_unknown_model_client_side_truncation_uses_runtime_dims(self):
