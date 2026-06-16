@@ -20,18 +20,18 @@ from chunkhound.providers.database.duckdb_provider import (
     DuckDBIndexedRootMismatchError,
     DuckDBProvider,
 )
+
+# Optional - used in type annotations and at runtime inside _create_provider
+try:
+    from chunkhound.providers.database.lancedb_provider import LanceDBProvider
+except ImportError:  # pragma: no cover - optional dependency
+    LanceDBProvider = None  # type: ignore[assignment,misc]
+
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-try:
-    from chunkhound.providers.database.lancedb_provider import LanceDBProvider
-
-    LANCEDB_AVAILABLE = True
-except ImportError:  # pragma: no cover - optional dependency
-    LANCEDB_AVAILABLE = False
 
 try:
     from tests.fixtures.fake_providers import ConstantEmbeddingProvider
@@ -81,6 +81,40 @@ def dummy_repo(tmp_path: Path) -> Path:
         "        return x * y\n"
     )
     return repo
+
+
+def _create_provider(backend: str, db_path: Path, base_directory: Path):
+    """Create and connect a provider for the given backend."""
+    if backend == "duckdb":
+        p = DuckDBProvider(db_path=db_path, base_directory=base_directory)
+    elif backend == "lancedb":
+        from chunkhound.providers.database.lancedb_provider import LanceDBProvider
+
+        p = LanceDBProvider(db_path, base_directory=base_directory)
+    else:
+        raise ValueError(f"Unknown backend: {backend!r}")
+    p.connect()
+    return p
+
+
+def _remove_sidecar(backend: str, db_path: Path) -> None:
+    """Remove indexed-root sidecar for DuckDB; no-op for LanceDB."""
+    if backend == "duckdb":
+        sidecar = db_path.with_name(db_path.name + ".root.json")
+        if sidecar.exists():
+            sidecar.unlink()
+
+
+@pytest.fixture(params=["duckdb", "lancedb"])
+def portability_backend(request: pytest.FixtureRequest) -> str:
+    """Parametrized backend name for DuckDB/LanceDB portability tests.
+
+    LanceDB tests are skipped when lancedb is not installed.
+    """
+    backend: str = request.param
+    if backend == "lancedb":
+        pytest.importorskip("lancedb")
+    return backend
 
 
 def _index_all(coordinator: IndexingCoordinator, repo: Path) -> dict[str, Any]:
@@ -187,7 +221,12 @@ def _repo_python_paths(repo: Path) -> list[str]:
 def _raw_stored_paths(provider: DuckDBProvider | LanceDBProvider) -> list[str]:
     """Return raw file paths exactly as stored in the backing database."""
     rows = provider.execute_query("SELECT path FROM files")
-    return sorted(str(row["path"]) for row in rows if row.get("path"))
+    paths: list[str] = []
+    for row in rows:
+        path = row.get("path")
+        assert path is not None, f"Row missing 'path' key: {row}"
+        paths.append(str(path))
+    return sorted(paths)
 
 
 def _assert_stored_paths_match(
@@ -219,30 +258,31 @@ def _verify_same_results(
 
 
 # ===========================================================================
-# DuckDB portability test
+# DB portability: stored path format
 # ===========================================================================
 
 
 @pytest.mark.integration
-def test_duckdb_path_format_contract(
+def test_path_format_contract(
     tmp_path: Path,
     dummy_repo: Path,
     fake_embedding: Any,
     constant_query_vec: list[float],
+    portability_backend: str,
 ) -> None:
-    """DuckDB: paths stored as relative unix, native on output.
+    """Paths stored as relative unix, native on output.
 
     Phase 1 — Index at original location.
     Phase 2 — Verify stored paths are relative unix (forward slashes).
-    Phase 3 — Verify output can be converted to native format.
+    Phase 3 — Regex search returns relative unix, native-convertible paths.
+    Phase 4 — Semantic search returns relative unix, native-convertible paths.
     """
-    db_file = tmp_path / "db" / "chunks.db"
-    db_file.parent.mkdir(parents=True)
-    provider = DuckDBProvider(
-        db_path=db_file,
-        base_directory=dummy_repo,
-    )
-    provider.connect()
+    backend = portability_backend
+    ext = "chunks.db" if backend == "duckdb" else "lancedb.lancedb"
+    db_path = tmp_path / "db" / ext
+    db_path.parent.mkdir(parents=True)
+
+    provider = _create_provider(backend, db_path, dummy_repo)
 
     try:
         # Phase 1: Index
@@ -274,29 +314,29 @@ def test_duckdb_path_format_contract(
 
 
 @pytest.mark.integration
-def test_duckdb_portability_after_move(
+def test_portability_after_move(
     tmp_path: Path,
     dummy_repo: Path,
     fake_embedding: Any,
     constant_query_vec: list[float],
+    portability_backend: str,
 ) -> None:
-    """DuckDB: DB contents stay portable after move when sidecar is missing.
+    """DB contents stay portable after move (with sidecar removal for DuckDB).
 
     Phase 1 — Index at original location.
     Phase 2 — Run baseline queries.
     Phase 3 — Close DB, move DB + codebase.
-    Phase 4 — Delete indexed-root sidecar.
+    Phase 4 — Delete indexed-root sidecar (DuckDB) or no-op (LanceDB).
     Phase 5 — Re-open at new location, re-index.
     Phase 6 — Run same queries, verify identical results.
     """
+    backend = portability_backend
+    db_ext = "chunks.db" if backend == "duckdb" else "lancedb.lancedb"
+
     # Phase 1: Index
-    db_file = tmp_path / "db" / "chunks.db"
-    db_file.parent.mkdir(parents=True)
-    provider = DuckDBProvider(
-        db_path=db_file,
-        base_directory=dummy_repo,
-    )
-    provider.connect()
+    db_path = tmp_path / "db" / db_ext
+    db_path.parent.mkdir(parents=True)
+    provider = _create_provider(backend, db_path, dummy_repo)
 
     try:
         coordinator = IndexingCoordinator(
@@ -321,24 +361,16 @@ def test_duckdb_portability_after_move(
     new_repo = tmp_path / "new_repo"
     new_db_dir = tmp_path / "new_db"
     shutil.copytree(dummy_repo, new_repo)
-    shutil.copytree(db_file.parent, new_db_dir)
-    new_db_file = new_db_dir / "chunks.db"
+    shutil.copytree(db_path.parent, new_db_dir)
+    new_db_path = new_db_dir / db_ext
 
-    # Phase 4: Delete indexed-root sidecar (allows re-open at new path)
-    sidecar = new_db_file.with_name(new_db_file.name + ".root.json")
-    if sidecar.exists():
-        sidecar.unlink()
+    # Phase 4: Delete indexed-root sidecar (DuckDB) or no-op (LanceDB)
+    _remove_sidecar(backend, new_db_path)
 
     # Phase 5: Re-open at new location, re-index
-    provider2 = DuckDBProvider(
-        db_path=new_db_file,
-        base_directory=new_repo,
-    )
-    provider2.connect()
+    provider2 = _create_provider(backend, new_db_path, new_repo)
 
     try:
-        # Re-index at the new location. Portability is proven by stable stored
-        # paths and identical query results, not by coordinator accounting.
         coordinator2 = IndexingCoordinator(
             database_provider=provider2,
             base_directory=new_repo,
@@ -406,116 +438,8 @@ def test_duckdb_move_with_sidecar_mismatch_fails(
         provider2.connect()
 
 
-# ===========================================================================
-# LanceDB portability test (no indexed-root guard)
-# ===========================================================================
-
-
-@pytest.mark.skipif(not LANCEDB_AVAILABLE, reason="lancedb not installed")
-@pytest.mark.integration
-def test_lancedb_path_format_contract(
-    tmp_path: Path,
-    dummy_repo: Path,
-    fake_embedding: Any,
-    constant_query_vec: list[float],
-) -> None:
-    """LanceDB: paths stored as relative unix, native on output."""
-    db_dir = tmp_path / "lancedb.lancedb"
-    provider = LanceDBProvider(str(db_dir), base_directory=dummy_repo)
-    provider.connect()
-
-    try:
-        coordinator = IndexingCoordinator(
-            database_provider=provider,
-            base_directory=dummy_repo,
-            embedding_provider=fake_embedding,
-        )
-        stats = _index_all(coordinator, dummy_repo)
-        assert stats.get("files_processed", 0) > 0
-
-        # Verify provider-visible file records use portable stored paths.
-        expected_paths = _repo_python_paths(dummy_repo)
-        _assert_stored_paths_match(provider, expected_paths)
-
-        # Regex search — path format
-        regex_results = _search_regex(provider, "def")
-        _assert_stored_paths_are_relative_unix(regex_results)
-        _assert_native_format(regex_results)
-
-        # Semantic search — path format
-        semantic_results = _search_semantic(provider, constant_query_vec)
-        _assert_stored_paths_are_relative_unix(semantic_results)
-        _assert_native_format(semantic_results)
-
-    finally:
-        provider.disconnect()
-
-
-@pytest.mark.skipif(not LANCEDB_AVAILABLE, reason="lancedb not installed")
-@pytest.mark.integration
-def test_lancedb_portability_after_move(
-    tmp_path: Path,
-    dummy_repo: Path,
-    fake_embedding: Any,
-    constant_query_vec: list[float],
-) -> None:
-    """LanceDB: full portability flow — move DB + codebase, re-index, re-search."""
-
-    # Phase 1: Index
-    db_dir = tmp_path / "lancedb.lancedb"
-    provider = LanceDBProvider(str(db_dir), base_directory=dummy_repo)
-    provider.connect()
-
-    try:
-        coordinator = IndexingCoordinator(
-            database_provider=provider,
-            base_directory=dummy_repo,
-            embedding_provider=fake_embedding,
-        )
-        _index_all(coordinator, dummy_repo)
-
-        # Phase 2: Baseline queries
-        baseline_regex = _search_regex(provider, "def")
-        baseline_semantic = _search_semantic(provider, constant_query_vec)
-        assert len(baseline_regex) > 0
-        assert len(baseline_semantic) > 0
-
-    finally:
-        provider.disconnect()
-
-    # Phase 3: Move DB + codebase
-    new_repo = tmp_path / "new_repo"
-    new_db_dir = tmp_path / "moved_lancedb.lancedb"
-    shutil.copytree(dummy_repo, new_repo)
-    shutil.copytree(db_dir, new_db_dir)
-
-    # Phase 4/5: Re-open at new location, re-index
-    provider2 = LanceDBProvider(str(new_db_dir), base_directory=new_repo)
-    provider2.connect()
-
-    try:
-        coordinator2 = IndexingCoordinator(
-            database_provider=provider2,
-            base_directory=new_repo,
-            embedding_provider=fake_embedding,
-        )
-        # LanceDB has no indexed-root guard. Portability is proven by stable
-        # search results after reopening under a new location.
-        _index_all(coordinator2, new_repo)
-
-        # Phase 6: Same queries — identical results
-        moved_regex = _search_regex(provider2, "def")
-        _verify_same_results(baseline_regex, moved_regex)
-        _assert_stored_paths_are_relative_unix(moved_regex)
-        _assert_native_format(moved_regex)
-
-        moved_semantic = _search_semantic(provider2, constant_query_vec)
-        _verify_same_results(baseline_semantic, moved_semantic)
-        _assert_stored_paths_are_relative_unix(moved_semantic)
-        _assert_native_format(moved_semantic)
-
-    finally:
-        provider2.disconnect()
+# LanceDB portability is covered by parametrized tests above
+# (test_path_format_contract and test_portability_after_move).
 
 
 # ===========================================================================
