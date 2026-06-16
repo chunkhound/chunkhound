@@ -188,7 +188,7 @@ jobs:
         with:
           results-name: test-results-${{ matrix.os }}-py${{ matrix.python }}
           results-path: test-results.xml
-          check-flaky-annotations: ${{ failure() && steps.tests.outcome == 'failure' }}
+          check-flaky-annotations: ${{ steps.tests.outcome == 'failure' }}
 
   ruff-integration-validation:
     runs-on: ubuntu-latest
@@ -227,7 +227,7 @@ jobs:
         with:
           results-name: test-results-ruff-integration-validation
           results-path: test-results.xml
-          check-flaky-annotations: ${{ failure() && steps.tests.outcome == 'failure' }}
+          check-flaky-annotations: ${{ steps.tests.outcome == 'failure' }}
 
   pages-artifact:
     needs: [lint-changed-ruff, site-build, tests, site-build-validation, watchman-rollout-gate, ruff-integration-validation]
