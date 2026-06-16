@@ -256,12 +256,41 @@ class DuckDBConnectionManager:
                 )
                 os.replace(old_db, self.db_path)
 
+    def _recover_interrupted_compaction(self) -> None:
+        """Restore from a compact_backup file left by an interrupted compaction.
+
+        Called at connection time before any DB operations. If the live DB
+        is missing or empty but a .compact_backup file exists, the backup is
+        restored as the live DB. This handles the case where a process was
+        killed after the PHASE_1 rename (db_path → backup) but before the
+        PHASE_2 rename (compact → db_path) completed.
+
+        The intent-file recovery mechanism (_recover_from_intent) handles the
+        broader crash recovery; this method covers the simple backup-restore
+        case for .compact_backup files specifically.
+        """
+        if not self.db_path:
+            return
+        backup_path = Path(str(self.db_path) + ".compact_backup")
+        if not backup_path.exists():
+            return
+        if not self.db_path.exists() or self.db_path.stat().st_size == 0:
+            logger.warning(
+                f"Recovered from interrupted compaction — restoring backup: {backup_path}"
+            )
+            import os
+            os.replace(backup_path, self.db_path)
+        else:
+            # Live DB is intact; discard stale backup
+            backup_path.unlink(missing_ok=True)
+
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         logger.info(f"Connecting to DuckDB database: {self.db_path}")
 
-        # Recover from interrupted compaction
+        # Recover from interrupted compaction (backup file + intent file approaches)
         if not self.is_memory_db:
+            self._recover_interrupted_compaction()
             assert isinstance(self.db_path, Path)
             foreign_lock_alive = False
             own_lock_alive = False
