@@ -941,7 +941,7 @@ class TestIndexFlowCompaction:
                 events.append("embed")
                 return {"status": "success", "generated": 0}
 
-        async def _compact_database() -> dict[str, Any]:
+        async def _compact_database_with_metrics() -> dict[str, Any]:
             events.append("compact")
             return {
                 "status": "success",
@@ -958,7 +958,7 @@ class TestIndexFlowCompaction:
             )
         )
         coordinator = SimpleNamespace(
-            compact_database=AsyncMock(side_effect=_compact_database)
+            compact_database_with_metrics=AsyncMock(side_effect=_compact_database_with_metrics)
         )
 
         stats = await _Service(coordinator, config).process_directory(
@@ -985,7 +985,7 @@ class TestIndexFlowCompaction:
 
         monkeypatch.setattr(
             coordinator,
-            "compact_database",
+            "compact_database_with_metrics",
             AsyncMock(
                 return_value={
                     "status": "success",
@@ -1002,7 +1002,7 @@ class TestIndexFlowCompaction:
         svc = DirectoryIndexingService(coordinator, config)
         stats = await svc.process_directory(tmp_path, no_embeddings=False)
 
-        assert coordinator.compact_database.call_count == 2
+        assert coordinator.compact_database_with_metrics.call_count == 2
         assert stats.db_compactions == 2
 
     @pytest.mark.asyncio
@@ -1022,7 +1022,7 @@ class TestIndexFlowCompaction:
 
         monkeypatch.setattr(
             coordinator,
-            "compact_database",
+            "compact_database_with_metrics",
             AsyncMock(
                 return_value={
                     "status": "success",
@@ -1039,7 +1039,7 @@ class TestIndexFlowCompaction:
         svc = DirectoryIndexingService(coordinator, config)
         stats = await svc.process_directory(tmp_path, no_embeddings=True)
 
-        assert coordinator.compact_database.call_count == 2
+        assert coordinator.compact_database_with_metrics.call_count == 2
         assert stats.db_compactions == 2
 
     @pytest.mark.asyncio
@@ -1056,7 +1056,7 @@ class TestIndexFlowCompaction:
         cfg.target_dir = tmp_path
 
         _, coordinator, config = self._make_coordinator(tmp_path, cfg)
-        compact_database = AsyncMock(
+        compact_database_with_metrics = AsyncMock(
             side_effect=[
                 {
                     "status": "success",
@@ -1074,7 +1074,11 @@ class TestIndexFlowCompaction:
                 {"status": "skipped", "reason": "unsupported"},
             ]
         )
-        monkeypatch.setattr(coordinator, "compact_database", compact_database)
+        monkeypatch.setattr(
+            coordinator,
+            "compact_database_with_metrics",
+            compact_database_with_metrics,
+        )
 
         test_file = tmp_path / "mod.py"
         test_file.write_text("def hello(): pass\n")
@@ -1083,7 +1087,7 @@ class TestIndexFlowCompaction:
         await svc.process_directory(tmp_path, no_embeddings=False)
         stats2 = await svc.process_directory(tmp_path, no_embeddings=False)
 
-        assert compact_database.await_count == 4
+        assert compact_database_with_metrics.await_count == 4
         assert stats2.db_compactions == 0
 
     @pytest.mark.asyncio
@@ -1103,7 +1107,7 @@ class TestIndexFlowCompaction:
 
         monkeypatch.setattr(
             coordinator,
-            "compact_database",
+            "compact_database_with_metrics",
             AsyncMock(return_value={"status": "skipped", "reason": "unsupported"}),
         )
 
@@ -1113,7 +1117,7 @@ class TestIndexFlowCompaction:
         svc = DirectoryIndexingService(coordinator, config)
         stats = await svc.process_directory(tmp_path, no_embeddings=False)
 
-        assert coordinator.compact_database.call_count == 2
+        assert coordinator.compact_database_with_metrics.call_count == 2
         assert stats.db_compactions == 0
         assert stats.files_processed >= 1
 
@@ -1133,7 +1137,7 @@ class TestIndexFlowCompaction:
         _, coordinator, config = self._make_coordinator(tmp_path, cfg)
         monkeypatch.setattr(
             coordinator,
-            "compact_database",
+            "compact_database_with_metrics",
             AsyncMock(return_value={"status": "error", "error": "boom"}),
         )
 
@@ -1192,7 +1196,7 @@ class TestIndexingCoordinatorCompactionContract:
 
         coordinator = IndexingCoordinator(_Db(db_path), tmp_path)
 
-        result = await coordinator.compact_database()
+        result = await coordinator.compact_database_with_metrics()
 
         assert result == {
             "status": "success",
@@ -1209,7 +1213,7 @@ class TestIndexingCoordinatorCompactionContract:
             async def compact_database_async(self) -> int:
                 raise NotImplementedError
 
-        result = await IndexingCoordinator(_Db(), tmp_path).compact_database()
+        result = await IndexingCoordinator(_Db(), tmp_path).compact_database_with_metrics()
 
         assert result == {"status": "skipped", "reason": "No compaction support"}
 
@@ -1221,7 +1225,7 @@ class TestIndexingCoordinatorCompactionContract:
             async def compact_database_async(self) -> int:
                 raise RuntimeError("boom")
 
-        result = await IndexingCoordinator(_Db(), tmp_path).compact_database()
+        result = await IndexingCoordinator(_Db(), tmp_path).compact_database_with_metrics()
 
         assert result == {"status": "error", "error": "boom"}
 
@@ -1278,7 +1282,7 @@ class TestDatabaseProcessDirectoryCompactionContract:
             events.append("chunk")
             return {"status": "success"}
 
-        async def _compact_database() -> dict[str, Any]:
+        async def _compact_database_with_metrics() -> dict[str, Any]:
             events.append("compact")
             return {"status": "success", "size_before": 10, "size_after": 9}
 
@@ -1289,7 +1293,7 @@ class TestDatabaseProcessDirectoryCompactionContract:
 
         coordinator = SimpleNamespace(
             process_directory=AsyncMock(side_effect=_process_directory),
-            compact_database=AsyncMock(side_effect=_compact_database),
+            compact_database_with_metrics=AsyncMock(side_effect=_compact_database_with_metrics),
         )
         embedding_service = SimpleNamespace(
             generate_missing_embeddings=AsyncMock(side_effect=_generate_missing_embeddings)
@@ -1320,7 +1324,7 @@ class TestDatabaseProcessDirectoryCompactionContract:
             process_directory=AsyncMock(
                 return_value={"status": "error", "error": "boom"}
             ),
-            compact_database=AsyncMock(),
+            compact_database_with_metrics=AsyncMock(),
         )
         embedding_service = SimpleNamespace(
             generate_missing_embeddings=AsyncMock()
@@ -1332,7 +1336,7 @@ class TestDatabaseProcessDirectoryCompactionContract:
         result = await db.process_directory(Path("repo"), patterns=["**/*.py"])
 
         assert result == {"status": "error", "error": "boom"}
-        coordinator.compact_database.assert_not_awaited()
+        coordinator.compact_database_with_metrics.assert_not_awaited()
         embedding_service.generate_missing_embeddings.assert_not_awaited()
 
 

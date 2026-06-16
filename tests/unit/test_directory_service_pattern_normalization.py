@@ -55,7 +55,7 @@ async def test_patterns_not_double_prefixed(tmp_path: Path):
 async def test_process_directory_reports_discovery_phase_first(tmp_path: Path) -> None:
     coord = AsyncMock()
     coord.process_directory.return_value = {"status": "no_files"}
-    coord.compact_database.return_value = {"status": "skipped", "reason": "unsupported"}
+    coord.compact_database_with_metrics.return_value = {"status": "skipped", "reason": "unsupported"}
     messages: list[str] = []
     svc = DirectoryIndexingService(
         indexing_coordinator=coord,

@@ -22,7 +22,7 @@ async def test_timeout_prompt_adds_exclusions(
         "skipped": 0,
         "skipped_due_to_timeout": ["big.bin"],
     }
-    coord.compact_database.return_value = {"status": "skipped", "reason": "unsupported"}
+    coord.compact_database_with_metrics.return_value = {"status": "skipped", "reason": "unsupported"}
 
     # Patch registry hooks used by run_command
     from chunkhound.api.cli.commands import run as run_mod
@@ -94,7 +94,7 @@ async def test_timeout_prompt_skipped_in_mcp_mode(
         "skipped": 0,
         "skipped_due_to_timeout": ["big.bin"],
     }
-    coord.compact_database.return_value = {"status": "skipped", "reason": "unsupported"}
+    coord.compact_database_with_metrics.return_value = {"status": "skipped", "reason": "unsupported"}
 
     from chunkhound.api.cli.commands import run as run_mod
 
