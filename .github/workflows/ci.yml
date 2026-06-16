@@ -183,17 +183,12 @@ jobs:
           max_attempts: 2
           command: uv run pytest tests/ -v --junit-xml=test-results.xml ${{ matrix.pytest_extra_args || '' }}
 
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
+      - if: ${{ always() }}
+        uses: ./.github/actions/test-triage
         with:
-          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
-          path: test-results.xml
-          if-no-files-found: ignore
-
-      - name: Check flaky annotations
-        if: failure() && steps.tests.outcome == 'failure'
-        run: uv run python scripts/check_flaky_annotations.py test-results.xml
+          results-name: test-results-${{ matrix.os }}-py${{ matrix.python }}
+          results-path: test-results.xml
+          check-flaky-annotations: ${{ failure() && steps.tests.outcome == 'failure' }}
 
   ruff-integration-validation:
     runs-on: ubuntu-latest
@@ -227,17 +222,12 @@ jobs:
           -v
           --junit-xml=test-results.xml
 
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
+      - if: ${{ always() }}
+        uses: ./.github/actions/test-triage
         with:
-          name: test-results-ruff-integration-validation
-          path: test-results.xml
-          if-no-files-found: ignore
-
-      - name: Check flaky annotations
-        if: failure() && steps.tests.outcome == 'failure'
-        run: uv run python scripts/check_flaky_annotations.py test-results.xml
+          results-name: test-results-ruff-integration-validation
+          results-path: test-results.xml
+          check-flaky-annotations: ${{ failure() && steps.tests.outcome == 'failure' }}
 
   pages-artifact:
     needs: [lint-changed-ruff, site-build, tests, site-build-validation, watchman-rollout-gate, ruff-integration-validation]

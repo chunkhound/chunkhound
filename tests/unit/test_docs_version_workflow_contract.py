@@ -532,6 +532,41 @@ class TestDocsVersionWorkflowContract:
             for step in steps
         )
 
+    @pytest.mark.parametrize(
+        ("job_name", "expected_results_name"),
+        [
+            ("tests", "test-results-${{ matrix.os }}-py${{ matrix.python }}"),
+            (
+                "ruff-integration-validation",
+                "test-results-ruff-integration-validation",
+            ),
+        ],
+    )
+    def test_test_jobs_run_triage_after_tests_with_failure_safe_conditions(
+        self, job_name: str, expected_results_name: str
+    ) -> None:
+        job = _job(".github/workflows/ci.yml", job_name)
+        steps = cast(list[dict[str, Any]], job["steps"])
+        test_index = _find_step_index(
+            steps,
+            "test runner step",
+            lambda step: step.get("id") == "tests",
+        )
+        triage_index = _find_step_index(
+            steps,
+            "test triage composite action step",
+            lambda step: str(step.get("uses", "")) == "./.github/actions/test-triage",
+        )
+        triage_step = steps[triage_index]
+
+        assert triage_step["if"] == "${{ always() }}"
+        assert triage_step["with"]["results-name"] == expected_results_name
+        assert triage_step["with"]["results-path"] == "test-results.xml"
+        assert triage_step["with"]["check-flaky-annotations"] == (
+            "${{ failure() && steps.tests.outcome == 'failure' }}"
+        )
+        assert test_index < triage_index
+
     def test_ruff_integration_validation_job_contract(self) -> None:
         job = _job(".github/workflows/ci.yml", "ruff-integration-validation")
         steps = cast(list[dict[str, Any]], job["steps"])
@@ -541,34 +576,16 @@ class TestDocsVersionWorkflowContract:
             lambda step: step.get("id") == "tests"
             and step.get("name") == "Run real uv+ruff integration contract tests",
         )
-        upload_index = _find_step_index(
-            steps,
-            "test results upload step",
-            lambda step: str(step.get("uses", "")).startswith(
-                "actions/upload-artifact@"
-            ),
-        )
-        flaky_index = _find_step_index(
-            steps,
-            "flaky annotations check step",
-            lambda step: step.get("run")
-            == "uv run python scripts/check_flaky_annotations.py test-results.xml",
-        )
         test_step = steps[test_index]
-        upload_step = steps[upload_index]
-        flaky_step = steps[flaky_index]
 
         assert job["runs-on"] == "ubuntu-latest"
         assert job["timeout-minutes"] == 20
-        assert cast(dict[str, str], job["env"])["CHUNKHOUND_RUN_RUFF_INTEGRATION"] == "1"
+        job_env = cast(dict[str, str], job["env"])
+        assert job_env["CHUNKHOUND_RUN_RUFF_INTEGRATION"] == "1"
         assert test_step["run"] == (
             "uv run pytest tests/unit/test_python_lint_tooling_contract.py "
             "-m requires_ruff_integration -v --junit-xml=test-results.xml"
         )
-        assert upload_step["with"]["name"] == "test-results-ruff-integration-validation"
-        assert upload_step["with"]["path"] == "test-results.xml"
-        assert flaky_step["if"] == "failure() && steps.tests.outcome == 'failure'"
-        assert test_index < upload_index < flaky_index
 
     def test_pages_artifact_job_contract(self) -> None:
         job = _job(".github/workflows/ci.yml", "pages-artifact")
