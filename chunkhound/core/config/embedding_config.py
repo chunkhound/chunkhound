@@ -187,7 +187,7 @@ class EmbeddingConfig(BaseSettings):
     )
 
     dimensions: int | None = Field(
-        default=256,
+        default=None,
         description=(
             "Output embedding dimensions. Enables Matryoshka truncation (client-side "
             "for OpenAI-compatible servers) or server-side truncation (VoyageAI). "
