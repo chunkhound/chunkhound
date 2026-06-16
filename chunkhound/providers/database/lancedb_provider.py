@@ -135,7 +135,9 @@ def _deserialize_metadata(metadata_json: str | float | None) -> dict:
 
     Handles pandas NaN values (float) which represent NULL string fields.
     """
-    if metadata_json is None or (isinstance(metadata_json, float) and np.isnan(metadata_json)):
+    if metadata_json is None or (
+        isinstance(metadata_json, float) and np.isnan(metadata_json)
+    ):
         return {}
     if isinstance(metadata_json, str):
         return json.loads(metadata_json)
@@ -366,10 +368,14 @@ class LanceDBProvider(SerialDatabaseProvider):
             # Migrate: add skip_reason column to existing tables
             if "skip_reason" not in self._files_table.schema.names:
                 try:
-                    self._files_table.add_columns({"skip_reason": "cast(null as varchar)"})
+                    self._files_table.add_columns(
+                        {"skip_reason": "cast(null as varchar)"}
+                    )
                     logger.info("Migrated files table: added skip_reason column")
                 except Exception as e:
-                    logger.warning(f"Could not add skip_reason column to files table: {e}")
+                    logger.warning(
+                        f"Could not add skip_reason column to files table: {e}"
+                    )
         except Exception:
             # Table doesn't exist, create it
             # Create table using PyArrow schema
@@ -599,9 +605,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             )
             return file_data["id"]
 
-    def list_file_paths_under_directory(
-        self, directory_prefix: str
-    ) -> list[str]:
+    def list_file_paths_under_directory(self, directory_prefix: str) -> list[str]:
         return cast(
             list[str],
             self._execute_in_db_thread_sync(
@@ -794,7 +798,14 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Upsert a file record with skip_reason to prevent re-scanning on next run."""
         self._execute_in_db_thread_sync(
             "record_skipped_file",
-            path, name, extension, size, mtime, language, content_hash, skip_reason,
+            path,
+            name,
+            extension,
+            size,
+            mtime,
+            language,
+            content_hash,
+            skip_reason,
         )
 
     def _executor_record_skipped_file(
@@ -817,7 +828,9 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Preserve existing id so chunks.file_id references are not orphaned
         # when a previously-indexed file transitions to skipped.
         try:
-            existing = self._files_table.search().where(f"path = '{path}'").limit(1).to_list()
+            existing = (
+                self._files_table.search().where(f"path = '{path}'").limit(1).to_list()
+            )
             file_id = existing[0]["id"] if existing else int(time.time() * 1000000)
         except Exception:
             file_id = int(time.time() * 1000000)
@@ -2323,6 +2336,10 @@ class LanceDBProvider(SerialDatabaseProvider):
         Supported forms:
         - SELECT path, size, modified_time, content_hash FROM files
         - SELECT path, size, modified_time FROM files
+        - SELECT path FROM files
+
+        Note: ORDER BY, WHERE, LIMIT and other SQL clauses are silently
+        ignored by this adapter. Results are unsorted.
         """
         try:
             if not self._files_table:
