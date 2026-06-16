@@ -191,6 +191,49 @@ def validate_positive_output_dims(
     return output_dims
 
 
+def validate_runtime_output_dims_config(
+    output_dims: int | None,
+    client_side_truncation: bool,
+    *,
+    model: str | None = None,
+    context: str | None = None,
+) -> int | None:
+    """Validate runtime output_dims config, guarding against missing
+    dims for client-side truncation.
+
+    Wraps ``validate_positive_output_dims`` then checks the
+    ``client_side_truncation`` invariant: if server-side truncation is
+    disabled (client-side active), output_dims must be set.
+
+    Args:
+        output_dims: The value to validate.
+        client_side_truncation: Whether client-side truncation is active.
+        model: Optional model name for error messages.
+        context: Optional context string for the error message, e.g.
+            ``"runtime truncation"`` to clarify the embed-time path.
+
+    Returns:
+        Validated positive int, or None if output_dims is None.
+
+    Raises:
+        EmbeddingConfigurationError: If output_dims is None but
+            client_side_truncation is True, or if output_dims is not
+            a positive integer.
+    """
+    dims = validate_positive_output_dims(output_dims, model=model)
+    if dims is None and client_side_truncation:
+        if context:
+            raise EmbeddingConfigurationError(
+                f"Model '{model}' uses client_side_truncation=True but "
+                f"output_dims is not set. Set output_dims before using {context}."
+            )
+        raise EmbeddingConfigurationError(
+            f"Model '{model}' uses client_side_truncation=True but "
+            "output_dims is not set. output_dims must be a positive integer."
+        )
+    return dims
+
+
 def validate_embedding_dims(
     actual_dims: int,
     expected_dims: int,

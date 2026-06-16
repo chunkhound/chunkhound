@@ -32,7 +32,7 @@ from chunkhound.providers.embeddings.shared_utils import (
     apply_client_side_truncation,
     build_dimension_request_param,
     validate_embedding_dims,
-    validate_positive_output_dims,
+    validate_runtime_output_dims_config,
 )
 
 from .batch_utils import handle_token_limit_error
@@ -527,16 +527,17 @@ class OpenAIEmbeddingProvider:
         return not is_official_openai_endpoint(self._base_url)
 
     def _validate_output_dims_config(self) -> None:
-        """Reject invalid output_dims only when official model semantics apply."""
-        output_dims = validate_positive_output_dims(
-            self._output_dims, model=self._model
+        """Validate output_dims config and reject missing dims for client-side truncation.
+
+        Only enforces official model semantics (matryoshka range, supported dims)
+        when the model is known and the endpoint is not a custom/trusted endpoint.
+        """
+        output_dims = validate_runtime_output_dims_config(
+            self._output_dims,
+            self._client_side_truncation,
+            model=self._model,
         )
         if output_dims is None:
-            if self._client_side_truncation:
-                raise EmbeddingConfigurationError(
-                    f"Model '{self._model}' uses client_side_truncation=True but "
-                    "output_dims is not set. output_dims must be a positive integer."
-                )
             return
 
         if self._trust_runtime_output_dims() or self._model not in self._model_config:
@@ -601,18 +602,12 @@ class OpenAIEmbeddingProvider:
         validation turns invalid configs into EmbeddingConfigurationError
         before request dispatch.
         """
-        output_dims = validate_positive_output_dims(
-            self._output_dims, model=self._model
+        return validate_runtime_output_dims_config(
+            self._output_dims,
+            self._client_side_truncation,
+            model=self._model,
+            context="runtime truncation",
         )
-        if output_dims is None:
-            if self._client_side_truncation:
-                raise EmbeddingConfigurationError(
-                    f"Model '{self._model}' uses client_side_truncation=True but "
-                    "output_dims is not set. runtime truncation requires "
-                    "a positive integer output_dims explicitly."
-                )
-            return None
-        return output_dims
 
     def _validate_client_side_truncation_runtime_config(
         self, raw_dim: int, output_dims: int

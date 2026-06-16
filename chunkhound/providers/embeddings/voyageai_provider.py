@@ -29,6 +29,7 @@ from .shared_utils import (
     get_usage_stats_dict,
     validate_embedding_dims,
     validate_positive_output_dims,
+    validate_runtime_output_dims_config,
     validate_text_input,
 )
 
@@ -500,22 +501,12 @@ class VoyageAIEmbeddingProvider:
             return await self._embed_single_batch_locked(texts)
 
     def _validate_runtime_output_dims_config(self) -> int | None:
-        """Validate runtime truncation config before dispatching a request.
-
-        This provider intentionally trusts custom Voyage-compatible endpoints,
-        but missing or invalid local truncation settings are our bug to catch
-        before the request leaves the process.
-        """
-        output_dims = validate_positive_output_dims(self._output_dims, model=self._model)
-        if output_dims is None:
-            if self._client_side_truncation:
-                raise EmbeddingConfigurationError(
-                    f"Model '{self._model}' uses client_side_truncation=True but "
-                    "output_dims is not set. Set output_dims to the desired "
-                    "truncated dimension before calling embed()."
-                )
-            return None
-        return output_dims
+        return validate_runtime_output_dims_config(
+            self._output_dims,
+            self._client_side_truncation,
+            model=self._model,
+            context="client-side truncation",
+        )
 
     async def _embed_single_batch_locked(self, texts: list[str]) -> list[list[float]]:
         """Inner embed implementation, called while holding the semaphore."""

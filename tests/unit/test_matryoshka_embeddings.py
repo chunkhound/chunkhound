@@ -1100,6 +1100,67 @@ class TestSharedMatryoshkaUtils:
         assert result is None
 
 
+class TestValidateRuntimeOutputDimsConfig:
+    """Tests for validate_runtime_output_dims_config."""
+
+    def test_none_without_client_truncation_returns_none(self):
+        """Unset output_dims is valid when server-side truncation is disabled."""
+        from chunkhound.providers.embeddings.shared_utils import (
+            validate_runtime_output_dims_config,
+        )
+
+        assert validate_runtime_output_dims_config(None, False) is None
+
+    def test_positive_int_returns_value(self):
+        """A valid positive output_dims passes through unchanged."""
+        from chunkhound.providers.embeddings.shared_utils import (
+            validate_runtime_output_dims_config,
+        )
+
+        assert validate_runtime_output_dims_config(256, False) == 256
+
+    def test_positive_int_with_client_truncation_returns_value(self):
+        """Valid output_dims with client-side truncation passes through."""
+        from chunkhound.providers.embeddings.shared_utils import (
+            validate_runtime_output_dims_config,
+        )
+
+        assert validate_runtime_output_dims_config(256, True) == 256
+
+    @pytest.mark.parametrize("output_dims", [0, -1, True, "256"])
+    def test_invalid_values_raise_configuration_error(self, output_dims):
+        """Non-positive or non-int output_dims fail explicitly."""
+        from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
+        from chunkhound.providers.embeddings.shared_utils import (
+            validate_runtime_output_dims_config,
+        )
+
+        with pytest.raises(EmbeddingConfigurationError, match="positive integer"):
+            validate_runtime_output_dims_config(output_dims, False)
+
+    def test_client_side_truncation_requires_output_dims(self):
+        """Client-side truncation without output_dims must fail."""
+        from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
+        from chunkhound.providers.embeddings.shared_utils import (
+            validate_runtime_output_dims_config,
+        )
+
+        with pytest.raises(EmbeddingConfigurationError, match="output_dims is not set"):
+            validate_runtime_output_dims_config(None, True, model="test-model")
+
+    def test_context_appears_in_error_message(self):
+        """The context parameter is included in the error message."""
+        from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
+        from chunkhound.providers.embeddings.shared_utils import (
+            validate_runtime_output_dims_config,
+        )
+
+        with pytest.raises(EmbeddingConfigurationError, match="Set output_dims before using runtime truncation"):
+            validate_runtime_output_dims_config(
+                None, True, model="test-model", context="runtime truncation"
+            )
+
+
 class TestVoyageAIClientSideTruncation:
     """Tests for VoyageAI client_side_truncation support."""
 
