@@ -14,6 +14,7 @@
 import json
 import os
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -1176,13 +1177,13 @@ class DuckDBProvider(SerialDatabaseProvider):
             # only rebuilds HNSW if the original had one — this prevents HNSW
             # from being wrongly created mid-pipeline between the batch CLI
             # bookends (drop_all → … → ensure_all).
-            had_hnsw_result = tgt_conn.execute("""
-                SELECT COUNT(*) FROM duckdb_indexes()
-                WHERE database_name = 'src'
-                  AND table_name LIKE 'embeddings_%'
-                  AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
-            """).fetchone()
-            had_hnsw = bool(had_hnsw_result and had_hnsw_result[0] > 0)
+            # Use _is_hnsw_index_definition (via the catalog-aware helper)
+            # instead of name-pattern matching to handle custom HNSW names.
+            had_hnsw = len(
+                self._executor_get_existing_vector_indexes_from_catalog(
+                    tgt_conn, catalog="src"
+                )
+            ) > 0
 
             tgt_conn.execute(
                 f"CREATE TABLE schema_version ({_SCHEMA_VERSION_TABLE_COLUMNS})"
@@ -1230,7 +1231,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             ).fetchall()
             dropped_tables = sorted(tname for (tname,) in all_src if tname not in known)
             if dropped_tables:
-                logger.warning(
+                msg = (
                     "DuckDB compaction dropped non-ChunkHound tables by design: "
                     f"{', '.join(dropped_tables[:5])}"
                     + (
@@ -1239,6 +1240,12 @@ class DuckDBProvider(SerialDatabaseProvider):
                         else ""
                     )
                 )
+                if os.environ.get("CHUNKHOUND_MCP_MODE") == "1":
+                    # Destructive operation — surface to stderr even in MCP
+                    # mode (loguru sinks are disabled by stdio.py)
+                    print(f"WARNING: {msg}", file=sys.stderr)
+                else:
+                    log_if_not_mcp("warning", msg)
 
             tgt_conn.execute("DETACH src")
 
