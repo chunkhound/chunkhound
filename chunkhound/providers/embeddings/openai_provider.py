@@ -20,6 +20,7 @@ from chunkhound.core.exceptions.core import ValidationError
 from chunkhound.core.exceptions.embedding import (
     EmbeddingConfigurationError,
     EmbeddingDimensionError,
+    EmbeddingProviderError,
 )
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.core.utils.openai_utils import (
@@ -1021,6 +1022,9 @@ class OpenAIEmbeddingProvider:
 
                 return cast(list[list[float]], embeddings)
 
+            except EmbeddingProviderError:
+                raise
+
             except Exception as rate_error:
                 if (
                     openai
@@ -1526,6 +1530,8 @@ class OpenAIEmbeddingProvider:
                         query, batch_documents, top_k=None
                     )
                     break  # Success - exit retry loop
+                except EmbeddingProviderError:
+                    raise
                 except Exception as e:
                     # Classify error as retryable or not
                     error_str = str(e).lower()
