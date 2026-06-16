@@ -37,6 +37,7 @@ from chunkhound.providers.database.duckdb.embedding_repository import (
     DuckDBEmbeddingRepository,
 )
 from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
@@ -506,22 +507,22 @@ class DuckDBProvider(SerialDatabaseProvider):
             if not skip_checkpoint and not self._connection_manager.is_memory_db:
                 # Force checkpoint before close to ensure durability
                 conn.execute("CHECKPOINT")
-                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.debug("Database checkpoint completed before disconnect")
+                log_if_not_mcp(
+                    "debug", "Database checkpoint completed before disconnect"
+                )
             else:
-                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.debug("Skipping checkpoint before disconnect (already done)")
+                log_if_not_mcp(
+                    "debug", "Skipping checkpoint before disconnect (already done)"
+                )
         except Exception as e:
-            if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                logger.error(f"Checkpoint failed during disconnect: {e}")
+            log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")
         finally:
             # Close connection
             conn.close()
             # Clear thread-local connection
             if hasattr(_executor_local, "connection"):
                 delattr(_executor_local, "connection")
-            if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                logger.info("DuckDB connection closed in executor thread")
+            log_if_not_mcp("info", "DuckDB connection closed in executor thread")
 
     def health_check(self) -> dict[str, Any]:
         """Perform health check and return status information - delegate to connection manager."""
@@ -1096,13 +1097,15 @@ class DuckDBProvider(SerialDatabaseProvider):
         threshold = self.config.fragmentation_threshold_pct if self.config else 30.0
         ratio = self._executor_measure_fragmentation(conn, state)
         if not self._fragmentation_exceeds_threshold(ratio, threshold):
-            logger.debug(
+            log_if_not_mcp(
+                "debug",
                 f"Fragmentation ratio={ratio:.2f} below threshold={threshold}% — "
-                "skipping auto-compaction"
+                "skipping auto-compaction",
             )
             return False
-        logger.info(
-            f"Fragmentation ratio={ratio:.2f} (threshold={threshold}%) — compacting"
+        log_if_not_mcp(
+            "info",
+            f"Fragmentation ratio={ratio:.2f} (threshold={threshold}%) — compacting",
         )
         self._executor_compact_database(conn, state)
         return True
@@ -1261,7 +1264,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         _t0: float,
     ) -> int:
         """Steps 4-8: atomic swap, reconnect, reseed, restore indexes, cleanup."""
-        # Let DuckDB release the OS file handle before renaming (Windows)
+        # Pre-sleep lets the OS release the file handle before the first
+        # rename attempt.  _atomic_replace has exponential-backoff retries,
+        # but the pre-sleep avoids entering the retry loop at all.
         if IS_WINDOWS:
             time.sleep(WINDOWS_FILE_HANDLE_DELAY)
         _atomic_replace(compacted_path, db_path)
@@ -1318,9 +1323,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             if original_size > 0
             else 0.0
         )
-        logger.info(
+        log_if_not_mcp(
+            "info",
             f"Compaction complete: {original_size:,} → {compacted_size:,} bytes "
-            f"({reduction:.1f}% reduction, {time.monotonic() - _t0:.1f}s)"
+            f"({reduction:.1f}% reduction, {time.monotonic() - _t0:.1f}s)",
         )
         return compacted_size
 
@@ -1351,7 +1357,9 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> None:
         """Restore original DB from backup after a compaction failure."""
         if not db_path or not backup_path:
-            logger.warning("Cannot restore: compaction paths not initialized")
+            log_if_not_mcp(
+                "warning", "Cannot restore: compaction paths not initialized"
+            )
             return
         self._close_live_compaction_connections()
         if backup_path.exists():
@@ -1410,16 +1418,17 @@ class DuckDBProvider(SerialDatabaseProvider):
                 _t0,
             )
         except Exception as e:
-            logger.error(f"Compaction failed: {e}")
+            log_if_not_mcp("error", f"Compaction failed: {e}")
             try:
                 self._compact_restore(
                     backup_path, compacted_path, db_path, state,
                     had_hnsw=had_hnsw,
                 )
             except Exception as restore_err:
-                logger.error(
+                log_if_not_mcp(
+                    "error",
                     f"Compaction failed AND restore failed: {restore_err}. "
-                    f"Backup at: {backup_path}"
+                    f"Backup at: {backup_path}",
                 )
             raise
         finally:
@@ -1757,20 +1766,19 @@ class DuckDBProvider(SerialDatabaseProvider):
         Actual physical compaction is handled separately via
         ``compact_database()`` / ``compact_if_needed()``.
         """
-        if os.environ.get("CHUNKHOUND_MCP_MODE"):
-            return
         metrics = self._metrics.get("chunks", {})
         rows = int(metrics.get("rows", 0))
         if rows == 0:
             return
-        logger.info(
+        log_if_not_mcp(
+            "info",
             "DuckDB chunks bulk metrics: "
             f"files={int(metrics.get('files', 0))} "
             f"rows={rows} "
             f"batches={int(metrics.get('batches', 0))} "
             f"temp_create_s={float(metrics.get('temp_create_s', 0.0)):.3f} "
             f"temp_insert_s={float(metrics.get('temp_insert_s', 0.0)):.3f} "
-            f"main_insert_s={float(metrics.get('main_insert_s', 0.0)):.3f}"
+            f"main_insert_s={float(metrics.get('main_insert_s', 0.0)):.3f}",
         )
 
     def _executor_migrate_legacy_embeddings_table(
