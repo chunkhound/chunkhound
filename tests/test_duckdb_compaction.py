@@ -4,6 +4,7 @@ Every test reuses the existing synthetic-vector infrastructure used elsewhere
 in the suite.
 """
 
+import io
 import os
 import pathlib
 import threading
@@ -12,6 +13,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+from loguru import logger
+
 import pytest
 
 duckdb = pytest.importorskip("duckdb")
@@ -19,7 +22,7 @@ duckdb = pytest.importorskip("duckdb")
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.models import Chunk, File
-from chunkhound.core.types.common import ChunkType, Language
+from chunkhound.core.types.common import ChunkType, FilePath, Language
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database import duckdb_provider as duckdb_provider_module
@@ -76,6 +79,29 @@ def _assert_db_integrity(db_path: Path | str) -> None:
         assert "chunks" in names, "Expected 'chunks' table in compacted DB"
     finally:
         conn.close()
+
+
+def _insert_minimal_chunks(provider: DuckDBProvider) -> None:
+    """Seed a provider with a small file + chunk pair for compaction tests."""
+    file_id = provider.insert_file(
+        File(
+            path=FilePath("seed.py"),
+            mtime=0.0,
+            size_bytes=10,
+            language=Language.PYTHON,
+        )
+    )
+    provider.insert_chunks_batch([
+        Chunk(
+            file_id=file_id,
+            chunk_type=ChunkType.FUNCTION,
+            symbol="seed_func",
+            code="def seed_func(): pass",
+            start_line=1,
+            end_line=2,
+            language=Language.PYTHON,
+        )
+    ])
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -1213,7 +1239,9 @@ class TestIndexingCoordinatorCompactionContract:
             async def compact_database_async(self) -> int:
                 raise NotImplementedError
 
-        result = await IndexingCoordinator(_Db(), tmp_path).compact_database_with_metrics()
+        result = await IndexingCoordinator(
+            _Db(), tmp_path
+        ).compact_database_with_metrics()
 
         assert result == {"status": "skipped", "reason": "No compaction support"}
 
@@ -1225,7 +1253,9 @@ class TestIndexingCoordinatorCompactionContract:
             async def compact_database_async(self) -> int:
                 raise RuntimeError("boom")
 
-        result = await IndexingCoordinator(_Db(), tmp_path).compact_database_with_metrics()
+        result = await IndexingCoordinator(
+            _Db(), tmp_path
+        ).compact_database_with_metrics()
 
         assert result == {"status": "error", "error": "boom"}
 
@@ -1792,6 +1822,147 @@ class TestAutoCompactionMaintenance:
         )
 
         assert compact_calls == ["compact"]
+
+    def test_mcp_mode_suppresses_compaction_logs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Compaction log messages must be suppressed in MCP mode.
+
+        MCP uses stdout for JSON-RPC — leaked log output breaks protocol.
+        """
+        monkeypatch.setenv("CHUNKHOUND_MCP_MODE", "1")
+        buf = io.StringIO()
+        sink_id = logger.add(buf, level="INFO")
+        provider = DuckDBProvider(
+            db_path=tmp_path / "mcp_compact.duckdb",
+            base_directory=tmp_path,
+        )
+        try:
+            provider.connect()
+            _insert_minimal_chunks(provider)
+            provider.compact_database()
+        finally:
+            provider.disconnect()
+            logger.remove(sink_id)
+
+        out = buf.getvalue()
+        assert "Compaction complete:" not in out, (
+            "MCP mode must suppress compaction log messages"
+        )
+        assert "Fragmentation ratio" not in out, (
+            "MCP mode must suppress fragmentation log messages"
+        )
+
+    def test_mcp_mode_zero_does_not_suppress_logs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CHUNKHOUND_MCP_MODE=0 must NOT suppress compaction logs."""
+        monkeypatch.setenv("CHUNKHOUND_MCP_MODE", "0")
+        buf = io.StringIO()
+        sink_id = logger.add(buf, level="INFO")
+        provider = DuckDBProvider(
+            db_path=tmp_path / "mcp0_compact.duckdb",
+            base_directory=tmp_path,
+        )
+        try:
+            provider.connect()
+            _insert_minimal_chunks(provider)
+            provider.compact_database()
+        finally:
+            provider.disconnect()
+            logger.remove(sink_id)
+
+        out = buf.getvalue()
+        assert "Compaction complete:" in out, (
+            "CHUNKHOUND_MCP_MODE=0 must not suppress compaction logs"
+        )
+
+    def test_mcp_mode_suppresses_compaction_failure_logs(
+        self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MCP mode must suppress compaction failure logs too."""
+        monkeypatch.setenv("CHUNKHOUND_MCP_MODE", "1")
+        buf = io.StringIO()
+        sink_id = logger.add(buf, level="WARNING")
+
+        def _fail_copy(*args, **kwargs):
+            raise RuntimeError("simulated copy failure")
+
+        monkeypatch.setattr(file_backed_db, "_compact_copy_data", _fail_copy)
+        _insert_minimal_chunks(file_backed_db)
+        try:
+            with pytest.raises(RuntimeError, match="simulated copy failure"):
+                file_backed_db.compact_database()
+        finally:
+            logger.remove(sink_id)
+
+        out = buf.getvalue()
+        assert "Compaction failed" not in out
+        assert "simulated copy failure" not in out
+
+    def test_mcp_mode_suppresses_restore_failure_logs(
+        self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MCP mode must suppress restore-failure logs after compaction errors."""
+        monkeypatch.setenv("CHUNKHOUND_MCP_MODE", "1")
+        buf = io.StringIO()
+        sink_id = logger.add(buf, level="WARNING")
+
+        def _fail_copy(*args, **kwargs):
+            raise RuntimeError("simulated copy failure")
+
+        def _fail_restore(*args, **kwargs):
+            raise RuntimeError("simulated restore failure")
+
+        monkeypatch.setattr(file_backed_db, "_compact_copy_data", _fail_copy)
+        monkeypatch.setattr(file_backed_db, "_compact_restore", _fail_restore)
+        _insert_minimal_chunks(file_backed_db)
+        try:
+            with pytest.raises(RuntimeError, match="simulated copy failure"):
+                file_backed_db.compact_database()
+        finally:
+            logger.remove(sink_id)
+
+        out = buf.getvalue()
+        assert "Compaction failed" not in out
+        assert "restore failed" not in out
+        assert "simulated restore failure" not in out
+
+    def test_mcp_mode_surfaces_dropped_tables_on_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dropped-tables warning must reach stderr in MCP mode.
+
+        This is a destructive, irreversible operation — operators need
+        visibility even when loguru sinks are disabled.
+        """
+        monkeypatch.setenv("CHUNKHOUND_MCP_MODE", "1")
+        provider = DuckDBProvider(
+            db_path=tmp_path / "drop_warn.duckdb",
+            base_directory=tmp_path,
+        )
+        provider.connect()
+        _insert_minimal_chunks(provider)
+        # Inject a non-ChunkHound table that compaction will drop
+        provider._connection_manager.connection.execute(
+            "CREATE TABLE custom_user_data (id INT, val TEXT)"
+        )
+        provider._connection_manager.connection.execute(
+            "INSERT INTO custom_user_data VALUES (1, 'hello')"
+        )
+
+        captured = io.StringIO()
+        monkeypatch.setattr("sys.stderr", captured)
+        try:
+            provider.compact_database()
+        finally:
+            provider.disconnect()
+
+        stderr_out = captured.getvalue()
+        assert "dropped non-ChunkHound tables" in stderr_out, (
+            "MCP mode must surface dropped-tables warning to stderr"
+        )
+        assert "custom_user_data" in stderr_out
 
     @pytest.mark.asyncio
     async def test_async_dispatch_layer_triggers_compact_if_needed(

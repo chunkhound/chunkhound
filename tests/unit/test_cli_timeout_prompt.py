@@ -3,6 +3,7 @@ import json
 import sys
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,6 +15,10 @@ async def test_timeout_prompt_adds_exclusions(
 ):
     # Mock coordinator that returns canned values (no actual indexing needed)
     coord = AsyncMock()
+    coord._db = SimpleNamespace(
+        drop_all_hnsw_indexes=lambda: None,
+        ensure_all_hnsw_indexes=lambda: None,
+    )
     coord.get_stats.return_value = {"files": 0, "chunks": 0, "embeddings": 0}
     coord.process_directory.return_value = {
         "status": "success",
@@ -22,7 +27,10 @@ async def test_timeout_prompt_adds_exclusions(
         "skipped": 0,
         "skipped_due_to_timeout": ["big.bin"],
     }
-    coord.compact_database_with_metrics.return_value = {"status": "skipped", "reason": "unsupported"}
+    coord.compact_database_with_metrics.return_value = {
+        "status": "skipped",
+        "reason": "unsupported",
+    }
 
     # Patch registry hooks used by run_command
     from chunkhound.api.cli.commands import run as run_mod
@@ -86,6 +94,10 @@ async def test_timeout_prompt_skipped_in_mcp_mode(
 ):
     """CHUNKHOUND_MCP_MODE=1 must prevent input() call and show info instead."""
     coord = AsyncMock()
+    coord._db = SimpleNamespace(
+        drop_all_hnsw_indexes=lambda: None,
+        ensure_all_hnsw_indexes=lambda: None,
+    )
     coord.get_stats.return_value = {"files": 0, "chunks": 0, "embeddings": 0}
     coord.process_directory.return_value = {
         "status": "success",
@@ -94,7 +106,10 @@ async def test_timeout_prompt_skipped_in_mcp_mode(
         "skipped": 0,
         "skipped_due_to_timeout": ["big.bin"],
     }
-    coord.compact_database_with_metrics.return_value = {"status": "skipped", "reason": "unsupported"}
+    coord.compact_database_with_metrics.return_value = {
+        "status": "skipped",
+        "reason": "unsupported",
+    }
 
     from chunkhound.api.cli.commands import run as run_mod
 

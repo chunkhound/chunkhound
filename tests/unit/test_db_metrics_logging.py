@@ -1,6 +1,7 @@
 import io
 from pathlib import Path
 
+import pytest
 from loguru import logger
 
 from chunkhound.core.models import Chunk, File
@@ -64,8 +65,9 @@ def test_duckdb_chunk_metrics_emitted(tmp_path: Path, monkeypatch):
     assert "rows=2" in out
 
 
-def test_compaction_logging(tmp_path: Path):
+def test_compaction_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Compaction logs contain size and reduction info (external observable)."""
+    monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
     buf = io.StringIO()
     sink_id = logger.add(buf, level="INFO")
 

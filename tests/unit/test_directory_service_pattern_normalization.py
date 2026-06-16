@@ -7,6 +7,7 @@ the coordinator.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -54,8 +55,15 @@ async def test_patterns_not_double_prefixed(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_process_directory_reports_discovery_phase_first(tmp_path: Path) -> None:
     coord = AsyncMock()
+    coord._db = SimpleNamespace(
+        drop_all_hnsw_indexes=lambda: None,
+        ensure_all_hnsw_indexes=lambda: None,
+    )
     coord.process_directory.return_value = {"status": "no_files"}
-    coord.compact_database_with_metrics.return_value = {"status": "skipped", "reason": "unsupported"}
+    coord.compact_database_with_metrics.return_value = {
+        "status": "skipped",
+        "reason": "unsupported",
+    }
     messages: list[str] = []
     svc = DirectoryIndexingService(
         indexing_coordinator=coord,
