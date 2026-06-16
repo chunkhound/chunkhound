@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
-from chunkhound.services.indexing_coordinator import _run_batch_compaction_boundary
+from chunkhound.services.indexing_coordinator import run_batch_compaction_boundary
 
 # Provider imports
 # Registry import for service layer
@@ -244,7 +244,7 @@ class Database:
 
     async def _run_batch_compaction_boundary(self) -> None:
         """Run one mandatory batch-compaction boundary."""
-        await _run_batch_compaction_boundary(self._indexing_coordinator)
+        await run_batch_compaction_boundary(self._indexing_coordinator)
 
     # =============================================================================
     # Search Methods - Delegate to SearchService

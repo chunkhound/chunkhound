@@ -9,7 +9,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
-from chunkhound.services.indexing_coordinator import _run_batch_compaction_boundary
+from chunkhound.services.indexing_coordinator import run_batch_compaction_boundary
 from chunkhound.utils.file_patterns import normalize_include_patterns
 
 
@@ -125,7 +125,7 @@ class DirectoryIndexingService:
 
     async def _run_batch_compaction(self, stats: IndexingStats) -> None:
         """Run one mandatory batch-compaction boundary."""
-        await _run_batch_compaction_boundary(self.indexing_coordinator, stats)
+        await run_batch_compaction_boundary(self.indexing_coordinator, stats)
 
     async def _drop_hnsw_indexes(self) -> None:
         """Drop HNSW indexes before bulk indexing."""

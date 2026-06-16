@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from chunkhound.services.directory_indexing_service import IndexingStats
 
 from loguru import logger
+
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from rich.progress import Progress, TaskID
 
 from chunkhound.core.detection import detect_language
@@ -163,7 +165,7 @@ def _calculate_worker_count(file_count: int, cpu_count: int) -> int:
         return min(cpu_count, MAX_WORKERS_LARGE_BATCH, file_count)
 
 
-async def _run_batch_compaction_boundary(
+async def run_batch_compaction_boundary(
     coordinator: "IndexingCoordinator",
     stats: "IndexingStats | None" = None,
 ) -> None:
@@ -174,7 +176,7 @@ async def _run_batch_compaction_boundary(
     RuntimeError on failure. Skips silently when the provider reports
     compaction as unsupported. Updates ``stats.db_compactions`` when provided.
     """
-    compaction = await coordinator.compact_database()
+    compaction = await coordinator.compact_database_with_metrics()
     status = compaction.get("status")
     if status == "success":
         if stats is not None:
@@ -1715,8 +1717,8 @@ class IndexingCoordinator(BaseService):
         """
         return await self._db.get_stats_async()
 
-    async def compact_database(self) -> dict[str, Any]:
-        """Compact the database file unconditionally.
+    async def compact_database_with_metrics(self) -> dict[str, Any]:
+        """Compact the database file unconditionally and return metrics.
 
         This is the batch-indexing contract used at fixed phase boundaries.
         Threshold-gated background maintenance belongs in the provider's
@@ -1739,7 +1741,7 @@ class IndexingCoordinator(BaseService):
         except NotImplementedError:
             return {"status": "skipped", "reason": "No compaction support"}
         except Exception as e:
-            logger.error(f"Database compaction failed: {e}")
+            log_if_not_mcp("error", f"Database compaction failed: {e}")
             return {"status": "error", "error": str(e)}
 
         reduction_pct = (
