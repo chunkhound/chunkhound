@@ -179,10 +179,33 @@ def _paths_from(results: list[dict[str, Any]]) -> list[str]:
     return sorted({r.get("file_path", "") for r in results})
 
 
-def _all_stored_paths(provider: DuckDBProvider | LanceDBProvider) -> list[str]:
-    """Get all stored file paths from the database (no guaranteed order)."""
+def _repo_python_paths(repo: Path) -> list[str]:
+    """Return repo Python file paths in stored-path format."""
+    return sorted(path.relative_to(repo).as_posix() for path in repo.rglob("*.py"))
+
+
+def _raw_stored_paths(provider: DuckDBProvider | LanceDBProvider) -> list[str]:
+    """Return raw file paths exactly as stored in the backing database."""
     rows = provider.execute_query("SELECT path FROM files")
-    return [r["path"] for r in rows]
+    return sorted(str(row["path"]) for row in rows if row.get("path"))
+
+
+def _assert_stored_paths_match(
+    provider: DuckDBProvider | LanceDBProvider, expected_paths: list[str]
+) -> None:
+    """Assert raw stored file paths match expectations exactly."""
+    stored_paths = _raw_stored_paths(provider)
+    assert stored_paths == sorted(expected_paths), (
+        f"Stored paths mismatch. Expected {sorted(expected_paths)}, got {stored_paths}"
+    )
+    for p in stored_paths:
+        assert "\\" not in p, f"Expected no backslash in stored path: {p!r}"
+        assert not p.startswith("/"), (
+            f"Expected relative stored path, got absolute: {p!r}"
+        )
+        assert ".." not in p.split("/"), (
+            f"Expected no directory traversal in stored path: {p!r}"
+        )
 
 
 def _verify_same_results(
@@ -233,11 +256,8 @@ def test_duckdb_path_format_contract(
         assert stats.get("total_chunks", 0) > 0, "Expected chunks to be created"
 
         # Phase 2: Verify stored paths are relative unix
-        stored_paths = _all_stored_paths(provider)
-        for p in stored_paths:
-            assert "\\" not in p, f"Expected no backslash: {p!r}"
-            assert not p.startswith("/"), f"Expected relative: {p!r}"
-            assert ".." not in p.split("/"), f"Expected no directory traversal: {p!r}"
+        expected_paths = _repo_python_paths(dummy_repo)
+        _assert_stored_paths_match(provider, expected_paths)
 
         # Phase 3: Regex search — verify paths
         regex_results = _search_regex(provider, "def")
@@ -289,9 +309,10 @@ def test_duckdb_portability_after_move(
         # Phase 2: Baseline queries
         baseline_regex = _search_regex(provider, "def")
         baseline_semantic = _search_semantic(provider, constant_query_vec)
+        baseline_stored_paths = _raw_stored_paths(provider)
         assert len(baseline_regex) > 0, "Expected regex results"
         assert len(baseline_semantic) > 0, "Expected semantic results"
-        baseline_list_paths = _all_stored_paths(provider)
+        expected_paths = _repo_python_paths(dummy_repo)
 
     finally:
         provider.disconnect()
@@ -326,12 +347,10 @@ def test_duckdb_portability_after_move(
         _index_all(coordinator2, new_repo)
 
         # Verify paths still correct after move
-        moved_list_paths = _all_stored_paths(provider2)
-        assert sorted(moved_list_paths) == sorted(baseline_list_paths), (
-            f"File paths changed after move: "
-            f"before={baseline_list_paths}, "
-            f"after={moved_list_paths}"
-        )
+        moved_expected_paths = _repo_python_paths(new_repo)
+        assert moved_expected_paths == expected_paths
+        _assert_stored_paths_match(provider2, moved_expected_paths)
+        assert _raw_stored_paths(provider2) == baseline_stored_paths
 
         # Phase 6: Run same queries — verify identical results
         moved_regex = _search_regex(provider2, "def")
@@ -414,11 +433,9 @@ def test_lancedb_path_format_contract(
         stats = _index_all(coordinator, dummy_repo)
         assert stats.get("files_processed", 0) > 0
 
-        # Verify stored paths via raw query
-        stored_paths = _all_stored_paths(provider)
-        for p in stored_paths:
-            assert "\\" not in p, f"Expected no backslash: {p!r}"
-            assert not p.startswith("/"), f"Expected relative: {p!r}"
+        # Verify provider-visible file records use portable stored paths.
+        expected_paths = _repo_python_paths(dummy_repo)
+        _assert_stored_paths_match(provider, expected_paths)
 
         # Regex search — path format
         regex_results = _search_regex(provider, "def")
@@ -546,12 +563,7 @@ def test_case_sensitivity_contract(
         _index_all(coordinator, repo)
 
         # The DB must reflect exactly what the host filesystem exposed.
-        stored_paths = _all_stored_paths(provider)
-        assert sorted(stored_paths) == fs_visible_paths
-
-        for p in stored_paths:
-            assert "\\" not in p, f"Backslash in path: {p}"
-            assert not p.startswith("/"), f"Absolute path: {p}"
+        _assert_stored_paths_match(provider, fs_visible_paths)
 
         results, _ = provider.search_regex(pattern="def", page_size=100, offset=0)
         assert sorted({r["file_path"] for r in results}) == fs_visible_paths
@@ -594,9 +606,10 @@ def test_unicode_path_contract(
         _index_all(coordinator, repo)
 
         # Verify unicode path is stored
-        stored_paths = _all_stored_paths(provider)
-        assert any("données" in p for p in stored_paths), (
-            f"Unicode path not found in stored paths: {stored_paths}"
+        expected_paths = _repo_python_paths(repo)
+        _assert_stored_paths_match(provider, expected_paths)
+        assert any("données" in p for p in expected_paths), (
+            f"Unicode path not found in repo paths: {expected_paths}"
         )
 
         # Verify search works with unicode files
@@ -646,8 +659,9 @@ def test_deeply_nested_path_contract(
         _index_all(coordinator, repo)
 
         # Verify deep path is stored correctly
-        stored_paths = _all_stored_paths(provider)
-        deep_paths = [p for p in stored_paths if "assistants" in p]
+        expected_paths = _repo_python_paths(repo)
+        _assert_stored_paths_match(provider, expected_paths)
+        deep_paths = [p for p in expected_paths if "assistants" in p]
         assert len(deep_paths) == 1
         assert deep_paths[0] == "src/lib/core/utils/helpers/assistants.py"
 
