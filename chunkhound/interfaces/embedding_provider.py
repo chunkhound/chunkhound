@@ -1,6 +1,6 @@
 """EmbeddingProvider protocol for ChunkHound - abstract interface for embedding implementations."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -49,7 +49,27 @@ class EmbeddingProvider(Protocol):
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
+        """Embedding dimensions (reflects output_dims when set, else native_dims)."""
+        ...
+
+    @property
+    def native_dims(self) -> int:
+        """Full/native embedding dimension from the model before any truncation."""
+        ...
+
+    @property
+    def supported_dimensions(self) -> Sequence[int]:
+        """Known valid output dimensions for this model. Empty means native-only or unknown."""
+        ...
+
+    @property
+    def output_dims(self) -> int | None:
+        """Active dimension override, or None to use native dims."""
+        ...
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """True: API returns full vector, client truncates + L2-normalizes locally."""
         ...
 
     @property

@@ -191,6 +191,7 @@ class VoyageAIEmbeddingProvider:
         ssl_verify: bool = True,
         rerank_ssl_verify: bool | None = None,
         dimensions: int | None = None,
+        client_side_truncation: bool = False,
     ):
         """Initialize VoyageAI embedding provider.
 
@@ -269,6 +270,7 @@ class VoyageAIEmbeddingProvider:
         self._dimensions = dimensions if (
             dimensions is not None and model in _variable_dim_models
         ) else None
+        self._client_side_truncation = client_side_truncation
         self._rerank_ssl_verify_enabled = (
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
         )
@@ -346,12 +348,35 @@ class VoyageAIEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
+        """Embedding dimensions (reflects output_dims when set, else native_dims)."""
         if self._dimensions is not None:
             return self._dimensions
         return get_dimensions_for_model(
             self._model, self._dimensions_map, default_dims=1024
         )
+
+    @property
+    def native_dims(self) -> int:
+        """Full/native embedding dimension from the model before any truncation."""
+        return get_dimensions_for_model(self._model, self._dimensions_map, default_dims=1024)
+
+    @property
+    def supported_dimensions(self) -> list[int]:
+        """Known valid output dimensions for this model."""
+        cfg = VOYAGE_MODEL_CONFIG.get(self._model)
+        if cfg is None:
+            return []
+        return list(cfg["dimensions"])
+
+    @property
+    def output_dims(self) -> int | None:
+        """Active dimension override, or None to use native dims."""
+        return self._dimensions
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """True: client truncates + L2-normalizes instead of API server-side."""
+        return self._client_side_truncation
 
     @property
     def distance(self) -> str:

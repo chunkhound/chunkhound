@@ -84,6 +84,7 @@ class EmbeddingProviderFactory:
         ssl_verify = config.get("ssl_verify", True)
         rerank_ssl_verify = config.get("rerank_ssl_verify")
         dimensions = config.get("dimensions")
+        client_side_truncation = config.get("client_side_truncation", False)
 
         # Azure OpenAI parameters
         api_version = config.get("api_version")
@@ -127,6 +128,7 @@ class EmbeddingProviderFactory:
                 azure_endpoint=azure_endpoint,
                 azure_deployment=azure_deployment,
                 dimensions=dimensions,
+                client_side_truncation=client_side_truncation,
             )
         except Exception as e:
             raise ValueError(f"Failed to create OpenAI provider: {e}") from e
@@ -156,6 +158,7 @@ class EmbeddingProviderFactory:
         ssl_verify = config.get("ssl_verify", True)
         rerank_ssl_verify = config.get("rerank_ssl_verify")
         dimensions = config.get("dimensions")
+        client_side_truncation = config.get("client_side_truncation", False)
 
         # Model should come from config, but handle None case safely
         if not model:
@@ -203,6 +206,8 @@ class EmbeddingProviderFactory:
                 kwargs["max_concurrent_batches"] = max_concurrent_batches
             if dimensions is not None:
                 kwargs["dimensions"] = dimensions
+            if client_side_truncation:
+                kwargs["client_side_truncation"] = True
 
             return VoyageAIEmbeddingProvider(**kwargs)
         except Exception as e:

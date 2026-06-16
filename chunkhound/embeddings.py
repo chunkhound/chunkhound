@@ -194,6 +194,7 @@ def create_openai_provider(
     azure_endpoint: str | None = None,
     azure_deployment: str | None = None,
     dimensions: int | None = None,
+    client_side_truncation: bool = False,
 ) -> "OpenAIEmbeddingProvider":
     """Create an OpenAI embedding provider with default settings.
 
@@ -237,4 +238,5 @@ def create_openai_provider(
         azure_endpoint=azure_endpoint,
         azure_deployment=azure_deployment,
         dimensions=dimensions,
+        client_side_truncation=client_side_truncation,
     )

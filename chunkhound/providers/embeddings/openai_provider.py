@@ -211,6 +211,7 @@ class OpenAIEmbeddingProvider:
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
         dimensions: int | None = None,
+        client_side_truncation: bool = False,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -266,6 +267,7 @@ class OpenAIEmbeddingProvider:
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
         )
         self._dimensions = dimensions
+        self._client_side_truncation = client_side_truncation
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -478,12 +480,43 @@ class OpenAIEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
+        """Embedding dimensions (reflects output_dims when set, else native_dims)."""
         if self._dimensions is not None:
             return self._dimensions
         if self._model in self._model_config:
             return self._model_config[self._model]["dims"]
         return 1536  # Default for most OpenAI models
+
+    @property
+    def native_dims(self) -> int:
+        """Full/native embedding dimension from the model before any truncation."""
+        if self._model in self._model_config:
+            return self._model_config[self._model]["dims"]
+        return 1536
+
+    @property
+    def supported_dimensions(self) -> list[int]:
+        """Known valid output dimensions for this model. Empty = native-only."""
+        cfg = self._model_config.get(self._model)
+        if cfg is None:
+            return []
+        matryoshka = cfg.get("matryoshka", False)
+        if not matryoshka:
+            return []
+        native = cfg["dims"]
+        min_dims = cfg.get("min_dims", 1)
+        # Return a representative set for known matryoshka models
+        return [d for d in [64, 128, 256, 512, 1024, native] if min_dims <= d <= native]
+
+    @property
+    def output_dims(self) -> int | None:
+        """Active dimension override, or None to use native dims."""
+        return self._dimensions
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """True: client truncates + L2-normalizes instead of API server-side."""
+        return self._client_side_truncation
 
     @property
     def distance(self) -> str:
@@ -725,6 +758,8 @@ class OpenAIEmbeddingProvider:
                     "input": texts,
                     "timeout": self._timeout,
                 }
+                if self._dimensions is not None and not self._client_side_truncation:
+                    embed_kwargs["dimensions"] = self._dimensions
                 response = await self._client.embeddings.create(**embed_kwargs)
 
                 # Extract embeddings from response, sorted by original input order
@@ -747,8 +782,12 @@ class OpenAIEmbeddingProvider:
                 if hasattr(response, "usage") and response.usage:
                     self._usage_stats["tokens_used"] += response.usage.total_tokens
 
-                logger.debug(f"Successfully generated {len(embeddings)} embeddings")
-                return cast(list[list[float]], embeddings)
+                result = cast(list[list[float]], embeddings)
+                if self._client_side_truncation and self._dimensions is not None:
+                    from chunkhound.providers.embeddings.shared_utils import apply_client_side_truncation
+                    result = apply_client_side_truncation(result, self._dimensions)
+                logger.debug(f"Successfully generated {len(result)} embeddings")
+                return result
 
             except Exception as rate_error:
                 if (

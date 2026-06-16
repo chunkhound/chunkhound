@@ -1,5 +1,6 @@
 """Shared utilities for embedding providers."""
 
+import math
 from typing import Any
 
 from chunkhound.core.utils.token_utils import LLM_CHARS_PER_TOKEN
@@ -60,3 +61,23 @@ def get_dimensions_for_model(
 ) -> int:
     """Get embedding dimensions for a model with fallback to default."""
     return dimensions_map.get(model, default_dims)
+
+
+def l2_normalize(vector: list[float]) -> list[float]:
+    """Normalize a vector to unit length (L2 norm = 1).
+
+    Required after client-side truncation to preserve cosine similarity semantics.
+    """
+    norm = math.sqrt(sum(x * x for x in vector))
+    if norm == 0.0:
+        return vector
+    return [x / norm for x in vector]
+
+
+def apply_client_side_truncation(embeddings: list[list[float]], output_dims: int) -> list[list[float]]:
+    """Truncate embeddings to output_dims and L2-normalize each vector.
+
+    Use when the provider returns full-size vectors and the caller wants
+    Matryoshka-style dimension reduction without a server-side API parameter.
+    """
+    return [l2_normalize(v[:output_dims]) for v in embeddings]

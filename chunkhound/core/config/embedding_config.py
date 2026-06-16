@@ -196,6 +196,16 @@ class EmbeddingConfig(BaseSettings):
         ),
     )
 
+    client_side_truncation: bool = Field(
+        default=False,
+        description=(
+            "When True, request full-size vectors from the API and truncate + L2-normalize "
+            "locally to the requested dimensions. Requires dimensions to be set. Useful for "
+            "providers that don't support server-side truncation. "
+            "Env: CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION"
+        ),
+    )
+
     @field_validator("rerank_batch_size")
     def validate_rerank_batch_size(cls, v: int | None) -> int | None:  # noqa: N805
         """Validate rerank batch size is positive."""
@@ -297,6 +307,13 @@ class EmbeddingConfig(BaseSettings):
 
         return self
 
+    @model_validator(mode="after")
+    def validate_client_side_truncation(self) -> Self:
+        """client_side_truncation requires dimensions to be set."""
+        if self.client_side_truncation and self.dimensions is None:
+            raise ValueError("client_side_truncation requires dimensions to be set")
+        return self
+
     def get_provider_config(self) -> dict[str, Any]:
         """
         Get provider-specific configuration dictionary.
@@ -343,6 +360,8 @@ class EmbeddingConfig(BaseSettings):
             base_config["max_concurrent_batches"] = self.max_concurrent_batches
         if self.dimensions is not None:
             base_config["dimensions"] = self.dimensions
+        if self.client_side_truncation:
+            base_config["client_side_truncation"] = True
 
         return base_config
 
