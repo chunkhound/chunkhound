@@ -1,8 +1,15 @@
 """EmbeddingProvider protocol for ChunkHound - abstract interface for embedding implementations."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+# Import and re-export exceptions for convenience
+from chunkhound.core.exceptions.embedding import (
+    EmbeddingConfigurationError,
+    EmbeddingDimensionError,
+    EmbeddingProviderError,
+)
 
 
 @dataclass
@@ -49,7 +56,27 @@ class EmbeddingProvider(Protocol):
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
+        """Actual output dimension (reflects matryoshka config if set)."""
+        ...
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension."""
+        ...
+
+    @property
+    def supported_dimensions(self) -> Sequence[int]:
+        """Known-valid output dimensions for this model."""
+        ...
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        ...
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
         ...
 
     @property
