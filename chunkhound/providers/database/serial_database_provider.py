@@ -697,7 +697,7 @@ class SerialDatabaseProvider(ABC):
         Falls back to should_optimize + compact_database for providers without
         an executor.
         """
-        if hasattr(self, "_executor"):
+        if self._executor is not None:
             return cast(bool, self._execute_in_db_thread_sync("compact_if_needed"))
         # Fallback for providers without executor
         try:
@@ -713,6 +713,6 @@ class SerialDatabaseProvider(ABC):
 
     async def compact_if_needed_async(self) -> bool:
         """Async variant of compact_if_needed."""
-        if hasattr(self, "_executor"):
+        if self._executor is not None:
             return cast(bool, await self._execute_in_db_thread("compact_if_needed"))
         return self.compact_if_needed()
