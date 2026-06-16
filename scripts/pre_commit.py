@@ -227,7 +227,7 @@ def _rewritten_files(
     return [file for file, digest in after.items() if digest != before.get(file)]
 
 
-def _run_ruff_direct(files: list[str]) -> int:
+def _run_ruff_lint_and_format(files: list[str]) -> int:
     """Run ruff lint and format checks directly, not via pre-commit.
 
     Exit 0 if all checks pass, 1 if any violations or formatting issues found.
@@ -273,7 +273,8 @@ def _add_diff_range_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--github-actions", action="store_true")
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser with all subcommands."""
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -291,6 +292,11 @@ def main() -> int:
     run_ruff = subparsers.add_parser("run-ruff")
     _add_diff_range_arguments(run_ruff)
 
+    return parser
+
+
+def main() -> int:
+    parser = _build_parser()
     args = parser.parse_args()
 
     try:
@@ -311,7 +317,7 @@ def main() -> int:
             if not files:
                 print("No changed Python files found.")
                 return 0
-            return _run_ruff_direct(files)
+            return _run_ruff_lint_and_format(files)
     except RuntimeError as error:
         print(str(error), file=sys.stderr)
         return 1
