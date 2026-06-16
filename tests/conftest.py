@@ -60,7 +60,10 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_heavy)
         if not native_watchman_ready and "requires_native_watchman" in item.keywords:
             item.add_marker(skip_native_watchman)
-        if skip_ruff_integration is not None and "requires_ruff_integration" in item.keywords:
+        if (
+            skip_ruff_integration is not None
+            and "requires_ruff_integration" in item.keywords
+        ):
             item.add_marker(skip_ruff_integration)
 
 
