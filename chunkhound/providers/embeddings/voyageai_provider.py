@@ -8,9 +8,12 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from chunkhound.core.config.voyageai_utils import is_official_voyageai_endpoint
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
+from chunkhound.core.utils.voyageai_utils import (
+    OFFICIAL_VOYAGEAI_BASE_V1,
+    is_official_voyageai_endpoint,
+)
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .shared_utils import (
@@ -315,6 +318,11 @@ class VoyageAIEmbeddingProvider:
         """Model name."""
         return self._model
 
+    @property
+    def base_url(self) -> str:
+        """Base URL for API requests."""
+        return self._base_url or OFFICIAL_VOYAGEAI_BASE_V1
+
     @staticmethod
     def _resolve_http_verify_setting(
         ssl_verify_enabled: bool, endpoint: str | None
@@ -363,6 +371,7 @@ class VoyageAIEmbeddingProvider:
             batch_size=self._batch_size,
             max_tokens=self._max_tokens,
             api_key=self._api_key,
+            base_url=self._base_url,
             timeout=self._timeout,
             retry_attempts=self._retry_attempts,
             retry_delay=self._retry_delay,

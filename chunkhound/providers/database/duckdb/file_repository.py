@@ -392,9 +392,4 @@ class DuckDBFileRepository:
             return {}
 
     def _maybe_checkpoint(self, force: bool = False) -> None:
-        """Perform checkpoint if needed - delegate to provider."""
-        if self._provider:
-            self._provider._maybe_checkpoint(force)
-        else:
-            # Fallback for tests - no checkpoint needed
-            pass
+        """No-op: DuckDB native auto-checkpoint replaces manual tracking."""

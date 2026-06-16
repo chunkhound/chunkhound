@@ -32,6 +32,11 @@ format:    uv run ruff format chunkhound
 index:     uv run chunkhound index [directory]
 mcp_stdio: uv run chunkhound mcp
 mcp_http:  uv run chunkhound mcp --transport http --port 5173
+
+# Git diff search
+git_search: uv run chunkhound search "<query>" --last-n <N>
+git_range:  uv run chunkhound search "<query>" --commit-range <range>
+git_hash:   uv run chunkhound search "<query>" --commit-hash <hash>
 ```
 
 ## VERSION_MANAGEMENT

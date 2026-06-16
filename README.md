@@ -77,6 +77,22 @@ uv tool install chunkhound
 chunkhound index
 ```
 
+3. Search changed code in recent commits
+```bash
+# Last N commits
+chunkhound search "authentication changes" --last-n 20
+
+# Changes introduced by that commit (diff against its parent; root commits use empty tree)
+chunkhound search "database migration" --commit-hash abc1234
+
+# Custom git range
+chunkhound search "API changes" --commit-range v2.0..HEAD
+
+# Deep research over recent changes
+chunkhound research "what changed in the auth module?" --last-n 50
+```
+> `--vector-source` controls scope: `diff` (default, changed code only), `both` (merges diff + DB), `db` (ignore diff).
+
 **For configuration, IDE setup, and advanced usage, see the [documentation](https://chunkhound.ai).**
 
 ## Why ChunkHound?

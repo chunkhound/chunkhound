@@ -1118,6 +1118,43 @@ def test_no_tool_definitions_list():
     )
 
 
+@pytest.mark.asyncio
+async def test_non_db_tools_do_not_trigger_provider_connect() -> None:
+    """daemon_status/websearch must not conflate MCP sessions with DB opens."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    server = StdioMCPServer(config=MagicMock())
+    server.services = SimpleNamespace(provider=SimpleNamespace(is_connected=False))
+    connect_provider = AsyncMock()
+    server._connect_provider = connect_provider
+
+    await server.ensure_tool_services("daemon_status")
+    await server.ensure_tool_services("websearch")
+
+    connect_provider.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_db_tools_still_trigger_provider_connect() -> None:
+    """DB-backed tools still require the authoritative provider instance."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    server = StdioMCPServer(config=MagicMock())
+    server.services = SimpleNamespace(provider=SimpleNamespace(is_connected=False))
+    connect_provider = AsyncMock()
+    server._connect_provider = connect_provider
+
+    await server.ensure_tool_services("search")
+
+    connect_provider.assert_awaited_once()
+
+
 def test_search_enum_restricted_without_embeddings():
     """Verify search type enum is restricted to regex when embeddings unavailable.
 

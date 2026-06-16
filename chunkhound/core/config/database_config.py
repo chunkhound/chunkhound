@@ -51,6 +51,17 @@ class DatabaseConfig(BaseModel):
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
     )
 
+    # Compaction / fragmentation management
+    fragmentation_threshold_pct: float | None = Field(
+        default=30.0,
+        ge=0.0,
+        description="Background/auto-compaction trigger: percentage overhead of "
+        "file size above the provider's estimated minimum live size. "
+        "30 = compact when the DB is ~30% larger than live data. "
+        "0 = compact whenever any overhead exists, None = never auto-compact. "
+        "Does not disable the fixed compaction boundaries in chunkhound index.",
+    )
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""
@@ -143,6 +154,13 @@ class DatabaseConfig(BaseModel):
             help="Maximum database size in GB before indexing is stopped",
         )
 
+        parser.add_argument(
+            "--fragmentation-threshold-pct",
+            type=float,
+            help="Compaction trigger: %% overhead above estimated live DB size "
+                 "(default: 30%%)",
+        )
+
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load database config from environment variables."""
@@ -167,6 +185,13 @@ class DatabaseConfig(BaseModel):
             except ValueError:
                 # Invalid value - silently ignore
                 pass
+
+        if threshold_pct := os.getenv("CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT"):
+            try:
+                config["fragmentation_threshold_pct"] = float(threshold_pct)
+            except ValueError:
+                pass
+
         return config
 
     @classmethod
@@ -181,6 +206,8 @@ class DatabaseConfig(BaseModel):
             overrides["provider"] = args.database_provider
         if hasattr(args, "max_disk_usage_gb") and args.max_disk_usage_gb is not None:
             overrides["max_disk_usage_mb"] = args.max_disk_usage_gb * 1024.0
+        if hasattr(args, "fragmentation_threshold_pct") and args.fragmentation_threshold_pct is not None:
+            overrides["fragmentation_threshold_pct"] = float(args.fragmentation_threshold_pct)
         return overrides
 
     def __repr__(self) -> str:
@@ -188,4 +215,6 @@ class DatabaseConfig(BaseModel):
         parts = [f"provider={self.provider}", f"path={self.path}"]
         if self.max_disk_usage_mb is not None:
             parts.append(f"max_disk_usage_mb={self.max_disk_usage_mb}")
+        if self.fragmentation_threshold_pct is not None:
+            parts.append(f"fragmentation_threshold_pct={self.fragmentation_threshold_pct}")
         return f"DatabaseConfig({', '.join(parts)})"

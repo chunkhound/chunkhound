@@ -14,6 +14,86 @@ ChunkHound is configured through a JSON file, environment variables, and CLI fla
 
 Create `.chunkhound.json` in your project root. Here is a full example showing all sections:
 
+### Global Defaults (cross-project configuration)
+
+To avoid copying the same settings into every project, place a global config in one of these locations (checked in order):
+
+- `~/.config/chunkhound/chunkhound.json`
+- `~/.config/chunkhound/.chunkhound.json`
+- `~/.chunkhound/chunkhound.json`
+- `~/.chunkhound/.chunkhound.json`
+- `~/chunkhound.json`
+- `~/.chunkhound.json`
+
+You can also point to an arbitrary file with the `CHUNKHOUND_GLOBAL_CONFIG_FILE` environment variable.
+
+Example global config (`~/.config/chunkhound/chunkhound.json`):
+
+```json
+{
+  "embedding": {
+    "provider": "voyageai",
+    "model": "voyage-3.5"
+  },
+  "llm": {
+    "provider": "anthropic"
+  },
+  "indexing": {
+    "exclude": ["**/node_modules/**", "**/.git/**", "**/dist/**"]
+  }
+}
+```
+
+Then in a specific project you only need a minimal `.chunkhound.json` for project-specific overrides (or nothing at all if the globals are sufficient):
+
+```json
+{
+  "embedding": {
+    "api_key": "sk-..."   // only the key differs per machine
+  }
+}
+```
+
+Global values are deep-merged; project files win for any keys they specify.
+
+Merging behavior:
+
+- **Nested objects** (`embedding`, `llm`, `research`, `database`, etc.): deep merge. You only need to specify the keys you want to change in a higher-priority file (local, explicit config, or CLI). Siblings from global (or lower layers) are preserved. This lets a project override just an `api_key`, switch `llm.model`, or change `research.algorithm` without losing other global settings.
+
+- **Lists** (`indexing.exclude`, `indexing.include`): the list supplied by the higher-priority source completely replaces any list from a lower layer (including global). ChunkHound's built-in safe defaults are still layered on top of your list in the *effective* excludes (see `get_effective_config_excludes()`), and `.gitignore` interaction is controlled by `exclude_mode`.
+
+Example — project overrides only the secret while inheriting provider + model from global (or switches providers entirely):
+
+```json
+{
+  "embedding": {
+    "api_key": "sk-..."
+  }
+}
+```
+
+or to use a completely different provider for this project:
+
+```json
+{
+  "embedding": {
+    "provider": "openai",
+    "model": "text-embedding-3-large",
+    "api_key": "sk-..."
+  }
+}
+```
+
+Example — project uses its own exclude list (replaces global's list at the raw config level):
+
+```json
+{
+  "indexing": {
+    "exclude": ["**/my-vendor/**", "**/generated/**"]
+  }
+}
+```
+
 ```json
 {
   "database": {
@@ -48,8 +128,11 @@ Settings are resolved in this order (highest priority first):
 1. **CLI arguments** -- flags passed directly on the command line
 2. **Config file** -- loaded via `--config` or `CHUNKHOUND_CONFIG_FILE`
 3. **Local `.chunkhound.json`** -- auto-detected in the target directory
-4. **Environment variables** -- `CHUNKHOUND_*` prefixed variables
-5. **Defaults** -- built-in fallback values
+4. **Global defaults** -- `CHUNKHOUND_GLOBAL_CONFIG_FILE` or auto-discovered in `~/.config/chunkhound/` (or `~/.chunkhound/`)
+5. **Environment variables** -- `CHUNKHOUND_*` prefixed variables
+6. **Defaults** -- built-in fallback values
+
+Global defaults let you maintain shared settings (e.g. embedding provider + API key, common exclude patterns, LLM roles) in a single file so you do not need to copy `.chunkhound.json` into every project. Any project-local `.chunkhound.json` (or explicit config/CLI) overrides values from the global layer. Nested objects (embedding, llm, research, database, ...) are deep-merged: specify only the keys you want to change and siblings from global survive. Lists such as `indexing.exclude` / `include` from a higher layer fully replace lower ones (built-in defaults are still applied on top; see Global Defaults above for details and examples).
 
 ## Embedding Providers
 
@@ -115,8 +198,13 @@ Fast analytical queries and efficient storage.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `max_disk_usage_mb` | `number` | `null` | Max DB size in MB before indexing stops (CLI flag uses GB) |
+| `fragmentation_threshold_pct` | `number` | `30` | Background/auto-compaction trigger: file-size overhead above the provider's estimated live DB size (%). 30 = compact when the DB is ~30% larger than live data. 0 = always, null = never. This does not disable the fixed `chunkhound index` compaction boundaries. CLI: `--fragmentation-threshold-pct`. |
 | `lancedb_index_type` | `string` | `null` | LanceDB vector index type: `auto`, `ivf_hnsw_sq`, or `ivf_rq` |
 | `lancedb_optimize_fragment_threshold` | `number` | `100` | Fragment count to trigger LanceDB compaction |
+
+DuckDB also compacts during `chunkhound index` at two fixed batch boundaries: once after chunking and before embedding generation, then again at the end of the indexing pass. Those boundary calls are unconditional, including `--no-embeddings` and noop re-index runs. If a batch compaction fails with `status: "error"`, the index run is aborted. Providers that report compaction as unsupported/`skipped` keep indexing normally. Sampled/background auto-compaction (triggered by fragmentation threshold during normal operations) does NOT fail the original operation — failures are logged and skipped.
+
+DuckDB compaction rebuilds a fresh canonical ChunkHound database file and swaps it into place atomically. This is intentionally **not** a generic DuckDB passthrough: only ChunkHound-owned canonical tables (`schema_version`, `files`, `chunks`, `embeddings_*`) are preserved. Any unknown or non-canonical tables are dropped during compaction by design.
 
 ## Indexing Options
 
@@ -413,6 +501,10 @@ Embedding and reranker config (`.chunkhound.json`):
 No `rerank_url` is needed — it is auto-derived from `base_url`.
 
 LLM config:
+
+> **Migration note:** Do not set `llm.provider` to `"ollama"`.
+> ChunkHound treats Ollama as an OpenAI-compatible endpoint, so use
+> `provider: "openai"` with the Ollama `base_url` and an explicit `model`.
 
 ```json
 {

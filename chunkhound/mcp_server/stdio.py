@@ -160,7 +160,7 @@ class StdioMCPServer(MCPServerBase):
             tool_name: str, arguments: dict[str, Any]
         ) -> list[types.TextContent]:
             """Universal tool handler that routes to the unified handler."""
-            services = await self.ensure_services()
+            services = await self.ensure_tool_services(tool_name)
 
             # Long-running tools (code_research, websearch) emit periodic log
             # notifications so that HTTP MCP clients don't drop the SSE channel

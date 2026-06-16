@@ -36,6 +36,12 @@ MAX_RESPONSE_TOKENS = 20000
 MIN_RESPONSE_TOKENS = 1000
 MAX_ALLOWED_TOKENS = 25000
 
+# Diff chunk cap: prevent OOM when commit_range spans thousands of changed files
+MAX_DIFF_CHUNKS = 500
+# Per-chunk char cap: JSON/HTML diffs are ~1:1 chars-to-tokens; 10k chars stays
+# safely under the 16384-token limit of the smallest supported embedding model.
+MAX_DIFF_CHUNK_CHARS = 10_000
+
 
 def _summarize_subprocess_stderr(stderr: bytes) -> str:
     """Return the user-visible stderr summary for MCP subprocess failures."""
@@ -91,6 +97,16 @@ class Tool:
 
 # Tool registry - populated by @register_tool decorator
 TOOL_REGISTRY: dict[str, Tool] = {}
+
+
+def tool_requires_services(tool_name: str) -> bool:
+    """Return True when the tool implementation needs DB services.
+
+    This is the daemon/session boundary: non-DB tools must not trigger
+    provider reconnect/open work just because an MCP client called them.
+    """
+    tool = TOOL_REGISTRY[tool_name]
+    return "services" in inspect.signature(tool.implementation).parameters
 
 
 def _python_type_to_json_schema_type(type_hint: Any) -> dict[str, Any]:
@@ -332,6 +348,7 @@ class SearchResponse(TypedDict):
 
     results: list[dict[str, Any]]
     pagination: PaginationInfo
+    warnings: NotRequired[list[str]]
 
 
 def estimate_tokens(text: str) -> int:
@@ -433,7 +450,14 @@ DECISION GUIDE:
 - Concept or behavior → semantic
 - Cross-file architecture question → call code_research first
 
-OUTPUT: Markdown blocks — file path, line range, symbol name, code block, pagination footer."""
+GIT HISTORY SEARCH (type='semantic' only):
+- commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
+- commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
+- last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
+- vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
+Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
+
+OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
 SEARCH_DESCRIPTION_NO_RESEARCH = """Pinpoint specific code locations — find exact symbols, patterns, or concepts in the indexed codebase. Returns structurally-parsed code chunks (functions, classes) — large definitions may span multiple results.
 
@@ -466,6 +490,13 @@ EXAMPLES:
 
 SCOPE: Use the path parameter to restrict analysis to a subdirectory for faster, focused results.
 
+GIT HISTORY RESEARCH:
+- commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
+- commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
+- last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
+- vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
+Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
+
 One call replaces 5-10 manual searches. Call it liberally — understanding first, coding second."""
 
 DAEMON_STATUS_DESCRIPTION = """Report daemon startup, scan, and realtime
@@ -487,6 +518,112 @@ WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, bu
 # =============================================================================
 
 
+def _resolve_commit_range(
+    commit_range: str | None,
+    commit_hash: str | None,
+    last_n_commits: int | None,
+) -> str | None:
+    """Resolve mutually-exclusive commit inputs to a single git revision range."""
+    if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
+        raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
+    if commit_hash is not None:
+        return f"{commit_hash}^..{commit_hash}"
+    if last_n_commits is not None:
+        return f"HEAD~{last_n_commits}..HEAD"
+    return commit_range
+
+
+_EMBED_TIMEOUT_SECONDS = 120  # same as provider-level default in .chunkhound.json
+
+
+async def _git_cwd_from_services(services: DatabaseServices) -> Path:
+    """Derive git repo root from the indexed DB path, not from process cwd.
+
+    In MCP / ``--db`` flows the process cwd may point to an unrelated directory.
+    Walking up from the DB file's location via ``git rev-parse --show-toplevel``
+    gives the correct repo root for the indexed project.  Falls back to
+    project-marker detection then cwd only when the git lookup fails.
+    """
+    try:
+        db_path = Path(services.provider.db_path)
+        start = db_path if db_path.is_dir() else db_path.parent
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(start), "rev-parse", "--show-toplevel",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        if proc.returncode == 0:
+            return Path(stdout.decode("utf-8", errors="replace").strip())
+    except Exception:
+        from loguru import logger as _log
+        _log.debug("git rev-parse failed from {}, falling back", start, exc_info=True)
+
+    # Fallback: project markers, then bare cwd
+    from chunkhound.utils.project_detection import find_project_root
+
+    try:
+        return find_project_root(None)
+    except SystemExit:
+        return Path.cwd()
+
+
+async def _inject_diff_service(
+    services: DatabaseServices,
+    effective_commit_range: str,
+    vector_source: str,
+    embedding_manager: Any,
+) -> tuple[DatabaseServices, str | None]:
+    """Build a DiffAwareSearchService and return it alongside a truncation warning.
+
+    Returns (updated_services, warning_str | None).  The warning is non-None when
+    the diff produced more than MAX_DIFF_CHUNKS chunks and results were capped —
+    callers must surface this to the MCP client so the LLM knows results are partial.
+    """
+    if vector_source not in ("diff", "db", "both"):
+        raise ValueError(f"Invalid vector_source: {vector_source!r}. Must be 'diff', 'db', or 'both'.")
+
+    # Local imports avoid circular dependency: tools → git_diff → (nothing in tools)
+    from loguru import logger as _log
+
+    from chunkhound.core.git_diff import parse_diff_to_chunks, run_git_diff
+    from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
+
+    _cwd = await _git_cwd_from_services(services)
+    raw_diff = await run_git_diff(effective_commit_range, cwd=_cwd)
+    diff_chunks = parse_diff_to_chunks(raw_diff, max_chunk_chars=MAX_DIFF_CHUNK_CHARS)
+    truncation_warning: str | None = None
+    if len(diff_chunks) > MAX_DIFF_CHUNKS:
+        truncation_warning = (
+            f"Diff range produced {len(diff_chunks)} chunks; results capped at "
+            f"{MAX_DIFF_CHUNKS} to avoid OOM. Use a narrower commit range for complete coverage."
+        )
+        _log.warning(truncation_warning)
+        diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
+    diff_embeddings: list[list[float]] = []
+    if diff_chunks and embedding_manager is not None:
+        try:
+            emb_result = await asyncio.wait_for(
+                embedding_manager.embed_texts([c.code for c in diff_chunks]),
+                timeout=_EMBED_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Embedding {len(diff_chunks)} diff chunks timed out after "
+                f"{_EMBED_TIMEOUT_SECONDS}s. Use a smaller commit range or "
+                "set vector_source='db' to skip diff embedding."
+            )
+        diff_embeddings = emb_result.embeddings
+    diff_service = DiffAwareSearchService(
+        original=services.search_service,
+        diff_chunks=diff_chunks,
+        diff_embeddings=diff_embeddings,
+        vector_source=vector_source,
+        embedding_manager=embedding_manager,
+    )
+    return services._replace(search_service=diff_service), truncation_warning
+
+
 @register_tool(
     description=SEARCH_DESCRIPTION,
     requires_embeddings=False,
@@ -500,6 +637,10 @@ async def search_impl(
     path: str | None = None,
     page_size: int = 10,
     offset: int = 0,
+    commit_range: str | None = None,
+    commit_hash: str | None = None,
+    last_n_commits: int | None = None,
+    vector_source: str = "diff",
 ) -> SearchResponse:
     """Unified search dispatching to regex or semantic based on type.
 
@@ -511,6 +652,10 @@ async def search_impl(
         path: Optional relative subdirectory to restrict search scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         page_size: Number of results per page (1-100)
         offset: Starting offset for pagination
+        commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
+        commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
+        last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
+        vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
 
     Returns:
         Dict with 'results' and 'pagination' keys
@@ -528,6 +673,8 @@ async def search_impl(
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
 
+    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+
     if type == "semantic":
         # Validate embedding manager for semantic search
         if not embedding_manager or not embedding_manager.list_providers():
@@ -536,6 +683,12 @@ async def search_impl(
                 "Configure via .chunkhound.json or CHUNKHOUND_EMBEDDING__API_KEY. "
                 "Use type='regex' for pattern-based search without embeddings."
             )
+
+    truncation_warning: str | None = None
+    if effective_commit_range is not None and type == "semantic" and vector_source != "db":
+        services, truncation_warning = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
+
+    if type == "semantic":
 
         # Get default provider/model
         try:
@@ -566,9 +719,10 @@ async def search_impl(
     # Convert file paths to native platform format
     native_results = _convert_paths_to_native(results)
 
-    return cast(
-        SearchResponse, {"results": native_results, "pagination": pagination}
-    )
+    response: dict[str, Any] = {"results": native_results, "pagination": pagination}
+    if truncation_warning:
+        response["warnings"] = [truncation_warning]
+    return cast(SearchResponse, response)
 
 
 @register_tool(
@@ -598,6 +752,10 @@ async def deep_research_impl(
     progress: Any = None,
     path: str | None = None,
     config: Config | None = None,
+    commit_range: str | None = None,
+    commit_hash: str | None = None,
+    last_n_commits: int | None = None,
+    vector_source: str = "diff",
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -609,6 +767,10 @@ async def deep_research_impl(
         progress: Optional Rich Progress instance for terminal UI (None for MCP)
         path: Optional relative subdirectory to restrict analysis scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         config: Application configuration (optional, defaults to environment config)
+        commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
+        commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
+        last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
+        vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
 
     Returns:
         Dict with answer and metadata
@@ -640,6 +802,12 @@ async def deep_research_impl(
             "Configure a rerank_model in your embedding configuration."
         )
 
+    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+
+    truncation_warning: str | None = None
+    if effective_commit_range is not None and vector_source != "db":
+        services, truncation_warning = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
+
     # Create default config from environment if not provided
     if config is None:
         config = Config.from_environment()
@@ -656,7 +824,11 @@ async def deep_research_impl(
         path_filter=path,
     )
 
-    return await research_service.deep_research(query)
+    result = await research_service.deep_research(query)
+    if truncation_warning:
+        answer = result.get("answer", "")
+        result["answer"] = f"> **Note:** {truncation_warning}\n\n{answer}"
+    return result
 
 
 @register_tool(
@@ -857,6 +1029,7 @@ async def execute_tool(
             search_type = arguments.get("type", "regex")
             results_list = list(result.get("results", []))
             pagination = dict(result.get("pagination", {}))
+            diff_warnings: list[str] = result.get("warnings", [])
             md = format_search_results_markdown(results_list, pagination, search_type)
             # Keep at least 1 result; preserve original page_size so the footer's
             # total-page count stays calibrated to the requested page size.
@@ -884,6 +1057,9 @@ async def execute_tool(
                     max_content_chars = max(0, max_content_chars - excess_chars - 1)
                     result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
                     md = format_search_results_markdown([result_copy], pagination, search_type)
+            if diff_warnings:
+                warning_block = "\n".join(f"> **Warning:** {w}" for w in diff_warnings)
+                md = f"{warning_block}\n\n{md}"
             return md
 
     # String return types (e.g., websearch) pass through directly as markdown

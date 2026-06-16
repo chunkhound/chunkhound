@@ -15,7 +15,7 @@ from chunkhound.core.config.embedding_config import (
     RERANK_BASE_URL_REQUIRED,
     validate_rerank_configuration,
 )
-from chunkhound.core.config.openai_utils import is_azure_openai_endpoint
+from chunkhound.core.utils.openai_utils import is_azure_openai_endpoint
 from chunkhound.core.exceptions.core import ValidationError
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
@@ -386,7 +386,7 @@ class OpenAIEmbeddingProvider:
             return
 
         # Only require API key for official OpenAI API
-        from chunkhound.core.config.openai_utils import is_official_openai_endpoint
+        from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
 
         is_openai_official = is_official_openai_endpoint(self._base_url)
         if is_openai_official and not self._api_key:
@@ -560,7 +560,7 @@ class OpenAIEmbeddingProvider:
             return self._api_key is not None and self._api_version is not None
 
         # Import the utility function (following existing pattern)
-        from chunkhound.core.config.openai_utils import is_official_openai_endpoint
+        from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
 
         # Use the same logic as _ensure_client() and config validation
         if is_official_openai_endpoint(self._base_url):

@@ -32,9 +32,11 @@ from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.types.common import Language
 
 if TYPE_CHECKING:
+    from chunkhound.services.diff_aware_search_service import SearchServiceProtocol
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
-    from chunkhound.services.search_service import SearchService
+
+from chunkhound.services.indexing_coordinator import _run_batch_compaction_boundary
 
 # Provider imports
 # Registry import for service layer
@@ -65,7 +67,7 @@ class Database:
         embedding_manager: EmbeddingManager | None = None,
         config: DatabaseConfig | None = None,
         indexing_coordinator: "IndexingCoordinator | None" = None,
-        search_service: "SearchService | None" = None,
+        search_service: "SearchServiceProtocol | None" = None,
         embedding_service: "EmbeddingService | None" = None,
         provider: Any | None = None,
     ):
@@ -107,7 +109,8 @@ class Database:
             # WARNING: Auto-configuration may not set optimal batch sizes
             # MIGRATION: Use create_database_with_dependencies() instead
             logger.warning(
-                "Using legacy Database initialization - consider using create_database_with_dependencies()"
+                "Using legacy Database initialization - consider using "
+                "create_database_with_dependencies()"
             )
 
             # Auto-detect configuration if not provided
@@ -199,15 +202,49 @@ class Database:
     ) -> dict[str, Any]:
         """Process all supported files in a directory.
 
-        Delegates to IndexingCoordinator for actual processing.
+        Legacy callers must observe the same chunk → compact → embed → compact
+        phase contract as the shared directory indexing service. We only enter
+        the first compaction boundary after the chunking phase completes
+        successfully.
         """
         if patterns is None:
             # Use centralized file patterns from Language enum
             patterns = Language.get_file_patterns()
 
-        return await self._indexing_coordinator.process_directory(
+        result = await self._indexing_coordinator.process_directory(
             directory, patterns, exclude_patterns
         )
+        if not self._should_run_batch_compaction(result):
+            return result
+
+        await self._run_batch_compaction_boundary()
+        await self._generate_missing_embeddings(exclude_patterns)
+        await self._run_batch_compaction_boundary()
+        return result
+
+    @staticmethod
+    def _should_run_batch_compaction(result: dict[str, Any]) -> bool:
+        """Return True only when the chunking phase reached the compaction boundary."""
+        return result.get("status") in {"success", "complete"}
+
+    async def _generate_missing_embeddings(
+        self, exclude_patterns: list[str] | None
+    ) -> dict[str, Any]:
+        """Run the legacy embedding phase between the fixed compaction boundaries."""
+        generator = getattr(
+            self._embedding_service, "generate_missing_embeddings", None
+        )
+        if not callable(generator):
+            return {
+                "status": "error",
+                "error": "No embedding generation service configured",
+                "generated": 0,
+            }
+        return await generator(exclude_patterns=exclude_patterns)
+
+    async def _run_batch_compaction_boundary(self) -> None:
+        """Run one mandatory batch-compaction boundary."""
+        await _run_batch_compaction_boundary(self._indexing_coordinator)
 
     # =============================================================================
     # Search Methods - Delegate to SearchService
