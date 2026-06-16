@@ -11,7 +11,7 @@ Verifies that ChunkHound stores portable DB contents:
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import pytest
@@ -166,8 +166,6 @@ def _assert_native_format(results: list[dict[str, Any]]) -> None:
             f"Expected relative native path, got absolute: {native!r}"
         )
         # Must not raise — PurePath(fp) parses on all platforms
-        from pathlib import PurePosixPath, PureWindowsPath
-
         PurePosixPath(fp)  # forward-slash parse must succeed
         PureWindowsPath(fp)  # Windows parse must not raise
         # On Windows, Path(fp) must not produce a drive-absolute path
@@ -182,8 +180,8 @@ def _paths_from(results: list[dict[str, Any]]) -> list[str]:
 
 
 def _all_stored_paths(provider: DuckDBProvider | LanceDBProvider) -> list[str]:
-    """Get all stored file paths from the database."""
-    rows = provider.execute_query("SELECT path FROM files ORDER BY path")
+    """Get all stored file paths from the database (no guaranteed order)."""
+    rows = provider.execute_query("SELECT path FROM files")
     return [r["path"] for r in rows]
 
 
@@ -329,7 +327,7 @@ def test_duckdb_portability_after_move(
 
         # Verify paths still correct after move
         moved_list_paths = _all_stored_paths(provider2)
-        assert moved_list_paths == baseline_list_paths, (
+        assert sorted(moved_list_paths) == sorted(baseline_list_paths), (
             f"File paths changed after move: "
             f"before={baseline_list_paths}, "
             f"after={moved_list_paths}"
@@ -549,7 +547,7 @@ def test_case_sensitivity_contract(
 
         # The DB must reflect exactly what the host filesystem exposed.
         stored_paths = _all_stored_paths(provider)
-        assert stored_paths == fs_visible_paths
+        assert sorted(stored_paths) == fs_visible_paths
 
         for p in stored_paths:
             assert "\\" not in p, f"Backslash in path: {p}"
