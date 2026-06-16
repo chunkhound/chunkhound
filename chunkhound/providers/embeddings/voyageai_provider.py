@@ -294,16 +294,20 @@ class VoyageAIEmbeddingProvider:
         # Known official models keep strict whitelist validation. Unknown/custom
         # models accept any positive output_dims and validate against real runtime
         # responses instead of the temporary 1024 introspection fallback.
-        if output_dims is not None:
-            validate_positive_output_dims(output_dims, model=model)
-            if self._is_known_model:
-                default_dim = model_config.get("default_dimension", 1024)
-                supported = model_config.get("dimensions", [default_dim])
-                if output_dims not in supported:
-                    raise EmbeddingConfigurationError(
-                        f"output_dims {output_dims} not in supported dimensions "
-                        f"{supported} for model {model}"
-                    )
+        output_dims = validate_runtime_output_dims_config(
+            output_dims,
+            client_side_truncation,
+            model=model,
+            context="client-side truncation",
+        )
+        if output_dims is not None and self._is_known_model:
+            default_dim = model_config.get("default_dimension", 1024)
+            supported = model_config.get("dimensions", [default_dim])
+            if output_dims not in supported:
+                raise EmbeddingConfigurationError(
+                    f"output_dims {output_dims} not in supported dimensions "
+                    f"{supported} for model {model}"
+                )
         self._output_dims = output_dims
         self._client_side_truncation = client_side_truncation
 

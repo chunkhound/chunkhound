@@ -1197,6 +1197,23 @@ class TestVoyageAIClientSideTruncation:
         p = VoyageAIEmbeddingProvider(api_key="test-key", model="voyage-2")
         assert p.client_side_truncation is False
 
+    def test_client_side_truncation_requires_output_dims_at_init(self):
+        """VoyageAI direct construction must fail fast without output_dims."""
+        from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
+        from chunkhound.providers.embeddings.voyageai_provider import (
+            VoyageAIEmbeddingProvider,
+        )
+
+        with pytest.raises(
+            EmbeddingConfigurationError,
+            match="output_dims is not set",
+        ):
+            VoyageAIEmbeddingProvider(
+                api_key="test-key",
+                model="voyage-2",
+                client_side_truncation=True,
+            )
+
     def test_server_side_truncation_with_output_dims(self):
         """VoyageAI with output_dims and no client_side_truncation uses server-side."""
         from chunkhound.providers.embeddings.voyageai_provider import (
