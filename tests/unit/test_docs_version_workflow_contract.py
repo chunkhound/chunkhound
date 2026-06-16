@@ -563,7 +563,7 @@ class TestDocsVersionWorkflowContract:
         assert triage_step["with"]["results-name"] == expected_results_name
         assert triage_step["with"]["results-path"] == "test-results.xml"
         assert triage_step["with"]["check-flaky-annotations"] == (
-            "${{ failure() && steps.tests.outcome == 'failure' }}"
+            "${{ steps.tests.outcome == 'failure' }}"
         )
         assert test_index < triage_index
 
