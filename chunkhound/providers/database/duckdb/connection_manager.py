@@ -32,6 +32,7 @@ warnings.filterwarnings(
 import duckdb
 from loguru import logger
 
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.utils.windows_constants import _unlink_compacted
 
 
@@ -329,24 +330,16 @@ class DuckDBConnectionManager:
                 if not skip_checkpoint and not self.is_memory_db:
                     # Force checkpoint before close to ensure durability
                     self.connection.execute("CHECKPOINT")
-                    # Only log in non-MCP mode to avoid JSON-RPC interference
-                    if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                        logger.debug("Database checkpoint completed before disconnect")
+                    log_if_not_mcp("debug", "Database checkpoint completed before disconnect")
                 else:
-                    if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                        logger.debug(
-                            "Skipping checkpoint before disconnect (already done)"
-                        )
+                    log_if_not_mcp("debug", "Skipping checkpoint before disconnect (already done)")
             except Exception as e:
-                # Only log errors in non-MCP mode
-                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.error(f"Checkpoint failed during disconnect: {e}")
+                log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")
                 # Continue with close - don't block shutdown
             finally:
                 self.connection.close()
                 self.connection = None
-                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.info("DuckDB connection closed")
+                log_if_not_mcp("info", "DuckDB connection closed")
 
     def _load_extensions(self) -> None:
         """Load required DuckDB extensions with macOS x86 crash prevention."""
