@@ -99,7 +99,11 @@ class DirectoryIndexingService:
             # Update stats from processing result
             self._update_stats_from_process_result(stats, process_result)
 
-            await self._run_batch_compaction(stats)
+            # Only compact when actual work was done — avoids a costly
+            # no-op compaction on the MCP initial scan path where all
+            # files are already indexed and unchanged.
+            if stats.files_processed > 0 or stats.chunks_created > 0:
+                await self._run_batch_compaction(stats)
 
             # Embedding generation (extracted from run.py:85-88, 287-312)
             if not no_embeddings:
@@ -107,7 +111,15 @@ class DirectoryIndexingService:
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 stats.embeddings_generated = embed_result.get("generated", 0)
 
-            await self._run_batch_compaction(stats)
+            # Second compaction boundary: needed when embeddings were
+            # generated, or when files were processed (but the first
+            # compaction may have been skipped).
+            if (
+                stats.files_processed > 0
+                or stats.chunks_created > 0
+                or stats.embeddings_generated > 0
+            ):
+                await self._run_batch_compaction(stats)
 
             # === Rebuild HNSW indexes as final step ===
             # Must be last: compaction produces a clean DB file, and HNSW

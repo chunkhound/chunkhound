@@ -1069,10 +1069,15 @@ class TestIndexFlowCompaction:
         assert stats.db_compactions == 2
 
     @pytest.mark.asyncio
-    async def test_noop_index_run_still_invokes_both_compaction_boundaries(
+    async def test_noop_reindex_skips_batch_compaction(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Noop re-index still invokes both fixed compaction boundaries."""
+        """A noop re-index (all files unchanged) must NOT trigger batch compaction.
+
+        Prevents the MCP server's initial scan on an already-indexed repo
+        from performing a costly no-op compaction that exceeds test wait
+        windows on Windows.
+        """
         cfg = Config(
             database={
                 "path": str(tmp_path / "index_test.duckdb"),
@@ -1082,39 +1087,42 @@ class TestIndexFlowCompaction:
         cfg.target_dir = tmp_path
 
         _, coordinator, config = self._make_coordinator(tmp_path, cfg)
-        compact_database_with_metrics = AsyncMock(
-            side_effect=[
-                {
-                    "status": "success",
-                    "size_before": 10,
-                    "size_after": 9,
-                    "reduction_pct": 10.0,
-                },
-                {
-                    "status": "success",
-                    "size_before": 9,
-                    "size_after": 9,
-                    "reduction_pct": 0.0,
-                },
-                {"status": "skipped", "reason": "unsupported"},
-                {"status": "skipped", "reason": "unsupported"},
-            ]
-        )
+        compact_calls: list[int] = []
+
+        async def tracked_compact() -> dict[str, Any]:
+            compact_calls.append(1)
+            return {
+                "status": "success",
+                "size_before": 10,
+                "size_after": 9,
+                "reduction_pct": 10.0,
+            }
+
         monkeypatch.setattr(
             coordinator,
             "compact_database_with_metrics",
-            compact_database_with_metrics,
+            tracked_compact,
         )
 
         test_file = tmp_path / "mod.py"
         test_file.write_text("def hello(): pass\n")
 
         svc = DirectoryIndexingService(coordinator, config)
-        await svc.process_directory(tmp_path, no_embeddings=False)
-        stats2 = await svc.process_directory(tmp_path, no_embeddings=False)
 
-        assert compact_database_with_metrics.await_count == 4
+        # First index: new file → compaction runs at both boundaries
+        stats1 = await svc.process_directory(tmp_path, no_embeddings=False)
+        assert stats1.files_processed >= 1
+        assert stats1.db_compactions == 2
+        assert len(compact_calls) == 2
+
+        # Second index: no changes → compaction skipped entirely
+        compact_calls.clear()
+        stats2 = await svc.process_directory(tmp_path, no_embeddings=False)
+        assert stats2.files_processed == 0
+        assert stats2.chunks_created == 0
+        assert stats2.embeddings_generated == 0
         assert stats2.db_compactions == 0
+        assert len(compact_calls) == 0
 
     @pytest.mark.asyncio
     async def test_unsupported_batch_compaction_is_skipped_not_fatal(
