@@ -131,6 +131,12 @@ class TestOpenAIProviderMatryoshka:
         )
         assert provider.supported_dimensions == [1536]
 
+    def test_unknown_model_supported_dimensions_empty_until_discovery(self):
+        """Unknown models must not fabricate supported dimensions pre-discovery."""
+        provider = TestOpenAIProviderRuntimeBehavior._unknown_model_provider()
+
+        assert provider.supported_dimensions == []
+
     def test_output_dims_changes_dims_property(self):
         """Setting output_dims changes dims property."""
         from chunkhound.providers.embeddings.openai_provider import (
