@@ -725,8 +725,6 @@ class OpenAIEmbeddingProvider:
                     "input": texts,
                     "timeout": self._timeout,
                 }
-                if self._dimensions is not None and self._model != "text-embedding-ada-002":
-                    embed_kwargs["dimensions"] = self._dimensions
                 response = await self._client.embeddings.create(**embed_kwargs)
 
                 # Extract embeddings from response, sorted by original input order
