@@ -1128,15 +1128,16 @@ class DuckDBProvider(SerialDatabaseProvider):
         conn.execute("CHECKPOINT")
         original_size = os.path.getsize(db_path)
 
-        conn.close()
-        if hasattr(_executor_local, "connection"):
-            delattr(_executor_local, "connection")
-        if self._connection_manager.connection is not None:
-            self._connection_manager.connection.close()
-            self._connection_manager.connection = None
+        self._close_live_compaction_connections()
 
         backup_path.unlink(missing_ok=True)
         _unlink_compacted(compacted_path)
+
+        # Pre-sleep lets the OS release the file handle before the first
+        # rename attempt.  _atomic_replace has exponential-backoff retries,
+        # but the pre-sleep avoids entering the retry loop at all.
+        if IS_WINDOWS:
+            time.sleep(WINDOWS_FILE_HANDLE_DELAY)
         _atomic_replace(db_path, backup_path)
         return original_size
 
@@ -1362,6 +1363,12 @@ class DuckDBProvider(SerialDatabaseProvider):
             )
             return
         self._close_live_compaction_connections()
+
+        # Pre-sleep lets the OS release the file handle before the first
+        # rename attempt.  _atomic_replace has exponential-backoff retries,
+        # but the pre-sleep avoids entering the retry loop at all.
+        if IS_WINDOWS:
+            time.sleep(WINDOWS_FILE_HANDLE_DELAY)
         if backup_path.exists():
             _atomic_replace(backup_path, db_path)
         _unlink_compacted(compacted_path)
