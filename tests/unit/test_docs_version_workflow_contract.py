@@ -148,6 +148,11 @@ def _job_steps(path: str, job_name: str) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], _job(path, job_name)["steps"])
 
 
+def _composite_action_steps(path: str) -> list[dict[str, Any]]:
+    action = _load_workflow(path)
+    return cast(list[dict[str, Any]], action["runs"]["steps"])
+
+
 def _find_step_index(
     steps: list[dict], description: str, predicate: Callable[[dict], bool]
 ) -> int:
@@ -673,3 +678,46 @@ class TestDocsVersionWorkflowContract:
         assert ruff_env["CHUNKHOUND_GITHUB_DEFAULT_BRANCH"] == (
             "${{ github.event.repository.default_branch || '' }}"
         )
+
+
+class TestTestTriageCompositeActionContract:
+    def test_declares_explicit_flaky_annotation_gate_input(self) -> None:
+        action = _load_workflow(".github/actions/test-triage/action.yml")
+        flaky_gate = cast(dict[str, Any], action["inputs"]["check-flaky-annotations"])
+
+        assert flaky_gate["required"] is False
+        assert flaky_gate["default"] == "false"
+
+    def test_uploads_results_before_optional_flaky_annotation_check(self) -> None:
+        steps = _composite_action_steps(".github/actions/test-triage/action.yml")
+        upload_index = _find_step_index(
+            steps,
+            "upload test results step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/upload-artifact@"
+            ),
+        )
+        flaky_index = _find_step_index(
+            steps,
+            "flaky annotation check step",
+            lambda step: step.get("name") == "Check flaky annotations",
+        )
+        upload_step = steps[upload_index]
+        flaky_step = steps[flaky_index]
+
+        assert upload_step["if"] == "always()"
+        assert upload_step["with"]["if-no-files-found"] == "ignore"
+        assert flaky_step["if"] == "${{ inputs.check-flaky-annotations == 'true' }}"
+        expected_command = (
+            "uv run python scripts/check_flaky_annotations.py "
+            "${{ inputs.results-path }}"
+        )
+        assert flaky_step["run"] == expected_command
+        assert upload_index < flaky_index
+
+    def test_does_not_reach_into_caller_step_state(self) -> None:
+        contents = (ROOT / ".github/actions/test-triage/action.yml").read_text(
+            encoding="utf-8"
+        )
+
+        assert "steps.tests.outcome" not in contents
