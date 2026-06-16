@@ -527,6 +527,44 @@ class TestDocsVersionWorkflowContract:
             for step in steps
         )
 
+    def test_ruff_integration_validation_job_contract(self) -> None:
+        job = _job(".github/workflows/ci.yml", "ruff-integration-validation")
+        steps = cast(list[dict[str, Any]], job["steps"])
+        test_index = _find_step_index(
+            steps,
+            "ruff integration pytest step",
+            lambda step: step.get("id") == "tests"
+            and step.get("name") == "Run real uv+ruff integration contract tests",
+        )
+        upload_index = _find_step_index(
+            steps,
+            "test results upload step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/upload-artifact@"
+            ),
+        )
+        flaky_index = _find_step_index(
+            steps,
+            "flaky annotations check step",
+            lambda step: step.get("run")
+            == "uv run python scripts/check_flaky_annotations.py test-results.xml",
+        )
+        test_step = steps[test_index]
+        upload_step = steps[upload_index]
+        flaky_step = steps[flaky_index]
+
+        assert job["runs-on"] == "ubuntu-latest"
+        assert job["timeout-minutes"] == 20
+        assert cast(dict[str, str], job["env"])["CHUNKHOUND_RUN_RUFF_INTEGRATION"] == "1"
+        assert test_step["run"] == (
+            "uv run pytest tests/unit/test_python_lint_tooling_contract.py "
+            "-m requires_ruff_integration -v --junit-xml=test-results.xml"
+        )
+        assert upload_step["with"]["name"] == "test-results-ruff-integration-validation"
+        assert upload_step["with"]["path"] == "test-results.xml"
+        assert flaky_step["if"] == "failure() && steps.tests.outcome == 'failure'"
+        assert test_index < upload_index < flaky_index
+
     def test_pages_artifact_job_contract(self) -> None:
         job = _job(".github/workflows/ci.yml", "pages-artifact")
         steps = cast(list[dict[str, Any]], job["steps"])
@@ -554,6 +592,7 @@ class TestDocsVersionWorkflowContract:
             "tests",
             "site-build-validation",
             "watchman-rollout-gate",
+            "ruff-integration-validation",
         ]
         assert job["if"] == "github.ref == 'refs/heads/main'"
         assert download_step["with"]["name"] == "site-dist"

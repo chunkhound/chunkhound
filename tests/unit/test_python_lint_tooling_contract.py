@@ -1,3 +1,12 @@
+"""Contract tests for the ChunkHound pre-commit lint tooling.
+
+Tests the external invariants of:
+  - Script subcommands: install, run-files, run-staged, run-changed, run-ruff
+  - Git diff range resolution for CI events (pull_request, merge_group, push)
+  - Ruff rewrite detection via SHA256 digests
+  - Real uv+ruff integration (guarded behind CHUNKHOUND_RUN_RUFF_INTEGRATION)
+"""
+
 from __future__ import annotations
 
 import importlib.util
@@ -880,13 +889,7 @@ class TestPreCommitScript:
         assert "ruff format --check" in result.stderr
         assert len(_uv_log_calls(log_path)) == 2
 
-    @pytest.mark.skipif(
-        os.environ.get("CHUNKHOUND_RUN_RUFF_INTEGRATION") != "1",
-        reason=(
-            "Set CHUNKHOUND_RUN_RUFF_INTEGRATION=1 to run "
-            "real uv+ruff integration coverage."
-        ),
-    )
+    @pytest.mark.requires_ruff_integration
     def test_run_ruff_with_real_ruff_fails_on_formatting_violation(
         self, tmp_path: Path
     ) -> None:
@@ -910,13 +913,7 @@ class TestPreCommitScript:
         assert result.returncode != 0
         assert "good.py" in f"{result.stdout}\n{result.stderr}"
 
-    @pytest.mark.skipif(
-        os.environ.get("CHUNKHOUND_RUN_RUFF_INTEGRATION") != "1",
-        reason=(
-            "Set CHUNKHOUND_RUN_RUFF_INTEGRATION=1 to run "
-            "real uv+ruff integration coverage."
-        ),
-    )
+    @pytest.mark.requires_ruff_integration
     def test_run_ruff_with_real_ruff_fails_when_check_auto_fixes_file(
         self, tmp_path: Path
     ) -> None:
