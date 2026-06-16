@@ -1502,12 +1502,9 @@ class IndexingCoordinator(BaseService):
                 if task.total:
                     self.progress.update(parse_task, completed=task.total)
 
-            # Optimize tables after parsing/chunking (only if fragmentation warrants it)
-            if agg_total_chunks > 0 and self._db.has_reclaimable_space(
-                operation="post-chunking"
-            ):
-                logger.debug("Optimizing database after chunking phase...")
-                self._db.optimize_tables()
+            # Compact after chunking: lightweight checkpoint + optional heavy rebuild
+            if agg_total_chunks > 0:
+                self._run_batch_compaction_boundary(operation="post-chunking")
 
             # Record startup profile if enabled (before heavy parse+store dominates totals)
             if _t0 is not None:
@@ -1588,12 +1585,12 @@ class IndexingCoordinator(BaseService):
             # to provide a unified progress experience
 
             # FINAL: Unified optimization (CHECKPOINT + HNSW compact + full compaction)
-            # Only run if fragmentation warrants it
             _db_optimized = False
-            if self._db.has_reclaimable_space(operation="post-indexing"):
+            _pre_opt_space = self._db.has_reclaimable_space(operation="post-indexing")
+            if _pre_opt_space:
                 logger.info("Running final database optimization...")
-                self._db.optimize_tables()
-                _db_optimized = True
+            self._run_batch_compaction_boundary(operation="post-indexing")
+            _db_optimized = _pre_opt_space
 
             # Check for disk limit exceeded errors
             for error in agg_errors:
@@ -1633,11 +1630,24 @@ class IndexingCoordinator(BaseService):
             else:
                 return {"status": "error", "error": str(e)}
 
+    def _run_batch_compaction_boundary(self, operation: str = "") -> None:
+        """Run compaction boundary check at a batch transition point.
+
+        Called after chunking and after embedding phases. First runs a
+        lightweight checkpoint via optimize_tables() if WAL/MVCC waste is
+        detected, then runs the heavier atomic rebuild via compact_if_needed()
+        if fragmentation exceeds the configured threshold.
+        """
+        if self._db.has_reclaimable_space(operation=operation):
+            logger.debug(f"Optimizing database at {operation} boundary...")
+            self._db.optimize_tables()
+        compact_fn = getattr(self._db, "compact_if_needed", None)
+        if compact_fn is not None:
+            compact_fn()
+
     def finalize_optimization(self) -> None:
         """Run post-embedding optimization if warranted."""
-        if self._db.has_reclaimable_space(operation="post-embedding"):
-            logger.info("Running post-embedding database optimization...")
-            self._db.optimize_tables()
+        self._run_batch_compaction_boundary(operation="post-embedding")
         # Create deferred HNSW indexes after bulk indexing completes
         self._db.create_deferred_indexes()
 

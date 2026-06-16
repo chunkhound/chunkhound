@@ -17,6 +17,23 @@ from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_D
 # Thread-local storage for executor thread state
 _executor_local = threading.local()
 
+COMPACT_SAMPLE_INTERVAL = 100  # 1/100 writes trigger a compaction check
+
+_WRITE_OPERATIONS = frozenset({
+    "insert_file",
+    "insert_chunk",
+    "insert_chunks_batch",
+    "insert_embedding",
+    "insert_embeddings_batch",
+    "delete_file_completely",
+    "delete_files_batch",
+    "delete_file_chunks",
+    "delete_chunks_batch",
+    "delete_chunk",
+    "update_file",
+    "update_chunk",
+})
+
 
 def get_thread_local_connection(provider: Any) -> Any:
     """Get thread-local database connection for executor thread.
@@ -112,6 +129,20 @@ def reset_thread_local_state() -> None:
             _executor_local.state["deferred_hnsw_indexes"] = preserved_hnsw
 
 
+def _maybe_compact(provider: Any) -> None:
+    """Call provider.compact_if_needed() if the provider supports it.
+
+    Called probabilistically (every COMPACT_SAMPLE_INTERVAL writes) from the
+    executor thread so it runs serially with all other DB operations.
+    """
+    compact_fn = getattr(provider, "compact_if_needed", None)
+    if compact_fn is not None:
+        try:
+            compact_fn()
+        except Exception as e:
+            logger.debug(f"Probabilistic compaction check skipped: {e}")
+
+
 class SerialDatabaseExecutor:
     """Thread-safe executor for database operations requiring single-threaded execution.
 
@@ -163,7 +194,7 @@ class SerialDatabaseExecutor:
             # Execute operation - look for method named _executor_{operation_name}
             op_func = getattr(provider, f"_executor_{operation_name}")
             try:
-                return op_func(conn, state, *args, **kwargs)
+                result = op_func(conn, state, *args, **kwargs)
             except Exception as exc:
                 err_str = str(exc)
                 _is_disk_full = "No space left on device" in err_str
@@ -192,6 +223,13 @@ class SerialDatabaseExecutor:
                             f"DuckDB connection reset after corrupting error in '{operation_name}': {exc}"
                         )
                 raise
+            # Probabilistic compaction: 1/COMPACT_SAMPLE_INTERVAL writes trigger a check
+            if operation_name in _WRITE_OPERATIONS:
+                wc = state.get("_write_count", 0) + 1
+                state["_write_count"] = wc
+                if wc % COMPACT_SAMPLE_INTERVAL == 0:
+                    _maybe_compact(provider)
+            return result
 
         # Run in executor synchronously with timeout (env override)
         future = self._db_executor.submit(executor_operation)
@@ -242,7 +280,7 @@ class SerialDatabaseExecutor:
             # Execute operation - look for method named _executor_{operation_name}
             op_func = getattr(provider, f"_executor_{operation_name}")
             try:
-                return op_func(conn, state, *args, **kwargs)
+                result = op_func(conn, state, *args, **kwargs)
             except Exception as exc:
                 err_str = str(exc)
                 _is_disk_full = "No space left on device" in err_str
@@ -270,6 +308,12 @@ class SerialDatabaseExecutor:
                             f"DuckDB connection reset after corrupting error in '{operation_name}': {exc}"
                         )
                 raise
+            if operation_name in _WRITE_OPERATIONS:
+                wc = state.get("_write_count", 0) + 1
+                state["_write_count"] = wc
+                if wc % COMPACT_SAMPLE_INTERVAL == 0:
+                    _maybe_compact(provider)
+            return result
 
         # Capture context for async compatibility
         ctx = contextvars.copy_context()

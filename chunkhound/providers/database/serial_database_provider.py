@@ -237,6 +237,27 @@ class SerialDatabaseProvider(ABC):
         self.ensure_usable(f"execute database operation '{operation_name}'")
         return await self._executor.execute_async(self, operation_name, *args, **kwargs)
 
+    async def _with_compaction_retry(
+        self, fn: Callable, max_retries: int = 5
+    ) -> Any:
+        """Retry an async operation when compaction is in progress.
+
+        Exponential backoff (0.1s base) gives the compaction window time to
+        close before re-attempting. After max_retries the last CompactionError
+        is re-raised so callers can decide whether to defer or fail.
+        """
+        from chunkhound.core.exceptions import CompactionError
+
+        delay = 0.1
+        for attempt in range(max_retries):
+            try:
+                return await fn()
+            except CompactionError:
+                if attempt >= max_retries - 1:
+                    raise
+                await asyncio.sleep(delay)
+                delay *= 2
+
     def get_base_directory(self) -> Path:
         """Get the current base directory for path normalization."""
         return self._base_directory
