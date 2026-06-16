@@ -779,6 +779,19 @@ async def websearch_impl(
 # =============================================================================
 
 
+def tool_requires_services(tool_name: str) -> bool:
+    """Return True when the registered tool implementation takes a 'services' parameter.
+
+    Tools that don't take 'services' (e.g., pure metadata or status tools) can
+    skip the expensive DB reconnect inside ensure_tool_services().
+    """
+    tool = TOOL_REGISTRY.get(tool_name)
+    if tool is None:
+        return False
+    sig = inspect.signature(tool.implementation)
+    return "services" in sig.parameters
+
+
 async def execute_tool(
     tool_name: str,
     services: Any,

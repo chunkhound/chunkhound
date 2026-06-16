@@ -1571,6 +1571,23 @@ class MCPServerBase(ABC):
         self._refresh_background_compaction_status()
         return self.services
 
+    async def ensure_tool_services(self, tool_name: str) -> DatabaseServices:
+        """Ensure services are ready, skipping DB reconnect for tools that don't need it.
+
+        For tools whose implementation does not take a `services` parameter the
+        full DB reconnect / recovery cycle is skipped so read-only or status
+        tools never stall behind a compaction window.
+        """
+        from chunkhound.mcp_server.tools import tool_requires_services
+
+        if not self.services:
+            raise RuntimeError("Services not initialized. Call initialize() first.")
+
+        if not tool_requires_services(tool_name):
+            return self.services
+
+        return await self.ensure_services()
+
     async def _connect_provider(self) -> None:
         """Connect the database provider if not already connected.
 

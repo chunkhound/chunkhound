@@ -163,7 +163,7 @@ class StdioMCPServer(MCPServerBase):
         ) -> list[types.TextContent]:
             """Universal tool handler that routes to the unified handler."""
             try:
-                services = await self.ensure_services()
+                services = await self.ensure_tool_services(tool_name)
             except CompactionError as exc:
                 return [types.TextContent(
                     type="text",
