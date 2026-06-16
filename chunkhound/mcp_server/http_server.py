@@ -19,9 +19,8 @@ from typing import Any
 from aiohttp import web
 
 from chunkhound.core.config.config import Config
-from chunkhound.core.exceptions import CompactionError
 from chunkhound.mcp_server.base import MCPServerBase
-from chunkhound.mcp_server.common import compaction_error_response, handle_tool_call
+from chunkhound.mcp_server.common import handle_tool_call
 from chunkhound.version import __version__
 
 
@@ -210,10 +209,6 @@ class HttpMCPServer(MCPServerBase):
 
         try:
             content = task.result()
-        except CompactionError as exc:
-            content_dicts: list[dict] = [
-                {"type": "text", "text": json.dumps(compaction_error_response(exc))}
-            ]
         except Exception as exc:
             err_payload = {
                 "jsonrpc": "2.0",
