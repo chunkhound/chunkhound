@@ -52,6 +52,12 @@ class DatabaseConfig(BaseModel):
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
     )
 
+    # DuckDB memory limit
+    duckdb_memory_limit: str | None = Field(
+        default=None,
+        description="DuckDB memory limit (e.g. '3GB', '512MB'). None = DuckDB default.",
+    )
+
     # Compaction settings
     compaction_enabled: bool = Field(
         default=True,
@@ -193,6 +199,8 @@ class DatabaseConfig(BaseModel):
                     "Ignoring invalid CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB value: {!r}",
                     max_disk_gb,
                 )
+        if memory_limit := os.getenv("CHUNKHOUND_DATABASE__DUCKDB_MEMORY_LIMIT"):
+            config["duckdb_memory_limit"] = memory_limit
         if compaction_enabled := os.getenv("CHUNKHOUND_DATABASE__COMPACTION_ENABLED"):
             lowered = compaction_enabled.lower()
             truthy = ("true", "1", "yes")

@@ -1592,6 +1592,26 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Get all chunks with their metadata including file paths (provider-agnostic)."""
         return self._execute_in_db_thread_sync("get_all_chunks_with_metadata")
 
+    def get_chunk_ids_and_file_paths(self) -> list[dict[str, Any]]:
+        """Get minimal (id, file_path) pairs without loading content or metadata."""
+        return self._execute_in_db_thread_sync("get_chunk_ids_and_file_paths")
+
+    def _executor_get_chunk_ids_and_file_paths(
+        self, conn: Any, state: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Executor method — runs in DB thread. Returns only chunk id + file_path."""
+        if not self._chunks_table or not self._files_table:
+            return []
+        chunks_count = self._chunks_table.count_rows()
+        files_count = self._files_table.count_rows()
+        chunks_df = self._chunks_table.head(chunks_count).to_pandas()[["id", "file_id"]]
+        files_df = self._files_table.head(files_count).to_pandas()[["id", "path"]]
+        file_paths = dict(zip(files_df["id"], files_df["path"]))
+        return [
+            {"id": int(row["id"]), "file_path": file_paths.get(row["file_id"], "")}
+            for _, row in chunks_df.iterrows()
+        ]
+
     def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
         """Return (total_files, total_chunks) under an optional scope prefix.
 

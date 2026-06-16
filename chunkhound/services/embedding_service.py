@@ -259,14 +259,18 @@ class EmbeddingService(BaseService):
                     "message": "All chunks have embeddings",
                 }
 
-            # Load chunk content and generate embeddings
-            chunks_data = self._get_chunks_by_ids(chunk_ids_without_embeddings)
-            chunk_id_list = [chunk["id"] for chunk in chunks_data]
-            chunk_texts = [chunk["code"] for chunk in chunks_data]
-
-            generated_count = await self.generate_embeddings_for_chunks(
-                chunk_id_list, chunk_texts, show_progress=True
-            )
+            # Load chunk content and generate embeddings in fetch-batches to bound
+            # memory: avoid loading all N million chunks' code into RAM at once.
+            _FETCH_BATCH = 5000
+            generated_count = 0
+            for i in range(0, len(chunk_ids_without_embeddings), _FETCH_BATCH):
+                batch_ids = chunk_ids_without_embeddings[i : i + _FETCH_BATCH]
+                chunks_data = self._get_chunks_by_ids(batch_ids)
+                chunk_id_list = [chunk["id"] for chunk in chunks_data]
+                chunk_texts = [chunk["code"] for chunk in chunks_data]
+                generated_count += await self.generate_embeddings_for_chunks(
+                    chunk_id_list, chunk_texts, show_progress=True
+                )
 
             return {
                 "status": "success",
@@ -816,8 +820,8 @@ class EmbeddingService(BaseService):
         self, provider: str, model: str, exclude_patterns: list[str] | None = None
     ) -> list[ChunkId]:
         """Get just the IDs of chunks that don't have embeddings (provider-agnostic)."""
-        # Get all chunks with metadata using provider-agnostic method
-        all_chunks = self._db.get_all_chunks_with_metadata()
+        # Fetch only chunk_id + file_path — avoids loading code/metadata for millions of rows
+        all_chunks = self._db.get_chunk_ids_and_file_paths()
 
         # Apply exclude patterns filter using fnmatch (no SQL dependency)
         if exclude_patterns:
@@ -918,33 +922,24 @@ class EmbeddingService(BaseService):
         if not chunk_ids:
             return []
 
-        # Use provider-agnostic method to get all chunks with metadata
-        all_chunks_data = self._db.get_all_chunks_with_metadata()
-
-        # Filter to only the requested chunk IDs
-        chunk_id_set = set(chunk_ids)
-        filtered_chunks = []
-
-        # Import locally to avoid circular import
-        from chunkhound.core.utils.chunk_utils import get_chunk_id
-
-        for chunk in all_chunks_data:
-            chunk_id = get_chunk_id(chunk)
-            if chunk_id in chunk_id_set:
-                # Ensure we have the expected fields
-                filtered_chunk = {
-                    "id": chunk_id,
-                    "code": chunk.get(
-                        "content", chunk.get("code", "")
-                    ),  # LanceDB uses 'content'
-                    "symbol": chunk.get(
-                        "name", chunk.get("symbol", "")
-                    ),  # LanceDB uses 'name'
-                    "path": chunk.get("file_path", ""),
-                }
-                filtered_chunks.append(filtered_chunk)
-
-        return filtered_chunks
+        # Fetch in batches to avoid SQL IN-clause size limits and memory exhaustion
+        # on large repos where chunk_ids can number in the millions.
+        _BATCH = 1000
+        result: list[dict[str, Any]] = []
+        int_ids = [int(cid) for cid in chunk_ids]
+        for i in range(0, len(int_ids), _BATCH):
+            batch = int_ids[i : i + _BATCH]
+            placeholders = ",".join("?" * len(batch))
+            query = f"""
+                SELECT c.id, c.code, c.symbol, f.path
+                FROM chunks c
+                JOIN files f ON c.file_id = f.id
+                WHERE c.id IN ({placeholders})
+                ORDER BY c.id
+            """
+            rows = self._db.execute_query(query, batch)
+            result.extend(rows)
+        return result
 
     def _get_chunks_by_file_path(self, file_path: str) -> list[dict[str, Any]]:
         """Get all chunks for a specific file path."""

@@ -666,6 +666,16 @@ class DuckDBConnectionManager:
             self.connection.execute("SET hnsw_enable_experimental_persistence = true")
             logger.debug("HNSW experimental persistence enabled")
 
+            # Reduces peak memory for large scans by skipping insertion-order bookkeeping
+            self.connection.execute("SET preserve_insertion_order = false")
+            logger.debug("DuckDB insertion-order preservation disabled")
+
+            if self.config is not None and getattr(self.config, "duckdb_memory_limit", None):
+                self.connection.execute(
+                    f"SET memory_limit = '{self.config.duckdb_memory_limit}'"
+                )
+                logger.info(f"DuckDB memory limit set to {self.config.duckdb_memory_limit}")
+
         except Exception as e:
             logger.error(f"Failed to load DuckDB extensions: {e}")
             raise

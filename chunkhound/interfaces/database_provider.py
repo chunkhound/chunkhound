@@ -253,6 +253,15 @@ class DatabaseProvider(Protocol):
         """Get all chunks with their metadata including file paths (provider-agnostic)."""
         ...
 
+    def get_chunk_ids_and_file_paths(self) -> list[dict[str, Any]]:
+        """Get minimal (chunk_id, file_path) pairs for all chunks.
+
+        Lightweight alternative to get_all_chunks_with_metadata — does not load
+        code or metadata, suitable for large repos where loading full content
+        would exhaust memory.
+        """
+        ...
+
     # Search Operations
     def search_semantic(
         self,
