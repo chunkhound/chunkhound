@@ -81,6 +81,18 @@ class DatabaseConfig(BaseModel):
         description="Minimum reclaimable space in MB to trigger compaction",
     )
 
+    fragmentation_threshold_pct: float | None = Field(
+        default=30.0,
+        ge=0.0,
+        description=(
+            "Auto-compaction trigger: percentage overhead of file size above the "
+            "estimated minimum live-data size. 30 = compact when DB is ~30%% larger "
+            "than live data. 0 = compact whenever any overhead exists. "
+            "None = never auto-compact via this metric. "
+            "Env: CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT"
+        ),
+    )
+
     @field_validator("path", mode="before")
     def validate_path(cls, v: Any) -> Path | None:
         """Convert string paths to Path objects."""

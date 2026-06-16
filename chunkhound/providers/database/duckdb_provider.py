@@ -4164,6 +4164,133 @@ class DuckDBProvider(SerialDatabaseProvider):
         # it from firing on the next unrelated commit.
         state["deferred_checkpoint"] = False
 
+    def measure_fragmentation(self) -> float:
+        """Return a fragmentation ratio for the current database.
+
+        Uses get_storage_stats() to compute the effective waste ratio.
+        Returns 0.0 for in-memory databases. A ratio of 1.0 means no overhead.
+        Values > 1.5 indicate healthy overhead; > 3.0 indicates fragmentation.
+        """
+        if self._connection_manager.is_memory_db:
+            return 0.0
+        stats = self.get_storage_stats()
+        waste = stats.get("effective_waste", 0.0)
+        return 1.0 + waste
+
+    def compact_database(self) -> int:
+        """Compact the database and return the new file size in bytes.
+
+        Delegates to the existing three-phase compaction implementation.
+        """
+        self._run_blocking_compaction()
+        if self._connection_manager.is_memory_db:
+            return 0
+        db_path = self._connection_manager.db_path
+        if db_path:
+            try:
+                return os.path.getsize(db_path)
+            except OSError:
+                pass
+        return 0
+
+    def compact_if_needed(self) -> bool:
+        """Compact if fragmentation exceeds the configured threshold.
+
+        Uses fragmentation_threshold_pct from config if set, otherwise falls
+        back to compaction_threshold. Returns True if compaction ran.
+        """
+        if self._connection_manager.is_memory_db:
+            return False
+        config = getattr(self, "_config", None) or getattr(self, "config", None)
+        threshold_pct = getattr(config, "fragmentation_threshold_pct", None) if config else None
+        if threshold_pct is None:
+            return False
+        ratio = self.measure_fragmentation()
+        overhead_pct = (ratio - 1.0) * 100.0
+        if overhead_pct < threshold_pct:
+            logger.debug(
+                f"Fragmentation overhead={overhead_pct:.1f}% below threshold={threshold_pct}% — skipping"
+            )
+            return False
+        logger.info(
+            f"Fragmentation overhead={overhead_pct:.1f}% >= threshold={threshold_pct}% — compacting"
+        )
+        self._run_blocking_compaction()
+        return True
+
+    def drop_hnsw_indexes(self) -> None:
+        """Drop all HNSW indexes on embedding tables."""
+        self._execute_in_db_thread_sync("drop_all_hnsw_indexes")
+
+    def ensure_hnsw_indexes(self) -> None:
+        """Recreate HNSW indexes on all embedding tables that contain data."""
+        self._execute_in_db_thread_sync("ensure_all_hnsw_indexes")
+
+    def _executor_drop_all_hnsw_indexes(
+        self, conn: Any, state: dict[str, Any]
+    ) -> None:
+        """Drop every HNSW index on all embedding_* tables."""
+        tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema='main' AND table_name LIKE 'embeddings_%'"
+        ).fetchall()
+        dropped = 0
+        for (table_name,) in tables:
+            indexes = conn.execute(
+                "SELECT index_name FROM duckdb_indexes() "
+                "WHERE table_name = ? "
+                "AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')",
+                [table_name],
+            ).fetchall()
+            for (index_name,) in indexes:
+                conn.execute(
+                    f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(index_name)}"
+                )
+                dropped += 1
+        if dropped:
+            logger.info(f"Dropped {dropped} HNSW index(es) for bulk operation")
+
+    def _executor_ensure_all_hnsw_indexes(
+        self, conn: Any, state: dict[str, Any]
+    ) -> None:
+        """Create HNSW indexes on all embedding_* tables that have data."""
+        tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema='main' AND table_name LIKE 'embeddings_%'"
+        ).fetchall()
+        created = 0
+        for (table_name,) in tables:
+            row_count = conn.execute(
+                f"SELECT COUNT(*) FROM {self._quote_duckdb_identifier(table_name)}"
+            ).fetchone()[0]
+            if row_count == 0:
+                continue
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM duckdb_indexes() "
+                "WHERE table_name = ? "
+                "AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')",
+                [table_name],
+            ).fetchone()[0]
+            if existing > 0:
+                continue
+            dims_match = re.search(r"embeddings_(\d+)", table_name)
+            if not dims_match:
+                continue
+            dims = int(dims_match.group(1))
+            hnsw_name = f"hnsw_{table_name}"
+            try:
+                conn.execute(f"""
+                    CREATE INDEX {hnsw_name} ON {self._quote_duckdb_identifier(table_name)}
+                    USING HNSW (embedding)
+                    WITH (metric = 'cosine')
+                """)
+                created += 1
+            except Exception as e:
+                logger.warning(f"Failed to create HNSW index on {table_name}: {e}")
+        if created:
+            conn.execute("CHECKPOINT")
+            logger.info(f"Created {created} HNSW index(es)")
+
     def optimize(self, cancel_check: Callable[[], bool] | None = None) -> bool:
         """Optimize DuckDB storage: CHECKPOINT and full compaction.
 

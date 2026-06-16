@@ -262,6 +262,48 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    # Compaction Operations
+
+    def compact_database(self) -> int:
+        """Compact the database file and return the new file size in bytes.
+
+        Performs a full rebuild of the database to reclaim space from HNSW
+        index churn and MVCC stale data. Safe to call at any time — the
+        existing data is preserved via atomic swap.
+        """
+        ...
+
+    def measure_fragmentation(self) -> float:
+        """Return a fragmentation ratio for the current database.
+
+        Returns a ratio where 1.0 = no overhead, > 1.5 = healthy overhead,
+        > 3.0 = fragmented, > 5.0 = critically fragmented.
+        Returns 0.0 for in-memory databases.
+        """
+        ...
+
+    def compact_if_needed(self) -> bool:
+        """Compact the database if fragmentation exceeds the configured threshold.
+
+        Returns True if compaction ran, False if it was skipped.
+        """
+        ...
+
+    def drop_hnsw_indexes(self) -> None:
+        """Drop all HNSW indexes on embedding tables.
+
+        Called before bulk insert operations to avoid per-insert index overhead.
+        Pair with ensure_hnsw_indexes() after bulk operations complete.
+        """
+        ...
+
+    def ensure_hnsw_indexes(self) -> None:
+        """Recreate HNSW indexes on all embedding tables that contain data.
+
+        Called after bulk insert operations to restore search performance.
+        """
+        ...
+
     # Search Operations
     def search_semantic(
         self,
