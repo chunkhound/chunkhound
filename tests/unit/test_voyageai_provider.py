@@ -202,6 +202,31 @@ class TestSemaphoreInit:
         assert p._embed_semaphore._value == 3
 
 
+class TestClientBaseUrlParams:
+    def test_explicit_official_base_url_uses_modern_sdk_param(self):
+        """Regression: official base_url must stay out of request JSON on new SDKs."""
+        mock_client = _make_mock_client(params={"base_url": None})
+        with patch.object(voyageai, "Client", return_value=mock_client):
+            VoyageAIEmbeddingProvider(
+                api_key="test-key",
+                base_url="https://api.voyageai.com/v1",
+            )
+
+        assert mock_client._params["base_url"] == "https://api.voyageai.com/v1"
+        assert "api_base" not in mock_client._params
+
+    def test_explicit_official_base_url_falls_back_to_legacy_sdk_param(self):
+        mock_client = _make_mock_client(params={})
+        with patch.object(voyageai, "Client", return_value=mock_client):
+            VoyageAIEmbeddingProvider(
+                api_key="test-key",
+                base_url="https://api.voyageai.com/v1",
+            )
+
+        assert mock_client._params["api_base"] == "https://api.voyageai.com/v1"
+        assert "base_url" not in mock_client._params
+
+
 # ===========================================================================
 # 3. estimate_tokens
 # ===========================================================================
