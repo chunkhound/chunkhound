@@ -7,9 +7,9 @@ import socket
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
-from unittest.mock import AsyncMock
 
 import chunkhound.daemon.discovery as discovery_module
 from chunkhound.daemon.discovery import (
@@ -101,7 +101,7 @@ def test_unix_ipc_address_uses_runtime_scoped_socket_dir(
     tmp_path: Path,
 ) -> None:
     """Unix IPC should live under the active runtime-scoped socket directory."""
-    runtime_dir = _set_runtime_dir_env(monkeypatch, tmp_path)
+    _set_runtime_dir_env(monkeypatch, tmp_path)
     monkeypatch.setattr(discovery_module.sys, "platform", "linux")
 
     project_dir = tmp_path / "repo"
@@ -202,7 +202,7 @@ def test_windows_ipc_address_changes_with_runtime_dir(
     assert address_a != address_b
 
 
-def test_windows_startup_ipc_address_avoids_live_sibling_port_collision_without_registry(
+def test_windows_startup_ipc_address_avoids_live_sibling_port_collision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -755,12 +755,17 @@ async def test_ensure_daemon_running_publishes_registry_entry_authoritatively(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.touch()
 
-    def fake_start(args: object, *, socket_path: str | None = None) -> DaemonStartupHandle:
+    def fake_start(
+        args: object, *, socket_path: str | None = None
+    ) -> DaemonStartupHandle:
         # Publish an authoritative runtime-scoped lock file the way a real
         # daemon would — but deliberately never publish a registry entry, so
         # the proxy-side write is the only thing that can close the gap.
         discovery.write_lock(os.getpid(), fake_address, auth_token="token")
-        return DaemonStartupHandle(process=_FakeProcess(), log_path=log_path)  # type: ignore[arg-type]
+        return DaemonStartupHandle(
+            process=_FakeProcess(),
+            log_path=log_path,
+        )  # type: ignore[arg-type]
 
     async def fake_connectable(address: str) -> bool:
         return address == fake_address
@@ -833,10 +838,15 @@ async def test_find_or_start_daemon_terminates_child_when_registry_publish_fails
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.touch()
 
-    def fake_start(args: object, *, socket_path: str | None = None) -> DaemonStartupHandle:
+    def fake_start(
+        args: object, *, socket_path: str | None = None
+    ) -> DaemonStartupHandle:
         del args, socket_path
         discovery.write_lock(os.getpid(), fake_address, auth_token="token")
-        return DaemonStartupHandle(process=fake_process, log_path=log_path)  # type: ignore[arg-type]
+        return DaemonStartupHandle(
+            process=fake_process,
+            log_path=log_path,
+        )  # type: ignore[arg-type]
 
     async def fake_connectable(address: str) -> bool:
         return address == fake_address
@@ -855,6 +865,41 @@ async def test_find_or_start_daemon_terminates_child_when_registry_publish_fails
     assert fake_process.terminate_calls == 1
     assert fake_process.wait_calls >= 1
     assert not discovery.get_registry_entry_path().exists()
+
+
+def test_discovery_startup_timeout_honors_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon discovery timeout contract must follow the env override."""
+    monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "12.5")
+    assert discovery_module._read_startup_timeout() == 12.5
+
+
+def test_discovery_startup_timeout_default_when_no_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon discovery timeout defaults to 30s when no env override."""
+    monkeypatch.delenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", raising=False)
+    assert discovery_module._read_startup_timeout() == 30.0
+
+
+def test_discovery_startup_timeout_rejects_invalid_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon discovery timeout env must fail loudly when malformed."""
+    monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "not-a-number")
+    with pytest.raises(ValueError, match="must be a number"):
+        discovery_module._read_startup_timeout()
+
+
+def test_discovery_startup_timeout_rejects_non_positive_or_non_finite_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon discovery timeout env must be finite and strictly positive."""
+    for raw in ("0", "-1", "nan", "inf"):
+        monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", raw)
+        with pytest.raises(ValueError, match="finite positive number"):
+            discovery_module._read_startup_timeout()
 
 
 @pytest.mark.asyncio
@@ -896,7 +941,7 @@ async def test_find_or_start_daemon_terminates_detached_child_on_startup_timeout
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(discovery_module, "_STARTUP_TIMEOUT", 0.05)
+    monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "0.05")
     monkeypatch.setattr(discovery, "_reuse_live_daemon", AsyncMock(return_value=None))
     monkeypatch.setattr(discovery, "_acquire_cross_runtime_startup_lock", lambda: True)
     monkeypatch.setattr(discovery, "_release_cross_runtime_startup_lock", lambda: None)
@@ -920,7 +965,7 @@ async def test_find_or_start_daemon_terminates_detached_child_on_startup_timeout
         ),
     )
 
-    with pytest.raises(RuntimeError, match="did not start within"):
+    with pytest.raises(RuntimeError, match=r"did not start within 0\.05s"):
         await discovery.find_or_start_daemon(object())
 
     assert fake_process.terminate_calls == 1
@@ -1141,7 +1186,10 @@ def test_format_startup_failure_parses_prefixed_breadcrumbs_and_keeps_legacy_sup
             [
                 f"[{started_at}] [startup] startup: startup tracking began mode=daemon",
                 f"[{started_at}] [startup] phase completed: db_connect duration=0.125s",
-                f"[{started_at}] [startup] startup: phase started: watchman_watch_project",
+                (
+                    f"[{started_at}] [startup] startup: phase started: "
+                    "watchman_watch_project"
+                ),
                 (
                     f"[{started_at}] [startup] startup: startup failed duration=12.0s "
                     "error=watchman session bootstrap exploded"

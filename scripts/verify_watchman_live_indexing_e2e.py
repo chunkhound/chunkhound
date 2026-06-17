@@ -360,6 +360,9 @@ def _clean_room_env(
         env["CHUNKHOUND_DAEMON_REGISTRY_DIR"] = str(
             runtime_dir / "daemon-user-registry"
         )
+    # Give the daemon more time for its import chain on slow CI hosts
+    # (notably Windows) so it does not time out before becoming reachable.
+    env.setdefault("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "60.0")
     if extra_env:
         env.update(extra_env)
     return env

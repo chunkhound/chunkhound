@@ -712,7 +712,9 @@ def test_rewrite_watchman_source_urls_rewrites_manifest_sources(tmp_path: Path) 
     )
 
 
-def test_clean_room_env_injects_runtime_dir(tmp_path: Path, monkeypatch) -> None:
+def test_clean_room_env_injects_runtime_dir_and_startup_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
     venv_dir = tmp_path / "venv"
     runtime_dir = tmp_path / "runtime"
     bin_dir = venv_dir / ("Scripts" if os.name == "nt" else "bin")
@@ -729,7 +731,24 @@ def test_clean_room_env_injects_runtime_dir(tmp_path: Path, monkeypatch) -> None
     assert env["CHUNKHOUND_DAEMON_REGISTRY_DIR"] == str(
         runtime_dir / "daemon-user-registry"
     )
+    assert env["CHUNKHOUND_DAEMON_STARTUP_TIMEOUT"] == "60.0"
     assert env["TEST_FLAG"] == "1"
+
+
+def test_clean_room_env_preserves_existing_startup_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    venv_dir = tmp_path / "venv"
+    bin_dir = venv_dir / ("Scripts" if os.name == "nt" else "bin")
+    bin_dir.mkdir(parents=True)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), "/usr/bin"]))
+
+    env = live_verifier._clean_room_env(
+        venv_dir,
+        extra_env={"CHUNKHOUND_DAEMON_STARTUP_TIMEOUT": "75.0"},
+    )
+
+    assert env["CHUNKHOUND_DAEMON_STARTUP_TIMEOUT"] == "75.0"
 
 
 @pytest.mark.asyncio
