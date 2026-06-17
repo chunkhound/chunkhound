@@ -271,6 +271,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Used during bulk embedding generation to suppress mid-batch compaction.
         self._suppress_compaction: bool = False
 
+        # When True, insert_embeddings_batch commits without force-checkpoint.
+        # Lets the 60s timer control checkpoints during bulk embedding instead of
+        # firing CHECKPOINT after every one of the ~200 API-batch commits per fetch-batch.
+        self._suppress_force_checkpoint: bool = False
+
     def _create_connection(self) -> Any:
         """Create and return a DuckDB connection.
 
@@ -761,10 +766,21 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Executor method for _ensure_embedding_table_exists - runs in DB thread."""
         table_name = f"embeddings_{dims}"
 
-        if self._executor_table_exists(conn, state, table_name):
-            self._executor_ensure_embedding_upsert_contract(
-                conn, state, table_name, dims
-            )
+        # Cache table-existence and contract-verified results in thread-local state.
+        # Without caching, each of the ~200 API-batch inserts per fetch-batch
+        # queries information_schema and duckdb_indexes() twice — 600 catalog
+        # queries per fetch-batch with answers that never change mid-session.
+        _exists_key = f"_ce_exists_{table_name}"
+        if _exists_key not in state:
+            state[_exists_key] = self._executor_table_exists(conn, state, table_name)
+
+        if state[_exists_key]:
+            _contract_key = f"_ce_contract_{table_name}"
+            if _contract_key not in state:
+                self._executor_ensure_embedding_upsert_contract(
+                    conn, state, table_name, dims
+                )
+                state[_contract_key] = True
             return table_name
 
         logger.info(f"Creating embedding table for {dims} dimensions: {table_name}")
@@ -829,6 +845,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 logger.info(
                     f"Created {table_name} with regular indexes (HNSW index deferred)"
                 )
+            state[_exists_key] = True
             return table_name
 
         except Exception as e:
@@ -3074,7 +3091,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                     total_inserted += len(batch_data)
 
             if transaction_started:
-                self._executor_commit_transaction(conn, state, True)
+                force_cp = not self._suppress_force_checkpoint
+                self._executor_commit_transaction(conn, state, force_cp)
                 transaction_started = False
 
             return total_inserted

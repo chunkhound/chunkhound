@@ -283,6 +283,9 @@ class EmbeddingService(BaseService):
             _suppress_attr = hasattr(self._db, "_suppress_compaction")
             if _suppress_attr:
                 self._db._suppress_compaction = True  # type: ignore[attr-defined]
+            _suppress_cp_attr = hasattr(self._db, "_suppress_force_checkpoint")
+            if _suppress_cp_attr:
+                self._db._suppress_force_checkpoint = True  # type: ignore[attr-defined]
             try:
                 for fetch_idx, i in enumerate(
                     range(0, len(chunk_ids_without_embeddings), _FETCH_BATCH)
@@ -322,6 +325,8 @@ class EmbeddingService(BaseService):
             finally:
                 if _suppress_attr:
                     self._db._suppress_compaction = False  # type: ignore[attr-defined]
+                if _suppress_cp_attr:
+                    self._db._suppress_force_checkpoint = False  # type: ignore[attr-defined]
 
             return {
                 "status": "success",
@@ -564,6 +569,11 @@ class EmbeddingService(BaseService):
         # Process batches with concurrency control
         semaphore = asyncio.Semaphore(self._max_concurrent_batches)
 
+        # Per-batch API and DB timings accumulated across concurrent tasks.
+        # Asyncio is single-threaded so list.append() is safe without a lock.
+        _api_ms_list: list[float] = []
+        _db_ms_list: list[float] = []
+
         async def process_batch(
             batch: list[tuple[ChunkId, str]],
             batch_num: int,
@@ -590,7 +600,9 @@ class EmbeddingService(BaseService):
                         return 0
                     if timing:
                         timing.mark_embed_api_start()
+                    _t_api = time.monotonic()
                     embedding_results = await self._embedding_provider.embed(texts)
+                    _api_ms_list.append((time.monotonic() - _t_api) * 1000)
                     if timing:
                         timing.mark_embed_api_end()
 
@@ -620,9 +632,11 @@ class EmbeddingService(BaseService):
                     # Store in database with configurable batch size
                     if timing:
                         timing.mark_db_insert_start()
+                    _t_db = time.monotonic()
                     stored_count = self._db.insert_embeddings_batch(
                         embeddings_data, self._db_batch_size
                     )
+                    _db_ms_list.append((time.monotonic() - _t_db) * 1000)
                     if timing:
                         timing.mark_db_insert_end()
                     logger.debug(
@@ -707,9 +721,12 @@ class EmbeddingService(BaseService):
         ]
         _gather_start = time.monotonic()
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        logger.debug(
-            f"[EmbSvc] gather: {len(chunk_data)} chunks, "
-            f"{len(batches)} API batches in {time.monotonic() - _gather_start:.1f}s"
+        _api_total_s = sum(_api_ms_list) / 1000
+        _db_total_s = sum(_db_ms_list) / 1000
+        logger.info(
+            f"[EmbSvc] gather: {len(chunk_data)} chunks, {len(batches)} batches "
+            f"wall={time.monotonic() - _gather_start:.1f}s "
+            f"api_sum={_api_total_s:.1f}s db_sum={_db_total_s:.1f}s"
         )
 
         # Count successful embeddings and track completed batches
