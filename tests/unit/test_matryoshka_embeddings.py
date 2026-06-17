@@ -1032,6 +1032,86 @@ class TestFactoryMatryoshkaForwarding:
         assert provider.dims == 256
 
 
+class TestProviderConfigSnapshots:
+    """Tests for provider config snapshots preserving matryoshka state."""
+
+    def test_openai_config_snapshot_preserves_server_side_truncation(self):
+        """OpenAI config snapshots keep output_dims in server-side mode."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="text-embedding-3-small",
+            output_dims=256,
+            base_url="http://localhost:8000",
+        )
+
+        snapshot = provider.config
+
+        assert snapshot.provider == "openai"
+        assert snapshot.dims == 256
+        assert snapshot.output_dims == 256
+        assert snapshot.client_side_truncation is False
+
+    def test_openai_config_snapshot_preserves_client_side_truncation(self):
+        """OpenAI config snapshots keep client-side truncation state."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="text-embedding-3-small",
+            output_dims=256,
+            client_side_truncation=True,
+            base_url="http://localhost:8000",
+        )
+
+        snapshot = provider.config
+
+        assert snapshot.dims == 256
+        assert snapshot.output_dims == 256
+        assert snapshot.client_side_truncation is True
+
+    def test_voyageai_config_snapshot_preserves_client_side_truncation(self):
+        """VoyageAI config snapshots keep matryoshka fields."""
+        from chunkhound.providers.embeddings.voyageai_provider import (
+            VoyageAIEmbeddingProvider,
+        )
+
+        provider = VoyageAIEmbeddingProvider(
+            api_key="test-key",
+            model="voyage-3.5",
+            output_dims=512,
+            client_side_truncation=True,
+        )
+
+        snapshot = provider.config
+
+        assert snapshot.provider == "voyageai"
+        assert snapshot.dims == 512
+        assert snapshot.output_dims == 512
+        assert snapshot.client_side_truncation is True
+
+    def test_fake_provider_config_snapshot_round_trips_matryoshka_state(self):
+        """Fake provider snapshots model the real provider contract."""
+        from tests.fixtures.fake_providers import FakeEmbeddingProvider
+
+        provider = FakeEmbeddingProvider(
+            dims=1536,
+            output_dims=512,
+            client_side_truncation=True,
+        )
+
+        snapshot = provider.config
+
+        assert snapshot.dims == 512
+        assert snapshot.output_dims == 512
+        assert snapshot.client_side_truncation is True
+
+
 class TestSharedMatryoshkaUtils:
     """Tests for shared matryoshka utility functions."""
 
