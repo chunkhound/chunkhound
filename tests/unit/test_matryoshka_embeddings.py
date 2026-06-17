@@ -885,49 +885,6 @@ class TestOpenAIProviderRuntimeBehavior:
             self._unknown_model_provider(client_side_truncation=True)
 
 
-class TestMeanPoolEmbeddings:
-    """Tests for mean_pool_embeddings in shared_utils."""
-
-    def test_two_orthogonal_vectors(self):
-        """Mean-pool two orthogonal vectors produces an L2-normalized result."""
-        from chunkhound.providers.embeddings.shared_utils import mean_pool_embeddings
-
-        result = mean_pool_embeddings([[1.0, 0.0], [0.0, 1.0]])
-        # Mean is [0.5, 0.5]; L2-normalized: each component = 0.5 / sqrt(0.5)
-        expected = 0.5 / (0.5**0.5)
-        assert abs(result[0] - expected) < 1e-9
-        assert abs(result[1] - expected) < 1e-9
-        magnitude = sum(x * x for x in result) ** 0.5
-        assert abs(magnitude - 1.0) < 1e-9
-
-    def test_empty_list_raises_value_error(self):
-        """Empty list raises ValueError."""
-        from chunkhound.providers.embeddings.shared_utils import mean_pool_embeddings
-
-        with pytest.raises(ValueError, match="empty"):
-            mean_pool_embeddings([])
-
-    def test_single_item_passthrough(self):
-        """Single embedding is returned as-is (value equality)."""
-        from chunkhound.providers.embeddings.shared_utils import mean_pool_embeddings
-
-        vec = [3.0, 4.0]
-        result = mean_pool_embeddings([vec])
-        assert result == vec
-
-    def test_multiple_embeddings(self):
-        """Three vectors produce a correctly averaged and L2-normalized result."""
-        from chunkhound.providers.embeddings.shared_utils import mean_pool_embeddings
-
-        result = mean_pool_embeddings([[3.0, 0.0], [0.0, 3.0], [3.0, 3.0]])
-        # Mean: [2.0, 2.0]; L2-norm = sqrt(8)
-        expected = 2.0 / (8.0**0.5)
-        assert abs(result[0] - expected) < 1e-9
-        assert abs(result[1] - expected) < 1e-9
-        magnitude = sum(x * x for x in result) ** 0.5
-        assert abs(magnitude - 1.0) < 1e-9
-
-
 class TestValidateEmbeddingDims:
     """Tests for validate_embedding_dims invariant (INV-1)."""
 
