@@ -6,7 +6,8 @@ import math
 import random
 import re
 from collections.abc import AsyncIterator, Sequence
-from typing import Any, cast
+from typing import Any, TypedDict, cast
+from typing_extensions import NotRequired
 
 import httpx
 from loguru import logger
@@ -184,9 +185,29 @@ def _validate_qwen_model_config() -> None:
 # Validate configuration at module load
 _validate_qwen_model_config()
 
+class OpenAIModelConfig(TypedDict):
+    """Static config for a known OpenAI embedding model.
+
+    Fields:
+        dims: Default output dimension.
+        native_dims: Full/native embedding dimension.
+        distance: Distance metric (always "cosine" for OpenAI).
+        max_tokens: Maximum tokens per request.
+        matryoshka: Whether the model supports variable-dimension output.
+        min_dims: Minimum supported dimension (only meaningful when matryoshka=True).
+    """
+
+    dims: int
+    native_dims: int
+    distance: str
+    max_tokens: int
+    matryoshka: NotRequired[bool]
+    min_dims: NotRequired[int]
+
+
 # Model-specific configuration for OpenAI models
 # matryoshka flag indicates support for variable output dimensions
-OPENAI_MODEL_CONFIG: dict[str, dict[str, object]] = {
+OPENAI_MODEL_CONFIG: dict[str, OpenAIModelConfig] = {
     "text-embedding-3-small": {
         "dims": 1536,
         "native_dims": 1536,
@@ -543,7 +564,7 @@ class OpenAIEmbeddingProvider:
         if self._trust_runtime_output_dims() or self._model not in self._model_config:
             return
 
-        cfg = cast(dict[str, Any], self._model_config[self._model])
+        cfg = self._model_config[self._model]
         native_dims = cfg.get("native_dims", 1536)
         if not cfg.get("matryoshka", False):
             if self._output_dims != native_dims:
@@ -585,7 +606,7 @@ class OpenAIEmbeddingProvider:
             dim_param is not None
             and not self._trust_runtime_output_dims()
             and self._model in self._model_config
-            and not cast(dict[str, Any], self._model_config[self._model]).get(
+            and not self._model_config[self._model].get(
                 "matryoshka", False
             )
         ):
