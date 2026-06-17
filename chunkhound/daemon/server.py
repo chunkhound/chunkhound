@@ -126,6 +126,11 @@ class ChunkHoundDaemon(MCPServerBase):
                     os.getpid(), self._socket_path, auth_token=auth_token
                 )
 
+                # Signal initialization complete BEFORE post-write validation and
+                # registry entry, so tool calls never wait for the event after
+                # the daemon becomes discoverable via the lock file.
+                self._initialization_complete.set()
+
                 # Post-write validation: verify our PID is the one recorded; if
                 # not, another daemon won the startup race.
                 written_lock = self._discovery.read_lock()
@@ -171,7 +176,8 @@ class ChunkHoundDaemon(MCPServerBase):
                 return
 
             # --- THEN deferred startup barrier (sidecar readiness) ---
-            self._initialization_complete.set()
+            # _initialization_complete was already set right after write_lock(),
+            # before any client could discover this daemon.
             await self.await_startup_barrier()
             self._complete_startup()
 
