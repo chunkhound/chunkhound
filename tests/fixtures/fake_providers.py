@@ -295,10 +295,12 @@ class FakeEmbeddingProvider:
         return EmbeddingConfig(
             provider="fake",
             model=self._model,
-            dims=self._dims,
+            dims=self.dims,
             distance=self._distance,
             batch_size=self._batch_size,
             max_tokens=self._max_tokens,
+            output_dims=self.output_dims,
+            client_side_truncation=self.client_side_truncation,
         )
 
     def _generate_deterministic_vector(self, text: str) -> list[float]:

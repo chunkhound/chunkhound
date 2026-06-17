@@ -749,6 +749,8 @@ class OpenAIEmbeddingProvider:
             timeout=self._timeout,
             retry_attempts=self._retry_attempts,
             retry_delay=self._retry_delay,
+            output_dims=self.output_dims,
+            client_side_truncation=self.client_side_truncation,
         )
 
     @property
