@@ -22,7 +22,7 @@ class RerankResult:
 
 @dataclass
 class EmbeddingConfig:
-    """Configuration for embedding providers."""
+    """Configuration snapshot for embedding providers."""
 
     provider: str
     model: str
@@ -35,6 +35,8 @@ class EmbeddingConfig:
     timeout: int = 30
     retry_attempts: int = 3
     retry_delay: float = 1.0
+    output_dims: int | None = None
+    client_side_truncation: bool = False
 
 
 class EmbeddingProvider(Protocol):
