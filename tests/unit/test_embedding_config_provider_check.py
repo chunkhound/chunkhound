@@ -64,6 +64,14 @@ class TestIsProviderConfigured:
         cfg = EmbeddingConfig(provider="voyageai", api_key=None)
         assert cfg.is_provider_configured() is False
 
+    def test_voyageai_explicit_official_url_without_key(self):
+        cfg = EmbeddingConfig(
+            provider="voyageai",
+            base_url="https://api.voyageai.com/v1",
+            api_key=None,
+        )
+        assert cfg.is_provider_configured() is False
+
     def test_voyageai_custom_endpoint_without_key(self):
         cfg = EmbeddingConfig(
             provider="voyageai",
