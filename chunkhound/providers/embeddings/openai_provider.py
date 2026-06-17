@@ -557,6 +557,7 @@ class OpenAIEmbeddingProvider:
             self._output_dims,
             self._client_side_truncation,
             model=self._model,
+            context="init-time validation",
         )
         if output_dims is None:
             return
