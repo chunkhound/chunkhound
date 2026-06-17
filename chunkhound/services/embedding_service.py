@@ -769,6 +769,12 @@ class EmbeddingService(BaseService):
         2. Database provider supports optimization (has has_reclaimable_space method)
         3. Database actually needs optimization (has free blocks to reclaim)
         """
+        # During bulk embedding, _suppress_compaction is True and optimization
+        # is deferred to finalize_optimization() at the end of the loop.
+        # Skipping here avoids the expensive pragma_storage_info() scan (O(table_size))
+        # that fires at exactly the 5th fetch-batch and causes a visible throughput spike.
+        if getattr(self._db, "_suppress_compaction", False):
+            return
         if self._completed_batches >= self._optimization_batch_frequency:
             has_reclaimable = await asyncio.to_thread(
                 self._db.has_reclaimable_space, operation="embedding-generation"
