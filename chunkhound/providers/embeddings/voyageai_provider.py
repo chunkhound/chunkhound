@@ -351,10 +351,13 @@ class VoyageAIEmbeddingProvider:
         self._embeddings_generated = 0
 
         # Concurrency limiter: custom endpoints (e.g. Azure ML) often reject
-        # simultaneous requests with HTTP 424. Default to 1 for custom base_url,
-        # high value for the official API which supports 2000 RPM.
+        # simultaneous requests with HTTP 424. Default to 1 only for custom
+        # endpoints; the official VoyageAI API keeps the higher recommended
+        # concurrency even when callers pass its base_url explicitly.
         if max_concurrent_batches is None:
-            max_concurrent_batches = 1 if base_url else self.RECOMMENDED_CONCURRENCY
+            max_concurrent_batches = (
+                1 if is_custom else self.RECOMMENDED_CONCURRENCY
+            )
         self._embed_semaphore = asyncio.Semaphore(max_concurrent_batches)
 
     @property
