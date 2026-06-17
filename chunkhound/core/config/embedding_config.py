@@ -216,6 +216,10 @@ class EmbeddingConfig(BaseSettings):
 
         String parsing belongs to CLI/env loaders so config construction rejects
         implicit coercion from bools, strings, and floats uniformly.
+
+        Mirrors the type/range checks in
+        ``chunkhound.providers.embeddings.shared_utils.validate_positive_output_dims``
+        (kept separate to avoid config→provider import).
         """
         if v is None:
             return None
