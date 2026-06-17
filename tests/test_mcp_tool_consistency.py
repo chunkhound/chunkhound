@@ -4,9 +4,11 @@ This test ensures the MCP stdio server exposes correct tool metadata from TOOL_R
 preventing issues where tools have incorrect or missing descriptions.
 """
 
+import inspect
+
 import pytest
 
-from chunkhound.mcp_server.tools import TOOL_REGISTRY
+from chunkhound.mcp_server.tools import TOOL_REGISTRY, tool_requires_services
 from chunkhound.version import __version__
 
 
@@ -1153,6 +1155,55 @@ async def test_db_tools_still_trigger_provider_connect() -> None:
     await server.ensure_tool_services("search")
 
     connect_provider.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_daemon_handle_tools_call_skips_connect_for_non_db_tools() -> None:
+    """Daemon _handle_tools_call must not trigger DB connect for daemon_status."""
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from chunkhound.daemon.server import ChunkHoundDaemon
+
+    daemon = ChunkHoundDaemon(
+        config=MagicMock(),
+        args=MagicMock(),
+        socket_path="",
+        project_dir=Path("/tmp"),
+    )
+    daemon.services = SimpleNamespace(
+        provider=SimpleNamespace(is_connected=False)
+    )
+    connect_mock = AsyncMock()
+    daemon._connect_provider = connect_mock
+
+    msg = {
+        "id": "1",
+        "params": {"name": "daemon_status", "arguments": {}},
+    }
+    with patch(
+        "chunkhound.daemon.server.handle_tool_call",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        await daemon._handle_tools_call(msg)
+
+    connect_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "tool_name,expected",
+    [
+        (name, "services" in inspect.signature(tool.implementation).parameters)
+        for name, tool in TOOL_REGISTRY.items()
+    ],
+)
+def test_tool_requires_services_matches_signature(
+    tool_name: str, expected: bool
+) -> None:
+    """Every tool's DB-service requirement must match its implementation signature."""
+    assert tool_requires_services(tool_name) is expected
 
 
 def test_search_enum_restricted_without_embeddings():
