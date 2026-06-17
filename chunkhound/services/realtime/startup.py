@@ -4,20 +4,28 @@ import asyncio
 import copy
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from loguru import logger
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
-from chunkhound.watchman import WatchmanScopePlan
-from chunkhound.watchman_runtime.loader import default_realtime_backend_for_current_install
 from chunkhound.utils.windows_constants import IS_WINDOWS
+from chunkhound.watchman import WatchmanScopePlan
+from chunkhound.watchman_runtime.loader import (
+    default_realtime_backend_for_current_install,
+)
 
-from .adapters import PollingRealtimeAdapter, WatchdogRealtimeAdapter, WatchmanRealtimeAdapter
+from .adapters import (
+    PollingRealtimeAdapter,
+    WatchdogRealtimeAdapter,
+    WatchmanRealtimeAdapter,
+)
 from .events import SimpleEventHandler
+
 
 class RealtimeStartupStatusTracker:
     """Track bounded daemon-side startup timing for public status surfaces."""
