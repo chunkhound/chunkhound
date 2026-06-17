@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import time
 from typing import Any
 
 from loguru import logger
@@ -28,6 +29,7 @@ class EmbeddingService(BaseService):
         max_concurrent_batches: int | None = None,
         progress: Progress | None = None,
         metrics_collector: BatchMetricsCollector | None = None,
+        compaction_interval: int = 5,
     ):
         """Initialize embedding service.
 
@@ -39,6 +41,7 @@ class EmbeddingService(BaseService):
             max_concurrent_batches: Maximum concurrent batches (None = auto-detect from provider)
             progress: Optional Rich Progress instance for hierarchical progress display
             metrics_collector: Optional collector for per-batch timing metrics
+            compaction_interval: Run compaction every N fetch-batches (0 = disabled)
         """
         super().__init__(database_provider)
         self._embedding_provider = embedding_provider
@@ -85,6 +88,10 @@ class EmbeddingService(BaseService):
         # All counter updates happen sequentially in result processing loop (line 677).
         self._optimization_batch_frequency = self._parse_optimization_frequency()
         self._completed_batches = 0
+
+        # How many fetch-batches between explicit compaction calls.
+        # 0 disables scheduled compaction entirely (only finalize_optimization runs it).
+        self._compaction_interval = max(0, compaction_interval)
 
     def _parse_optimization_frequency(self) -> int:
         """Parse optimization batch frequency from environment with validation.
@@ -171,6 +178,7 @@ class EmbeddingService(BaseService):
         chunk_ids: list[ChunkId],
         chunk_texts: list[str],
         show_progress: bool = True,
+        skip_filter: bool = False,
     ) -> int:
         """Generate embeddings for a list of chunks.
 
@@ -178,6 +186,8 @@ class EmbeddingService(BaseService):
             chunk_ids: List of chunk IDs to generate embeddings for
             chunk_texts: Corresponding text content for each chunk
             show_progress: Whether to show progress bar (default True)
+            skip_filter: Skip the existing-embeddings filter (use when caller
+                has already pre-filtered, e.g. generate_missing_embeddings)
 
         Returns:
             Number of embeddings successfully generated
@@ -192,10 +202,13 @@ class EmbeddingService(BaseService):
         try:
             logger.debug(f"Generating embeddings for {len(chunk_ids)} chunks")
 
-            # Filter out chunks that already have embeddings
-            filtered_chunks = await self._filter_existing_embeddings(
-                chunk_ids, chunk_texts
-            )
+            # Filter out chunks that already have embeddings (skip when pre-filtered)
+            if skip_filter:
+                filtered_chunks = list(zip(chunk_ids, chunk_texts))
+            else:
+                filtered_chunks = await self._filter_existing_embeddings(
+                    chunk_ids, chunk_texts
+                )
 
             if not filtered_chunks:
                 logger.debug("All chunks already have embeddings")
@@ -263,14 +276,52 @@ class EmbeddingService(BaseService):
             # memory: avoid loading all N million chunks' code into RAM at once.
             _FETCH_BATCH = 5000
             generated_count = 0
-            for i in range(0, len(chunk_ids_without_embeddings), _FETCH_BATCH):
-                batch_ids = chunk_ids_without_embeddings[i : i + _FETCH_BATCH]
-                chunks_data = self._get_chunks_by_ids(batch_ids)
-                chunk_id_list = [chunk["id"] for chunk in chunks_data]
-                chunk_texts = [chunk["code"] for chunk in chunks_data]
-                generated_count += await self.generate_embeddings_for_chunks(
-                    chunk_id_list, chunk_texts, show_progress=True
-                )
+
+            # Suppress mid-batch probabilistic compaction; we run it on a
+            # controlled schedule every _compaction_interval fetch-batches.
+            _compact_fn = getattr(self._db, "compact_if_needed", None)
+            _suppress_attr = hasattr(self._db, "_suppress_compaction")
+            if _suppress_attr:
+                self._db._suppress_compaction = True  # type: ignore[attr-defined]
+            try:
+                for fetch_idx, i in enumerate(
+                    range(0, len(chunk_ids_without_embeddings), _FETCH_BATCH)
+                ):
+                    batch_ids = chunk_ids_without_embeddings[i : i + _FETCH_BATCH]
+                    chunks_data = self._get_chunks_by_ids(batch_ids)
+                    chunk_id_list = [chunk["id"] for chunk in chunks_data]
+                    chunk_texts = [chunk["code"] for chunk in chunks_data]
+
+                    fetch_start = time.monotonic()
+                    generated_count += await self.generate_embeddings_for_chunks(
+                        chunk_id_list, chunk_texts, show_progress=True,
+                        skip_filter=True,
+                    )
+                    elapsed = time.monotonic() - fetch_start
+                    rate = len(batch_ids) / elapsed if elapsed > 0 else 0
+                    logger.info(
+                        f"[EmbSvc] fetch-batch {fetch_idx + 1}: "
+                        f"{len(batch_ids)} chunks in {elapsed:.1f}s ({rate:.1f} chunks/s)"
+                    )
+
+                    # Scheduled compaction every N fetch-batches
+                    if (
+                        self._compaction_interval > 0
+                        and (fetch_idx + 1) % self._compaction_interval == 0
+                        and _compact_fn is not None
+                    ):
+                        logger.info(
+                            f"[EmbSvc] Running scheduled compaction after "
+                            f"fetch-batch {fetch_idx + 1}"
+                        )
+                        if _suppress_attr:
+                            self._db._suppress_compaction = False  # type: ignore[attr-defined]
+                        await asyncio.to_thread(_compact_fn)
+                        if _suppress_attr:
+                            self._db._suppress_compaction = True  # type: ignore[attr-defined]
+            finally:
+                if _suppress_attr:
+                    self._db._suppress_compaction = False  # type: ignore[attr-defined]
 
             return {
                 "status": "success",
@@ -654,7 +705,12 @@ class EmbeddingService(BaseService):
             process_batch_with_optional_progress(batch, i)
             for i, batch in enumerate(batches)
         ]
+        _gather_start = time.monotonic()
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        logger.debug(
+            f"[EmbSvc] gather: {len(chunk_data)} chunks, "
+            f"{len(batches)} API batches in {time.monotonic() - _gather_start:.1f}s"
+        )
 
         # Count successful embeddings and track completed batches
         total_generated = 0

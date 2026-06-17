@@ -1648,8 +1648,10 @@ class IndexingCoordinator(BaseService):
     def finalize_optimization(self) -> None:
         """Run post-embedding optimization if warranted."""
         self._run_batch_compaction_boundary(operation="post-embedding")
-        # Create deferred HNSW indexes after bulk indexing completes
+        # Create deferred HNSW indexes (first-indexing path) then ensure all
+        # tables have HNSW regardless of whether this was first or re-indexing
         self._db.create_deferred_indexes()
+        self._db.ensure_hnsw_indexes()
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
         """Safely extract file ID from either dict or File model."""
@@ -1808,6 +1810,9 @@ class IndexingCoordinator(BaseService):
             if self.config and self.config.indexing:
                 db_batch_size = self.config.indexing.db_batch_size
 
+            compaction_interval = int(
+                os.getenv("CHUNKHOUND_EMBEDDING_COMPACTION_INTERVAL", "5")
+            )
             embedding_service = EmbeddingService(
                 database_provider=self._db,
                 embedding_provider=self._embedding_provider,
@@ -1816,8 +1821,10 @@ class IndexingCoordinator(BaseService):
                 max_concurrent_batches=max_concurrent_batches,
                 progress=self.progress,
                 metrics_collector=metrics_collector,
+                compaction_interval=compaction_interval,
             )
 
+            self._db.drop_hnsw_indexes()
             result = await embedding_service.generate_missing_embeddings(
                 exclude_patterns=exclude_patterns
             )

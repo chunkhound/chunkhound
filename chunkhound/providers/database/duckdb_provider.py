@@ -267,6 +267,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             }
         }
 
+        # When True, compact_if_needed() returns immediately without running compaction.
+        # Used during bulk embedding generation to suppress mid-batch compaction.
+        self._suppress_compaction: bool = False
+
     def _create_connection(self) -> Any:
         """Create and return a DuckDB connection.
 
@@ -4199,6 +4203,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         Uses fragmentation_threshold_pct from config if set, otherwise falls
         back to compaction_threshold. Returns True if compaction ran.
         """
+        if self._suppress_compaction:
+            return False
         if self._connection_manager.is_memory_db:
             return False
         config = getattr(self, "_config", None) or getattr(self, "config", None)
