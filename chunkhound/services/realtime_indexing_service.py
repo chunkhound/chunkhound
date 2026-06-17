@@ -7,5 +7,5 @@
 from importlib import import_module
 import sys
 
-_MODULE = import_module("chunkhound.services.realtime.service")
+_MODULE = import_module("chunkhound.services.realtime")
 sys.modules[__name__] = _MODULE
