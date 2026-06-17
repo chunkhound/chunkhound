@@ -267,9 +267,7 @@ def test_delete_files_batch_raises_typed_conflict_inside_outer_transaction(
     try:
         _insert_file_with_embedding(provider, "conflict.py", 0.1)
         state = {
-            "operations_since_checkpoint": 0,
             "transaction_active": True,
-            "deferred_checkpoint": False,
             "base_directory": str(tmp_path),
         }
 

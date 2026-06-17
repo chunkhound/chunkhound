@@ -1,0 +1,107 @@
+version: "3.9"
+
+# Shared config applied to every chunkhound replica.
+x-chunkhound-common: &chunkhound-common
+  image: chunkhound-mcp:latest
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+    args:
+      HOST_UID: "333408069"
+      HOST_GID: "2080"
+  restart: unless-stopped
+  working_dir: ${CHUNKHOUND_SOURCE_PATH}
+  env_file:
+    - .env.docker
+  environment:
+    # Replicas serve read-only search traffic.
+    CHUNKHOUND_DATABASE__COMPACTION_ENABLED: "false"
+    CHUNKHOUND_SKIP_INITIAL_SCAN: "true"
+    # HNSW index rebuild on first semantic search takes 15-30 min for 3-5M vectors.
+    # After the first search persists the index to disk this can be lowered.
+    CHUNKHOUND_DB_EXECUTE_TIMEOUT: "7200"
+    # Mount the host .chunkhound.json as the config source of truth.
+    CHUNKHOUND_CONFIG_FILE: /etc/chunkhound/config.json
+    # Match nginx proxy_read_timeout so long-running tools (code_research) don't get killed.
+    SESSION_TIMEOUT: "1200000"
+  networks:
+    - mcp-net
+  healthcheck:
+    # Liveness-only: verify supergateway is listening without creating an MCP
+    # session. Omitting -f so curl exits 0 for any HTTP response (even 400);
+    # it only fails on connection errors. Sending an initialize request here
+    # would spawn a chunkhound child, hold the DuckDB exclusive lock for the
+    # full sessionTimeout, and block the real MCP client.
+    test: ["CMD-SHELL", "curl --max-time 3 --connect-timeout 3 -s -o /dev/null http://localhost:8080/mcp || exit 1"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
+
+services:
+  # ── ChunkHound MCP replicas ─────────────────────────────────────────────────
+  # Each replica mounts its own copy of the database.
+  # DuckDB takes an exclusive write-lock on chunks.db at open time; sharing one
+  # file across containers would cause all but the first to fail at startup.
+  # Run scripts/prepare-db-replicas.sh once to populate each replica directory.
+  #
+  # NOTE: volumes are NOT :ro — DuckDB needs write access for WAL and lock files
+  # even during read-only queries. The source database is protected because
+  # replicas use independent copies, not the original.
+
+  chunkhound-1:
+    <<: *chunkhound-common
+    container_name: chunkhound-mcp-1
+    volumes:
+      - /home/e120400/views/g/quest/mono/.chunkhound.json:/etc/chunkhound/config.json:ro
+      - /opt/chunkhound/db/replica1:/data/db
+      - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - ${CHUNKHOUND_SOURCE_PATH}:${CHUNKHOUND_SOURCE_PATH}
+      - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
+      - /home/e120400/.claude:/home/chunkhound/.claude:ro
+
+  chunkhound-2:
+    <<: *chunkhound-common
+    container_name: chunkhound-mcp-2
+    volumes:
+      - /home/e120400/views/g/quest/mono/.chunkhound.json:/etc/chunkhound/config.json:ro
+      - /opt/chunkhound/db/replica2:/data/db
+      - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - ${CHUNKHOUND_SOURCE_PATH}:${CHUNKHOUND_SOURCE_PATH}
+      - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
+      - /home/e120400/.claude:/home/chunkhound/.claude:ro
+
+  chunkhound-3:
+    <<: *chunkhound-common
+    container_name: chunkhound-mcp-3
+    volumes:
+      - /home/e120400/views/g/quest/mono/.chunkhound.json:/etc/chunkhound/config.json:ro
+      - /opt/chunkhound/db/replica3:/data/db
+      - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - ${CHUNKHOUND_SOURCE_PATH}:${CHUNKHOUND_SOURCE_PATH}
+      - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
+      - /home/e120400/.claude:/home/chunkhound/.claude:ro
+
+  # ── nginx reverse proxy ─────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: chunkhound-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # Uncomment to add TLS termination (provide certs via additional volume):
+      # - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/mcp_upstream.conf:/etc/nginx/conf.d/mcp_upstream.conf:ro
+      - /dev/null:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - mcp-net
+    depends_on:
+      - chunkhound-1
+      - chunkhound-2
+      - chunkhound-3
+
+networks:
+  mcp-net:
+    driver: bridge

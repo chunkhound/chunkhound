@@ -160,17 +160,47 @@ class StdioMCPServer(MCPServerBase):
             tool_name: str, arguments: dict[str, Any]
         ) -> list[types.TextContent]:
             """Universal tool handler that routes to the unified handler."""
-            return await handle_tool_call(
-                tool_name=tool_name,
-                arguments=arguments,
-                services=await self.ensure_services(),
-                embedding_manager=self.embedding_manager,
-                initialization_complete=self._initialization_complete,
-                debug_mode=self.debug_mode,
-                scan_progress=self._scan_progress,
-                llm_manager=self.llm_manager,
-                config=self.config,
-            )
+            services = await self.ensure_tool_services(tool_name)
+
+            # Long-running tools (code_research, websearch) emit periodic log
+            # notifications so that HTTP MCP clients don't drop the SSE channel
+            # due to idle-timeout before the result arrives (~3 min typical).
+            LONG_RUNNING_TOOLS = {"code_research", "websearch"}
+            keepalive_task = None
+            if tool_name in LONG_RUNNING_TOOLS:
+                server_ref = self.server
+
+                async def _keepalive() -> None:
+                    interval = 0
+                    while True:
+                        await asyncio.sleep(15)
+                        interval += 15
+                        try:
+                            ctx = server_ref.request_context
+                            await ctx.session.send_log_message(
+                                level="info",
+                                data=f"Processing {tool_name}… ({interval}s)",
+                            )
+                        except Exception:
+                            pass
+
+                keepalive_task = asyncio.create_task(_keepalive())
+
+            try:
+                return await handle_tool_call(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    services=services,
+                    embedding_manager=self.embedding_manager,
+                    initialization_complete=self._initialization_complete,
+                    debug_mode=self.debug_mode,
+                    scan_progress=self._scan_progress,
+                    llm_manager=self.llm_manager,
+                    config=self.config,
+                )
+            finally:
+                if keepalive_task is not None:
+                    keepalive_task.cancel()
 
         self._register_list_tools()
 

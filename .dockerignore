@@ -8,7 +8,8 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+# dist/ is intentionally included: the pre-built wheel (from `uv build`) is
+# COPYed into the image. Do not add dist/ back to this ignore list.
 downloads/
 eggs/
 .eggs/
@@ -70,9 +71,9 @@ test.db*
 correct.db*
 chunkhound.db*
 
-# Docker files
-Dockerfile*
-docker-compose*.yml
+# Docker files (anchored to root so docker/Dockerfile is included in build context)
+/Dockerfile*
+/docker-compose*.yml
 .dockerignore
 
 # CI/CD

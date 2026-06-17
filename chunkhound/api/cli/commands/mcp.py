@@ -37,6 +37,13 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
         args: Parsed command-line arguments containing database path
         config: Pre-validated configuration instance
     """
+    # HTTP transport mode: delegate entirely to the HTTP MCP server.
+    if getattr(args, "transport", None) == "http":
+        from chunkhound.mcp_server.http_server import main as http_main
+
+        await http_main(args)
+        return
+
     # Handle --show-setup flag (display instructions and exit)
     if hasattr(args, "show_setup") and args.show_setup:
         _show_mcp_setup_instructions(args, force_display=True)

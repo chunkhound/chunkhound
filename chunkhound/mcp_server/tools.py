@@ -99,6 +99,16 @@ class Tool:
 TOOL_REGISTRY: dict[str, Tool] = {}
 
 
+def tool_requires_services(tool_name: str) -> bool:
+    """Return True when the tool implementation needs DB services.
+
+    This is the daemon/session boundary: non-DB tools must not trigger
+    provider reconnect/open work just because an MCP client called them.
+    """
+    tool = TOOL_REGISTRY[tool_name]
+    return "services" in inspect.signature(tool.implementation).parameters
+
+
 def _python_type_to_json_schema_type(type_hint: Any) -> dict[str, Any]:
     """Convert Python type hint to JSON Schema type definition.
 
