@@ -436,9 +436,14 @@ class RealtimeStartupMixin:
         if callable(ensure_root):
             get_base = getattr(provider, "get_base_directory", None)
             requested_root = get_base() if callable(get_base) else watch_path
-            ensure_root(
-                requested_root=requested_root,
-                allow_claim_if_missing=True,
+            loop = asyncio.get_running_loop()
+            # run_in_executor only forwards positional args; lambda bridges kwargs
+            await loop.run_in_executor(
+                None,
+                lambda: ensure_root(
+                    requested_root=requested_root,
+                    allow_claim_if_missing=True,
+                ),
             )
 
         start_task = asyncio.current_task()
