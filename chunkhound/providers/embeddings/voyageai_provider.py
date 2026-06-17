@@ -421,11 +421,13 @@ class VoyageAIEmbeddingProvider:
 
     @property
     def supported_dimensions(self) -> Sequence[int]:
-        """List of known-valid output dimensions for this model.
+        """Known-valid output dimensions for this model.
 
         Unknown/custom Voyage-compatible models have no static whitelist, so we
         only report runtime-discovered native dimensions after the provider has
         observed a real API response.
+
+        Use ``in`` for membership checks, not equality.
         """
         dims = self._model_config["dimensions"]
         if dims:

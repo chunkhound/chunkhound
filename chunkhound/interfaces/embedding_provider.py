@@ -68,7 +68,11 @@ class EmbeddingProvider(Protocol):
 
     @property
     def supported_dimensions(self) -> Sequence[int]:
-        """Known-valid output dimensions for this model."""
+        """Known-valid output dimensions for this model.
+
+        Matryoshka models may return ``range()`` for efficiency. Use ``in``
+        for membership checks rather than equality comparison.
+        """
         ...
 
     @property

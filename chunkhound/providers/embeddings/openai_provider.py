@@ -717,7 +717,11 @@ class OpenAIEmbeddingProvider:
 
     @property
     def supported_dimensions(self) -> Sequence[int]:
-        """Valid output dimensions for this model."""
+        """Valid output dimensions for this model.
+
+        Matryoshka models return ``range()`` for efficiency.
+        Use ``in`` for membership checks, not equality.
+        """
         if self._model in self._model_config:
             cfg = self._model_config[self._model]
             if cfg.get("matryoshka", False):
