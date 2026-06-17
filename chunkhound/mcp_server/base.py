@@ -619,6 +619,12 @@ class MCPServerBase(ABC):
         self, target_path: Path, monitoring_task: asyncio.Task[Any]
     ) -> None:
         """Perform initial scan after monitoring is confirmed ready."""
+        if os.environ.get("CHUNKHOUND_SKIP_INITIAL_SCAN", "").lower() in ("1", "true"):
+            self._scan_progress.update({
+                "is_scanning": False,
+                "scan_completed_at": datetime.now().isoformat(),
+            })
+            return
         realtime_indexing = self.realtime_indexing
         if realtime_indexing is None:
             raise RuntimeError(

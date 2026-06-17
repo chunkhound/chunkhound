@@ -16,6 +16,10 @@ x-chunkhound-common: &chunkhound-common
   environment:
     # Replicas serve read-only search traffic.
     CHUNKHOUND_DATABASE__COMPACTION_ENABLED: "false"
+    CHUNKHOUND_SKIP_INITIAL_SCAN: "true"
+    # HNSW index rebuild on first semantic search takes 15-30 min for 3-5M vectors.
+    # After the first search persists the index to disk this can be lowered.
+    CHUNKHOUND_DB_EXECUTE_TIMEOUT: "7200"
     # Mount the host .chunkhound.json as the config source of truth.
     CHUNKHOUND_CONFIG_FILE: /etc/chunkhound/config.json
     # Match nginx proxy_read_timeout so long-running tools (code_research) don't get killed.
@@ -49,7 +53,7 @@ services:
     <<: *chunkhound-common
     container_name: chunkhound-mcp-1
     volumes:
-      - ./.chunkhound.json:/etc/chunkhound/config.json:ro
+      - /home/e120400/views/g/quest/mono/.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica1:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
       - ${CHUNKHOUND_SOURCE_PATH}:${CHUNKHOUND_SOURCE_PATH}
@@ -60,7 +64,7 @@ services:
     <<: *chunkhound-common
     container_name: chunkhound-mcp-2
     volumes:
-      - ./.chunkhound.json:/etc/chunkhound/config.json:ro
+      - /home/e120400/views/g/quest/mono/.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica2:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
       - ${CHUNKHOUND_SOURCE_PATH}:${CHUNKHOUND_SOURCE_PATH}
@@ -71,7 +75,7 @@ services:
     <<: *chunkhound-common
     container_name: chunkhound-mcp-3
     volumes:
-      - ./.chunkhound.json:/etc/chunkhound/config.json:ro
+      - /home/e120400/views/g/quest/mono/.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica3:/data/db
       - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
       - ${CHUNKHOUND_SOURCE_PATH}:${CHUNKHOUND_SOURCE_PATH}
