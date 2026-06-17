@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from loguru import logger
-from watchdog.observers.api import BaseObserver
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
@@ -41,6 +40,7 @@ from .events import (
 )
 from .pipeline import RealtimePipelineMixin
 from .startup import (
+    RealtimeObserver,
     RealtimeStartupMixin,
     RealtimeStartupStatusTracker,
     default_realtime_backend_for_current_install,
@@ -198,7 +198,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._reserved_follow_up_change_generations: dict[str, int] = {}
         self.scan_iterator: Iterator | None = None
         self.scan_complete = False
-        self.observer: BaseObserver | None = None
+        self.observer: RealtimeObserver | None = None
         self.event_handler: SimpleEventHandler | None = None
         self.watch_path: Path | None = None
         self.process_task: asyncio.Task | None = None
@@ -206,7 +206,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._polling_task: asyncio.Task | None = None
         self._watchdog_setup_task: asyncio.Task | None = None
         self._watchdog_bootstrap_future: (
-            asyncio.Future[tuple[BaseObserver, SimpleEventHandler] | None] | None
+            asyncio.Future[tuple[RealtimeObserver, SimpleEventHandler] | None] | None
         ) = None
         self._watchdog_bootstrap_abort = threading.Event()
         self._resync_dispatch_task: asyncio.Task | None = None
@@ -288,6 +288,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     @staticmethod
     def _build_watchman_subscription_names(**kwargs: Any) -> tuple[str, ...]:
         return build_watchman_subscription_names_for_scope_plan(**kwargs)
+
+    def _default_realtime_backend_for_current_install(self) -> str:
+        return default_realtime_backend_for_current_install()
 
     @staticmethod
     def _utc_now() -> str:

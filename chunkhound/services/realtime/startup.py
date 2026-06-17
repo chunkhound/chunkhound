@@ -7,11 +7,9 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from loguru import logger
-from watchdog.observers import Observer
-from watchdog.observers.api import BaseObserver
 
 from chunkhound.utils.windows_constants import IS_WINDOWS
 from chunkhound.watchman import WatchmanScopePlan
@@ -25,6 +23,32 @@ from .adapters import (
     WatchmanRealtimeAdapter,
 )
 from .events import SimpleEventHandler
+
+
+class RealtimeObserver(Protocol):
+    """Minimal watchdog observer contract used by the watchdog backend only."""
+
+    def schedule(
+        self,
+        event_handler: SimpleEventHandler,
+        path: str,
+        recursive: bool = ...,
+    ) -> Any: ...
+
+    def start(self) -> None: ...
+
+    def is_alive(self) -> bool: ...
+
+    def stop(self) -> None: ...
+
+    def join(self, timeout: float | None = ...) -> None: ...
+
+
+def _create_watchdog_observer() -> RealtimeObserver:
+    """Import watchdog only inside the watchdog startup path."""
+    from watchdog.observers import Observer
+
+    return Observer()
 
 
 class RealtimeStartupStatusTracker:
@@ -326,6 +350,9 @@ class RealtimeStartupMixin:
             return
         self._service_state = "running"
 
+    def _default_realtime_backend_for_current_install(self) -> str:
+        return default_realtime_backend_for_current_install()
+
     def _resolve_configured_backend(self) -> str:
         backend = getattr(self.config.indexing, "realtime_backend", None)
         self._configured_backend_raw = backend
@@ -333,7 +360,7 @@ class RealtimeStartupMixin:
             self._configured_backend_resolution = "explicit"
             return str(backend)
         self._configured_backend_resolution = "install_default"
-        resolved_backend = default_realtime_backend_for_current_install()
+        resolved_backend = self._default_realtime_backend_for_current_install()
         if backend is None:
             reason = "no explicit realtime backend is configured"
         else:
@@ -673,7 +700,7 @@ class RealtimeStartupMixin:
                 self._watchdog_bootstrap_future = None
 
     def _handle_watchdog_bootstrap_done(
-        self, future: asyncio.Future[tuple[BaseObserver, SimpleEventHandler] | None]
+        self, future: asyncio.Future[tuple[RealtimeObserver, SimpleEventHandler] | None]
     ) -> None:
         """Drain watchdog bootstrap exceptions and reflect unexpected failures."""
         if self._watchdog_bootstrap_future is future:
@@ -724,7 +751,7 @@ class RealtimeStartupMixin:
 
     def _adopt_watchdog_monitor(
         self,
-        observer: BaseObserver,
+        observer: RealtimeObserver,
         event_handler: SimpleEventHandler,
         watch_path: Path,
     ) -> None:
@@ -750,7 +777,7 @@ class RealtimeStartupMixin:
         self._emit_status_update()
 
     @staticmethod
-    def _stop_bootstrap_observer(observer: BaseObserver) -> None:
+    def _stop_bootstrap_observer(observer: RealtimeObserver) -> None:
         """Stop a watchdog observer created during a bootstrap race."""
         try:
             observer.stop()
@@ -766,7 +793,7 @@ class RealtimeStartupMixin:
         watch_path: Path,
         loop: asyncio.AbstractEventLoop,
         abort_event: threading.Event,
-    ) -> tuple[BaseObserver, SimpleEventHandler] | None:
+    ) -> tuple[RealtimeObserver, SimpleEventHandler] | None:
         """Create and start a watchdog observer without mutating shared state."""
         event_handler = SimpleEventHandler(
             self.event_queue,
@@ -778,7 +805,7 @@ class RealtimeStartupMixin:
             filtered_event_callback=self._record_filtered_event,
             admission_callback=self._should_admit_realtime_event,
         )
-        observer = Observer()
+        observer = _create_watchdog_observer()
 
         # Use recursive=True to ensure all directory events are captured
         # This is necessary for proper real-time monitoring of new directories
