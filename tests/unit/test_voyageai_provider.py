@@ -35,9 +35,16 @@ class _FakeEmbedResult:
         self.total_tokens = total_tokens
 
 
+def _make_mock_client(*, params: dict[str, object] | None = None) -> MagicMock:
+    """Return a fake VoyageAI SDK client with controllable internal params."""
+    mock_client = MagicMock()
+    mock_client._params = {} if params is None else dict(params)
+    return mock_client
+
+
 def _make_provider(**kwargs) -> VoyageAIEmbeddingProvider:
     """Return a VoyageAIEmbeddingProvider with the SDK client mocked out."""
-    mock_client = MagicMock()
+    mock_client = _make_mock_client()
     with patch.object(voyageai, "Client", return_value=mock_client):
         return VoyageAIEmbeddingProvider(**kwargs)
 
@@ -158,6 +165,27 @@ class TestSemaphoreInit:
     def test_official_api_defaults_to_recommended_concurrency(self, provider_official):
         assert (
             provider_official._embed_semaphore._value
+            == VoyageAIEmbeddingProvider.RECOMMENDED_CONCURRENCY
+        )
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://api.voyageai.com",
+            "https://api.voyageai.com/v1",
+            "https://api.voyageai.com/v1/",
+        ],
+    )
+    def test_explicit_official_base_url_keeps_recommended_concurrency(
+        self, base_url: str
+    ):
+        """Regression: explicit official base_url must not drop concurrency to 1."""
+        p = _make_provider(
+            api_key="test-key",
+            base_url=base_url,
+        )
+        assert (
+            p._embed_semaphore._value
             == VoyageAIEmbeddingProvider.RECOMMENDED_CONCURRENCY
         )
 
