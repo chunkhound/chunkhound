@@ -290,6 +290,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         return build_watchman_subscription_names_for_scope_plan(**kwargs)
 
     def _default_realtime_backend_for_current_install(self) -> str:
+        # Keep backend resolution patched through the legacy compatibility
+        # module path, which is still what many tests and callers target.
         return default_realtime_backend_for_current_install()
 
     @staticmethod

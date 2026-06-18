@@ -59,3 +59,12 @@ def test_simple_event_handler_dispatches_without_watchdog_base(tmp_path: Path) -
             "loop_unavailable",
         )
     ]
+
+
+def test_legacy_realtime_module_targets_live_service_namespace() -> None:
+    legacy_module = importlib.import_module(
+        "chunkhound.services.realtime_indexing_service"
+    )
+    service_module = importlib.import_module("chunkhound.services.realtime.service")
+
+    assert legacy_module is service_module
