@@ -261,9 +261,19 @@ class EmbeddingService(BaseService):
             target_provider = provider_name or self._embedding_provider.name
             target_model = model_name or self._embedding_provider.model
 
+            # Detect migration mode: client_side_truncation=True with a target dimension
+            _cst = getattr(self._embedding_provider, "client_side_truncation", False)
+            _target_dims: int | None = None
+            if _cst:
+                _target_dims = getattr(self._embedding_provider, "output_dims", None)
+                if _target_dims is None:
+                    _target_dims = getattr(self._embedding_provider, "dims", None)
+            _migration_mode = _cst and _target_dims is not None
+
             # First, just get the count and IDs of chunks without embeddings (fast query)
             chunk_ids_without_embeddings = self._get_chunk_ids_without_embeddings(
-                target_provider, target_model, exclude_patterns
+                target_provider, target_model, exclude_patterns,
+                target_dims=_target_dims if _migration_mode else None,
             )
 
             if not chunk_ids_without_embeddings:
@@ -287,11 +297,33 @@ class EmbeddingService(BaseService):
             _suppress_cp_attr = hasattr(self._db, "_suppress_force_checkpoint")
             if _suppress_cp_attr:
                 self._db._suppress_force_checkpoint = True  # type: ignore[attr-defined]
+            _force_defer_attr = hasattr(self._db, "_force_defer_hnsw")
+            if _force_defer_attr and _migration_mode:
+                self._db._force_defer_hnsw = True  # type: ignore[attr-defined]
             try:
                 for fetch_idx, i in enumerate(
                     range(0, len(chunk_ids_without_embeddings), _FETCH_BATCH)
                 ):
-                    batch_ids = chunk_ids_without_embeddings[i : i + _FETCH_BATCH]
+                    batch_ids = list(chunk_ids_without_embeddings[i : i + _FETCH_BATCH])
+
+                    # Migration step: for chunks with full-size vectors, truncate locally
+                    # instead of making API calls. Truly new chunks fall through to API path.
+                    _migrated_ids: set[int] = set()
+                    if _migration_mode and _target_dims is not None:
+                        _migrated_ids = await self._migrate_from_full_embeddings(
+                            list(batch_ids), _target_dims
+                        )
+                        if _migrated_ids:
+                            generated_count += len(_migrated_ids)
+                            batch_ids = [cid for cid in batch_ids if cid not in _migrated_ids]
+                            logger.info(
+                                f"[EmbSvc] fetch-batch {fetch_idx + 1}: "
+                                f"{len(_migrated_ids)} migrated, {len(batch_ids)} need API"
+                            )
+
+                    if not batch_ids:
+                        continue  # All handled via migration
+
                     chunks_data = self._get_chunks_by_ids(batch_ids)
                     chunk_id_list = [chunk["id"] for chunk in chunks_data]
                     chunk_texts = [chunk["code"] for chunk in chunks_data]
@@ -328,6 +360,31 @@ class EmbeddingService(BaseService):
                     self._db._suppress_compaction = False  # type: ignore[attr-defined]
                 if _suppress_cp_attr:
                     self._db._suppress_force_checkpoint = False  # type: ignore[attr-defined]
+                if _force_defer_attr:
+                    self._db._force_defer_hnsw = False  # type: ignore[attr-defined]
+
+            # Optionally drop the full-length source table after migration
+            _drop_configured = (
+                _migration_mode
+                and self._embedding_provider is not None
+                and getattr(
+                    getattr(self._embedding_provider, "config", None),
+                    "drop_full_vectors_after_migration",
+                    False,
+                )
+            )
+            if _drop_configured and _target_dims is not None:
+                # Discover source_dims by calling with empty chunk_ids (discovery mode)
+                _dummy, _source_dims = await asyncio.to_thread(
+                    self._db.get_full_embeddings_for_migration,
+                    [], target_provider, target_model, _target_dims,
+                )
+                if _source_dims is not None:
+                    logger.info(
+                        f"[Migration] drop_full_vectors_after_migration=True: "
+                        f"dropping embeddings_{_source_dims}"
+                    )
+                    self._db.drop_embedding_table(_source_dims)
 
             return {
                 "status": "success",
@@ -968,7 +1025,11 @@ class EmbeddingService(BaseService):
         return batches
 
     def _get_chunk_ids_without_embeddings(
-        self, provider: str, model: str, exclude_patterns: list[str] | None = None
+        self,
+        provider: str,
+        model: str,
+        exclude_patterns: list[str] | None = None,
+        target_dims: int | None = None,
     ) -> list[ChunkId]:
         """Get just the IDs of chunks that don't have embeddings (provider-agnostic)."""
         # Fetch only chunk_id + file_path — avoids loading code/metadata for millions of rows
@@ -1005,9 +1066,17 @@ class EmbeddingService(BaseService):
             return []
 
         # Use provider-agnostic get_existing_embeddings to check which chunks already have embeddings
-        existing_chunk_ids = self._db.get_existing_embeddings(
-            chunk_ids=all_chunk_ids, provider=provider, model=model
-        )
+        if target_dims is not None:
+            existing_chunk_ids = self._db.get_existing_embeddings_in_table(
+                chunk_ids=all_chunk_ids,
+                provider=provider,
+                model=model,
+                dims=target_dims,
+            )
+        else:
+            existing_chunk_ids = self._db.get_existing_embeddings(
+                chunk_ids=all_chunk_ids, provider=provider, model=model
+            )
 
         # Return only chunks that don't have embeddings (convert back to ChunkId)
         return [
