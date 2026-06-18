@@ -5,6 +5,8 @@ import asyncio
 import logging as _pylogging
 import multiprocessing
 import sys
+import time
+from datetime import datetime
 
 from loguru import logger
 
@@ -14,6 +16,21 @@ from .utils.config_factory import create_validated_config
 
 # Required for PyInstaller multiprocessing support
 multiprocessing.freeze_support()
+
+
+def _daemon_startup_breadcrumb(args: argparse.Namespace, message: str) -> None:
+    """Emit pre-server daemon startup breadcrumbs to the daemon stderr log."""
+    if getattr(args, "command", None) != "_daemon":
+        return
+    try:
+        timestamp = datetime.now().isoformat()
+        print(
+            f"[{timestamp}] [startup] startup: {message}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        pass
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -113,9 +130,19 @@ async def async_main() -> None:
 
         args.path = _Path(args.project_dir).resolve()
 
+    _daemon_startup_breadcrumb(args, "startup tracking began mode=daemon")
+    config_validation_started = time.monotonic()
+    _daemon_startup_breadcrumb(args, "phase started: cli_config_validation")
     config, validation_errors = create_validated_config(args, args.command)
+    config_validation_duration = time.monotonic() - config_validation_started
 
     if validation_errors:
+        joined_errors = "; ".join(validation_errors)
+        _daemon_startup_breadcrumb(
+            args,
+            "phase failed: cli_config_validation "
+            f"duration={config_validation_duration:.3f}s error={joined_errors}",
+        )
         should_show_web_banner = sys.stderr.isatty()
         logger.error("Configuration error — see details below.")
         if should_show_web_banner:
@@ -157,6 +184,12 @@ async def async_main() -> None:
                 print("  4. Use --no-embeddings to skip embeddings", file=sys.stderr)
 
         sys.exit(1)
+
+    _daemon_startup_breadcrumb(
+        args,
+        "phase completed: cli_config_validation "
+        f"duration={config_validation_duration:.3f}s",
+    )
 
     try:
         if args.command == "index":

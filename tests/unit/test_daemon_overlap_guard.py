@@ -965,9 +965,11 @@ async def test_find_or_start_daemon_terminates_detached_child_on_startup_timeout
         ),
     )
 
-    with pytest.raises(RuntimeError, match=r"did not start within 0\.05s"):
+    with pytest.raises(RuntimeError, match="did not start within") as exc_info:
         await discovery.find_or_start_daemon(object())
 
+    assert "process_state=running" in str(exc_info.value)
+    assert "Daemon log was empty or unavailable" in str(exc_info.value)
     assert fake_process.terminate_calls == 1
     assert fake_process.kill_calls == 1
 
@@ -1135,6 +1137,70 @@ def test_write_json_atomically_retries_transient_windows_replace_error(
 
     assert attempts["count"] == 1
     assert json.loads(target_path.read_text()) == {"value": 1}
+
+
+def test_format_startup_failure_treats_completed_startup_as_historical_context(
+    tmp_path: Path,
+) -> None:
+    """Post-startup failures should not present old startup breadcrumbs as active."""
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+    log_path = project_dir / ".chunkhound" / "daemon.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    started_at = (datetime.now() - timedelta(seconds=1178)).isoformat()
+    completed_at = (datetime.now() - timedelta(seconds=1174)).isoformat()
+    log_path.write_text(
+        "\n".join(
+            [
+                f"[{started_at}] [startup] startup: startup tracking began mode=daemon",
+                (
+                    f"[{completed_at}] [startup] startup: phase completed: "
+                    "startup_barrier duration=3.741s"
+                ),
+                (
+                    f"[{completed_at}] [startup] startup: startup completed "
+                    "duration=4.153s"
+                ),
+                (
+                    "08:55:33 | WARNING  | Watchman event translation warning: "
+                    "Skipping unexpected Watchman file type '?'"
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    message = discovery.format_startup_failure(
+        prefix="ChunkHound daemon died during registration handshake",
+        log_path=log_path,
+    )
+
+    assert "Daemon startup status: completed" in message
+    assert f"Daemon log path: {log_path}" in message
+    assert "Elapsed startup duration so far" not in message
+    assert "Last known startup phase: startup_barrier" not in message
+
+
+def test_format_startup_failure_reports_empty_or_missing_log_path(
+    tmp_path: Path,
+) -> None:
+    """Pre-breadcrumb daemon startup stalls should identify the daemon log path."""
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+    log_path = project_dir / ".chunkhound" / "daemon.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    message = discovery.format_startup_failure(
+        prefix="ChunkHound daemon did not start within 30.0s",
+        log_path=log_path,
+    )
+
+    assert f"Daemon log path: {log_path}" in message
+    assert "Daemon log was empty or unavailable" in message
+    assert "Recent daemon log output" not in message
 
 
 def test_format_startup_failure_includes_phase_elapsed_and_error(

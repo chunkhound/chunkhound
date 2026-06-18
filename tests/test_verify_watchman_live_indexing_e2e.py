@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -86,10 +87,7 @@ def test_rollout_gate_workflow_runs_single_aggregate_fallback_proof() -> None:
         pytest.skip("PyYAML not available")
 
     workflow_path = (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "ci.yml"
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
     )
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     jobs = workflow["jobs"]
@@ -114,8 +112,7 @@ def test_rollout_gate_workflow_runs_single_aggregate_fallback_proof() -> None:
     )
 
     step_runs = [
-        (step.get("name", ""), step.get("run", ""))
-        for step in rollout_gate["steps"]
+        (step.get("name", ""), step.get("run", "")) for step in rollout_gate["steps"]
     ]
     joined_runs = "\n".join(run for _, run in step_runs)
     assert "--require-supported-matrix" in joined_runs, (
@@ -329,6 +326,75 @@ async def test_wait_for_ready_times_out_when_daemon_never_ready(
         await live_verifier._wait_for_ready(client)
 
     assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_json_rpc_eof_awaits_process_exit_before_reporting_returncode() -> None:
+    class EofStdout:
+        def __init__(self) -> None:
+            self._release = asyncio.Event()
+
+        def release(self) -> None:
+            self._release.set()
+
+        async def readline(self) -> bytes:
+            await self._release.wait()
+            return b""
+
+    class FakeStdin:
+        def __init__(self, stdout: EofStdout) -> None:
+            self._stdout = stdout
+            self.writes: list[bytes] = []
+
+        def write(self, data: bytes) -> None:
+            self.writes.append(data)
+
+        async def drain(self) -> None:
+            self._stdout.release()
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class FakeStderr:
+        async def read(self) -> bytes:
+            return b"daemon failed\n"
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = EofStdout()
+            self.stdin = FakeStdin(self.stdout)
+            self.stderr = FakeStderr()
+            self.wait_calls = 0
+
+        async def wait(self) -> int:
+            self.wait_calls += 1
+            self.returncode = 7
+            return self.returncode
+
+        def terminate(self) -> None:
+            raise AssertionError("process already exited after EOF wait")
+
+        def kill(self) -> None:
+            raise AssertionError("process already exited after EOF wait")
+
+    process = FakeProcess()
+    client = live_verifier.SubprocessJsonRpcClient(process)  # type: ignore[arg-type]
+    await client.start()
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            await client.send_request("tools/call", {}, timeout=1.0)
+    finally:
+        await client.close()
+
+    message = str(exc_info.value)
+    assert process.wait_calls == 1
+    assert "rc=7" in message
+    assert "rc=None" not in message
+    assert "stderr_tail='daemon failed'" in message
 
 
 def test_source_tree_copy_ignore_excludes_transient_repo_state() -> None:
@@ -651,8 +717,7 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
         daemon_log_path = project_dir / ".chunkhound" / "daemon.log"
         daemon_log_path.parent.mkdir(parents=True, exist_ok=True)
         daemon_log_path.write_text(
-            "Watchman runtime archive download failed during source fallback "
-            "test\n",
+            "Watchman runtime archive download failed during source fallback test\n",
             encoding="utf-8",
         )
         return 1, "", "Recent daemon log output\nsimulated watchman failure"
@@ -1034,9 +1099,7 @@ async def test_verify_wheel_proves_live_searchability_in_polling_fallback(
     monkeypatch.setattr(
         live_verifier, "_verify_daemon_startup", fake_verify_daemon_startup
     )
-    monkeypatch.setattr(
-        live_verifier, "_wait_for_search_hit", fake_wait_for_search_hit
-    )
+    monkeypatch.setattr(live_verifier, "_wait_for_search_hit", fake_wait_for_search_hit)
     monkeypatch.setattr(
         live_verifier,
         "_write_project",
@@ -1045,9 +1108,7 @@ async def test_verify_wheel_proves_live_searchability_in_polling_fallback(
     monkeypatch.setattr(
         live_verifier, "_terminate_processes_using_root", lambda root: None
     )
-    monkeypatch.setattr(
-        live_verifier, "_remove_tree_with_retries", lambda root: None
-    )
+    monkeypatch.setattr(live_verifier, "_remove_tree_with_retries", lambda root: None)
 
     await live_verifier._verify_wheel(wheel_path)
 
@@ -1656,12 +1717,7 @@ def test_remove_tree_with_retries_terminates_windows_processes_with_open_file_ha
                     ["python", "--flag"],
                     [
                         FakeOpenFile(
-                            str(
-                                locked_root
-                                / "project"
-                                / ".chunkhound"
-                                / "daemon.log"
-                            )
+                            str(locked_root / "project" / ".chunkhound" / "daemon.log")
                         )
                     ],
                 ),
