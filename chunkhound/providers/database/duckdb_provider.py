@@ -100,6 +100,7 @@ class DuckDBIndexedRootMismatchError(RuntimeError):
 
 _INDEXED_ROOT_SIDECAR_SUFFIX = ".root.json"
 _INDEXED_ROOT_SIDECAR_VERSION = 1
+_CHUNK_INSERT_BATCH_SIZE = 5000  # Optimal benchmarked batch size for chunk inserts
 
 
 def _normalize_indexed_root(root: Path | str) -> str:
@@ -2624,13 +2625,21 @@ class DuckDBProvider(SerialDatabaseProvider):
         return self._chunk_repository.insert_chunk(chunk)
 
     def insert_chunks_batch(self, chunks: list[Chunk]) -> list[int]:
-        """Insert multiple chunks in batch using optimized DuckDB bulk loading - delegate to chunk repository.
+        """Insert multiple chunks in batch using optimized DuckDB bulk loading.
 
         # PERFORMANCE: 250x faster than single inserts
-        # OPTIMAL_BATCH: 5000 chunks (benchmarked)
-        # PATTERN: Uses VALUES clause for bulk insert
+        # OPTIMAL_BATCH: _CHUNK_INSERT_BATCH_SIZE chunks (benchmarked)
+        # PATTERN: Uses temp table + INSERT SELECT for bulk insert; sub-batches oversized inputs
         """
-        return self._execute_in_db_thread_sync("insert_chunks_batch", chunks)
+        if not chunks:
+            return []
+        if len(chunks) <= _CHUNK_INSERT_BATCH_SIZE:
+            return self._execute_in_db_thread_sync("insert_chunks_batch", chunks)
+        ids: list[int] = []
+        for i in range(0, len(chunks), _CHUNK_INSERT_BATCH_SIZE):
+            sub = chunks[i : i + _CHUNK_INSERT_BATCH_SIZE]
+            ids.extend(self._execute_in_db_thread_sync("insert_chunks_batch", sub))
+        return ids
 
     def _executor_insert_chunks_batch(
         self, conn: Any, state: dict[str, Any], chunks: list[Chunk]
