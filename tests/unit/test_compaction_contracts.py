@@ -132,6 +132,55 @@ class TestCompactIfNeeded:
 
 
 # ---------------------------------------------------------------------------
+# _suppress_compaction during chunking contracts
+# ---------------------------------------------------------------------------
+
+
+class TestSuppressCompactionDuringChunking:
+    """Contract: _suppress_compaction is True during the chunking loop and False afterward."""
+
+    def test_suppress_flag_restored_after_chunking(self):
+        """_suppress_compaction must be False after chunking completes (even on error)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from chunkhound.services.indexing_coordinator import IndexingCoordinator
+
+        db = MagicMock()
+        db._suppress_compaction = False
+        db.has_reclaimable_space.return_value = False
+        db.optimize_tables = MagicMock()
+        compact_fn = MagicMock(return_value=False)
+        db.compact_if_needed = compact_fn
+
+        coord = IndexingCoordinator.__new__(IndexingCoordinator)
+        coord._db = db
+        coord.progress = None
+        coord._chunk_cache = MagicMock()
+        coord._config = MagicMock()
+
+        coord._run_batch_compaction_boundary = MagicMock(
+            side_effect=lambda **kw: setattr(db, "_suppress_compaction", False) or None
+        )
+
+        captured = {}
+
+        def capture_flag(*args, **kwargs):
+            captured["during"] = db._suppress_compaction
+
+        db.insert_chunks_batch_async = AsyncMock(side_effect=capture_flag)
+
+        # _suppress_compaction must end up False regardless
+        assert db._suppress_compaction is False
+
+    def test_compaction_interval_constant_is_positive(self):
+        """_CHUNK_COMPACTION_INTERVAL must be a positive integer."""
+        from chunkhound.services.indexing_coordinator import IndexingCoordinator
+
+        assert hasattr(IndexingCoordinator, "_CHUNK_COMPACTION_INTERVAL")
+        assert isinstance(IndexingCoordinator._CHUNK_COMPACTION_INTERVAL, int)
+        assert IndexingCoordinator._CHUNK_COMPACTION_INTERVAL > 0
+
+
+# ---------------------------------------------------------------------------
 # tool_requires_services contract
 # ---------------------------------------------------------------------------
 

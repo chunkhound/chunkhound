@@ -173,6 +173,7 @@ class IndexingCoordinator(BaseService):
     """
 
     _ORPHAN_CLEANUP_BATCH_SIZE = 128
+    _CHUNK_COMPACTION_INTERVAL = 10  # Run compact_if_needed() every N file-batches during chunking
 
     def __init__(
         self,
@@ -1461,6 +1462,12 @@ class IndexingCoordinator(BaseService):
                 "errors": 0,
             }
 
+            _chunk_batch_idx = 0
+            _suppress_compaction_attr = hasattr(self._db, "_suppress_compaction")
+            _compact_fn = getattr(self._db, "compact_if_needed", None)
+            if _suppress_compaction_attr:
+                self._db._suppress_compaction = True  # type: ignore[attr-defined]
+
             async def _on_batch_store(batch: list[ParsedFileResult]) -> None:
                 nonlocal \
                     agg_total_files, \
@@ -1468,7 +1475,8 @@ class IndexingCoordinator(BaseService):
                     agg_errors, \
                     agg_skipped, \
                     agg_skipped_timeout, \
-                    agg_skipped_paths
+                    agg_skipped_paths, \
+                    _chunk_batch_idx
                 # Update skip counters from parse results
                 for r in batch:
                     if r.status == "skipped":
@@ -1486,15 +1494,30 @@ class IndexingCoordinator(BaseService):
                 agg_errors.extend(stats_part.get("errors", []))
                 agg_skipped_paths.extend(stats_part.get("skipped_paths", []))
 
+                _chunk_batch_idx += 1
+                if (
+                    _compact_fn is not None
+                    and _suppress_compaction_attr
+                    and self._CHUNK_COMPACTION_INTERVAL > 0
+                    and _chunk_batch_idx % self._CHUNK_COMPACTION_INTERVAL == 0
+                ):
+                    self._db._suppress_compaction = False  # type: ignore[attr-defined]
+                    await asyncio.to_thread(_compact_fn)
+                    self._db._suppress_compaction = True  # type: ignore[attr-defined]
+
             # Parse files (streaming progress as batches complete and store concurrently)
             # Pass files_to_process directly - preserves hash for each file
             # Results flow to storage via on_batch=_on_batch_store; return value unused.
-            await self._process_files_in_batches(
-                files_to_process,
-                config_file_size_threshold_kb,
-                parse_task,
-                on_batch=_on_batch_store,
-            )
+            try:
+                await self._process_files_in_batches(
+                    files_to_process,
+                    config_file_size_threshold_kb,
+                    parse_task,
+                    on_batch=_on_batch_store,
+                )
+            finally:
+                if _suppress_compaction_attr:
+                    self._db._suppress_compaction = False  # type: ignore[attr-defined]
 
             # Mark parse task complete
             if parse_task is not None and self.progress:
