@@ -217,3 +217,71 @@ class TestGetExistingEmbeddingsInTable:
             [10], "openai", "text-embedding-3-small", dims=256
         )
         assert result == {10}
+
+
+# ---------------------------------------------------------------------------
+# Contract 7: EmbeddingService._migrate_from_full_embeddings (integration)
+# ---------------------------------------------------------------------------
+
+class TestMigrateFromFullEmbeddingsMethod:
+    """Contract tests for EmbeddingService._migrate_from_full_embeddings."""
+
+    def _make_provider_mock(self, name="openai", model="text-embedding-3-small"):
+        """Create a minimal mock embedding provider."""
+        from unittest.mock import MagicMock
+        provider = MagicMock()
+        provider.name = name
+        provider.model = model
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_migrates_full_vectors_to_truncated_table(self, tmp_path):
+        """Full vectors in source table are truncated and written to target table."""
+        from chunkhound.services.embedding_service import EmbeddingService
+
+        db = _make_db(tmp_path)
+        provider = self._make_provider_mock()
+
+        # Insert a 1536-dim embedding into the source table using the existing helper
+        _insert_embedding(db, chunk_id=1, dims=1536)
+
+        # Build a minimal EmbeddingService without full __init__
+        service = EmbeddingService.__new__(EmbeddingService)
+        service._db = db
+        service._embedding_provider = provider
+        service._db_batch_size = 100
+
+        # Run migration from 1536-dim source to 256-dim target
+        migrated = await service._migrate_from_full_embeddings([1], target_dims=256)
+
+        # chunk 1 must be reported as migrated
+        assert 1 in migrated
+
+        # The truncated embedding must now exist in embeddings_256
+        existing_256 = db.get_existing_embeddings_in_table(
+            [1], "openai", "text-embedding-3-small", dims=256
+        )
+        assert existing_256 == {1}
+
+        # The original full-size embedding must still exist in embeddings_1536
+        records, source_dims = db.get_full_embeddings_for_migration(
+            [1], "openai", "text-embedding-3-small", target_dims=256
+        )
+        assert source_dims == 1536
+        assert len(records) == 1
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_set_when_no_source_data(self, tmp_path):
+        """Returns empty set when no full-size embeddings exist to migrate."""
+        from chunkhound.services.embedding_service import EmbeddingService
+
+        db = _make_db(tmp_path)
+        provider = self._make_provider_mock()
+
+        service = EmbeddingService.__new__(EmbeddingService)
+        service._db = db
+        service._embedding_provider = provider
+        service._db_batch_size = 100
+
+        migrated = await service._migrate_from_full_embeddings([1, 2, 3], target_dims=256)
+        assert migrated == set()

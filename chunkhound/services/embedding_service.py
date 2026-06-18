@@ -277,6 +277,25 @@ class EmbeddingService(BaseService):
             )
 
             if not chunk_ids_without_embeddings:
+                # Even with no new chunks, drop the source table if configured
+                # (handles re-runs where migration already completed)
+                if _migration_mode and _target_dims is not None:
+                    _drop_on_noop = getattr(
+                        getattr(self._embedding_provider, "config", None),
+                        "drop_full_vectors_after_migration",
+                        False,
+                    )
+                    if _drop_on_noop:
+                        _dummy, _src = await asyncio.to_thread(
+                            self._db.get_full_embeddings_for_migration,
+                            [], target_provider, target_model, _target_dims,
+                        )
+                        if _src is not None:
+                            logger.info(
+                                f"[Migration] drop_full_vectors_after_migration=True: "
+                                f"dropping embeddings_{_src} (all chunks already migrated)"
+                            )
+                            self._db.drop_embedding_table(_src)
                 return {
                     "status": "complete",
                     "generated": 0,
