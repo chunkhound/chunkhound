@@ -1091,6 +1091,7 @@ async def test_watchman_relative_root_mapping_and_filtering(
         services.provider.disconnect()
 
 
+@pytest.mark.native_watcher
 @pytest.mark.requires_native_watchman
 @pytest.mark.asyncio
 async def test_watchman_multi_scope_translation_deduplicates_across_subscriptions(
