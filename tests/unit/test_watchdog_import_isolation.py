@@ -9,6 +9,7 @@ from chunkhound.services.realtime.events import SimpleEventHandler
 
 def _clear_watchdog_sensitive_modules() -> None:
     prefixes = (
+        "watchdog",
         "chunkhound.daemon.server",
         "chunkhound.mcp_server.base",
         "chunkhound.services.realtime",
