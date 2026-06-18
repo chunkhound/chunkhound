@@ -52,7 +52,7 @@ except ImportError:
 # Research: https://www.baseten.co/blog/day-zero-benchmarks-for-qwen-3
 # Batch sizes optimized for throughput on GPU inference (A100 baseline)
 # Rerank limits: 32-128 per batch based on model size to prevent OOM
-QWEN_MODEL_CONFIG = {
+QWEN_MODEL_CONFIG: dict[str, dict[str, int]] = {
     # Qwen3 Embedding Models (via Ollama)
     # Batch sizes balanced for GPU memory and throughput
     "dengcao/Qwen3-Embedding-0.6B:Q5_K_M": {
@@ -337,6 +337,7 @@ class OpenAIEmbeddingProvider:
         self._discovered_native_dims: int | None = None
         self._warned_default_dims = False
         self._ssl_verify = ssl_verify
+        self._client: Any | None = None
         self._rerank_ssl_verify: bool = (
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
         )
@@ -379,9 +380,8 @@ class OpenAIEmbeddingProvider:
             "errors": 0,
         }
 
-        # Initialize OpenAI client lazily to avoid TaskGroup errors on Ubuntu
-        # Creating AsyncOpenAI in __init__ can fail when no event loop is running
-        self._client = None
+        # Initialize OpenAI client lazily to avoid TaskGroup errors on Ubuntu.
+        # Any keeps the optional dependency boundary local to this provider.
         self._client_initialized = False
 
     def _configure_qwen_batch_sizes(
@@ -398,7 +398,7 @@ class OpenAIEmbeddingProvider:
             batch_size: User-requested batch size
         """
         # Detect Qwen models
-        qwen_config = None
+        qwen_config: dict[str, int] | None = None
         model_lower = model.lower()
         rerank_model_lower = (rerank_model or "").lower()
 
@@ -409,7 +409,7 @@ class OpenAIEmbeddingProvider:
                 logger.info(f"Detected Qwen embedding model: {model}")
 
         # Check if rerank model is a Qwen model
-        qwen_rerank_config = None
+        qwen_rerank_config: dict[str, int] | None = None
         if rerank_model and (
             "qwen" in rerank_model_lower or rerank_model in QWEN_MODEL_CONFIG
         ):
@@ -418,6 +418,8 @@ class OpenAIEmbeddingProvider:
                 logger.info(f"Detected Qwen reranker model: {rerank_model}")
 
         # Apply Qwen batch size limits if detected
+        self._qwen_model_config: dict[str, int] | None = None
+        self._qwen_rerank_config: dict[str, int] | None = None
         if qwen_config:
             # Apply min(user_batch_size, model_max_batch) pattern from VoyageAI
             effective_batch_size = min(batch_size, qwen_config["max_texts_per_batch"])
@@ -461,7 +463,10 @@ class OpenAIEmbeddingProvider:
             # OpenAI client requires a string value, provide placeholder for custom endpoints
             api_key_value = "not-required"
 
-        client_kwargs = {"api_key": api_key_value, "timeout": self._timeout}
+        client_kwargs: dict[str, Any] = {
+            "api_key": api_key_value,
+            "timeout": self._timeout,
+        }
 
         if self._base_url:
             client_kwargs["base_url"] = self._base_url
@@ -867,7 +872,7 @@ class OpenAIEmbeddingProvider:
 
     async def health_check(self) -> dict[str, Any]:
         """Perform health check and return status information."""
-        status = {
+        status: dict[str, Any] = {
             "provider": self.name,
             "model": self.model,
             "available": self.is_available(),
@@ -953,8 +958,8 @@ class OpenAIEmbeddingProvider:
             return []
 
         # Use token-aware batching
-        all_embeddings = []
-        current_batch = []
+        all_embeddings: list[list[float]] = []
+        current_batch: list[str] = []
         current_tokens = 0
         token_limit = self.get_model_token_limit() - 100  # Safety margin
 
@@ -1161,7 +1166,7 @@ class OpenAIEmbeddingProvider:
                     )
                 ):
                     # Log detailed connection error information
-                    error_details = {
+                    error_details: dict[str, Any] = {
                         "error_type": type(rate_error).__name__,
                         "error_message": str(rate_error),
                         "base_url": self._base_url,
@@ -1289,7 +1294,7 @@ class OpenAIEmbeddingProvider:
             "errors": 0,
         }
 
-    def update_config(self, **kwargs) -> None:
+    def update_config(self, **kwargs: Any) -> None:
         """Update provider configuration."""
         if "model" in kwargs:
             self._model = kwargs["model"]
@@ -1461,7 +1466,7 @@ class OpenAIEmbeddingProvider:
         elif format_to_use == "cohere":
             # Cohere format: requires model, uses "documents" field
             # Validation already done in __init__, so we know model is present
-            payload = {
+            payload: dict[str, Any] = {
                 "model": self._rerank_model,
                 "query": query,
                 "documents": documents,
@@ -1476,17 +1481,17 @@ class OpenAIEmbeddingProvider:
         else:  # auto mode
             # Try Cohere first if model is set, otherwise TEI
             if self._rerank_model:
-                payload = {
+                auto_payload: dict[str, Any] = {
                     "model": self._rerank_model,
                     "query": query,
                     "documents": documents,
                 }
                 if top_k is not None:
-                    payload["top_n"] = top_k
+                    auto_payload["top_n"] = top_k
                 logger.debug(
                     f"Auto-detecting format, trying Cohere first (model: {self._rerank_model})"
                 )
-                return payload
+                return auto_payload
             else:
                 logger.debug("Auto-detecting format, trying TEI first (no model set)")
                 return {"query": query, "texts": documents}
@@ -1697,6 +1702,7 @@ class OpenAIEmbeddingProvider:
             rerank_endpoint = self._rerank_url
         else:
             # Relative path - combine with base_url
+            assert self._base_url is not None
             base_url = self._base_url.rstrip("/")
             rerank_url = self._rerank_url.lstrip("/")
             rerank_endpoint = f"{base_url}/{rerank_url}"
@@ -1709,7 +1715,7 @@ class OpenAIEmbeddingProvider:
             # Make API request with timeout using httpx directly
             # since OpenAI client doesn't support custom endpoints well
 
-            client_kwargs = {"timeout": self._timeout}
+            client_kwargs: dict[str, Any] = {"timeout": self._timeout}
             if not self._effective_rerank_ssl_verify(rerank_endpoint):
                 client_kwargs["verify"] = False
                 logger.debug(
@@ -1825,15 +1831,17 @@ class OpenAIEmbeddingProvider:
             )
             return []
 
+        normalized_response = cast(dict[str, Any], response_data)
+
         # Validate response has results
         # Note: Bare array responses are normalized to {"results": [...]} before this point
-        if "results" not in response_data:
+        if "results" not in normalized_response:
             raise ValueError(
                 "Invalid rerank response: missing 'results' field. "
                 "Expected dict with 'results' key or bare array (auto-normalized)."
             )
 
-        results = response_data["results"]
+        results = normalized_response["results"]
         if not isinstance(results, list):
             raise ValueError("Invalid rerank response: 'results' must be a list")
 

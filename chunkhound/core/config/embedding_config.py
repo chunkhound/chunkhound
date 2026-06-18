@@ -579,7 +579,7 @@ class EmbeddingConfig(BaseSettings):
                     return val
             return None
 
-        config = {}
+        config: dict[str, Any] = {}
 
         if api_key := _first_env(
             "CHUNKHOUND_EMBEDDING__API_KEY", "CHUNKHOUND_EMBEDDING_API_KEY"
