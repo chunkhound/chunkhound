@@ -206,6 +206,16 @@ class EmbeddingConfig(BaseSettings):
         ),
     )
 
+    drop_full_vectors_after_migration: bool = Field(
+        default=False,
+        description=(
+            "When True and client_side_truncation is enabled, drop the full-length "
+            "embedding table after migrating vectors to the truncated-dimension table. "
+            "Reduces DB size by avoiding keeping both full and truncated vectors. "
+            "Env: CHUNKHOUND_EMBEDDING__DROP_FULL_VECTORS_AFTER_MIGRATION"
+        ),
+    )
+
     @field_validator("rerank_batch_size")
     def validate_rerank_batch_size(cls, v: int | None) -> int | None:  # noqa: N805
         """Validate rerank batch size is positive."""
@@ -362,6 +372,8 @@ class EmbeddingConfig(BaseSettings):
             base_config["dimensions"] = self.dimensions
         if self.client_side_truncation:
             base_config["client_side_truncation"] = True
+        if self.drop_full_vectors_after_migration:
+            base_config["drop_full_vectors_after_migration"] = True
 
         return base_config
 
