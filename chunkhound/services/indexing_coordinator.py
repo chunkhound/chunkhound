@@ -1497,13 +1497,14 @@ class IndexingCoordinator(BaseService):
                 _chunk_batch_idx += 1
                 if (
                     _compact_fn is not None
-                    and _suppress_compaction_attr
                     and self._CHUNK_COMPACTION_INTERVAL > 0
                     and _chunk_batch_idx % self._CHUNK_COMPACTION_INTERVAL == 0
                 ):
-                    self._db._suppress_compaction = False  # type: ignore[attr-defined]
+                    if _suppress_compaction_attr:
+                        self._db._suppress_compaction = False  # type: ignore[attr-defined]
                     await asyncio.to_thread(_compact_fn)
-                    self._db._suppress_compaction = True  # type: ignore[attr-defined]
+                    if _suppress_compaction_attr:
+                        self._db._suppress_compaction = True  # type: ignore[attr-defined]
 
             # Parse files (streaming progress as batches complete and store concurrently)
             # Pass files_to_process directly - preserves hash for each file
