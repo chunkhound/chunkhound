@@ -314,6 +314,18 @@ class TestClientSideTruncation:
         config = EmbeddingConfig(base_url="http://localhost:8000")
         assert config.client_side_truncation is False
 
+    @pytest.mark.parametrize("raw_value", ["", "maybe", "2", "truthy"])
+    def test_load_from_env_rejects_invalid_bool(self, monkeypatch, raw_value):
+        """Invalid env bools must fail explicitly instead of being ignored."""
+        monkeypatch.setenv(
+            "CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION", raw_value
+        )
+
+        with pytest.raises(
+            ValueError, match="CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION"
+        ):
+            EmbeddingConfig.load_from_env()
+
     def test_in_provider_config_when_true(self):
         """client_side_truncation is included in provider config when True."""
         config = EmbeddingConfig(

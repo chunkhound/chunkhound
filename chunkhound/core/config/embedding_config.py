@@ -34,6 +34,29 @@ RERANK_BASE_URL_REQUIRED = (
 )
 
 
+def _validate_explicit_output_dims(v: object) -> int | None:
+    """Validate output_dims is an explicit positive integer."""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ValueError(
+            f"output_dims must be a positive integer, got {type(v).__name__}({v!r})"
+        )
+    if v <= 0:
+        raise ValueError("output_dims must be positive")
+    return v
+
+
+def _require_env_bool(var_name: str, raw_value: str) -> bool:
+    """Parse a strict bool env var and fail explicitly on invalid values."""
+    parsed = _parse_env_bool(raw_value)
+    if parsed is None:
+        raise ValueError(
+            f"{var_name} must be a boolean value (true/false), got {raw_value!r}"
+        )
+    return parsed
+
+
 def validate_rerank_configuration(
     provider: str,
     rerank_format: str,
@@ -221,15 +244,7 @@ class EmbeddingConfig(BaseSettings):
         ``chunkhound.providers.embeddings.shared_utils.validate_positive_output_dims``
         (kept separate to avoid config→provider import).
         """
-        if v is None:
-            return None
-        if isinstance(v, bool) or not isinstance(v, int):
-            raise ValueError(
-                f"output_dims must be a positive integer, got {type(v).__name__}({v!r})"
-            )
-        if v <= 0:
-            raise ValueError("output_dims must be positive")
-        return v
+        return _validate_explicit_output_dims(v)
 
     @model_validator(mode="after")
     def validate_client_side_truncation(self) -> Self:
@@ -582,9 +597,11 @@ class EmbeddingConfig(BaseSettings):
             "CHUNKHOUND_EMBEDDING__MODEL", "CHUNKHOUND_EMBEDDING_MODEL"
         ):
             config["model"] = model
-        if ssl_verify_raw := os.getenv("CHUNKHOUND_EMBEDDING__SSL_VERIFY"):
-            if (ssl_verify := _parse_env_bool(ssl_verify_raw)) is not None:
-                config["ssl_verify"] = ssl_verify
+        ssl_verify_raw = os.getenv("CHUNKHOUND_EMBEDDING__SSL_VERIFY")
+        if ssl_verify_raw is not None:
+            config["ssl_verify"] = _require_env_bool(
+                "CHUNKHOUND_EMBEDDING__SSL_VERIFY", ssl_verify_raw
+            )
 
         # Azure OpenAI configuration
         if api_version := os.getenv("CHUNKHOUND_EMBEDDING__API_VERSION"):
@@ -613,13 +630,12 @@ class EmbeddingConfig(BaseSettings):
             config["rerank_url"] = rerank_url
         if rerank_format := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_FORMAT"):
             config["rerank_format"] = rerank_format
-        if rerank_ssl_verify_raw := os.getenv(
-            "CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY"
-        ):
-            if (
-                rerank_ssl_verify := _parse_env_bool(rerank_ssl_verify_raw)
-            ) is not None:
-                config["rerank_ssl_verify"] = rerank_ssl_verify
+        rerank_ssl_verify_raw = os.getenv("CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY")
+        if rerank_ssl_verify_raw is not None:
+            config["rerank_ssl_verify"] = _require_env_bool(
+                "CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY",
+                rerank_ssl_verify_raw,
+            )
         if rerank_batch_size := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE"):
             try:
                 config["rerank_batch_size"] = int(rerank_batch_size)
@@ -631,18 +647,20 @@ class EmbeddingConfig(BaseSettings):
         if output_dims_raw is not None:
             try:
                 output_dims = int(output_dims_raw)
-                config["output_dims"] = cls.validate_output_dims(output_dims)
+                config["output_dims"] = _validate_explicit_output_dims(output_dims)
             except ValueError as exc:
                 raise ValueError(
                     "CHUNKHOUND_EMBEDDING__OUTPUT_DIMS must be a positive integer, "
                     f"got {output_dims_raw!r}"
                 ) from exc
-        if client_side_truncation_raw := os.getenv(
+        client_side_truncation_raw = os.getenv(
             "CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION"
-        ):
-            parsed = _parse_env_bool(client_side_truncation_raw)
-            if parsed is not None:
-                config["client_side_truncation"] = parsed
+        )
+        if client_side_truncation_raw is not None:
+            config["client_side_truncation"] = _require_env_bool(
+                "CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION",
+                client_side_truncation_raw,
+            )
 
         return config
 
