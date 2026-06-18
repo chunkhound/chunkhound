@@ -410,9 +410,15 @@ class OpenAIEmbeddingProvider:
                 client_kwargs["http_client"] = httpx.AsyncClient(
                     timeout=httpx.Timeout(timeout=self._timeout),
                     verify=False,
+                    trust_env=False,
                 )
                 logger.debug(
                     f"SSL verification disabled for embedding endpoint: {self._base_url}"
+                )
+            else:
+                client_kwargs["http_client"] = httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout=self._timeout),
+                    trust_env=False,
                 )
 
         # IMPORTANT: Create the client in async context to avoid TaskGroup errors on Ubuntu
@@ -757,6 +763,7 @@ class OpenAIEmbeddingProvider:
                     "model": self._get_deployment_model(),
                     "input": texts,
                     "timeout": self._timeout,
+                    "encoding_format": "float",
                 }
                 if self._dimensions is not None and not self._client_side_truncation:
                     embed_kwargs["dimensions"] = self._dimensions
@@ -869,7 +876,7 @@ class OpenAIEmbeddingProvider:
                     and isinstance(
                         rate_error, (openai.APITimeoutError, openai.APIConnectionError)
                     )
-                ):
+                ) or isinstance(rate_error, (httpx.NetworkError, httpx.TimeoutException)):
                     # Log detailed connection error information
                     error_details = {
                         "error_type": type(rate_error).__name__,
@@ -888,11 +895,12 @@ class OpenAIEmbeddingProvider:
                             getattr(rate_error.response, "headers", {})
                         )
 
+                    backoff = min(self._retry_delay * (2**attempt), 60.0)
                     logger.warning(
-                        f"API connection error, retrying in {self._retry_delay} seconds: {error_details}"
+                        f"API connection error, retrying in {backoff:.1f}s (attempt {attempt + 1}/{self._retry_attempts}): {error_details}"
                     )
                     if attempt < self._retry_attempts - 1:
-                        await asyncio.sleep(self._retry_delay)
+                        await asyncio.sleep(backoff)
                         continue
                     else:
                         raise
