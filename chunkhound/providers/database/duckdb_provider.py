@@ -3194,6 +3194,88 @@ class DuckDBProvider(SerialDatabaseProvider):
         all_in_table = {row[0] for row in rows}
         return all_in_table & set(chunk_ids)
 
+    def get_full_embeddings_for_migration(
+        self,
+        chunk_ids: list[int],
+        provider: str,
+        model: str,
+        target_dims: int,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Read full-size embeddings from the largest available source table.
+
+        Discovers the source table by finding embeddings_{X} where X > target_dims
+        and the (provider, model) pair has rows. Returns (records, source_dims)
+        where records is a list of {"chunk_id", "embedding", "dims"} dicts.
+        Returns ([], None) if no suitable source table is found.
+        Called with empty chunk_ids to discover source_dims without reading data.
+        """
+        return self._execute_in_db_thread_sync(
+            "get_full_embeddings_for_migration", chunk_ids, provider, model, target_dims
+        )
+
+    def _executor_get_full_embeddings_for_migration(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunk_ids: list[int],
+        provider: str,
+        model: str,
+        target_dims: int,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        # Find all embedding tables with dims > target_dims, largest first
+        all_tables = conn.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_name LIKE 'embeddings_%'
+            ORDER BY table_name DESC
+        """).fetchall()
+
+        source_table: str | None = None
+        source_dims: int | None = None
+
+        for (tname,) in all_tables:
+            suffix = tname[len("embeddings_"):]
+            try:
+                dims = int(suffix)
+            except ValueError:
+                continue
+            if dims <= target_dims:
+                continue
+            # Check whether this table has any rows for this provider/model
+            count = conn.execute(
+                f'SELECT COUNT(*) FROM "{tname}" WHERE provider = ? AND model = ?',
+                [provider, model],
+            ).fetchone()[0]
+            if count > 0:
+                source_table = tname
+                source_dims = dims
+                break  # Take the largest (DESC order gives biggest dims first)
+
+        if source_table is None or source_dims is None:
+            return [], None
+
+        if not chunk_ids:
+            return [], source_dims
+
+        placeholders = ", ".join("?" * len(chunk_ids))
+        rows = conn.execute(
+            f"""
+            SELECT chunk_id, embedding
+            FROM "{source_table}"
+            WHERE provider = ? AND model = ? AND chunk_id IN ({placeholders})
+            """,
+            [provider, model, *chunk_ids],
+        ).fetchall()
+
+        records = [
+            {
+                "chunk_id": row[0],
+                "embedding": list(row[1]),
+                "dims": source_dims,
+            }
+            for row in rows
+        ]
+        return records, source_dims
+
     def delete_embeddings_by_chunk_id(self, chunk_id: int) -> None:
         """Delete all embeddings for a specific chunk - delegate to embedding repository."""
         self._embedding_repository.delete_embeddings_by_chunk_id(chunk_id)
