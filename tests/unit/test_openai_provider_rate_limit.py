@@ -58,6 +58,7 @@ def _make_provider(retry_attempts: int = 3, retry_delay: float = 1.0):
     provider._azure_deployment = None
     provider._timeout = 30
     provider._dimensions = None
+    provider._client_side_truncation = False
     provider._usage_stats = {
         "requests_made": 0,
         "embeddings_generated": 0,

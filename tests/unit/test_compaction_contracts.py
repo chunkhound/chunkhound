@@ -83,6 +83,7 @@ class TestCompactIfNeeded:
         # Explicitly set _config=None so the code falls through to provider.config
         provider._config = None
         provider.config = config
+        provider._suppress_compaction = False
         provider.get_storage_stats.return_value = {"effective_waste": effective_waste}
         provider.measure_fragmentation = lambda: DuckDBProvider.measure_fragmentation(provider)
         provider.compact_if_needed = lambda: DuckDBProvider.compact_if_needed(provider)

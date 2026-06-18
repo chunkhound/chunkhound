@@ -338,7 +338,7 @@ def test_process_directory_fails_closed_when_orphan_cleanup_delete_returns_false
     error = result["error"]
     assert "Storage reconciliation cleanup failed:" in error
     assert (
-        "orphan/excluded cleanup delete returned false for excluded/still_here.py"
+        "orphan/excluded cleanup delete failed entirely for batch starting at excluded/still_here.py"
     ) in error
     assert "reason=excluded_by_current_policy" in error
 

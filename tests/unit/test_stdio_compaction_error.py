@@ -148,7 +148,7 @@ async def test_stdio_handler_returns_error_on_compaction_during_ensure_services(
     exc = CompactionError("Compaction in progress", operation="connection")
     with patch.object(
         server,
-        "ensure_services",
+        "ensure_tool_services",
         new_callable=AsyncMock,
         side_effect=exc,
     ):
@@ -180,7 +180,7 @@ async def test_stdio_handler_returns_restore_hint_for_unrecoverable_recovery():
     )
     with patch.object(
         server,
-        "ensure_services",
+        "ensure_tool_services",
         new_callable=AsyncMock,
         side_effect=exc,
     ):
