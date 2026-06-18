@@ -7,6 +7,7 @@ from typing import Any, cast
 from .common_arguments import (
     add_common_arguments,
     add_config_arguments,
+    add_git_diff_arguments,
     nonempty_path_filter,
 )
 
@@ -46,6 +47,9 @@ def add_research_subparser(subparsers: Any) -> argparse.ArgumentParser:
         type=nonempty_path_filter,
         help="Optional path filter (e.g., 'src/', 'tests/')",
     )
+
+    # Git diff / commit-range arguments
+    add_git_diff_arguments(research_parser)
 
     # Add common arguments
     add_common_arguments(research_parser)

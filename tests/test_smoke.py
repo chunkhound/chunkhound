@@ -518,9 +518,9 @@ class TestParserLoading:
         failed_parsers = []
         setup_errors = []
 
-        # Test all languages except UNKNOWN (not a real parser)
+        # Test all languages except UNKNOWN and GIT_DIFF (not tree-sitter parsers)
         for language in Language:
-            if language == Language.UNKNOWN:
+            if language in (Language.UNKNOWN, Language.GIT_DIFF):
                 continue
 
             try:

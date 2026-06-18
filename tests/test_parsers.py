@@ -185,7 +185,7 @@ pub fn main() void {{
 class TestParserValidation:
     """Test that all parsers can parse minimal valid code."""
 
-    @pytest.mark.parametrize("language", [lang for lang in Language if lang != Language.UNKNOWN])
+    @pytest.mark.parametrize("language", [lang for lang in Language if lang not in (Language.UNKNOWN, Language.GIT_DIFF)])
     def test_parser_can_parse_minimal_code(self, language):
         """Test that each parser can parse a minimal valid code sample."""
         factory = get_parser_factory()
@@ -216,7 +216,7 @@ class TestParserValidation:
         except Exception as e:
             pytest.fail(f"Parser for {language.value} failed to parse minimal code: {e}")
 
-    @pytest.mark.parametrize("language", [lang for lang in Language if lang != Language.UNKNOWN])
+    @pytest.mark.parametrize("language", [lang for lang in Language if lang not in (Language.UNKNOWN, Language.GIT_DIFF)])
     def test_parser_initializes_tree_sitter_language(self, language):
         """Test that parsers can initialize tree-sitter Language objects without version conflicts.
 

@@ -135,6 +135,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     local_config_path = project_dir / ".chunkhound.json"
     if local_config_path.exists():
         formatter.info(f"Found local config: {local_config_path}")
+    if getattr(config, "global_config_file", None):
+        formatter.info(f"Found global config: {config.global_config_file}")
 
     # Use database path from config
     db_path = Path(config.database.path)

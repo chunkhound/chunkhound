@@ -30,6 +30,9 @@ _READY_TIMEOUT_SECONDS = 60.0
 _MCP_INITIALIZE_TIMEOUT_SECONDS = 60.0
 _SEARCH_TIMEOUT_SECONDS = 30.0
 _SOURCE_FALLBACK_FAILURE_TIMEOUT_SECONDS = 20.0
+_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS = 1.0
+_JSON_RPC_STDERR_READ_TIMEOUT_SECONDS = 1.0
+_JSON_RPC_STDERR_TAIL_BYTES = 4096
 _DETERMINISTIC_FAILURE_URL_BASE = "https://127.0.0.1:9/chunkhound-watchman-fail"
 _SOURCE_FALLBACK_PRETEND_VERSION = "0.0.0"
 
@@ -177,23 +180,7 @@ class SubprocessJsonRpcClient:
             while True:
                 raw_line = await self._process.stdout.readline()
                 if not raw_line:
-                    await self._process.wait()
-                    stderr_snippet = ""
-                    if self._process.stderr is not None:
-                        try:
-                            raw_err = await asyncio.wait_for(
-                                self._process.stderr.read(4096), timeout=2.0
-                            )
-                            stderr_snippet = raw_err.decode("utf-8", errors="replace").strip()
-                        except Exception:
-                            pass
-                    msg = (
-                        "JSON-RPC subprocess terminated unexpectedly "
-                        f"(rc={self._process.returncode})"
-                    )
-                    if stderr_snippet:
-                        msg += f"\nstderr: {stderr_snippet}"
-                    self._fail_pending(RuntimeError(msg))
+                    self._fail_pending(await self._unexpected_termination_error())
                     return
 
                 line = raw_line.decode("utf-8", errors="replace").strip()
@@ -212,6 +199,57 @@ class SubprocessJsonRpcClient:
             pass
         except Exception as error:
             self._fail_pending(error)
+
+    async def _unexpected_termination_error(self) -> RuntimeError:
+        wait_note: str | None = None
+        if self._process.returncode is None:
+            try:
+                await asyncio.wait_for(
+                    self._process.wait(),
+                    timeout=_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                wait_note = (
+                    "wait_timeout="
+                    f"{_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS:.1f}s"
+                )
+            except Exception as error:
+                wait_note = f"wait_error={error!r}"
+
+        details = [f"rc={self._process.returncode}"]
+        if wait_note is not None:
+            details.append(wait_note)
+
+        stderr_tail = await self._read_exited_stderr_tail()
+        if stderr_tail:
+            details.append(f"stderr_tail={stderr_tail!r}")
+
+        return RuntimeError(
+            "JSON-RPC subprocess terminated unexpectedly "
+            f"({', '.join(details)})"
+        )
+
+    async def _read_exited_stderr_tail(self) -> str | None:
+        if self._process.returncode is None or self._process.stderr is None:
+            return None
+        try:
+            raw_stderr = await asyncio.wait_for(
+                self._process.stderr.read(),
+                timeout=_JSON_RPC_STDERR_READ_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return (
+                "<stderr read timed out after "
+                f"{_JSON_RPC_STDERR_READ_TIMEOUT_SECONDS:.1f}s>"
+            )
+        except Exception as error:
+            return f"<stderr read failed: {error!r}>"
+
+        if not raw_stderr:
+            return None
+        if len(raw_stderr) > _JSON_RPC_STDERR_TAIL_BYTES:
+            raw_stderr = raw_stderr[-_JSON_RPC_STDERR_TAIL_BYTES:]
+        return raw_stderr.decode("utf-8", errors="replace").strip() or None
 
     def _fail_pending(self, error: Exception) -> None:
         for future in self._pending_requests.values():

@@ -3484,9 +3484,8 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         return chunks_with_metadata
 
-    def _validate_and_normalize_path_filter(
-        self, path_filter: str | None
-    ) -> str | None:
+    @staticmethod
+    def _validate_and_normalize_path_filter(path_filter: str | None) -> str | None:
         """Validate and normalize path filter for security and consistency.
 
         Args:
@@ -3519,15 +3518,33 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Remove leading slashes to ensure relative paths
         normalized = normalized.lstrip("/")
 
-        # Ensure trailing slash for directory patterns
-        if (
-            normalized
-            and not normalized.endswith("/")
-            and "." not in normalized.split("/")[-1]
-        ):
-            normalized += "/"
+        # Ensure trailing slash for directory patterns.
+        # A file extension is a dot that appears AFTER the first character.
+        # Leading-dot names without a second dot (.github, .env) are directories.
+        # Leading-dot names with an extension (.eslintrc.js, .babelrc.js) are files.
+        if normalized and not normalized.endswith("/"):
+            last = normalized.split("/")[-1]
+            has_file_extension = "." in last[1:]
+            if not has_file_extension:
+                normalized += "/"
 
         return normalized
+
+    @staticmethod
+    def _build_path_like_pattern(normalized_path: str) -> str:
+        """Build a LIKE pattern from a normalized path filter.
+
+        Directory patterns (trailing /) keep wildcards on both sides (%/dir/%).
+        File patterns are right-anchored (%/file.py) so module.py does not match
+        module.py.bak.
+
+        Metacharacters (_, %) are escaped so they match literally rather than
+        acting as single-character or any-sequence wildcards.
+        """
+        escaped = escape_like_pattern(normalized_path)
+        if escaped.endswith("/"):
+            return f"%/{escaped}%"
+        return f"%/{escaped}"
 
     def search_semantic(
         self,
@@ -3612,8 +3629,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             path_like: str | None = None
             if normalized_path is not None:
-                escaped_path = escape_like_pattern(normalized_path)
-                path_like = f"%{escaped_path}%"
+                path_like = self._build_path_like_pattern(normalized_path)
 
             if threshold is not None:
                 query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
@@ -3621,9 +3637,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                 params.append(threshold)
 
             if path_like is not None:
-                query += " AND f.path LIKE ? ESCAPE '\\'"
-                # Use substring match so callers can pass repo-relative paths
-                # even when the database base_directory is higher (e.g., monorepo root).
+                query += " AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
+                # Prepend / so %/repo_a/% only matches repo_a as a complete directory component.
                 params.append(path_like)
 
             # Get total count for pagination
@@ -3643,8 +3658,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                 count_params.extend([query_embedding, threshold])
 
             if path_like is not None:
-                count_query += " AND f.path LIKE ? ESCAPE '\\'"
-                # Substring match for consistency with main query
+                count_query += " AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
+                # Directory-boundary-anchored match, consistent with main query
                 count_params.append(path_like)
 
             total_count = conn.execute(count_query, count_params).fetchone()[0]
@@ -3736,10 +3751,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             params = [pattern]
 
             if normalized_path is not None:
-                escaped_path = escape_like_pattern(normalized_path)
-                where_conditions.append("f.path LIKE ? ESCAPE '\\'")
-                # Allow matching repo-relative segments inside stored paths
-                params.append(f"%{escaped_path}%")
+                where_conditions.append("CONCAT('/', f.path) LIKE ? ESCAPE '\\'")
+                params.append(self._build_path_like_pattern(normalized_path))
 
             where_clause = " AND ".join(where_conditions)
 
@@ -3921,10 +3934,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             path_condition = ""
             params: list[Any] = [target_embedding, provider, model, chunk_id]
             if normalized_path is not None:
-                escaped_path = escape_like_pattern(normalized_path)
-                path_condition = "AND f.path LIKE ? ESCAPE '\\'"
-                # Substring match so repo-relative scopes still work when base_directory is higher
-                params.append(f"%{escaped_path}%")
+                path_condition = "AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
+                params.append(self._build_path_like_pattern(normalized_path))
 
             # Query for similar chunks (exclude the original chunk)
             # Cast the target embedding to match the table's embedding type
@@ -4030,14 +4041,13 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Build path filter condition
             normalized_path = self._validate_and_normalize_path_filter(path_filter)
             path_condition = ""
-            query_params = [query_embedding, provider, model, limit]
+            query_params: list[Any] = [query_embedding, provider, model]
 
             if normalized_path is not None:
-                # Convert relative path to SQL pattern
-                escaped_path = escape_like_pattern(normalized_path)
-                path_pattern = f"%{escaped_path}%"
-                path_condition = "AND f.path LIKE ? ESCAPE '\\'"
-                query_params.insert(-1, path_pattern)  # Insert before limit
+                path_pattern = self._build_path_like_pattern(normalized_path)
+                path_condition = "AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
+                query_params.append(path_pattern)
+            query_params.append(limit)
 
             # Build threshold condition
             threshold_condition = (
