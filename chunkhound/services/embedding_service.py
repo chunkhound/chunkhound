@@ -13,6 +13,7 @@ from chunkhound.core.types.common import ChunkId
 from chunkhound.core.utils import DEFAULT_CHARS_PER_TOKEN, estimate_tokens
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
+from chunkhound.providers.embeddings.shared_utils import apply_client_side_truncation
 
 from .base_service import BaseService
 
@@ -541,6 +542,77 @@ class EmbeddingService(BaseService):
             f"Filtered {len(filtered_chunks)} chunks (out of {len(chunk_ids)}) need embeddings"
         )
         return filtered_chunks
+
+    async def _migrate_from_full_embeddings(
+        self,
+        chunk_ids: list[int],
+        target_dims: int,
+    ) -> set[int]:
+        """Read full-size vectors from source table in batches, truncate, insert to target.
+
+        Called inside the generate_missing_embeddings batch loop when
+        client_side_truncation=True. Applies the same _suppress_compaction and
+        _suppress_force_checkpoint flags that are already active in the outer loop.
+        _force_defer_hnsw is also set by the outer loop so HNSW creation on the
+        target table is deferred until finalize_optimization().
+
+        Reads from source in sub-batches of _MIGRATE_READ_BATCH to avoid loading
+        thousands of large float arrays into memory at once (e.g. 1000 × 1536 floats
+        ≈ 6MB per sub-batch, vs potentially 30MB+ for a 5000-item batch).
+
+        Returns the set of chunk_ids that were successfully migrated (these do NOT
+        need API calls). Chunk_ids absent from the source table must go via API.
+        """
+        if not chunk_ids or not self._embedding_provider:
+            return set()
+
+        _MIGRATE_READ_BATCH = 1000  # max vectors read from source table per SQL query
+
+        provider = self._embedding_provider.name
+        model = self._embedding_provider.model
+        migrated_ids: set[int] = set()
+        source_dims_seen: int | None = None
+
+        for sub_start in range(0, len(chunk_ids), _MIGRATE_READ_BATCH):
+            sub_batch = chunk_ids[sub_start : sub_start + _MIGRATE_READ_BATCH]
+
+            records, source_dims = await asyncio.to_thread(
+                self._db.get_full_embeddings_for_migration,
+                sub_batch,
+                provider,
+                model,
+                target_dims,
+            )
+            if not records:
+                continue
+
+            if source_dims_seen is None:
+                source_dims_seen = source_dims
+
+            # Truncate + L2-normalize each full vector locally
+            batch_data = [
+                {
+                    "chunk_id": rec["chunk_id"],
+                    "provider": provider,
+                    "model": model,
+                    "embedding": apply_client_side_truncation([rec["embedding"]], target_dims)[0],
+                    "dims": target_dims,
+                }
+                for rec in records
+            ]
+
+            # insert_embeddings_batch handles its own internal sub-batching
+            await asyncio.to_thread(
+                self._db.insert_embeddings_batch, batch_data, self._db_batch_size
+            )
+            migrated_ids |= {rec["chunk_id"] for rec in records}
+
+        if migrated_ids:
+            logger.info(
+                f"[Migration] Truncated {len(migrated_ids)} embeddings: "
+                f"embeddings_{source_dims_seen} → embeddings_{target_dims}"
+            )
+        return migrated_ids
 
     async def _generate_embeddings_in_batches(
         self, chunk_data: list[tuple[ChunkId, str]], show_progress: bool = True
