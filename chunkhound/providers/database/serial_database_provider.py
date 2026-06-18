@@ -823,3 +823,35 @@ class SerialDatabaseProvider(ABC):
         (e.g., LanceDB fragment compaction threshold).
         """
         return False
+
+    def get_existing_embeddings_in_table(
+        self, chunk_ids: list[int], provider: str, model: str, dims: int
+    ) -> set[int]:
+        """Get chunk IDs with embeddings in the dimension-specific table (migration check)."""
+        if not hasattr(self, "_executor_get_existing_embeddings_in_table"):
+            return set()
+        return cast(
+            set[int],
+            self._execute_in_db_thread_sync(
+                "get_existing_embeddings_in_table", chunk_ids, provider, model, dims
+            ),
+        )
+
+    def get_full_embeddings_for_migration(
+        self, chunk_ids: list[int], provider: str, model: str, target_dims: int
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Read full-size vectors for client-side truncation migration."""
+        if not hasattr(self, "_executor_get_full_embeddings_for_migration"):
+            return [], None
+        return cast(
+            tuple[list[dict[str, Any]], int | None],
+            self._execute_in_db_thread_sync(
+                "get_full_embeddings_for_migration", chunk_ids, provider, model, target_dims
+            ),
+        )
+
+    def drop_embedding_table(self, dims: int) -> None:
+        """Drop the embeddings_{dims} table after a successful migration."""
+        if not hasattr(self, "_executor_drop_embedding_table"):
+            return
+        self._execute_in_db_thread_sync("drop_embedding_table", dims)

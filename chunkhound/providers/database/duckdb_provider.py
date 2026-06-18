@@ -4496,10 +4496,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             if not dims_match:
                 continue
             dims = int(dims_match.group(1))
-            hnsw_name = f"hnsw_{table_name}"
+            hnsw_name = f"idx_hnsw_{dims}"
             try:
                 conn.execute(f"""
-                    CREATE INDEX {hnsw_name} ON {self._quote_duckdb_identifier(table_name)}
+                    CREATE INDEX "{hnsw_name}" ON "{table_name}"
                     USING HNSW (embedding)
                     WITH (metric = 'cosine')
                 """)
@@ -4529,7 +4529,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         if cancel_check and cancel_check():
             return False
 
-        # Step 1: Always run CHECKPOINT + HNSW compact (lightweight)
+        # Step 1: CHECKPOINT (HNSW compact removed — see optimize_tables comment)
         self.optimize_tables()
 
         if cancel_check and cancel_check():

@@ -245,6 +245,22 @@ class DatabaseProvider(Protocol):
         """Get set of chunk IDs that already have embeddings for given provider/model."""
         ...
 
+    def get_existing_embeddings_in_table(
+        self, chunk_ids: list[int], provider: str, model: str, dims: int
+    ) -> set[int]:
+        """Get chunk IDs that have embeddings in the dimension-specific table (for migration)."""
+        ...
+
+    def get_full_embeddings_for_migration(
+        self, chunk_ids: list[int], provider: str, model: str, target_dims: int
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Read full-size embeddings from the source table for client-side truncation migration."""
+        ...
+
+    def drop_embedding_table(self, dims: int) -> None:
+        """Drop the embeddings_{dims} table after a successful migration."""
+        ...
+
     def delete_embeddings_by_chunk_id(self, chunk_id: int) -> None:
         """Delete all embeddings for a specific chunk."""
         ...
