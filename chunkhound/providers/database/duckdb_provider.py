@@ -3223,21 +3223,27 @@ class DuckDBProvider(SerialDatabaseProvider):
         target_dims: int,
     ) -> tuple[list[dict[str, Any]], int | None]:
         # Find all embedding tables with dims > target_dims, largest first
-        all_tables = conn.execute("""
+        all_tables_raw = conn.execute("""
             SELECT table_name FROM information_schema.tables
             WHERE table_schema = 'main' AND table_name LIKE 'embeddings_%'
-            ORDER BY table_name DESC
         """).fetchall()
+
+        # Parse dims from table names and sort numerically descending
+        # (ORDER BY table_name DESC would sort lexicographically, giving wrong order
+        # for mixed digit-length dims like 768 vs 1536)
+        all_tables_with_dims: list[tuple[str, int]] = []
+        for (tname,) in all_tables_raw:
+            suffix = tname[len("embeddings_"):]
+            try:
+                all_tables_with_dims.append((tname, int(suffix)))
+            except ValueError:
+                continue
+        all_tables_with_dims.sort(key=lambda x: x[1], reverse=True)
 
         source_table: str | None = None
         source_dims: int | None = None
 
-        for (tname,) in all_tables:
-            suffix = tname[len("embeddings_"):]
-            try:
-                dims = int(suffix)
-            except ValueError:
-                continue
+        for tname, dims in all_tables_with_dims:
             if dims <= target_dims:
                 continue
             # Check whether this table has any rows for this provider/model
@@ -3248,7 +3254,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             if count > 0:
                 source_table = tname
                 source_dims = dims
-                break  # Take the largest (DESC order gives biggest dims first)
+                break  # Take the largest (numeric DESC) dims first
 
         if source_table is None or source_dims is None:
             return [], None
