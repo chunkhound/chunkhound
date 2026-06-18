@@ -620,6 +620,104 @@ class TestOpenAIProviderRuntimeBehavior:
         assert call_kwargs["dimensions"] == 512
 
     @pytest.mark.asyncio
+    async def test_known_model_on_custom_endpoint_does_not_cache_truncated_probe_dims(
+        self,
+    ):
+        """Server-side truncation on custom endpoints must not overwrite native dims."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            base_url="http://localhost:8000",
+            model="text-embedding-3-small",
+            output_dims=512,
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=512)
+        )
+        provider._ensure_client = AsyncMock()
+
+        assert await provider.validate_api_key() is True
+        result = await provider.embed(["hello"])
+
+        assert len(result[0]) == 512
+        assert provider.dims == 512
+        assert provider.native_dims == 1536
+        assert provider.supported_dimensions == []
+
+    @pytest.mark.asyncio
+    async def test_known_model_on_custom_endpoint_discovers_runtime_native_dims(self):
+        """Custom endpoints must not keep official dims metadata for known names."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            base_url="http://localhost:8000",
+            model="text-embedding-3-small",
+            client_side_truncation=True,
+            output_dims=256,
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=768)
+        )
+        provider._ensure_client = AsyncMock()
+
+        assert await provider.validate_api_key() is True
+        assert provider.native_dims == 768
+        assert provider.supported_dimensions == [768]
+
+    @pytest.mark.asyncio
+    async def test_known_model_on_custom_endpoint_without_output_dims_trusts_runtime(self):
+        """Custom endpoints without truncation must accept and cache runtime dims."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            base_url="http://localhost:8000",
+            model="text-embedding-3-small",
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=768)
+        )
+        provider._ensure_client = AsyncMock()
+
+        assert await provider.validate_api_key() is True
+        assert provider.native_dims == 768
+        assert provider.dims == 768
+        assert provider.supported_dimensions == [768]
+
+    def test_known_model_on_custom_endpoint_pre_discovery_warning_is_accurate(self):
+        """Pre-discovery fallback messaging must describe endpoint runtime discovery."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            base_url="http://localhost:8000",
+            model="text-embedding-3-small",
+        )
+
+        with patch(
+            "chunkhound.providers.embeddings.openai_provider.logger.warning"
+        ) as warn:
+            assert provider.dims == 1536
+
+        assert warn.call_count == 1
+        warning_message = warn.call_args.args[0]
+        assert "Unknown model" not in warning_message
+        assert "runtime dimension for this endpoint" in warning_message
+
+    @pytest.mark.asyncio
     async def test_known_ada_official_endpoint_omits_dimensions_at_native_dims(
         self,
     ):

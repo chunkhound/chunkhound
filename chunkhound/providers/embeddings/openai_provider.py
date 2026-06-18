@@ -568,7 +568,7 @@ class OpenAIEmbeddingProvider:
         cfg = self._model_config[self._model]
         native_dims = cfg.get("native_dims", 1536)
         if not cfg.get("matryoshka", False):
-            if self._output_dims != native_dims:
+            if output_dims != native_dims:
                 raise EmbeddingConfigurationError(
                     f"Model '{self._model}' does not support output_dims="
                     f"{self._output_dims}. Use the native dimension {native_dims}."
@@ -576,9 +576,7 @@ class OpenAIEmbeddingProvider:
             return
 
         min_dims = cfg.get("min_dims", 1)
-        if not isinstance(min_dims, int):
-            min_dims = 1
-        if not min_dims <= self._output_dims <= native_dims:
+        if not min_dims <= output_dims <= native_dims:
             raise EmbeddingConfigurationError(
                 f"Model '{self._model}' supports output_dims in the range "
                 f"{min_dims}-{native_dims}, got {self._output_dims}."
@@ -659,6 +657,28 @@ class OpenAIEmbeddingProvider:
         """
         return self.native_dims if self._client_side_truncation else self.dims
 
+    def _uses_static_model_dims(self) -> bool:
+        """Return True only when official OpenAI metadata is authoritative."""
+        return not self._trust_runtime_output_dims() and self._model in self._model_config
+
+    def _cache_runtime_native_dims(
+        self, actual_dims: int, *, server_side_truncation: bool
+    ) -> None:
+        """Cache native dims only when the response is known to be untruncated."""
+        if self._discovered_native_dims is not None or server_side_truncation:
+            return
+        if self._trust_runtime_output_dims() or self._model not in self._model_config:
+            self._discovered_native_dims = actual_dims
+
+    def _required_output_dims_for_client_truncation(self) -> int:
+        """Return validated client-side truncation dims as a concrete int."""
+        output_dims = self._validate_runtime_output_dims_config()
+        if output_dims is None:
+            raise EmbeddingConfigurationError(
+                f"Model '{self._model}' has client_side_truncation=True but output_dims is not set."
+            )
+        return output_dims
+
     def _validation_probe_matches_runtime_contract(self, response: Any) -> bool:
         """Validate probe responses using the same dims rules as embed()."""
         if len(response.data) != 1:
@@ -670,46 +690,58 @@ class OpenAIEmbeddingProvider:
         )
 
         if self._client_side_truncation:
-            output_dims = self._validate_runtime_output_dims_config()
+            output_dims = self._required_output_dims_for_client_truncation()
             self._validate_client_side_truncation_runtime_config(
                 actual_dims, output_dims
             )
-            # Side effect: cache discovered native dims for subsequent embed() calls
-            if self._model not in self._model_config:
-                self._discovered_native_dims = actual_dims
+            self._cache_runtime_native_dims(
+                actual_dims,
+                server_side_truncation=server_side_truncation,
+            )
             if self._trust_runtime_output_dims():
                 return True
             return actual_dims == self.native_dims
 
-        if self._model not in self._model_config and not server_side_truncation:
-            self._discovered_native_dims = actual_dims
+        self._cache_runtime_native_dims(
+            actual_dims,
+            server_side_truncation=server_side_truncation,
+        )
+        if self._trust_runtime_output_dims() and self._output_dims is None:
+            return True
         return actual_dims == self._expected_validation_response_dims()
 
     @property
     def dims(self) -> int:
         """Actual output dimension (reflects matryoshka config if set).
 
-        For unknown models (no config entry), returns 1536 as a pre-discovery
-        default until the first embed() call discovers the actual dimension.
+        Returns a 1536 pre-discovery fallback until the first embed() call
+        discovers the runtime dimension for models whose static OpenAI
+        metadata is unavailable or intentionally bypassed for this endpoint.
         """
         if self._output_dims is not None:
             return self._output_dims
-        if self._model in self._model_config:
+        if self._uses_static_model_dims():
             return self._model_config[self._model]["dims"]
         if self._discovered_native_dims is not None:
             return self._discovered_native_dims
         if not self._warned_default_dims:
             self._warned_default_dims = True
             logger.warning(
-                f"Unknown model '{self._model}': using default dims=1536. "
-                "Actual dimensions will be discovered on first embed() call."
+                f"Using default dims=1536 for model '{self._model}' until "
+                "first embed() call discovers the runtime dimension for "
+                "this endpoint."
             )
         return 1536  # Default for most OpenAI models
 
     @property
     def native_dims(self) -> int:
-        """Model's full/native embedding dimension."""
-        if self._model in self._model_config:
+        """Model's full/native embedding dimension.
+
+        Custom OpenAI-compatible endpoints become runtime-authoritative after
+        the first untruncated response instead of reusing OpenAI's published
+        metadata for the same model name.
+        """
+        if self._uses_static_model_dims():
             return self._model_config[self._model].get("native_dims", 1536)
         if self._discovered_native_dims is not None:
             return self._discovered_native_dims
@@ -722,7 +754,7 @@ class OpenAIEmbeddingProvider:
         Matryoshka models return ``range()`` for efficiency.
         Use ``in`` for membership checks, not equality.
         """
-        if self._model in self._model_config:
+        if self._uses_static_model_dims():
             cfg = self._model_config[self._model]
             if cfg.get("matryoshka", False):
                 min_dims = cfg.get("min_dims", 1)
@@ -1008,14 +1040,15 @@ class OpenAIEmbeddingProvider:
                 if self._client_side_truncation:
                     output_dims = self._validate_client_side_truncation_runtime_config(
                         cast(int, raw_dim),
-                        cast(int, self._output_dims),  # already init-time validated; runtime path still defends bypassed state
+                        self._required_output_dims_for_client_truncation(),
                     )
                     logger.debug(
                         f"Applying client-side truncation: {cast(int, raw_dim)}→{output_dims}"
                     )
-                    embeddings = apply_client_side_truncation(
+                    truncated_embeddings = apply_client_side_truncation(
                         cast(list[list[float]], embeddings), output_dims
                     )
+                    embeddings = cast(list[list[float] | None], truncated_embeddings)
 
                 # Update usage statistics
                 self._usage_stats["requests_made"] += 1
@@ -1025,22 +1058,19 @@ class OpenAIEmbeddingProvider:
 
                 logger.debug(f"Successfully generated {len(embeddings)} embeddings")
 
-                # Discover native dims and validate output dims (INV-1)
+                # Discover native dims and validate output dims (INV-1).
+                # Custom endpoints may reuse official model names, so runtime
+                # discovery must stay authoritative whenever the response is
+                # known to be untruncated.
                 actual_dims = len(cast(list[float], embeddings[0]))
-                # Only discover when raw_dim reflects the true native size:
-                # skip when server-side truncation is active (API already truncated).
-                # NOTE: For unknown custom models with server-side truncation, native_dims
-                # stays at the 1536 fallback (introspection-only limitation, not a functional
-                # bug since dims correctly returns output_dims).
                 server_side_truncation = (
                     self._output_dims is not None and not self._client_side_truncation
                 )
-                if (
-                    self._discovered_native_dims is None
-                    and self._model not in self._model_config
-                    and not server_side_truncation
-                ):
-                    self._discovered_native_dims = cast(int, raw_dim)
+                self._cache_runtime_native_dims(
+                    cast(int, raw_dim),
+                    server_side_truncation=server_side_truncation,
+                )
+                if self._discovered_native_dims == raw_dim and not server_side_truncation:
                     logger.debug(
                         f"Discovered native embedding dimension: {self._discovered_native_dims}"
                     )
