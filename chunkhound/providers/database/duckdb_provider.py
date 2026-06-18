@@ -3282,6 +3282,31 @@ class DuckDBProvider(SerialDatabaseProvider):
         ]
         return records, source_dims
 
+    def drop_embedding_table(self, dims: int) -> None:
+        """Drop the embeddings_{dims} table and its indexes.
+
+        Used after successful migration to keep DB size small when
+        drop_full_vectors_after_migration is enabled.
+        Clears cached state for this table so subsequent operations
+        don't assume it exists.
+        """
+        self._execute_in_db_thread_sync("drop_embedding_table", dims)
+
+    def _executor_drop_embedding_table(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        dims: int,
+    ) -> None:
+        table_name = f"embeddings_{dims}"
+        logger.info(f"[Migration] Dropping source table {table_name}")
+        conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+        # Clear any cached table-existence flags so future calls don't
+        # think the table still exists.
+        state.pop(f"_ce_exists_{table_name}", None)
+        state.pop(f"_ce_contract_{table_name}", None)
+        logger.info(f"[Migration] Dropped {table_name}")
+
     def delete_embeddings_by_chunk_id(self, chunk_id: int) -> None:
         """Delete all embeddings for a specific chunk - delegate to embedding repository."""
         self._embedding_repository.delete_embeddings_by_chunk_id(chunk_id)
