@@ -3154,6 +3154,46 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         return all_existing & set(chunk_ids)
 
+    def get_existing_embeddings_in_table(
+        self,
+        chunk_ids: list[int],
+        provider: str,
+        model: str,
+        dims: int,
+    ) -> set[int]:
+        """Check only the embeddings_{dims} table — dimension-specific existence check.
+
+        Used when client_side_truncation is active so that chunks with full-size
+        embeddings in a different table are NOT treated as already-done.
+        """
+        return self._execute_in_db_thread_sync(
+            "get_existing_embeddings_in_table", chunk_ids, provider, model, dims
+        )
+
+    def _executor_get_existing_embeddings_in_table(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunk_ids: list[int],
+        provider: str,
+        model: str,
+        dims: int,
+    ) -> set[int]:
+        """Executor method for get_existing_embeddings_in_table - runs in DB thread.
+
+        Queries only the embeddings_{dims} table so that chunks with full-size
+        embeddings in a different table are not treated as already indexed.
+        """
+        table_name = f"embeddings_{dims}"
+        if not self._executor_table_exists(conn, state, table_name):
+            return set()
+        rows = conn.execute(
+            f"SELECT DISTINCT chunk_id FROM {table_name} WHERE provider = ? AND model = ?",
+            [provider, model],
+        ).fetchall()
+        all_in_table = {row[0] for row in rows}
+        return all_in_table & set(chunk_ids)
+
     def delete_embeddings_by_chunk_id(self, chunk_id: int) -> None:
         """Delete all embeddings for a specific chunk - delegate to embedding repository."""
         self._embedding_repository.delete_embeddings_by_chunk_id(chunk_id)
