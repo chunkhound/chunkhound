@@ -276,6 +276,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         # firing CHECKPOINT after every one of the ~200 API-batch commits per fetch-batch.
         self._suppress_force_checkpoint: bool = False
 
+        # When True, _executor_ensure_embedding_table_exists always defers HNSW
+        # index creation regardless of whether other HNSW indexes already exist.
+        # Set during bulk migration to avoid creating HNSW on the target table
+        # mid-batch; the coordinator's finalize_optimization() builds it at the end.
+        self._force_defer_hnsw: bool = False
+
     def _create_connection(self) -> Any:
         """Create and return a DuckDB connection.
 
@@ -808,11 +814,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             """).fetchone()[0]
 
             hnsw_index_name = f"idx_hnsw_{dims}"
-            if existing_hnsw == 0:
-                # First indexing: defer HNSW index creation for bulk performance
+            if existing_hnsw == 0 or self._force_defer_hnsw:
+                # First indexing or forced deferral: defer HNSW index creation for bulk performance
                 logger.debug(
                     f"Deferring HNSW index creation for {table_name} "
-                    "(first indexing detected)"
+                    f"({'forced-defer for migration' if self._force_defer_hnsw else 'first indexing detected'})"
                 )
                 if "deferred_hnsw_indexes" not in state:
                     state["deferred_hnsw_indexes"] = set()
