@@ -2641,6 +2641,23 @@ class DuckDBProvider(SerialDatabaseProvider):
             ids.extend(self._execute_in_db_thread_sync("insert_chunks_batch", sub))
         return ids
 
+    async def insert_chunks_batch_async(self, chunks: list[Chunk]) -> list[int]:
+        """Insert multiple chunks in batch (async). Sub-batches oversized inputs at _CHUNK_INSERT_BATCH_SIZE.
+
+        # PERFORMANCE: 250x faster than single inserts
+        # OPTIMAL_BATCH: _CHUNK_INSERT_BATCH_SIZE chunks (benchmarked)
+        # PATTERN: Uses temp table + INSERT SELECT for bulk insert; sub-batches oversized inputs
+        """
+        if not chunks:
+            return []
+        if len(chunks) <= _CHUNK_INSERT_BATCH_SIZE:
+            return await self._execute_in_db_thread("insert_chunks_batch", chunks)
+        ids: list[int] = []
+        for i in range(0, len(chunks), _CHUNK_INSERT_BATCH_SIZE):
+            sub = chunks[i : i + _CHUNK_INSERT_BATCH_SIZE]
+            ids.extend(await self._execute_in_db_thread("insert_chunks_batch", sub))
+        return ids
+
     def _executor_insert_chunks_batch(
         self, conn: Any, state: dict[str, Any], chunks: list[Chunk]
     ) -> list[int]:

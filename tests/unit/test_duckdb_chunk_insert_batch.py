@@ -67,3 +67,29 @@ class TestChunkInsertBatchSizeCap:
         ids = DuckDBProvider.insert_chunks_batch(provider, [])
         assert ids == []
         provider._execute_in_db_thread_sync.assert_not_called()
+
+    def test_async_oversized_batch_split_returns_all_ids(self):
+        """insert_chunks_batch_async must also split oversized batches."""
+        import asyncio
+        from chunkhound.providers.database import duckdb_provider
+        from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+
+        cap = duckdb_provider._CHUNK_INSERT_BATCH_SIZE
+        n_chunks = cap + 1
+
+        chunks = [MagicMock() for _ in range(n_chunks)]
+
+        call_sizes = []
+
+        async def fake_execute_async(method_name, sub_chunks):
+            call_sizes.append(len(sub_chunks))
+            return list(range(len(sub_chunks)))
+
+        provider = MagicMock(spec=DuckDBProvider)
+        provider._execute_in_db_thread = fake_execute_async
+
+        ids = asyncio.run(DuckDBProvider.insert_chunks_batch_async(provider, chunks))
+
+        assert len(ids) == n_chunks, f"Expected {n_chunks} IDs, got {len(ids)}"
+        assert len(call_sizes) >= 2, "Expected sub-batching but got single call"
+        assert max(call_sizes) <= cap, f"Sub-batch exceeded cap: {max(call_sizes)}"
