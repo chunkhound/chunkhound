@@ -76,6 +76,13 @@ class ClientProxy:
             )
         )
 
+    async def _probe_daemon_liveness(self) -> bool | None:
+        """Best-effort daemon liveness probe for registration diagnostics."""
+        try:
+            return await self._discovery.ping_daemon()
+        except Exception:
+            return None
+
     async def _register_with_daemon(
         self,
         reader: asyncio.StreamReader,
@@ -97,11 +104,9 @@ class ClientProxy:
         try:
             ipc.write_frame(writer, reg_frame)
             await writer.drain()
-            ack = await asyncio.wait_for(ipc.read_frame(reader), timeout=10.0)
         except (
             OSError,
             EOFError,
-            asyncio.TimeoutError,
             asyncio.IncompleteReadError,
             BrokenPipeError,
             ConnectionAbortedError,
@@ -109,6 +114,38 @@ class ClientProxy:
         ) as error:
             raise self._startup_failure_error(
                 "ChunkHound daemon died during registration handshake"
+            ) from error
+
+        try:
+            ack = await asyncio.wait_for(ipc.read_frame(reader), timeout=10.0)
+        except asyncio.TimeoutError as error:
+            daemon_alive = await self._probe_daemon_liveness()
+            if daemon_alive is True:
+                prefix = (
+                    "ChunkHound daemon registration ack timed out after 10.0s; "
+                    "daemon still reachable"
+                )
+            elif daemon_alive is False:
+                prefix = (
+                    "ChunkHound daemon registration ack timed out after 10.0s; "
+                    "daemon no longer reachable"
+                )
+            else:
+                prefix = (
+                    "ChunkHound daemon registration ack timed out after 10.0s; "
+                    "daemon reachability could not be confirmed"
+                )
+            raise self._startup_failure_error(prefix) from error
+        except (
+            OSError,
+            EOFError,
+            asyncio.IncompleteReadError,
+            BrokenPipeError,
+            ConnectionAbortedError,
+            ConnectionResetError,
+        ) as error:
+            raise self._startup_failure_error(
+                "ChunkHound daemon connection closed before registration ack"
             ) from error
 
         if not isinstance(ack, dict) or ack.get("type") != "registered":
