@@ -127,7 +127,7 @@ def _run_staged() -> int:
     if not files:
         print("No staged Python files found.")
         return 0
-    return _run_files(files)
+    return _run_ruff_lint_and_format(files, check_only=False)
 
 
 def _git_ref_exists(ref: str) -> bool:
@@ -227,39 +227,61 @@ def _rewritten_files(
     return [file for file, digest in after.items() if digest != before.get(file)]
 
 
-def _run_ruff_lint_and_format(files: list[str]) -> int:
-    """Run ruff lint and format checks directly, not via pre-commit.
+def _print_rewritten_files(message: str, files: list[str]) -> None:
+    print(message, file=sys.stderr)
+    for path in files:
+        print(f"  {path}", file=sys.stderr)
 
-    Exit 0 if all checks pass, 1 if any violations or formatting issues found.
-    CI intentionally treats Ruff auto-fixes as failures because the pushed diff
-    must already be lint-clean.
-    """
+
+def _lint_rewrite_message(check_only: bool) -> str:
+    if check_only:
+        return (
+            "Ruff rewrote changed Python files in CI. "
+            "Run Ruff locally, commit the fixes, and push again:"
+        )
+    return (
+        "Ruff rewrote staged Python files. "
+        "Run 'git add' on the changed files, then recommit:"
+    )
+
+
+def _run_ruff_format(files: list[str], *, check_only: bool) -> int:
+    if check_only:
+        return _run_ruff_command("format", "--check", "--", *files)
+
+    before_format = _file_digests(files)
+    if _run_ruff_command("format", "--", *files) != 0:
+        return 1
+
+    changed_files = _rewritten_files(before_format, _file_digests(files))
+    if not changed_files:
+        return 0
+
+    _print_rewritten_files(
+        _lint_rewrite_message(check_only),
+        changed_files,
+    )
+    return 1
+
+
+def _run_ruff_lint_and_format(files: list[str], *, check_only: bool = True) -> int:
+    """Run Ruff directly for both CI checks and the managed local git hook."""
+    # --fix must stay in sync with .pre-commit-config.yaml ruff-check args.
     if not files:
         return 0
 
     exit_code = 0
-
-    # --fix matches .pre-commit-config.yaml so CI and local hooks use the same
-    # lint rules. CI still fails if Ruff rewrites tracked files because the PR
-    # contents, not the ephemeral workspace after auto-fix, must be clean.
     before_fix = _file_digests(files)
     if _run_ruff_command("check", "--fix", "--", *files) != 0:
         exit_code = 1
 
     changed_files = _rewritten_files(before_fix, _file_digests(files))
     if changed_files:
-        print(
-            "Ruff rewrote changed Python files in CI. "
-            "Run the formatter locally, re-stage, and commit the fixes:",
-            file=sys.stderr,
-        )
-        for path in changed_files:
-            print(f"  {path}", file=sys.stderr)
+        _print_rewritten_files(_lint_rewrite_message(check_only), changed_files)
         exit_code = 1
 
-    if _run_ruff_command("format", "--check", "--", *files) != 0:
+    if _run_ruff_format(files, check_only=check_only) != 0:
         exit_code = 1
-
     return exit_code
 
 

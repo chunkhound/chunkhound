@@ -426,17 +426,106 @@ class TestPreCommitScript:
         )
 
         assert result.returncode == 0
-        assert log_path.read_text(encoding="utf-8").splitlines() == [
-            "tool",
-            "run",
-            "--from",
-            PRE_COMMIT_PACKAGE,
-            "pre-commit",
-            "run",
-            "--files",
-            "added.pyi",
-            "tracked.py",
+        assert _uv_log_calls(log_path) == [
+            [
+                "tool",
+                "run",
+                "--from",
+                RUFF_PACKAGE,
+                "ruff",
+                "check",
+                "--fix",
+                "--",
+                "added.pyi",
+                "tracked.py",
+            ],
+            [
+                "tool",
+                "run",
+                "--from",
+                RUFF_PACKAGE,
+                "ruff",
+                "format",
+                "--",
+                "added.pyi",
+                "tracked.py",
+            ],
         ]
+
+    def test_run_staged_returns_nonzero_when_ruff_check_rewrites_file(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "tracked.py").write_text("x=1\n", encoding="utf-8")
+        _run(["git", "add", "tracked.py"], repo_dir)
+
+        bin_dir, log_path = _fake_uv_dir(
+            tmp_path,
+            exit_codes=(0, 0),
+            file_updates=((0, str(repo_dir / "tracked.py"), "x = 1\n"),),
+        )
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        assert "Ruff rewrote staged Python files" in result.stderr
+        assert "tracked.py" in result.stderr
+        assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_staged_returns_nonzero_when_ruff_format_rewrites_file(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "tracked.py").write_text("x=1\n", encoding="utf-8")
+        _run(["git", "add", "tracked.py"], repo_dir)
+
+        bin_dir, log_path = _fake_uv_dir(
+            tmp_path,
+            exit_codes=(0, 0),
+            file_updates=((1, str(repo_dir / "tracked.py"), "x = 1\n"),),
+        )
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        assert "Ruff rewrote staged Python files" in result.stderr
+        assert "tracked.py" in result.stderr
+        assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_staged_returns_nonzero_when_ruff_check_fails(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "tracked.py").write_text("x=1\n", encoding="utf-8")
+        _run(["git", "add", "tracked.py"], repo_dir)
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(1, 0))
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        assert len(_uv_log_calls(log_path)) == 2
 
     @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
     def test_diff_commands_use_only_changed_python_paths(
