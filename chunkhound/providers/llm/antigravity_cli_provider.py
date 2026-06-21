@@ -6,6 +6,7 @@ import tempfile
 from loguru import logger
 
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
+from chunkhound.utils.windows_constants import get_utf8_env
 
 
 class AntigravityCLIProvider(BaseCLIProvider):
@@ -45,24 +46,39 @@ class AntigravityCLIProvider(BaseCLIProvider):
             binary = "antigravity"
 
         # Build CLI command
-        cmd = [binary, "chat", "--print", "--sandbox", "read-only"]
+        cmd = [binary, "--print", "--sandbox"]
         if self._model:
             cmd.extend(["--model", self._model])
 
         # Merge system prompt if provided
         merged_prompt = self._merge_prompts(prompt, system)
 
-        # Clone and sanitize environment variables to prevent plugin hijacking
-        env = os.environ.copy()
-        keys_to_remove = [
-            k
-            for k in env
-            if k.startswith("CHUNKHOUND_")
-            or k.startswith("SDLAIC_")
-            or k.startswith("ENFORCER_")
-        ]
-        for k in keys_to_remove:
-            env.pop(k, None)
+        # Clone and sanitize environment variables to prevent credentials/plugin hijacking
+        safe_keys = {
+            "PATH",
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "USERPROFILE",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "TERM",
+            "SHELL",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LC_MESSAGES",
+            "SystemRoot",
+            "SystemDrive",
+            "ComSpec",
+            "PATHEXT",
+            "WINDIR",
+            "APPDATA",
+            "LOCALAPPDATA",
+        }
+        base_env = {k: v for k, v in os.environ.items() if k in safe_keys}
+        env = get_utf8_env(base_env)
 
         logger.debug(f"Executing CLI command: {' '.join(cmd)} in sandboxed mode")
 
