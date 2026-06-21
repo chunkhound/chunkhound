@@ -871,45 +871,56 @@ class TestShouldOptimize:
 
         assert db.should_optimize() is False
 
-    def test_nonzero_threshold_skips_when_ratio_is_below_boundary(
-        self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
+
+class TestFragmentationThresholdBoundaries:
+    """Boundary tests for ``_fragmentation_exceeds_threshold``.
+
+    Tests the pure decision function directly — no monkeypatching or I/O.
+
+    Formula: ``(ratio - 1.0) * 100.0 > threshold``
+    Guards: ``threshold is None`` → False; ``threshold < 0`` → False
+    (unreachable in production: DatabaseConfig enforces ``>= 0`` via Pydantic).
+    """
+
+    @pytest.mark.parametrize(
+        "ratio,threshold,expected",
+        [
+            pytest.param(
+                1.29, 30.0, False, id="below-nonzero-threshold-29pct-lt-30"
+            ),
+            pytest.param(
+                1.25, 25.0, False, id="exact-boundary-strict-gt-25-not-gt-25"
+            ),
+            pytest.param(
+                1.31, 30.0, True, id="above-nonzero-threshold-31pct-gt-30"
+            ),
+            pytest.param(
+                1.01, 0.0, True, id="threshold-zero-any-positive-overhead"
+            ),
+            pytest.param(
+                0.5, 0.0, False, id="ratio-below-one-negative-overhead"
+            ),
+            pytest.param(
+                1.0, 30.0, False, id="ratio-exactly-one-zero-overhead"
+            ),
+            pytest.param(
+                1.5, None, False, id="threshold-none-always-false"
+            ),
+            pytest.param(
+                1.5, -1.0, False, id="threshold-negative-always-false"
+            ),
+        ],
+    )
+    def test_fragmentation_exceeds_threshold(
+        self,
+        ratio: float,
+        threshold: float | None,
+        expected: bool,
     ) -> None:
-        """A realistic nonzero threshold must not compact below the boundary."""
-        file_backed_db.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
-        monkeypatch.setattr(
-            file_backed_db,
-            "_executor_measure_fragmentation",
-            lambda conn, state: 1.29,
-        )
-        compact_calls: list[str] = []
-        monkeypatch.setattr(
-            file_backed_db,
-            "_executor_compact_database",
-            lambda conn, state: compact_calls.append("compact") or 0,
-        )
-
-        assert file_backed_db.compact_if_needed() is False
-        assert compact_calls == []
-
-    def test_compact_if_needed_runs_when_threshold_is_exceeded(
-        self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A realistic nonzero threshold compacts once above the boundary."""
-        file_backed_db.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
-        monkeypatch.setattr(
-            file_backed_db,
-            "_executor_measure_fragmentation",
-            lambda conn, state: 1.31,
-        )
-        compact_calls: list[str] = []
-        monkeypatch.setattr(
-            file_backed_db,
-            "_executor_compact_database",
-            lambda conn, state: compact_calls.append("compact") or 0,
-        )
-
-        assert file_backed_db.compact_if_needed() is True
-        assert compact_calls == ["compact"]
+        """Every boundary of the fragmentation threshold decision formula."""
+        # Pure function — no I/O or instance state needed.
+        provider = object.__new__(DuckDBProvider)
+        assert provider._fragmentation_exceeds_threshold(ratio, threshold) is expected
 
 
 # ── Index flow compaction points ─────────────────────────────────────────
