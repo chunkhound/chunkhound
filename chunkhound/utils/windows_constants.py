@@ -43,6 +43,9 @@ def unlink_with_retry(path: Path, max_attempts: int = 5) -> None:
 
     On non-Windows platforms this behaves identically to path.unlink(missing_ok=True).
     """
+    if not IS_WINDOWS:
+        path.unlink(missing_ok=True)
+        return
     for attempt in range(max_attempts):
         try:
             path.unlink(missing_ok=True)

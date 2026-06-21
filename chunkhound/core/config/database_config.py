@@ -264,6 +264,30 @@ class DatabaseConfig(BaseModel):
                     )
                 else:
                     config["compaction_min_size_mb"] = parsed_min_size
+        if frag_pct_raw := os.getenv(
+            "CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT"
+        ):
+            lowered = frag_pct_raw.strip().lower()
+            if lowered in ("none", "null", ""):
+                config["fragmentation_threshold_pct"] = None
+            else:
+                try:
+                    parsed_frag_pct = float(frag_pct_raw)
+                except ValueError:
+                    logger.warning(
+                        "Ignoring invalid CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT "
+                        "value: {!r}",
+                        frag_pct_raw,
+                    )
+                else:
+                    if parsed_frag_pct < 0.0:
+                        logger.warning(
+                            "Ignoring negative CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT "
+                            "value: {!r} (must be >= 0.0)",
+                            frag_pct_raw,
+                        )
+                    else:
+                        config["fragmentation_threshold_pct"] = parsed_frag_pct
         return config
 
     @classmethod
