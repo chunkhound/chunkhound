@@ -107,7 +107,7 @@ class MCPServerBase(ABC):
             "chunks_created": 0,
             "is_scanning": False,
             "scan_started_at": None,
-            "scan_completed_at": None,
+            "query_ready_at": None,
             "realtime": RealtimeIndexingService.health_snapshot_for_config(
                 config,
                 startup_mode=self._realtime_startup_mode(),
@@ -362,7 +362,8 @@ class MCPServerBase(ABC):
                     raise ValueError("Database configuration not initialized")
 
                 db_path = Path(self.config.database.path)
-                db_path.parent.mkdir(parents=True, exist_ok=True)
+                if not self.config.database.read_only:
+                    db_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # Initialize embedding manager
                 self.embedding_manager = EmbeddingManager()
@@ -476,6 +477,10 @@ class MCPServerBase(ABC):
 
     def requires_strict_startup_barrier(self) -> bool:
         """Return whether daemon startup must block on realtime readiness."""
+        if self.config.database.read_only:
+            # Read-only deferred startup skips realtime entirely (no scan, no
+            # monitoring task), so there is nothing for the barrier to block on.
+            return False
         backend = self._configured_realtime_backend()
         if backend is None:
             backend = default_realtime_backend_for_current_install()
@@ -505,6 +510,15 @@ class MCPServerBase(ABC):
             self._start_startup_phase("db_connect")
             await self._connect_provider()
             self._complete_startup_phase("db_connect")
+
+            if self.config.database.read_only:
+                self.debug_log(
+                    "Read-only mode: skipping realtime indexing and initial scan"
+                )
+                # Read-only sessions have nothing to scan; mark the index queryable now.
+                self._scan_progress["query_ready_at"] = datetime.now().isoformat()
+                self._complete_startup()
+                return
 
             # Start real-time indexing service
             self.debug_log("Starting real-time indexing service (deferred)")
@@ -1007,7 +1021,7 @@ class MCPServerBase(ABC):
                         "files_processed": stats.files_processed,
                         "chunks_created": stats.chunks_created,
                         "is_scanning": False,
-                        "scan_completed_at": datetime.now().isoformat(),
+                        "query_ready_at": datetime.now().isoformat(),
                     }
                 )
 
