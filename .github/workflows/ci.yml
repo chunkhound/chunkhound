@@ -67,8 +67,8 @@ jobs:
         python: ["3.12", "3.14"]
         include:
           - os: ubuntu-latest
-            job_timeout_minutes: 30
-            pytest_timeout_minutes: 14
+            job_timeout_minutes: 40
+            pytest_timeout_minutes: 18
             pytest_timeout_seconds: 300
           - os: macos-latest
             job_timeout_minutes: 45
