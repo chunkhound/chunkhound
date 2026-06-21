@@ -214,11 +214,11 @@ async def test_cli_complete_failure(mock_subprocess):
     mock_process.returncode = 1
     mock_process.communicate.return_value = (
         b"",
-        b"Command not found or permission denied",
+        b"Authentication failed: api_key=secret_1234567890",
     )
     mock_subprocess.return_value = mock_process
 
-    with pytest.raises(RuntimeError, match="Command not found or permission denied"):
+    with pytest.raises(RuntimeError, match="Authentication failed: api_key=\\[REDACTED\\]"):
         await provider.complete("CLI prompt")
 
 
@@ -252,19 +252,29 @@ async def test_cli_binary_fallback(mock_subprocess):
 
 @pytest.mark.asyncio
 async def test_cli_timeout_cleanup(mock_subprocess):
+    import sys
+    import signal
     provider = AntigravityCLIProvider(model="gemini-3.5-flash", timeout=2)
 
     mock_process = AsyncMock()
-    mock_process.kill = MagicMock()
-    mock_process.wait = AsyncMock()
+    mock_process.pid = 12345
+    mock_process.returncode = None
+    mock_process.wait = AsyncMock(return_value=0)
     mock_subprocess.return_value = mock_process
 
-    with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError()):
+    with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError()), \
+         patch("os.killpg") as mock_killpg, \
+         patch("subprocess.run") as mock_run:
         with pytest.raises(RuntimeError, match="timed out after 2s"):
             await provider.complete("CLI prompt")
 
-    mock_process.kill.assert_called_once()
-    mock_process.wait.assert_called_once()
+    if sys.platform == "win32":
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        assert "taskkill" in args
+        assert "12345" in args
+    else:
+        mock_killpg.assert_any_call(12345, signal.SIGTERM)
 
 
 @pytest.mark.asyncio
@@ -360,6 +370,24 @@ async def test_sdk_structured_validation(mock_antigravity_agent):
 def test_cli_synthesis_concurrency():
     provider = AntigravityCLIProvider(model="gemini-3.5-flash")
     assert provider.get_synthesis_concurrency() == 1
+
+
+@pytest.mark.asyncio
+async def test_cli_max_completion_tokens_warning(mock_subprocess):
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"Response from CLI", b"")
+    mock_subprocess.return_value = mock_process
+
+    with patch("chunkhound.providers.llm.antigravity_cli_provider.logger.warning") as mock_warn:
+        await provider.complete("prompt", max_completion_tokens=512)
+        mock_warn.assert_called_once_with(
+            "Antigravity CLI does not support limiting output tokens "
+            "via max_completion_tokens. "
+            "Requested limit of 512 is ignored."
+        )
 
 
 @pytest.mark.asyncio
