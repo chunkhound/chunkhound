@@ -163,9 +163,10 @@ class DuckDBConnectionManager:
                 live_missing_or_empty = True
 
         if backup_path.exists() and live_missing_or_empty:
-            logger.warning(
+            log_if_not_mcp(
+                "warning",
                 "Recovering DuckDB database from interrupted compaction backup: "
-                f"{backup_path}"
+                f"{backup_path}",
             )
             try:
                 db_path.unlink(missing_ok=True)

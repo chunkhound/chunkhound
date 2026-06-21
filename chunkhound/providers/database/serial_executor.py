@@ -15,6 +15,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 
 
@@ -278,7 +279,9 @@ class SerialDatabaseExecutor:
         try:
             provider.compact_if_needed()
         except Exception as error:
-            logger.warning(f"Sampled auto-compaction skipped after failure: {error}")
+            log_if_not_mcp(
+                "warning", f"Sampled auto-compaction skipped after failure: {error}"
+            )
 
     async def _maybe_run_sampled_auto_compaction_async(
         self, provider: Any, operation_name: str
@@ -289,7 +292,9 @@ class SerialDatabaseExecutor:
         try:
             await provider.compact_if_needed_async()
         except Exception as error:
-            logger.warning(f"Sampled auto-compaction skipped after failure: {error}")
+            log_if_not_mcp(
+                "warning", f"Sampled auto-compaction skipped after failure: {error}"
+            )
 
     def shutdown(self, wait: bool = True) -> None:
         """Shutdown the executor with proper cleanup.

@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.utils.path_utils import normalize_realtime_path
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.providers.database.duckdb_provider import DuckDBTransactionConflictError
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
@@ -384,11 +385,12 @@ class RealtimePipelineMixin:
         caller should handle the failure path.
         """
         if self._schedule_compaction_retry(mutation):
-            logger.info(
+            log_if_not_mcp(
+                "info",
                 f"Retrying realtime {op_desc} for {mutation.path} "
                 f"after database compaction "
                 f"(attempt {mutation.retry_count + 1}/"
-                f"{self._DELETE_CONFLICT_MAX_RETRIES})"
+                f"{self._DELETE_CONFLICT_MAX_RETRIES})",
             )
             self._debug(
                 f"retrying {op_desc} after database compaction "
@@ -398,7 +400,9 @@ class RealtimePipelineMixin:
         error = DatabaseCompactionInProgressError(
             "Database compaction in progress — retry budget exhausted"
         )
-        logger.error(f"Error during {op_desc} for {mutation.path}: {error}")
+        log_if_not_mcp(
+            "error", f"Error during {op_desc} for {mutation.path}: {error}"
+        )
         self.failed_files.add(str(mutation.path))
         self._record_processing_error()
         self._set_error(f"Error during {op_desc} for {mutation.path}: {error}")
@@ -424,9 +428,10 @@ class RealtimePipelineMixin:
                 exhausted.append(mutation)
 
         if surviving:
-            logger.info(
+            log_if_not_mcp(
+                "info",
                 f"Retrying realtime {op_desc} for "
-                f"{len(surviving)} files after database compaction"
+                f"{len(surviving)} files after database compaction",
             )
             self._debug(
                 f"retrying {op_desc} after database compaction "
@@ -438,7 +443,9 @@ class RealtimePipelineMixin:
                 "Database compaction in progress — retry budget exhausted"
             )
             paths = ", ".join(str(m.path) for m in exhausted[:3])
-            logger.error(f"Error during {op_desc} for {paths}: {error}")
+            log_if_not_mcp(
+                "error", f"Error during {op_desc} for {paths}: {error}"
+            )
             for mutation in exhausted:
                 self.failed_files.add(str(mutation.path))
             self._record_processing_error()
@@ -1555,12 +1562,13 @@ class RealtimePipelineMixin:
                 raise
             except DatabaseCompactionInProgressError:
                 if mutation is not None and self._schedule_compaction_retry(mutation):
-                    logger.info(
+                    log_if_not_mcp(
+                        "info",
                         "Retrying realtime "
                         f"{self._status_operation(mutation.operation)} for "
                         f"{mutation.path} after database compaction "
                         f"(attempt {mutation.retry_count + 1}/"
-                        f"{self._DELETE_CONFLICT_MAX_RETRIES})"
+                        f"{self._DELETE_CONFLICT_MAX_RETRIES})",
                     )
                     self._debug(
                         "retrying mutation after database compaction "
@@ -1574,7 +1582,7 @@ class RealtimePipelineMixin:
                 error = DatabaseCompactionInProgressError(
                     "Database compaction in progress — retry budget exhausted"
                 )
-                logger.error(f"Error processing {mutation_path}: {error}")
+                log_if_not_mcp("error", f"Error processing {mutation_path}: {error}")
                 self._record_processing_error()
                 self._set_error(f"Error processing {mutation_path}: {error}")
                 async with self._file_condition:
@@ -1584,7 +1592,7 @@ class RealtimePipelineMixin:
                 mutation_path = (
                     mutation.path if mutation is not None else Path("<unknown>")
                 )
-                logger.error(f"Error processing {mutation_path}: {error}")
+                log_if_not_mcp("error", f"Error processing {mutation_path}: {error}")
                 # Track failed files for debugging and monitoring
                 self._record_processing_error()
                 self._set_error(f"Error processing {mutation_path}: {error}")

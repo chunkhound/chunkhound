@@ -1779,7 +1779,7 @@ class IndexingCoordinator(BaseService):
         except NotImplementedError:
             return {"status": "skipped", "compacted": False, "reason": "unsupported"}
         except Exception as e:
-            logger.error(f"Database compact_if_needed failed: {e}")
+            log_if_not_mcp("error", f"Database compact_if_needed failed: {e}")
             return {"status": "error", "compacted": False, "error": str(e)}
 
     async def remove_file(self, file_path: str) -> int:

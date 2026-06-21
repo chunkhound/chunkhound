@@ -11,6 +11,7 @@ from chunkhound.core.models import Chunk, File
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.file_discovery_cache import FileDiscoveryCache
 from chunkhound.providers.database.serial_executor import SerialDatabaseExecutor
+from chunkhound.utils.logging_guard import log_if_not_mcp
 
 # Type hinting only
 if TYPE_CHECKING:
@@ -708,7 +709,7 @@ class SerialDatabaseProvider(ABC):
         except NotImplementedError:
             return False
         except Exception as e:
-            logger.warning(f"Compaction failed: {e}")
+            log_if_not_mcp("warning", f"Compaction failed: {e}")
             return False
 
     async def compact_if_needed_async(self) -> bool:
