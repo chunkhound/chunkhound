@@ -297,7 +297,7 @@ async def test_watchman_subscription_queue_overflow_requests_resync_and_degrades
         pending_stats = await service.get_health()
         pending_daemon_status = derive_daemon_status(
             {
-                "scan_completed_at": "2026-03-14T00:00:00Z",
+                "query_ready_at": "2026-03-14T00:00:00Z",
                 "is_scanning": False,
                 "realtime": pending_stats,
             }
@@ -315,7 +315,7 @@ async def test_watchman_subscription_queue_overflow_requests_resync_and_degrades
         stats = await service.get_health()
         daemon_status = derive_daemon_status(
             {
-                "scan_completed_at": "2026-03-14T00:00:00Z",
+                "query_ready_at": "2026-03-14T00:00:00Z",
                 "is_scanning": False,
                 "realtime": stats,
             }
