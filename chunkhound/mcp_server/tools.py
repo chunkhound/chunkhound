@@ -497,8 +497,7 @@ USE FOR:
 - Inspecting backend-neutral realtime health and resync state
 - Debugging degraded daemon behavior without opening log files
 
-OUTPUT: {status, query_ready, scan_progress}
-NOTE: Query readiness is derived from scan state on this branch."""
+OUTPUT: {status, query_ready, scan_progress}"""
 
 WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, build a transient in-memory index over the fetched pages, and run deep research to produce a cited answer. Use when the question requires external documentation, library references, or up-to-date web content — not for searching the local codebase (use `code_research` for that). High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
 

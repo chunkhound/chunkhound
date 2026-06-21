@@ -146,7 +146,7 @@ class TestNonBlockingInitialization:
 
                 # Verify we haven't completed scanning yet
                 # (either still scanning, or scan hasn't started because it's deferred)
-                assert progress.get("scan_completed_at") is None, (
+                assert progress.get("query_ready_at") is None, (
                     "Initialization should return before scan completes"
                 )
 
@@ -178,7 +178,7 @@ class TestNonBlockingInitialization:
                 assert "files_processed" in progress
                 assert "chunks_created" in progress
                 assert "scan_started_at" in progress
-                assert "scan_completed_at" in progress
+                assert "query_ready_at" in progress
                 assert "background_compaction" in progress
 
                 background_compaction = progress["background_compaction"]
@@ -214,7 +214,7 @@ class TestNonBlockingInitialization:
                 assert server._initialized
 
                 # But scan should not be complete yet
-                assert server._scan_progress["scan_completed_at"] is None
+                assert server._scan_progress["query_ready_at"] is None
 
                 await server.cleanup()
 
