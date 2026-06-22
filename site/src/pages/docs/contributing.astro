@@ -77,9 +77,10 @@ import DocsLayout from "../../layouts/DocsLayout.astro";
         <li><code>ruff-format</code> on the staged <code>.py</code> and <code>.pyi</code> snapshot</li>
     </ul>
     <p>
-        <code>pre-commit</code> temporarily stashes unstaged edits before it
-        runs, so partial staging stays safe. If a hook rewrites staged files,
-        the commit stops on purpose. Re-stage the fixed files and commit again.
+        The hook finds staged Python files via <code>git diff --cached</code>,
+        runs Ruff on them, and compares file hashes before and after to detect
+        auto-fixes. If Ruff rewrites any staged files, the commit stops on
+        purpose. Re-stage the fixed files and commit again.
         This keeps the final commit explicit while still letting deterministic
         tools clean up AI-generated noise.
     </p>
