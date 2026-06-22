@@ -74,6 +74,7 @@ def _bare_provider(
         "requests_made": 0,
         "embeddings_generated": 0,
         "tokens_used": 0,
+        "errors": 0,
     }
 
     async def _noop_ensure_client():

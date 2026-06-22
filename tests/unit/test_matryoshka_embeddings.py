@@ -17,7 +17,10 @@ import pytest
 
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
-from chunkhound.interfaces.embedding_provider import EmbeddingConfigurationError
+from chunkhound.core.exceptions.embedding import (
+    EmbeddingConfigurationError,
+    EmbeddingDimensionError,
+)
 from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 from tests.unit.provider_test_helpers import _bare_provider, _ok_response
 
@@ -1488,7 +1491,7 @@ class TestOpenAIDimensionDiscovery:
 
         assert dims == 1536
         mock_warn.assert_called_once()
-        assert "Unknown model" in mock_warn.call_args[0][0]
+        assert "default dims=1536" in mock_warn.call_args[0][0]
 
 
 # ---------------------------------------------------------------------------
@@ -1545,7 +1548,6 @@ class TestOpenAIMatryoshkaEmbed:
     @pytest.mark.asyncio
     async def test_inv1_violation_raises(self):
         """API returning wrong dims raises EmbeddingDimensionError."""
-        from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
 
         provider, _, _ = _bare_provider(
             output_dims=512,
@@ -1566,7 +1568,6 @@ class TestOpenAINonRetryableErrors:
     @pytest.mark.asyncio
     async def test_embedding_dimension_error_propagates_without_retry(self):
         """EmbeddingDimensionError must propagate immediately, not retry."""
-        from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
 
         provider, _, _ = _bare_provider(retry_attempts=3)
         provider._client = MagicMock()
@@ -1599,3 +1600,83 @@ class TestOpenAINonRetryableErrors:
             await provider._embed_batch_internal(["hello"])
 
         assert provider._client.embeddings.create.call_count == 1
+
+
+
+class TestOpenAIEmbedErrorPropagation:
+    """Contract: domain errors from embed() skip error stats and verbose logging."""
+
+    @pytest.mark.asyncio
+    async def test_dimension_error_does_not_increment_error_stat(self):
+        """EmbeddingDimensionError must propagate without incrementing usage stats errors."""
+        provider, _, _ = _bare_provider(retry_attempts=1)
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            side_effect=EmbeddingDimensionError(
+                "dimension mismatch: got 768, expected 512"
+            )
+        )
+
+        with pytest.raises(EmbeddingDimensionError, match="dimension mismatch"):
+            await provider.embed(["hello"])
+
+        assert provider.get_usage_stats()["errors"] == 0
+
+    @pytest.mark.asyncio
+    async def test_configuration_error_does_not_increment_error_stat(self):
+        """EmbeddingConfigurationError must propagate without incrementing usage stats errors."""
+        provider, _, _ = _bare_provider(retry_attempts=1)
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            side_effect=EmbeddingConfigurationError(
+                "output_dims 999 not in supported dimensions"
+            )
+        )
+
+        with pytest.raises(
+            EmbeddingConfigurationError, match="not in supported dimensions"
+        ):
+            await provider.embed(["hello"])
+
+        assert provider.get_usage_stats()["errors"] == 0
+
+    @pytest.mark.asyncio
+    async def test_transient_error_increments_error_stat(self):
+        """Non-domain errors must increment usage stats errors."""
+        provider, _, _ = _bare_provider(retry_attempts=1)
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            side_effect=RuntimeError("connection refused")
+        )
+
+        with pytest.raises(RuntimeError, match="connection refused"):
+            await provider.embed(["hello"])
+
+        assert provider.get_usage_stats()["errors"] == 1
+
+
+class TestConcurrentDimensionDiscovery:
+    """Contract: concurrent embed() calls discover native dims without corruption."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_embed_calls_discover_same_native_dims(self):
+        """Multiple concurrent embed() calls on an unknown model converge on the same native dims."""
+        import asyncio
+
+        provider, _, _ = _bare_provider(model="my-custom-embed-v1")
+        provider._client = MagicMock()
+        # All calls return 256-dim vectors
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=256)
+        )
+        provider._ensure_client = AsyncMock()
+
+        # Launch 5 concurrent embed calls
+        results = await asyncio.gather(
+            *[provider.embed([f"text {i}"]) for i in range(5)]
+        )
+
+        # All should return 256-dim vectors
+        assert all(len(r[0]) == 256 for r in results)
+        # Native dims should be discovered once, consistently
+        assert provider.native_dims == 256
