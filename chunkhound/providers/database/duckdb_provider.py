@@ -1076,8 +1076,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         live = expected_min * block_size
         return current_size / live
 
+    @staticmethod
     def _fragmentation_exceeds_threshold(
-        self, ratio: float, threshold: float | None
+        ratio: float, threshold: float | None
     ) -> bool:
         """Return True when the fragmentation ratio exceeds the configured threshold."""
         if threshold is None or threshold < 0:

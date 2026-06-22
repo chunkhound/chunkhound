@@ -918,9 +918,8 @@ class TestFragmentationThresholdBoundaries:
         expected: bool,
     ) -> None:
         """Every boundary of the fragmentation threshold decision formula."""
-        # Pure function — no I/O or instance state needed.
-        provider = object.__new__(DuckDBProvider)
-        assert provider._fragmentation_exceeds_threshold(ratio, threshold) is expected
+        # Pure static function — no I/O or instance state needed.
+        assert DuckDBProvider._fragmentation_exceeds_threshold(ratio, threshold) is expected
 
 
 # ── Index flow compaction points ─────────────────────────────────────────
