@@ -245,29 +245,19 @@ def _create_changed_python_repo_with_subdir(
     (repo_dir / "tests").mkdir()
     (repo_dir / "kept.py").write_text("print('old')\n", encoding="utf-8")
     (repo_dir / "deleted.py").write_text("print('delete')\n", encoding="utf-8")
-    (repo_dir / "src" / "utils.py").write_text(
-        "print('old')\n", encoding="utf-8"
-    )
-    (repo_dir / "tests" / "test_app.py").write_text(
-        "print('old')\n", encoding="utf-8"
-    )
+    (repo_dir / "src" / "utils.py").write_text("print('old')\n", encoding="utf-8")
+    (repo_dir / "tests" / "test_app.py").write_text("print('old')\n", encoding="utf-8")
     (repo_dir / "notes.md").write_text("old\n", encoding="utf-8")
     base = _commit_all(repo_dir, "base")
 
     (repo_dir / "kept.py").write_text("print('new')\n", encoding="utf-8")
     (repo_dir / "added.pyi").write_text("value: int\n", encoding="utf-8")
-    (repo_dir / "src" / "utils.py").write_text(
-        "print('new')\n", encoding="utf-8"
-    )
+    (repo_dir / "src" / "utils.py").write_text("print('new')\n", encoding="utf-8")
     (repo_dir / "tests" / "test_app.py").write_text(
         "print('updated')\n", encoding="utf-8"
     )
-    (repo_dir / "src" / "__init__.py").write_text(
-        "", encoding="utf-8"
-    )
-    (repo_dir / "tests" / "test_api.pyi").write_text(
-        "value: int\n", encoding="utf-8"
-    )
+    (repo_dir / "src" / "__init__.py").write_text("", encoding="utf-8")
+    (repo_dir / "tests" / "test_api.pyi").write_text("value: int\n", encoding="utf-8")
     (repo_dir / "notes.md").write_text("new\n", encoding="utf-8")
     (repo_dir / "deleted.py").unlink()
     head = _commit_all(repo_dir, "head")
