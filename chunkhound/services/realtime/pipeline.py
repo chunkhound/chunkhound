@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import random
 import time
 from collections.abc import Awaitable
 from dataclasses import replace
@@ -361,9 +362,10 @@ class RealtimePipelineMixin:
         if not self._register_pending_mutation(retry_mutation):
             return True
 
-        delay_seconds = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
+        base = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
             2**mutation.retry_count
         )
+        delay_seconds = base * random.uniform(0.75, 1.25)
         self._start_transient_task(
             self._retry_mutation_after_delay(retry_mutation, delay_seconds)
         )
@@ -474,9 +476,10 @@ class RealtimePipelineMixin:
         if not self._register_pending_mutation(retry_mutation):
             return True
 
-        delay_seconds = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
+        base = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
             2**mutation.retry_count
         )
+        delay_seconds = base * random.uniform(0.75, 1.25)
         self._start_transient_task(
             self._retry_mutation_after_delay(retry_mutation, delay_seconds)
         )
