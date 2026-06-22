@@ -40,14 +40,6 @@ def _unlink_compacted(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def is_windows() -> bool:
-    """Check if running on Windows platform.
-
-    Returns:
-        True if running on Windows, False otherwise.
-    """
-    return IS_WINDOWS
-
 
 def get_utf8_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     """Get environment variables with Windows UTF-8 settings.
