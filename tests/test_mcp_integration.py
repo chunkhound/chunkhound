@@ -72,7 +72,7 @@ async def _wait_for_scan_completed(
     """Wait until MCP background scan reports completion."""
 
     async def _wait() -> None:
-        while server._scan_progress["scan_completed_at"] is None:
+        while server._scan_progress["query_ready_at"] is None:
             await asyncio.sleep(0.05)
 
     await asyncio.wait_for(_wait(), timeout=timeout)
