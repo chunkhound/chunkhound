@@ -60,7 +60,14 @@ def _compile_gitwildmatch(patterns: Iterable[str]) -> PathSpec:
         raise RuntimeError(
             "pathspec is required for IgnoreEngine; please add dependency 'pathspec'"
         )
-    return PathSpec.from_lines(GitWildMatchPattern, patterns)
+    valid: list[str] = []
+    for p in patterns:
+        try:
+            GitWildMatchPattern(p)
+            valid.append(p)
+        except Exception:
+            logger.debug("Skipping invalid gitignore pattern: {!r}", p)
+    return PathSpec.from_lines(GitWildMatchPattern, valid)
 
 
 def _collect_global_gitignore_patterns() -> list[str]:
