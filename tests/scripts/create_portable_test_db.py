@@ -10,6 +10,9 @@ from pathlib import Path
 
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
+# Imports from tests/ rely on PEP 420 implicit namespace packages
+# (tests/fixtures/ has no __init__.py). This works when run via
+# 'uv run python tests/scripts/...' from the project root.
 from tests.fixtures.fake_providers import ConstantEmbeddingProvider
 
 
