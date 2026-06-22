@@ -209,10 +209,7 @@ class SubprocessJsonRpcClient:
                     timeout=_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                wait_note = (
-                    "wait_timeout="
-                    f"{_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS:.1f}s"
-                )
+                wait_note = f"wait_timeout={_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS:.1f}s"
             except Exception as error:
                 wait_note = f"wait_error={error!r}"
 
@@ -225,8 +222,7 @@ class SubprocessJsonRpcClient:
             details.append(f"stderr_tail={stderr_tail!r}")
 
         return RuntimeError(
-            "JSON-RPC subprocess terminated unexpectedly "
-            f"({', '.join(details)})"
+            f"JSON-RPC subprocess terminated unexpectedly ({', '.join(details)})"
         )
 
     async def _read_exited_stderr_tail(self) -> str | None:
