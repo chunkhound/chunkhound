@@ -670,6 +670,8 @@ class OpenAIEmbeddingProvider:
         self, actual_dims: int, *, server_side_truncation: bool
     ) -> None:
         """Cache native dims only when the response is known to be untruncated."""
+        # Race-safe: concurrent async tasks set the same value from the same
+        # API response. A double-write of the same int is harmless.
         if self._discovered_native_dims is not None or server_side_truncation:
             return
         if self._trust_runtime_output_dims() or self._model not in self._model_config:
