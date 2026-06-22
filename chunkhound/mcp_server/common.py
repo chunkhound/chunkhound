@@ -54,18 +54,6 @@ class ServiceNotInitializedError(MCPError):
     pass
 
 
-class EmbeddingTimeoutError(MCPError):
-    """Raised when embedding operations timeout."""
-
-    pass
-
-
-class EmbeddingProviderError(MCPError):
-    """Raised when embedding provider is not available."""
-
-    pass
-
-
 async def with_timeout(
     coro: Coroutine[Any, Any, T],
     timeout_seconds: float,
