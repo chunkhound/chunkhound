@@ -917,6 +917,9 @@ class OpenAIEmbeddingProvider:
             # Always use token-aware batching
             return await self.embed_batch(validated_texts)
 
+        except EmbeddingProviderError:
+            raise  # Domain errors (dim mismatch, config) — not transient failures
+
         except Exception as e:
             self._usage_stats["errors"] += 1
             # Log details of oversized chunks for root cause analysis
