@@ -51,6 +51,21 @@ class DatabaseConfig(BaseModel):
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
     )
 
+    # Read-only mode. The --read-only flag is registered only on the mcp
+    # subparser; Config.validate_for_command rejects read_only=True for any
+    # non-mcp subcommand and for any provider other than DuckDB, so JSON/env
+    # config cannot silently break writers or open an unsupported provider.
+    read_only: bool = Field(
+        default=False,
+        description=(
+            "Open DB read-only; reject all writes. MCP + DuckDB only "
+            "(validator rejects other commands/providers). Precedence: "
+            "CLI --read-only > CHUNKHOUND_DATABASE__READ_ONLY > JSON. "
+            "CLI can only set True; use the env var (false) or edit JSON "
+            "to disable a persisted setting."
+        ),
+    )
+
     # Compaction / fragmentation management
     fragmentation_threshold_pct: float | None = Field(
         default=30.0,
@@ -108,10 +123,11 @@ class DatabaseConfig(BaseModel):
             # Path ends with a known DB extension (.db / .duckdb) — treat as an explicit
             # database file rather than a directory layout. Create the parent and return as-is.
             if self.path.suffix.lower() in _EXPLICIT_DB_SUFFIXES:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
+                if not self.read_only:
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
                 return self.path
 
-        if not is_memory:
+        if not is_memory and not self.read_only:
             # For directory-style layouts, ensure the base path exists.
             self.path.mkdir(parents=True, exist_ok=True)
 
@@ -185,13 +201,14 @@ class DatabaseConfig(BaseModel):
             except ValueError:
                 # Invalid value - silently ignore
                 pass
+        if read_only := os.getenv("CHUNKHOUND_DATABASE__READ_ONLY"):
+            config["read_only"] = read_only.lower() in ("true", "1", "yes")
 
         if threshold_pct := os.getenv("CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT"):
             try:
                 config["fragmentation_threshold_pct"] = float(threshold_pct)
             except ValueError:
                 pass
-
         return config
 
     @classmethod
@@ -206,6 +223,8 @@ class DatabaseConfig(BaseModel):
             overrides["provider"] = args.database_provider
         if hasattr(args, "max_disk_usage_gb") and args.max_disk_usage_gb is not None:
             overrides["max_disk_usage_mb"] = args.max_disk_usage_gb * 1024.0
+        if getattr(args, "read_only", False):
+            overrides["read_only"] = True
         if hasattr(args, "fragmentation_threshold_pct") and args.fragmentation_threshold_pct is not None:
             overrides["fragmentation_threshold_pct"] = float(args.fragmentation_threshold_pct)
         return overrides

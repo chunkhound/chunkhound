@@ -199,7 +199,11 @@ class TestRealtimeStartTaskDoneCallback:
             mock_services = MagicMock()
             mock_services.provider.is_connected = False
             mock_create.return_value = mock_services
-            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"), patch.object(
+                MCPServerBase,
+                "_deferred_connect_and_start",
+                AsyncMock(return_value=None),
+            ):
                 server = _TestServer(config=config)
                 await server.initialize()
 
@@ -235,7 +239,11 @@ class TestRealtimeStartTaskDoneCallback:
             mock_services = MagicMock()
             mock_services.provider.is_connected = False
             mock_create.return_value = mock_services
-            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"), patch.object(
+                MCPServerBase,
+                "_deferred_connect_and_start",
+                AsyncMock(return_value=None),
+            ):
                 server = _TestServer(config=config)
                 await server.initialize()
 
@@ -279,7 +287,11 @@ class TestRealtimeStartTaskDoneCallback:
             mock_services = MagicMock()
             mock_services.provider.is_connected = False
             mock_create.return_value = mock_services
-            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"), patch.object(
+                MCPServerBase,
+                "_deferred_connect_and_start",
+                AsyncMock(return_value=None),
+            ):
                 server = _TestServer(config=config)
                 await server.initialize()
 

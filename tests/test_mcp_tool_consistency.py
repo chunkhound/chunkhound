@@ -192,7 +192,7 @@ async def test_daemon_status_tool_returns_scan_progress_snapshot():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -223,7 +223,7 @@ async def test_daemon_status_tool_degrades_on_realtime_state():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "degraded",
             "last_error": None,
@@ -252,7 +252,7 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "configured_backend": "watchman",
             "effective_backend": "watchman",
@@ -379,7 +379,7 @@ async def test_daemon_status_tool_exposes_startup_timing_breakdown():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -491,7 +491,7 @@ async def test_daemon_status_tool_degrades_stalled_pipeline_summary():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -549,7 +549,7 @@ async def test_daemon_status_tool_keeps_query_ready_after_realtime_failure():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "scan_error": (
             "Storage reconciliation cleanup failed: "
             "database invalidated during orphan cleanup"
@@ -608,7 +608,7 @@ async def test_daemon_status_tool_keeps_initial_scan_failure_unqueryable():
         "chunks_created": 0,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": None,
+        "query_ready_at": None,
         "scan_error": "Initial directory scan failed: database unavailable",
         "realtime": {
             "service_state": "running",
@@ -649,7 +649,7 @@ async def test_daemon_status_tool_keeps_query_ready_during_post_bootstrap_scan()
         "chunks_created": 9,
         "is_scanning": True,
         "scan_started_at": "2026-04-01T00:00:10",
-        "scan_completed_at": "2026-04-01T00:00:05",
+        "query_ready_at": "2026-04-01T00:00:05",
         "scan_error": None,
         "realtime": {
             "service_state": "running",
@@ -688,7 +688,7 @@ async def test_daemon_status_tool_keeps_initial_scan_in_progress_unqueryable():
         "chunks_created": 2,
         "is_scanning": True,
         "scan_started_at": "2026-04-01T00:00:00",
-        "scan_completed_at": None,
+        "query_ready_at": None,
         "scan_error": None,
         "realtime": {
             "service_state": "running",
@@ -726,7 +726,7 @@ async def test_daemon_status_tool_exposes_pending_mutation_backlog_details():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -822,7 +822,7 @@ async def test_daemon_status_tool_exposes_hot_path_event_pressure():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -888,7 +888,7 @@ async def test_daemon_status_tool_exposes_event_queue_overflow_reconciling_paylo
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -977,7 +977,7 @@ async def test_daemon_status_tool_exposes_event_queue_overflow_failed_payload():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "degraded",
             "last_error": "No resync callback configured",
