@@ -42,6 +42,7 @@ from chunkhound.watchman_runtime.loader import (
 )
 from chunkhound.providers.database.serial_executor import DatabaseCompactionInProgressError
 from chunkhound.mcp_server.tools import tool_requires_services
+from chunkhound.utils.logging_guard import log_if_not_mcp
 
 _DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
 
@@ -1165,21 +1166,6 @@ class MCPServerBase(ABC):
             finally:
                 self._initialized = False
 
-    async def ensure_services(self) -> DatabaseServices:
-        """Ensure DB-backed services are ready and return them.
-
-        Returns:
-            DatabaseServices instance
-
-        Raises:
-            RuntimeError: If services are not initialized
-        """
-        if not self.services:
-            raise RuntimeError("Services not initialized. Call initialize() first.")
-
-        await self._connect_provider()
-        return self.services
-
     async def ensure_tool_services(self, tool_name: str) -> DatabaseServices:
         """Return services for one tool without conflating daemon and DB lifecycles.
 
@@ -1214,10 +1200,11 @@ class MCPServerBase(ABC):
                 try:
                     await loop.run_in_executor(None, self.services.provider.connect)
                 except DatabaseCompactionInProgressError:
-                    logger.info(
+                    log_if_not_mcp(
+                        "info",
                         "Database compaction in progress \u2014 DB-backed MCP tools will be "
                         "unavailable until compaction finishes. "
-                        "Non-DB tools (daemon_status, websearch) are unaffected."
+                        "Non-DB tools (daemon_status, websearch) are unaffected.",
                     )
 
     def ensure_embedding_manager(self) -> EmbeddingManager:
