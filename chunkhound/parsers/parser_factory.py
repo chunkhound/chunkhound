@@ -74,6 +74,7 @@ from chunkhound.parsers.mappings import (
     PDFMapping,
     PHPMapping,
     PythonMapping,
+    RubyMapping,
     RustMapping,
     ScssMapping,
     SqlMapping,
@@ -98,6 +99,7 @@ _swift_lang = _get_lang("swift")
 _yaml_lang = _get_lang("yaml")
 _hcl_lang = _get_lang("hcl")
 _dart_lang = _get_lang("dart")
+_ruby_lang = _get_lang("ruby")
 
 
 class _LanguagePackWrapper:
@@ -116,6 +118,7 @@ ts_swift = _LanguagePackWrapper(_swift_lang)
 ts_yaml = _LanguagePackWrapper(_yaml_lang)
 ts_hcl = _LanguagePackWrapper(_hcl_lang)
 ts_dart = _LanguagePackWrapper(_dart_lang)
+ts_ruby = _LanguagePackWrapper(_ruby_lang)
 
 _scss_lang = _get_lang("scss")
 ts_scss: _LanguagePackWrapper | None = (
@@ -229,6 +232,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     ),
     # Haskell (required dependency in pyproject.toml)
     Language.ELIXIR: LanguageConfig(ts_elixir, ElixirMapping, True, "elixir"),
+    Language.RUBY: LanguageConfig(ts_ruby, RubyMapping, True, "ruby"),
     Language.HASKELL: LanguageConfig(ts_haskell, HaskellMapping, True, "haskell"),
     Language.HCL: LanguageConfig(ts_hcl, HclMapping, True, "hcl"),
     # Language pack languages (required via tree-sitter-language-pack)
@@ -333,6 +337,14 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     # Elixir
     ".ex": Language.ELIXIR,
     ".exs": Language.ELIXIR,
+    # Ruby
+    ".rb": Language.RUBY,
+    ".rake": Language.RUBY,
+    ".gemspec": Language.RUBY,
+    "Gemfile": Language.RUBY,
+    "gemfile": Language.RUBY,
+    "Rakefile": Language.RUBY,
+    "rakefile": Language.RUBY,
     ".mm": Language.OBJC,
     # PHP
     ".php": Language.PHP,

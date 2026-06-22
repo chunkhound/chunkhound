@@ -420,6 +420,7 @@ function qaTestFunction() {
             Language.PDF: None,  # PDF is binary, skip content template
             Language.SQL: '-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT \'sql_qa_unique\'\n);',
             Language.ELIXIR: 'defmodule QATest do\n  # Elixir QA test\n  def test, do: "elixir_qa_unique"\nend',
+            Language.RUBY: 'module QATest\n  # Ruby QA test\n  def test\n    "ruby_qa_unique"\n  end\nend',
             Language.HTML: '<!DOCTYPE html>\n<html>\n<body>\n  <!-- HTML QA test -->\n  <p>html_qa_unique</p>\n</body>\n</html>',
             Language.CSS: '/* CSS QA test */\n.qa-test {\n  content: "css_qa_unique";\n  color: blue;\n}',
             Language.SCSS: '/* SCSS QA test */\n$color: blue;\n.qa-test {\n  content: "scss_qa_unique";\n  color: $color;\n}',
@@ -465,6 +466,7 @@ function qaTestFunction() {
             Language.PDF: ".pdf",
             Language.SQL: ".sql",
             Language.ELIXIR: ".ex",
+            Language.RUBY: ".rb",
             Language.HTML: ".html",
             Language.CSS: ".css",
             Language.SCSS: ".scss",

@@ -255,6 +255,15 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Normal
         "function greet(name)\n    return 'Hello, ' .. name\nend",
     ),
+    Language.RUBY: (
+        ".rb",
+        # Large method - triggers line-based split
+        "def process_data(items)\n"
+        + _make_large_statements("  x = 1")
+        + "\n  x\nend",
+        # Normal
+        'def greet(name)\n  "Hello, #{name}"\nend',
+    ),
     Language.BASH: (
         ".sh",
         # Large script
