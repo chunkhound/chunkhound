@@ -230,6 +230,50 @@ def _create_changed_python_repo(tmp_path: Path) -> tuple[Path, str, str]:
     return repo_dir, base, head
 
 
+def _create_changed_python_repo_with_subdir(
+    tmp_path: Path,
+) -> tuple[Path, str, str]:
+    """Like _create_changed_python_repo but with files in subdirectories.
+
+    Verifies that git diff pathspec *.py matches across directory
+    boundaries (not just repo root).
+    """
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _create_repo(repo_dir)
+    (repo_dir / "src").mkdir()
+    (repo_dir / "tests").mkdir()
+    (repo_dir / "kept.py").write_text("print('old')\n", encoding="utf-8")
+    (repo_dir / "deleted.py").write_text("print('delete')\n", encoding="utf-8")
+    (repo_dir / "src" / "utils.py").write_text(
+        "print('old')\n", encoding="utf-8"
+    )
+    (repo_dir / "tests" / "test_app.py").write_text(
+        "print('old')\n", encoding="utf-8"
+    )
+    (repo_dir / "notes.md").write_text("old\n", encoding="utf-8")
+    base = _commit_all(repo_dir, "base")
+
+    (repo_dir / "kept.py").write_text("print('new')\n", encoding="utf-8")
+    (repo_dir / "added.pyi").write_text("value: int\n", encoding="utf-8")
+    (repo_dir / "src" / "utils.py").write_text(
+        "print('new')\n", encoding="utf-8"
+    )
+    (repo_dir / "tests" / "test_app.py").write_text(
+        "print('updated')\n", encoding="utf-8"
+    )
+    (repo_dir / "src" / "__init__.py").write_text(
+        "", encoding="utf-8"
+    )
+    (repo_dir / "tests" / "test_api.pyi").write_text(
+        "value: int\n", encoding="utf-8"
+    )
+    (repo_dir / "notes.md").write_text("new\n", encoding="utf-8")
+    (repo_dir / "deleted.py").unlink()
+    head = _commit_all(repo_dir, "head")
+    return repo_dir, base, head
+
+
 def _create_non_python_change_repo(tmp_path: Path) -> tuple[Path, str, str]:
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
@@ -528,10 +572,14 @@ class TestPreCommitScript:
         assert len(_uv_log_calls(log_path)) == 2
 
     @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
+    @pytest.mark.parametrize("with_subdir", [False, True], ids=["root", "subdir"])
     def test_diff_commands_use_only_changed_python_paths(
-        self, tmp_path: Path, command: str
+        self, tmp_path: Path, command: str, with_subdir: bool
     ) -> None:
-        repo_dir, base, head = _create_changed_python_repo(tmp_path)
+        if with_subdir:
+            repo_dir, base, head = _create_changed_python_repo_with_subdir(tmp_path)
+        else:
+            repo_dir, base, head = _create_changed_python_repo(tmp_path)
         bin_dir, log_path = _fake_uv_dir(tmp_path)
 
         result = _run_diff_command(
@@ -544,44 +592,97 @@ class TestPreCommitScript:
 
         assert result.returncode == 0
         if command == "run-changed":
-            assert log_path.read_text(encoding="utf-8").splitlines() == [
-                "tool",
-                "run",
-                "--from",
-                PRE_COMMIT_PACKAGE,
-                "pre-commit",
-                "run",
-                "--files",
-                "added.pyi",
-                "kept.py",
-            ]
+            if with_subdir:
+                assert log_path.read_text(encoding="utf-8").splitlines() == [
+                    "tool",
+                    "run",
+                    "--from",
+                    PRE_COMMIT_PACKAGE,
+                    "pre-commit",
+                    "run",
+                    "--files",
+                    "added.pyi",
+                    "kept.py",
+                    "src/__init__.py",
+                    "src/utils.py",
+                    "tests/test_api.pyi",
+                    "tests/test_app.py",
+                ]
+            else:
+                assert log_path.read_text(encoding="utf-8").splitlines() == [
+                    "tool",
+                    "run",
+                    "--from",
+                    PRE_COMMIT_PACKAGE,
+                    "pre-commit",
+                    "run",
+                    "--files",
+                    "added.pyi",
+                    "kept.py",
+                ]
             return
-        assert _uv_log_calls(log_path) == [
-            [
-                "tool",
-                "run",
-                "--from",
-                RUFF_PACKAGE,
-                "ruff",
-                "check",
-                "--fix",
-                "--",
-                "added.pyi",
-                "kept.py",
-            ],
-            [
-                "tool",
-                "run",
-                "--from",
-                RUFF_PACKAGE,
-                "ruff",
-                "format",
-                "--check",
-                "--",
-                "added.pyi",
-                "kept.py",
-            ],
-        ]
+        if with_subdir:
+            assert _uv_log_calls(log_path) == [
+                [
+                    "tool",
+                    "run",
+                    "--from",
+                    RUFF_PACKAGE,
+                    "ruff",
+                    "check",
+                    "--fix",
+                    "--",
+                    "added.pyi",
+                    "kept.py",
+                    "src/__init__.py",
+                    "src/utils.py",
+                    "tests/test_api.pyi",
+                    "tests/test_app.py",
+                ],
+                [
+                    "tool",
+                    "run",
+                    "--from",
+                    RUFF_PACKAGE,
+                    "ruff",
+                    "format",
+                    "--check",
+                    "--",
+                    "added.pyi",
+                    "kept.py",
+                    "src/__init__.py",
+                    "src/utils.py",
+                    "tests/test_api.pyi",
+                    "tests/test_app.py",
+                ],
+            ]
+        else:
+            assert _uv_log_calls(log_path) == [
+                [
+                    "tool",
+                    "run",
+                    "--from",
+                    RUFF_PACKAGE,
+                    "ruff",
+                    "check",
+                    "--fix",
+                    "--",
+                    "added.pyi",
+                    "kept.py",
+                ],
+                [
+                    "tool",
+                    "run",
+                    "--from",
+                    RUFF_PACKAGE,
+                    "ruff",
+                    "format",
+                    "--check",
+                    "--",
+                    "added.pyi",
+                    "kept.py",
+                ],
+            ]
 
     @pytest.mark.parametrize("command", ["run-changed", "run-ruff"])
     def test_diff_commands_merge_group_use_base_sha_directly(
