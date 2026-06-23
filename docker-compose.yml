@@ -59,10 +59,10 @@ services:
     volumes:
       - /home/e120400/views/g/quest/mono/.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica1:/data/db
-      # - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
       - ${CHUNKHOUND_SOURCE_PATH}:${CHUNKHOUND_SOURCE_PATH}
-      # - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
-      # - /home/e120400/.claude:/home/chunkhound/.claude:ro
+      - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
+      - /home/e120400/.claude:/home/chunkhound/.claude:ro
 
   chunkhound-2:
     <<: *chunkhound-common
@@ -70,10 +70,10 @@ services:
     volumes:
       - /home/e120400/views/g/quest/mono/.chunkhound.json:/etc/chunkhound/config.json:ro
       - /opt/chunkhound/db/replica2:/data/db
-      # - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
+      - ${CLAUDE_CLI_MODULE_PATH}:/usr/local/lib/node_modules/@anthropic-ai/claude-code:ro
       - ${CHUNKHOUND_SOURCE_PATH}:${CHUNKHOUND_SOURCE_PATH}
-      # - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
-      # - /home/e120400/.claude:/home/chunkhound/.claude:ro
+      - /home/e120400/.claude.json:/home/chunkhound/.claude.json:ro
+      - /home/e120400/.claude:/home/chunkhound/.claude:ro
 
   # ── nginx reverse proxy ─────────────────────────────────────────────────────
   nginx:
