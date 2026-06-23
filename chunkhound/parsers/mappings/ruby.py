@@ -40,13 +40,17 @@ class RubyMapping(BaseMapping):
 
     def get_function_query(self) -> str:
         """Get tree-sitter query pattern for Ruby method definitions."""
+        # name: (_) matches every method-name node shape - identifier
+        # (plain_method), setter (name=), and operator ([], <=>, +, ...) -
+        # mirroring upstream tree-sitter-ruby tags.scm. (identifier) alone
+        # silently drops setter and operator methods.
         return """
             (method
-                name: (identifier) @function_name
+                name: (_) @function_name
             ) @function_def
 
             (singleton_method
-                name: (identifier) @function_name
+                name: (_) @function_name
             ) @function_def
         """
 
@@ -107,12 +111,15 @@ class RubyMapping(BaseMapping):
                 name: (_) @name
             ) @definition
 
+            ; name: (_) matches identifier (plain_method), setter (name=),
+            ; and operator ([], <=>, +, ...) method names, matching upstream
+            ; tags.scm. (identifier) alone drops setter/operator methods.
             (method
-                name: (identifier) @name
+                name: (_) @name
             ) @definition
 
             (singleton_method
-                name: (identifier) @name
+                name: (_) @name
             ) @definition
 
             ; Constant assignment (left side is a constant node)

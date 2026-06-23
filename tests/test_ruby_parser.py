@@ -120,6 +120,37 @@ class TestRubyParser:
             f"Expected 'full_name' in {[c.symbol for c in method_chunks]}"
         )
 
+    @pytest.mark.parametrize(
+        "source,expected_symbol",
+        [
+            ("def name=(value)\n  @name = value\nend\n", "name="),
+            ("def [](key)\n  @data[key]\nend\n", "[]"),
+            ("def <=>(other)\n  0\nend\n", "<=>"),
+            ("def +(other)\n  dup\nend\n", "+"),
+        ],
+    )
+    def test_non_identifier_method_names_extracted(
+        self, parser, tmp_path, source, expected_symbol
+    ):
+        """Setter and operator methods must become searchable METHOD chunks.
+
+        Ruby method names are not always ``identifier`` nodes: setters
+        (``name=``) are ``setter`` nodes and operators (``[]``, ``<=>``,
+        ``+``) are ``operator`` nodes. The DEFINITION query must match every
+        shape (upstream tree-sitter-ruby tags.scm uses ``name: (_)``); the
+        narrower ``name: (identifier)`` drops these methods from the index
+        entirely. One method per file keeps the cAST greedy-merge pass from
+        absorbing the chunk under a neighbour's name.
+        """
+        f = tmp_path / "test.rb"
+        f.write_text(source)
+        chunks = parser.parse_file(f, FileId(1))
+
+        method_chunks = [c for c in chunks if c.chunk_type == ChunkType.METHOD]
+        assert any(c.symbol == expected_symbol for c in method_chunks), (
+            f"Expected {expected_symbol!r} in {[c.symbol for c in method_chunks]}"
+        )
+
 
 class TestRubyImportResolution:
     """Tests for Ruby require/require_relative path resolution."""
