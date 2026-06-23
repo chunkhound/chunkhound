@@ -1393,6 +1393,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             log_if_not_mcp(
                 "warning", "Cannot restore: compaction paths not initialized"
             )
+            _unlink_compacted(compacted_path)
             return
         self._close_live_compaction_connections()
 
