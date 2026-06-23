@@ -127,7 +127,7 @@ def _run_staged() -> int:
     if not files:
         print("No staged Python files found.")
         return 0
-    return _run_ruff_lint_and_format(files, check_only=False)
+    return _run_ruff_lint_and_format(files, ci_mode=False)
 
 
 def _git_ref_exists(ref: str) -> bool:
@@ -233,8 +233,13 @@ def _print_rewritten_files(message: str, files: list[str]) -> None:
         print(f"  {path}", file=sys.stderr)
 
 
-def _lint_rewrite_message(check_only: bool) -> str:
-    if check_only:
+def _lint_rewrite_message(ci_mode: bool) -> str:
+    """Return the error message for CI vs local hook rewrite detection.
+
+    ci_mode=True means rewrites are forbidden (CI validation path).
+    ci_mode=False means rewrites are expected (local staged hook path).
+    """
+    if ci_mode:
         return (
             "Ruff rewrote changed Python files in CI. "
             "Run Ruff locally, commit the fixes, and push again:"
@@ -245,8 +250,14 @@ def _lint_rewrite_message(check_only: bool) -> str:
     )
 
 
-def _run_ruff_format(files: list[str], *, check_only: bool) -> int:
-    if check_only:
+def _run_ruff_format(files: list[str], *, ci_mode: bool) -> int:
+    """Run ruff format in CI (check-only) or local (write) mode.
+
+    In CI mode (ci_mode=True) runs ``ruff format --check`` so rewrites are
+    forbidden. In local mode (ci_mode=False) runs ``ruff format`` then detects
+    rewrites via SHA256 digests.
+    """
+    if ci_mode:
         return _run_ruff_command("format", "--check", "--", *files)
 
     before_format = _file_digests(files)
@@ -258,14 +269,20 @@ def _run_ruff_format(files: list[str], *, check_only: bool) -> int:
         return 0
 
     _print_rewritten_files(
-        _lint_rewrite_message(check_only),
+        _lint_rewrite_message(ci_mode),
         changed_files,
     )
     return 1
 
 
-def _run_ruff_lint_and_format(files: list[str], *, check_only: bool = True) -> int:
-    """Run Ruff directly for both CI checks and the managed local git hook."""
+def _run_ruff_lint_and_format(files: list[str], *, ci_mode: bool = True) -> int:
+    """Run Ruff lint + format on the given files.
+
+    When ci_mode=True (default), rewrites are forbidden: ``ruff check --fix``
+    rewrites are detected, and ``ruff format`` runs with ``--check``.
+    When ci_mode=False (local staged hook), format runs in write mode and
+    rewrites are expected (the hook exits non-zero to ask the user to re-stage).
+    """
     # --fix must stay in sync with .pre-commit-config.yaml ruff-check args.
     if not files:
         return 0
@@ -277,10 +294,10 @@ def _run_ruff_lint_and_format(files: list[str], *, check_only: bool = True) -> i
 
     changed_files = _rewritten_files(before_fix, _file_digests(files))
     if changed_files:
-        _print_rewritten_files(_lint_rewrite_message(check_only), changed_files)
+        _print_rewritten_files(_lint_rewrite_message(ci_mode), changed_files)
         exit_code = 1
 
-    if _run_ruff_format(files, check_only=check_only) != 0:
+    if _run_ruff_format(files, ci_mode=ci_mode) != 0:
         exit_code = 1
     return exit_code
 
