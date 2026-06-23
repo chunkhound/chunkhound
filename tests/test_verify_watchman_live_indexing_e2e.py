@@ -51,6 +51,46 @@ class _FakeDaemonProcess:
         self.returncode = -9
 
 
+class _FakeClient:
+    """Shared fake JSON-RPC client for verifier contract tests.
+
+    Records all requests/notifications and returns configured responses.
+    """
+
+    def __init__(self, responses: list[dict[str, object]] | None = None) -> None:
+        self.calls = 0
+        self.requests: list[tuple[str, dict[str, object] | None, float]] = []
+        self.notifications: list[tuple[str, dict[str, object] | None]] = []
+        self.closed = False
+        self._responses = responses or []
+
+    async def send_request(
+        self,
+        method: str,
+        params: dict[str, object] | None = None,
+        timeout: float = 5.0,
+    ) -> dict[str, object]:
+        self.requests.append((method, params, timeout))
+        if self.calls < len(self._responses):
+            response = self._responses[self.calls]
+            self.calls += 1
+            return {"content": [{"type": "text", "text": json.dumps(response)}]}
+        self.calls += 1
+        return {}
+
+    async def send_notification(
+        self, method: str, params: dict[str, object] | None = None
+    ) -> None:
+        self.notifications.append((method, params))
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def _async_noop(_delay: float) -> None:
+    return None
+
+
 def test_prepare_release_runs_watchman_release_verifiers_in_order() -> None:
     prepare_release = (
         Path(__file__).resolve().parents[1] / "scripts" / "prepare_release.sh"
@@ -171,24 +211,9 @@ async def test_wait_for_ready_requires_watchman_ready_state(monkeypatch) -> None
         },
     ]
 
-    class FakeClient:
-        def __init__(self) -> None:
-            self.calls = 0
+    monkeypatch.setattr(live_verifier.asyncio, "sleep", _async_noop)
 
-        async def send_request(
-            self, method: str, params: dict[str, object], timeout: float
-        ) -> dict[str, object]:
-            del method, params, timeout
-            response = responses[self.calls]
-            self.calls += 1
-            return {"content": [{"type": "text", "text": json.dumps(response)}]}
-
-    async def fake_sleep(_delay: float) -> None:
-        return None
-
-    monkeypatch.setattr(live_verifier.asyncio, "sleep", fake_sleep)
-
-    client = FakeClient()
+    client = _FakeClient(responses)
     status = await live_verifier._wait_for_ready(client)
 
     assert client.calls == 1
@@ -220,31 +245,18 @@ async def test_wait_for_ready_retries_until_watchman_contract_is_explicit(
             },
         },
     ]
-    sleep_calls = 0
+    _sleep_counter = SimpleNamespace(value=0)
 
-    class FakeClient:
-        def __init__(self) -> None:
-            self.calls = 0
+    async def _counting_sleep(_delay: float) -> None:
+        _sleep_counter.value += 1
 
-        async def send_request(
-            self, method: str, params: dict[str, object], timeout: float
-        ) -> dict[str, object]:
-            del method, params, timeout
-            response = responses[self.calls]
-            self.calls += 1
-            return {"content": [{"type": "text", "text": json.dumps(response)}]}
+    monkeypatch.setattr(live_verifier.asyncio, "sleep", _counting_sleep)
 
-    async def fake_sleep(_delay: float) -> None:
-        nonlocal sleep_calls
-        sleep_calls += 1
-
-    monkeypatch.setattr(live_verifier.asyncio, "sleep", fake_sleep)
-
-    client = FakeClient()
+    client = _FakeClient(responses)
     status = await live_verifier._wait_for_ready(client)
 
     assert client.calls == 2
-    assert sleep_calls == 1
+    assert _sleep_counter.value == 1
     assert status["scan_progress"]["realtime"]["effective_backend"] == "watchman"
 
 
@@ -262,23 +274,12 @@ async def test_wait_for_ready_accepts_only_polling_fallback_mode(
         },
     }
 
-    class FakeClient:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def send_request(
-            self, method: str, params: dict[str, object], timeout: float
-        ) -> dict[str, object]:
-            del method, params, timeout
-            self.calls += 1
-            return {"content": [{"type": "text", "text": json.dumps(response)}]}
-
-    async def fake_sleep(_delay: float) -> None:
+    async def _failing_sleep(_delay: float) -> None:
         raise AssertionError("Polling fallback mode should return immediately")
 
-    monkeypatch.setattr(live_verifier.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(live_verifier.asyncio, "sleep", _failing_sleep)
 
-    client = FakeClient()
+    client = _FakeClient([response])
     status = await live_verifier._wait_for_ready(client)
 
     assert client.calls == 1
@@ -298,30 +299,16 @@ async def test_wait_for_ready_times_out_when_daemon_never_ready(
         },
     }
 
-    class FakeClient:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def send_request(
-            self, method: str, params: dict[str, object], timeout: float
-        ) -> dict[str, object]:
-            del method, params, timeout
-            self.calls += 1
-            return {"content": [{"type": "text", "text": json.dumps(response)}]}
-
-    async def fake_sleep(_delay: float) -> None:
-        return None
-
     monotonic_values = iter([0.0, 0.0, 1.0])
 
     def fake_monotonic() -> float:
         return next(monotonic_values, 1.0)
 
-    monkeypatch.setattr(live_verifier.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(live_verifier.asyncio, "sleep", _async_noop)
     monkeypatch.setattr(live_verifier, "_READY_TIMEOUT_SECONDS", 0.5)
     monkeypatch.setattr(live_verifier.time, "monotonic", fake_monotonic)
 
-    client = FakeClient()
+    client = _FakeClient([response])
     with pytest.raises(RuntimeError, match="Timed out waiting for ready daemon"):
         await live_verifier._wait_for_ready(client)
 
@@ -643,25 +630,18 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
         async def read(self) -> bytes:
             return b""
 
-    class FakeClient:
-        def __init__(self) -> None:
-            self.closed = False
-
-        async def close(self) -> None:
-            self.closed = True
-
     class FakeProc:
         def __init__(self) -> None:
             self.stderr = FakeReader()
 
-    default_client = FakeClient()
+    default_client = _FakeClient()
 
     async def fake_start_proxy_client(
         *,
         chunkhound_exe: Path,
         project_dir: Path,
         env: dict[str, str],
-    ) -> tuple[FakeProc, FakeClient]:
+    ) -> tuple[FakeProc, _FakeClient]:
         default_project_dirs.append(project_dir)
         assert chunkhound_exe.is_file()
         config = json.loads(
@@ -674,7 +654,7 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
         return FakeProc(), default_client
 
     async def fake_wait_for_daemon_status(
-        client: FakeClient,
+        client: _FakeClient,
         *,
         predicate,
         description: str,
@@ -1312,25 +1292,6 @@ def test_assert_sidecar_uses_installed_runtime_rejects_non_file_binary_path(
 async def test_verify_daemon_startup_initializes_and_validates_watchman_contract(
     monkeypatch,
 ) -> None:
-    class FakeClient:
-        def __init__(self) -> None:
-            self.requests: list[tuple[str, dict[str, object] | None, float]] = []
-            self.notifications: list[tuple[str, dict[str, object] | None]] = []
-
-        async def send_request(
-            self,
-            method: str,
-            params: dict[str, object] | None = None,
-            timeout: float = 5.0,
-        ) -> dict[str, object]:
-            self.requests.append((method, params, timeout))
-            return {}
-
-        async def send_notification(
-            self, method: str, params: dict[str, object] | None = None
-        ) -> None:
-            self.notifications.append((method, params))
-
     ready_status = {
         "scan_progress": {
             "realtime": {
@@ -1349,7 +1310,7 @@ async def test_verify_daemon_startup_initializes_and_validates_watchman_contract
     ) -> None:
         validated_realtime.append((realtime, expected_venv_dir))
 
-    client = FakeClient()
+    client = _FakeClient()
     monkeypatch.setattr(live_verifier, "_wait_for_ready", fake_wait_for_ready)
     monkeypatch.setattr(
         live_verifier,
@@ -1381,25 +1342,6 @@ async def test_verify_daemon_startup_initializes_and_validates_watchman_contract
 async def test_verify_daemon_startup_accepts_polling_without_sidecar_validation(
     monkeypatch,
 ) -> None:
-    class FakeClient:
-        def __init__(self) -> None:
-            self.requests: list[tuple[str, dict[str, object] | None, float]] = []
-            self.notifications: list[tuple[str, dict[str, object] | None]] = []
-
-        async def send_request(
-            self,
-            method: str,
-            params: dict[str, object] | None = None,
-            timeout: float = 5.0,
-        ) -> dict[str, object]:
-            self.requests.append((method, params, timeout))
-            return {}
-
-        async def send_notification(
-            self, method: str, params: dict[str, object] | None = None
-        ) -> None:
-            self.notifications.append((method, params))
-
     ready_status = {
         "scan_progress": {
             "realtime": {
@@ -1418,7 +1360,7 @@ async def test_verify_daemon_startup_accepts_polling_without_sidecar_validation(
         del realtime, expected_venv_dir
         raise AssertionError("sidecar validation should not run for polling")
 
-    client = FakeClient()
+    client = _FakeClient()
     monkeypatch.setattr(live_verifier, "_wait_for_ready", fake_wait_for_ready)
     monkeypatch.setattr(
         live_verifier,
@@ -1446,21 +1388,6 @@ async def test_verify_daemon_startup_accepts_polling_without_sidecar_validation(
 async def test_verify_daemon_startup_rejects_unexpected_ready_backend(
     monkeypatch,
 ) -> None:
-    class FakeClient:
-        async def send_request(
-            self,
-            method: str,
-            params: dict[str, object] | None = None,
-            timeout: float = 5.0,
-        ) -> dict[str, object]:
-            del method, params, timeout
-            return {}
-
-        async def send_notification(
-            self, method: str, params: dict[str, object] | None = None
-        ) -> None:
-            del method, params
-
     ready_status = {
         "scan_progress": {
             "realtime": {
@@ -1473,7 +1400,7 @@ async def test_verify_daemon_startup_rejects_unexpected_ready_backend(
     async def fake_wait_for_ready(_client: object) -> dict[str, object]:
         return ready_status
 
-    client = FakeClient()
+    client = _FakeClient()
     monkeypatch.setattr(live_verifier, "_wait_for_ready", fake_wait_for_ready)
     with pytest.raises(RuntimeError, match="unexpected backend state"):
         await live_verifier._verify_daemon_startup(
@@ -1491,20 +1418,7 @@ async def test_verify_live_mutation_waits_for_search_and_keeps_watchman_running(
     live_symbol = "live_symbol"
     search_queries: list[str] = []
 
-    class FakeClient:
-        def __init__(self) -> None:
-            self.requests: list[tuple[str, dict[str, object], float]] = []
-
-        async def send_request(
-            self,
-            method: str,
-            params: dict[str, object],
-            timeout: float,
-        ) -> dict[str, object]:
-            self.requests.append((method, params, timeout))
-            return {"content": [{"type": "text", "text": "unused"}]}
-
-    client = FakeClient()
+    client = _FakeClient()
 
     async def fake_wait_for_search_hit(_client: object, *, query: str) -> None:
         search_queries.append(query)
@@ -1550,16 +1464,6 @@ async def test_verify_live_mutation_fails_when_watchman_drops_after_search_hit(
 ) -> None:
     live_file = tmp_path / "src" / "live.py"
 
-    class FakeClient:
-        async def send_request(
-            self,
-            method: str,
-            params: dict[str, object],
-            timeout: float,
-        ) -> dict[str, object]:
-            del method, params, timeout
-            return {"content": [{"type": "text", "text": "unused"}]}
-
     async def fake_wait_for_search_hit(_client: object, *, query: str) -> None:
         del query
 
@@ -1577,7 +1481,7 @@ async def test_verify_live_mutation_fails_when_watchman_drops_after_search_hit(
 
     with pytest.raises(RuntimeError, match="lost running state"):
         await live_verifier._verify_live_mutation(
-            FakeClient(),
+            _FakeClient(),
             ready_realtime={
                 "watchman_sidecar_state": "running",
                 "effective_backend": "watchman",
@@ -1595,7 +1499,7 @@ async def test_verify_live_mutation_polling_contract_only_waits_for_search_hit(
     live_file = tmp_path / "src" / "live.py"
     search_queries: list[str] = []
 
-    class FakeClient:
+    class _RaisingFakeClient:
         async def send_request(
             self,
             method: str,
@@ -1614,7 +1518,7 @@ async def test_verify_live_mutation_polling_contract_only_waits_for_search_hit(
     )
 
     await live_verifier._verify_live_mutation(
-        FakeClient(),
+        _RaisingFakeClient(),
         ready_realtime={
             "watchman_sidecar_state": "stopped",
             "effective_backend": "polling",
