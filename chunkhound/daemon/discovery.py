@@ -735,6 +735,28 @@ class DaemonDiscovery:
             "completed_duration_seconds": completed_duration_seconds,
         }
 
+    @staticmethod
+    def _format_startup_context_text(
+        startup_context: dict[str, object],
+    ) -> list[str]:
+        """Format startup context dict into human-readable diagnostic lines."""
+        lines: list[str] = []
+        if startup_context.get("startup_completed") is True:
+            lines.append("Daemon startup status: completed")
+        else:
+            last_phase = startup_context.get("last_phase")
+            if isinstance(last_phase, str) and last_phase:
+                lines.append(f"Last known startup phase: {last_phase}")
+            elapsed_seconds = startup_context.get("elapsed_seconds")
+            if isinstance(elapsed_seconds, float):
+                lines.append(
+                    f"Elapsed startup duration so far: {elapsed_seconds:.3f}s"
+                )
+            last_error = startup_context.get("last_error")
+            if isinstance(last_error, str) and last_error:
+                lines.append(f"Last startup error: {last_error}")
+        return lines
+
     def format_startup_failure(
         self,
         *,
@@ -749,21 +771,7 @@ class DaemonDiscovery:
         effective_log_path = log_path or self.get_daemon_log_path()
         startup_context = self._startup_failure_context(effective_log_path)
         if startup_context is not None:
-            context_lines: list[str] = []
-            if startup_context.get("startup_completed") is True:
-                context_lines.append("Daemon startup status: completed")
-            else:
-                last_phase = startup_context.get("last_phase")
-                if isinstance(last_phase, str) and last_phase:
-                    context_lines.append(f"Last known startup phase: {last_phase}")
-                elapsed_seconds = startup_context.get("elapsed_seconds")
-                if isinstance(elapsed_seconds, float):
-                    context_lines.append(
-                        f"Elapsed startup duration so far: {elapsed_seconds:.3f}s"
-                    )
-                last_error = startup_context.get("last_error")
-                if isinstance(last_error, str) and last_error:
-                    context_lines.append(f"Last startup error: {last_error}")
+            context_lines = self._format_startup_context_text(startup_context)
             if context_lines:
                 message = f"{message}\n" + "\n".join(context_lines)
         log_tail = self._tail_daemon_log(effective_log_path)
