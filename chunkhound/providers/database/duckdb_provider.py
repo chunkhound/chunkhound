@@ -1406,6 +1406,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             _atomic_replace(backup_path, db_path)
         _unlink_compacted(compacted_path)
         restored_conn = self._create_connection()
+        # Assign immediately so _close_live_compaction_connections() can
+        # close it if a later step (schema/index creation) raises.
+        _executor_local.connection = restored_conn
         self._executor_create_schema(restored_conn, state)
         self._executor_create_indexes(restored_conn, state)
         # Restore HNSW only if the backup DB had it.  During batch CLI
@@ -1413,7 +1416,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         # intermediate compaction failures won't recreate it.
         if had_hnsw:
             self._executor_ensure_all_hnsw_indexes(restored_conn, state)
-        _executor_local.connection = restored_conn
         self._connection_manager.connection = (
             self._create_connection_manager_connection()
         )
