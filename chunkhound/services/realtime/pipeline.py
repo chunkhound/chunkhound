@@ -455,7 +455,12 @@ class RealtimePipelineMixin:
 
         return surviving, exhausted
 
-    def _schedule_delete_retry(self, mutation: RealtimeMutation) -> bool:
+    def _schedule_delete_retry(
+        self,
+        mutation: RealtimeMutation,
+        *,
+        delay_seconds: float | None = None,
+    ) -> bool:
         if self._delete_mutation_is_stale(mutation):
             self._debug(
                 "skipped stale delete retry scheduling "
@@ -476,10 +481,11 @@ class RealtimePipelineMixin:
         if not self._register_pending_mutation(retry_mutation):
             return True
 
-        base = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
-            2**mutation.retry_count
-        )
-        delay_seconds = base * random.uniform(0.75, 1.25)
+        if delay_seconds is None:
+            base = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
+                2**mutation.retry_count
+            )
+            delay_seconds = base * random.uniform(0.75, 1.25)
         self._start_transient_task(
             self._retry_mutation_after_delay(retry_mutation, delay_seconds)
         )
@@ -1309,6 +1315,15 @@ class RealtimePipelineMixin:
             surviving_mutations: list[RealtimeMutation] = []
             exhausted_mutations: list[RealtimeMutation] = []
 
+            # Compute a single shared delay so all retry mutations arrive at the
+            # queue together and can be re-collected into a single batch.
+            # All mutations share the same retry_count — they were collected together.
+            batch_retry_count = executable_mutations[0].retry_count
+            batch_base = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
+                2**batch_retry_count
+            )
+            batch_delay_seconds = batch_base * random.uniform(0.75, 1.25)
+
             for mutation in executable_mutations:
                 if self._delete_mutation_is_stale(mutation):
                     self._debug(
@@ -1320,7 +1335,9 @@ class RealtimePipelineMixin:
                     finished_mutation_ids.add(mutation.mutation_id)
                     continue
 
-                if self._schedule_delete_retry(mutation):
+                if self._schedule_delete_retry(
+                    mutation, delay_seconds=batch_delay_seconds
+                ):
                     surviving_mutations.append(mutation)
                     continue
 
