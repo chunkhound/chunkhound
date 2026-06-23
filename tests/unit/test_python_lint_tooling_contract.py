@@ -20,6 +20,8 @@ from typing import Any, cast
 import pytest
 import yaml  # type: ignore[import-untyped]
 
+from tests.utils import SUBPROCESS_ENV_ALLOWLIST as _SUBPROCESS_ENV_ALLOWLIST
+from tests.utils.git_repo import commit_all as _commit_all, create_repo as _create_repo, run as _run
 from tests.utils.windows_subprocess import get_safe_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,24 +40,6 @@ _PRE_COMMIT_MODULE = _load_pre_commit_module()
 PRE_COMMIT_PACKAGE = _PRE_COMMIT_MODULE.PRE_COMMIT_PACKAGE
 RUFF_PACKAGE = _PRE_COMMIT_MODULE.RUFF_PACKAGE
 HOOK_MARKER = "chunkhound-managed-pre-commit-hook"
-_SUBPROCESS_ENV_ALLOWLIST = (
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "SHELL",
-)
-
-
-def _run(command: list[str], cwd: Path) -> None:
-    subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
 
 
 def _run_capture(
@@ -70,24 +54,6 @@ def _run_capture(
         env=env,
     )
 
-
-def _create_repo(repo_dir: Path) -> None:
-    _run(["git", "init"], repo_dir)
-    _run(["git", "config", "user.name", "ChunkHound Tests"], repo_dir)
-    _run(["git", "config", "user.email", "tests@chunkhound.invalid"], repo_dir)
-
-
-def _commit_all(repo_dir: Path, message: str) -> str:
-    _run(["git", "add", "-A"], repo_dir)
-    _run(["git", "commit", "-m", message], repo_dir)
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo_dir,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
 
 
 def _current_branch(repo_dir: Path) -> str:
@@ -169,7 +135,7 @@ def _uv_log_calls(log_path: Path) -> list[list[str]]:
 
 def _script_env(bin_dir: Path) -> dict[str, str]:
     base_env = {
-        key: os.environ[key] for key in _SUBPROCESS_ENV_ALLOWLIST if key in os.environ
+        key: os.environ[key] for key in (*_SUBPROCESS_ENV_ALLOWLIST, "SHELL") if key in os.environ
     }
     path = str(bin_dir)
     if "PATH" in base_env:

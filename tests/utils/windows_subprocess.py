@@ -1,4 +1,4 @@
-"""Windows-compatible subprocess utilities for tests."""
+"""Windows-compatible subprocess utilities for test environment isolation."""
 
 import asyncio
 from typing import Dict, Optional, Any
@@ -32,6 +32,24 @@ async def create_subprocess_exec_safe(
         cwd=cwd,
         **kwargs
     )
+
+
+# Environment variables allowed through to subprocess calls in tests.
+# Prevents accidental leakage of dev environment (e.g., VIRTUAL_ENV, PYTHONPATH)
+# while still allowing essential PATH/temp resolution.
+SUBPROCESS_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "SystemRoot",
+    "ComSpec",
+    "PATHEXT",
+    "APPDATA",
+    "LOCALAPPDATA",
+)
 
 
 def get_safe_subprocess_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:

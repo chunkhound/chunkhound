@@ -12,6 +12,8 @@ from typing import Any, cast
 import pytest
 import yaml  # type: ignore[import-untyped]
 
+from tests.utils import SUBPROCESS_ENV_ALLOWLIST as _SUBPROCESS_ENV_ALLOWLIST
+from tests.utils.git_repo import commit_all as _commit_all, create_repo as _create_repo, run as _run
 from tests.utils.windows_subprocess import get_safe_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,24 +21,6 @@ RESOLVER = ROOT / "scripts" / "resolve_docs_version.sh"
 INLINE_RESOLVE_SNIPPET = (
     "CHUNKHOUND_DOCS_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')"
 )
-_SUBPROCESS_ENV_ALLOWLIST = (
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "SHELL",
-)
-
-
-def _run(command: list[str], cwd: Path) -> None:
-    subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
 
 
 def _is_windows() -> bool:
@@ -94,7 +78,7 @@ def _resolver_command() -> list[str]:
 
 def _resolver_env() -> dict[str, str]:
     base_env = {
-        key: os.environ[key] for key in _SUBPROCESS_ENV_ALLOWLIST if key in os.environ
+        key: os.environ[key] for key in (*_SUBPROCESS_ENV_ALLOWLIST, "SHELL") if key in os.environ
     }
     return get_safe_subprocess_env(base_env)
 
