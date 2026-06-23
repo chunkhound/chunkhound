@@ -48,6 +48,39 @@ def _write_registry_payload(entry_path: Path, data: dict[str, object]) -> None:
     entry_path.write_text(json.dumps(data))
 
 
+class _FakeProcess:
+    """Shared fake subprocess.Popen for daemon discovery tests.
+
+    Tracks lifecycle calls. terminate() and kill() set returncode only
+    when it is currently None, so callers that pre-set returncode (e.g.,
+    via poll_return) are not overridden.
+    """
+
+    def __init__(self, *, poll_return: int | None = None) -> None:
+        self.terminate_calls = 0
+        self.wait_calls = 0
+        self.kill_calls = 0
+        self.returncode: int | None = poll_return
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        if self.returncode is None:
+            self.returncode = -15
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        self.wait_calls += 1
+        return self.returncode if self.returncode is not None else -15
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        if self.returncode is None:
+            self.returncode = -9
+
+
 def _atomic_write_race_worker(
     path_str: str,
     start_event: multiprocessing.synchronize.Event,
@@ -747,10 +780,6 @@ async def test_ensure_daemon_running_publishes_registry_entry_authoritatively(
 
     fake_address = "tcp:127.0.0.1:54997"
 
-    class _FakeProcess:
-        def poll(self) -> int | None:
-            return None
-
     log_path = discovery.get_daemon_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.touch()
@@ -812,26 +841,6 @@ async def test_find_or_start_daemon_terminates_child_when_registry_publish_fails
     discovery = DaemonDiscovery(project_dir)
 
     fake_address = "tcp:127.0.0.1:54998"
-
-    class _FakeProcess:
-        def __init__(self) -> None:
-            self.terminate_calls = 0
-            self.wait_calls = 0
-            self.returncode = None
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-        def terminate(self) -> None:
-            self.terminate_calls += 1
-            self.returncode = -15
-
-        def wait(self, timeout: float | None = None) -> int:
-            self.wait_calls += 1
-            return -15
-
-        def kill(self) -> None:
-            self.returncode = -9
 
     fake_process = _FakeProcess()
     log_path = discovery.get_daemon_log_path()
@@ -913,12 +922,17 @@ async def test_find_or_start_daemon_terminates_detached_child_on_startup_timeout
     project_dir.mkdir()
     discovery = DaemonDiscovery(project_dir)
 
-    class _FakeProcess:
+    class _TimeoutFakeProcess:
+        """Fake process that raises TimeoutExpired on first wait, then exits.
+
+        Simulates a child that ignores SIGTERM and must be SIGKILLed.
+        """
+
         def __init__(self) -> None:
             self.terminate_calls = 0
             self.kill_calls = 0
             self.wait_calls = 0
-            self.returncode = None
+            self.returncode: int | None = None
 
         def poll(self) -> int | None:
             return self.returncode
@@ -936,7 +950,7 @@ async def test_find_or_start_daemon_terminates_detached_child_on_startup_timeout
         def kill(self) -> None:
             self.kill_calls += 1
 
-    fake_process = _FakeProcess()
+    fake_process = _TimeoutFakeProcess()
     log_path = discovery.get_daemon_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("", encoding="utf-8")
