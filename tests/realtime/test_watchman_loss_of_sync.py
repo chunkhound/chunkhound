@@ -9,7 +9,7 @@ import psutil
 import pytest
 
 from chunkhound.mcp_server.status import derive_daemon_status
-from chunkhound.services.realtime_indexing_service import WatchmanRealtimeAdapter
+from chunkhound.services.realtime.adapters import WatchmanRealtimeAdapter
 from tests.helpers.watchman_realtime import (
     active_session_close_handle as _active_session_close_handle,
 )

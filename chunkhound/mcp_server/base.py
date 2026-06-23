@@ -34,15 +34,17 @@ from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as EmbeddingProviderProtocol,
 )
 from chunkhound.llm_manager import LLMManager
+from chunkhound.mcp_server.tools import tool_requires_services
+from chunkhound.providers.database.serial_executor import (
+    DatabaseCompactionInProgressError,
+)
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime import RealtimeStartupStatusTracker
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.service import RealtimeIndexingService
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
 )
-from chunkhound.providers.database.serial_executor import DatabaseCompactionInProgressError
-from chunkhound.mcp_server.tools import tool_requires_services
-from chunkhound.utils.logging_guard import log_if_not_mcp
 
 _DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
 

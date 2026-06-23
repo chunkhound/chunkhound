@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from chunkhound.services.realtime.events import SimpleEventHandler
 
 
@@ -13,7 +15,6 @@ def _clear_watchdog_sensitive_modules() -> None:
         "chunkhound.daemon.server",
         "chunkhound.mcp_server.base",
         "chunkhound.services.realtime",
-        "chunkhound.services.realtime_indexing_service",
     )
     for name in list(sys.modules):
         if name.startswith(prefixes):
@@ -62,10 +63,7 @@ def test_simple_event_handler_dispatches_without_watchdog_base(tmp_path: Path) -
     ]
 
 
-def test_legacy_realtime_module_targets_live_service_namespace() -> None:
-    legacy_module = importlib.import_module(
-        "chunkhound.services.realtime_indexing_service"
-    )
-    service_module = importlib.import_module("chunkhound.services.realtime.service")
-
-    assert legacy_module is service_module
+def test_legacy_realtime_indexing_service_module_no_longer_exists() -> None:
+    """The realtime_indexing_service compatibility shim has been removed."""
+    with pytest.raises(ImportError):
+        importlib.import_module("chunkhound.services.realtime_indexing_service")

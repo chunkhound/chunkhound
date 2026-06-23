@@ -21,7 +21,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
 from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.tools import execute_tool, search_impl
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.service import RealtimeIndexingService
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     realtime_backend_for_tests,

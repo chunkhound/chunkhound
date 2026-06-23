@@ -8,7 +8,7 @@ import pytest
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
 )
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.service import RealtimeIndexingService
 
 
 @pytest.fixture
