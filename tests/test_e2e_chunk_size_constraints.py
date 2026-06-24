@@ -183,6 +183,15 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Normal
         "class Calculator {\npublic:\n    int add(int a, int b) { return a + b; }\n};",
     ),
+    Language.METAL: (
+        ".metal",
+        # MSL is C++14; the C++ grammar chunks structs/classes
+        "class DataProcessor {\npublic:\n"
+        + _make_large_statements("    int field = 0;")
+        + "\n};",
+        # Normal
+        "class Calculator {\npublic:\n    int add(int a, int b) { return a + b; }\n};",
+    ),
     Language.HASKELL: (
         ".hs",
         # Large function with many let bindings

@@ -70,6 +70,7 @@ from chunkhound.parsers.mappings import (
     MakefileMapping,
     MarkdownMapping,
     MatlabMapping,
+    MetalMapping,
     ObjCMapping,
     PDFMapping,
     PHPMapping,
@@ -210,6 +211,9 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.JAVA: LanguageConfig(ts_java, JavaMapping, True, "java"),
     Language.C: LanguageConfig(ts_c, CMapping, True, "c"),
     Language.CPP: LanguageConfig(ts_cpp, CppMapping, True, "cpp"),
+    # MSL is C++14 — reuse the cpp grammar (language_name stays "cpp"); Metal
+    # identity comes from the enum + MetalMapping, not the grammar accessor.
+    Language.METAL: LanguageConfig(ts_cpp, MetalMapping, True, "cpp"),
     Language.CSHARP: LanguageConfig(
         ts_csharp, CSharpMapping, True, "csharp", pip_package="tree-sitter-c-sharp"
     ),
@@ -311,6 +315,7 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".hxx": Language.CPP,
     ".hh": Language.CPP,
     ".h++": Language.CPP,
+    ".metal": Language.METAL,
     # C#
     ".cs": Language.CSHARP,
     ".csx": Language.CSHARP,

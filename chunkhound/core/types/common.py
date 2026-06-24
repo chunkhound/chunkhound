@@ -172,6 +172,7 @@ class Language(Enum):
     MAKEFILE = "makefile"
     C = "c"
     CPP = "cpp"
+    METAL = "metal"  # Metal Shading Language — C++ grammar
     MATLAB = "matlab"
     HCL = "hcl"
     OBJC = "objc"
@@ -291,6 +292,7 @@ class Language(Enum):
             ".hxx": cls.CPP,
             ".hh": cls.CPP,
             ".h++": cls.CPP,
+            ".metal": cls.METAL,
             ".rs": cls.RUST,
             ".zig": cls.ZIG,
             ".m": cls.MATLAB,  # Note: .m is ambiguous, will use content detection
@@ -368,6 +370,7 @@ class Language(Enum):
             Language.MAKEFILE,
             Language.C,
             Language.CPP,
+            Language.METAL,
             Language.MATLAB,
             Language.OBJC,
             Language.PHP,
@@ -394,6 +397,7 @@ class Language(Enum):
             Language.KOTLIN,
             Language.GO,
             Language.CPP,
+            Language.METAL,
             Language.MATLAB,
             Language.OBJC,
             Language.PHP,

@@ -27,6 +27,7 @@ LANGUAGE_SAMPLES = {
     Language.MAKEFILE: "all:\n\techo hello",
     Language.C: "int main() { return 0; }",
     Language.CPP: "int main() { return 0; }",
+    Language.METAL: "int main() { return 0; }",  # MSL is C++14 -> cpp grammar
     Language.OBJC: "@interface MyClass : NSObject\n@end",
     Language.MATLAB: "function result = hello()\nresult = 1;\nend",
     Language.MARKDOWN: "# Hello\nWorld",
