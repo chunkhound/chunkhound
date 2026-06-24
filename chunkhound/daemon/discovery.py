@@ -749,9 +749,7 @@ class DaemonDiscovery:
                 lines.append(f"Last known startup phase: {last_phase}")
             elapsed_seconds = startup_context.get("elapsed_seconds")
             if isinstance(elapsed_seconds, float):
-                lines.append(
-                    f"Elapsed startup duration so far: {elapsed_seconds:.3f}s"
-                )
+                lines.append(f"Elapsed startup duration so far: {elapsed_seconds:.3f}s")
             last_error = startup_context.get("last_error")
             if isinstance(last_error, str) and last_error:
                 lines.append(f"Last startup error: {last_error}")

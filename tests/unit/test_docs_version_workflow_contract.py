@@ -13,7 +13,9 @@ import pytest
 import yaml  # type: ignore[import-untyped]
 
 from tests.utils import SUBPROCESS_ENV_ALLOWLIST as _SUBPROCESS_ENV_ALLOWLIST
-from tests.utils.git_repo import commit_all as _commit_all, create_repo as _create_repo, run as _run
+from tests.utils.git_repo import (
+    run as _run,
+)
 from tests.utils.windows_subprocess import get_safe_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -78,7 +80,9 @@ def _resolver_command() -> list[str]:
 
 def _resolver_env() -> dict[str, str]:
     base_env = {
-        key: os.environ[key] for key in (*_SUBPROCESS_ENV_ALLOWLIST, "SHELL") if key in os.environ
+        key: os.environ[key]
+        for key in (*_SUBPROCESS_ENV_ALLOWLIST, "SHELL")
+        if key in os.environ
     }
     return get_safe_subprocess_env(base_env)
 

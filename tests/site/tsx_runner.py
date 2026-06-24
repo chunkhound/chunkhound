@@ -16,9 +16,7 @@ NPM: str = shutil.which("npm") or "npm"
 def sanitized_subprocess_env(**overrides: str) -> dict[str, str]:
     """Build a hermetic runtime env for site subprocess tests."""
     env = {
-        key: os.environ[key]
-        for key in SUBPROCESS_ENV_ALLOWLIST
-        if key in os.environ
+        key: os.environ[key] for key in SUBPROCESS_ENV_ALLOWLIST if key in os.environ
     }
     env.update(overrides)
     return env
