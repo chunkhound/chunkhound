@@ -93,14 +93,15 @@ def _install_late_completion_guard() -> None:
     if zendriver.__version__ != "0.15.3":
         warnings.warn(
             f"zendriver {zendriver.__version__} != pinned 0.15.3; "
-            "late-completion guard may be redundant or broken",
+            "late-completion guard may now be redundant or broken — revisit "
+            "whether upstream fixed Connection.send or Transaction.__call__",
             RuntimeWarning,
             stacklevel=2,
         )
 
     _orig_call = Transaction.__call__
 
-    def _safe_call(self: Transaction, **response: dict[str, Any]) -> None:
+    def _safe_call(self: Transaction, **response: Any) -> None:
         if self.done():
             return
         _orig_call(self, **response)
