@@ -257,6 +257,17 @@ def _verify_same_results(
     assert _paths_from(results_a) == _paths_from(results_b), "Paths differ between runs"
 
 
+def _move_repo_and_db(
+    tmp_path: Path, repo: Path, db_dir: Path, db_name: str
+) -> tuple[Path, Path]:
+    """Copy the repo + DB to a new location and return their moved paths."""
+    new_repo = tmp_path / "new_repo"
+    new_db_dir = tmp_path / "new_db"
+    shutil.copytree(repo, new_repo)
+    shutil.copytree(db_dir, new_db_dir)
+    return new_repo, new_db_dir / db_name
+
+
 # ===========================================================================
 # DB portability: stored path format
 # ===========================================================================
@@ -314,26 +325,25 @@ def test_path_format_contract(
 
 
 @pytest.mark.integration
-def test_portability_after_move(
+def test_portable_db_remains_searchable_immediately_after_move(
     tmp_path: Path,
     dummy_repo: Path,
     fake_embedding: Any,
     constant_query_vec: list[float],
     portability_backend: str,
 ) -> None:
-    """DB contents stay portable after move (with sidecar removal for DuckDB).
+    """Moved DB stays searchable before any repair step like re-indexing.
 
     Phase 1 — Index at original location.
     Phase 2 — Run baseline queries.
     Phase 3 — Close DB, move DB + codebase.
     Phase 4 — Delete indexed-root sidecar (DuckDB) or no-op (LanceDB).
-    Phase 5 — Re-open at new location, re-index.
+    Phase 5 — Re-open at new location without re-indexing.
     Phase 6 — Run same queries, verify identical results.
     """
     backend = portability_backend
     db_ext = "chunks.db" if backend == "duckdb" else "lancedb.lancedb"
 
-    # Phase 1: Index
     db_path = tmp_path / "db" / db_ext
     db_path.parent.mkdir(parents=True)
     provider = _create_provider(backend, db_path, dummy_repo)
@@ -346,57 +356,122 @@ def test_portability_after_move(
         )
         _index_all(coordinator, dummy_repo)
 
-        # Phase 2: Baseline queries
         baseline_regex = _search_regex(provider, "def")
         baseline_semantic = _search_semantic(provider, constant_query_vec)
         baseline_stored_paths = _raw_stored_paths(provider)
         assert len(baseline_regex) > 0, "Expected regex results"
         assert len(baseline_semantic) > 0, "Expected semantic results"
         expected_paths = _repo_python_paths(dummy_repo)
-
     finally:
         provider.disconnect()
 
-    # Phase 3: Move DB + codebase to new location
-    new_repo = tmp_path / "new_repo"
-    new_db_dir = tmp_path / "new_db"
-    shutil.copytree(dummy_repo, new_repo)
-    shutil.copytree(db_path.parent, new_db_dir)
-    new_db_path = new_db_dir / db_ext
-
-    # Phase 4: Delete indexed-root sidecar (DuckDB) or no-op (LanceDB)
+    new_repo, new_db_path = _move_repo_and_db(
+        tmp_path, dummy_repo, db_path.parent, db_ext
+    )
     _remove_sidecar(backend, new_db_path)
 
-    # Phase 5: Re-open at new location, re-index
-    provider2 = _create_provider(backend, new_db_path, new_repo)
+    moved_provider = _create_provider(backend, new_db_path, new_repo)
+    try:
+        moved_expected_paths = _repo_python_paths(new_repo)
+        assert moved_expected_paths == expected_paths
+        _assert_stored_paths_match(moved_provider, moved_expected_paths)
+        assert _raw_stored_paths(moved_provider) == baseline_stored_paths
+
+        moved_regex = _search_regex(moved_provider, "def")
+        _verify_same_results(baseline_regex, moved_regex)
+        _assert_stored_paths_are_relative_unix(moved_regex)
+        _assert_native_format(moved_regex)
+
+        moved_semantic = _search_semantic(moved_provider, constant_query_vec)
+        _verify_same_results(baseline_semantic, moved_semantic)
+        _assert_stored_paths_are_relative_unix(moved_semantic)
+        _assert_native_format(moved_semantic)
+    finally:
+        moved_provider.disconnect()
+
+
+@pytest.mark.integration
+def test_reindex_after_move_is_idempotent(
+    tmp_path: Path,
+    dummy_repo: Path,
+    fake_embedding: Any,
+    constant_query_vec: list[float],
+    portability_backend: str,
+) -> None:
+    """Re-indexing after a portable move must preserve search results.
+
+    This stays separate from the move-portability contract so re-indexing cannot
+    mask a moved-DB regression before the first post-move query.
+
+    Phase 1 — Index at original location.
+    Phase 2 — Run baseline queries.
+    Phase 3 — Close DB, move DB + codebase.
+    Phase 4 — Delete indexed-root sidecar (DuckDB) or no-op (LanceDB).
+    Phase 5 — Re-open at new location, verify pre-reindex baseline.
+    Phase 6 — Re-index at new location.
+    Phase 7 — Run same queries, verify idempotent results.
+    """
+    backend = portability_backend
+    db_ext = "chunks.db" if backend == "duckdb" else "lancedb.lancedb"
+
+    db_path = tmp_path / "db" / db_ext
+    db_path.parent.mkdir(parents=True)
+    provider = _create_provider(backend, db_path, dummy_repo)
 
     try:
+        coordinator = IndexingCoordinator(
+            database_provider=provider,
+            base_directory=dummy_repo,
+            embedding_provider=fake_embedding,
+        )
+        _index_all(coordinator, dummy_repo)
+
+        baseline_regex = _search_regex(provider, "def")
+        baseline_semantic = _search_semantic(provider, constant_query_vec)
+        baseline_stored_paths = _raw_stored_paths(provider)
+        assert len(baseline_regex) > 0, "Expected regex results"
+        assert len(baseline_semantic) > 0, "Expected semantic results"
+        expected_paths = _repo_python_paths(dummy_repo)
+    finally:
+        provider.disconnect()
+
+    new_repo, new_db_path = _move_repo_and_db(
+        tmp_path, dummy_repo, db_path.parent, db_ext
+    )
+    _remove_sidecar(backend, new_db_path)
+
+    moved_provider = _create_provider(backend, new_db_path, new_repo)
+    try:
+        # Verify the moved DB works before re-indexing so the idempotency check
+        # starts from a known-portable baseline rather than repairing first.
+        pre_reindex_regex = _search_regex(moved_provider, "def")
+        pre_reindex_semantic = _search_semantic(moved_provider, constant_query_vec)
+        _verify_same_results(baseline_regex, pre_reindex_regex)
+        _verify_same_results(baseline_semantic, pre_reindex_semantic)
+
         coordinator2 = IndexingCoordinator(
-            database_provider=provider2,
+            database_provider=moved_provider,
             base_directory=new_repo,
             embedding_provider=fake_embedding,
         )
         _index_all(coordinator2, new_repo)
 
-        # Verify paths still correct after move
         moved_expected_paths = _repo_python_paths(new_repo)
         assert moved_expected_paths == expected_paths
-        _assert_stored_paths_match(provider2, moved_expected_paths)
-        assert _raw_stored_paths(provider2) == baseline_stored_paths
+        _assert_stored_paths_match(moved_provider, moved_expected_paths)
+        assert _raw_stored_paths(moved_provider) == baseline_stored_paths
 
-        # Phase 6: Run same queries — verify identical results
-        moved_regex = _search_regex(provider2, "def")
+        moved_regex = _search_regex(moved_provider, "def")
         _verify_same_results(baseline_regex, moved_regex)
         _assert_stored_paths_are_relative_unix(moved_regex)
         _assert_native_format(moved_regex)
 
-        moved_semantic = _search_semantic(provider2, constant_query_vec)
+        moved_semantic = _search_semantic(moved_provider, constant_query_vec)
         _verify_same_results(baseline_semantic, moved_semantic)
         _assert_stored_paths_are_relative_unix(moved_semantic)
         _assert_native_format(moved_semantic)
-
     finally:
-        provider2.disconnect()
+        moved_provider.disconnect()
 
 
 # ===========================================================================
