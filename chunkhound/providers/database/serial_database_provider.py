@@ -659,6 +659,22 @@ class SerialDatabaseProvider(ABC):
         """
         return False
 
+    def drop_all_hnsw_indexes(self) -> None:
+        """Drop provider-managed HNSW indexes when the backend exposes them.
+
+        Compatibility no-op for providers whose vector layer is engine-managed
+        or does not expose standalone HNSW index DDL.
+        """
+        pass
+
+    def ensure_all_hnsw_indexes(self) -> None:
+        """Create provider-managed HNSW indexes when the backend exposes them.
+
+        Compatibility no-op for providers whose vector layer is engine-managed
+        or does not expose standalone HNSW index DDL.
+        """
+        pass
+
     def compact_database(self) -> int:
         """Compact the database file to eliminate fragmentation.
 

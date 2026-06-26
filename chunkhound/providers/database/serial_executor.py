@@ -32,12 +32,12 @@ _COMPACTION_OPERATION_TIMEOUT_SECONDS = 660.0
 # average rate at ~1 check per N operations without any counters or
 # cross-thread state.
 #
-# 10 = ~1 check per 10 write operations. During a typical chunkhound index
-# run (~1000-5000 write ops), this yields ~100-500 auto-compaction checks,
-# which is frequent enough to catch fragmentation early but not so frequent
-# that the fragmentation measurement overhead (PRAGMA + file stat) becomes
-# noticeable. Reads are excluded — they don't cause fragmentation.
-COMPACT_SAMPLE_INTERVAL = 10
+# 100 = ~1 check per 100 write operations. During a typical chunkhound index
+# run (~1000-5000 write ops), this yields ~10-50 auto-compaction checks,
+# which is frequent enough to catch fragmentation early while keeping the
+# fragmentation measurement overhead (PRAGMA + file stat) negligible.
+# Reads are excluded — they don't cause fragmentation.
+COMPACT_SAMPLE_INTERVAL = 100
 
 
 # Thread-local storage for executor thread state

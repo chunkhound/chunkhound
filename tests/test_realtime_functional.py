@@ -1114,7 +1114,7 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            "_RETRY_BASE_DELAY_SECONDS",
             0.01,
             raising=False,
         )
@@ -1199,7 +1199,7 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            "_RETRY_BASE_DELAY_SECONDS",
             0.05,
             raising=False,
         )
@@ -1301,7 +1301,7 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            "_RETRY_BASE_DELAY_SECONDS",
             0.05,
             raising=False,
         )
@@ -1392,13 +1392,13 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_MAX_RETRIES",
+            "_MAX_RETRY_BUDGET",
             1,
             raising=False,
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            "_RETRY_BASE_DELAY_SECONDS",
             0.01,
             raising=False,
         )
@@ -1613,7 +1613,7 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            "_RETRY_BASE_DELAY_SECONDS",
             0.01,
             raising=False,
         )

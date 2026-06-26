@@ -349,7 +349,7 @@ class RealtimePipelineMixin:
 
     def _schedule_compaction_retry(self, mutation: RealtimeMutation) -> bool:
         """Retry realtime work later when compaction temporarily owns the DB."""
-        if mutation.retry_count >= self._DELETE_CONFLICT_MAX_RETRIES:
+        if mutation.retry_count >= self._MAX_RETRY_BUDGET:
             return False
 
         retry_mutation = self._build_mutation(
@@ -362,7 +362,7 @@ class RealtimePipelineMixin:
         if not self._register_pending_mutation(retry_mutation):
             return True
 
-        base = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
+        base = self._RETRY_BASE_DELAY_SECONDS * (
             2**mutation.retry_count
         )
         delay_seconds = base * random.uniform(0.75, 1.25)
@@ -392,7 +392,7 @@ class RealtimePipelineMixin:
                 f"Retrying realtime {op_desc} for {mutation.path} "
                 f"after database compaction "
                 f"(attempt {mutation.retry_count + 1}/"
-                f"{self._DELETE_CONFLICT_MAX_RETRIES})",
+                f"{self._MAX_RETRY_BUDGET})",
             )
             self._debug(
                 f"retrying {op_desc} after database compaction "
@@ -468,7 +468,7 @@ class RealtimePipelineMixin:
             )
             return True
 
-        if mutation.retry_count >= self._DELETE_CONFLICT_MAX_RETRIES:
+        if mutation.retry_count >= self._MAX_RETRY_BUDGET:
             return False
 
         retry_mutation = self._build_mutation(
@@ -482,7 +482,7 @@ class RealtimePipelineMixin:
             return True
 
         if delay_seconds is None:
-            base = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
+            base = self._RETRY_BASE_DELAY_SECONDS * (
                 2**mutation.retry_count
             )
             delay_seconds = base * random.uniform(0.75, 1.25)
@@ -1243,7 +1243,7 @@ class RealtimePipelineMixin:
                     "Retrying realtime delete for "
                     f"{mutation.path} after transaction conflict "
                     f"(attempt {mutation.retry_count + 1}/"
-                    f"{self._DELETE_CONFLICT_MAX_RETRIES})"
+                    f"{self._MAX_RETRY_BUDGET})"
                 )
                 self._debug(
                     "retrying delete after transaction conflict "
@@ -1319,7 +1319,7 @@ class RealtimePipelineMixin:
             # queue together and can be re-collected into a single batch.
             # All mutations share the same retry_count — they were collected together.
             batch_retry_count = executable_mutations[0].retry_count
-            batch_base = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
+            batch_base = self._RETRY_BASE_DELAY_SECONDS * (
                 2**batch_retry_count
             )
             batch_delay_seconds = batch_base * random.uniform(0.75, 1.25)
@@ -1459,6 +1459,13 @@ class RealtimePipelineMixin:
                         indexing_coordinator = self.services.indexing_coordinator
                         await indexing_coordinator.generate_missing_embeddings()
                         completed = True
+                    except DatabaseCompactionInProgressError:
+                        # Delegate to the shared compaction-busy handler:
+                        # schedules retry with backoff, or records permanent
+                        # error (including failed_files) when budget exhausted.
+                        # The finally block handles _record_processing_finished.
+                        if self._handle_compaction_busy(mutation, "embed"):
+                            continue
                     except Exception as error:
                         logger.warning(
                             "Embedding generation failed in realtime "
@@ -1588,7 +1595,7 @@ class RealtimePipelineMixin:
                         f"{self._status_operation(mutation.operation)} for "
                         f"{mutation.path} after database compaction "
                         f"(attempt {mutation.retry_count + 1}/"
-                        f"{self._DELETE_CONFLICT_MAX_RETRIES})",
+                        f"{self._MAX_RETRY_BUDGET})",
                     )
                     self._debug(
                         "retrying mutation after database compaction "

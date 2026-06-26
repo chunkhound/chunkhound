@@ -86,8 +86,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     _WATCHDOG_SETUP_TIMEOUT_SECONDS = 5.0
     _MONITORING_READY_TIMEOUT_SECONDS = 10.0
     _POLLING_STARTUP_SETTLE_SECONDS = 0.5
-    _DELETE_CONFLICT_MAX_RETRIES = 5
-    _DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS = 0.1
+    # Retry budget shared by delete-conflict and compaction-busy retries.
+    _MAX_RETRY_BUDGET = 5
+    _RETRY_BASE_DELAY_SECONDS = 0.1
     _DELETE_BATCH_SIZE = 64
     _MUTATION_PRIORITIES = {
         "delete": 0,
