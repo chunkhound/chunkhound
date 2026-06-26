@@ -81,3 +81,23 @@ def test_metal_captures_method_as_function_chunk():
     assert "reduce_many" in func_symbols, (
         f"Expected a 'reduce_many' FUNCTION chunk, got: {sorted(func_symbols)}"
     )
+
+
+def test_metal_chunks_stay_tagged_metal():
+    """Emitted chunks keep Language.METAL — not the cpp grammar's identity."""
+    chunks = parse_metal(METAL_SNIPPET)
+    assert chunks, "expected at least one chunk"
+    assert all(c.language == Language.METAL for c in chunks), (
+        f"chunks leaked non-METAL languages: "
+        f"{sorted({c.language for c in chunks}, key=str)}"
+    )
+
+
+def test_metal_parse_result_tagged_metal(tmp_path):
+    """ParseResult.language is METAL, matching file detection end-to-end."""
+    f = tmp_path / "kernel.metal"
+    f.write_text(METAL_SNIPPET)
+    result = get_parser_factory().create_parser(Language.METAL).parse_with_result(
+        f, FileId(1)
+    )
+    assert result.language == Language.METAL
