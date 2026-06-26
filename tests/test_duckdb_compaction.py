@@ -21,18 +21,31 @@ duckdb = pytest.importorskip("duckdb")
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
-from chunkhound.core.models import Chunk, File
-from chunkhound.core.types.common import ChunkType, FilePath, Language
+from chunkhound.core.models import Chunk, Embedding, File
+from chunkhound.core.types.common import (
+    ChunkType,
+    FileId,
+    FilePath,
+    Language,
+    LineNumber,
+)
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database import duckdb_provider as duckdb_provider_module
-from chunkhound.providers.database.duckdb_provider import (
-    DuckDBProvider,
+from chunkhound.providers.database.duckdb.embedding_repository import (
+    DuckDBEmbeddingRepository,
 )
+from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
+from chunkhound.providers.database.duckdb.schema_constants import (
+    _assert_allowed_identifier,
+    is_hnsw_index,
+)
+from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
 )
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
+from chunkhound.services.embedding_service import EmbeddingService
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.utils import windows_constants
 from tests.fixtures.fake_providers import (
@@ -91,17 +104,54 @@ def _insert_minimal_chunks(provider: DuckDBProvider) -> None:
             language=Language.PYTHON,
         )
     )
-    provider.insert_chunks_batch([
-        Chunk(
-            file_id=file_id,
-            chunk_type=ChunkType.FUNCTION,
-            symbol="seed_func",
-            code="def seed_func(): pass",
-            start_line=1,
-            end_line=2,
+    provider.insert_chunks_batch(
+        [
+            Chunk(
+                file_id=file_id,
+                chunk_type=ChunkType.FUNCTION,
+                symbol="seed_func",
+                code="def seed_func(): pass",
+                start_line=1,
+                end_line=2,
+                language=Language.PYTHON,
+            )
+        ]
+    )
+
+
+def _seed_embedding_dims_3(
+    provider: DuckDBProvider, file_path: str = "dims3.py"
+) -> tuple[int, int]:
+    """Create one populated embeddings_3 table row for HNSW/table-selection tests."""
+    file_id = provider.insert_file(
+        File(
+            path=FilePath(file_path),
+            mtime=1.0,
+            size_bytes=24,
             language=Language.PYTHON,
         )
-    ])
+    )
+    chunk_id = provider.insert_chunk(
+        Chunk(
+            file_id=FileId(file_id),
+            symbol=pathlib.Path(file_path).stem,
+            start_line=LineNumber(1),
+            end_line=LineNumber(2),
+            code="def dims3():\n    return 1\n",
+            chunk_type=ChunkType.FUNCTION,
+            language=Language.PYTHON,
+        )
+    )
+    provider.insert_embedding(
+        Embedding(
+            chunk_id=chunk_id,
+            provider="test",
+            model="mini",
+            dims=3,
+            vector=[0.1, 0.2, 0.3],
+        )
+    )
+    return file_id, chunk_id
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -817,6 +867,347 @@ class TestCompactionGuard:
         finally:
             file_backed_db._executor.set_compaction_in_progress(False)
 
+    def test_connect_refused_during_compaction(self, tmp_path: Path) -> None:
+        """connect() fast-fails with DatabaseCompactionInProgressError."""
+        db_path = tmp_path / "guard_connect.duckdb"
+        db = DuckDBProvider(db_path, base_directory=tmp_path)
+        db.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
+        # Set compaction flag BEFORE connecting so the guard triggers.
+        db._executor.set_compaction_in_progress(True)
+        try:
+            with pytest.raises(DatabaseCompactionInProgressError):
+                db.connect()
+        finally:
+            db._executor.set_compaction_in_progress(False)
+
+    def test_readonly_connect_does_not_mutate_compaction_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        """Read-only connect leaves pre-existing compaction artifacts untouched."""
+        db_path = tmp_path / "readonly_guard.duckdb"
+        db = DuckDBProvider(db_path, base_directory=tmp_path)
+        db.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
+
+        db.connect()
+        db.disconnect()
+
+        backup_path = db_path.with_suffix(db_path.suffix + ".compact_backup")
+        staged_path = db_path.with_suffix(db_path.suffix + ".compact_new")
+        backup_path.write_bytes(b"backup artifact")
+        staged_path.write_bytes(b"staged artifact")
+        artifacts_before = {
+            path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in (backup_path, staged_path)
+        }
+        live_before = (db_path.read_bytes(), db_path.stat().st_mtime_ns)
+
+        ro_db = DuckDBProvider(
+            db_path,
+            base_directory=tmp_path,
+            config=DatabaseConfig(fragmentation_threshold_pct=30.0, read_only=True),
+        )
+        ro_db.connect()
+        try:
+            assert ro_db.get_stats()["files"] == 0
+            artifacts_after = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (backup_path, staged_path)
+            }
+            live_after = (db_path.read_bytes(), db_path.stat().st_mtime_ns)
+            assert artifacts_after == artifacts_before
+            assert live_after == live_before
+        finally:
+            ro_db.disconnect()
+
+
+class TestEmbeddingTableNamePattern:
+    """SIMILAR TO 'embeddings_[0-9]+' matches only dimension-suffixed tables."""
+
+    def _create_table(self, db_path: Path, table_name: str) -> None:
+        conn = duckdb.connect(str(db_path))
+        try:
+            conn.execute(f"CREATE TABLE {table_name} (id INTEGER, embedding FLOAT[4])")
+        finally:
+            conn.close()
+
+    def test_matches_canonical_name(self, tmp_path: Path) -> None:
+        """embeddings_384 is matched."""
+        db_path = tmp_path / "pattern.duckdb"
+        self._create_table(db_path, "embeddings_384")
+        conn = duckdb.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' "
+                "AND table_name SIMILAR TO 'embeddings_[0-9]+'"
+            ).fetchall()
+            assert [r[0] for r in rows] == ["embeddings_384"]
+        finally:
+            conn.close()
+
+    def test_rejects_backup_table(self, tmp_path: Path) -> None:
+        """embeddings_backup must NOT match."""
+        db_path = tmp_path / "pattern.duckdb"
+        self._create_table(db_path, "embeddings_backup")
+        conn = duckdb.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' "
+                "AND table_name SIMILAR TO 'embeddings_[0-9]+'"
+            ).fetchall()
+            assert rows == []
+        finally:
+            conn.close()
+
+    def test_rejects_staging_table(self, tmp_path: Path) -> None:
+        """embeddings_staging must NOT match."""
+        db_path = tmp_path / "pattern.duckdb"
+        self._create_table(db_path, "embeddings_staging")
+        conn = duckdb.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' "
+                "AND table_name SIMILAR TO 'embeddings_[0-9]+'"
+            ).fetchall()
+            assert rows == []
+        finally:
+            conn.close()
+
+    def test_matches_multiple_dims(self, tmp_path: Path) -> None:
+        """Multiple dimension tables all match."""
+        db_path = tmp_path / "pattern.duckdb"
+        for name in ["embeddings_384", "embeddings_1536", "embeddings_768"]:
+            self._create_table(db_path, name)
+        conn = duckdb.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' "
+                "AND table_name SIMILAR TO 'embeddings_[0-9]+' "
+                "ORDER BY table_name"
+            ).fetchall()
+            assert [r[0] for r in rows] == [
+                "embeddings_1536",
+                "embeddings_384",
+                "embeddings_768",
+            ]
+        finally:
+            conn.close()
+
+
+class TestEmbeddingTableSelectionContracts:
+    """Real provider/service APIs ignore non-canonical embedding tables."""
+
+    def test_provider_get_all_embedding_tables_ignores_noncanonical_tables(
+        self, tmp_path: Path
+    ) -> None:
+        db = DuckDBProvider(tmp_path / "tables.duckdb", base_directory=tmp_path)
+        db.connect()
+        try:
+            _seed_embedding_dims_3(db)
+            db.execute_query(
+                "CREATE TABLE embeddings_backup (id INTEGER, embedding FLOAT[3])", []
+            )
+            db.execute_query(
+                "CREATE TABLE embeddings_3_staging (id INTEGER, embedding FLOAT[3])",
+                [],
+            )
+
+            assert db._get_all_embedding_tables() == ["embeddings_3"]
+        finally:
+            db.disconnect()
+
+    def test_embedding_service_get_all_embedding_tables_ignores_noncanonical_tables(
+        self, tmp_path: Path
+    ) -> None:
+        db = DuckDBProvider(tmp_path / "service_tables.duckdb", base_directory=tmp_path)
+        db.connect()
+        try:
+            _seed_embedding_dims_3(db)
+            db.execute_query(
+                "CREATE TABLE embeddings_backup (id INTEGER, embedding FLOAT[3])", []
+            )
+            db.execute_query(
+                "CREATE TABLE embeddings_3_staging (id INTEGER, embedding FLOAT[3])",
+                [],
+            )
+
+            service = EmbeddingService(db)
+            assert service._get_all_embedding_tables() == ["embeddings_3"]
+        finally:
+            db.disconnect()
+
+    def test_embedding_repository_fallback_ignores_noncanonical_tables(
+        self, tmp_path: Path
+    ) -> None:
+        db = DuckDBProvider(tmp_path / "repo_tables.duckdb", base_directory=tmp_path)
+        db.connect()
+        try:
+            _, chunk_id = _seed_embedding_dims_3(db)
+            db.execute_query(
+                "CREATE TABLE embeddings_backup (id INTEGER, embedding FLOAT[3])", []
+            )
+            db.execute_query(
+                "CREATE TABLE embeddings_3_staging (id INTEGER, embedding FLOAT[3])",
+                [],
+            )
+
+            repository = DuckDBEmbeddingRepository(
+                db._connection_manager,
+                provider=None,
+            )
+            assert repository.get_existing_embeddings([chunk_id], "test", "mini") == {
+                chunk_id
+            }
+        finally:
+            db.disconnect(skip_checkpoint=True)
+
+    def test_file_repository_fallback_ignores_noncanonical_tables(
+        self, tmp_path: Path
+    ) -> None:
+        db = DuckDBProvider(
+            tmp_path / "file_repo_tables.duckdb",
+            base_directory=tmp_path,
+        )
+        db.connect()
+        try:
+            file_id, _ = _seed_embedding_dims_3(db)
+            db.execute_query(
+                "CREATE TABLE embeddings_backup (id INTEGER, embedding FLOAT[3])", []
+            )
+            db.execute_query(
+                "CREATE TABLE embeddings_3_staging (id INTEGER, embedding FLOAT[3])",
+                [],
+            )
+
+            repository = DuckDBFileRepository(db._connection_manager, provider=None)
+            assert repository.get_file_stats(file_id)["embeddings"] == 1
+        finally:
+            db.disconnect(skip_checkpoint=True)
+
+
+class TestHNSWCatalogAwareContracts:
+    """Catalog-aware HNSW helpers respect custom names and safe catalogs."""
+
+    def test_get_existing_vector_indexes_from_catalog_rejects_invalid_catalog(
+        self, tmp_path: Path
+    ) -> None:
+        db = DuckDBProvider(tmp_path / "catalog_guard.duckdb", base_directory=tmp_path)
+        db.connect()
+        try:
+            conn = db._connection_manager.connection
+            assert conn is not None
+            with pytest.raises(ValueError, match="Invalid catalog name"):
+                db._executor_get_existing_vector_indexes_from_catalog(conn, "archive")
+        finally:
+            db.disconnect()
+
+    def test_drop_all_hnsw_indexes_drops_custom_named_index(
+        self, tmp_path: Path
+    ) -> None:
+        db = DuckDBProvider(tmp_path / "custom_drop.duckdb", base_directory=tmp_path)
+        db.connect()
+        try:
+            _seed_embedding_dims_3(db)
+            initial_indexes = _fetch_index_names(db.db_path)
+            if "idx_hnsw_3" not in initial_indexes:
+                pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+
+            db.execute_query("DROP INDEX IF EXISTS idx_hnsw_3", [])
+            db.execute_query(
+                "CREATE INDEX alt_live_idx ON embeddings_3 USING HNSW (embedding)",
+                [],
+            )
+
+            assert "alt_live_idx" in _fetch_index_names(db.db_path)
+            db.drop_all_hnsw_indexes()
+            remaining_indexes = _fetch_index_names(db.db_path)
+            assert "alt_live_idx" not in remaining_indexes
+            assert "idx_hnsw_3" not in remaining_indexes
+        finally:
+            db.disconnect()
+
+    def test_ensure_all_hnsw_indexes_respects_existing_custom_hnsw_index(
+        self, tmp_path: Path
+    ) -> None:
+        db = DuckDBProvider(tmp_path / "custom_keep.duckdb", base_directory=tmp_path)
+        db.connect()
+        try:
+            _seed_embedding_dims_3(db)
+            initial_indexes = _fetch_index_names(db.db_path)
+            if "idx_hnsw_3" not in initial_indexes:
+                pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+
+            db.execute_query("DROP INDEX IF EXISTS idx_hnsw_3", [])
+            db.execute_query(
+                "CREATE INDEX alt_live_idx ON embeddings_3 USING HNSW (embedding)",
+                [],
+            )
+
+            db.ensure_all_hnsw_indexes()
+
+            remaining_indexes = _fetch_index_names(db.db_path)
+            assert "alt_live_idx" in remaining_indexes
+            assert "idx_hnsw_3" not in remaining_indexes
+        finally:
+            db.disconnect()
+
+    def test_compaction_rebuilds_hnsw_when_src_catalog_has_custom_named_index(
+        self, tmp_path: Path
+    ) -> None:
+        db = DuckDBProvider(tmp_path / "src_catalog.duckdb", base_directory=tmp_path)
+        db.connect()
+        try:
+            _seed_embedding_dims_3(db)
+            initial_indexes = _fetch_index_names(db.db_path)
+            if "idx_hnsw_3" not in initial_indexes:
+                pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+
+            db.execute_query("DROP INDEX IF EXISTS idx_hnsw_3", [])
+            db.execute_query(
+                "CREATE INDEX alt_live_idx ON embeddings_3 USING HNSW (embedding)",
+                [],
+            )
+
+            db.compact_database()
+
+            remaining_indexes = _fetch_index_names(db.db_path)
+            assert "idx_hnsw_3" in remaining_indexes
+        finally:
+            db.disconnect()
+
+    def test_compaction_fails_when_src_catalog_hnsw_discovery_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = DuckDBProvider(
+            tmp_path / "src_catalog_fail.duckdb", base_directory=tmp_path
+        )
+        db.connect()
+        try:
+            _seed_embedding_dims_3(db)
+            initial_indexes = _fetch_index_names(db.db_path)
+            if "idx_hnsw_3" not in initial_indexes:
+                pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+
+            def _fail_hnsw_detection(index_name: str, create_sql: str | None) -> bool:
+                raise RuntimeError("simulated src catalog scan failure")
+
+            import chunkhound.providers.database.duckdb_provider as _dp_mod
+
+            monkeypatch.setattr(_dp_mod, "is_hnsw_index", _fail_hnsw_detection)
+
+            with pytest.raises(
+                RuntimeError, match="catalog src|simulated src catalog scan failure"
+            ):
+                db.compact_database()
+
+            assert "idx_hnsw_3" in _fetch_index_names(db.db_path)
+            _assert_db_integrity(db.db_path)
+        finally:
+            db.disconnect()
+
 
 # ── should_optimize / optimize_tables ────────────────────────────────────
 
@@ -885,30 +1276,14 @@ class TestFragmentationThresholdBoundaries:
     @pytest.mark.parametrize(
         "ratio,threshold,expected",
         [
-            pytest.param(
-                1.29, 30.0, False, id="below-nonzero-threshold-29pct-lt-30"
-            ),
-            pytest.param(
-                1.25, 25.0, False, id="exact-boundary-strict-gt-25-not-gt-25"
-            ),
-            pytest.param(
-                1.31, 30.0, True, id="above-nonzero-threshold-31pct-gt-30"
-            ),
-            pytest.param(
-                1.01, 0.0, True, id="threshold-zero-any-positive-overhead"
-            ),
-            pytest.param(
-                0.5, 0.0, False, id="ratio-below-one-negative-overhead"
-            ),
-            pytest.param(
-                1.0, 30.0, False, id="ratio-exactly-one-zero-overhead"
-            ),
-            pytest.param(
-                1.5, None, False, id="threshold-none-always-false"
-            ),
-            pytest.param(
-                1.5, -1.0, False, id="threshold-negative-always-false"
-            ),
+            pytest.param(1.29, 30.0, False, id="below-nonzero-threshold-29pct-lt-30"),
+            pytest.param(1.25, 25.0, False, id="exact-boundary-strict-gt-25-not-gt-25"),
+            pytest.param(1.31, 30.0, True, id="above-nonzero-threshold-31pct-gt-30"),
+            pytest.param(1.01, 0.0, True, id="threshold-zero-any-positive-overhead"),
+            pytest.param(0.5, 0.0, False, id="ratio-below-one-negative-overhead"),
+            pytest.param(1.0, 30.0, False, id="ratio-exactly-one-zero-overhead"),
+            pytest.param(1.5, None, False, id="threshold-none-always-false"),
+            pytest.param(1.5, -1.0, False, id="threshold-negative-always-false"),
         ],
     )
     def test_fragmentation_exceeds_threshold(
@@ -1728,8 +2103,79 @@ class TestCompactionDataIntegrity:
 # ── Guard extended coverage ──────────────────────────────────────────────
 
 
+def test_zero_compact_sample_interval_disables_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sampling must disable cleanly when tests or operators set interval <= 0."""
+    from chunkhound.providers.database import serial_executor
+
+    monkeypatch.setattr(serial_executor, "COMPACT_SAMPLE_INTERVAL", 0)
+
+    assert not serial_executor._should_sample_auto_compaction("insert_file")
+
+
+def test_unit_compact_sample_interval_samples_every_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Interval 1 must sample every mutation without sampling reads."""
+    from chunkhound.providers.database import serial_executor
+
+    monkeypatch.setattr(serial_executor, "COMPACT_SAMPLE_INTERVAL", 1)
+
+    assert serial_executor._should_sample_auto_compaction("insert_file")
+    assert serial_executor._should_sample_auto_compaction("delete_file")
+    assert not serial_executor._should_sample_auto_compaction("search_regex")
+
+
 class TestAutoCompactionMaintenance:
     """Auto-compaction stays active during normal operations via random sampling."""
+
+    def test_compaction_busy_connect_is_not_logged_as_generic_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Expected compaction-busy connects should only emit the specific info log."""
+        provider = DuckDBProvider(
+            db_path=tmp_path / "busy_connect.duckdb",
+            base_directory=tmp_path,
+        )
+        provider._executor.set_compaction_in_progress(True)
+        buf = io.StringIO()
+        sink_id = logger.add(buf, level="INFO")
+
+        try:
+            with pytest.raises(DatabaseCompactionInProgressError):
+                provider.connect()
+        finally:
+            provider._executor.set_compaction_in_progress(False)
+            logger.remove(sink_id)
+
+        out = buf.getvalue()
+        assert "Database compaction in progress — refusing connection" in out
+        assert "DuckDB connection failed" not in out
+
+    def test_unexpected_connect_failure_is_still_logged_as_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unexpected connect failures must stay visible in error logs."""
+        provider = DuckDBProvider(
+            db_path=tmp_path / "connect_error.duckdb",
+            base_directory=tmp_path,
+        )
+        monkeypatch.setattr(
+            provider._connection_manager,
+            "connect",
+            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        buf = io.StringIO()
+        sink_id = logger.add(buf, level="ERROR")
+
+        try:
+            with pytest.raises(RuntimeError, match="boom"):
+                provider.connect()
+        finally:
+            logger.remove(sink_id)
+
+        assert "DuckDB connection failed: boom" in buf.getvalue()
 
     def test_dispatch_layer_triggers_compact_if_needed(
         self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
@@ -2349,3 +2795,62 @@ def test_live_file_is_valid_after_compaction(populated_db: DuckDBProvider) -> No
     remaining_indexes = _fetch_index_names(db_path)
     assert "idx_files_path" in remaining_indexes
     assert "idx_chunks_file_id" in remaining_indexes
+
+
+# ── SQL safety helpers (schema_constants) ────────────────────────────────
+
+
+class TestAssertAllowedIdentifier:
+    """_assert_allowed_identifier accepts only allowlisted identifiers."""
+
+    def test_valid_catalog_passes(self) -> None:
+        """Known catalogs do not raise."""
+        _assert_allowed_identifier("main", {"main", "src"}, "catalog")
+        _assert_allowed_identifier("src", {"main", "src"}, "catalog")
+
+    def test_valid_schema_passes(self) -> None:
+        """Known schemas do not raise."""
+        _assert_allowed_identifier("main", {"main"}, "schema")
+
+    def test_invalid_catalog_raises_value_error(self) -> None:
+        """Unknown catalog raises ValueError with the invalid value."""
+        with pytest.raises(ValueError, match="Invalid catalog 'archive'"):
+            _assert_allowed_identifier("archive", {"main", "src"}, "catalog")
+
+    def test_invalid_schema_raises_value_error(self) -> None:
+        """Unknown schema raises ValueError with the invalid value."""
+        with pytest.raises(ValueError, match="Invalid schema 'public'"):
+            _assert_allowed_identifier("public", {"main"}, "schema")
+
+    def test_sql_metacharacters_are_rejected(self) -> None:
+        """Injection payloads cannot pass the allowlist."""
+        with pytest.raises(ValueError):
+            _assert_allowed_identifier("'; DROP TABLE files; --", {"main"}, "schema")
+
+
+class TestIsHnswIndex:
+    """is_hnsw_index detects HNSW indexes from DDL and naming conventions."""
+
+    def test_ddl_with_using_hnsw(self) -> None:
+        """CREATE INDEX ... USING HNSW is detected regardless of index name."""
+        assert is_hnsw_index("alt_live_idx", "CREATE INDEX alt_live_idx ON t USING HNSW (col)") is True
+
+    def test_ddl_case_insensitive(self) -> None:
+        """USING HNSW detection is case-insensitive."""
+        assert is_hnsw_index("idx", "CREATE INDEX idx ON t using hnsw (col)") is True
+
+    def test_canonical_name_prefix_hnsw(self) -> None:
+        """Index name starting with hnsw_ is detected."""
+        assert is_hnsw_index("hnsw_384", None) is True
+
+    def test_canonical_name_prefix_idx_hnsw(self) -> None:
+        """Index name starting with idx_hnsw_ is detected."""
+        assert is_hnsw_index("idx_hnsw_3", None) is True
+
+    def test_non_hnsw_name_without_ddl(self) -> None:
+        """Non-HNSW name with no DDL returns False."""
+        assert is_hnsw_index("idx_embeddings_384_chunk_id", None) is False
+
+    def test_non_hnsw_name_with_unrelated_ddl(self) -> None:
+        """Non-HNSW name with non-HNSW DDL returns False."""
+        assert is_hnsw_index("some_idx", "CREATE INDEX some_idx ON t (col)") is False

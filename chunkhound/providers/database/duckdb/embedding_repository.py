@@ -12,9 +12,12 @@ from chunkhound.providers.database.duckdb.connection_manager import (
 from chunkhound.providers.database.duckdb.schema_constants import (
     _create_embedding_table_sql,
     _embedding_chunk_id_index_name,
+    _embedding_indexes_where_clause,
     _embedding_provider_model_index_name,
     _embedding_table_name,
     _embedding_unique_index_name,
+    fallback_embedding_tables,
+    is_hnsw_index,
 )
 
 
@@ -121,24 +124,16 @@ class DuckDBEmbeddingRepository:
         """Quote a DuckDB identifier safely."""
         return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
 
-    @staticmethod
-    def _is_hnsw_index(index_name: str, create_sql: str | None) -> bool:
-        """Return True when the index metadata describes an HNSW index."""
-        if create_sql and "USING HNSW" in create_sql.upper():
-            return True
-        return index_name.startswith("hnsw_") or index_name.startswith("idx_hnsw_")
-
     def _fallback_index_exists(
         self, conn: Any, table_name: str, index_name: str
     ) -> bool:
         """Return True when one named index exists on the fallback table."""
         result = conn.execute(
-            """
-            SELECT 1
-            FROM duckdb_indexes()
-            WHERE table_name = ? AND index_name = ?
-            LIMIT 1
-            """,
+            "SELECT 1 "
+            "FROM duckdb_indexes() "
+            f"WHERE {_embedding_indexes_where_clause()} "
+            "AND table_name = ? AND index_name = ? "
+            "LIMIT 1",
             [table_name, index_name],
         ).fetchone()
         return result is not None
@@ -148,17 +143,16 @@ class DuckDBEmbeddingRepository:
     ) -> list[dict[str, str | None]]:
         """Discover exact HNSW index identity for a fallback embedding table."""
         rows = conn.execute(
-            """
-            SELECT index_name, sql
-            FROM duckdb_indexes()
-            WHERE table_name = ?
-            ORDER BY index_name
-            """,
+            "SELECT index_name, sql "
+            "FROM duckdb_indexes() "
+            f"WHERE {_embedding_indexes_where_clause()} "
+            "AND table_name = ? "
+            "ORDER BY index_name",
             [table_name],
         ).fetchall()
         indexes: list[dict[str, str | None]] = []
         for index_name, create_sql in rows:
-            if not self._is_hnsw_index(index_name, create_sql):
+            if not is_hnsw_index(index_name, create_sql):
                 continue
             indexes.append({"index_name": index_name, "create_sql": create_sql})
         return indexes
@@ -644,12 +638,9 @@ class DuckDBEmbeddingRepository:
             if self._provider:
                 embedding_tables = self._provider._get_all_embedding_tables()
             else:
-                # Fallback for tests - query information_schema
-                tables = self.connection_manager.connection.execute("""
-                    SELECT table_name FROM information_schema.tables
-                    WHERE table_name LIKE 'embeddings_%'
-                """).fetchall()
-                embedding_tables = [table[0] for table in tables]
+                embedding_tables = fallback_embedding_tables(
+                    self.connection_manager.connection
+                )
 
             for table_name in embedding_tables:
                 result = self.connection_manager.connection.execute(
@@ -690,13 +681,9 @@ class DuckDBEmbeddingRepository:
             # Check all embedding tables since dimensions vary by model
             all_chunk_ids = set()
 
-            # Get all embedding tables
-            table_result = self.connection_manager.connection.execute("""
-                SELECT table_name FROM information_schema.tables 
-                WHERE table_name LIKE 'embeddings_%'
-            """).fetchall()
-
-            for (table_name,) in table_result:
+            for table_name in fallback_embedding_tables(
+                self.connection_manager.connection
+            ):
                 # Create placeholders for IN clause
                 placeholders = ",".join("?" * len(chunk_ids))
                 params = chunk_ids + [provider, model]
@@ -727,12 +714,9 @@ class DuckDBEmbeddingRepository:
             if self._provider:
                 embedding_tables = self._provider._get_all_embedding_tables()
             else:
-                # Fallback for tests
-                tables = self.connection_manager.connection.execute("""
-                    SELECT table_name FROM information_schema.tables
-                    WHERE table_name LIKE 'embeddings_%'
-                """).fetchall()
-                embedding_tables = [table[0] for table in tables]
+                embedding_tables = fallback_embedding_tables(
+                    self.connection_manager.connection
+                )
 
             for table_name in embedding_tables:
                 self.connection_manager.connection.execute(

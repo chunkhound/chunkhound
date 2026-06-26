@@ -5,6 +5,10 @@ Used by duckdb_provider.py (create/migrate/compact) and
 embedding_repository.py (upsert fallback path).
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 # ── Schema version ──────────────────────────────────────────────────────
 
 _SCHEMA_VERSION_TABLE_COLUMNS: str = """\
@@ -49,6 +53,83 @@ _CHUNKS_TABLE_COLUMNS: str = """\
 
 
 # ── Embedding table helpers ─────────────────────────────────────────────
+
+# SIMILAR TO pattern for matching canonical embedding table names.
+# Only matches dimension-suffixed tables (embeddings_384) and excludes
+# non-canonical names like embeddings_backup or embeddings_staging.
+EMBEDDING_TABLE_SIMILAR_PATTERN = "embeddings_[0-9]+"
+_DUCKDB_DEFAULT_SCHEMA = "main"
+
+# Catalogs and schemas that the WHERE clause helpers accept.
+# Input validation prevents SQL injection from malformed identifiers.
+# If adding a new catalog or schema, add it here AND update the
+# docstring of _executor_get_existing_vector_indexes_from_catalog
+# in duckdb_provider.py to list valid catalogs explicitly.
+VALID_CATALOGS: set[str] = {"main", "src"}
+VALID_SCHEMAS: set[str] = {"main"}
+
+
+def _assert_allowed_identifier(value: str, allowed: set[str], kind: str) -> None:
+    """Raise ValueError when *value* is not in the *allowed* set."""
+    if value not in allowed:
+        raise ValueError(
+            f"Invalid {kind} {value!r}; expected one of {sorted(allowed)}"
+        )
+
+
+def _embedding_tables_where_clause(
+    *,
+    catalog: str | None = None,
+    schema: str = _DUCKDB_DEFAULT_SCHEMA,
+) -> str:
+    """Return the shared information_schema filter for embedding tables."""
+    _assert_allowed_identifier(schema, VALID_SCHEMAS, "schema")
+    filters = [f"table_schema = '{schema}'"]
+    if catalog is not None:
+        _assert_allowed_identifier(catalog, VALID_CATALOGS, "catalog")
+        filters.append(f"table_catalog = '{catalog}'")
+    filters.append(
+        f"table_name SIMILAR TO '{EMBEDDING_TABLE_SIMILAR_PATTERN}'"
+    )
+    return " AND ".join(filters)
+
+
+def _embedding_indexes_where_clause(
+    *,
+    catalog: str | None = None,
+    schema: str = _DUCKDB_DEFAULT_SCHEMA,
+) -> str:
+    """Return the shared duckdb_indexes() scope for embedding tables."""
+    _assert_allowed_identifier(schema, VALID_SCHEMAS, "schema")
+    filters = [f"schema_name = '{schema}'"]
+    if catalog is not None:
+        _assert_allowed_identifier(catalog, VALID_CATALOGS, "catalog")
+        filters.append(f"database_name = '{catalog}'")
+    filters.append(f"table_name SIMILAR TO '{EMBEDDING_TABLE_SIMILAR_PATTERN}'")
+    return " AND ".join(filters)
+
+
+def is_hnsw_index(index_name: str, create_sql: str | None) -> bool:
+    """Return True when index metadata describes an HNSW index.
+
+    Checks ``USING HNSW`` in the DDL first (handles custom-named indexes
+    like ``alt_live_idx``), then falls back to canonical name prefixes.
+    """
+    if create_sql and "USING HNSW" in create_sql.upper():
+        return True
+    return index_name.startswith("hnsw_") or index_name.startswith("idx_hnsw_")
+
+
+def fallback_embedding_tables(connection: Any) -> list[str]:
+    """Discover embedding tables from the default catalog/schema.
+
+    Used as a fallback when the provider is not available (e.g. tests).
+    """
+    rows = connection.execute(
+        "SELECT table_name FROM information_schema.tables "
+        f"WHERE {_embedding_tables_where_clause()}"
+    ).fetchall()
+    return [str(row[0]) for row in rows]
 
 
 def _embedding_table_name(dims: int) -> str:

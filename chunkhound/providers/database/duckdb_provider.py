@@ -44,6 +44,7 @@ from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
 from chunkhound.providers.database.serial_executor import (
+    DatabaseCompactionInProgressError,
     _executor_local,
 )
 from chunkhound.utils.windows_constants import (
@@ -88,11 +89,15 @@ from chunkhound.providers.database.duckdb.schema_constants import (
     _embedding_chunk_id_index_name,
     _embedding_dims_from_table_name,
     _embedding_hnsw_index_name,
+    _embedding_indexes_where_clause,
     _embedding_provider_model_index_name,
     _embedding_table_columns,
     _embedding_table_name,
+    _embedding_tables_where_clause,
     _embedding_unique_index_name,
     _embeddings_column_names,
+    VALID_CATALOGS,
+    is_hnsw_index,
 )
 
 
@@ -341,6 +346,20 @@ class DuckDBProvider(SerialDatabaseProvider):
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         try:
+            # Fast-fail if compaction owns the database — connection_manager's
+            # recovery path would otherwise undo the in-progress compaction.
+            # Must be checked BEFORE _connection_manager.connect() which also
+            # runs recovery.
+            if self._executor.is_compaction_in_progress():
+                logger.info(
+                    "Database compaction in progress — refusing connection "
+                    "until compaction completes"
+                )
+                raise DatabaseCompactionInProgressError(
+                    "Database compaction in progress — connection refused until "
+                    "compaction completes"
+                )
+
             # Validate stored indexed-root identity before any file-backed DB
             # open, WAL replay, extension load, or schema touch happens.
             self.ensure_indexed_root_identity(
@@ -354,6 +373,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Call parent connect which handles executor initialization
             super().connect()
 
+        except DatabaseCompactionInProgressError:
+            raise
         except Exception as e:
             logger.error(f"DuckDB connection failed: {e}")
             raise
@@ -696,7 +717,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Return the global max embedding id across all embeddings_* tables."""
         rows = conn.execute(
             "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema='main' AND table_name LIKE 'embeddings_%'"
+            f"WHERE {_embedding_tables_where_clause()}"
         ).fetchall()
         max_id = 0
         for (table_name,) in rows:
@@ -736,12 +757,11 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> bool:
         """Return True when duckdb_indexes() reports the named index."""
         result = conn.execute(
-            """
-            SELECT 1
-            FROM duckdb_indexes()
-            WHERE table_name = ? AND index_name = ?
-            LIMIT 1
-            """,
+            "SELECT 1 "
+            "FROM duckdb_indexes() "
+            f"WHERE {_embedding_indexes_where_clause()} "
+            "AND table_name = ? AND index_name = ? "
+            "LIMIT 1",
             [table_name, index_name],
         ).fetchone()
         return result is not None
@@ -1198,17 +1218,18 @@ class DuckDBProvider(SerialDatabaseProvider):
             escaped_backup = str(backup_path).replace("'", "''")
             tgt_conn.execute(f"ATTACH '{escaped_backup}' AS src")
 
-            # Check whether the original DB had any HNSW indexes. Compaction
-            # only rebuilds HNSW if the original had one — this prevents HNSW
-            # from being wrongly created mid-pipeline between the batch CLI
-            # bookends (drop_all → … → ensure_all).
-            # Use _is_hnsw_index_definition (via the catalog-aware helper)
-            # instead of name-pattern matching to handle custom HNSW names.
-            had_hnsw = len(
-                self._executor_get_existing_vector_indexes_from_catalog(
-                    tgt_conn, catalog="src"
+            # Check whether the source catalog already had HNSW indexes.
+            # Compaction only restores HNSW when the pre-compaction source DB
+            # had one, so a false negative here would silently degrade search.
+            # Treat source-catalog discovery as fatal instead of best-effort.
+            had_hnsw = (
+                len(
+                    self._executor_get_existing_vector_indexes_from_catalog(
+                        tgt_conn, catalog="src", fail_on_error=True
+                    )
                 )
-            ) > 0
+                > 0
+            )
 
             tgt_conn.execute(
                 f"CREATE TABLE schema_version ({_SCHEMA_VERSION_TABLE_COLUMNS})"
@@ -1229,23 +1250,24 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             emb_tables = tgt_conn.execute(
                 "SELECT table_name FROM information_schema.tables "
-                "WHERE table_catalog='src' AND table_name LIKE 'embeddings_%%'"
+                f"WHERE {_embedding_tables_where_clause(catalog='src')}"
             ).fetchall()
 
             for (tname,) in emb_tables:
+                qtname = self._quote_duckdb_identifier(tname)
                 dims = _embedding_dims_from_table_name(tname)
                 if dims is None:
                     tgt_conn.execute(
-                        f"CREATE TABLE {tname} AS SELECT * FROM src.{tname} LIMIT 0"
+                        f"CREATE TABLE {qtname} AS SELECT * FROM src.{qtname} LIMIT 0"
                     )
-                    tgt_conn.execute(f"INSERT INTO {tname} SELECT * FROM src.{tname}")
+                    tgt_conn.execute(f"INSERT INTO {qtname} SELECT * FROM src.{qtname}")
                 else:
                     tgt_conn.execute(
-                        f"CREATE TABLE {tname} ({_embedding_table_columns(dims)})"
+                        f"CREATE TABLE {qtname} ({_embedding_table_columns(dims)})"
                     )
                     elist = ", ".join(_embeddings_column_names(dims))
                     tgt_conn.execute(
-                        f"INSERT INTO {tname} ({elist}) SELECT {elist} FROM src.{tname}"
+                        f"INSERT INTO {qtname} ({elist}) SELECT {elist} FROM src.{qtname}"
                     )
 
             known = {"schema_version", "files", "chunks"}
@@ -1596,12 +1618,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             embedding_dims: list[int] = []
             for (table_name,) in conn.execute(
-                """
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema = 'main' AND table_name LIKE 'embeddings_%'
-                ORDER BY table_name
-                """
+                "SELECT table_name FROM information_schema.tables "
+                f"WHERE {_embedding_tables_where_clause()} "
+                "ORDER BY table_name"
             ).fetchall():
                 dims = _embedding_dims_from_table_name(table_name)
                 if dims is not None:
@@ -1712,12 +1731,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS skip_reason TEXT")
 
             for (table_name,) in conn.execute(
-                """
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_name LIKE 'embeddings_%'
-                ORDER BY table_name
-                """
+                "SELECT table_name FROM information_schema.tables "
+                f"WHERE {_embedding_tables_where_clause()} "
+                "ORDER BY table_name"
             ).fetchall():
                 dims = _embedding_dims_from_table_name(table_name)
                 if dims is None:
@@ -1759,10 +1775,10 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any]
     ) -> list[str]:
         """Executor method for _get_all_embedding_tables - runs in DB thread."""
-        tables = conn.execute("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_name LIKE 'embeddings_%'
-        """).fetchall()
+        tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            f"WHERE {_embedding_tables_where_clause()}"
+        ).fetchall()
 
         return [table[0] for table in tables]
 
@@ -2061,14 +2077,6 @@ class DuckDBProvider(SerialDatabaseProvider):
             f"{normalized_metric}"
         )
 
-    def _is_hnsw_index_definition(
-        self, index_name: str, create_sql: str | None
-    ) -> bool:
-        """Return True when duckdb_indexes() describes an HNSW index."""
-        if create_sql and "USING HNSW" in create_sql.upper():
-            return True
-        return index_name.startswith("hnsw_") or index_name.startswith("idx_hnsw_")
-
     def _extract_hnsw_metric(self, create_sql: str | None) -> str:
         """Best-effort metric extraction from a DuckDB HNSW CREATE INDEX statement."""
         if not create_sql:
@@ -2126,18 +2134,18 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> list[dict[str, Any]]:
         """Executor method for get_existing_vector_indexes - runs in DB thread."""
         try:
-            results = conn.execute("""
-                SELECT index_name, table_name, sql
-                FROM duckdb_indexes()
-                WHERE table_name LIKE 'embeddings_%'
-            """).fetchall()
+            results = conn.execute(
+                "SELECT index_name, table_name, sql "
+                "FROM duckdb_indexes() "
+                f"WHERE {_embedding_indexes_where_clause()}"
+            ).fetchall()
 
             indexes = []
             for result in results:
                 index_name = result[0]
                 table_name = result[1]
                 create_sql = result[2]
-                if not self._is_hnsw_index_definition(index_name, create_sql):
+                if not is_hnsw_index(index_name, create_sql):
                     continue
 
                 dims = _embedding_dims_from_table_name(table_name)
@@ -2173,24 +2181,33 @@ class DuckDBProvider(SerialDatabaseProvider):
             return []
 
     def _executor_get_existing_vector_indexes_from_catalog(
-        self, conn: Any, catalog: str = "main"
+        self,
+        conn: Any,
+        catalog: str = "main",
+        *,
+        fail_on_error: bool = False,
     ) -> list[dict[str, Any]]:
-        """Return HNSW vector indexes from a specific catalog (e.g. "main" or "src").
+        """Return HNSW vector indexes from one DuckDB catalog.
 
-        During compaction the source database is ATTACHed as catalog "src",
-        and its indexes must be discovered by filtering on ``database_name``.
-        Returns the same list-of-dicts shape as
-        ``_executor_get_existing_vector_indexes`` but for an arbitrary
-        attached catalog.
+        ``catalog='src'`` is used during compaction after ATTACHing the
+        pre-compaction database. Most callers want best-effort discovery and
+        can fall back to ``[]`` on catalog issues. Compaction cannot: a false
+        negative would skip HNSW restoration, so it passes
+        ``fail_on_error=True``.
+
+        Valid catalogs: ``main``, ``src``, defined in ``VALID_CATALOGS`` in
+        ``schema_constants.py``. If adding a new catalog, add it to that set.
         """
+        if catalog not in VALID_CATALOGS:
+            raise ValueError(
+                f"Invalid catalog name {catalog!r}; "
+                f"expected one of {sorted(VALID_CATALOGS)}"
+            )
         try:
             results = conn.execute(
-                f"""
-                SELECT index_name, table_name, sql
-                FROM duckdb_indexes()
-                WHERE database_name = '{catalog}'
-                  AND table_name LIKE 'embeddings_%%'
-                """
+                "SELECT index_name, table_name, sql "
+                "FROM duckdb_indexes() "
+                f"WHERE {_embedding_indexes_where_clause(catalog=catalog)}"
             ).fetchall()
 
             indexes = []
@@ -2198,7 +2215,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 index_name = result[0]
                 table_name = result[1]
                 create_sql = result[2]
-                if not self._is_hnsw_index_definition(index_name, create_sql):
+                if not is_hnsw_index(index_name, create_sql):
                     continue
 
                 dims = _embedding_dims_from_table_name(table_name)
@@ -2229,9 +2246,10 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             return indexes
         except Exception as e:
-            logger.error(
-                f"Failed to get existing vector indexes from catalog {catalog}: {e}"
-            )
+            msg = f"Failed to get existing vector indexes from catalog {catalog}: {e}"
+            if fail_on_error:
+                raise RuntimeError(msg) from e
+            logger.error(msg)
             return []
 
     def _executor_drop_vector_index_by_name(self, conn: Any, index_name: str) -> None:
@@ -2240,42 +2258,43 @@ class DuckDBProvider(SerialDatabaseProvider):
             f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(index_name)}"
         )
 
-    def _executor_hnsw_index_exists(
-        self, conn: Any, table_name: str
-    ) -> bool:
-        """Return True when any HNSW index exists on the given table."""
-        result = conn.execute(
-            """
-            SELECT 1 FROM duckdb_indexes()
-            WHERE table_name = ?
-              AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
-            LIMIT 1
-            """,
-            [table_name],
-        ).fetchone()
-        return result is not None
+    def _executor_hnsw_index_exists(self, conn: Any, table_name: str) -> bool:
+        """Return True when any HNSW index exists on the given table.
 
-    def _executor_drop_all_hnsw_indexes(
-        self, conn: Any, state: dict[str, Any]
-    ) -> None:
-        """Drop every HNSW index on all embedding tables."""
-        tables = conn.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_name LIKE 'embeddings_%'"
+        Uses ``is_hnsw_index()`` instead of name-pattern matching so that
+        custom-named HNSW indexes (e.g. ``alt_live_idx ON embeddings_3 USING HNSW``)
+        are correctly identified.
+        """
+        results = conn.execute(
+            "SELECT index_name, sql "
+            "FROM duckdb_indexes() "
+            f"WHERE {_embedding_indexes_where_clause()} "
+            "AND table_name = ?",
+            [table_name],
         ).fetchall()
+        for row in results:
+            idx_name = row[0]
+            create_sql = row[1]
+            if is_hnsw_index(idx_name, create_sql):
+                return True
+        return False
+
+    def _executor_drop_all_hnsw_indexes(self, conn: Any, state: dict[str, Any]) -> None:
+        """Drop every HNSW index on all embedding tables.
+
+        Uses catalog-based detection (reuses ``_executor_get_existing_vector_indexes``)
+        so custom-named HNSW indexes are properly dropped.  Previously the name-pattern
+        filter (``LIKE 'hnsw_%'``) missed indexes like ``alt_live_idx`` that use
+        ``USING HNSW``.
+        """
+        indexes = self._executor_get_existing_vector_indexes(conn, state)
         dropped = 0
-        for (table_name,) in tables:
-            indexes = conn.execute(
-                "SELECT index_name FROM duckdb_indexes() "
-                "WHERE table_name = ? "
-                "AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')",
-                [table_name],
-            ).fetchall()
-            for (index_name,) in indexes:
-                conn.execute(
-                    f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(index_name)}"
-                )
-                dropped += 1
+        for idx in indexes:
+            idx_name = str(idx["index_name"])
+            conn.execute(
+                f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(idx_name)}"
+            )
+            dropped += 1
         if dropped:
             logger.info(f"Dropped {dropped} HNSW index(es) before bulk indexing")
 
@@ -2285,7 +2304,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Create canonical HNSW indexes on all embedding tables that have data."""
         tables = conn.execute(
             "SELECT table_name FROM information_schema.tables "
-            "WHERE table_name LIKE 'embeddings_%'"
+            f"WHERE {_embedding_tables_where_clause()}"
         ).fetchall()
         created = 0
         for (table_name,) in tables:

@@ -95,9 +95,15 @@ class DuckDBConnectionManager:
 
             # Connect to database with WAL validation
             # Thread safety is now handled by DuckDBProvider's executor pattern
-            self._recover_interrupted_compaction()
+            # Gate recovery on read-only mode — a read-only observer must never
+            # mutate compaction artifacts or attempt WAL replay.
             if not self._read_only:
+                self._recover_interrupted_compaction()
                 self._preemptive_wal_cleanup()
+            else:
+                logger.debug(
+                    "Read-only mode — skipping compaction recovery and WAL cleanup"
+                )
             self._connect_with_wal_validation()
 
             logger.info("DuckDB connection established")
