@@ -853,31 +853,40 @@ class OpenAIEmbeddingProvider:
             self._client = None
         logger.info("OpenAI embedding provider shutdown")
 
+    def _endpoint_requires_api_key(self) -> bool:
+        """Return True when the endpoint type mandates an API key.
+
+        Azure and official OpenAI endpoints require authentication;
+        custom OpenAI-compatible endpoints (Ollama, vLLM, etc.) do not.
+        """
+        return is_azure_openai_endpoint(self._azure_endpoint) or is_official_openai_endpoint(
+            self._base_url
+        )
+
     def is_available(self) -> bool:
         """Check if the provider is available and properly configured."""
         if not OPENAI_AVAILABLE:
             return False
-
-        # Azure OpenAI always requires API key and api_version
+        if not self._endpoint_requires_api_key():
+            return True
         if is_azure_openai_endpoint(self._azure_endpoint):
             return self._api_key is not None and self._api_version is not None
-
-        # Import the utility function (following existing pattern)
-        from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
-
-        # Use the same logic as _ensure_client() and config validation
-        if is_official_openai_endpoint(self._base_url):
-            return self._api_key is not None
-        else:
-            # Custom endpoints don't require API key
-            return True
+        return self._api_key is not None
 
     async def health_check(self) -> dict[str, Any]:
         """Perform health check and return status information."""
+        auth_required = self._endpoint_requires_api_key()
+        auth_configured = True
+        if auth_required:
+            auth_configured = self._api_key is not None
+            if is_azure_openai_endpoint(self._azure_endpoint):
+                auth_configured = auth_configured and self._api_version is not None
         status: dict[str, Any] = {
             "provider": self.name,
             "model": self.model,
             "available": self.is_available(),
+            "authentication_required": auth_required,
+            "authentication_configured": auth_configured,
             "api_key_configured": self._api_key is not None,
             "client_initialized": self._client is not None,
             "errors": [],
@@ -886,10 +895,10 @@ class OpenAIEmbeddingProvider:
         if not self.is_available():
             if not OPENAI_AVAILABLE:
                 status["errors"].append("OpenAI package not installed")
-            if not self._api_key:
+            if auth_required and not self._api_key:
                 status["errors"].append("API key not configured")
-            if not self._client:
-                status["errors"].append("Client not initialized")
+            if is_azure_openai_endpoint(self._azure_endpoint) and not self._api_version:
+                status["errors"].append("API version not configured")
             return status
 
         try:
@@ -1343,27 +1352,26 @@ class OpenAIEmbeddingProvider:
         return 8191  # Default OpenAI limit
 
     async def validate_api_key(self) -> bool:
-        """Validate API key with the service."""
-        if not self._api_key:
-            return False
-
-        await self._ensure_client()
-        if not self._client:
+        """Validate connectivity (and API key where required) with the service."""
+        if self._endpoint_requires_api_key() and not self._api_key:
             return False
 
         try:
+            await self._ensure_client()
+            if not self._client:
+                return False
             response = await self._client.embeddings.create(
                 **self._build_embedding_request_kwargs(["test"], 5)
             )
             return self._validation_probe_matches_runtime_contract(response)
         except EmbeddingDimensionError as e:
-            logger.error(f"API key validation failed (dimension mismatch): {e}")
+            logger.error(f"OpenAI embedding validation failed (dimension mismatch): {e}")
             return False
         except EmbeddingConfigurationError as e:
-            logger.error(f"API key validation failed (configuration error): {e}")
+            logger.error(f"OpenAI embedding validation failed (configuration error): {e}")
             return False
         except Exception as e:
-            logger.error(f"API key validation failed: {e}")
+            logger.error(f"OpenAI embedding validation failed: {e}")
             return False
 
     def get_rate_limits(self) -> dict[str, Any]:

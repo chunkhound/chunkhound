@@ -801,10 +801,65 @@ class TestOpenAIProviderRuntimeBehavior:
 
     @pytest.mark.asyncio
     async def test_validate_api_key_returns_false_without_api_key(self):
-        """Missing API key is a silent False, not an exception."""
+        """Official OpenAI validation without a key is a silent False."""
         provider, _, _ = _bare_provider()
         provider._api_key = None
         assert await provider.validate_api_key() is False
+
+    @pytest.mark.asyncio
+    async def test_azure_endpoint_validate_api_key_rejects_missing_key(self):
+        """Azure OpenAI validation without a key is a silent False."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key=None,
+            azure_endpoint="https://my-resource.openai.azure.com",
+            model="text-embedding-3-small",
+        )
+        provider._ensure_client = AsyncMock()
+
+        assert await provider.validate_api_key() is False
+
+    @pytest.mark.asyncio
+    async def test_azure_endpoint_validate_api_key_rejects_missing_api_version(self):
+        """Azure OpenAI validation without an API version is a silent False."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="az-key",
+            azure_endpoint="https://my-resource.openai.azure.com",
+            api_version=None,
+            model="text-embedding-3-small",
+        )
+
+        assert await provider.validate_api_key() is False
+
+    @pytest.mark.asyncio
+    async def test_custom_endpoint_validate_api_key_without_truncation_settings(self):
+        """Custom endpoint validates connectivity with no truncation config."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key=None,
+            base_url="http://localhost:8000",
+            model="text-embedding-3-small",
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=768)
+        )
+        provider._ensure_client = AsyncMock()
+
+        assert provider.supported_dimensions == []
+        assert await provider.validate_api_key() is True
+        assert provider.native_dims == 768
+        assert list(provider.supported_dimensions) == [768]
 
     @pytest.mark.asyncio
     async def test_unknown_model_validate_api_key_discovers_runtime_dims(self):

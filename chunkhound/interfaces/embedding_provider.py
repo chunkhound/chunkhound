@@ -363,7 +363,7 @@ class APIEmbeddingProvider(EmbeddingProvider, Protocol):
         ...
 
     async def validate_api_key(self) -> bool:
-        """Validate API key with the service."""
+        """Validate connectivity (and API key where required) with the service."""
         ...
 
     def get_rate_limits(self) -> dict[str, Any]:
