@@ -738,11 +738,13 @@ class TestVoyageOutputDimsRuntimeBehavior:
             return_value=_FakeEmbedResult([[3.0, 4.0, 5.0]], total_tokens=3)
         )
 
+        assert p.supported_dimensions == []
         result = await p.embed(["hello"])
 
         assert len(result[0]) == 2
         assert p.native_dims == 3
         assert p.dims == 2
+        assert list(p.supported_dimensions) == [1, 2, 3]
         assert math.sqrt(sum(x * x for x in result[0])) == pytest.approx(1.0)
 
     @pytest.mark.asyncio

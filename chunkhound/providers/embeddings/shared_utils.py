@@ -1,5 +1,6 @@
 """Shared utilities for embedding providers."""
 
+from collections.abc import Sequence
 from typing import Any
 
 from chunkhound.core.exceptions.embedding import (
@@ -12,8 +13,8 @@ from chunkhound.core.utils.token_utils import LLM_CHARS_PER_TOKEN
 def chunk_text_by_words(text: str, max_tokens: int) -> list[str]:
     """Split text into chunks by approximate token count using word splitting."""
     words = text.split()
-    chunks = []
-    current_chunk = []
+    chunks: list[str] = []
+    current_chunk: list[str] = []
     current_tokens = 0
 
     for word in words:
@@ -37,7 +38,7 @@ def validate_text_input(texts: list[str]) -> list[str]:
     if not texts:
         return []
 
-    validated = []
+    validated: list[str] = []
     for text in texts:
         if not isinstance(text, str):
             raise ValueError(f"Text must be string, got {type(text)}")
@@ -127,6 +128,26 @@ def build_dimension_request_param(
     if output_dims is not None and not client_side_truncation:
         return output_dims
     return None
+
+
+def build_runtime_supported_dimensions(
+    native_dims: int | None,
+    client_side_truncation: bool,
+) -> Sequence[int]:
+    """Return supported dims for runtime-discovered models/endpoints.
+
+    When the client truncates, all dimensions up to native are valid
+    (``range(1, native_dims + 1)``).  When the server truncates or no
+    truncation is active, only the native dimension is valid.
+
+    Runtime-discovered models assume ``min_dims=1`` (every dimension
+    from 1 to native is reachable via client-side truncation).
+    """
+    if native_dims is None:
+        return []
+    if client_side_truncation:
+        return range(1, native_dims + 1)
+    return [native_dims]
 
 
 def validate_positive_output_dims(

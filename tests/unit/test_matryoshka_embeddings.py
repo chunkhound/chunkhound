@@ -665,7 +665,7 @@ class TestOpenAIProviderRuntimeBehavior:
 
     @pytest.mark.asyncio
     async def test_known_model_on_custom_endpoint_discovers_runtime_native_dims(self):
-        """Custom endpoints must not keep official dims metadata for known names."""
+        """Client truncation should expose runtime-supported dims after discovery."""
         from chunkhound.providers.embeddings.openai_provider import (
             OpenAIEmbeddingProvider,
         )
@@ -675,17 +675,18 @@ class TestOpenAIProviderRuntimeBehavior:
             base_url="http://localhost:8000",
             model="text-embedding-3-small",
             client_side_truncation=True,
-            output_dims=256,
+            output_dims=2,
         )
         provider._client = MagicMock()
         provider._client.embeddings.create = AsyncMock(
-            return_value=_ok_response(dim=768)
+            return_value=_ok_response(dim=3)
         )
         provider._ensure_client = AsyncMock()
 
+        assert provider.supported_dimensions == []
         assert await provider.validate_api_key() is True
-        assert provider.native_dims == 768
-        assert provider.supported_dimensions == [768]
+        assert provider.native_dims == 3
+        assert list(provider.supported_dimensions) == [1, 2, 3]
 
     @pytest.mark.asyncio
     async def test_known_model_on_custom_endpoint_without_output_dims_trusts_runtime(self):
@@ -805,6 +806,30 @@ class TestOpenAIProviderRuntimeBehavior:
         provider, _, _ = _bare_provider()
         provider._api_key = None
         assert await provider.validate_api_key() is False
+
+    @pytest.mark.asyncio
+    async def test_custom_endpoint_validate_api_key_allows_missing_api_key(self):
+        """Custom OpenAI-compatible endpoints validate connectivity without a key."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key=None,
+            base_url="http://localhost:8000",
+            model="text-embedding-3-small",
+            output_dims=2,
+            client_side_truncation=True,
+        )
+        provider._client = MagicMock()
+        provider._client.embeddings.create = AsyncMock(
+            return_value=_ok_response(dim=3)
+        )
+        provider._ensure_client = AsyncMock()
+
+        assert provider.supported_dimensions == []
+        assert await provider.validate_api_key() is True
+        assert list(provider.supported_dimensions) == [1, 2, 3]
 
     @pytest.mark.asyncio
     async def test_azure_endpoint_validate_api_key_rejects_missing_key(self):
@@ -1311,6 +1336,28 @@ class TestSharedMatryoshkaUtils:
             client_side_truncation=True,
         )
         assert result is None
+
+    @pytest.mark.parametrize(
+        "native_dims,client_side_truncation,expected",
+        [
+            (None, False, []),
+            (None, True, []),
+            (768, False, [768]),
+            (768, True, list(range(1, 769))),
+            (1, True, [1]),
+            (3, True, [1, 2, 3]),
+        ],
+    )
+    def test_build_runtime_supported_dimensions(
+        self, native_dims, client_side_truncation, expected
+    ):
+        """Contract: client truncation → full range, server truncation → native only."""
+        from chunkhound.providers.embeddings.shared_utils import (
+            build_runtime_supported_dimensions,
+        )
+
+        result = build_runtime_supported_dimensions(native_dims, client_side_truncation)
+        assert list(result) == expected
 
 
 class TestValidateRuntimeOutputDimsConfig:

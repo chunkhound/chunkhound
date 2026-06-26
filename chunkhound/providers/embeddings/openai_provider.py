@@ -32,6 +32,7 @@ from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResu
 from chunkhound.providers.embeddings.shared_utils import (
     apply_client_side_truncation,
     build_dimension_request_param,
+    build_runtime_supported_dimensions,
     validate_embedding_dims,
     validate_runtime_output_dims_config,
 )
@@ -768,9 +769,10 @@ class OpenAIEmbeddingProvider:
                 native = cfg.get("native_dims", 1536)
                 return range(min_dims, native + 1)
             return [self.native_dims]
-        if self._discovered_native_dims is None:
-            return []
-        return [self._discovered_native_dims]
+        return build_runtime_supported_dimensions(
+            self._discovered_native_dims,
+            self._client_side_truncation,
+        )
 
     @property
     def output_dims(self) -> int | None:

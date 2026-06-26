@@ -24,11 +24,11 @@ from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResu
 from .shared_utils import (
     apply_client_side_truncation,
     build_dimension_request_param,
+    build_runtime_supported_dimensions,
     chunk_text_by_words,
     get_dimensions_for_model,
     get_usage_stats_dict,
     validate_embedding_dims,
-    validate_positive_output_dims,
     validate_runtime_output_dims_config,
     validate_text_input,
 )
@@ -426,18 +426,20 @@ class VoyageAIEmbeddingProvider:
     def supported_dimensions(self) -> Sequence[int]:
         """Known-valid output dimensions for this model.
 
-        Unknown/custom Voyage-compatible models have no static whitelist, so we
-        only report runtime-discovered native dimensions after the provider has
-        observed a real API response.
+        Unknown/custom Voyage-compatible models have no static whitelist before
+        the first real API response. After runtime discovery, client-side
+        truncation exposes every dimension from 1..native_dims; otherwise only
+        the native dimension is valid.
 
         Use ``in`` for membership checks, not equality.
         """
         dims = self._model_config["dimensions"]
         if dims:
             return dims
-        if self._discovered_native_dims is None:
-            return []
-        return [self._discovered_native_dims]
+        return build_runtime_supported_dimensions(
+            self._discovered_native_dims,
+            self._client_side_truncation,
+        )
 
     @property
     def output_dims(self) -> int | None:
