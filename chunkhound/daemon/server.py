@@ -21,7 +21,7 @@ from typing import Any
 
 from chunkhound.core.config.config import Config
 from chunkhound.mcp_server.base import MCPServerBase
-from chunkhound.mcp_server.common import handle_tool_call
+from chunkhound.mcp_server.common import handle_tool_call, tool_call_failed
 from chunkhound.version import __version__
 
 from . import ipc
@@ -383,13 +383,14 @@ class ChunkHoundDaemon(MCPServerBase):
         text_contents = await handle_tool_call(
             tool_name=tool_name,
             arguments=arguments,
-            services=await self.ensure_tool_services(tool_name),
+            services=self.services,
             embedding_manager=self.embedding_manager,
             initialization_complete=self._initialization_complete,
             debug_mode=self.debug_mode,
             scan_progress=self._scan_progress,
             llm_manager=self.llm_manager,
             config=self.config,
+            ensure_services=self.ensure_tool_services,
         )
 
         content = [{"type": tc.type, "text": tc.text} for tc in text_contents]
@@ -397,7 +398,7 @@ class ChunkHoundDaemon(MCPServerBase):
         return {
             "jsonrpc": "2.0",
             "id": msg.get("id"),
-            "result": {"content": content, "isError": False},
+            "result": {"content": content, "isError": tool_call_failed(text_contents)},
         }
 
     # ------------------------------------------------------------------

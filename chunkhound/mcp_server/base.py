@@ -34,7 +34,7 @@ from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as EmbeddingProviderProtocol,
 )
 from chunkhound.llm_manager import LLMManager
-from chunkhound.mcp_server.tools import tool_requires_services
+from chunkhound.mcp_server.tools import tool_requires_db
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
 )
@@ -1191,7 +1191,7 @@ class MCPServerBase(ABC):
         """
         if not self.services:
             raise RuntimeError("Services not initialized. Call initialize() first.")
-        if tool_requires_services(tool_name):
+        if tool_requires_db(tool_name):
             await self._connect_provider()
         return self.services
 
@@ -1203,9 +1203,13 @@ class MCPServerBase(ABC):
 
         During DuckDB compaction the connection is temporarily closed
         (is_connected \u2192 False).  Non-DB tools (daemon_status, websearch,
-        git history diff search) are needlessly blocked by an eager
-        reconnect attempt that hits the compaction guard.  We silently
-        skip reconnect during compaction \u2014 _compact_finalize() restores
+        git history diff search) are handled by ensure_tool_services()
+        which skips reconnect for tools without *requires_db*.
+
+        For DB-backed tools the compaction guard in the provider raises
+        DatabaseCompactionInProgressError, which we re-raise so the
+        calling MCP tool handler returns an explicit error instead of
+        silently returning empty results.  _compact_finalize() restores
         the connection when compaction finishes.
         """
         if self.services.provider.is_connected:
@@ -1222,6 +1226,7 @@ class MCPServerBase(ABC):
                         "unavailable until compaction finishes. "
                         "Non-DB tools (daemon_status, websearch) are unaffected.",
                     )
+                    raise
 
     def ensure_embedding_manager(self) -> EmbeddingManager:
         """Ensure embedding manager is available and has providers.

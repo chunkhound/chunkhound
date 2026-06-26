@@ -93,20 +93,23 @@ class Tool:
     requires_embeddings: bool = False
     requires_llm: bool = False
     requires_reranker: bool = False
+    requires_db: bool = False
 
 
 # Tool registry - populated by @register_tool decorator
 TOOL_REGISTRY: dict[str, Tool] = {}
 
 
-def tool_requires_services(tool_name: str) -> bool:
+def tool_requires_db(tool_name: str) -> bool:
     """Return True when the tool implementation needs DB services.
 
     This is the daemon/session boundary: non-DB tools must not trigger
     provider reconnect/open work just because an MCP client called them.
     """
-    tool = TOOL_REGISTRY[tool_name]
-    return "services" in inspect.signature(tool.implementation).parameters
+    tool = TOOL_REGISTRY.get(tool_name)
+    if tool is None:
+        return True  # Conservative: assume DB needed for unknown tools
+    return tool.requires_db
 
 
 def _python_type_to_json_schema_type(type_hint: Any) -> dict[str, Any]:
@@ -309,6 +312,7 @@ def register_tool(
             requires_embeddings=requires_embeddings,
             requires_llm=requires_llm,
             requires_reranker=requires_reranker,
+            requires_db="services" in inspect.signature(func).parameters,
         )
 
         return func
