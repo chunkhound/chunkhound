@@ -26,6 +26,7 @@ from .lua import LuaMapping
 from .makefile import MakefileMapping
 from .markdown import MarkdownMapping
 from .matlab import MatlabMapping
+from .metal import MetalMapping
 from .objc import ObjCMapping
 from .pdf import PDFMapping
 from .php import PHPMapping
@@ -68,6 +69,7 @@ __all__ = [
     "MakefileMapping",
     "MarkdownMapping",
     "MatlabMapping",
+    "MetalMapping",
     "ObjCMapping",
     "PDFMapping",
     "PHPMapping",
