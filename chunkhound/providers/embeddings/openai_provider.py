@@ -34,6 +34,7 @@ from chunkhound.providers.embeddings.shared_utils import (
     build_dimension_request_param,
     build_runtime_supported_dimensions,
     validate_embedding_dims,
+    validate_positive_output_dims,
     validate_runtime_output_dims_config,
 )
 
@@ -1334,6 +1335,14 @@ class OpenAIEmbeddingProvider:
             # Reset client to force re-initialization with new base URL
             self._client = None
             self._client_initialized = False
+        if "output_dims" in kwargs:
+            self._output_dims = validate_positive_output_dims(
+                kwargs["output_dims"], model=self._model
+            )
+        if "client_side_truncation" in kwargs:
+            self._client_side_truncation = kwargs["client_side_truncation"]
+        if "output_dims" in kwargs or "client_side_truncation" in kwargs:
+            self._validate_output_dims_config()
 
     def get_supported_distances(self) -> list[str]:
         """Get list of supported distance metrics."""
