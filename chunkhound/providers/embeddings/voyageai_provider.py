@@ -773,12 +773,24 @@ class VoyageAIEmbeddingProvider:
         """Update provider configuration."""
         if "model" in kwargs:
             self._model = kwargs["model"]
+            self._is_known_model = self._model in VOYAGE_MODEL_CONFIG
+            self._model_config = VOYAGE_MODEL_CONFIG.get(
+                self._model, DEFAULT_UNKNOWN_MODEL_CONFIG
+            )
         if "rerank_model" in kwargs:
             self._rerank_model = kwargs["rerank_model"]
         if "batch_size" in kwargs:
             self._batch_size = kwargs["batch_size"]
         if "timeout" in kwargs:
             self._timeout = kwargs["timeout"]
+        if "output_dims" in kwargs:
+            self._output_dims = validate_positive_output_dims(
+                kwargs["output_dims"], model=self._model
+            )
+        if "client_side_truncation" in kwargs:
+            self._client_side_truncation = kwargs["client_side_truncation"]
+        if "model" in kwargs or "output_dims" in kwargs or "client_side_truncation" in kwargs:
+            self._validate_output_dims_config()
 
     def get_supported_distances(self) -> list[str]:
         """Get list of supported distance metrics."""
