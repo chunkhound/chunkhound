@@ -7,10 +7,10 @@ import random
 import re
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, TypedDict, cast
-from typing_extensions import NotRequired
 
 import httpx
 from loguru import logger
+from typing_extensions import NotRequired
 
 from chunkhound.core.config.embedding_config import (
     RERANK_BASE_URL_REQUIRED,
