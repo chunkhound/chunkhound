@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
 
 from chunkhound.core.config.research_config import ResearchConfig
-from chunkhound.services.research.shared.progress_mixin import ProgressEmitterMixin
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
@@ -52,6 +51,7 @@ from chunkhound.services.research.shared.models import (
     IMPORT_DEFAULT_SCORE,
     ResearchContext,
 )
+from chunkhound.services.research.shared.progress_mixin import ProgressEmitterMixin
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
 
 
@@ -176,7 +176,8 @@ class DepthExplorationService(ProgressEmitterMixin):
         )
         await self._emit_event(
             "gap_step",
-            f"Step 1.5.2: Generated {total_queries} queries across {len(exploration_queries)} files",
+            f"Step 1.5.2: Generated {total_queries} queries"
+            f" across {len(exploration_queries)} files",
             duration=perf_counter() - t,
         )
 
@@ -216,7 +217,8 @@ class DepthExplorationService(ProgressEmitterMixin):
         )
         await self._emit_event(
             "gap_step",
-            f"Step 1.5.4: Global dedup: {total_results} → {len(unified_exploration_chunks)} unique chunks",
+            f"Step 1.5.4: Global dedup: {total_results}"
+            f" → {len(unified_exploration_chunks)} unique chunks",
             duration=perf_counter() - t,
         )
 
@@ -233,7 +235,8 @@ class DepthExplorationService(ProgressEmitterMixin):
         )
         await self._emit_event(
             "gap_step",
-            f"Step 1.5.5: Final merge: {len(covered_chunks)} + {len(unified_exploration_chunks)} → {len(expanded_chunks)} total",
+            f"Step 1.5.5: Final merge: {len(covered_chunks)}"
+            f" + {len(unified_exploration_chunks)} → {len(expanded_chunks)} total",
             duration=perf_counter() - t,
         )
 
@@ -271,7 +274,8 @@ class DepthExplorationService(ProgressEmitterMixin):
         )
         await self._emit_event(
             "gap_step",
-            f"Depth exploration complete: +{total_added} chunks added ({len(expanded_chunks)} total)",
+            f"Depth exploration complete: +{total_added} chunks added"
+            f" ({len(expanded_chunks)} total)",
             duration=elapsed_total,
         )
 

@@ -12,7 +12,7 @@ class ProgressEmitterMixin:
     Requires the subclass to set self._progress in its __init__.
     """
 
-    _progress: "TreeProgressDisplay | None"
+    _progress: "TreeProgressDisplay | None" = None
 
     async def _emit_event(
         self,
