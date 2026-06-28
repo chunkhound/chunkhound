@@ -61,6 +61,7 @@ from chunkhound.services.research.shared.models import (
     IMPORT_DEFAULT_SCORE,
     ResearchContext,
 )
+from chunkhound.services.research.shared.progress_mixin import ProgressEmitterMixin
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
 
 # Token budget per gap detection cluster (affects LLM context size)
@@ -70,7 +71,7 @@ GAP_CLUSTER_TOKEN_BUDGET = 50_000
 KMEANS_N_INIT = 10
 
 
-class GapDetectionService:
+class GapDetectionService(ProgressEmitterMixin):
     """Service for detecting and filling semantic gaps in code coverage."""
 
     def __init__(
@@ -102,30 +103,6 @@ class GapDetectionService:
         self._import_context_service = import_context_service
         self._progress = progress
         self._unified_search = UnifiedSearch(db_services, embedding_manager, config)
-
-    async def _emit_event(
-        self,
-        event_type: str,
-        message: str,
-        depth: int = 2,
-        **metadata: Any,
-    ) -> None:
-        """Emit a progress event to the terminal display.
-
-        Args:
-            event_type: Event type identifier (e.g. "gap_step")
-            message: Human-readable description
-            depth: Tree indentation depth (2 = nested under Phase 2)
-            **metadata: Additional data (e.g. duration=0.62)
-        """
-        if not self._progress:
-            return
-        await self._progress.emit_event(
-            event_type=event_type,
-            message=message,
-            depth=depth,
-            metadata=metadata,
-        )
 
     async def detect_and_fill_gaps(
         self,

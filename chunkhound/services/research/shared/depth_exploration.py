@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
 
 from chunkhound.core.config.research_config import ResearchConfig
+from chunkhound.services.research.shared.progress_mixin import ProgressEmitterMixin
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
@@ -54,7 +55,7 @@ from chunkhound.services.research.shared.models import (
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
 
 
-class DepthExplorationService:
+class DepthExplorationService(ProgressEmitterMixin):
     """Service for exploring existing coverage from multiple angles.
 
     Unlike gap detection (which finds missing external references), depth
@@ -92,23 +93,6 @@ class DepthExplorationService:
         self._import_context_service = import_context_service
         self._progress = progress
         self._unified_search = UnifiedSearch(db_services, embedding_manager, config)
-
-    async def _emit_event(
-        self,
-        event_type: str,
-        message: str,
-        depth: int = 2,
-        **metadata: Any,
-    ) -> None:
-        """Emit a progress event to the terminal display."""
-        if not self._progress:
-            return
-        await self._progress.emit_event(
-            event_type=event_type,
-            message=message,
-            depth=depth,
-            metadata=metadata,
-        )
 
     async def explore_coverage_depth(
         self,
@@ -296,7 +280,7 @@ class DepthExplorationService:
             "queries_generated": total_queries,
             "exploration_chunks_found": total_results,
             "exploration_chunks_unique": len(unified_exploration_chunks),
-            "chunks_added": chunks_added,
+            "chunks_added": total_added,  # expansion chunks + import resolution chunks
             "import_chunks_added": import_chunks_added,
             "total_chunks": len(expanded_chunks),
             "query_generation_failures": generation_metrics.to_dict(),
