@@ -512,6 +512,7 @@ class TestParserLoading:
             Language.PDF: "hello world",
             Language.SWIFT: "struct Point { let x: Int; let y: Int }",
             Language.ELIXIR: "defmodule M do\n  def hello, do: :world\nend",
+            Language.RUBY: "module M\n  def hello\n    :world\n  end\nend",
         }
 
         factory = get_parser_factory()

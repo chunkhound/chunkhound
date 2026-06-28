@@ -183,6 +183,7 @@ class Language(Enum):
     SWIFT = "swift"
     DART = "dart"
     ELIXIR = "elixir"
+    RUBY = "ruby"
     LUA = "lua"
     TWINCAT = "twincat"
 
@@ -225,6 +226,8 @@ class Language(Enum):
             "gnumakefile": cls.MAKEFILE,
             "dockerfile": cls.TEXT,
             "jenkinsfile": cls.TEXT,
+            "gemfile": cls.RUBY,
+            "rakefile": cls.RUBY,
         }
 
         if basename in filename_map:
@@ -310,6 +313,9 @@ class Language(Enum):
             ".swiftinterface": cls.SWIFT,
             ".ex": cls.ELIXIR,
             ".exs": cls.ELIXIR,
+            ".rb": cls.RUBY,
+            ".rake": cls.RUBY,
+            ".gemspec": cls.RUBY,
             ".lua": cls.LUA,
             ".scss": cls.SCSS if SCSS_AVAILABLE else cls.TEXT,
             ".html": cls.HTML,
@@ -380,6 +386,7 @@ class Language(Enum):
             Language.SWIFT,
             Language.DART,
             Language.ELIXIR,
+            Language.RUBY,
             Language.LUA,
             Language.TWINCAT,
         }
@@ -405,6 +412,7 @@ class Language(Enum):
             Language.SVELTE,
             Language.SWIFT,
             Language.DART,
+            Language.RUBY,
         }
 
     @property
