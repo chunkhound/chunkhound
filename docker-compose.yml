@@ -18,9 +18,6 @@ x-chunkhound-common: &chunkhound-common
   env_file:
     - .env.docker
   environment:
-    # Replicas serve read-only search traffic.
-    CHUNKHOUND_DATABASE__COMPACTION_ENABLED: "false"
-    CHUNKHOUND_SKIP_INITIAL_SCAN: "true"
     # DuckDB reconstructs the persistent HNSW index into memory on first DB open
     # — CPU-intensive for large DBs (~2 min, 600-800% CPU for 3-5M vectors).
     CHUNKHOUND_DB_EXECUTE_TIMEOUT: "7200"
@@ -49,9 +46,10 @@ services:
   # file across containers would cause all but the first to fail at startup.
   # Run scripts/prepare-db-replicas.sh once to populate each replica directory.
   #
-  # NOTE: volumes are NOT :ro — DuckDB needs write access for WAL and lock files
-  # even during read-only queries. The source database is protected because
-  # replicas use independent copies, not the original.
+  # NOTE: volumes are mounted read-write so DuckDB can write the WAL/lock files
+  # it creates during normal open. With --read-only the lock is skipped, but the
+  # WAL must be absent (a pending WAL blocks read-only open). Replicas are safe
+  # because prepare-db-replicas.sh copies a clean DB without a WAL file.
 
   chunkhound-1:
     <<: *chunkhound-common

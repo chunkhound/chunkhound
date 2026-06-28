@@ -28,6 +28,7 @@ if [ -n "${CONFIG_FILE}" ]; then
 fi
 
 exec chunkhound mcp \
+    --read-only \
     --transport http \
     --port "${PORT:-8080}" \
     --host 0.0.0.0 \
