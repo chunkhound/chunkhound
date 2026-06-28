@@ -29,6 +29,7 @@ from .shared_utils import (
     get_dimensions_for_model,
     get_usage_stats_dict,
     validate_embedding_dims,
+    validate_positive_output_dims,
     validate_runtime_output_dims_config,
     validate_text_input,
 )
@@ -291,25 +292,9 @@ class VoyageAIEmbeddingProvider:
         self._rerank_batch_size = rerank_batch_size
         self._discovered_native_dims: int | None = None
 
-        # Known official models keep strict whitelist validation. Unknown/custom
-        # models accept any positive output_dims and validate against real runtime
-        # responses instead of the temporary 1024 introspection fallback.
-        output_dims = validate_runtime_output_dims_config(
-            output_dims,
-            client_side_truncation,
-            model=model,
-            context="client-side truncation",
-        )
-        if output_dims is not None and self._is_known_model:
-            default_dim = model_config.get("default_dimension", 1024)
-            supported = model_config.get("dimensions", [default_dim])
-            if output_dims not in supported:
-                raise EmbeddingConfigurationError(
-                    f"output_dims {output_dims} not in supported dimensions "
-                    f"{supported} for model {model}"
-                )
-        self._output_dims = output_dims
+        self._output_dims = validate_positive_output_dims(output_dims, model=model)
         self._client_side_truncation = client_side_truncation
+        self._validate_output_dims_config()
 
         self._ssl_verify_enabled = ssl_verify
         self._rerank_ssl_verify_enabled = (
@@ -513,13 +498,54 @@ class VoyageAIEmbeddingProvider:
         async with self._embed_semaphore:
             return await self._embed_single_batch_locked(texts)
 
-    def _validate_runtime_output_dims_config(self) -> int | None:
-        return validate_runtime_output_dims_config(
+    def _validate_output_dims_config(self) -> None:
+        """Validate output_dims and client_side_truncation, enforcing VoyageAI whitelist."""
+        validate_runtime_output_dims_config(
             self._output_dims,
             self._client_side_truncation,
             model=self._model,
             context="client-side truncation",
         )
+        if self._output_dims is None or not self._is_known_model:
+            return
+        default_dim = self._model_config.get("default_dimension", 1024)
+        supported = self._model_config.get("dimensions", [default_dim])
+        if self._output_dims not in supported:
+            raise EmbeddingConfigurationError(
+                f"output_dims {self._output_dims} not in supported "
+                f"dimensions {supported} for model {self._model}"
+            )
+
+    def _expected_raw_dims(self) -> int | None:
+        """Expected native dimension from API before client-side truncation.
+
+        Returns ``None`` for undiscovered unknown models, causing callers to
+        skip dimension validation until the native size is known from the
+        first full-dimension response.
+        """
+        if self._client_side_truncation:
+            # Client-side: expect full native dims from API
+            if self._is_known_model:
+                return self.native_dims
+            return self._discovered_native_dims
+        # Server-side or no truncation: expect the configured output dims
+        return self.dims
+
+    def _maybe_discover_native_dims(
+        self, raw_dims: int | None, server_side_truncation: bool
+    ) -> None:
+        """Discover native dims for unknown models from untruncated responses."""
+        if (
+            raw_dims is not None
+            and not self._is_known_model
+            and self._discovered_native_dims is None
+            and not server_side_truncation
+        ):
+            self._discovered_native_dims = raw_dims
+            logger.debug(
+                f"Discovered native embedding dimension {raw_dims} "
+                f"for model {self._model}"
+            )
 
     async def _embed_single_batch_locked(self, texts: list[str]) -> list[list[float]]:
         """Inner embed implementation, called while holding the semaphore."""
@@ -532,7 +558,12 @@ class VoyageAIEmbeddingProvider:
                     "input_type": "document",
                     "truncation": True,
                 }
-                output_dims = self._validate_runtime_output_dims_config()
+                output_dims = validate_runtime_output_dims_config(
+                    self._output_dims,
+                    self._client_side_truncation,
+                    model=self._model,
+                    context="client-side truncation",
+                )
                 dim_param = build_dimension_request_param(
                     output_dims, self._client_side_truncation
                 )
@@ -553,38 +584,13 @@ class VoyageAIEmbeddingProvider:
                     self._output_dims is not None and not self._client_side_truncation
                 )
 
-                if (
-                    raw_dims is not None
-                    and not self._is_known_model
-                    and self._discovered_native_dims is None
-                    and not server_side_truncation
-                ):
-                    self._discovered_native_dims = raw_dims
-                    logger.debug(
-                        f"Discovered native embedding dimension {raw_dims} "
-                        f"for model {self._model}"
-                    )
+                self._maybe_discover_native_dims(raw_dims, server_side_truncation)
 
-                # Validate raw API response dims before any client-side truncation.
-                # Unknown/custom models skip this until runtime has revealed the
-                # native vector size.
-                expected_raw_dims: int | None = None
-                if self._client_side_truncation:
-                    # Client-side: expect native dims (known from config or
-                    # discovered at runtime).  If still undiscovered (None)
-                    # the guard below skips validation — correct for the
-                    # first call on an unknown model.
-                    expected_raw_dims = (
-                        self.native_dims
-                        if self._is_known_model
-                        else self._discovered_native_dims
-                    )
-                else:
-                    # Server-side or no truncation: expect the configured dims.
-                    expected_raw_dims = self.dims
-                if raw_dims is not None and expected_raw_dims is not None:
+                # Validate raw API response dims before any client-side truncation
+                expected_raw = self._expected_raw_dims()
+                if raw_dims is not None and expected_raw is not None:
                     validate_embedding_dims(
-                        raw_dims, expected_raw_dims, model=self._model
+                        raw_dims, expected_raw, model=self._model
                     )
 
                 # Apply client-side truncation when server doesn't support dim param
@@ -593,7 +599,7 @@ class VoyageAIEmbeddingProvider:
                         embeddings, cast(int, output_dims)
                     )
 
-                # Validate final embedding dimension (INV-1) after all truncation
+                # Validate final embedding dimension after all truncation
                 if embeddings:
                     validate_embedding_dims(
                         len(embeddings[0]), self.dims, model=self._model
