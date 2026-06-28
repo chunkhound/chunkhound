@@ -28,6 +28,7 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
+
 from sklearn.cluster import (
     AgglomerativeClustering,
     KMeans,
@@ -171,7 +172,8 @@ class GapDetectionService(ProgressEmitterMixin):
         logger.info(f"Step 2.3: Detected {len(raw_gaps)} raw gap candidates")
         await self._emit_event(
             "gap_step",
-            f"Step 2.3: Detected {len(raw_gaps)} raw gap candidates (from {len(shards)} shards)",
+            f"Step 2.3: Detected {len(raw_gaps)} raw gap candidates"
+            f" (from {len(shards)} shards)",
             duration=perf_counter() - t,
         )
 
@@ -255,7 +257,8 @@ class GapDetectionService(ProgressEmitterMixin):
         )
         await self._emit_event(
             "gap_step",
-            f"Step 2.7: Filled {gaps_filled}/{len(selected_gaps)} gaps → {chunks_from_fills} chunks",
+            f"Step 2.7: Filled {gaps_filled}/{len(selected_gaps)} gaps"
+            f" → {chunks_from_fills} chunks",
             duration=perf_counter() - t,
         )
 
@@ -270,7 +273,8 @@ class GapDetectionService(ProgressEmitterMixin):
         )
         await self._emit_event(
             "gap_step",
-            f"Step 2.8: Global dedup: {total_before_dedup} → {len(unified_gap_chunks)} unique chunks",
+            f"Step 2.8: Global dedup: {total_before_dedup}"
+            f" → {len(unified_gap_chunks)} unique chunks",
             duration=perf_counter() - t,
         )
 
@@ -283,7 +287,8 @@ class GapDetectionService(ProgressEmitterMixin):
         )
         await self._emit_event(
             "gap_step",
-            f"Step 2.9: Final merge: {len(covered_chunks)} + {len(unified_gap_chunks)} → {len(all_chunks)} total",
+            f"Step 2.9: Final merge: {len(covered_chunks)}"
+            f" + {len(unified_gap_chunks)} → {len(all_chunks)} total",
             duration=perf_counter() - t,
         )
 
@@ -325,7 +330,8 @@ class GapDetectionService(ProgressEmitterMixin):
         )
         await self._emit_event(
             "gap_step",
-            f"Gap detection complete: +{chunks_added} chunks added ({len(all_chunks)} total)",
+            f"Gap detection complete: +{chunks_added} chunks added"
+            f" ({len(all_chunks)} total)",
             duration=elapsed_total,
         )
 
@@ -334,7 +340,7 @@ class GapDetectionService(ProgressEmitterMixin):
             "gaps_unified": len(unified_gaps),
             "gaps_selected": len(selected_gaps),
             "gaps_filled": gaps_filled,  # reuse variable from step 2.7
-            "chunks_added": chunks_added,  # unified gap chunks + import resolution chunks
+            "chunks_added": chunks_added,  # gap chunks + import resolution chunks
             "import_chunks_added": import_chunks_added,
             "total_chunks": len(all_chunks),
             "gap_queries": gap_queries,  # For compound context in Phase 3
