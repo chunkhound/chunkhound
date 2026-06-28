@@ -110,6 +110,8 @@ class TreeProgressDisplay:
             "main_complete": "🎉",
             "error": "❌",
             "evidence_ledger": "📊",
+            "gap_step": "▶",
+            "fact_extraction": "🧮",
         }
         return symbols.get(event_type, "•")
 
