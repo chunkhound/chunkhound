@@ -232,7 +232,7 @@ def validate_embedding_dims(
     *,
     model: str | None = None,
 ) -> None:
-    """Validate embedding dimensions match expected value (INV-1).
+    """Validate embedding dimensions match expected value.
 
     Raises:
         EmbeddingDimensionError: If dimensions don't match.
