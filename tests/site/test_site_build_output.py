@@ -5,7 +5,6 @@ import tempfile
 from pathlib import Path
 
 import pytest
-
 from tests.site.png_helpers import png_dimensions
 from tests.site.tsx_runner import run_tsx_raw, sanitized_subprocess_env
 
@@ -221,11 +220,13 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert "--overwrite-hook" in contributing
     assert ".py</code>" in contributing
     assert ".pyi</code>" in contributing
-    assert "Re-stage the" in contributing
-    assert "fixed files and commit again" in contributing
+    assert "review the staged diff and commit again" in contributing
+    assert "re-stage and commit again" not in contributing
+    assert "partially staged files" in contributing
+    assert "remain unstaged" in contributing
     assert "already be" in contributing
     assert "clean. If Ruff would rewrite a pushed file" in contributing
-    assert "commit the fix locally" in contributing
+    assert "review the diff and commit the fix locally" in contributing
     assert "--no-verify" in contributing
 
 
