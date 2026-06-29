@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PRE_COMMIT_PACKAGE = "pre-commit==4.2.0"
@@ -16,6 +17,8 @@ GITHUB_BASE_SHA_ENV = "CHUNKHOUND_GITHUB_BASE_SHA"
 GITHUB_HEAD_SHA_ENV = "CHUNKHOUND_GITHUB_HEAD_SHA"
 GITHUB_DEFAULT_BRANCH_ENV = "CHUNKHOUND_GITHUB_DEFAULT_BRANCH"
 HOOK_MARKER = "chunkhound-managed-pre-commit-hook"
+# Prefix for temp dirs holding staged snapshots; shared with test fake script.
+STAGED_SNAPSHOT_PREFIX = "chunkhound-staged-ruff-"
 
 
 def _git_output(*args: str, check: bool = True, stdin: str | None = None) -> str:
@@ -27,6 +30,16 @@ def _git_output(*args: str, check: bool = True, stdin: str | None = None) -> str
         input=stdin,
     )
     return result.stdout.strip()
+
+
+def _git_output_bytes(*args: str) -> bytes:
+    result = subprocess.run(
+        ["git", *args],
+        check=True,
+        capture_output=True,
+        text=False,
+    )
+    return result.stdout
 
 
 def _uv_tool_command(package: str, executable: str, *args: str) -> list[str]:
@@ -122,14 +135,6 @@ def _run_files(files: list[str]) -> int:
     return 0
 
 
-def _run_staged() -> int:
-    files = _git_changed_python_files("--cached")
-    if not files:
-        print("No staged Python files found.")
-        return 0
-    return _run_ruff_lint_and_format(files, ci_mode=False)
-
-
 def _git_ref_exists(ref: str) -> bool:
     try:
         _git_output("rev-parse", "--verify", ref)
@@ -203,8 +208,8 @@ def _ruff_command(*args: str) -> list[str]:
     return _uv_tool_command(RUFF_PACKAGE, "ruff", *args)
 
 
-def _run_ruff_command(*args: str) -> int:
-    result = subprocess.run(_ruff_command(*args), check=False)
+def _run_ruff_command(*args: str, cwd: Path | None = None) -> int:
+    result = subprocess.run(_ruff_command(*args), check=False, cwd=cwd)
     if result.returncode in (0, 1):
         return result.returncode
     raise subprocess.CalledProcessError(result.returncode, result.args)
@@ -244,44 +249,176 @@ def _lint_rewrite_message(ci_mode: bool) -> str:
             "Ruff rewrote changed Python files in CI. "
             "Run Ruff locally, commit the fixes, and push again:"
         )
-    return (
-        "Ruff rewrote staged Python files. "
-        "Run 'git add' on the changed files, then recommit:"
+    return "Ruff rewrote staged Python files. Review the staged diff and commit again:"
+
+
+# Snapshot files live in a temp directory, so Ruff can't auto-discover
+# pyproject.toml.  The CI path runs on worktree files and doesn't need this.
+def _repo_ruff_args(command: str, *args: str) -> list[str]:
+    pyproject = Path("pyproject.toml")
+    if pyproject.is_file():
+        return [command, "--config", str(pyproject.resolve()), *args]
+    return [command, *args]
+
+
+def _copy_tracked_file(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(source.read_bytes())
+
+
+def _tracked_python_modes(files: list[str]) -> dict[str, str]:
+    output = subprocess.run(
+        ["git", "ls-files", "--stage", "-z", "--", *files],
+        check=True,
+        capture_output=True,
+        text=False,
+    ).stdout
+    entries = [part for part in output.split(b"\0") if part]
+    modes: dict[str, str] = {}
+    for entry in entries:
+        meta, path_bytes = entry.split(b"\t", 1)
+        mode, _object_id, stage = meta.decode().split()
+        if stage != "0":
+            raise RuntimeError(
+                "run-staged does not support unmerged files. Resolve conflicts first."
+            )
+        path = path_bytes.decode()
+        modes[path] = mode
+    missing = [file for file in files if file not in modes]
+    if missing:
+        raise RuntimeError(
+            "run-staged only supports tracked staged files; missing index entry for: "
+            + ", ".join(sorted(missing))
+        )
+    return modes
+
+
+def _unstaged_python_files(files: list[str]) -> set[str]:
+    """Detect files with unstaged changes so we can preserve their worktree state."""
+    output = subprocess.run(
+        ["git", "diff", "--name-only", "-z", "--", *files],
+        check=True,
+        capture_output=True,
+        text=False,
+    ).stdout
+    return {part.decode() for part in output.split(b"\0") if part}
+
+
+def _write_index_snapshot(temp_root: Path, files: list[str]) -> dict[str, Path]:
+    snapshots: dict[str, Path] = {}
+    for file in files:
+        snapshot_path = temp_root / file
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_bytes(_git_output_bytes("show", f":{file}"))
+        snapshots[file] = snapshot_path
+    return snapshots
+
+
+def _update_index_from_snapshot(
+    files: list[str], snapshots: dict[str, Path], modes: dict[str, str]
+) -> None:
+    # Compute all blob hashes first, then issue one update-index invocation
+    # (batched via --index-info stdin). If hash-object fails mid-way, the
+    # index is untouched.
+    lines: list[str] = []
+    for file in files:
+        object_id = _git_output("hash-object", "-w", "--", str(snapshots[file]))
+        lines.append(f"{modes[file]} {object_id} 0\t{file}")
+    subprocess.run(
+        ["git", "update-index", "--index-info"],
+        input="\n".join(lines),
+        check=True,
+        text=True,
     )
 
 
-def _run_ruff_format(files: list[str], *, ci_mode: bool) -> int:
-    """Run ruff format in CI (check-only) or local (write) mode.
+def _run_ruff_on_snapshot(
+    files: list[str],
+    snapshots: dict[str, Path],
+    temp_root: Path,
+) -> tuple[int, list[str]]:
+    snapshot_paths = [str(snapshots[file]) for file in files]
+    before = _file_digests(snapshot_paths)
 
-    In CI mode (ci_mode=True) runs ``ruff format --check`` so rewrites are
-    forbidden. In local mode (ci_mode=False) runs ``ruff format`` then detects
-    rewrites via SHA256 digests.
-    """
-    if ci_mode:
-        return _run_ruff_command("format", "--check", "--", *files)
+    exit_code = 0
+    # Ruff must see repo-relative paths so path-based settings like
+    # per-file-ignores match the same files as normal repo runs.
+    check_args = _repo_ruff_args("check", "--fix", "--", *files)
+    if _run_ruff_command(*check_args, cwd=temp_root) != 0:
+        exit_code = 1
+    format_args = _repo_ruff_args("format", "--", *files)
+    if _run_ruff_command(*format_args, cwd=temp_root) != 0:
+        exit_code = 1
 
-    before_format = _file_digests(files)
-    if _run_ruff_command("format", "--", *files) != 0:
-        return 1
+    changed_snapshot_paths = _rewritten_files(before, _file_digests(snapshot_paths))
+    changed_files = [
+        file
+        for file, snapshot_path in snapshots.items()
+        if str(snapshot_path) in changed_snapshot_paths
+    ]
+    return exit_code, changed_files
 
-    changed_files = _rewritten_files(before_format, _file_digests(files))
-    if not changed_files:
+
+def _sync_clean_worktree_files(
+    changed_files: list[str],
+    snapshots: dict[str, Path],
+    partially_staged_rewrites: set[str],
+) -> None:
+    # Sync fully-staged files so the worktree matches what will be committed;
+    # skip partially-staged files to preserve the user's unstaged edits.
+    for file in changed_files:
+        if file in partially_staged_rewrites:
+            continue
+        _copy_tracked_file(snapshots[file], Path(file))
+
+
+def _print_partial_staging_note(partially_staged: list[str]) -> None:
+    if not partially_staged:
+        return
+    print(
+        "Partially staged files were fixed in the index only; "
+        "unstaged edits were left untouched:",
+        file=sys.stderr,
+    )
+    for path in partially_staged:
+        print(f"  {path}", file=sys.stderr)
+
+
+def _run_staged() -> int:
+    files = _git_changed_python_files("--cached")
+    if not files:
+        print("No staged Python files found.")
         return 0
 
-    _print_rewritten_files(
-        _lint_rewrite_message(ci_mode),
-        changed_files,
-    )
-    return 1
+    # Ruff must see the staged snapshot, not the live worktree, or partially
+    # staged files would accidentally pull unrelated edits into the commit.
+    tracked_modes = _tracked_python_modes(files)
+    originally_partially_staged = _unstaged_python_files(files)
+    with tempfile.TemporaryDirectory(prefix=STAGED_SNAPSHOT_PREFIX) as temp_dir:
+        temp_root = Path(temp_dir)
+        snapshots = _write_index_snapshot(temp_root, files)
+        exit_code, changed_files = _run_ruff_on_snapshot(files, snapshots, temp_root)
+        if not changed_files:
+            return exit_code
+
+        _update_index_from_snapshot(changed_files, snapshots, tracked_modes)
+        partial_rewrites = originally_partially_staged.intersection(changed_files)
+        _sync_clean_worktree_files(changed_files, snapshots, partial_rewrites)
+        _print_rewritten_files(_lint_rewrite_message(ci_mode=False), changed_files)
+        _print_partial_staging_note(sorted(partial_rewrites))
+        return 1
 
 
-def _run_ruff_lint_and_format(files: list[str], *, ci_mode: bool = True) -> int:
-    """Run Ruff lint + format on the given files.
+def _run_ruff_format(files: list[str]) -> int:
+    """Run ``ruff format --check`` (CI-only, no rewrites allowed)."""
+    return _run_ruff_command("format", "--check", "--", *files)
 
-    When ci_mode=True (default), rewrites are forbidden: ``ruff check --fix``
-    rewrites are detected, and ``ruff format`` runs with ``--check``.
-    When ci_mode=False (local staged hook), format runs in write mode and
-    rewrites are expected (the hook exits non-zero to ask the user to re-stage).
+
+def _run_ruff_lint_and_format(files: list[str]) -> int:
+    """Run Ruff lint + format on the given files (CI path, no rewrites allowed).
+
+    ``ruff check --fix`` rewrites are detected via SHA256 digests.
+    ``ruff format`` runs with ``--check``.
     """
     # --fix must stay in sync with .pre-commit-config.yaml ruff-check args.
     if not files:
@@ -294,10 +431,10 @@ def _run_ruff_lint_and_format(files: list[str], *, ci_mode: bool = True) -> int:
 
     changed_files = _rewritten_files(before_fix, _file_digests(files))
     if changed_files:
-        _print_rewritten_files(_lint_rewrite_message(ci_mode), changed_files)
+        _print_rewritten_files(_lint_rewrite_message(ci_mode=True), changed_files)
         exit_code = 1
 
-    if _run_ruff_format(files, ci_mode=ci_mode) != 0:
+    if _run_ruff_format(files) != 0:
         exit_code = 1
     return exit_code
 
