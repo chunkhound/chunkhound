@@ -13,6 +13,7 @@ the algorithm outlined in the deep research specification.
 
 import asyncio
 import re
+from time import perf_counter
 from typing import Any
 
 from loguru import logger
@@ -370,10 +371,17 @@ class UnifiedSearch:
 
                     # Rerank against each query
                     all_scores: list[dict[int, float]] = []
-                    for rerank_query in rerank_queries:
+                    t_rerank_total = perf_counter()
+                    for i, rerank_query in enumerate(rerank_queries):
+                        t_rerank = perf_counter()
                         rerank_results = await embedding_provider.rerank(
                             query=rerank_query,
                             documents=documents,
+                        )
+                        logger.warning(
+                            f"Step 7 rerank [{i+1}/{len(rerank_queries)}]: "
+                            f"{perf_counter() - t_rerank:.3f}s "
+                            f"({len(documents)} docs)"
                         )
 
                         # Collect scores for this query
@@ -391,18 +399,23 @@ class UnifiedSearch:
                         compound_score = sum(scores) / len(scores) if scores else 0.0
                         combined_pool[idx]["rerank_score"] = compound_score
 
-                    logger.debug(
-                        "Step 7: Compound rerank complete - averaged scores from "
-                        f"{len(rerank_queries)} queries"
+                    logger.warning(
+                        f"Step 7 rerank total: {perf_counter() - t_rerank_total:.3f}s "
+                        f"({len(rerank_queries)} queries)"
                     )
                 else:
                     # Single query reranking (default behavior)
                     rerank_query = (
                         rerank_queries[0] if rerank_queries else context.root_query
                     )
+                    t_rerank = perf_counter()
                     rerank_results = await embedding_provider.rerank(
                         query=rerank_query,
                         documents=documents,
+                    )
+                    logger.warning(
+                        f"Step 7 rerank: {perf_counter() - t_rerank:.3f}s "
+                        f"({len(combined_pool)} docs)"
                     )
 
                     # Apply reranking scores (same pattern as multi_hop_strategy.py)
@@ -411,11 +424,6 @@ class UnifiedSearch:
                             combined_pool[rerank_result.index]["rerank_score"] = (
                                 rerank_result.score
                             )
-
-                    logger.debug(
-                        f"Step 7: Unified rerank complete - {len(combined_pool)} "
-                        "chunks reranked against root query"
-                    )
 
                 # Sort by rerank score descending
                 combined_pool.sort(
