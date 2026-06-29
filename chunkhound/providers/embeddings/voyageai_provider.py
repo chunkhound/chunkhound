@@ -498,23 +498,45 @@ class VoyageAIEmbeddingProvider:
         async with self._embed_semaphore:
             return await self._embed_single_batch_locked(texts)
 
-    def _validate_output_dims_config(self) -> None:
-        """Validate output_dims and client_side_truncation, enforcing VoyageAI whitelist."""
+    def _validate_output_dims_config_for(
+        self,
+        *,
+        model: str,
+        model_config: VoyageModelConfig,
+        is_known_model: bool,
+        output_dims: int | None,
+        client_side_truncation: bool,
+    ) -> None:
+        """Validate output-dims semantics for a concrete config snapshot."""
         validate_runtime_output_dims_config(
-            self._output_dims,
-            self._client_side_truncation,
-            model=self._model,
+            output_dims,
+            client_side_truncation,
+            model=model,
             context="client-side truncation",
         )
-        if self._output_dims is None or not self._is_known_model:
+        if output_dims is None or not is_known_model:
             return
-        default_dim = self._model_config.get("default_dimension", 1024)
-        supported = self._model_config.get("dimensions", [default_dim])
-        if self._output_dims not in supported:
+        default_dim = model_config.get("default_dimension", 1024)
+        supported = model_config.get("dimensions", [default_dim])
+        if output_dims not in supported:
             raise EmbeddingConfigurationError(
-                f"output_dims {self._output_dims} not in supported "
-                f"dimensions {supported} for model {self._model}"
+                f"output_dims {output_dims} not in supported "
+                f"dimensions {supported} for model {model}"
             )
+
+    def _validate_output_dims_config(self) -> None:
+        """Validate output_dims and client_side_truncation, enforcing VoyageAI whitelist."""
+        self._validate_output_dims_config_for(
+            model=self._model,
+            model_config=self._model_config,
+            is_known_model=self._is_known_model,
+            output_dims=self._output_dims,
+            client_side_truncation=self._client_side_truncation,
+        )
+
+    def _reset_runtime_output_dims_state(self) -> None:
+        """Clear runtime-discovered dimensions after config changes."""
+        self._discovered_native_dims = None
 
     def _expected_raw_dims(self) -> int | None:
         """Expected native dimension from API before client-side truncation.
@@ -771,12 +793,33 @@ class VoyageAIEmbeddingProvider:
 
     def update_config(self, **kwargs: Any) -> None:
         """Update provider configuration."""
-        if "model" in kwargs:
-            self._model = kwargs["model"]
-            self._is_known_model = self._model in VOYAGE_MODEL_CONFIG
-            self._model_config = VOYAGE_MODEL_CONFIG.get(
-                self._model, DEFAULT_UNKNOWN_MODEL_CONFIG
+        next_model = kwargs.get("model", self._model)
+        next_is_known_model = next_model in VOYAGE_MODEL_CONFIG
+        next_model_config = VOYAGE_MODEL_CONFIG.get(
+            next_model, DEFAULT_UNKNOWN_MODEL_CONFIG
+        )
+        next_output_dims = self._output_dims
+        if "output_dims" in kwargs:
+            next_output_dims = validate_positive_output_dims(
+                kwargs["output_dims"], model=next_model
             )
+        next_client_side_truncation = kwargs.get(
+            "client_side_truncation", self._client_side_truncation
+        )
+        if {"model", "output_dims", "client_side_truncation"} & kwargs.keys():
+            self._validate_output_dims_config_for(
+                model=next_model,
+                model_config=next_model_config,
+                is_known_model=next_is_known_model,
+                output_dims=next_output_dims,
+                client_side_truncation=next_client_side_truncation,
+            )
+
+        if "model" in kwargs:
+            self._model = next_model
+            self._is_known_model = next_is_known_model
+            self._model_config = next_model_config
+            self._reset_runtime_output_dims_state()
         if "rerank_model" in kwargs:
             self._rerank_model = kwargs["rerank_model"]
         if "batch_size" in kwargs:
@@ -784,13 +827,9 @@ class VoyageAIEmbeddingProvider:
         if "timeout" in kwargs:
             self._timeout = kwargs["timeout"]
         if "output_dims" in kwargs:
-            self._output_dims = validate_positive_output_dims(
-                kwargs["output_dims"], model=self._model
-            )
+            self._output_dims = next_output_dims
         if "client_side_truncation" in kwargs:
-            self._client_side_truncation = kwargs["client_side_truncation"]
-        if "model" in kwargs or "output_dims" in kwargs or "client_side_truncation" in kwargs:
-            self._validate_output_dims_config()
+            self._client_side_truncation = next_client_side_truncation
 
     def get_supported_distances(self) -> list[str]:
         """Get list of supported distance metrics."""
