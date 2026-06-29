@@ -1182,6 +1182,117 @@ class TestFactoryMatryoshkaForwarding:
         assert provider.dims == 256
 
 
+class TestProviderConfigMutation:
+    """Contracts for provider update_config matryoshka semantics."""
+
+    def test_openai_update_config_revalidates_model_changes_before_mutation(self):
+        """Model changes must fail fast instead of leaving invalid output_dims behind."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="text-embedding-3-small",
+            output_dims=256,
+        )
+
+        with pytest.raises(EmbeddingConfigurationError, match="does not support"):
+            provider.update_config(model="text-embedding-ada-002")
+
+        assert provider.model == "text-embedding-3-small"
+        assert provider.output_dims == 256
+        assert provider.dims == 256
+
+    def test_openai_update_config_revalidates_base_url_changes_before_mutation(self):
+        """Switching back to the official endpoint must re-apply OpenAI dims rules."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            base_url="http://localhost:8000",
+            model="text-embedding-ada-002",
+            output_dims=512,
+        )
+
+        with pytest.raises(EmbeddingConfigurationError, match="does not support"):
+            provider.update_config(base_url="https://api.openai.com/v1")
+
+        assert provider.base_url == "http://localhost:8000"
+        assert provider.output_dims == 512
+        assert provider.dims == 512
+
+    def test_openai_update_config_resets_runtime_dimension_introspection(self):
+        """Runtime-discovered dims and fallback warnings must not leak across models."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            base_url="http://localhost:8000",
+            model="my-custom-embed-v1",
+        )
+        provider._discovered_native_dims = 768
+        provider._warned_default_dims = True
+
+        provider.update_config(model="my-custom-embed-v2")
+
+        assert provider._discovered_native_dims is None
+        assert provider._warned_default_dims is False
+        assert provider.native_dims == 1536
+        assert provider.supported_dimensions == []
+        with patch(
+            "chunkhound.providers.embeddings.openai_provider.logger.warning"
+        ) as warn:
+            assert provider.dims == 1536
+        assert warn.call_count == 1
+
+    def test_voyageai_update_config_revalidates_model_changes_before_mutation(self):
+        """Voyage model changes must reject stale output_dims and keep prior config."""
+        from chunkhound.providers.embeddings.voyageai_provider import (
+            VoyageAIEmbeddingProvider,
+        )
+
+        provider = VoyageAIEmbeddingProvider(
+            api_key="test-key",
+            model="voyage-3.5",
+            output_dims=512,
+        )
+
+        with pytest.raises(
+            EmbeddingConfigurationError,
+            match="not in supported dimensions",
+        ):
+            provider.update_config(model="voyage-2")
+
+        assert provider.model == "voyage-3.5"
+        assert provider.output_dims == 512
+        assert provider.dims == 512
+
+    def test_voyageai_update_config_resets_runtime_dimension_introspection(self):
+        """Unknown-model native dim discovery must reset when the model changes."""
+        from chunkhound.providers.embeddings.voyageai_provider import (
+            VoyageAIEmbeddingProvider,
+        )
+
+        provider = VoyageAIEmbeddingProvider(
+            api_key="test-key",
+            model="acme-voyage-compatible-a",
+            output_dims=256,
+            client_side_truncation=True,
+        )
+        provider._discovered_native_dims = 777
+
+        provider.update_config(model="acme-voyage-compatible-b")
+
+        assert provider._discovered_native_dims is None
+        assert provider.native_dims == 1024
+        assert provider.supported_dimensions == []
+
+
 class TestProviderConfigSnapshots:
     """Tests for provider config snapshots preserving matryoshka state."""
 
