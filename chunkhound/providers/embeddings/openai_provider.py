@@ -544,7 +544,7 @@ class OpenAIEmbeddingProvider:
             return self._azure_deployment or self._model
         return self._model
 
-    def _trust_runtime_output_dims(self) -> bool:
+    def _trust_runtime_output_dims(self, base_url: str | None = None) -> bool:
         """Return True when runtime behavior should override static model semantics.
 
         Custom OpenAI-compatible endpoints may legally repurpose known OpenAI
@@ -552,42 +552,61 @@ class OpenAIEmbeddingProvider:
         endpoints we validate only generic shape constraints here and let the
         live response prove compatibility.
         """
-        return not is_official_openai_endpoint(self._base_url)
+        return not is_official_openai_endpoint(
+            self._base_url if base_url is None else base_url
+        )
 
-    def _validate_output_dims_config(self) -> None:
-        """Validate output_dims config and reject missing dims for client-side truncation.
-
-        Only enforces official model semantics (matryoshka range, supported dims)
-        when the model is known and the endpoint is not a custom/trusted endpoint.
-        """
-        output_dims = validate_runtime_output_dims_config(
-            self._output_dims,
-            self._client_side_truncation,
-            model=self._model,
+    def _validate_output_dims_config_for(
+        self,
+        *,
+        model: str,
+        base_url: str | None,
+        output_dims: int | None,
+        client_side_truncation: bool,
+    ) -> None:
+        """Validate output-dims semantics for a concrete config snapshot."""
+        validated_output_dims = validate_runtime_output_dims_config(
+            output_dims,
+            client_side_truncation,
+            model=model,
             context="init-time validation",
         )
-        if output_dims is None:
+        if validated_output_dims is None:
             return
 
-        if self._trust_runtime_output_dims() or self._model not in self._model_config:
+        if self._trust_runtime_output_dims(base_url) or model not in self._model_config:
             return
 
-        cfg = self._model_config[self._model]
+        cfg = self._model_config[model]
         native_dims = cfg.get("native_dims", 1536)
         if not cfg.get("matryoshka", False):
-            if output_dims != native_dims:
+            if validated_output_dims != native_dims:
                 raise EmbeddingConfigurationError(
-                    f"Model '{self._model}' does not support output_dims="
-                    f"{self._output_dims}. Use the native dimension {native_dims}."
+                    f"Model '{model}' does not support output_dims="
+                    f"{validated_output_dims}. Use the native dimension {native_dims}."
                 )
             return
 
         min_dims = cfg.get("min_dims", 1)
-        if not min_dims <= output_dims <= native_dims:
+        if not min_dims <= validated_output_dims <= native_dims:
             raise EmbeddingConfigurationError(
-                f"Model '{self._model}' supports output_dims in the range "
-                f"{min_dims}-{native_dims}, got {self._output_dims}."
+                f"Model '{model}' supports output_dims in the range "
+                f"{min_dims}-{native_dims}, got {validated_output_dims}."
             )
+
+    def _validate_output_dims_config(self) -> None:
+        """Validate output_dims config and reject missing dims for client-side truncation."""
+        self._validate_output_dims_config_for(
+            model=self._model,
+            base_url=self._base_url,
+            output_dims=self._output_dims,
+            client_side_truncation=self._client_side_truncation,
+        )
+
+    def _reset_runtime_output_dims_state(self) -> None:
+        """Clear runtime-derived dimension caches after config changes."""
+        self._discovered_native_dims = None
+        self._warned_default_dims = False
 
     def _build_embedding_request_kwargs(
         self, texts: list[str], timeout: int
@@ -1313,8 +1332,31 @@ class OpenAIEmbeddingProvider:
 
     def update_config(self, **kwargs: Any) -> None:
         """Update provider configuration."""
+        next_model = kwargs.get("model", self._model)
+        next_base_url = kwargs.get("base_url", self._base_url)
+        next_output_dims = self._output_dims
+        if "output_dims" in kwargs:
+            next_output_dims = validate_positive_output_dims(
+                kwargs["output_dims"], model=next_model
+            )
+        next_client_side_truncation = kwargs.get(
+            "client_side_truncation", self._client_side_truncation
+        )
+        if {
+            "model",
+            "base_url",
+            "output_dims",
+            "client_side_truncation",
+        } & kwargs.keys():
+            self._validate_output_dims_config_for(
+                model=next_model,
+                base_url=next_base_url,
+                output_dims=next_output_dims,
+                client_side_truncation=next_client_side_truncation,
+            )
+
         if "model" in kwargs:
-            self._model = kwargs["model"]
+            self._model = next_model
         if "batch_size" in kwargs:
             self._batch_size = kwargs["batch_size"]
         if "timeout" in kwargs:
@@ -1327,22 +1369,18 @@ class OpenAIEmbeddingProvider:
             self._max_tokens = kwargs["max_tokens"]
         if "api_key" in kwargs:
             self._api_key = kwargs["api_key"]
-            # Reset client to force re-initialization with new API key
             self._client = None
             self._client_initialized = False
         if "base_url" in kwargs:
-            self._base_url = kwargs["base_url"]
-            # Reset client to force re-initialization with new base URL
+            self._base_url = next_base_url
             self._client = None
             self._client_initialized = False
         if "output_dims" in kwargs:
-            self._output_dims = validate_positive_output_dims(
-                kwargs["output_dims"], model=self._model
-            )
+            self._output_dims = next_output_dims
         if "client_side_truncation" in kwargs:
-            self._client_side_truncation = kwargs["client_side_truncation"]
-        if "output_dims" in kwargs or "client_side_truncation" in kwargs:
-            self._validate_output_dims_config()
+            self._client_side_truncation = next_client_side_truncation
+        if {"model", "base_url"} & kwargs.keys():
+            self._reset_runtime_output_dims_state()
 
     def get_supported_distances(self) -> list[str]:
         """Get list of supported distance metrics."""
