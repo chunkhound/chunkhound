@@ -19,7 +19,6 @@ from typing import Any, cast
 
 import pytest
 import yaml  # type: ignore[import-untyped]
-
 from tests.utils import SUBPROCESS_ENV_ALLOWLIST as _SUBPROCESS_ENV_ALLOWLIST
 from tests.utils.git_repo import (
     commit_all as _commit_all,
@@ -47,6 +46,7 @@ def _load_pre_commit_module() -> Any:
 _PRE_COMMIT_MODULE = _load_pre_commit_module()
 PRE_COMMIT_PACKAGE = _PRE_COMMIT_MODULE.PRE_COMMIT_PACKAGE
 RUFF_PACKAGE = _PRE_COMMIT_MODULE.RUFF_PACKAGE
+STAGED_SNAPSHOT_PREFIX = _PRE_COMMIT_MODULE.STAGED_SNAPSHOT_PREFIX
 HOOK_MARKER = "chunkhound-managed-pre-commit-hook"
 
 
@@ -80,6 +80,16 @@ def _fake_uv_dir(
     exit_codes: tuple[int, ...] = (0,),
     file_updates: tuple[tuple[int, str, str], ...] = (),
 ) -> tuple[Path, Path]:
+    """Create a fake uv executable that logs invocations and optionally modifies files.
+
+    Protocols:
+      - ``<<<UV-CALL>>>`` separator: delimits multiple invocations in the log file.
+        ``_uv_log_calls`` splits on this to recover per-call argument lists.
+      - ``file_updates`` paths are resolved relative to the fake uv process cwd.
+      - ``BASENAME:`` prefix in ``file_updates``: at runtime the fake resolves
+        ``BASENAME:tracked.py`` to the actual snapshot path whose basename matches.
+        This lets tests specify file updates without knowing the temp directory.
+    """
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
     log_path = tmp_path / "uv.log"
@@ -92,6 +102,24 @@ def _fake_uv_dir(
             f"count_path = pathlib.Path({str(count_path)!r})",
             f"exit_codes = {list(exit_codes)!r}",
             f"file_updates = {list(file_updates)!r}",
+            "def _normalized_args(argv):",
+            "    normalized = []",
+            "    for arg in argv:",
+            "        if (",
+            f"            '{STAGED_SNAPSHOT_PREFIX}' in arg",
+            "            and arg.endswith(('.py', '.pyi'))",
+            "        ):",
+            "            normalized.append(pathlib.Path(arg).name)",
+            "        else:",
+            "            normalized.append(arg)",
+            "    return normalized",
+            "def _resolve_update_path(relative_path):",
+            "    if relative_path.startswith('BASENAME:'):",
+            "        target = relative_path.removeprefix('BASENAME:')",
+            "        for arg in sys.argv[1:]:",
+            "            if pathlib.Path(arg).name == target:",
+            "                return pathlib.Path(arg)",
+            "    return pathlib.Path(relative_path)",
             "count = (",
             "    int(count_path.read_text(encoding='utf-8'))",
             "    if count_path.exists()",
@@ -100,10 +128,10 @@ def _fake_uv_dir(
             "with log_path.open('a', encoding='utf-8') as handle:",
             "    if count:",
             "        handle.write('<<<UV-CALL>>>\\n')",
-            "    handle.write('\\n'.join(sys.argv[1:]) + '\\n')",
+            "    handle.write('\\n'.join(_normalized_args(sys.argv[1:])) + '\\n')",
             "for update_count, relative_path, contents in file_updates:",
             "    if update_count == count:",
-            "        path = pathlib.Path(relative_path)",
+            "        path = _resolve_update_path(relative_path)",
             "        path.write_text(contents, encoding='utf-8')",
             "count_path.write_text(str(count + 1), encoding='utf-8')",
             "exit_code = exit_codes[count] if count < len(exit_codes) else (",
@@ -461,6 +489,174 @@ class TestPreCommitScript:
             ],
         ]
 
+    def test_run_staged_uses_pyproject_config_when_present(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        # Production hook runs from repo root where pyproject.toml exists;
+        # verify that _repo_ruff_args adds --config in that case.
+        shutil.copy2(ROOT / "pyproject.toml", repo_dir / "pyproject.toml")
+        (repo_dir / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "tracked.py").write_text("x=1\n", encoding="utf-8")
+        _run(["git", "add", "tracked.py"], repo_dir)
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(0, 0))
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 0
+        calls = _uv_log_calls(log_path)
+        assert len(calls) == 2
+        for call in calls:
+            assert "--config" in call, f"--config missing from ruff args: {call}"
+            assert any("pyproject.toml" in arg for arg in call), (
+                f"pyproject.toml path missing from ruff args: {call}"
+            )
+
+    def test_run_staged_handles_subdirectory_paths(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "src").mkdir()
+        (repo_dir / "src" / "util.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "src" / "util.py").write_text("x=1\n", encoding="utf-8")
+        _run(["git", "add", "src/util.py"], repo_dir)
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(0, 0))
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 0
+        calls = _uv_log_calls(log_path)
+        assert len(calls) == 2
+        for call in calls:
+            assert any("src/util.py" == arg for arg in call)
+
+    def test_run_staged_preserves_same_basename_paths_in_different_directories(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "pkg_a").mkdir()
+        (repo_dir / "pkg_b").mkdir()
+        (repo_dir / "pkg_a" / "shared.py").write_text("a = 1\n", encoding="utf-8")
+        (repo_dir / "pkg_b" / "shared.py").write_text("b = 2\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "pkg_a" / "shared.py").write_text("a=1\n", encoding="utf-8")
+        (repo_dir / "pkg_b" / "shared.py").write_text("b=2\n", encoding="utf-8")
+        _run(["git", "add", "pkg_a/shared.py", "pkg_b/shared.py"], repo_dir)
+
+        bin_dir, log_path = _fake_uv_dir(
+            tmp_path,
+            exit_codes=(0, 0),
+            file_updates=(
+                (0, "pkg_a/shared.py", "a = 1\n"),
+                (0, "pkg_b/shared.py", "b = 2\n"),
+            ),
+        )
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        assert (repo_dir / "pkg_a" / "shared.py").read_text(encoding="utf-8") == (
+            "a = 1\n"
+        )
+        assert (repo_dir / "pkg_b" / "shared.py").read_text(encoding="utf-8") == (
+            "b = 2\n"
+        )
+        assert _run_capture(["git", "show", ":pkg_a/shared.py"], repo_dir).stdout == (
+            "a = 1\n"
+        )
+        assert _run_capture(["git", "show", ":pkg_b/shared.py"], repo_dir).stdout == (
+            "b = 2\n"
+        )
+        calls = _uv_log_calls(log_path)
+        assert len(calls) == 2
+        for call in calls:
+            assert "pkg_a/shared.py" in call
+            assert "pkg_b/shared.py" in call
+
+    def test_run_staged_matches_repo_relative_ruff_paths(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        shutil.copy2(ROOT / "pyproject.toml", repo_dir / "pyproject.toml")
+        target_dir = repo_dir / "chunkhound" / "mcp_server"
+        target_dir.mkdir(parents=True)
+        target = target_dir / "tools.py"
+        target.write_text("# base\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        target.write_text("# " + "x" * 120 + "\n", encoding="utf-8")
+        _run(["git", "add", "chunkhound/mcp_server/tools.py"], repo_dir)
+
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_repo_env(tmp_path),
+            timeout=120,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Ruff rewrote" not in result.stderr
+        staged_file = _run_capture(
+            ["git", "show", ":chunkhound/mcp_server/tools.py"],
+            repo_dir,
+        )
+        assert staged_file.stdout == "# " + "x" * 120 + "\n"
+
+    def test_run_staged_returns_explicit_error_for_unmerged_file(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        base_branch = _current_branch(repo_dir)
+
+        _run(["git", "checkout", "-b", "other"], repo_dir)
+        (repo_dir / "tracked.py").write_text("x = 2\n", encoding="utf-8")
+        _commit_all(repo_dir, "other change")
+
+        _run(["git", "checkout", base_branch], repo_dir)
+        (repo_dir / "tracked.py").write_text("x = 3\n", encoding="utf-8")
+        _commit_all(repo_dir, "main change")
+
+        merge = _run_capture(["git", "merge", "other"], repo_dir)
+        assert merge.returncode != 0
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(0, 0))
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        assert (
+            "run-staged does not support unmerged files. Resolve conflicts first."
+            in result.stderr
+        )
+        assert (
+            "fatal: path 'tracked.py' is in the index, but not at stage 0"
+            not in result.stderr
+        )
+        assert not log_path.exists()
+
     def test_run_staged_returns_nonzero_when_ruff_check_rewrites_file(
         self, tmp_path: Path
     ) -> None:
@@ -475,7 +671,7 @@ class TestPreCommitScript:
         bin_dir, log_path = _fake_uv_dir(
             tmp_path,
             exit_codes=(0, 0),
-            file_updates=((0, str(repo_dir / "tracked.py"), "x = 1\n"),),
+            file_updates=((0, "BASENAME:tracked.py", "x = 1\n"),),
         )
         result = _run_pre_commit_script(
             repo_dir,
@@ -486,6 +682,9 @@ class TestPreCommitScript:
         assert result.returncode == 1
         assert "Ruff rewrote staged Python files" in result.stderr
         assert "tracked.py" in result.stderr
+        assert (repo_dir / "tracked.py").read_text(encoding="utf-8") == "x = 1\n"
+        staged_file = _run_capture(["git", "show", ":tracked.py"], repo_dir)
+        assert staged_file.stdout == "x = 1\n"
         assert len(_uv_log_calls(log_path)) == 2
 
     def test_run_staged_returns_nonzero_when_ruff_format_rewrites_file(
@@ -502,7 +701,7 @@ class TestPreCommitScript:
         bin_dir, log_path = _fake_uv_dir(
             tmp_path,
             exit_codes=(0, 0),
-            file_updates=((1, str(repo_dir / "tracked.py"), "x = 1\n"),),
+            file_updates=((1, "BASENAME:tracked.py", "x = 1\n"),),
         )
         result = _run_pre_commit_script(
             repo_dir,
@@ -513,7 +712,224 @@ class TestPreCommitScript:
         assert result.returncode == 1
         assert "Ruff rewrote staged Python files" in result.stderr
         assert "tracked.py" in result.stderr
+        assert (repo_dir / "tracked.py").read_text(encoding="utf-8") == "x = 1\n"
+        staged_file = _run_capture(["git", "show", ":tracked.py"], repo_dir)
+        assert staged_file.stdout == "x = 1\n"
         assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_staged_preserves_unstaged_hunks_for_partially_staged_file(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "tracked.py").write_text("x=1\n", encoding="utf-8")
+        _run(["git", "add", "tracked.py"], repo_dir)
+        (repo_dir / "tracked.py").write_text(
+            "x=1\nunstaged_value=2\n",
+            encoding="utf-8",
+        )
+
+        bin_dir, log_path = _fake_uv_dir(
+            tmp_path,
+            exit_codes=(0, 0),
+            file_updates=((0, "BASENAME:tracked.py", "x = 1\n"),),
+        )
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        assert "Ruff rewrote staged Python files" in result.stderr
+        assert "fixed in the index only" in result.stderr
+        assert (repo_dir / "tracked.py").read_text(encoding="utf-8") == (
+            "x=1\nunstaged_value=2\n"
+        )
+        staged_file = _run_capture(["git", "show", ":tracked.py"], repo_dir)
+        assert staged_file.stdout == "x = 1\n"
+        assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_staged_returns_zero_when_ruff_does_not_rewrite(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "tracked.py").write_text("x=1\n", encoding="utf-8")
+        _run(["git", "add", "tracked.py"], repo_dir)
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(0, 0))
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 0
+        assert "Ruff rewrote" not in result.stderr
+        assert (repo_dir / "tracked.py").read_text(encoding="utf-8") == "x=1\n"
+        staged_file = _run_capture(["git", "show", ":tracked.py"], repo_dir)
+        assert staged_file.stdout == "x=1\n"
+        assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_staged_preserves_unstaged_hunks_for_multiple_partially_staged_files(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "a.py").write_text("x = 1\n", encoding="utf-8")
+        (repo_dir / "b.py").write_text("y = 2\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "a.py").write_text("x=1\n", encoding="utf-8")
+        (repo_dir / "b.py").write_text("y=2\n", encoding="utf-8")
+        _run(["git", "add", "a.py", "b.py"], repo_dir)
+        (repo_dir / "a.py").write_text("x=1\nunstaged_a=1\n", encoding="utf-8")
+        (repo_dir / "b.py").write_text("y=2\nunstaged_b=2\n", encoding="utf-8")
+
+        bin_dir, log_path = _fake_uv_dir(
+            tmp_path,
+            exit_codes=(0, 0),
+            file_updates=(
+                (0, "BASENAME:a.py", "x = 1\n"),
+                (0, "BASENAME:b.py", "y = 2\n"),
+            ),
+        )
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        assert "fixed in the index only" in result.stderr
+        assert (repo_dir / "a.py").read_text(encoding="utf-8") == (
+            "x=1\nunstaged_a=1\n"
+        )
+        assert (repo_dir / "b.py").read_text(encoding="utf-8") == (
+            "y=2\nunstaged_b=2\n"
+        )
+        assert _run_capture(["git", "show", ":a.py"], repo_dir).stdout == "x = 1\n"
+        assert _run_capture(["git", "show", ":b.py"], repo_dir).stdout == "y = 2\n"
+        assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_staged_handles_mix_of_fully_and_partially_staged_files(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "full.py").write_text("a = 1\n", encoding="utf-8")
+        (repo_dir / "partial.py").write_text("b = 2\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "full.py").write_text("a=1\n", encoding="utf-8")
+        (repo_dir / "partial.py").write_text("b=2\n", encoding="utf-8")
+        _run(["git", "add", "full.py", "partial.py"], repo_dir)
+        # Only partial.py has unstaged edits
+        (repo_dir / "partial.py").write_text("b=2\nunstaged=3\n", encoding="utf-8")
+
+        bin_dir, log_path = _fake_uv_dir(
+            tmp_path,
+            exit_codes=(0, 0),
+            file_updates=(
+                (0, "BASENAME:full.py", "a = 1\n"),
+                (0, "BASENAME:partial.py", "b = 2\n"),
+            ),
+        )
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 1
+        # full.py is fully staged → worktree synced from snapshot
+        assert (repo_dir / "full.py").read_text(encoding="utf-8") == "a = 1\n"
+        assert _run_capture(["git", "show", ":full.py"], repo_dir).stdout == "a = 1\n"
+        # partial.py has unstaged edits → worktree preserved
+        assert (repo_dir / "partial.py").read_text(encoding="utf-8") == (
+            "b=2\nunstaged=3\n"
+        )
+        assert (
+            _run_capture(["git", "show", ":partial.py"], repo_dir).stdout == "b = 2\n"
+        )
+        assert "fixed in the index only" in result.stderr
+        assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_staged_returns_zero_for_partial_file_without_rewrite(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "tracked.py").write_text("x=1\n", encoding="utf-8")
+        _run(["git", "add", "tracked.py"], repo_dir)
+        (repo_dir / "tracked.py").write_text(
+            "x=1\nunstaged_value=2\n", encoding="utf-8"
+        )
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(0, 0))
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 0
+        assert "Ruff rewrote" not in result.stderr
+        assert (repo_dir / "tracked.py").read_text(encoding="utf-8") == (
+            "x=1\nunstaged_value=2\n"
+        )
+        assert len(_uv_log_calls(log_path)) == 2
+
+    def test_run_staged_skips_deleted_files(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        _run(["git", "rm", "tracked.py"], repo_dir)
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path, exit_codes=(0, 0))
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 0
+        assert "No staged Python files found" in result.stdout
+        assert not log_path.exists()
+
+    def test_run_staged_returns_zero_when_no_python_files_staged(
+        self, tmp_path: Path
+    ) -> None:
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _create_repo(repo_dir)
+        (repo_dir / "notes.md").write_text("old\n", encoding="utf-8")
+        _commit_all(repo_dir, "base")
+        (repo_dir / "notes.md").write_text("new\n", encoding="utf-8")
+        _run(["git", "add", "notes.md"], repo_dir)
+
+        bin_dir, log_path = _fake_uv_dir(tmp_path)
+        result = _run_pre_commit_script(
+            repo_dir,
+            "run-staged",
+            env=_script_env(bin_dir),
+        )
+
+        assert result.returncode == 0
+        assert "No staged Python files found" in result.stdout
+        assert not log_path.exists()
 
     def test_run_staged_returns_nonzero_when_ruff_check_fails(
         self, tmp_path: Path
@@ -1121,10 +1537,14 @@ class TestPreCommitScript:
 
         assert failed_commit.returncode != 0
         assert bad_file.read_text(encoding="utf-8") == "x = 1\n"
-        diff_after_rewrite = _run_capture(["git", "diff", "--", "bad.py"], repo_dir)
-        assert diff_after_rewrite.stdout.strip() != ""
+        worktree_diff = _run_capture(["git", "diff", "--", "bad.py"], repo_dir)
+        assert worktree_diff.stdout == ""
+        staged_diff = _run_capture(
+            ["git", "diff", "--cached", "--", "bad.py"],
+            repo_dir,
+        )
+        assert staged_diff.stdout.strip() != ""
 
-        _run(["git", "add", "bad.py"], repo_dir)
         successful_commit = _run_capture(
             ["git", "commit", "-m", "lint me"], repo_dir, env=_repo_env(tmp_path)
         )
