@@ -393,11 +393,19 @@ class UnifiedSearch:
                     )
 
                     all_scores: list[dict[int, float]] = []
-                    for rerank_query in rerank_queries:
+                    t_rerank_total = perf_counter()
+                    for i, rerank_query in enumerate(rerank_queries):
+                        t_rerank = perf_counter()
                         rerank_results = await embedding_provider.rerank(
                             query=rerank_query,
                             documents=documents,
                         )
+                        logger.warning(
+                            f"Step 7 rerank [{i+1}/{len(rerank_queries)}]: "
+                            f"{perf_counter() - t_rerank:.3f}s "
+                            f"({len(documents)} docs)"
+                        )
+
                         query_scores = {}
                         for rerank_result in rerank_results:
                             if 0 <= rerank_result.index < len(combined_pool):
@@ -415,18 +423,24 @@ class UnifiedSearch:
                         )
                         combined_pool[idx]["rerank_score"] = compound_score
 
-                    logger.debug(
-                        "Step 7: Compound rerank complete - averaged scores from "
-                        f"{len(rerank_queries)} queries"
+                    logger.warning(
+                        f"Step 7 rerank total: {perf_counter() - t_rerank_total:.3f}s "
+                        f"({len(rerank_queries)} queries)"
                     )
                 else:
                     rerank_query = (
                         rerank_queries[0] if rerank_queries else context.root_query
                     )
+                    t_rerank = perf_counter()
                     rerank_results = await embedding_provider.rerank(
                         query=rerank_query,
                         documents=documents,
                     )
+                    logger.warning(
+                        f"Step 7 rerank: {perf_counter() - t_rerank:.3f}s "
+                        f"({len(combined_pool)} docs)"
+                    )
+
                     for rerank_result in rerank_results:
                         if 0 <= rerank_result.index < len(combined_pool):
                             combined_pool[rerank_result.index]["rerank_score"] = (
