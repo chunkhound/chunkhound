@@ -74,6 +74,7 @@ from chunkhound.parsers.mappings import (
     ObjCMapping,
     PDFMapping,
     PHPMapping,
+    PowerShellMapping,
     PythonMapping,
     RustMapping,
     ScssMapping,
@@ -99,6 +100,7 @@ _swift_lang = _get_lang("swift")
 _yaml_lang = _get_lang("yaml")
 _hcl_lang = _get_lang("hcl")
 _dart_lang = _get_lang("dart")
+_powershell_lang = _get_lang("powershell")
 
 
 class _LanguagePackWrapper:
@@ -117,6 +119,7 @@ ts_swift = _LanguagePackWrapper(_swift_lang)
 ts_yaml = _LanguagePackWrapper(_yaml_lang)
 ts_hcl = _LanguagePackWrapper(_hcl_lang)
 ts_dart = _LanguagePackWrapper(_dart_lang)
+ts_powershell = _LanguagePackWrapper(_powershell_lang)
 
 _scss_lang = _get_lang("scss")
 ts_scss: _LanguagePackWrapper | None = (
@@ -243,6 +246,9 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.OBJC: LanguageConfig(ts_objc, ObjCMapping, True, "objc"),
     Language.SQL: LanguageConfig(ts_sql, SqlMapping, True, "sql"),
     Language.SWIFT: LanguageConfig(ts_swift, SwiftMapping, True, "swift"),
+    Language.POWERSHELL: LanguageConfig(
+        ts_powershell, PowerShellMapping, True, "powershell"
+    ),
     # Languages that use TypeScript parser
     Language.VUE: LanguageConfig(
         ts_typescript, VueMapping, True, "vue"
@@ -353,6 +359,9 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".swift": Language.SWIFT,
     ".swiftinterface": Language.SWIFT,
     ".lua": Language.LUA,
+    # PowerShell
+    ".ps1": Language.POWERSHELL,
+    ".psm1": Language.POWERSHELL,
     ".vue": Language.VUE,
     ".svelte": Language.SVELTE,
     # Config & Data

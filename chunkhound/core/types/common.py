@@ -184,6 +184,7 @@ class Language(Enum):
     DART = "dart"
     ELIXIR = "elixir"
     LUA = "lua"
+    POWERSHELL = "powershell"
     TWINCAT = "twincat"
 
     # Web languages
@@ -311,6 +312,8 @@ class Language(Enum):
             ".ex": cls.ELIXIR,
             ".exs": cls.ELIXIR,
             ".lua": cls.LUA,
+            ".ps1": cls.POWERSHELL,
+            ".psm1": cls.POWERSHELL,
             ".scss": cls.SCSS if SCSS_AVAILABLE else cls.TEXT,
             ".html": cls.HTML,
             ".htm": cls.HTML,
@@ -381,6 +384,7 @@ class Language(Enum):
             Language.DART,
             Language.ELIXIR,
             Language.LUA,
+            Language.POWERSHELL,
             Language.TWINCAT,
         }
 
@@ -405,6 +409,7 @@ class Language(Enum):
             Language.SVELTE,
             Language.SWIFT,
             Language.DART,
+            Language.POWERSHELL,
         }
 
     @property

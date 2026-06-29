@@ -30,6 +30,7 @@ from .metal import MetalMapping
 from .objc import ObjCMapping
 from .pdf import PDFMapping
 from .php import PHPMapping
+from .powershell import PowerShellMapping
 from .python import PythonMapping
 from .rust import RustMapping
 from .scss import ScssMapping
@@ -73,6 +74,7 @@ __all__ = [
     "ObjCMapping",
     "PDFMapping",
     "PHPMapping",
+    "PowerShellMapping",
     "PythonMapping",
     "RustMapping",
     "ScssMapping",

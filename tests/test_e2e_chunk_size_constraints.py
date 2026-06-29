@@ -264,6 +264,17 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Normal
         "function greet(name)\n    return 'Hello, ' .. name\nend",
     ),
+    Language.POWERSHELL: (
+        ".ps1",
+        # Large function
+        "function Get-Data {\n"
+        + _make_large_statements("    $x = 1")
+        + "\n    return $x\n}",
+        # Normal
+        'function Get-Greeting {\n'
+        '    param([string]$Name)\n'
+        '    return "Hello, $Name"\n}',
+    ),
     Language.BASH: (
         ".sh",
         # Large script

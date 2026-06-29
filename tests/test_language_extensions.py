@@ -291,6 +291,7 @@ class TestExtensionCoverage:
             ".php", ".phtml", ".php3", ".php4", ".php5", ".phps",  # PHP variants
             ".zig",  # Zig
             ".vue",  # Vue
+            ".ps1", ".psm1",  # PowerShell
         ],
     )
     def test_language_variant_extensions_supported(self, ext):

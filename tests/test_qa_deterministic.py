@@ -417,6 +417,7 @@ function qaTestFunction() {
             Language.OBJC: '// Objective-C QA test\n@implementation QATest\n- (NSString *)qaTestMethod {\n    return @"objc_qa_unique";\n}\n@end',
             Language.PHP: '<?php\n// PHP QA test\nfunction qa_test_function() {\n    return "php_qa_unique";\n}',
             Language.SWIFT: '// Swift QA test\nfunc qaTestFunction() -> String {\n    return "swift_qa_unique"\n}',
+            Language.POWERSHELL: '# PowerShell QA test\nfunction Get-QaTest {\n    return "powershell_qa_unique"\n}',
             Language.ZIG: '// Zig QA test\nfn qa_test_function() []const u8 {\n    return "zig_qa_unique";\n}',
             Language.PDF: None,  # PDF is binary, skip content template
             Language.SQL: '-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT \'sql_qa_unique\'\n);',
@@ -463,6 +464,7 @@ function qaTestFunction() {
             Language.OBJC: ".m",
             Language.PHP: ".php",
             Language.SWIFT: ".swift",
+            Language.POWERSHELL: ".ps1",
             Language.ZIG: ".zig",
             Language.PDF: ".pdf",
             Language.SQL: ".sql",
