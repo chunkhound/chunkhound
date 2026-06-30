@@ -252,11 +252,13 @@ class LLMConfig(BaseSettings):
             default=None,
             description=(
                 "Explicit thinking mode. 'adaptive' lets Claude decide depth "
-                "(Opus 4.6/4.7, Sonnet 4.6, Mythos). 'manual' uses a fixed "
-                "budget (accepted on Opus 4.5/4.6, Sonnet 4.5/4.6, Haiku 4.5; "
-                "rejected on Opus 4.7/Mythos). 'off' disables thinking. "
-                "Default 'auto' picks adaptive for 4.6+ models and manual "
-                "for older ones when anthropic_thinking_enabled is true."
+                "(Fable 5, Mythos, Opus 4.6/4.7/4.8, Sonnet 4.6). 'manual' uses "
+                "a fixed budget (accepted on Opus 4.5/4.6, Sonnet 4.5/4.6, "
+                "Haiku 4.5; rejected on Fable 5, Mythos, and Opus 4.7/4.8). "
+                "'off' disables thinking (Fable 5 and Mythos 5 still run "
+                "adaptive thinking server-side). Default 'auto' picks adaptive "
+                "for 4.6+ models and manual for older ones when "
+                "anthropic_thinking_enabled is true."
             ),
         )
     )
@@ -266,8 +268,9 @@ class LLMConfig(BaseSettings):
         description=(
             "Claude's thinking block display mode. 'summarized' (default on "
             "Opus 4.6 and Sonnet 4.6) returns summarized thinking text. "
-            "'omitted' (default on Opus 4.7) keeps signatures for multi-turn "
-            "continuity but returns empty thinking text. Applies to adaptive mode."
+            "'omitted' (default on Fable 5, Mythos, and Opus 4.7/4.8) keeps "
+            "signatures for multi-turn continuity but returns empty thinking "
+            "text. Applies to adaptive mode."
         ),
     )
 
@@ -284,21 +287,22 @@ class LLMConfig(BaseSettings):
         default=False,
         description=(
             "Enable interleaved thinking for tool use. Auto-enabled in "
-            "adaptive mode (Opus 4.6/4.7, Sonnet 4.6, Mythos). For manual "
-            "mode on any model that supports it (Opus 4.5, Sonnet 4.5/4.6, "
-            "Haiku 4.5), sends the interleaved-thinking-2025-05-14 beta."
+            "adaptive mode (Fable 5, Mythos, Opus 4.6/4.7/4.8, Sonnet 4.6). "
+            "For manual mode on any model that supports it (Opus 4.5, "
+            "Sonnet 4.5/4.6, Haiku 4.5), sends the "
+            "interleaved-thinking-2025-05-14 beta."
         ),
     )
 
-    # Anthropic Effort Parameter (Opus 4.5/4.6/4.7, Sonnet 4.6, Mythos)
+    # Anthropic Effort Parameter (Fable 5, Mythos, Opus 4.5-4.8, Sonnet 4.6)
     anthropic_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = Field(
         default=None,
         description=(
             "Control token usage vs thoroughness tradeoff. Supported on "
-            "Opus 4.5, Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6, and Mythos. "
-            "low/medium/high on all supported models; max on 4.6+; "
-            "xhigh on Opus 4.7/4.8. high is the API default; Sonnet 4.6 "
-            "recommends medium."
+            "Fable 5, Mythos 5, Opus 4.5-4.8, Sonnet 4.6, and Mythos Preview. "
+            "low/medium/high on all supported models; max on 4.6+; xhigh on "
+            "Fable 5, Mythos 5, and Opus 4.7/4.8. high is the API default; "
+            "Sonnet 4.6 recommends medium."
         ),
     )
 

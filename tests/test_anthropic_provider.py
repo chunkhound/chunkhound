@@ -797,6 +797,8 @@ class TestCapabilityPredicates:
             "claude-opus-4-7",
             "claude-sonnet-4-6",
             "claude-mythos-preview",
+            "claude-fable-5",
+            "claude-mythos-5",
         ],
     )
     def test_supports_effort(self, model):
@@ -817,23 +819,32 @@ class TestCapabilityPredicates:
         assert supports_effort_level("claude-opus-4-6", "max") is True
         assert supports_effort_level("claude-opus-4-7", "max") is True
         assert supports_effort_level("claude-sonnet-4-6", "max") is True
+        assert supports_effort_level("claude-fable-5", "max") is True
+        assert supports_effort_level("claude-mythos-5", "max") is True
         assert supports_effort_level("claude-opus-4-5-20251101", "max") is False
 
-    def test_xhigh_only_on_opus_47(self):
+    def test_xhigh_effort_model_gating(self):
         assert supports_effort_level("claude-opus-4-7", "xhigh") is True
+        assert supports_effort_level("claude-fable-5", "xhigh") is True
+        assert supports_effort_level("claude-mythos-5", "xhigh") is True
         assert supports_effort_level("claude-opus-4-6", "xhigh") is False
         assert supports_effort_level("claude-sonnet-4-6", "xhigh") is False
+        assert supports_effort_level("claude-mythos-preview", "xhigh") is False
 
     def test_adaptive_thinking_models(self):
         assert supports_adaptive_thinking("claude-opus-4-7") is True
         assert supports_adaptive_thinking("claude-opus-4-6") is True
         assert supports_adaptive_thinking("claude-sonnet-4-6") is True
+        assert supports_adaptive_thinking("claude-fable-5") is True
+        assert supports_adaptive_thinking("claude-mythos-5") is True
         assert supports_adaptive_thinking("claude-opus-4-5-20251101") is False
         assert supports_adaptive_thinking("claude-sonnet-4-5-20250929") is False
 
-    def test_adaptive_only_on_opus_47(self):
+    def test_adaptive_only_model_gating(self):
         assert requires_adaptive_thinking("claude-opus-4-7") is True
         assert requires_adaptive_thinking("claude-mythos-preview") is True
+        assert requires_adaptive_thinking("claude-fable-5") is True
+        assert requires_adaptive_thinking("claude-mythos-5") is True
         assert requires_adaptive_thinking("claude-opus-4-6") is False
         assert requires_adaptive_thinking("claude-sonnet-4-6") is False
 
@@ -1036,8 +1047,10 @@ class TestStructuredOutputsConfig:
 class TestTaskBudget:
     """Advisory task_budget beta for Opus 4.7."""
 
-    def test_task_budget_supported_on_opus_47(self):
+    def test_task_budget_model_gating(self):
         assert supports_task_budget("claude-opus-4-7") is True
+        assert supports_task_budget("claude-fable-5") is True
+        assert supports_task_budget("claude-mythos-5") is True
         assert supports_task_budget("claude-mythos-preview") is False
         assert supports_task_budget("claude-opus-4-6") is False
         assert supports_task_budget("claude-sonnet-4-6") is False
@@ -1900,6 +1913,120 @@ class TestRequestShape:
         # must go out as adaptive (no budget_tokens), not the enabled shape.
         kwargs = provider._client.messages.create.call_args.kwargs
         assert kwargs["thinking"] == {"type": "adaptive"}
+
+    @pytest.mark.asyncio
+    async def test_fable_5_emits_adaptive_thinking_and_xhigh_effort(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-fable-5",
+            thinking_enabled=True,
+            effort="xhigh",
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+
+        await provider.complete("hello")
+
+        assert provider._client.beta.messages.create.call_args is None
+        kwargs = provider._client.messages.create.call_args.kwargs
+        assert kwargs["model"] == "claude-fable-5"
+        # Fable 5 is adaptive-only; auto thinking must go out as adaptive.
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        # xhigh is supported on Fable 5 and must reach output_config.
+        assert kwargs["output_config"] == {"effort": "xhigh"}
+
+    @pytest.mark.asyncio
+    async def test_fable_5_manual_thinking_falls_back_to_adaptive(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-fable-5",
+            thinking_enabled=True,
+            thinking_mode="manual",
+            thinking_budget_tokens=8000,
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+
+        await provider.complete("hello")
+
+        # Fable 5 rejects thinking.type=enabled with a 400, so a manual
+        # request must go out as adaptive (no budget_tokens).
+        kwargs = provider._client.messages.create.call_args.kwargs
+        assert kwargs["thinking"] == {"type": "adaptive"}
+
+    @pytest.mark.asyncio
+    async def test_fable_5_thinking_off_omits_thinking_param(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-fable-5",
+            thinking_enabled=False,
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+
+        await provider.complete("hello")
+
+        # Fable 5 rejects an explicit thinking.type=disabled, so off mode
+        # must omit the thinking parameter entirely.
+        kwargs = provider._client.messages.create.call_args.kwargs
+        assert "thinking" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_mythos_5_emits_adaptive_thinking_and_xhigh_effort(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-mythos-5",
+            thinking_enabled=True,
+            effort="xhigh",
+        )
+        provider._client.messages = MagicMock()
+        provider._client.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+        provider._client.beta = MagicMock()
+        provider._client.beta.messages = MagicMock()
+        provider._client.beta.messages.create = AsyncMock(
+            return_value=self._text_response(),
+        )
+
+        await provider.complete("hello")
+
+        assert provider._client.beta.messages.create.call_args is None
+        kwargs = provider._client.messages.create.call_args.kwargs
+        assert kwargs["model"] == "claude-mythos-5"
+        # Mythos 5 is adaptive-only; auto thinking must go out as adaptive.
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        # xhigh is supported on Mythos 5 (the preview model has no xhigh).
+        assert kwargs["output_config"] == {"effort": "xhigh"}
 
     @pytest.mark.asyncio
     async def test_complete_with_tools_routes_strict_tools_to_beta(self):

@@ -1,12 +1,13 @@
 """Anthropic LLM provider implementation for ChunkHound deep research.
 
-Supports Claude 4.5, 4.6, 4.7, and Mythos generation models:
-- Adaptive thinking (Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos)
+Supports Claude 4.5 through 4.8, Fable 5, and Mythos generation models:
+- Adaptive thinking (Fable 5, Mythos 5, Opus 4.6-4.8, Sonnet 4.6, Mythos
+  Preview); always on server-side for Fable 5 and Mythos 5
 - Manual extended thinking with configurable budget_tokens (Opus 4.5 and older)
 - Interleaved thinking for tool use (auto-enabled in adaptive mode)
 - Effort parameter for token usage vs thoroughness tradeoff
 - Opt-in prompt caching
-- Task budgets for agentic loops (Opus 4.7 beta)
+- Task budgets for agentic loops (beta: Fable 5, Mythos 5, Opus 4.7/4.8)
 - Context management for automatic tool result and thinking block clearing
 
 The default model is ChunkHound's ``claude-haiku`` sentinel for both utility and
@@ -56,6 +57,8 @@ _EFFORT_FAMILY_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-mythos-preview",
+    "claude-fable-5",
+    "claude-mythos-5",
 )
 _MAX_EFFORT_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-6",
@@ -63,21 +66,43 @@ _MAX_EFFORT_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-mythos-preview",
+    "claude-fable-5",
+    "claude-mythos-5",
 )
-_XHIGH_EFFORT_PREFIXES: tuple[str, ...] = ("claude-opus-4-7", "claude-opus-4-8")
+_XHIGH_EFFORT_PREFIXES: tuple[str, ...] = (
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
 _ADAPTIVE_THINKING_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-mythos-preview",
+    "claude-fable-5",
+    "claude-mythos-5",
 )
 _ADAPTIVE_ONLY_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-mythos-preview",
+    "claude-fable-5",
+    "claude-mythos-5",
 )
-_TASK_BUDGET_PREFIXES: tuple[str, ...] = ("claude-opus-4-7", "claude-opus-4-8")
+_TASK_BUDGET_PREFIXES: tuple[str, ...] = (
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
+# Models where the API runs adaptive thinking even when the request omits the
+# thinking parameter; thinking cannot be disabled and its tokens are billed.
+_ALWAYS_ON_THINKING_PREFIXES: tuple[str, ...] = (
+    "claude-fable-5",
+    "claude-mythos-5",
+)
 
 
 def _matches_family(model: str, prefixes: tuple[str, ...]) -> bool:
@@ -122,22 +147,32 @@ def supports_task_budget(model: str) -> bool:
     return _matches_family(model, _TASK_BUDGET_PREFIXES)
 
 
+def thinking_always_on(model: str) -> bool:
+    """True when the API runs adaptive thinking even without a thinking param."""
+    return _matches_family(model, _ALWAYS_ON_THINKING_PREFIXES)
+
+
 class AnthropicLLMProvider(LLMProvider):
     """Anthropic LLM provider using Claude models.
 
     Supports adaptive/manual extended thinking, tool use, effort control, and
-    automatic context management across Opus 4.5/4.6/4.7/4.8 and Sonnet 4.5/4.6.
+    automatic context management across Opus 4.5/4.6/4.7/4.8, Sonnet 4.5/4.6,
+    Fable 5, and Mythos.
 
     Thinking modes:
-        - Adaptive (Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6, Mythos): Claude
-          decides when to think. Interleaved thinking is auto-enabled. Opus
-          4.7/4.8 reject manual mode.
+        - Adaptive (Fable 5, Mythos 5, Opus 4.8, Opus 4.7, Opus 4.6,
+          Sonnet 4.6, Mythos Preview): Claude decides when to think.
+          Interleaved thinking is auto-enabled. Opus 4.7/4.8 and the Mythos
+          family reject manual mode. Fable 5 and Mythos 5 run adaptive
+          thinking even when the request omits the thinking parameter.
         - Manual (Opus 4.5 and older): fixed thinking_budget_tokens.
-        - Off: omit thinking.
+        - Off: omit thinking (on Fable 5 / Mythos 5 the API still thinks).
 
     Effort parameter:
-        - Supported on Opus 4.5, Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6, Mythos.
-        - Levels: low, medium, high (default), max (4.6+), xhigh (Opus 4.7/4.8).
+        - Supported on Fable 5, Mythos 5, Opus 4.5-4.8, Sonnet 4.6,
+          Mythos Preview.
+        - Levels: low, medium, high (default), max (4.6+),
+          xhigh (Fable 5, Mythos 5, Opus 4.7/4.8).
         - Affects all tokens: text, tool calls, and thinking.
 
     Interleaved thinking:
@@ -183,6 +218,10 @@ class AnthropicLLMProvider(LLMProvider):
                 because Haiku is Anthropic's cheapest capable Claude model.
                 Pass an explicit synthesis model for maximum quality.
                 Supported families:
+                - claude-fable-5: adaptive thinking always on (cannot be
+                  disabled server-side). Effort levels low/medium/high/xhigh/max.
+                - claude-mythos-5: adaptive thinking always on (cannot be
+                  disabled server-side). Effort levels low/medium/high/xhigh/max.
                 - claude-opus-4-8: adaptive thinking only. Effort levels
                   low/medium/high/xhigh/max. xhigh recommended for coding.
                 - claude-opus-4-7: adaptive thinking only. Effort levels
@@ -204,7 +243,7 @@ class AnthropicLLMProvider(LLMProvider):
             interleaved_thinking: Enable thinking between tool calls in manual
                 mode. Auto-enabled for adaptive mode regardless of this flag.
             effort: Token usage level - "low", "medium", "high", "xhigh"
-                (Opus 4.7/4.8), or "max" (4.6+ only).
+                (Fable 5, Mythos 5, Opus 4.7/4.8), or "max" (4.6+ only).
             context_management_enabled: Enable automatic context management
             clear_thinking_keep_turns: Number of thinking turns to preserve (None=all)
             clear_tool_uses_trigger_tokens: Token threshold to trigger tool clearing
@@ -212,8 +251,8 @@ class AnthropicLLMProvider(LLMProvider):
             thinking_mode: Explicit thinking mode: "adaptive", "manual", "off",
                 or "auto" / None for automatic selection based on model.
             thinking_display: "summarized" (default on 4.6) or "omitted"
-                (default on Opus 4.7/4.8 / Mythos). Controls whether thinking
-                text is returned in the response.
+                (default on Fable 5, Mythos, and Opus 4.7/4.8). Controls
+                whether thinking text is returned in the response.
             prompt_caching: When True, sends cache_control={"type": "ephemeral"}
                 so the Messages API can cache prompt prefixes. Disabled by
                 default because ChunkHound requests rarely reuse prefixes enough
@@ -222,8 +261,8 @@ class AnthropicLLMProvider(LLMProvider):
                 writes but is useful when the same prefix is reused less
                 often than every 5 minutes.
             task_budget_tokens: Total token budget across a full agentic loop
-                (beta, Opus 4.7/4.8). Advisory cap visible to the
-                model; min 20000. Leave None for open-ended quality work.
+                (beta: Fable 5, Mythos 5, Opus 4.7/4.8). Advisory cap visible
+                to the model; min 20000. Leave None for open-ended quality work.
         """
         if not ANTHROPIC_AVAILABLE:
             raise ImportError("Anthropic package not available")
@@ -297,6 +336,13 @@ class AnthropicLLMProvider(LLMProvider):
 
         self._thinking_mode = resolved_mode
         self._thinking_enabled = resolved_mode in ("manual", "adaptive")
+
+        if resolved_mode == "off" and thinking_always_on(self._model):
+            logger.warning(
+                f"Model {self._model} always runs adaptive thinking server-side; "
+                "thinking is omitted from the request but still happens (and is "
+                "billed). Use anthropic_effort to bound token spend instead."
+            )
 
         if thinking_display is not None and resolved_mode != "adaptive":
             logger.warning(
@@ -587,7 +633,7 @@ class AnthropicLLMProvider(LLMProvider):
 
         Effort is applied only when the model supports it. task_budget is
         applied only when task_budget_tokens was accepted in __init__ (which
-        requires an Opus 4.7/4.8-family model).
+        requires a task-budget-capable model: Fable 5, Mythos 5, Opus 4.7/4.8).
 
         Args:
             json_schema: Optional JSON schema for structured outputs.
