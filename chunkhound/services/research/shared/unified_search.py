@@ -80,6 +80,7 @@ class UnifiedSearch:
         node_id: int | None = None,
         depth: int | None = None,
         path_filter: str | None = None,
+        skip_rerank: bool = False,
     ) -> list[dict[str, Any]]:
         """Perform unified semantic + symbol-based regex search (Steps 2-7).
 
@@ -348,12 +349,47 @@ class UnifiedSearch:
         combined_pool = list(unified_map.values())
         logger.debug(f"Unified to {len(combined_pool)} unique chunks")
 
-        # Step 7: Unified rerank against ROOT query (or compound queries)
-        # Reranks semantic + regex results TOGETHER for optimal ranking
-        # Uses ROOT query (not BFS queries) to prevent diversity collapse
-        # Optionally uses compound reranking with multiple queries
+        # Step 7: Score and rank the combined pool.
+        #
+        # skip_rerank=True path: score regex-only chunks via cosine similarity
+        # against the stored embeddings, then sort all chunks by similarity.
+        # Semantic chunks already carry similarity from HNSW search (Step 2).
+        #
+        # skip_rerank=False path: rerank the combined pool against the root query
+        # using the configured reranking provider (existing behaviour).
         embedding_provider = self._embedding_manager.get_provider()
-        if (
+        search_service = self._db_services.search_service
+
+        if skip_rerank:
+            regex_only = [c for c in combined_pool if "similarity" not in c]
+            if regex_only:
+                try:
+                    query_vec = (await embedding_provider.embed([query]))[0]
+                    int_chunk_ids: list[int] = [
+                        cid
+                        for c in regex_only
+                        if isinstance(cid := get_chunk_id(c), int)
+                    ]
+                    similarity_scores = await search_service.get_chunk_similarities_async(
+                        int_chunk_ids, query_vec, embedding_provider.name, embedding_provider.model
+                    )
+                    for c in regex_only:
+                        cid = get_chunk_id(c)
+                        c["similarity"] = (
+                            similarity_scores.get(cid, 0.0)  # type: ignore[arg-type]
+                            if cid is not None
+                            else 0.0
+                        )
+                    logger.debug(
+                        f"Step 7: Cosine-scored {len(regex_only)} regex chunks "
+                        f"(skip_rerank=True)"
+                    )
+                except Exception as e:
+                    logger.warning(f"Cosine scoring for regex chunks failed: {e}")
+
+            combined_pool.sort(key=lambda c: c.get("similarity", 0.0), reverse=True)
+
+        elif (
             hasattr(embedding_provider, "supports_reranking")
             and embedding_provider.supports_reranking()
             and len(combined_pool) > 1
@@ -368,27 +404,27 @@ class UnifiedSearch:
                         "queries"
                     )
 
-                    # Rerank against each query
                     all_scores: list[dict[int, float]] = []
                     for rerank_query in rerank_queries:
                         rerank_results = await embedding_provider.rerank(
                             query=rerank_query,
                             documents=documents,
                         )
-
-                        # Collect scores for this query
                         query_scores = {}
                         for rerank_result in rerank_results:
                             if 0 <= rerank_result.index < len(combined_pool):
                                 query_scores[rerank_result.index] = rerank_result.score
                         all_scores.append(query_scores)
 
-                    # Compute compound score as average across all queries
                     for idx in range(len(combined_pool)):
-                        scores = [
+                        per_query_scores = [
                             query_scores.get(idx, 0.0) for query_scores in all_scores
                         ]
-                        compound_score = sum(scores) / len(scores) if scores else 0.0
+                        compound_score = (
+                            sum(per_query_scores) / len(per_query_scores)
+                            if per_query_scores
+                            else 0.0
+                        )
                         combined_pool[idx]["rerank_score"] = compound_score
 
                     logger.debug(
@@ -396,7 +432,6 @@ class UnifiedSearch:
                         f"{len(rerank_queries)} queries"
                     )
                 else:
-                    # Single query reranking (default behavior)
                     rerank_query = (
                         rerank_queries[0] if rerank_queries else context.root_query
                     )
@@ -404,8 +439,6 @@ class UnifiedSearch:
                         query=rerank_query,
                         documents=documents,
                     )
-
-                    # Apply reranking scores (same pattern as multi_hop_strategy.py)
                     for rerank_result in rerank_results:
                         if 0 <= rerank_result.index < len(combined_pool):
                             combined_pool[rerank_result.index]["rerank_score"] = (
@@ -417,7 +450,6 @@ class UnifiedSearch:
                         "chunks reranked against root query"
                     )
 
-                # Sort by rerank score descending
                 combined_pool.sort(
                     key=lambda c: c.get("rerank_score", 0.0),
                     reverse=True,
