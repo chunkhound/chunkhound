@@ -132,7 +132,7 @@ def _fake_uv_dir(
             "for update_count, relative_path, contents in file_updates:",
             "    if update_count == count:",
             "        path = _resolve_update_path(relative_path)",
-            "        path.write_text(contents, encoding='utf-8')",
+            "        path.write_bytes(contents.encode('utf-8'))",
             "count_path.write_text(str(count + 1), encoding='utf-8')",
             "exit_code = exit_codes[count] if count < len(exit_codes) else (",
             "    exit_codes[-1]",
