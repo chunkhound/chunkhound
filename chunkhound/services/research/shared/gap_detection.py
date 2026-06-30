@@ -75,6 +75,8 @@ KMEANS_N_INIT = 10
 class GapDetectionService(ProgressEmitterMixin):
     """Service for detecting and filling semantic gaps in code coverage."""
 
+    _default_depth = 2  # all gap_step events are nested under the current phase
+
     def __init__(
         self,
         llm_manager: LLMManager,

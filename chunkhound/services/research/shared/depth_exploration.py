@@ -64,6 +64,8 @@ class DepthExplorationService(ProgressEmitterMixin):
     while maintaining coverage-first philosophy.
     """
 
+    _default_depth = 2  # all gap_step events are nested under the current phase
+
     def __init__(
         self,
         llm_manager: LLMManager,

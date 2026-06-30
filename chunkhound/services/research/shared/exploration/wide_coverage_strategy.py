@@ -9,9 +9,6 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from chunkhound.core.config.research_config import ResearchConfig
-
-if TYPE_CHECKING:
-    from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
@@ -20,6 +17,9 @@ from chunkhound.services.research.shared.exploration.elbow_filter import (
 )
 from chunkhound.services.research.shared.file_reader import FileReader
 from chunkhound.services.research.shared.import_context import ImportContextService
+
+if TYPE_CHECKING:
+    from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
 
 
 class WideCoverageStrategy:
