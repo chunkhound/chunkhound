@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -202,11 +203,16 @@ class DuckDBConnectionManager:
                 live_missing_or_empty = True
 
         if backup_path.exists() and live_missing_or_empty:
-            log_if_not_mcp(
-                "warning",
-                "Recovering DuckDB database from interrupted compaction backup: "
-                f"{backup_path}",
+            msg = (
+                "WARNING: Recovering DuckDB database from interrupted "
+                f"compaction backup: {backup_path}"
             )
+            if os.environ.get("CHUNKHOUND_MCP_MODE") == "1":
+                # Crash recovery is significant — surface to stderr even in
+                # MCP mode (loguru sinks are disabled by stdio.py).
+                print(msg, file=sys.stderr)
+            else:
+                logger.warning(msg)
             try:
                 db_path.unlink(missing_ok=True)
                 os.replace(backup_path, db_path)
