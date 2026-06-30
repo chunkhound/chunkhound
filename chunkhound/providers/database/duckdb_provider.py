@@ -96,6 +96,7 @@ from chunkhound.providers.database.duckdb.schema_constants import (
     _embedding_tables_where_clause,
     _embedding_unique_index_name,
     _embeddings_column_names,
+    CANONICAL_TABLE_NAMES,
     VALID_CATALOGS,
     is_hnsw_index,
 )
@@ -1270,7 +1271,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                         f"INSERT INTO {qtname} ({elist}) SELECT {elist} FROM src.{qtname}"
                     )
 
-            known = {"schema_version", "files", "chunks"}
+            known = set(CANONICAL_TABLE_NAMES)
             known.update(t[0] for t in emb_tables)
             all_src = tgt_conn.execute(
                 "SELECT table_name FROM information_schema.tables "
@@ -1292,7 +1293,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     # mode (loguru sinks are disabled by stdio.py)
                     print(f"WARNING: {msg}", file=sys.stderr)
                 else:
-                    log_if_not_mcp("warning", msg)
+                    logger.warning(msg)
 
             tgt_conn.execute("DETACH src")
 

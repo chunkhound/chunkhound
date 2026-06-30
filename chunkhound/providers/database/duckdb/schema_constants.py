@@ -17,6 +17,14 @@ _SCHEMA_VERSION_TABLE_COLUMNS: str = """\
     description TEXT
 """
 
+# Canonical statically-named tables that compaction must preserve.
+# Embedding tables (embeddings_<dims>) are discovered dynamically from
+# information_schema and are NOT included here.  When adding a new
+# statically-named canonical table, add it here AND update
+# _compact_copy_data in duckdb_provider.py to CREATE + INSERT it.
+CANONICAL_TABLE_NAMES: set[str] = {"schema_version", "files", "chunks"}
+
+
 # ── Files table ─────────────────────────────────────────────────────────
 
 _FILES_TABLE_COLUMNS: str = """\
