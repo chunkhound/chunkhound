@@ -669,12 +669,10 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Advance one sequence so the next implicit id is above MAX(id).
 
         DuckDB 1.4 does not support ``ALTER SEQUENCE ... RESTART WITH`` or
-        ``setval()``.  We keep the ``SELECT nextval FROM range(N)`` approach.
-        "duckdb_sequences().last_value" is a binary flag (NULL = never used,
-        1 = used at least once), NOT the actual counter.  For a freshly-created
-        sequence (last_value = NULL) the advance is correct.  For an
-        already-existing sequence (last_value = 1) this over-advances by
-        roughly ``max_id`` — safe (no duplicates), just a gap.
+        ``setval()``.  ``DROP SEQUENCE CASCADE`` would silently destroy
+        dependent tables, so we keep ``SELECT nextval FROM range(N)`` for live
+        databases.  The compaction path (``_compact_copy_data``) avoids this
+        entirely by creating fresh sequences with the correct ``START`` value.
         """
         max_result = conn.execute(
             f"SELECT COALESCE(MAX(id), 0) FROM {self._quote_duckdb_identifier(table_name)}"
@@ -1210,14 +1208,36 @@ class DuckDBProvider(SerialDatabaseProvider):
             tgt_conn.execute("SET hnsw_enable_experimental_persistence = true")
             tgt_conn.execute("SET preserve_insertion_order = false")
 
-            for seq in ["files_id_seq", "chunks_id_seq", "embeddings_id_seq"]:
-                tgt_conn.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq}")
+            escaped_backup = str(backup_path).replace("'", "''")
+            tgt_conn.execute(f"ATTACH '{escaped_backup}' AS src")
+
+            # Compute MAX(id) from source tables so we can seed the fresh
+            # sequences with the correct START value.  The old approach of
+            # SELECT nextval FROM range(N) after the swap is O(max_id).
+            max_file_id = tgt_conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM src.files"
+            ).fetchone()[0]
+            max_chunk_id = tgt_conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM src.chunks"
+            ).fetchone()[0]
+            emb_rows = tgt_conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                f"WHERE {_embedding_tables_where_clause(catalog='src')}"
+            ).fetchall()
+            max_embedding_id = 0
+            for (tname,) in emb_rows:
+                qtname = self._quote_duckdb_identifier(tname)
+                table_max = tgt_conn.execute(
+                    f"SELECT COALESCE(MAX(id), 0) FROM src.{qtname}"
+                ).fetchone()[0]
+                max_embedding_id = max(max_embedding_id, int(table_max))
+
+            tgt_conn.execute(f"CREATE SEQUENCE files_id_seq START {max_file_id + 1}")
+            tgt_conn.execute(f"CREATE SEQUENCE chunks_id_seq START {max_chunk_id + 1}")
+            tgt_conn.execute(f"CREATE SEQUENCE embeddings_id_seq START {max_embedding_id + 1}")
 
             tgt_conn.execute(f"CREATE TABLE files ({_FILES_TABLE_COLUMNS})")
             tgt_conn.execute(f"CREATE TABLE chunks ({_CHUNKS_TABLE_COLUMNS})")
-
-            escaped_backup = str(backup_path).replace("'", "''")
-            tgt_conn.execute(f"ATTACH '{escaped_backup}' AS src")
 
             # Check whether the source catalog already had HNSW indexes.
             # Compaction only restores HNSW when the pre-compaction source DB
@@ -1319,7 +1339,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         had_hnsw: bool,
         _t0: float,
     ) -> int:
-        """Steps 4-8: atomic swap, reconnect, reseed, restore indexes, cleanup."""
+        """Steps 4-8: atomic swap, reconnect, restore indexes, cleanup.
+
+        Sequences are already seeded with the correct START value in
+        ``_compact_copy_data``, so no reseeding is needed here.
+        """
         # Pre-sleep lets the OS release the file handle before the first
         # rename attempt.  _atomic_replace has exponential-backoff retries,
         # but the pre-sleep avoids entering the retry loop at all.
@@ -1332,36 +1356,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         self._connection_manager.connection = (
             self._create_connection_manager_connection()
         )
-
-        for seq, table in [
-            ("files_id_seq", "files"),
-            ("chunks_id_seq", "chunks"),
-            ("embeddings_id_seq", None),
-        ]:
-            try:
-                max_id = (
-                    int(
-                        new_conn.execute(
-                            f"SELECT COALESCE(MAX(id), 0) FROM {table}"
-                        ).fetchone()[0]
-                    )
-                    if table is not None
-                    else self._executor_get_max_embedding_id(new_conn)
-                )
-            except Exception:
-                continue
-            if max_id > 0:
-                if table is not None:
-                    self._executor_reseed_sequence(new_conn, table, seq)
-                else:
-                    # Embeddings: sequence is freshly created in the compacted
-                    # file (start=1, last_value=NULL).  Calling nextval max_id
-                    # times advances it from 1 to max_id, so the next call
-                    # returns max_id + 1.  Can't use ALTER / setval / DROP
-                    # due to DuckDB 1.4 limitations.
-                    new_conn.execute(
-                        f"SELECT nextval('{seq}') FROM range({max_id})"
-                    )
 
         self._executor_create_indexes(new_conn, state)
 
