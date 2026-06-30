@@ -2077,14 +2077,27 @@ class DuckDBProvider(SerialDatabaseProvider):
             f"{normalized_metric}"
         )
 
-    def _extract_hnsw_metric(self, create_sql: str | None) -> str:
-        """Best-effort metric extraction from a DuckDB HNSW CREATE INDEX statement."""
-        if not create_sql:
-            return "cosine"
+    def _extract_hnsw_metric(self, conn: Any, index_name: str) -> str:
+        """Return HNSW similarity metric from ``pragma_hnsw_index_info()``.
 
-        match = re.search(r"metric\s*=\s*'([^']+)'", create_sql, flags=re.IGNORECASE)
-        if match:
-            return match.group(1)
+        DuckDB strips the ``WITH (metric = '...')`` clause from
+        ``duckdb_indexes().sql``, so we cannot recover the metric from
+        the CREATE INDEX DDL.  ``pragma_hnsw_index_info()`` returns the
+        live metric regardless.  The pragma scans ALL attached catalogs
+        (not just ``main``), so it works correctly during compaction when
+        the backup DB is ATTACHed as ``src``.
+        """
+        try:
+            row = conn.execute(
+                "SELECT metric FROM pragma_hnsw_index_info() WHERE index_name = ? LIMIT 1",
+                [index_name],
+            ).fetchone()
+            if row:
+                return str(row[0])
+        except Exception:
+            logger.debug(
+                f"Could not query HNSW metric for {index_name}, defaulting to cosine"
+            )
         return "cosine"
 
     def _extract_custom_hnsw_identity(
@@ -2170,7 +2183,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                         "provider": provider,
                         "model": model,
                         "dims": dims,
-                        "metric": self._extract_hnsw_metric(create_sql),
+                        "metric": self._extract_hnsw_metric(conn, index_name),
                     }
                 )
 
@@ -2240,7 +2253,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                         "provider": provider,
                         "model": model,
                         "dims": dims,
-                        "metric": self._extract_hnsw_metric(create_sql),
+                        "metric": self._extract_hnsw_metric(conn, index_name),
                     }
                 )
 
