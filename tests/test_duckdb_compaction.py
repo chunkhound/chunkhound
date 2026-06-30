@@ -74,6 +74,19 @@ def _fetch_index_names(db_path: Path | str) -> set[str]:
         conn.close()
 
 
+def _fetch_table_names(db_path: Path | str) -> set[str]:
+    """Return main-schema base table names from a DuckDB file."""
+    conn = duckdb.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main' AND table_type = 'BASE TABLE'"
+        ).fetchall()
+        return {row[0] for row in rows}
+    finally:
+        conn.close()
+
+
 def _assert_db_integrity(db_path: Path | str) -> None:
     """Verify the database file is a structurally valid DuckDB database.
 
@@ -152,6 +165,41 @@ def _seed_embedding_dims_3(
         )
     )
     return file_id, chunk_id
+
+
+def _seed_embedding_dims_3_without_indexes(
+    provider: DuckDBProvider, file_path: str = "dims3_copy.py"
+) -> None:
+    """Create a canonical embeddings_3 table row without building HNSW indexes."""
+    file_id = provider.insert_file(
+        File(
+            path=FilePath(file_path),
+            mtime=2.0,
+            size_bytes=24,
+            language=Language.PYTHON,
+        )
+    )
+    chunk_id = provider.insert_chunk(
+        Chunk(
+            file_id=FileId(file_id),
+            symbol=pathlib.Path(file_path).stem,
+            start_line=LineNumber(1),
+            end_line=LineNumber(2),
+            code="def dims3_copy():\n    return 1\n",
+            chunk_type=ChunkType.FUNCTION,
+            language=Language.PYTHON,
+        )
+    )
+    conn = provider._connection_manager.connection
+    assert conn is not None
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
+    conn.execute(_create_embedding_table_sql(3))
+    conn.execute(
+        "INSERT INTO embeddings_3 "
+        "(id, chunk_id, provider, model, embedding, dims) "
+        "VALUES (1, ?, 'test', 'mini', [0.1, 0.2, 0.3], 3)",
+        [chunk_id],
+    )
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -549,6 +597,39 @@ class TestCompactDatabase:
             db.disconnect()
 
 
+class TestCompactionCopyBehavior:
+    """Public compaction behavior for staged embedding-table copies."""
+
+    def test_compaction_rebuilds_embedding_lookup_indexes(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """Compaction restores canonical lookup indexes on copied embedding tables."""
+        _insert_minimal_chunks(file_backed_db)
+        _seed_embedding_dims_3_without_indexes(file_backed_db)
+
+        file_backed_db.compact_database()
+
+        index_names = _fetch_index_names(file_backed_db.db_path)
+        assert "idx_3_chunk_id" in index_names
+        assert "idx_3_provider_model" in index_names
+        assert "idx_3_chunk_provider_model_unique" in index_names
+        assert _fetch_scalar(file_backed_db.db_path, "SELECT COUNT(*) FROM embeddings_3") == 1
+
+    def test_compaction_does_not_create_hnsw_when_source_had_none(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """Compaction preserves the no-HNSW state for embedding tables copied mid-index."""
+        _insert_minimal_chunks(file_backed_db)
+        _seed_embedding_dims_3_without_indexes(file_backed_db)
+
+        assert file_backed_db.get_existing_vector_indexes() == []
+
+        file_backed_db.compact_database()
+
+        assert file_backed_db.get_existing_vector_indexes() == []
+        assert "idx_hnsw_3" not in _fetch_index_names(file_backed_db.db_path)
+
+
 # ── Crash recovery ──────────────────────────────────────────────────────
 
 
@@ -675,6 +756,43 @@ class TestCompactionCrashRecovery:
             assert not backup_path.exists()
         finally:
             recovered.disconnect()
+
+    def test_mcp_startup_recovery_surfaces_backup_restore_warning_on_stderr(
+        self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MCP startup recovery prints the interrupted-compaction warning to stderr."""
+        monkeypatch.setenv("CHUNKHOUND_MCP_MODE", "1")
+        db_path = Path(cast(str, file_backed_db.db_path))
+        file_backed_db._execute_in_db_thread_sync(
+            "insert_file",
+            File(
+                path="startup_recovery_stderr.py",
+                mtime=0.0,
+                language=Language.PYTHON,
+                size_bytes=50,
+            ),
+        )
+        file_backed_db.disconnect()
+
+        backup_path = db_path.with_suffix(db_path.suffix + ".compact_backup")
+        os.replace(db_path, backup_path)
+        db_path.write_bytes(b"")
+
+        captured = io.StringIO()
+        monkeypatch.setattr("sys.stderr", captured)
+
+        recovered = DuckDBProvider(db_path, base_directory=db_path.parent)
+        recovered.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
+        recovered.connect()
+        try:
+            assert recovered.get_stats()["files"] == 1
+            assert not backup_path.exists()
+        finally:
+            recovered.disconnect()
+
+        stderr_out = captured.getvalue()
+        assert "Recovering DuckDB database from interrupted compaction backup" in stderr_out
+        assert str(backup_path) in stderr_out
 
     def test_finalize_failure_restores_original_db_and_cleans_artifacts(
         self, populated_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
@@ -2854,3 +2972,93 @@ class TestIsHnswIndex:
     def test_non_hnsw_name_with_unrelated_ddl(self) -> None:
         """Non-HNSW name with non-HNSW DDL returns False."""
         assert is_hnsw_index("some_idx", "CREATE INDEX some_idx ON t (col)") is False
+
+
+def test_compaction_preserves_all_canonical_tables_behaviorally(
+    tmp_path: Path,
+) -> None:
+    """Compaction preserves the expected ChunkHound-owned tables and their data."""
+    db = DuckDBProvider(tmp_path / "canonical_tables.duckdb", base_directory=tmp_path)
+    db.connect()
+    try:
+        _insert_minimal_chunks(db)
+        _seed_embedding_dims_3_without_indexes(db)
+
+        expected_tables = {"schema_version", "files", "chunks", "embeddings_3"}
+        row_counts_before = {
+            table_name: _fetch_scalar(db.db_path, f"SELECT COUNT(*) FROM {table_name}")
+            for table_name in sorted(expected_tables)
+        }
+
+        db.compact_database()
+
+        assert _fetch_table_names(db.db_path) == expected_tables
+
+        row_counts_after = {
+            table_name: _fetch_scalar(db.db_path, f"SELECT COUNT(*) FROM {table_name}")
+            for table_name in row_counts_before
+        }
+        assert row_counts_after == row_counts_before
+    finally:
+        db.disconnect()
+
+
+def test_non_cosine_hnsw_metric_survives_index_rebuild(
+    tmp_path: Path,
+) -> None:
+    """Non-cosine HNSW indexes survive guarded drop/recreate rebuilds."""
+    db = DuckDBProvider(tmp_path / "metric.duckdb", base_directory=tmp_path)
+    db.connect()
+    try:
+        _, original_chunk_id = _seed_embedding_dims_3(db)
+        second_file_id = db.insert_file(
+            File(
+                path="metric_second.py",
+                mtime=2.0,
+                size_bytes=24,
+                language=Language.PYTHON,
+            )
+        )
+        second_chunk_id = db.insert_chunk(
+            Chunk(
+                file_id=FileId(second_file_id),
+                symbol="metric_second",
+                start_line=LineNumber(1),
+                end_line=LineNumber(2),
+                code="def metric_second():\n    return 2\n",
+                chunk_type=ChunkType.FUNCTION,
+                language=Language.PYTHON,
+            )
+        )
+        db.insert_embedding(
+            Embedding(
+                chunk_id=second_chunk_id,
+                provider="test",
+                model="mini",
+                dims=3,
+                vector=[0.3, 0.2, 0.1],
+            )
+        )
+
+        initial_indexes = _fetch_index_names(db.db_path)
+        if "idx_hnsw_3" not in initial_indexes:
+            pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+
+        db.execute_query("DROP INDEX IF EXISTS idx_hnsw_3", [])
+        db.execute_query(
+            "CREATE INDEX idx_hnsw_3 ON embeddings_3 USING HNSW (embedding) "
+            "WITH (metric = 'l2sq')",
+            [],
+        )
+
+        before = [i for i in db.get_existing_vector_indexes() if i["index_name"] == "idx_hnsw_3"]
+        assert len(before) == 1
+        assert before[0]["metric"] == "l2sq"
+
+        db._execute_in_db_thread_sync("delete_chunks_batch", [original_chunk_id])
+
+        after = [i for i in db.get_existing_vector_indexes() if i["index_name"] == "idx_hnsw_3"]
+        assert len(after) == 1
+        assert after[0]["metric"] == "l2sq"
+    finally:
+        db.disconnect()
