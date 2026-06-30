@@ -38,6 +38,7 @@ from chunkhound.providers.database.duckdb.embedding_repository import (
 from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
 from chunkhound.providers.database.duckdb.schema_constants import (
     _assert_allowed_identifier,
+    _create_embedding_table_sql,
     is_hnsw_index,
 )
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
