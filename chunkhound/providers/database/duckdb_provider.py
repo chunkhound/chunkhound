@@ -1206,7 +1206,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         """
         tgt_conn = duckdb.connect(str(compacted_path))
         try:
-            tgt_conn.execute("INSTALL vss")
             tgt_conn.execute("LOAD vss")
             tgt_conn.execute("SET hnsw_enable_experimental_persistence = true")
 
