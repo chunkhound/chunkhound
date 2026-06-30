@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
+from chunkhound.services.indexing_coordinator import run_batch_compaction_boundary
 from chunkhound.utils.file_patterns import normalize_include_patterns
 
 
@@ -28,6 +29,7 @@ class IndexingStats:
     skipped_due_to_timeout: list[str] = field(default_factory=list)
     skipped_unchanged: int = 0
     skipped_filtered: int = 0
+    db_compactions: int = 0
 
 
 class DirectoryIndexingService:
@@ -80,6 +82,11 @@ class DirectoryIndexingService:
         stats = IndexingStats()
 
         try:
+            # === Drop HNSW indexes before bulk indexing ===
+            # Eliminates per-batch index maintenance overhead during
+            # large embedding inserts and compaction steps.
+            await self._drop_hnsw_indexes()
+
             # File pattern resolution (extracted from run.py:61-65)
             include_patterns, exclude_patterns = self._resolve_file_patterns()
 
@@ -92,11 +99,33 @@ class DirectoryIndexingService:
             # Update stats from processing result
             self._update_stats_from_process_result(stats, process_result)
 
+            # Only compact when actual work was done — avoids a costly
+            # no-op compaction on the MCP initial scan path where all
+            # files are already indexed and unchanged.
+            if stats.files_processed > 0 or stats.chunks_created > 0:
+                await self._run_batch_compaction(stats)
+
             # Embedding generation (extracted from run.py:85-88, 287-312)
             if not no_embeddings:
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 stats.embeddings_generated = embed_result.get("generated", 0)
+
+            # Second compaction boundary: needed when embeddings were
+            # generated, or when files were processed (but the first
+            # compaction may have been skipped).
+            if (
+                stats.files_processed > 0
+                or stats.chunks_created > 0
+                or stats.embeddings_generated > 0
+            ):
+                await self._run_batch_compaction(stats)
+
+            # === Rebuild HNSW indexes as final step ===
+            # Must be last: compaction produces a clean DB file, and HNSW
+            # is built once on the clean DB instead of being rewritten on
+            # every checkpoint.
+            await self._ensure_hnsw_indexes()
 
             stats.processing_time = time.time() - start_time
 
@@ -105,6 +134,22 @@ class DirectoryIndexingService:
             raise
 
         return stats
+
+    async def _run_batch_compaction(self, stats: IndexingStats) -> None:
+        """Run one mandatory batch-compaction boundary."""
+        await run_batch_compaction_boundary(self.indexing_coordinator, stats)
+
+    async def _drop_hnsw_indexes(self) -> None:
+        """Drop HNSW indexes before bulk indexing."""
+        db = getattr(self.indexing_coordinator, "_db", None)
+        if db is not None and hasattr(db, "drop_all_hnsw_indexes"):
+            db.drop_all_hnsw_indexes()
+
+    async def _ensure_hnsw_indexes(self) -> None:
+        """Rebuild HNSW indexes after bulk indexing completes."""
+        db = getattr(self.indexing_coordinator, "_db", None)
+        if db is not None and hasattr(db, "ensure_all_hnsw_indexes"):
+            db.ensure_all_hnsw_indexes()
 
     def _resolve_file_patterns(self) -> tuple[list[str], list[str]]:
         """Extracted from run.py:152-175 - file pattern resolution logic."""

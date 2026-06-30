@@ -1,33 +1,42 @@
-import asyncio
+import io
 import json
+import sys
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 
 @pytest.mark.asyncio
-async def test_timeout_prompt_adds_exclusions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    # Prepare a fake coordinator that returns a timeout list
-    class FakeCoordinator:
-        async def get_stats(self):
-            return {"files": 0, "chunks": 0, "embeddings": 0}
-
-        async def process_directory(self, *args, **kwargs):
-            # Simulate no files processed, but timeouts present
-            return {
-                "status": "success",
-                "files_processed": 0,
-                "total_chunks": 0,
-                "skipped": 0,
-                "skipped_due_to_timeout": ["big.bin"],
-            }
+async def test_timeout_prompt_adds_exclusions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Mock coordinator that returns canned values (no actual indexing needed)
+    coord = AsyncMock()
+    coord._db = SimpleNamespace(
+        drop_all_hnsw_indexes=lambda: None,
+        ensure_all_hnsw_indexes=lambda: None,
+    )
+    coord.get_stats.return_value = {"files": 0, "chunks": 0, "embeddings": 0}
+    coord.process_directory.return_value = {
+        "status": "success",
+        "files_processed": 0,
+        "total_chunks": 0,
+        "skipped": 0,
+        "skipped_due_to_timeout": ["big.bin"],
+    }
+    coord.compact_database_with_metrics.return_value = {
+        "status": "skipped",
+        "reason": "unsupported",
+    }
 
     # Patch registry hooks used by run_command
     from chunkhound.api.cli.commands import run as run_mod
 
     monkeypatch.setattr(run_mod, "configure_registry", lambda cfg: None)
-    monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: FakeCoordinator())
+    monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: coord)
 
     # Pretend we are in a TTY and accept the prompt
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
@@ -62,7 +71,6 @@ async def test_timeout_prompt_adds_exclusions(tmp_path: Path, monkeypatch: pytes
 
     # Run
     # Capture stdout by temporarily redirecting the Rich console to a string buffer
-    import io, sys
     buf = io.StringIO()
     real_stdout = sys.stdout
     sys.stdout = buf
@@ -81,35 +89,52 @@ async def test_timeout_prompt_adds_exclusions(tmp_path: Path, monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_timeout_prompt_skipped_in_mcp_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_timeout_prompt_skipped_in_mcp_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """CHUNKHOUND_MCP_MODE=1 must prevent input() call and show info instead."""
-    class FakeCoordinator:
-        async def get_stats(self):
-            return {"files": 0, "chunks": 0, "embeddings": 0}
-
-        async def process_directory(self, *args, **kwargs):
-            return {
-                "status": "success",
-                "files_processed": 0,
-                "total_chunks": 0,
-                "skipped": 0,
-                "skipped_due_to_timeout": ["big.bin"],
-            }
+    coord = AsyncMock()
+    coord._db = SimpleNamespace(
+        drop_all_hnsw_indexes=lambda: None,
+        ensure_all_hnsw_indexes=lambda: None,
+    )
+    coord.get_stats.return_value = {"files": 0, "chunks": 0, "embeddings": 0}
+    coord.process_directory.return_value = {
+        "status": "success",
+        "files_processed": 0,
+        "total_chunks": 0,
+        "skipped": 0,
+        "skipped_due_to_timeout": ["big.bin"],
+    }
+    coord.compact_database_with_metrics.return_value = {
+        "status": "skipped",
+        "reason": "unsupported",
+    }
 
     from chunkhound.api.cli.commands import run as run_mod
 
     # Patch registry hooks used by run_command
     monkeypatch.setattr(run_mod, "configure_registry", lambda cfg: None)
-    monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: FakeCoordinator())
+    monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: coord)
 
     # Force MCP mode, pretend we are in TTY, but ensure input() would raise if called
     monkeypatch.setenv("CHUNKHOUND_MCP_MODE", "1")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda *_: (_ for _ in ()).throw(RuntimeError("input called")))
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("input called")),
+    )
 
     # Minimal config
     proj_dir = tmp_path
-    args = Namespace(path=proj_dir, verbose=False, no_embeddings=True, include=None, exclude=None, db=None)
+    args = Namespace(
+        path=proj_dir,
+        verbose=False,
+        no_embeddings=True,
+        include=None,
+        exclude=None,
+        db=None,
+    )
 
     from chunkhound.core.config.config import Config as CoreConfig
     from chunkhound.core.config.database_config import DatabaseConfig
@@ -119,7 +144,6 @@ async def test_timeout_prompt_skipped_in_mcp_mode(tmp_path: Path, monkeypatch: p
     cfg.database = db_cfg
 
     # Capture stdout
-    import io, sys
     buf = io.StringIO()
     real_stdout = sys.stdout
     sys.stdout = buf

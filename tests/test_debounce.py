@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from chunkhound.core.utils.path_utils import normalize_realtime_path
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.service import RealtimeIndexingService
 
 
 @pytest.fixture

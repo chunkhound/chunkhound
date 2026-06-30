@@ -48,7 +48,7 @@ from chunkhound.utils.windows_constants import IS_WINDOWS  # noqa: E402
 from chunkhound.version import __version__  # noqa: E402
 
 from .base import MCPServerBase  # noqa: E402
-from .common import handle_tool_call  # noqa: E402
+from .common import first_error_tool_content, handle_tool_call  # noqa: E402
 
 # CRITICAL: Disable Python logging at import to prevent JSON-RPC corruption.
 # Loguru is silenced separately in main() — see _silence_loguru below.
@@ -167,17 +167,22 @@ class StdioMCPServer(MCPServerBase):
             tool_name: str, arguments: dict[str, Any]
         ) -> list[types.TextContent]:
             """Universal tool handler that routes to the unified handler."""
-            return await handle_tool_call(
+            text_contents = await handle_tool_call(
                 tool_name=tool_name,
                 arguments=arguments,
-                services=await self.ensure_services(),
+                services=self.services,
                 embedding_manager=self.embedding_manager,
                 initialization_complete=self._initialization_complete,
                 debug_mode=self.debug_mode,
                 scan_progress=self._scan_progress,
                 llm_manager=self.llm_manager,
                 config=self.config,
+                ensure_services=self.ensure_tool_services,
             )
+            error_content = first_error_tool_content(text_contents)
+            if error_content is not None:
+                raise RuntimeError(error_content.text)
+            return text_contents
 
         self._register_list_tools()
 

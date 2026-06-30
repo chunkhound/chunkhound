@@ -21,11 +21,9 @@ from chunkhound.providers.database.duckdb_provider import (
     _normalize_indexed_root,
 )
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
-from chunkhound.services.realtime_indexing_service import (
-    RealtimeIndexingService,
-    SimpleEventHandler,
-    WatchmanRealtimeAdapter,
-)
+from chunkhound.services.realtime.service import RealtimeIndexingService
+from chunkhound.services.realtime.events import SimpleEventHandler
+from chunkhound.services.realtime.adapters import WatchmanRealtimeAdapter
 from chunkhound.services.realtime_path_filter import (
     RealtimePathFilter,
     RealtimePathFilterSettings,
