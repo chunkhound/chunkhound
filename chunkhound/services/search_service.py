@@ -261,6 +261,18 @@ class SearchService(BaseService):
             logger.error(f"Async regex search failed: {e}")
             raise
 
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        """Batch cosine similarity between a query embedding and stored chunk embeddings."""
+        return await self._db.get_chunk_similarities_async(
+            chunk_ids, query_embedding, provider, model
+        )
+
     async def search_hybrid(
         self,
         query: str,

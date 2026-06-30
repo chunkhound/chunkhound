@@ -317,7 +317,7 @@ class DepthExplorationService(ProgressEmitterMixin):
         file_to_chunks: dict[str, list[dict]],
         max_files: int,
     ) -> list[str]:
-        """Select top-K files by average rerank score.
+        """Select top-K files by average relevance score.
 
         Args:
             file_to_chunks: Mapping of file_path -> chunks
@@ -326,10 +326,13 @@ class DepthExplorationService(ProgressEmitterMixin):
         Returns:
             List of top file paths
         """
-        # Calculate average score per file
+        # Calculate average score per file — prefer similarity (cosine), fall back to rerank_score
         file_scores: dict[str, float] = {}
         for file_path, chunks in file_to_chunks.items():
-            scores = [c.get("rerank_score", 0.0) for c in chunks]
+            scores = [
+                c.get("similarity", c.get("rerank_score", 0.0))
+                for c in chunks
+            ]
             file_scores[file_path] = sum(scores) / len(scores) if scores else 0.0
 
         # Sort by score descending and take top-K
@@ -512,11 +515,11 @@ Output JSON with queries array."""
             """Execute a single exploration query."""
             context = ResearchContext(root_query=root_query)
 
-            # Run unified search with compound reranking (root + exploration query)
+            # Run unified search with cosine similarity scoring (no reranker)
             chunks = await self._unified_search.unified_search(
                 query=query,
                 context=context,
-                rerank_queries=[root_query, query],
+                skip_rerank=True,
                 path_filter=path_filter,
             )
 
@@ -528,7 +531,7 @@ Output JSON with queries array."""
 
             # Compute adaptive threshold
             if chunks:
-                scores = [c.get("rerank_score", 0.0) for c in chunks]
+                scores = [c.get("similarity", 0.0) for c in chunks]
                 exploration_threshold = compute_elbow_threshold(scores)
             else:
                 exploration_threshold = phase1_threshold
@@ -538,7 +541,7 @@ Output JSON with queries array."""
 
             # Filter chunks by threshold
             filtered = [
-                c for c in chunks if c.get("rerank_score", 0.0) >= effective_threshold
+                c for c in chunks if c.get("similarity", 0.0) >= effective_threshold
             ]
 
             logger.debug(
