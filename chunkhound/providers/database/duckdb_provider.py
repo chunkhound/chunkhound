@@ -1208,6 +1208,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         try:
             tgt_conn.execute("LOAD vss")
             tgt_conn.execute("SET hnsw_enable_experimental_persistence = true")
+            tgt_conn.execute("SET preserve_insertion_order = false")
 
             for seq in ["files_id_seq", "chunks_id_seq", "embeddings_id_seq"]:
                 tgt_conn.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq}")
