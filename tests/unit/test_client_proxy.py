@@ -363,6 +363,33 @@ async def test_run_wraps_registration_handshake_failures(
 
 
 @pytest.mark.asyncio
+async def test_registration_ack_timeout_reports_alive_daemon_not_died(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy, discovery, writer = _make_proxy(tmp_path, monkeypatch)
+    discovery.format_startup_failure.side_effect = (
+        lambda *, prefix, log_path=None, returncode=None: prefix
+    )
+    discovery.ping_daemon = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        client_proxy_module.ipc,
+        "read_frame",
+        AsyncMock(side_effect=asyncio.TimeoutError()),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await proxy.run()
+
+    message = str(exc_info.value)
+    assert "registration ack timed out" in message
+    assert "daemon still reachable" in message
+    assert "daemon died" not in message
+    assert writer.closed
+    assert writer.wait_closed_called
+
+
+@pytest.mark.asyncio
 async def test_run_wraps_registration_write_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

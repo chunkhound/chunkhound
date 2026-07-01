@@ -24,6 +24,14 @@ async def quickresearch_command(args: argparse.Namespace, config: Config) -> Non
         formatter.error(f"Path does not exist or is not a directory: {args.path}")
         sys.exit(1)
 
+    # _quickresearch is only invoked by `chunkhound websearch` and the websearch
+    # MCP tool, which point it at a tempdir of fetched pages. User-supplied
+    # include/exclude (from .chunkhound.json, --config, env vars, or global
+    # config) would zero out files in that tempdir. Reset to library defaults.
+    # System tempdirs typically have no .gitignore/.chignore, so the remaining
+    # ignore knobs (workspace_gitignore_*, chignore_file) are de-facto inert.
+    config.indexing.reset_user_include_exclude()
+
     embedding_manager, llm_manager = setup_embedding_llm(formatter, config)
 
     # Single create_services call owns the only :memory: connection.

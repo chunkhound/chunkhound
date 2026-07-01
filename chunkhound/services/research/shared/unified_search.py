@@ -81,6 +81,7 @@ class UnifiedSearch:
         node_id: int | None = None,
         depth: int | None = None,
         path_filter: str | None = None,
+        skip_rerank: bool = False,
     ) -> list[dict[str, Any]]:
         """Perform unified semantic + symbol-based regex search (Steps 2-7).
 
@@ -316,6 +317,7 @@ class UnifiedSearch:
                         target_per_symbol=target_per_symbol,
                         path_filter=path_filter,
                         exclude_ids=semantic_chunk_ids,
+                        query=query,
                     )
 
                     # Emit regex search results
@@ -349,17 +351,38 @@ class UnifiedSearch:
         combined_pool = list(unified_map.values())
         logger.debug(f"Unified to {len(combined_pool)} unique chunks")
 
-        # Step 7: Unified rerank against ROOT query (or compound queries)
-        # Reranks semantic + regex results TOGETHER for optimal ranking
-        # Uses ROOT query (not BFS queries) to prevent diversity collapse
-        # Optionally uses compound reranking with multiple queries
+        # Step 7: Score and rank the combined pool.
+        #
+        # skip_rerank=True path: score regex-only chunks via cosine similarity
+        # against the stored embeddings, then sort all chunks by similarity.
+        # Semantic chunks already carry similarity from HNSW search (Step 2).
+        #
+        # skip_rerank=False path: rerank the combined pool against the root query
+        # using the configured reranking provider (existing behaviour).
         embedding_provider = self._embedding_manager.get_provider()
-        if (
+        search_service = self._db_services.search_service
+
+        if skip_rerank:
+            # Regex chunks are scored at the service layer (search_regex_async with
+            # query=) so the combined pool already has similarity on every chunk.
+            # Just sort and emit.
+            t7 = perf_counter()
+            combined_pool.sort(key=lambda c: c.get("similarity", 0.0), reverse=True)
+            await emit_event(
+                "search_rerank",
+                f"Cosine-scored {len(combined_pool)} chunks",
+                node_id=node_id,
+                depth=depth,
+                duration=perf_counter() - t7,
+            )
+
+        elif (
             hasattr(embedding_provider, "supports_reranking")
             and embedding_provider.supports_reranking()
             and len(combined_pool) > 1
         ):
             try:
+                t7 = perf_counter()
                 documents = [get_chunk_text(c) for c in combined_pool]
 
                 # Compound reranking: rerank against each query and average scores
@@ -369,7 +392,6 @@ class UnifiedSearch:
                         "queries"
                     )
 
-                    # Rerank against each query
                     all_scores: list[dict[int, float]] = []
                     t_rerank_total = perf_counter()
                     for i, rerank_query in enumerate(rerank_queries):
@@ -384,19 +406,21 @@ class UnifiedSearch:
                             f"({len(documents)} docs)"
                         )
 
-                        # Collect scores for this query
                         query_scores = {}
                         for rerank_result in rerank_results:
                             if 0 <= rerank_result.index < len(combined_pool):
                                 query_scores[rerank_result.index] = rerank_result.score
                         all_scores.append(query_scores)
 
-                    # Compute compound score as average across all queries
                     for idx in range(len(combined_pool)):
-                        scores = [
+                        per_query_scores = [
                             query_scores.get(idx, 0.0) for query_scores in all_scores
                         ]
-                        compound_score = sum(scores) / len(scores) if scores else 0.0
+                        compound_score = (
+                            sum(per_query_scores) / len(per_query_scores)
+                            if per_query_scores
+                            else 0.0
+                        )
                         combined_pool[idx]["rerank_score"] = compound_score
 
                     logger.warning(
@@ -404,7 +428,6 @@ class UnifiedSearch:
                         f"({len(rerank_queries)} queries)"
                     )
                 else:
-                    # Single query reranking (default behavior)
                     rerank_query = (
                         rerank_queries[0] if rerank_queries else context.root_query
                     )
@@ -418,17 +441,22 @@ class UnifiedSearch:
                         f"({len(combined_pool)} docs)"
                     )
 
-                    # Apply reranking scores (same pattern as multi_hop_strategy.py)
                     for rerank_result in rerank_results:
                         if 0 <= rerank_result.index < len(combined_pool):
                             combined_pool[rerank_result.index]["rerank_score"] = (
                                 rerank_result.score
                             )
 
-                # Sort by rerank score descending
                 combined_pool.sort(
                     key=lambda c: c.get("rerank_score", 0.0),
                     reverse=True,
+                )
+                await emit_event(
+                    "search_rerank",
+                    f"Reranked {len(combined_pool)} chunks",
+                    node_id=node_id,
+                    depth=depth,
+                    duration=perf_counter() - t7,
                 )
 
             except Exception as e:
@@ -516,6 +544,7 @@ class UnifiedSearch:
         target_per_symbol: int = 10,
         path_filter: str | None = None,
         exclude_ids: set[int | str] | None = None,
+        query: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search codebase for top-ranked symbols using parallel async regex (Step 5).
 
@@ -568,6 +597,7 @@ class UnifiedSearch:
                         page_size=scan_page_size,
                         offset=offset,
                         path_filter=path_filter,
+                        query=query,
                     )
                     if not page:
                         break  # No more results available from backend

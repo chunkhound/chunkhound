@@ -132,6 +132,10 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
         env = os.environ.copy()
         env["CLAUDE_USE_SUBSCRIPTION"] = "true"
 
+        # Suppress the CLI's auto-updater: updates should be driven by the
+        # user's interactive `claude` sessions, not ChunkHound subprocess calls.
+        env["DISABLE_AUTOUPDATER"] = "1"
+
         # Remove ANTHROPIC_API_KEY if present to force subscription auth
         env.pop("ANTHROPIC_API_KEY", None)
 

@@ -21,6 +21,9 @@ from chunkhound.services.research.shared.exploration.elbow_filter import (
 from chunkhound.services.research.shared.file_reader import FileReader
 from chunkhound.services.research.shared.import_context import ImportContextService
 
+if TYPE_CHECKING:
+    from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
+
 
 class WideCoverageStrategy:
     """Wide coverage exploration strategy (V2 algorithm).

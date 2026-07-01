@@ -25,6 +25,7 @@ from typing import IO, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from http.client import HTTPMessage
+    from typing import Any
 
     import zendriver as zd
 
@@ -48,6 +49,65 @@ _CHROME_PATHS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
 ]
+
+
+_late_completion_guard_installed = False
+
+
+def _install_late_completion_guard() -> None:
+    """Patch zendriver's Transaction.__call__ to drop late completions.
+
+    TODO: remove once zendriver fixes Connection.send to pop cancelled
+    transactions from connection.mapper (or guards Transaction.__call__
+    upstream). Revisit on every zendriver bump — the version-mismatch
+    warning below is the in-process signal that this may be stale.
+
+    zendriver 0.15.3's Connection.send (connection.py:561-572) does not pop the
+    Transaction from connection.mapper when its awaiter is cancelled — e.g. when
+    we wrap tab.send(cdp.page.navigate(...)) in asyncio.wait_for(..., timeout=30)
+    at _fetch_page. The Transaction Future transitions to CANCELLED but stays
+    registered. When Chrome later delivers the response, Listener.listener_loop
+    (connection.py:780) pops the orphan and calls tx(**message), which calls
+    set_result() on the cancelled Future and raises InvalidStateError. That
+    exception is uncaught in listener_loop and kills the listener task — the
+    asyncio "Task exception was never retrieved" log is the visible symptom; the
+    real damage is that the websocket recv stops draining and the browser
+    session becomes unusable.
+
+    Guarding __call__ with a Future.done() check makes the late completion a
+    no-op, mirroring the local ``on_response`` idempotency guard inside
+    ``_fetch_page``. Discarding the late result is correct: the only consumer
+    was the awaiter inside Connection.send, which already received
+    CancelledError.
+
+    Idempotent via module-level flag — safe to call from every fetch_and_save.
+    """
+    global _late_completion_guard_installed
+    if _late_completion_guard_installed:
+        return
+    import warnings
+
+    import zendriver
+    from zendriver.core.connection import Transaction
+
+    if zendriver.__version__ != "0.15.3":
+        warnings.warn(
+            f"zendriver {zendriver.__version__} != pinned 0.15.3; "
+            "late-completion guard may now be redundant or broken — revisit "
+            "whether upstream fixed Connection.send or Transaction.__call__",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    _orig_call = Transaction.__call__
+
+    def _safe_call(self: Transaction, **response: Any) -> None:
+        if self.done():
+            return
+        _orig_call(self, **response)
+
+    Transaction.__call__ = _safe_call  # type: ignore[method-assign]
+    _late_completion_guard_installed = True
 
 
 def _check_chrome_version(chrome_path: str) -> None:
@@ -569,6 +629,9 @@ async def fetch_and_save(
     # Lazy import: pulls in websockets + CDP binding modules. Wasted cost
     # for CLI commands that never touch websearch (e.g. `chunkhound index`).
     import zendriver as zd
+
+    # Must run before any tab.send() creates a Transaction.
+    _install_late_completion_guard()
 
     # _resolve_chrome_path returns None for every "no usable Chrome >=124"
     # case (not installed, too old, --version probe failed) and emits its
