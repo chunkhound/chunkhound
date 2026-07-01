@@ -116,6 +116,25 @@ PyPI trusted publisher required for `release-rc.yml`:
 - Project-local `.chunkhound.json` with relative `"path": ".chunkhound"` resolves to CWD, not the project dir — use `--db` with absolute paths when indexing remote projects
 - `--config` does NOT override a project-local `.chunkhound.json` for DB path — always use explicit `--db` when the target project has its own config
 
+## RUST_RULES
+**NEVER:**
+- NEVER write `unsafe` code — `#![forbid(unsafe_code)]` is set at the crate root; the compiler will reject it
+- NEVER add `#[allow(clippy::...)]` without an inline comment explaining why
+- NEVER use `.unwrap()` at the PyO3 boundary — use `?` or `PyErr::new`; `.expect("reason")` is acceptable for truly-unreachable internal invariants
+- NEVER borrow `&str` across `py.allow_threads()` — convert to owned `String` before the GIL is released
+
+**ALWAYS:**
+- ALWAYS wrap CPU/IO-bound work in `py.allow_threads(|| { ... })` to release the GIL during Rust execution
+- ALWAYS run `cargo fmt` and `cargo clippy --all-targets -- -D warnings` before committing Rust changes (`make rust-check`)
+- ALWAYS run `cargo test` after Rust changes (`make rust-test`)
+- ALWAYS use owned types (`String`, `Vec<T>`) at the `allow_threads` boundary
+
+## RUST_COMMANDS
+```bash
+rust-check: make rust-check   # cargo fmt --check + clippy -D warnings
+rust-test:  make rust-test    # cargo test
+```
+
 ## PROJECT_MAINTENANCE
 - Smoke tests are mandatory guardrails
 - Run `uv run mypy chunkhound` during reviews to catch Optional/type boundary issues
