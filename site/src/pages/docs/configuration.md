@@ -241,6 +241,8 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | Gemini | `gemini` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Google Gemini API. Migration: `CHUNKHOUND_GEMINI_MODEL` was removed in v4.x — rename to `CHUNKHOUND_LLM_MODEL`. |
 | Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `grok-4.3`) | Must be set explicitly (configurator defaults to `grok-4.3`) | xAI API. Registry providers require explicit `model`. |
 | DeepSeek | `deepseek` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | DeepSeek API. Registry providers require explicit `model`. |
+| Antigravity SDK | `antigravity-sdk` | `CHUNKHOUND_LLM_API_KEY` | `gemini-3.5-flash` | `gemini-3.1-pro` | Uses official Google Antigravity SDK |
+| Antigravity CLI | `antigravity-cli` | -- | `gemini-3.5-flash` | `gemini-3.1-pro` | Uses local agy / antigravity CLI command |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
