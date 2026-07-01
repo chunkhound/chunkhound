@@ -7,29 +7,16 @@ import shutil
 import subprocess
 import tempfile
 
+from tests.utils import SUBPROCESS_ENV_ALLOWLIST
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NPM: str = shutil.which("npm") or "npm"
-_SUBPROCESS_ENV_ALLOWLIST = (
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-    "APPDATA",
-    "LOCALAPPDATA",
-)
 
 
 def sanitized_subprocess_env(**overrides: str) -> dict[str, str]:
     """Build a hermetic runtime env for site subprocess tests."""
     env = {
-        key: os.environ[key]
-        for key in _SUBPROCESS_ENV_ALLOWLIST
-        if key in os.environ
+        key: os.environ[key] for key in SUBPROCESS_ENV_ALLOWLIST if key in os.environ
     }
     env.update(overrides)
     return env

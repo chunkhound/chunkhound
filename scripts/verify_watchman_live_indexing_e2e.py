@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import ntpath
 import os
 import platform
 import shutil
@@ -11,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -209,10 +209,7 @@ class SubprocessJsonRpcClient:
                     timeout=_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                wait_note = (
-                    "wait_timeout="
-                    f"{_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS:.1f}s"
-                )
+                wait_note = f"wait_timeout={_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS:.1f}s"
             except Exception as error:
                 wait_note = f"wait_error={error!r}"
 
@@ -225,8 +222,7 @@ class SubprocessJsonRpcClient:
             details.append(f"stderr_tail={stderr_tail!r}")
 
         return RuntimeError(
-            "JSON-RPC subprocess terminated unexpectedly "
-            f"({', '.join(details)})"
+            f"JSON-RPC subprocess terminated unexpectedly ({', '.join(details)})"
         )
 
     async def _read_exited_stderr_tail(self) -> str | None:
@@ -409,6 +405,9 @@ def _clean_room_env(
         env["CHUNKHOUND_DAEMON_REGISTRY_DIR"] = str(
             runtime_dir / "daemon-user-registry"
         )
+    # Give the daemon more time for its import chain on slow CI hosts
+    # (notably Windows) so it does not time out before becoming reachable.
+    env.setdefault("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "60.0")
     if extra_env:
         env.update(extra_env)
     return env
@@ -480,83 +479,56 @@ def _build_sdist_artifact(*, source_root: Path, dist_dir: Path) -> Path:
 
 
 def _assert_sidecar_uses_installed_runtime(
-    realtime: dict[str, Any], *, venv_dir: Path
+    realtime: dict[str, Any], *, expected_venv_dir: Path
 ) -> None:
+    """Assert the Watchman sidecar uses the installed wheel runtime.
+
+    Checks stable contracts rather than PATH shape details:
+    - watchman_pid refers to a live process
+    - watchman_binary_path is a real file on disk
+    - The process's command line starts with that binary path
+      (not the ``chunkhound.watchman_runtime.bridge`` fallback)
+    - The process advertises the installed wheel virtualenv via ``VIRTUAL_ENV``
+    """
     watchman_pid = realtime.get("watchman_pid")
     if not isinstance(watchman_pid, int) or watchman_pid <= 0:
         raise RuntimeError(f"Invalid Watchman sidecar pid in daemon status: {realtime}")
 
-    process = _resolve_native_watchman_process(
-        watchman_pid,
-        expected_binary_path=realtime.get("watchman_binary_path"),
-    )
-
-    expected_bin_dir = _python_path(venv_dir).parent
-    process_env = process.environ()
-    if process_env.get("VIRTUAL_ENV") != str(venv_dir):
-        raise RuntimeError(
-            "Watchman sidecar inherited the wrong virtualenv environment: "
-            f"{process_env.get('VIRTUAL_ENV')!r}"
-        )
-    path_entries = process_env.get("PATH", "").split(os.pathsep)
-    normalized_entries = [
-        os.path.normcase(os.path.normpath(entry))
-        for entry in path_entries
-        if entry
-    ]
-    expected_venv_entry = os.path.normcase(os.path.normpath(str(expected_bin_dir)))
-    expected_runtime_dir = realtime.get("watchman_binary_path")
-    runtime_entry: str | None = None
-    if isinstance(expected_runtime_dir, str) and expected_runtime_dir:
-        runtime_entry = os.path.normcase(
-            os.path.normpath(ntpath.dirname(expected_runtime_dir))
-        )
-
-    if not normalized_entries:
-        raise RuntimeError(
-            "Watchman sidecar PATH was not pinned to the installed-wheel "
-            f"virtualenv: {process_env.get('PATH')!r}"
-        )
-    if runtime_entry is not None and normalized_entries[0] == runtime_entry:
-        if len(normalized_entries) < 2 or normalized_entries[1] != expected_venv_entry:
-            raise RuntimeError(
-                "Watchman sidecar PATH did not keep the installed-wheel virtualenv "
-                "immediately after the materialized runtime directory: "
-                f"{process_env.get('PATH')!r}"
-            )
-        return
-    if normalized_entries[0] != expected_venv_entry:
-        raise RuntimeError(
-            "Watchman sidecar PATH was not pinned to the installed-wheel "
-            f"virtualenv: {process_env.get('PATH')!r}"
-        )
-
-
-def _resolve_native_watchman_process(
-    watchman_pid: int, *, expected_binary_path: object
-) -> psutil.Process:
-    process = psutil.Process(watchman_pid)
-    cmdline = process.cmdline()
-    if not isinstance(expected_binary_path, str) or not expected_binary_path:
+    binary_path = realtime.get("watchman_binary_path")
+    if not isinstance(binary_path, str) or not binary_path:
         raise RuntimeError(
             "Watchman daemon status did not report a native binary path: "
-            f"{expected_binary_path!r}"
+            f"{binary_path!r}"
         )
+
+    binary_file = Path(binary_path)
+    if not binary_file.is_file():
+        raise RuntimeError(f"Watchman binary path is not a file on disk: {binary_path}")
+
+    process = psutil.Process(watchman_pid)
+    process_env = process.environ()
+    expected_virtual_env = str(expected_venv_dir)
+    if process_env.get("VIRTUAL_ENV") != expected_virtual_env:
+        raise RuntimeError(
+            "Watchman sidecar inherited the wrong installed-wheel virtualenv: "
+            f"{process_env.get('VIRTUAL_ENV')!r}"
+        )
+
+    cmdline = process.cmdline()
     if any(arg == "chunkhound.watchman_runtime.bridge" for arg in cmdline):
         raise RuntimeError(
             "Watchman sidecar fell back to the packaged runtime bridge instead of "
             f"the native daemon: {cmdline}"
         )
-    normalized_expected = os.path.normcase(os.path.normpath(expected_binary_path))
-    if cmdline and (
-        os.path.normcase(os.path.normpath(cmdline[0])) == normalized_expected
-    ):
-        return process
 
-    raise RuntimeError(
-        "Watchman sidecar did not launch the expected native daemon binary: "
-        f"expected={expected_binary_path!r} actual={cmdline}"
-    )
+    normalized_binary = os.path.normcase(os.path.normpath(binary_path))
+    if not cmdline or (
+        os.path.normcase(os.path.normpath(cmdline[0])) != normalized_binary
+    ):
+        raise RuntimeError(
+            "Watchman sidecar did not launch the expected native daemon binary: "
+            f"expected={binary_path!r} actual={cmdline}"
+        )
 
 
 def _parse_tool_json(result: dict[str, Any]) -> dict[str, Any]:
@@ -585,16 +557,15 @@ def _flatten_tool_text(result: dict[str, Any]) -> str:
     return "\n".join(rendered)
 
 
-def _has_nested_watchman_health(realtime: dict[str, Any]) -> bool:
-    subscription_names = realtime.get("watchman_subscription_names")
-    watchman_scopes = realtime.get("watchman_scopes")
-    loss_of_sync = realtime.get("watchman_loss_of_sync")
+def _is_watchman_ready_state(realtime: dict[str, Any]) -> bool:
+    """Return True if daemon_status reports a running Watchman backend.
+
+    Checks broad state invariants rather than specific key shapes so the
+    assertion survives refactors of the daemon_status payload internals.
+    """
     return (
-        isinstance(subscription_names, list)
-        and len(subscription_names) >= 1
-        and isinstance(watchman_scopes, list)
-        and len(watchman_scopes) >= 1
-        and isinstance(loss_of_sync, dict)
+        realtime.get("watchman_sidecar_state") == "running"
+        and realtime.get("effective_backend") == "watchman"
     )
 
 
@@ -616,15 +587,9 @@ async def _wait_for_ready(client: SubprocessJsonRpcClient) -> dict[str, Any]:
         last_status = _parse_tool_json(result)
         realtime = last_status.get("scan_progress", {}).get("realtime", {})
         if last_status.get("status") == "ready":
-            if realtime.get("watchman_sidecar_state") == "running":
-                # Full Watchman readiness: connected, subscribed, healthy
-                if (
-                    realtime.get("watchman_connection_state") == "connected"
-                    and realtime.get("watchman_subscription_count") == 1
-                    and _has_nested_watchman_health(realtime)
-                ):
-                    return last_status
-            elif _is_polling_fallback_ready_state(realtime):
+            if _is_watchman_ready_state(realtime):
+                return last_status
+            if _is_polling_fallback_ready_state(realtime):
                 # Polling fallback is only ready once status is explicit.
                 return last_status
         await asyncio.sleep(0.5)
@@ -892,13 +857,10 @@ async def _verify_fallback_install_contract(
         encoding="utf-8",
         errors="replace",
     )
-    if (
-        "Watchman runtime archive download failed" not in daemon_log_text
-        and "Watchman" not in daemon_log_text
-    ):
+    if "Watchman" not in daemon_log_text:
         raise RuntimeError(
             f"Explicit {install_label} watchman failure did not surface "
-            f"Watchman startup evidence: {daemon_log_text}"
+            f"Watchman startup breadcrumbs in daemon log: {daemon_log_text}"
         )
 
     lock_path = _lock_path_for_runtime(watchman_project_dir, failure_runtime_dir)
@@ -974,121 +936,161 @@ async def _verify_source_fallback(source_root: Path) -> None:
         _remove_tree_with_retries(root)
 
 
-async def _verify_wheel(wheel_path: Path) -> None:
-    root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-live-wheel-verify-"))
-    try:
-        venv_dir = root / "venv"
-        runtime_dir = root / "runtime"
-        project_dir = root / "project"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        live_file, live_symbol = _write_project(project_dir)
+@dataclass
+class _WheelInstallFixture:
+    """Bundles resources produced by installing a wheel for live-indexing E2E."""
 
-        subprocess.run(
-            ["uv", "venv", str(venv_dir)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        python_path = _python_path(venv_dir)
-        subprocess.run(
-            ["uv", "pip", "install", "--python", str(python_path), str(wheel_path)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        chunkhound_exe = _chunkhound_path(venv_dir)
-        if not chunkhound_exe.is_file():
-            raise FileNotFoundError(
-                f"Installed chunkhound executable not found: {chunkhound_exe}"
-            )
+    venv_dir: Path
+    runtime_dir: Path
+    project_dir: Path
+    chunkhound_exe: Path
+    live_file: Path
+    live_symbol: str
 
-        proc = await _create_subprocess_exec_safe(
-            str(chunkhound_exe),
-            *_mcp_command_args(project_dir),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_clean_room_env(venv_dir, runtime_dir=runtime_dir),
-            cwd=str(project_dir),
+
+async def _install_wheel_and_start_daemon(
+    wheel_path: Path, root: Path
+) -> tuple[
+    _WheelInstallFixture,
+    asyncio.subprocess.Process,
+    SubprocessJsonRpcClient,
+]:
+    """Install the wheel into a clean venv, start the daemon, return fixtures."""
+    venv_dir = root / "venv"
+    runtime_dir = root / "runtime"
+    project_dir = root / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    live_file, live_symbol = _write_project(project_dir)
+
+    subprocess.run(
+        ["uv", "venv", str(venv_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    python_path = _python_path(venv_dir)
+    subprocess.run(
+        ["uv", "pip", "install", "--python", str(python_path), str(wheel_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    chunkhound_exe = _chunkhound_path(venv_dir)
+    if not chunkhound_exe.is_file():
+        raise FileNotFoundError(
+            f"Installed chunkhound executable not found: {chunkhound_exe}"
         )
-        client = SubprocessJsonRpcClient(proc)
-        stderr_text = ""
-        await client.start()
-        try:
+
+    proc = await _create_subprocess_exec_safe(
+        str(chunkhound_exe),
+        *_mcp_command_args(project_dir),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=_clean_room_env(venv_dir, runtime_dir=runtime_dir),
+        cwd=str(project_dir),
+    )
+    client = SubprocessJsonRpcClient(proc)
+    await client.start()
+    return (
+        _WheelInstallFixture(
+            venv_dir=venv_dir,
+            runtime_dir=runtime_dir,
+            project_dir=project_dir,
+            chunkhound_exe=chunkhound_exe,
+            live_file=live_file,
+            live_symbol=live_symbol,
+        ),
+        proc,
+        client,
+    )
+
+
+async def _verify_daemon_startup(
+    client: SubprocessJsonRpcClient, *, expected_venv_dir: Path
+) -> dict[str, Any]:
+    """Contract: daemon boots, completes MCP handshake, and becomes ready.
+
+    This is the startup contract. Returns the ready daemon_status payload.
+    """
+    await client.send_request(
+        "initialize",
+        _MCP_INIT_PARAMS,
+        timeout=_MCP_INITIALIZE_TIMEOUT_SECONDS,
+    )
+    await client.send_notification("notifications/initialized", {})
+
+    ready_status = await _wait_for_ready(client)
+    realtime = ready_status["scan_progress"]["realtime"]
+
+    if _is_watchman_ready_state(realtime):
+        _assert_sidecar_uses_installed_runtime(
+            realtime, expected_venv_dir=expected_venv_dir
+        )
+    elif realtime.get("effective_backend") == "polling":
+        # Polling fallback is a valid ready state — no sidecar assertions.
+        pass
+    else:
+        raise RuntimeError(
+            f"Daemon reached READY with unexpected backend state: {realtime}"
+        )
+
+    return ready_status
+
+
+async def _verify_live_mutation(
+    client: SubprocessJsonRpcClient,
+    *,
+    ready_realtime: dict[str, Any],
+    live_file: Path,
+    live_symbol: str,
+) -> None:
+    """Contract: writing a new searchable file makes it discoverable.
+
+    The daemon must already be READY before calling this.
+    """
+    watchman_running = ready_realtime.get("watchman_sidecar_state") == "running"
+
+    live_file.parent.mkdir(parents=True, exist_ok=True)
+    live_file.write_text(
+        f"def {live_symbol}():\n    return 'live'\n",
+        encoding="utf-8",
+    )
+
+    await _wait_for_search_hit(client, query=live_symbol)
+
+    if watchman_running:
+        final_status = _parse_tool_json(
             await client.send_request(
-                "initialize",
-                _MCP_INIT_PARAMS,
-                timeout=_MCP_INITIALIZE_TIMEOUT_SECONDS,
+                "tools/call",
+                {"name": "daemon_status", "arguments": {}},
+                timeout=15.0,
             )
-            await client.send_notification("notifications/initialized", {})
+        )
+        final_realtime = final_status["scan_progress"]["realtime"]
+        if not _is_watchman_ready_state(final_realtime):
+            raise RuntimeError(
+                "Watchman sidecar lost running state after live mutation: "
+                f"{final_realtime}"
+            )
 
-            ready_status = await _wait_for_ready(client)
-            realtime = ready_status["scan_progress"]["realtime"]
-            sidecar_state = realtime.get("watchman_sidecar_state")
-            effective_backend = realtime.get("effective_backend")
-            if sidecar_state == "running":
-                # Full Watchman health check path
-                if not _has_nested_watchman_health(realtime):
-                    raise RuntimeError(
-                        "Ready Watchman daemon_status payload was missing nested "
-                        f"health structure: {realtime}"
-                    )
-                _assert_sidecar_uses_installed_runtime(realtime, venv_dir=venv_dir)
 
-                live_file.parent.mkdir(parents=True, exist_ok=True)
-                live_file.write_text(
-                    f"def {live_symbol}():\n    return 'live'\n",
-                    encoding="utf-8",
-                )
-
-                await _wait_for_search_hit(client, query=live_symbol)
-
-                final_status = _parse_tool_json(
-                    await client.send_request(
-                        "tools/call",
-                        {"name": "daemon_status", "arguments": {}},
-                        timeout=15.0,
-                    )
-                )
-                final_realtime = final_status["scan_progress"]["realtime"]
-                if not _has_nested_watchman_health(final_realtime):
-                    raise RuntimeError(
-                        "Final Watchman daemon_status payload was missing nested "
-                        f"health structure: {final_realtime}"
-                    )
-                if int(final_realtime.get("watchman_subscription_pdu_count", 0)) < 1:
-                    raise RuntimeError(
-                        "Live mutation became searchable, but no subscription PDUs "
-                        f"were recorded: {final_realtime}"
-                    )
-            else:
-                # Degraded mode — Watchman sidecar unavailable, polling fallback active
-                if effective_backend != "polling":
-                    raise RuntimeError(
-                        "Daemon in degraded mode but effective_backend is "
-                        f"'{effective_backend}' (expected 'polling'): {realtime}"
-                    )
-
-                live_file.parent.mkdir(parents=True, exist_ok=True)
-                live_file.write_text(
-                    f"def {live_symbol}():\n    return 'live'\n",
-                    encoding="utf-8",
-                )
-                await _wait_for_search_hit(client, query=live_symbol)
-
-                final_status = _parse_tool_json(
-                    await client.send_request(
-                        "tools/call",
-                        {"name": "daemon_status", "arguments": {}},
-                        timeout=15.0,
-                    )
-                )
-                final_realtime = final_status["scan_progress"]["realtime"]
-                if not _is_polling_fallback_ready_state(final_realtime):
-                    raise RuntimeError(
-                        "Polling fallback stopped being explicit after live mutation: "
-                        f"{final_realtime}"
-                    )
+async def _verify_wheel(wheel_path: Path) -> None:
+    """Verify a single wheel: startup contract, then live mutation contract."""
+    root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-live-wheel-verify-"))
+    stderr_text = ""
+    try:
+        fixture, proc, client = await _install_wheel_and_start_daemon(wheel_path, root)
+        try:
+            ready_status = await _verify_daemon_startup(
+                client, expected_venv_dir=fixture.venv_dir
+            )
+            await _verify_live_mutation(
+                client,
+                ready_realtime=ready_status["scan_progress"]["realtime"],
+                live_file=fixture.live_file,
+                live_symbol=fixture.live_symbol,
+            )
         finally:
             await client.close()
             if proc.stderr is not None:

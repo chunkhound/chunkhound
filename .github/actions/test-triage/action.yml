@@ -1,0 +1,28 @@
+name: 'Test Triage'
+description: 'Upload test results and check flaky annotations'
+inputs:
+  results-name:
+    description: 'Artifact name for test results XML'
+    required: true
+  results-path:
+    description: 'Path to JUnit XML results file'
+    required: true
+  check-flaky-annotations:
+    description: 'Whether the caller detected a real test-step failure that should trigger flaky annotation validation'
+    required: false
+    default: 'false'
+runs:
+  using: 'composite'
+  steps:
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.results-name }}
+        path: ${{ inputs.results-path }}
+        if-no-files-found: ignore
+
+    - name: Check flaky annotations
+      if: ${{ inputs.check-flaky-annotations == 'true' }}
+      shell: bash
+      run: uv run python scripts/check_flaky_annotations.py ${{ inputs.results-path }}

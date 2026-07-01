@@ -9,6 +9,7 @@ from chunkhound.watchman_runtime.loader import is_packaged_watchman_runtime_avai
 logger.remove()
 
 _WATCHMAN_RUNTIME_VALIDATION_ENV = "CHUNKHOUND_RUN_WATCHMAN_RUNTIME_VALIDATION"
+_RUFF_INTEGRATION_ENV = "CHUNKHOUND_RUN_RUFF_INTEGRATION"
 
 
 def pytest_configure(config):
@@ -44,11 +45,26 @@ def pytest_collection_modifyitems(config, items):
             "validation lane to exercise hydration)"
         )
     )
+    run_ruff_integration = os.getenv(_RUFF_INTEGRATION_ENV) == "1"
+    if run_ruff_integration:
+        skip_ruff_integration = None
+    else:
+        skip_ruff_integration = pytest.mark.skip(
+            reason=(
+                "Real uv+ruff integration tests are skipped by default. "
+                f"Set {_RUFF_INTEGRATION_ENV}=1 to run."
+            )
+        )
     for item in items:
         if skip_heavy is not None and "heavy" in item.keywords:
             item.add_marker(skip_heavy)
         if not native_watchman_ready and "requires_native_watchman" in item.keywords:
             item.add_marker(skip_native_watchman)
+        if (
+            skip_ruff_integration is not None
+            and "requires_ruff_integration" in item.keywords
+        ):
+            item.add_marker(skip_ruff_integration)
 
 
 def _discover_free_opencode_models() -> list[str]:

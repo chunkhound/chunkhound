@@ -1,4 +1,4 @@
-"""LanceDB provider implementation for ChunkHound - concrete database provider using LanceDB."""
+"""LanceDB provider implementation for ChunkHound - concrete LanceDB provider."""
 
 import json
 import os
@@ -52,7 +52,8 @@ def get_chunks_schema(embedding_dims: int | None = None) -> pa.Schema:
 
     Args:
         embedding_dims: Number of dimensions for embedding vectors.
-                       If None, uses variable-size list (which doesn't support vector search)
+                       If None, uses variable-size list (which doesn't support
+                       vector search)
     """
     # Define embedding field based on whether we have fixed dimensions
     if embedding_dims is not None:
@@ -135,7 +136,9 @@ def _deserialize_metadata(metadata_json: str | float | None) -> dict:
 
     Handles pandas NaN values (float) which represent NULL string fields.
     """
-    if metadata_json is None or (isinstance(metadata_json, float) and np.isnan(metadata_json)):
+    if metadata_json is None or (
+        isinstance(metadata_json, float) and np.isnan(metadata_json)
+    ):
         return {}
     if isinstance(metadata_json, str):
         return json.loads(metadata_json)
@@ -169,7 +172,9 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Initialize LanceDB provider.
 
         Args:
-            db_path: Path to LanceDB database directory (already includes .lancedb suffix from DatabaseConfig.get_db_path())
+            db_path: Path to LanceDB database directory
+                     (already includes .lancedb suffix
+                     from DatabaseConfig.get_db_path())
             base_directory: Base directory for path normalization
             embedding_manager: Optional embedding manager for vector generation
             config: Database configuration for provider-specific settings
@@ -345,12 +350,14 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         except AttributeError:
             logger.debug(
-                "Embedding provider has no 'dims' attribute - using variable-size schema"
+                "Embedding provider has no 'dims' attribute"
+                " - using variable-size schema"
             )
             return None
         except Exception as e:
             logger.warning(
-                f"Error detecting embedding dimensions: {e} - using variable-size schema"
+                f"Error detecting embedding dimensions: {e}"
+                " - using variable-size schema"
             )
             return None
 
@@ -366,10 +373,14 @@ class LanceDBProvider(SerialDatabaseProvider):
             # Migrate: add skip_reason column to existing tables
             if "skip_reason" not in self._files_table.schema.names:
                 try:
-                    self._files_table.add_columns({"skip_reason": "cast(null as varchar)"})
+                    self._files_table.add_columns(
+                        {"skip_reason": "cast(null as varchar)"}
+                    )
                     logger.info("Migrated files table: added skip_reason column")
                 except Exception as e:
-                    logger.warning(f"Could not add skip_reason column to files table: {e}")
+                    logger.warning(
+                        f"Could not add skip_reason column to files table: {e}"
+                    )
         except Exception:
             # Table doesn't exist, create it
             # Create table using PyArrow schema
@@ -415,12 +426,14 @@ class LanceDBProvider(SerialDatabaseProvider):
             lancedb_version = getattr(lancedb, "__version__", "0.0.0")
             if Version(lancedb_version) < Version("0.25.3"):
                 raise ValueError(
-                    f"ivf_rq index type requires LanceDB 0.25.3+, but found {lancedb_version}. "
+                    f"ivf_rq index type requires LanceDB 0.25.3+"
+                    f", but found {lancedb_version}. "
                     f"Please upgrade: pip install 'lancedb>=0.25.3'"
                 )
 
         # Create scalar index on chunks.id for merge_insert performance
-        # merge_insert performs join on id column, index provides O(log n) vs O(n) lookup
+        # merge_insert performs join on id column, index
+        # provides O(log n) vs O(n) lookup
         if self._chunks_table:
             try:
                 # Check if index already exists
@@ -430,9 +443,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                 )
 
                 if not has_id_index:
-                    logger.info(
-                        "Creating scalar index on chunks.id for merge_insert performance"
-                    )
+                    logger.info("Creating scalar index on chunks.id for merge_insert")
                     self._chunks_table.create_scalar_index("id")
                     logger.info("Scalar index on chunks.id created successfully")
                 else:
@@ -485,7 +496,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             )
             if total_embeddings < 1000:
                 logger.debug(
-                    f"Skipping index creation for {provider}/{model}: insufficient data ({total_embeddings} < 1000)"
+                    f"Skipping index creation for {provider}/{model}:"
+                    f" insufficient data ({total_embeddings} < 1000)"
                 )
                 return
 
@@ -595,13 +607,12 @@ class LanceDBProvider(SerialDatabaseProvider):
         else:
             # This should not happen, but handle gracefully
             logger.error(
-                f"Failed to retrieve file ID after merge_insert for path: {normalized_path}"
+                f"Failed to retrieve file ID after merge_insert"
+                f" for path: {normalized_path}"
             )
             return file_data["id"]
 
-    def list_file_paths_under_directory(
-        self, directory_prefix: str
-    ) -> list[str]:
+    def list_file_paths_under_directory(self, directory_prefix: str) -> list[str]:
         return cast(
             list[str],
             self._execute_in_db_thread_sync(
@@ -794,7 +805,14 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Upsert a file record with skip_reason to prevent re-scanning on next run."""
         self._execute_in_db_thread_sync(
             "record_skipped_file",
-            path, name, extension, size, mtime, language, content_hash, skip_reason,
+            path,
+            name,
+            extension,
+            size,
+            mtime,
+            language,
+            content_hash,
+            skip_reason,
         )
 
     def _executor_record_skipped_file(
@@ -817,7 +835,9 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Preserve existing id so chunks.file_id references are not orphaned
         # when a previously-indexed file transitions to skipped.
         try:
-            existing = self._files_table.search().where(f"path = '{path}'").limit(1).to_list()
+            existing = (
+                self._files_table.search().where(f"path = '{path}'").limit(1).to_list()
+            )
             file_id = existing[0]["id"] if existing else int(time.time() * 1000000)
         except Exception:
             file_id = int(time.time() * 1000000)
@@ -979,7 +999,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             )
 
             # Use merge_insert for atomic upsert with conflict-free semantics
-            # Handles idempotency (same file indexed multiple times) and concurrent writes
+            # Handles idempotency (same file indexed multiple times)
+            # and concurrent writes
             # (initial scan + file watcher, multiple processes, multiple file events)
             # LanceDB's MVCC ensures conflicts are resolved via automatic retries
             (
@@ -1076,7 +1097,7 @@ class LanceDBProvider(SerialDatabaseProvider):
     def get_chunks_in_range(
         self, file_id: int, start_line: int, end_line: int
     ) -> list[dict[str, Any]]:
-        """Get all chunks overlapping a line range (pattern from context_retriever.py)."""
+        """Get chunks overlapping a line range (pattern from context_retriever.py)."""
         return self._execute_in_db_thread_sync(
             "get_chunks_in_range", file_id, start_line, end_line
         )
@@ -1135,7 +1156,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "code": result.get("content", ""),
                     "start_line": result.get("start_line", 0),
                     "end_line": result.get("end_line", 0),
-                    "start_byte": None,  # LanceDB chunks table doesn't store byte offsets
+                    # LanceDB chunks table doesn't store byte offsets
+                    "start_byte": None,
                     "end_byte": None,
                     "language": result.get("language", ""),
                     "metadata": _deserialize_metadata(result.get("metadata")),
@@ -1225,7 +1247,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             provider = embeddings_data[0]["provider"]
             model = embeddings_data[0]["model"]
 
-            # Check if embedding columns exist in schema and if they have the correct type
+            # Check if embedding columns exist in schema and
+            # if they have the correct type
             current_schema = self._chunks_table.schema
             embedding_field = None
             for field in current_schema:
@@ -1239,7 +1262,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                 # Check if it's a fixed-size list with correct dimensions
                 if not pa.types.is_fixed_size_list(embedding_field.type):
                     logger.info(
-                        "Embedding column exists but is variable-size list - need to recreate table with fixed-size list"
+                        "Embedding column exists but is variable-size list"
+                        " - need to recreate table with fixed-size list"
                     )
                     needs_recreation = True
                 elif (
@@ -1247,7 +1271,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                     and embedding_field.type.list_size != embedding_dims
                 ):
                     logger.info(
-                        f"Embedding column exists but has wrong dimensions ({embedding_field.type.list_size} vs {embedding_dims}) - need to recreate table"
+                        f"Embedding column exists but has wrong dimensions"
+                        f" ({embedding_field.type.list_size} vs {embedding_dims})"
+                        " - need to recreate table"
                     )
                     needs_recreation = True
 
@@ -1257,10 +1283,13 @@ class LanceDBProvider(SerialDatabaseProvider):
                 logger.info(
                     f"Migrating chunks table to fixed-size embedding schema:\n"
                     f"  Reason: Schema created before embedding dimensions were known\n"
-                    f"  Required dimensions: {embedding_dims} (provider={provider}, model={model})\n"
+                    f"  Required dimensions: {embedding_dims}"
+                    f" (provider={provider}, model={model})\n"
                     f"  Chunks to migrate: {len(existing_data_df):,}\n"
-                    f"  This is a ONE-TIME operation - future embedding insertions will be fast\n"
-                    f"  To avoid this in future: Ensure embedding provider configured before database creation"
+                    f"  This is a ONE-TIME operation"
+                    " - future embedding insertions will be fast\n"
+                    f"  To avoid this in future: Ensure embedding"
+                    " provider configured before database creation"
                 )
 
                 # Drop the old table
@@ -1285,7 +1314,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                             "chunk_type": row["chunk_type"],
                             "language": row["language"],
                             "name": row["name"],
-                            "embedding": None,  # No placeholder - needs embedding generation
+                            # No placeholder - needs embedding generation
+                            "embedding": None,
                             "provider": "",
                             "model": "",
                             "created_time": row.get("created_time", time.time()),
@@ -1321,7 +1351,8 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             # Determine optimal batch size if not provided
             if batch_size is None:
-                # Use larger batches for better performance, but cap at 10k to avoid memory issues
+                # Use larger batches for better performance, but cap
+                # at 10k to avoid memory issues
                 batch_size = min(10000, len(embeddings_data))
 
             total_updated = 0
@@ -1349,23 +1380,27 @@ class LanceDBProvider(SerialDatabaseProvider):
 
                 # Read existing rows for these chunk IDs
                 # NOTE: Using Lance SQL filter instead of .search() because .search()
-                # may not reliably find rows with NULL embedding columns (vector search semantics)
+                # may not reliably find rows with NULL embedding
+                # columns (vector search semantics)
                 chunk_ids = list(embedding_lookup.keys())
                 chunk_ids_str = ",".join(map(str, chunk_ids))
 
                 try:
-                    # Primary: Use LanceDB's native Lance filter (efficient for large tables)
+                    # Primary: Use LanceDB's native Lance filter
+                    # (efficient for large tables)
                     existing_df = (
                         self._chunks_table.to_lance()
                         .to_table(filter=f"id IN ({chunk_ids_str})")
                         .to_pandas()
                     )
                 except Exception as lance_err:
-                    # Fallback: Paginated pandas filtering (memory-safe for large tables)
+                    # Fallback: Paginated pandas filtering
+                    # (memory-safe for large tables)
                     total_rows = self._chunks_table.count_rows()
 
                     logger.warning(
-                        f"Lance SQL filter unavailable, using paginated fallback for {total_rows:,} rows. "
+                        f"Lance SQL filter unavailable, using paginated"
+                        f" fallback for {total_rows:,} rows. "
                         f"Error: {lance_err}"
                     )
 
@@ -1382,10 +1417,12 @@ class LanceDBProvider(SerialDatabaseProvider):
                             )
                         except TypeError:
                             # LanceDB may not support offset/limit in to_pandas()
-                            # Fall back to loading all and slicing (less efficient but works)
+                            # Fall back to loading all and slicing
+                            # (less efficient but works)
                             if offset == 0:
                                 logger.debug(
-                                    "LanceDB to_pandas() doesn't support pagination, loading full table"
+                                    "LanceDB to_pandas() doesn't support"
+                                    " pagination, loading full table"
                                 )
                                 all_chunks_df = self._chunks_table.to_pandas()
                                 batch_df = all_chunks_df[
@@ -1412,14 +1449,18 @@ class LanceDBProvider(SerialDatabaseProvider):
 
                 # Diagnostic logging
                 logger.debug(
-                    f"Looking for {len(chunk_ids)} chunk IDs, found {len(existing_df)} existing chunks"
+                    f"Looking for {len(chunk_ids)} chunk IDs,"
+                    f" found {len(existing_df)} existing chunks"
                 )
                 if len(existing_df) == 0 and len(chunk_ids) > 0:
                     total_rows = self._chunks_table.count_rows()
                     logger.warning(
-                        f"Embedding update: search returned 0 results but table has {total_rows} rows. "
-                        f"This indicates a LanceDB query issue. Using paginated fallback. "
-                        f"Chunk IDs requested: {chunk_ids[:5]}{'...' if len(chunk_ids) > 5 else ''}"
+                        f"Embedding update: search returned 0 results"
+                        f" but table has {total_rows} rows. "
+                        f"This indicates a LanceDB query issue."
+                        " Using paginated fallback. "
+                        f"Chunk IDs requested: {chunk_ids[:5]}"
+                        f"{'...' if len(chunk_ids) > 5 else ''}"
                     )
 
                 # Merge embedding data into existing rows (full row data required)
@@ -1477,10 +1518,13 @@ class LanceDBProvider(SerialDatabaseProvider):
                         conn, state, provider, model, embedding_dims
                     )
                 except Exception as e:
-                    # This is expected if the table was created with variable-size list schema
-                    # The index will work once the table is recreated with fixed-size schema
+                    # This is expected if the table was created
+                    # with variable-size list schema
+                    # The index will work once the table is
+                    # recreated with fixed-size schema
                     logger.debug(
-                        f"Vector index creation deferred (expected with initial schema): {e}"
+                        f"Vector index creation deferred"
+                        f" (expected with initial schema): {e}"
                     )
 
             logger.debug(
@@ -1515,7 +1559,7 @@ class LanceDBProvider(SerialDatabaseProvider):
     def get_existing_embeddings(
         self, chunk_ids: list[int], provider: str, model: str
     ) -> set[int]:
-        """Get set of chunk IDs that already have embeddings for given provider/model."""
+        """Get set of chunk IDs with embeddings for given provider/model."""
         return self._execute_in_db_thread_sync(
             "get_existing_embeddings", chunk_ids, provider, model
         )
@@ -1552,8 +1596,10 @@ class LanceDBProvider(SerialDatabaseProvider):
                     logger.error(f"Failed to recover chunks table: {recovery_error}")
                     return set()
 
-            # Handle embeddings that are lists - pandas notna() might not work correctly with lists
-            # Also check embedding is not all zeros (defense-in-depth for legacy placeholder vectors)
+            # Handle embeddings that are lists - pandas notna()
+            # might not work correctly with lists
+            # Also check embedding is not all zeros
+            # (defense-in-depth for legacy placeholder vectors)
             embeddings_mask = all_chunks_df["embedding"].apply(_has_valid_embedding)
 
             # If no specific chunk_ids provided, check all chunks
@@ -1589,7 +1635,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         pass
 
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
-        """Get all chunks with their metadata including file paths (provider-agnostic)."""
+        """Get all chunks with their metadata including file paths."""
         return self._execute_in_db_thread_sync("get_all_chunks_with_metadata")
 
     def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
@@ -1659,7 +1705,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                             offset=offset, limit=page_size
                         )
                     except TypeError:
-                        # LanceDB may not support offset/limit; fall back to a full load.
+                        # LanceDB may not support offset/limit;
+                        # fall back to a full load.
                         if offset == 0:
                             try:
                                 chunks_df = self._chunks_table.to_pandas()
@@ -1835,7 +1882,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                 embeddings_mask = sample_chunks["embedding"].apply(_has_valid_embedding)
             except Exception as data_error:
                 logger.error(
-                    f"LanceDB data corruption detected during semantic search: {data_error}"
+                    f"LanceDB data corruption detected"
+                    f" during semantic search: {data_error}"
                 )
                 return [], {
                     "offset": offset,
@@ -1865,7 +1913,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                 query_embedding, vector_column_name="embedding"
             )
             query = query.where(
-                f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL"
+                f"provider = '{provider}' AND model = '{model}'"
+                " AND embedding IS NOT NULL"
             )
             query = query.limit(page_size + offset)
 
@@ -2021,7 +2070,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                 f"AND embedding IS NOT NULL AND id != {chunk_id}"
             )
 
-            # Note: Cannot filter by _distance in WHERE clause - it only exists in results
+            # Note: Cannot filter by _distance in WHERE clause
+            # - it only exists in results
             # We'll filter after getting results if threshold is specified
             # Request more results than needed if using threshold
             fetch_limit = limit * 3 if threshold is not None else limit
@@ -2039,7 +2089,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             # PHASE 3: Format results with file paths and apply threshold
             filtered_results: list[tuple[dict[str, Any], float]] = []
             for result in results:
-                # Convert distance to similarity score (cosine: similarity = 1 - distance)
+                # Convert distance to similarity score
+                # (cosine: similarity = 1 - distance)
                 distance = result.get("_distance", 0.0)
                 similarity = 1.0 - distance
 
@@ -2098,7 +2149,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             where_clause = f"regexp_match(content, '{escaped_pattern}')"
 
             # Get all matching chunks
-            # Note: .search().where() without vector may return duplicates across fragments
+            # Note: .search().where() without vector may return
+            # duplicates across fragments
             results = self._chunks_table.search().where(where_clause).to_list()
 
             # Deduplicate across fragments (critical fix for fragmentation bug)
@@ -2225,9 +2277,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                 try:
                     stats["files"] = len(self._files_table.to_pandas())
                 except Exception as data_error:
-                    logger.warning(
-                        f"Failed to get files stats due to data corruption: {data_error}"
-                    )
+                    logger.warning(f"File stats failed: {data_error}")
                     stats["files"] = 0
 
             if self._chunks_table:
@@ -2238,9 +2288,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     embeddings_mask = chunks_df["embedding"].apply(_has_valid_embedding)
                     stats["embeddings"] = len(chunks_df[embeddings_mask])
                 except Exception as data_error:
-                    logger.warning(
-                        f"Failed to get chunks stats due to data corruption: {data_error}"
-                    )
+                    logger.warning(f"Chunk stats failed: {data_error}")
                     # Try to get count using count_rows() which is more robust
                     try:
                         stats["chunks"] = self._chunks_table.count_rows()
@@ -2296,7 +2344,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             results = (
                 self._chunks_table.search()
                 .where(
-                    f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL"
+                    f"provider = '{provider}' AND model = '{model}'"
+                    " AND embedding IS NOT NULL"
                 )
                 .to_list()
             )
@@ -2323,6 +2372,10 @@ class LanceDBProvider(SerialDatabaseProvider):
         Supported forms:
         - SELECT path, size, modified_time, content_hash FROM files
         - SELECT path, size, modified_time FROM files
+        - SELECT path FROM files
+
+        Note: ORDER BY, WHERE, LIMIT and other SQL clauses are silently
+        ignored by this adapter. Results are unsorted.
         """
         try:
             if not self._files_table:
@@ -2450,14 +2503,17 @@ class LanceDBProvider(SerialDatabaseProvider):
         try:
             if self._chunks_table:
                 logger.debug("Optimizing chunks table - compacting fragments...")
-                # Use minimal cleanup window (1 minute) to focus on fragment consolidation
-                # rather than time-based cleanup. The goal is compaction, not age-based deletion.
+                # Use minimal cleanup window (1 minute) to focus
+                # on fragment consolidation
+                # rather than time-based cleanup. The goal is
+                # compaction, not age-based deletion.
                 stats = self._chunks_table.optimize(
                     cleanup_older_than=timedelta(minutes=1), delete_unverified=True
                 )
                 if stats is not None:
                     logger.debug(
-                        f"Chunks table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
+                        f"Chunks table cleanup freed"
+                        f" {stats.bytes_removed / 1024 / 1024:.2f} MB"
                     )
                 logger.debug("Chunks table optimization complete")
 
@@ -2468,7 +2524,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                 )
                 if stats is not None:
                     logger.debug(
-                        f"Files table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
+                        f"Files table cleanup freed"
+                        f" {stats.bytes_removed / 1024 / 1024:.2f} MB"
                     )
                 logger.debug("Files table optimization complete")
 

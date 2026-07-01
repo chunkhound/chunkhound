@@ -12,6 +12,10 @@ from typing import Any, cast
 import pytest
 import yaml  # type: ignore[import-untyped]
 
+from tests.utils import SUBPROCESS_ENV_ALLOWLIST as _SUBPROCESS_ENV_ALLOWLIST
+from tests.utils.git_repo import (
+    run as _run,
+)
 from tests.utils.windows_subprocess import get_safe_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,24 +23,6 @@ RESOLVER = ROOT / "scripts" / "resolve_docs_version.sh"
 INLINE_RESOLVE_SNIPPET = (
     "CHUNKHOUND_DOCS_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')"
 )
-_SUBPROCESS_ENV_ALLOWLIST = (
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SystemRoot",
-    "ComSpec",
-    "PATHEXT",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "SHELL",
-)
-
-
-def _run(command: list[str], cwd: Path) -> None:
-    subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
 
 
 def _is_windows() -> bool:
@@ -94,7 +80,9 @@ def _resolver_command() -> list[str]:
 
 def _resolver_env() -> dict[str, str]:
     base_env = {
-        key: os.environ[key] for key in _SUBPROCESS_ENV_ALLOWLIST if key in os.environ
+        key: os.environ[key]
+        for key in (*_SUBPROCESS_ENV_ALLOWLIST, "SHELL")
+        if key in os.environ
     }
     return get_safe_subprocess_env(base_env)
 
@@ -146,6 +134,11 @@ def _job(path: str, job_name: str) -> dict[str, Any]:
 
 def _job_steps(path: str, job_name: str) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], _job(path, job_name)["steps"])
+
+
+def _composite_action_steps(path: str) -> list[dict[str, Any]]:
+    action = _load_workflow(path)
+    return cast(list[dict[str, Any]], action["runs"]["steps"])
 
 
 def _find_step_index(
@@ -458,9 +451,7 @@ class TestDocsVersionWorkflowContract:
         assert resolve_index < consumer_index
 
     def test_workflows_do_not_inline_docs_version_resolution(self) -> None:
-        contents = (ROOT / ".github/workflows/ci.yml").read_text(
-            encoding="utf-8"
-        )
+        contents = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         assert INLINE_RESOLVE_SNIPPET not in contents
 
@@ -511,9 +502,7 @@ class TestDocsVersionWorkflowContract:
     def test_tests_job_matrix_uses_pytest_timeout_minutes_consistently(self) -> None:
         matrix = cast(
             list[dict[str, Any]],
-            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"][
-                "include"
-            ],
+            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"]["include"],
         )
 
         assert all("pytest_timeout_minutes" in entry for entry in matrix)
@@ -529,6 +518,61 @@ class TestDocsVersionWorkflowContract:
         assert not any(
             str(step.get("uses", "")).startswith("actions/upload-artifact@")
             for step in steps
+        )
+
+    @pytest.mark.parametrize(
+        ("job_name", "expected_results_name"),
+        [
+            ("tests", "test-results-${{ matrix.os }}-py${{ matrix.python }}"),
+            (
+                "ruff-integration-validation",
+                "test-results-ruff-integration-validation",
+            ),
+        ],
+    )
+    def test_test_jobs_run_triage_after_tests_with_failure_safe_conditions(
+        self, job_name: str, expected_results_name: str
+    ) -> None:
+        job = _job(".github/workflows/ci.yml", job_name)
+        steps = cast(list[dict[str, Any]], job["steps"])
+        test_index = _find_step_index(
+            steps,
+            "test runner step",
+            lambda step: step.get("id") == "tests",
+        )
+        triage_index = _find_step_index(
+            steps,
+            "test triage composite action step",
+            lambda step: str(step.get("uses", "")) == "./.github/actions/test-triage",
+        )
+        triage_step = steps[triage_index]
+
+        assert triage_step["if"] == "${{ always() }}"
+        assert triage_step["with"]["results-name"] == expected_results_name
+        assert triage_step["with"]["results-path"] == "test-results.xml"
+        assert triage_step["with"]["check-flaky-annotations"] == (
+            "${{ steps.tests.outcome == 'failure' }}"
+        )
+        assert test_index < triage_index
+
+    def test_ruff_integration_validation_job_contract(self) -> None:
+        job = _job(".github/workflows/ci.yml", "ruff-integration-validation")
+        steps = cast(list[dict[str, Any]], job["steps"])
+        test_index = _find_step_index(
+            steps,
+            "ruff integration pytest step",
+            lambda step: step.get("id") == "tests"
+            and step.get("name") == "Run real uv+ruff integration contract tests",
+        )
+        test_step = steps[test_index]
+
+        assert job["runs-on"] == "ubuntu-latest"
+        assert job["timeout-minutes"] == 20
+        job_env = cast(dict[str, str], job["env"])
+        assert job_env["CHUNKHOUND_RUN_RUFF_INTEGRATION"] == "1"
+        assert test_step["run"] == (
+            "uv run pytest tests/unit/test_python_lint_tooling_contract.py "
+            "-m requires_ruff_integration -v --junit-xml=test-results.xml"
         )
 
     def test_pages_artifact_job_contract(self) -> None:
@@ -553,10 +597,12 @@ class TestDocsVersionWorkflowContract:
         permissions = cast(dict[str, Any], job.get("permissions", {}))
 
         assert job["needs"] == [
+            "lint-changed-ruff",
             "site-build",
             "tests",
             "site-build-validation",
             "watchman-rollout-gate",
+            "ruff-integration-validation",
         ]
         assert job["if"] == "github.ref == 'refs/heads/main'"
         assert download_step["with"]["name"] == "site-dist"
@@ -568,9 +614,12 @@ class TestDocsVersionWorkflowContract:
         workflow = _load_workflow(".github/workflows/ci.yml")
         concurrency = cast(dict[str, Any], workflow.get("concurrency", {}))
 
-        assert concurrency["group"] == (
-            "${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}"
+        expected_group = (
+            "${{ github.ref == 'refs/heads/main' && "
+            "'ch-test-deploy' || github.run_id }}"
         )
+
+        assert concurrency["group"] == expected_group
         assert concurrency["cancel-in-progress"] is False
 
     def test_deploy_job_contract(self) -> None:
@@ -583,3 +632,97 @@ class TestDocsVersionWorkflowContract:
         assert permissions["contents"] == "read"
         assert permissions["pages"] == "write"
         assert permissions["id-token"] == "write"
+
+    def test_changed_python_lint_job_contract(self) -> None:
+        workflow = _load_workflow(".github/workflows/ci.yml")
+        triggers = cast(dict[str, Any], workflow.get("on", workflow.get(True, {})))
+        job = _job(".github/workflows/ci.yml", "lint-changed-ruff")
+        steps = cast(list[dict[str, Any]], job["steps"])
+
+        assert "pull_request" in triggers
+        assert "push" in triggers
+        assert "merge_group" in triggers
+        assert "workflow_dispatch" in triggers
+        assert job["runs-on"] == "ubuntu-latest"
+        assert job["timeout-minutes"] == 10
+
+        _assert_checkout_uses_full_history(steps)
+
+        python_index = _find_step_index(
+            steps,
+            "setup-python step",
+            lambda step: str(step.get("uses", "")).startswith("actions/setup-python@"),
+        )
+        uv_index = _find_step_index(
+            steps,
+            "setup-uv step",
+            lambda step: str(step.get("uses", "")).startswith("astral-sh/setup-uv@"),
+        )
+        ruff_index = _find_step_index(
+            steps,
+            "changed python ruff step",
+            lambda step: step.get("run")
+            == "python scripts/pre_commit.py run-ruff --github-actions",
+        )
+        ruff_step = steps[ruff_index]
+        ruff_env = cast(dict[str, str], ruff_step["env"])
+
+        assert python_index < uv_index < ruff_index
+        assert ruff_step["run"] == (
+            "python scripts/pre_commit.py run-ruff --github-actions"
+        )
+        assert ruff_env["CHUNKHOUND_GITHUB_EVENT_NAME"] == ("${{ github.event_name }}")
+        assert ruff_env["CHUNKHOUND_GITHUB_BASE_SHA"] == (
+            "${{ github.event.pull_request.base.sha || "
+            "github.event.merge_group.base_sha || github.event.before || '' }}"
+        )
+        assert ruff_env["CHUNKHOUND_GITHUB_HEAD_SHA"] == (
+            "${{ github.event.pull_request.head.sha || "
+            "github.event.merge_group.head_sha || github.sha }}"
+        )
+        assert ruff_env["CHUNKHOUND_GITHUB_DEFAULT_BRANCH"] == (
+            "${{ github.event.repository.default_branch || '' }}"
+        )
+
+
+class TestTestTriageCompositeActionContract:
+    def test_declares_explicit_flaky_annotation_gate_input(self) -> None:
+        action = _load_workflow(".github/actions/test-triage/action.yml")
+        flaky_gate = cast(dict[str, Any], action["inputs"]["check-flaky-annotations"])
+
+        assert flaky_gate["required"] is False
+        assert flaky_gate["default"] == "false"
+
+    def test_uploads_results_before_optional_flaky_annotation_check(self) -> None:
+        steps = _composite_action_steps(".github/actions/test-triage/action.yml")
+        upload_index = _find_step_index(
+            steps,
+            "upload test results step",
+            lambda step: str(step.get("uses", "")).startswith(
+                "actions/upload-artifact@"
+            ),
+        )
+        flaky_index = _find_step_index(
+            steps,
+            "flaky annotation check step",
+            lambda step: step.get("name") == "Check flaky annotations",
+        )
+        upload_step = steps[upload_index]
+        flaky_step = steps[flaky_index]
+
+        assert upload_step["if"] == "always()"
+        assert upload_step["with"]["if-no-files-found"] == "ignore"
+        assert flaky_step["if"] == "${{ inputs.check-flaky-annotations == 'true' }}"
+        expected_command = (
+            "uv run python scripts/check_flaky_annotations.py "
+            "${{ inputs.results-path }}"
+        )
+        assert flaky_step["run"] == expected_command
+        assert upload_index < flaky_index
+
+    def test_does_not_reach_into_caller_step_state(self) -> None:
+        contents = (ROOT / ".github/actions/test-triage/action.yml").read_text(
+            encoding="utf-8"
+        )
+
+        assert "steps.tests.outcome" not in contents
