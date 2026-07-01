@@ -7,11 +7,9 @@
         <p class="eyebrow">PROVEN AT SCALE</p>
         <h2 class="heading">Your laptop outperforms their cluster.</h2>
         <p class="body">
-            Sourcegraph needs Kubernetes. Augment Code needs their servers. GitHub Copilot's
-            @workspace tops out before your monorepo does. ChunkHound indexes your entire
-            codebase on your own machine — no cloud account, no vendor, no code leaving your
-            network. MIT licensed. Community built. Applied Materials runs 50M+ lines on a
-            developer laptop today.
+            ChunkHound indexes your entire codebase on your own machine — no
+            Kubernetes, no GPU servers, no vendor lock-in — and can run fully local with local providers. Open source, MIT licensed, and proven
+            on 50M+ line codebases in production today.
         </p>
 
         <div class="compare-card">
@@ -19,30 +17,30 @@
                 <thead>
                     <tr>
                         <th class="col-feature"></th>
-                        <th class="col-them">The alternatives</th>
+                        <th class="col-them">Typical setup</th>
                         <th class="col-us">ChunkHound</th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr>
                         <td class="feature-label">Kubernetes cluster</td>
-                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>required</span></span></td>
+                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>often required</span></span></td>
                         <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>not needed</span></span></td>
                     </tr>
                     <tr>
                         <td class="feature-label">H100 / GPU server</td>
-                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>required</span></span></td>
+                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>often required</span></span></td>
                         <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>not needed</span></span></td>
                     </tr>
                     <tr>
                         <td class="feature-label">Vendor subscription</td>
-                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>required</span></span></td>
+                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>often required</span></span></td>
                         <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>MIT licensed</span></span></td>
                     </tr>
                     <tr>
-                        <td class="feature-label">Code leaves network</td>
-                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>yes</span></span></td>
-                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>never</span></span></td>
+                        <td class="feature-label">Zero code egress</td>
+                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>rare</span></span></td>
+                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>with local providers</span></span></td>
                     </tr>
                     <tr>
                         <td class="feature-label">Closed, proprietary</td>
@@ -55,7 +53,7 @@
 
         <div class="proof-receipt">
             <a class="receipt-org" href="https://www.appliedmaterials.com" target="_blank" rel="noopener">Applied Materials</a>
-            <p class="receipt-facts">50M+ lines · 1 developer laptop · 0 bytes sent · MIT licensed · production today</p>
+            <p class="receipt-facts">50M+ lines · 1 developer laptop · local-provider option · MIT licensed · production today</p>
         </div>
     </div>
 </section>

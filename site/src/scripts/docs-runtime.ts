@@ -1,6 +1,6 @@
 import "./copy-handler.js";
 
-function buildTOC(): void {
+function enhanceTOC(): void {
     const toc = document.querySelector<HTMLElement>("[data-toc]");
     const content = document.querySelector<HTMLElement>(".docs-content");
     if (!toc || !content) {
@@ -8,7 +8,6 @@ function buildTOC(): void {
     }
 
     const headings = content.querySelectorAll<HTMLHeadingElement>("h2, h3");
-    const frag = document.createDocumentFragment();
 
     headings.forEach((heading) => {
         if (!heading.id) {
@@ -20,13 +19,11 @@ function buildTOC(): void {
         }
 
         if (!heading.querySelector(".heading-link")) {
+            const label = heading.textContent?.trim() || "section";
             const button = document.createElement("button");
             button.className = "heading-link";
             button.type = "button";
-            button.setAttribute(
-                "aria-label",
-                `Copy link to ${heading.textContent?.trim() || "section"}`,
-            );
+            button.setAttribute("aria-label", `Copy link to ${label}`);
             button.textContent = "#";
             button.addEventListener("click", () => {
                 const url = `${location.origin}${location.pathname}#${heading.id}`;
@@ -39,16 +36,7 @@ function buildTOC(): void {
             });
             heading.appendChild(button);
         }
-
-        const link = document.createElement("a");
-        link.className = "toc-link";
-        link.href = `#${heading.id}`;
-        link.textContent = heading.textContent?.replace(/#$/, "").trim() || "";
-        link.setAttribute("data-depth", heading.tagName === "H3" ? "3" : "2");
-        frag.appendChild(link);
     });
-
-    toc.appendChild(frag);
 
     const tocLinks = toc.querySelectorAll<HTMLAnchorElement>(".toc-link");
     if (!tocLinks.length) {
@@ -340,7 +328,7 @@ function initSearchShortcut(): void {
 }
 
 export async function initDocsRuntime(doc: Document = document): Promise<void> {
-    buildTOC();
+    enhanceTOC();
     initNavFilter();
     initMobileNav(doc);
     initSearchShortcut();

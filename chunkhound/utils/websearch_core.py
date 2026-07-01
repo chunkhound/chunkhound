@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 from chunkhound.core.config.config import Config
 
-_MAX_FETCH_CONCURRENCY = 5
+MAX_FETCH_CONCURRENCY = 5
 
 WEBSEARCH_LIMIT_MAX = 100
 
@@ -614,7 +614,7 @@ async def fetch_and_save(
     mapping: dict[str, str] | None = None,
 ) -> None:
     """Fetch each URL concurrently (bounded) and save content to tmpdir."""
-    semaphore = asyncio.Semaphore(_MAX_FETCH_CONCURRENCY)
+    semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
 
     async def _run(browser: zd.Browser | None) -> None:
         tasks = [

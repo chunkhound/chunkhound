@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
 VERSION_FILE = ROOT / "chunkhound" / "_version.py"
 VERSION_RESOLUTION_FAILURE = "Unable to resolve ChunkHound version for docs build"
+NUMERIC_LANGUAGE_CLAIM = re.compile(r"\b\d+\+?\s+languages\b", re.IGNORECASE)
 
 
 def _clean_dev_suffix(version: str) -> str:
@@ -147,6 +148,12 @@ def _meta_tag_content(html: str, attr_name: str, attr_value: str) -> str | None:
     return None
 
 
+def _title_content(html: str) -> str:
+    match = re.search(r"<title>(.*?)</title>", html, flags=re.DOTALL)
+    assert match is not None, "Missing <title> tag"
+    return match.group(1)
+
+
 def test_site_build_outputs_platform_aware_onboarding() -> None:
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
     getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(
@@ -177,6 +184,12 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     ), "Umami analytics script missing from getting_started"
     assert "platform-code-block" in getting_started
     assert "code-header" in getting_started
+    # Wordmark-text SVGs (stacked variant in hero)
+    assert "/wordmark-text.svg" in homepage
+    assert "/wordmark-text-dark.svg" in homepage
+    # UseCases component present
+    assert 'id="use-cases"' in homepage
+    assert "Research before editing" in homepage
     # Astro still emits Shiki's light/dark CSS variables even though the site
     # stylesheet intentionally renders code blocks with the dark token set.
     platform_code_block = _extract_astro_code_block_after_marker(
@@ -258,9 +271,60 @@ def test_version_helper_contract(scenario: str, expected_version: str | None) ->
         assert VERSION_RESOLUTION_FAILURE in combined_output
 
 
+def test_homepage_and_readme_use_qualified_locality_and_language_claims() -> None:
+    homepage = (DIST / "index.html").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    combined = f"{homepage}\n{readme}"
+
+    assert "Local-first" in homepage
+    assert "Local-first" in readme
+    assert "Dozens of languages & file types" in homepage
+    assert "Dozens of languages & file types" in readme
+    assert "can run fully local" in homepage
+    assert "Zero code egress" in homepage
+    assert "with local providers" in homepage
+    assert "local-provider option" in homepage
+    assert "Semantic search requires an embedding provider" in readme
+    assert "research requires an LLM provider and an embedding provider with reranking support" in readme
+    assert "zero-code-egress" in readme
+    assert "- [Docs](https://chunkhound.ai/docs/getting-started/)" in readme
+
+    for absolute_claim in (
+        "100% local",
+        "no code leaving your network",
+        "Your code never leaves",
+        "0 bytes sent",
+    ):
+        assert absolute_claim not in combined
+    assert NUMERIC_LANGUAGE_CLAIM.search(combined) is None
+    assert "Your entire engineering context, deeply understood" in homepage
+    assert "Your entire engineering context, deeply understood." in readme
+    assert "Cited answers · Git history research · Pinpoint web research" in homepage
+    assert "Cited answers · Git history research · Pinpoint web research" in readme
+
+
 def test_built_site_has_og_meta_tags() -> None:
     """Built homepage includes correct OG and Twitter Card meta tags."""
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
+    expected_title = "ChunkHound — Your engineering context, deeply understood"
+    expected_description = (
+        "ChunkHound gives AI agents cited context across current code, git history, "
+        "and technical web research — for safer edits, clearer reviews, and "
+        "release-ready summaries. Local-first. MIT licensed."
+    )
+
+    assert _title_content(homepage) == expected_title
+    assert _meta_tag_content(homepage, "name", "description") == expected_description
+    assert _meta_tag_content(homepage, "property", "og:title") == expected_title
+    assert (
+        _meta_tag_content(homepage, "property", "og:description")
+        == expected_description
+    )
+    assert _meta_tag_content(homepage, "name", "twitter:title") == expected_title
+    assert (
+        _meta_tag_content(homepage, "name", "twitter:description")
+        == expected_description
+    )
 
     # Meta tag checks must ignore serializer attribute order.
     og_image = _meta_tag_content(homepage, "property", "og:image")
@@ -289,6 +353,15 @@ def test_built_site_has_og_meta_tags() -> None:
     assert tw_card == "summary_large_image"
 
 
+def test_readme_branding_assets_exist() -> None:
+    assert (ROOT / "site" / "public" / "wordmark-text.svg").exists()
+    assert (ROOT / "site" / "public" / "wordmark-text-dark.svg").exists()
+    for name in ("og-image-dark.svg", "og-image-light.svg"):
+        assert "Your entire engineering context, deeply understood" in (
+            ROOT / "site" / "public" / name
+        ).read_text(encoding="utf-8")
+
+
 def test_built_site_has_changelog_page() -> None:
     """Changelog page is built from the current root changelog content."""
     changelog = (DIST / "docs" / "changelog" / "index.html").read_text(encoding="utf-8")
@@ -296,6 +369,48 @@ def test_built_site_has_changelog_page() -> None:
 
     assert version in changelog
     assert section in changelog
+
+
+def test_built_docs_pages_render_toc_links_server_side() -> None:
+    for page, anchors in {
+        "getting-started": (
+            "#install",
+            "#index-and-verify",
+            "#use-it-from-your-agent",
+            "#example-prompts",
+            "#mcp",
+            "#where-to-next",
+        ),
+        "contributing": (
+            "#getting-started",
+            "#development-workflow",
+            "#the-review-process",
+            "#what-makes-a-good-pr",
+        ),
+        "configuration": (
+            "#configuration-file",
+            "#configuration-precedence",
+            "#embedding-providers",
+            "#advanced-routing",
+        ),
+        "cli-reference": (
+            "#chunkhound-index",
+            "#chunkhound-search",
+            "#chunkhound-research",
+            "#common-flags",
+        ),
+        "changelog": (
+            "#unreleased",
+            "#breaking-changes",
+            "#added",
+            "#changed",
+        ),
+    }.items():
+        html = (DIST / "docs" / page / "index.html").read_text(encoding="utf-8")
+
+        assert '<nav class="toc-list" data-toc>' in html
+        for anchor in anchors:
+            assert f'href="{anchor}"' in html, f"Missing TOC anchor {anchor} on {page}"
 
 
 def test_built_site_has_og_png_assets() -> None:
