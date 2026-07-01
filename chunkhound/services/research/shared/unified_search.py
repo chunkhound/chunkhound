@@ -317,6 +317,7 @@ class UnifiedSearch:
                         target_per_symbol=target_per_symbol,
                         path_filter=path_filter,
                         exclude_ids=semantic_chunk_ids,
+                        query=query,
                     )
 
                     # Emit regex search results
@@ -362,29 +363,10 @@ class UnifiedSearch:
         search_service = self._db_services.search_service
 
         if skip_rerank:
+            # Regex chunks are scored at the service layer (search_regex_async with
+            # query=) so the combined pool already has similarity on every chunk.
+            # Just sort and emit.
             t7 = perf_counter()
-            regex_only = [c for c in combined_pool if "similarity" not in c]
-            if regex_only:
-                try:
-                    query_vec = (await embedding_provider.embed([query]))[0]
-                    int_chunk_ids: list[int] = [
-                        cid
-                        for c in regex_only
-                        if isinstance(cid := get_chunk_id(c), int)
-                    ]
-                    similarity_scores = await search_service.get_chunk_similarities_async(
-                        int_chunk_ids, query_vec, embedding_provider.name, embedding_provider.model
-                    )
-                    for c in regex_only:
-                        cid = get_chunk_id(c)
-                        c["similarity"] = (
-                            similarity_scores.get(cid, 0.0)  # type: ignore[arg-type]
-                            if cid is not None
-                            else 0.0
-                        )
-                except Exception as e:
-                    logger.warning(f"Cosine scoring for regex chunks failed: {e}")
-
             combined_pool.sort(key=lambda c: c.get("similarity", 0.0), reverse=True)
             await emit_event(
                 "search_rerank",
@@ -553,6 +535,7 @@ class UnifiedSearch:
         target_per_symbol: int = 10,
         path_filter: str | None = None,
         exclude_ids: set[int | str] | None = None,
+        query: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search codebase for top-ranked symbols using parallel async regex (Step 5).
 
@@ -605,6 +588,7 @@ class UnifiedSearch:
                         page_size=scan_page_size,
                         offset=offset,
                         path_filter=path_filter,
+                        query=query,
                     )
                     if not page:
                         break  # No more results available from backend

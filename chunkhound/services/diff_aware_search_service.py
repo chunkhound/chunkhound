@@ -42,6 +42,7 @@ class SearchServiceProtocol(Protocol):
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
+        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]: ...
 
     async def search_regex_async(
@@ -50,6 +51,7 @@ class SearchServiceProtocol(Protocol):
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
+        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]: ...
 
     async def search_hybrid(
@@ -354,9 +356,10 @@ class DiffAwareSearchService:
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
+        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         return self._original.search_regex(
-            pattern, page_size=page_size, offset=offset, path_filter=path_filter
+            pattern, page_size=page_size, offset=offset, path_filter=path_filter, query=query
         )
 
     async def search_regex_async(
@@ -365,9 +368,10 @@ class DiffAwareSearchService:
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
+        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         regex_result: tuple[list[dict[str, Any]], dict[str, Any]] = await self._original.search_regex_async(
-            pattern, page_size=page_size, offset=offset, path_filter=path_filter
+            pattern, page_size=page_size, offset=offset, path_filter=path_filter, query=query
         )
         return regex_result
 

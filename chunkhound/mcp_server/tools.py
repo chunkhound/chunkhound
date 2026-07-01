@@ -711,12 +711,13 @@ async def search_impl(
             path_filter=path,
         )
     else:  # regex
-        # Perform regex search
+        # Perform regex search; pass query so results are scored by cosine similarity
         results, pagination = await services.search_service.search_regex_async(
             pattern=query,
             page_size=page_size,
             offset=offset,
             path_filter=path,
+            query=query,
         )
 
     # Convert file paths to native platform format
