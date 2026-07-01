@@ -2,13 +2,18 @@
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterator, Sequence
+from typing import Any, TypedDict, cast
 
 import httpx
 from loguru import logger
 
+from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
+from chunkhound.core.exceptions.embedding import (
+    EmbeddingConfigurationError,
+    EmbeddingProviderError,
+)
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.core.utils.voyageai_utils import (
     OFFICIAL_VOYAGEAI_BASE_V1,
@@ -17,9 +22,15 @@ from chunkhound.core.utils.voyageai_utils import (
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .shared_utils import (
+    apply_client_side_truncation,
+    build_dimension_request_param,
+    build_runtime_supported_dimensions,
     chunk_text_by_words,
     get_dimensions_for_model,
     get_usage_stats_dict,
+    validate_embedding_dims,
+    validate_positive_output_dims,
+    validate_runtime_output_dims_config,
     validate_text_input,
 )
 
@@ -33,8 +44,23 @@ except ImportError:
     logger.warning("VoyageAI not available - install with: uv pip install voyageai")
 
 
+class VoyageModelConfig(TypedDict):
+    """Static config for a known VoyageAI model.
+
+    For unknown/custom models ``dimensions`` is intentionally empty ([]), and
+    the provider discovers the native dimension at runtime.  See
+    ``DEFAULT_UNKNOWN_MODEL_CONFIG``.
+    """
+
+    max_tokens_per_batch: int
+    max_texts_per_batch: int
+    context_length: int
+    dimensions: list[int]
+    default_dimension: int
+
+
 # Official VoyageAI model configuration based on API documentation
-VOYAGE_MODEL_CONFIG = {
+VOYAGE_MODEL_CONFIG: dict[str, VoyageModelConfig] = {
     # Models with 120,000 token limit per batch
     "voyage-3-large": {
         "max_tokens_per_batch": 120000,
@@ -101,6 +127,15 @@ VOYAGE_MODEL_CONFIG = {
         "dimensions": [256, 512, 1024, 2048],
         "default_dimension": 1024,
     },
+}
+
+
+DEFAULT_UNKNOWN_MODEL_CONFIG: VoyageModelConfig = {
+    "max_tokens_per_batch": 320000,
+    "max_texts_per_batch": 1000,
+    "context_length": 32000,
+    "dimensions": [],
+    "default_dimension": 1024,
 }
 
 
@@ -184,6 +219,8 @@ class VoyageAIEmbeddingProvider:
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        output_dims: int | None = None,
+        client_side_truncation: bool = False,
         base_url: str | None = None,
         rerank_url: str | None = None,
         rerank_format: str = "auto",
@@ -203,6 +240,14 @@ class VoyageAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides default of 1000)
+            output_dims: Optional server-side output dimension override. Known
+                official Voyage models keep their whitelist. Unknown/custom
+                Voyage-compatible endpoints are trusted instead and prove
+                compatibility at runtime.
+            client_side_truncation: If True, request full native vectors and
+                truncate locally instead of sending output_dimension. Direct
+                provider construction may defer the missing-output_dims failure
+                until the first embed() call, but it will fail explicitly.
             base_url: Custom API base URL (overrides https://api.voyageai.com/v1)
             rerank_url: Separate reranker endpoint URL (absolute http/https).
                 When set, reranking uses HTTP instead of the VoyageAI SDK.
@@ -227,17 +272,12 @@ class VoyageAIEmbeddingProvider:
         self._model = model
         self._rerank_model = rerank_model
 
-        # Get model configuration or use defaults
-        model_config = VOYAGE_MODEL_CONFIG.get(
-            model,
-            {
-                "max_tokens_per_batch": 320000,  # Default for unknown models
-                "max_texts_per_batch": 1000,
-                "context_length": 32000,
-                "dimensions": [1024],
-                "default_dimension": 1024,
-            },
-        )
+        # Known official VoyageAI models have strict dimension whitelists.
+        # Unknown/custom Voyage-compatible models must stay permissive so runtime
+        # validation can learn the actual vector size from the first full native
+        # response. Until then, introspection falls back to 1024 dims.
+        self._is_known_model = model in VOYAGE_MODEL_CONFIG
+        model_config = VOYAGE_MODEL_CONFIG.get(model, DEFAULT_UNKNOWN_MODEL_CONFIG)
 
         self._batch_size = min(batch_size, model_config["max_texts_per_batch"])
         self._timeout = timeout
@@ -250,6 +290,12 @@ class VoyageAIEmbeddingProvider:
         self._rerank_format = rerank_format
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
+        self._discovered_native_dims: int | None = None
+
+        self._output_dims = validate_positive_output_dims(output_dims, model=model)
+        self._client_side_truncation = client_side_truncation
+        self._validate_output_dims_config()
+
         self._ssl_verify_enabled = ssl_verify
         self._rerank_ssl_verify_enabled = (
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
@@ -290,10 +336,13 @@ class VoyageAIEmbeddingProvider:
         self._embeddings_generated = 0
 
         # Concurrency limiter: custom endpoints (e.g. Azure ML) often reject
-        # simultaneous requests with HTTP 424. Default to 1 for custom base_url,
-        # high value for the official API which supports 2000 RPM.
+        # simultaneous requests with HTTP 424. Default to 1 only for custom
+        # endpoints; the official VoyageAI API keeps the higher recommended
+        # concurrency even when callers pass its base_url explicitly.
         if max_concurrent_batches is None:
-            max_concurrent_batches = 1 if base_url else self.RECOMMENDED_CONCURRENCY
+            max_concurrent_batches = (
+                1 if is_custom else self.RECOMMENDED_CONCURRENCY
+            )
         self._embed_semaphore = asyncio.Semaphore(max_concurrent_batches)
 
     @property
@@ -328,10 +377,64 @@ class VoyageAIEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
-        return get_dimensions_for_model(
-            self._model, self._dimensions_map, default_dims=1024
+        """Actual output dimension (reflects matryoshka config if set).
+
+        For unknown/custom models, falls through to runtime-discovered native
+        dimension or a temporary 1024 fallback before the first full response.
+        """
+        if self._output_dims is not None:
+            return self._output_dims
+        if self._is_known_model:
+            return get_dimensions_for_model(
+                self._model, self._dimensions_map, default_dims=1024
+            )
+        if self._discovered_native_dims is not None:
+            return self._discovered_native_dims
+        return 1024
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension.
+
+        For unknown/custom models, returns the runtime-discovered native
+        dimension after the first full-dimension API response, or a temporary
+        1024 fallback before discovery completes.
+        """
+        dims_list = self._model_config.get("dimensions", [])
+        if dims_list:
+            return max(dims_list)
+        if self._discovered_native_dims is not None:
+            return self._discovered_native_dims
+        return 1024
+
+    @property
+    def supported_dimensions(self) -> Sequence[int]:
+        """Known-valid output dimensions for this model.
+
+        Unknown/custom Voyage-compatible models have no static whitelist before
+        the first real API response. After runtime discovery, client-side
+        truncation exposes every dimension from 1..native_dims; otherwise only
+        the native dimension is valid.
+
+        Use ``in`` for membership checks, not equality.
+        """
+        dims = self._model_config["dimensions"]
+        if dims:
+            return dims
+        return build_runtime_supported_dimensions(
+            self._discovered_native_dims,
+            self._client_side_truncation,
         )
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        return self._output_dims
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
+        return self._client_side_truncation
 
     @property
     def distance(self) -> str:
@@ -363,6 +466,8 @@ class VoyageAIEmbeddingProvider:
             timeout=self._timeout,
             retry_attempts=self._retry_attempts,
             retry_delay=self._retry_delay,
+            output_dims=self.output_dims,
+            client_side_truncation=self.client_side_truncation,
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -393,24 +498,139 @@ class VoyageAIEmbeddingProvider:
         async with self._embed_semaphore:
             return await self._embed_single_batch_locked(texts)
 
+    def _validate_output_dims_config_for(
+        self,
+        *,
+        model: str,
+        model_config: VoyageModelConfig,
+        is_known_model: bool,
+        output_dims: int | None,
+        client_side_truncation: bool,
+    ) -> None:
+        """Validate output-dims semantics for a concrete config snapshot."""
+        validate_runtime_output_dims_config(
+            output_dims,
+            client_side_truncation,
+            model=model,
+            context="client-side truncation",
+        )
+        if output_dims is None or not is_known_model:
+            return
+        default_dim = model_config.get("default_dimension", 1024)
+        supported = model_config.get("dimensions", [default_dim])
+        if output_dims not in supported:
+            raise EmbeddingConfigurationError(
+                f"output_dims {output_dims} not in supported "
+                f"dimensions {supported} for model {model}"
+            )
+
+    def _validate_output_dims_config(self) -> None:
+        """Validate output_dims and client_side_truncation, enforcing VoyageAI whitelist."""
+        self._validate_output_dims_config_for(
+            model=self._model,
+            model_config=self._model_config,
+            is_known_model=self._is_known_model,
+            output_dims=self._output_dims,
+            client_side_truncation=self._client_side_truncation,
+        )
+
+    def _reset_runtime_output_dims_state(self) -> None:
+        """Clear runtime-discovered dimensions after config changes."""
+        self._discovered_native_dims = None
+
+    def _expected_raw_dims(self) -> int | None:
+        """Expected native dimension from API before client-side truncation.
+
+        Returns ``None`` for undiscovered unknown models, causing callers to
+        skip dimension validation until the native size is known from the
+        first full-dimension response.
+        """
+        if self._client_side_truncation:
+            # Client-side: expect full native dims from API
+            if self._is_known_model:
+                return self.native_dims
+            return self._discovered_native_dims
+        # Server-side or no truncation: expect the configured output dims
+        return self.dims
+
+    def _maybe_discover_native_dims(
+        self, raw_dims: int | None, server_side_truncation: bool
+    ) -> None:
+        """Discover native dims for unknown models from untruncated responses."""
+        if (
+            raw_dims is not None
+            and not self._is_known_model
+            and self._discovered_native_dims is None
+            and not server_side_truncation
+        ):
+            self._discovered_native_dims = raw_dims
+            logger.debug(
+                f"Discovered native embedding dimension {raw_dims} "
+                f"for model {self._model}"
+            )
+
     async def _embed_single_batch_locked(self, texts: list[str]) -> list[list[float]]:
         """Inner embed implementation, called while holding the semaphore."""
         # Retry loop for transient network errors
         for attempt in range(self._retry_attempts):
             try:
-                result = await asyncio.to_thread(
-                    self._client.embed,
-                    texts=texts,
+                embed_kwargs: dict[str, Any] = {
+                    "texts": texts,
+                    "model": self._model,
+                    "input_type": "document",
+                    "truncation": True,
+                }
+                output_dims = validate_runtime_output_dims_config(
+                    self._output_dims,
+                    self._client_side_truncation,
                     model=self._model,
-                    input_type="document",
-                    truncation=True,
+                    context="client-side truncation",
                 )
+                dim_param = build_dimension_request_param(
+                    output_dims, self._client_side_truncation
+                )
+                # User configured output_dims — they know what they're doing.
+                # Pass through; the API rejects unsupported dimensions on its own.
+                if dim_param is not None:
+                    embed_kwargs["output_dimension"] = dim_param
+                result = await asyncio.to_thread(self._client.embed, **embed_kwargs)
 
                 self._requests_made += 1
                 self._tokens_used += result.total_tokens
                 self._embeddings_generated += len(texts)
 
-                return [embedding for embedding in result.embeddings]
+                embeddings = cast(list[list[float]], list(result.embeddings))
+
+                raw_dims = len(embeddings[0]) if embeddings else None
+                server_side_truncation = (
+                    self._output_dims is not None and not self._client_side_truncation
+                )
+
+                self._maybe_discover_native_dims(raw_dims, server_side_truncation)
+
+                # Validate raw API response dims before any client-side truncation
+                expected_raw = self._expected_raw_dims()
+                if raw_dims is not None and expected_raw is not None:
+                    validate_embedding_dims(
+                        raw_dims, expected_raw, model=self._model
+                    )
+
+                # Apply client-side truncation when server doesn't support dim param
+                if self._client_side_truncation:
+                    embeddings = apply_client_side_truncation(
+                        embeddings, cast(int, output_dims)
+                    )
+
+                # Validate final embedding dimension after all truncation
+                if embeddings:
+                    validate_embedding_dims(
+                        len(embeddings[0]), self.dims, model=self._model
+                    )
+
+                return embeddings
+
+            except EmbeddingProviderError:
+                raise  # Non-retryable domain errors propagate as-is
 
             except Exception as e:
                 error_type = type(e).__name__
@@ -552,6 +772,9 @@ class VoyageAIEmbeddingProvider:
             "model": self._model,
             "rerank_model": self._rerank_model,
             "dimensions": self.dims,
+            "native_dims": self.native_dims,
+            "output_dims": self.output_dims,
+            "client_side_truncation": self.client_side_truncation,
             "max_tokens": self._max_tokens,
             "supports_reranking": self.supports_reranking(),
         }
@@ -570,14 +793,43 @@ class VoyageAIEmbeddingProvider:
 
     def update_config(self, **kwargs: Any) -> None:
         """Update provider configuration."""
+        next_model = kwargs.get("model", self._model)
+        next_is_known_model = next_model in VOYAGE_MODEL_CONFIG
+        next_model_config = VOYAGE_MODEL_CONFIG.get(
+            next_model, DEFAULT_UNKNOWN_MODEL_CONFIG
+        )
+        next_output_dims = self._output_dims
+        if "output_dims" in kwargs:
+            next_output_dims = validate_positive_output_dims(
+                kwargs["output_dims"], model=next_model
+            )
+        next_client_side_truncation = kwargs.get(
+            "client_side_truncation", self._client_side_truncation
+        )
+        if {"model", "output_dims", "client_side_truncation"} & kwargs.keys():
+            self._validate_output_dims_config_for(
+                model=next_model,
+                model_config=next_model_config,
+                is_known_model=next_is_known_model,
+                output_dims=next_output_dims,
+                client_side_truncation=next_client_side_truncation,
+            )
+
         if "model" in kwargs:
-            self._model = kwargs["model"]
+            self._model = next_model
+            self._is_known_model = next_is_known_model
+            self._model_config = next_model_config
+            self._reset_runtime_output_dims_state()
         if "rerank_model" in kwargs:
             self._rerank_model = kwargs["rerank_model"]
         if "batch_size" in kwargs:
             self._batch_size = kwargs["batch_size"]
         if "timeout" in kwargs:
             self._timeout = kwargs["timeout"]
+        if "output_dims" in kwargs:
+            self._output_dims = next_output_dims
+        if "client_side_truncation" in kwargs:
+            self._client_side_truncation = next_client_side_truncation
 
     def get_supported_distances(self) -> list[str]:
         """Get list of supported distance metrics."""
@@ -635,15 +887,24 @@ class VoyageAIEmbeddingProvider:
 
     # Reranking Operations
     def supports_reranking(self) -> bool:
-        """Return True if reranking is available with the current configuration.
+        """Return True if reranking can run with the current configuration."""
+        try:
+            validate_rerank_configuration(
+                provider="voyageai",
+                rerank_format=self._rerank_format,
+                rerank_model=self._rerank_model,
+                rerank_url=self._rerank_url,
+                base_url=self._base_url,
+            )
+        except ValueError:
+            return False
 
-        - Custom base_url (e.g. Azure ML): only supported when rerank_url is
-          explicitly configured, since the embedding endpoint does not expose /rerank.
-        - Official VoyageAI API (no base_url): always supported via SDK.
-        """
-        if self._base_url:
-            return self._rerank_url is not None
-        return True
+        if self._rerank_url is not None:
+            return True
+        if self._base_url is not None:
+            return False
+
+        return self._rerank_model is not None
 
     async def rerank(
         self, query: str, documents: list[str], top_k: int | None = None
@@ -665,17 +926,21 @@ class VoyageAIEmbeddingProvider:
         self, query: str, documents: list[str], top_k: int | None
     ) -> list[RerankResult]:
         """Rerank using the VoyageAI SDK (official API)."""
+        rerank_model = self._rerank_model
+        if rerank_model is None:
+            raise RuntimeError("VoyageAI SDK reranking requires rerank_model")
+
         for attempt in range(self._retry_attempts):
             try:
                 logger.debug(
-                    f"VoyageAI reranking {len(documents)} documents with model {self._rerank_model}"
+                    f"VoyageAI reranking {len(documents)} documents with model {rerank_model}"
                 )
 
                 result = await asyncio.to_thread(
                     self._client.rerank,
                     query=query,
                     documents=documents,
-                    model=self._rerank_model,
+                    model=rerank_model,
                     top_k=top_k,
                 )
 
@@ -704,6 +969,8 @@ class VoyageAIEmbeddingProvider:
             except AttributeError as e:
                 logger.error(f"VoyageAI rerank response format error: {e}")
                 raise ValueError(f"Invalid rerank response format: {e}") from e
+            except EmbeddingProviderError:
+                raise
             except Exception as e:
                 error_type = type(e).__name__
                 error_module = type(e).__module__
@@ -765,9 +1032,12 @@ class VoyageAIEmbeddingProvider:
     ) -> list[RerankResult]:
         """Send one batch to the HTTP reranker and return parsed results."""
         payload = self._build_rerank_payload(query, documents, top_k)
+        rerank_url = self._rerank_url
+        if rerank_url is None:
+            raise RuntimeError("HTTP reranking requires rerank_url")
 
         logger.debug(
-            f"HTTP reranking {len(documents)} documents at {self._rerank_url} "
+            f"HTTP reranking {len(documents)} documents at {rerank_url} "
             f"(format={self._rerank_format})"
         )
 
@@ -778,9 +1048,7 @@ class VoyageAIEmbeddingProvider:
             if self._api_key:
                 headers["Authorization"] = f"Bearer {self._api_key}"
 
-            response = await client.post(
-                self._rerank_url, json=payload, headers=headers
-            )
+            response = await client.post(rerank_url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
 

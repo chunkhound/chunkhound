@@ -7,7 +7,7 @@ the complete code research pipeline in CI/CD without external dependencies.
 import asyncio
 import math
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import xxhash
@@ -209,17 +209,23 @@ class FakeEmbeddingProvider:
         self,
         model: str = "fake-embeddings",
         dims: int = 1536,
+        output_dims: int | None = None,
+        client_side_truncation: bool = False,
         batch_size: int = 100,
     ):
         """Initialize fake embedding provider.
 
         Args:
             model: Model name for identification
-            dims: Embedding dimensions
+            dims: Embedding dimensions (native/full dimension)
+            output_dims: Output dimension override for matryoshka testing
+            client_side_truncation: Truncate embeddings client-side (requires output_dims)
             batch_size: Maximum batch size
         """
         self._model = model
         self._dims = dims
+        self._output_dims = output_dims
+        self._client_side_truncation = client_side_truncation
         self._batch_size = batch_size
         self._distance = "cosine"
         self._max_tokens = 8192
@@ -241,8 +247,32 @@ class FakeEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
+        """Current embedding output dimension."""
+        if self._output_dims is not None:
+            return self._output_dims
         return self._dims
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension."""
+        return self._dims
+
+    @property
+    def supported_dimensions(self) -> Sequence[int]:
+        """List of valid output dimensions for this model."""
+        if self._output_dims is not None:
+            return [self._dims, self._output_dims]
+        return [self._dims]
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        return self._output_dims
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
+        return self._client_side_truncation
 
     @property
     def distance(self) -> str:
@@ -265,10 +295,12 @@ class FakeEmbeddingProvider:
         return EmbeddingConfig(
             provider="fake",
             model=self._model,
-            dims=self._dims,
+            dims=self.dims,
             distance=self._distance,
             batch_size=self._batch_size,
             max_tokens=self._max_tokens,
+            output_dims=self.output_dims,
+            client_side_truncation=self.client_side_truncation,
         )
 
     def _generate_deterministic_vector(self, text: str) -> list[float]:
@@ -279,7 +311,7 @@ class FakeEmbeddingProvider:
         and L2-normalizes. Produces vectors where texts sharing substrings
         (identifiers, keywords) have high cosine similarity.
         """
-        dims = self._dims
+        dims = self.native_dims
         vector = [0.0] * dims
 
         words = text.lower().split()
@@ -315,7 +347,23 @@ class FakeEmbeddingProvider:
         self._embeddings_generated += len(texts)
         self._tokens_used += sum(self.estimate_tokens(text) for text in texts)
 
-        return [self._generate_deterministic_vector(text) for text in texts]
+        embeddings = [self._generate_deterministic_vector(text) for text in texts]
+
+        # Apply truncation to simulate matryoshka behavior
+        if self._output_dims is not None:
+            if self._client_side_truncation:
+                from chunkhound.providers.embeddings.shared_utils import (
+                    apply_client_side_truncation,
+                )
+
+                embeddings = apply_client_side_truncation(
+                    embeddings, self._output_dims
+                )
+            else:
+                # Server-side truncation: API returns output_dims-sized vectors
+                embeddings = [v[: self._output_dims] for v in embeddings]
+
+        return embeddings
 
     async def embed_single(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
