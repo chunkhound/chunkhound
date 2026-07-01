@@ -13,6 +13,7 @@ the algorithm outlined in the deep research specification.
 
 import asyncio
 import re
+from time import perf_counter
 from typing import Any
 
 from loguru import logger
@@ -361,6 +362,7 @@ class UnifiedSearch:
         search_service = self._db_services.search_service
 
         if skip_rerank:
+            t7 = perf_counter()
             regex_only = [c for c in combined_pool if "similarity" not in c]
             if regex_only:
                 try:
@@ -380,14 +382,17 @@ class UnifiedSearch:
                             if cid is not None
                             else 0.0
                         )
-                    logger.debug(
-                        f"Step 7: Cosine-scored {len(regex_only)} regex chunks "
-                        f"(skip_rerank=True)"
-                    )
                 except Exception as e:
                     logger.warning(f"Cosine scoring for regex chunks failed: {e}")
 
             combined_pool.sort(key=lambda c: c.get("similarity", 0.0), reverse=True)
+            await emit_event(
+                "search_rerank",
+                f"Cosine-scored {len(combined_pool)} chunks",
+                node_id=node_id,
+                depth=depth,
+                duration=perf_counter() - t7,
+            )
 
         elif (
             hasattr(embedding_provider, "supports_reranking")
@@ -395,6 +400,7 @@ class UnifiedSearch:
             and len(combined_pool) > 1
         ):
             try:
+                t7 = perf_counter()
                 documents = [get_chunk_text(c) for c in combined_pool]
 
                 # Compound reranking: rerank against each query and average scores
@@ -453,6 +459,13 @@ class UnifiedSearch:
                 combined_pool.sort(
                     key=lambda c: c.get("rerank_score", 0.0),
                     reverse=True,
+                )
+                await emit_event(
+                    "search_rerank",
+                    f"Reranked {len(combined_pool)} chunks",
+                    node_id=node_id,
+                    depth=depth,
+                    duration=perf_counter() - t7,
                 )
 
             except Exception as e:

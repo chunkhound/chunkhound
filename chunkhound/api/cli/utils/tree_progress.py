@@ -94,6 +94,7 @@ class TreeProgressDisplay:
             "search_semantic": "🔎",
             "search_regex": "📝",
             "search_regex_complete": "✓",
+            "search_rerank": "⚖️",
             "extract_symbols": "🏷️",
             "extract_symbols_complete": "📋",
             "read_files": "📖",

@@ -947,6 +947,7 @@ Output a single unified query that captures the essential information need."""
             context=context,
             rerank_queries=[root_query, gap.query],
             path_filter=path_filter,
+            emit_event_callback=self._emit_event,
         )
 
         # Apply window expansion if enabled

@@ -521,6 +521,7 @@ Output JSON with queries array."""
                 context=context,
                 skip_rerank=True,
                 path_filter=path_filter,
+                emit_event_callback=self._emit_event,
             )
 
             # Apply window expansion if enabled
@@ -573,7 +574,7 @@ Output JSON with queries array."""
         """Global deduplication across all exploration results.
 
         SYNC POINT: This happens ONLY after all queries complete.
-        Conflict resolution: keep chunk with highest rerank_score.
+        Conflict resolution: keep chunk with highest similarity.
 
         Args:
             query_results: List of result lists from exploration queries
@@ -581,7 +582,7 @@ Output JSON with queries array."""
         Returns:
             Deduplicated chunks
         """
-        return deduplicate_chunks(query_results, log_prefix="Exploration dedup")
+        return deduplicate_chunks(query_results, score_field="similarity", log_prefix="Exploration dedup")
 
     def _merge_coverage(
         self, covered_chunks: list[dict], exploration_chunks: list[dict]
@@ -596,5 +597,5 @@ Output JSON with queries array."""
             Merged and deduplicated chunks
         """
         return merge_chunk_lists(
-            covered_chunks, exploration_chunks, log_prefix="Exploration merge"
+            covered_chunks, exploration_chunks, score_field="similarity", log_prefix="Exploration merge"
         )
