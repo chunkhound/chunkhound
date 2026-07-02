@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import html
 import html.parser
+import itertools
 import os
 import re
 import subprocess
@@ -22,6 +23,8 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
+
+from loguru import logger
 
 if TYPE_CHECKING:
     from http.client import HTTPMessage
@@ -710,6 +713,91 @@ def search(
             break
         params = next_params
     return results[:limit]
+
+
+def _normalize_url(raw: str) -> str:
+    """Dedupe key: lowercase netloc, strip trailing '/' from path, drop fragment.
+
+    Used only as a `dict` key inside `search_multi` — original URLs remain
+    unchanged in the returned tuples.
+    """
+    p = urllib.parse.urlparse(raw)
+    path = p.path.rstrip("/") or "/"
+    return p._replace(netloc=p.netloc.lower(), path=path, fragment="").geturl()
+
+
+async def search_multi(
+    queries: list[str],
+    limit: int,
+    progress_callback: Callable[[str], None] | None = None,
+    failure_callback: Callable[[str, urllib.error.URLError], None] | None = None,
+) -> list[tuple[str, str, str]]:
+    """Run multiple DDG queries sequentially, interleave by rank, dedupe.
+
+    Sequential (not parallel) because DDG's HTML endpoint rate-limits
+    aggressively. Each variant is capped at the full ``limit`` (not
+    ``limit / n``) so that heavy cross-variant overlap — common when the
+    LLM produces near-synonym expansions — cannot leave the caller with
+    fewer than ``limit`` distinct URLs. All queries are executed — no
+    early exit — so diversity from later variants is not lost when an
+    earlier variant alone could saturate ``limit``.
+
+    Ordering is rank-major: every variant's rank-1 hit comes before any
+    variant's rank-2 hit, etc. — so no single query dominates the head of
+    the list, and when the same URL appears in multiple batches its
+    stored ``(title, snippet)`` comes from the query where it ranked
+    highest. Dedupe (first-occurrence-wins by ``_normalize_url``) and
+    truncation to ``limit`` happen once, after every query has run.
+    Cost: worst case ``N × ceil(limit / page_size)`` page fetches —
+    traded against heavy cross-variant overlap silently under-filling
+    the result set.
+
+    On per-query URLError, invoke ``failure_callback`` when provided or
+    fall back to a ``logger.warning`` when no callback is supplied, and
+    continue with the remaining queries; if ALL raise, re-raise the
+    first.
+    """
+    if not queries:
+        return []
+    queries = list(dict.fromkeys(queries))  # dedupe identical strings; preserves order
+    n = len(queries)
+    batches: list[list[tuple[str, str, str]]] = []
+    first_error: urllib.error.URLError | None = None
+    successes = 0
+    for i, q in enumerate(queries, start=1):
+        per_query_progress: Callable[[str], None] | None = (
+            (lambda msg, p=f"[{i}/{n}] ": progress_callback(f"{p}{msg}"))
+            if progress_callback is not None
+            else None
+        )
+        try:
+            batch = await asyncio.to_thread(
+                search, q, limit, per_query_progress
+            )
+        except urllib.error.URLError as e:
+            if failure_callback is not None:
+                failure_callback(q, e)
+            else:
+                logger.warning(
+                    f"DDG query failed ({q!r}): {e.reason}; "
+                    "continuing with remaining queries"
+                )
+            if first_error is None:
+                first_error = e
+            continue
+        successes += 1
+        batches.append(batch)
+    if successes == 0 and first_error is not None:
+        raise first_error
+    seen: dict[str, tuple[str, str, str]] = {}
+    for rank_row in itertools.zip_longest(*batches):
+        for row in rank_row:
+            if row is None:
+                continue
+            key = _normalize_url(row[1])
+            if key not in seen:
+                seen[key] = row
+    return list(seen.values())[:limit]
 
 
 def build_quickresearch_argv_core(
