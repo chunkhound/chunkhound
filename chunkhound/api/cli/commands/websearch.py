@@ -31,12 +31,15 @@ def _build_quickresearch_argv(args: argparse.Namespace, tmpdir: Path, config: Co
     _tmp = argparse.ArgumentParser(add_help=False)
     qr_parser = add_quickresearch_subparser(_tmp.add_subparsers())
 
-    cmd = build_quickresearch_argv_core(args.query, tmpdir, config)
+    cmd = build_quickresearch_argv_core(
+        args.query, tmpdir, config, parent_pid=os.getpid()
+    )
     cmd.extend(build_forwarded_argv(
         qr_parser,
         args,
         # path_filter: defensive — forwarding would zero out results (flat tmpdir).
-        skip_dests={"help", "path_filter", "config"},
+        # parent_pid: emitted explicitly above; skip to avoid double-forwarding.
+        skip_dests={"help", "path_filter", "config", "parent_pid"},
     ))
     return cmd
 

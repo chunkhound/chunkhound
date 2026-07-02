@@ -716,12 +716,16 @@ def build_quickresearch_argv_core(
     query: str,
     tmpdir: Path,
     config: Config,
+    parent_pid: int,
 ) -> list[str]:
     """Build argv to invoke _quickresearch as a subprocess.
 
     Forwards the config source file as an absolute path so the child process
     does not need to re-run config discovery (which would otherwise fall back
     to env vars / defaults under the MCP server's working directory).
+
+    ``parent_pid`` is the caller's own PID (``os.getpid()``); the child uses
+    it as the reference for its orphan watchdog.
     """
     cmd: list[str] = [
         sys.executable,
@@ -729,6 +733,7 @@ def build_quickresearch_argv_core(
         "_quickresearch",
         query,
         str(tmpdir),
+        "--parent-pid", str(parent_pid),
     ]
     source = config.config_file or config.local_config_file
     if source is not None:

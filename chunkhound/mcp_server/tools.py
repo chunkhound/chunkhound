@@ -889,7 +889,9 @@ async def websearch_impl(
             mapping=mapping,
         )
 
-        cmd = build_quickresearch_argv_core(query, tmpdir, config)
+        cmd = build_quickresearch_argv_core(
+            query, tmpdir, config, parent_pid=os.getpid()
+        )
         # Scrub CHUNKHOUND_MCP_MODE so the child's RichOutputFormatter.error()
         # is not silenced — we rely on its stderr output to populate the
         # MCPError tail on subprocess failure.
