@@ -253,6 +253,33 @@ def test_makefile_split_contiguous_line_ranges() -> None:
         assert not part.content.startswith(target)
 
 
+def test_makefile_split_reserves_rule_target_embedding_context() -> None:
+    """Rule content leaves room for the target metadata added to embeddings."""
+    splitter = MakefileChunkSplitter()
+    target = "all:"
+    recipe_lines = ['\techo "building"' for _ in range(500)]
+    content = "\n".join([target] + recipe_lines)
+    chunk = _make_chunk(
+        content,
+        name="all",
+        start_line=1,
+        concept=UniversalConcept.DEFINITION,
+        metadata={"kind": "rule"},
+        language_node_type="rule",
+    )
+    rule_target_chars = sum(1 for char in f"[target: {target}]" if not char.isspace())
+
+    result = splitter.validate_and_split(chunk)
+
+    assert len(result) > 1
+    for part in result:
+        metrics = ChunkMetrics.from_content(part.content)
+        assert (
+            metrics.non_whitespace_chars + rule_target_chars
+            <= splitter.config.max_chunk_size
+        )
+
+
 def test_makefile_split_target_only_oversized_rule() -> None:
     """Oversized rule with no recipe lines falls back to _recursive_split."""
     splitter = MakefileChunkSplitter()

@@ -573,8 +573,8 @@ class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
         """
         if not text.startswith("# "):
             return None
-        # Look for language in parentheses within first 200 chars
-        match = re.search(r"\((\w+)\)\n", text[:200])
+        header = text.split("\n", 1)[0]
+        match = re.search(r"\((\w+)\)", header)
         return match.group(1).lower() if match else None
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
