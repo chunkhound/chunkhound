@@ -13,6 +13,7 @@ five filter-related `IndexingConfig` fields are reset to library defaults.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,9 @@ async def test_quickresearch_ignores_user_include_exclude_filters(
         path=tmp_path,
         path_filter=None,
         verbose=False,
+        # Match our own ppid so the startup orphan check passes and the
+        # watchdog thread stays quiet for the duration of the test.
+        parent_pid=os.getppid(),
     )
 
     await qr_mod.quickresearch_command(args, config)
