@@ -125,6 +125,9 @@ class EmbeddingProviderFactory:
                 api_version=api_version,
                 azure_endpoint=azure_endpoint,
                 azure_deployment=azure_deployment,
+                batch_size=config.get("batch_size", 100),
+                timeout=config.get("timeout", 30),
+                retry_attempts=config.get("max_retries", 3),
             )
         except Exception as e:
             raise ValueError(f"Failed to create OpenAI provider: {e}") from e
