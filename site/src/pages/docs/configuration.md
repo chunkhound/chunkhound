@@ -198,8 +198,13 @@ Fast analytical queries and efficient storage.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `max_disk_usage_mb` | `number` | `null` | Max DB size in MB before indexing stops (CLI flag uses GB) |
+| `fragmentation_threshold_pct` | `number` | `30` | Background/auto-compaction trigger: file-size overhead above the provider's estimated live DB size (%). 30 = compact when the DB is ~30% larger than live data. 0 = always, null = never. This does not disable the fixed `chunkhound index` compaction boundaries. CLI: `--fragmentation-threshold-pct`. |
 | `lancedb_index_type` | `string` | `null` | LanceDB vector index type: `auto`, `ivf_hnsw_sq`, or `ivf_rq` |
 | `lancedb_optimize_fragment_threshold` | `number` | `100` | Fragment count to trigger LanceDB compaction |
+
+DuckDB also compacts during `chunkhound index` at two fixed batch boundaries: once after chunking and before embedding generation, then again at the end of the indexing pass. Those boundary calls are unconditional, including `--no-embeddings` and noop re-index runs. If a batch compaction fails with `status: "error"`, the index run is aborted. Providers that report compaction as unsupported/`skipped` keep indexing normally. Sampled/background auto-compaction (triggered by fragmentation threshold during normal operations) does NOT fail the original operation — failures are logged and skipped.
+
+DuckDB compaction rebuilds a fresh canonical ChunkHound database file and swaps it into place atomically. This is intentionally **not** a generic DuckDB passthrough: only ChunkHound-owned canonical tables (`schema_version`, `files`, `chunks`, `embeddings_*`) are preserved. Any unknown or non-canonical tables are dropped during compaction by design.
 
 ## Indexing Options
 

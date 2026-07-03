@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from chunkhound.core.config.config import Config
-from chunkhound.services.realtime_indexing_service import SimpleEventHandler
+from chunkhound.services.realtime.events import SimpleEventHandler
 
 
 def _handler(tmp_path: Path) -> SimpleEventHandler:

@@ -12,7 +12,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.daemon.discovery import DaemonDiscovery
 from chunkhound.database_factory import create_services
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.service import RealtimeIndexingService
 from chunkhound.watchman_runtime import loader as watchman_runtime_loader
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
@@ -152,12 +152,12 @@ def test_realtime_service_logs_install_default_backend_resolution(
     info_messages: list[str] = []
 
     monkeypatch.setattr(
-        "chunkhound.services.realtime_indexing_service.default_realtime_backend_for_current_install",
+        "chunkhound.services.realtime.service.default_realtime_backend_for_current_install",
         lambda: "watchdog",
     )
     services = create_services(db_path, config)
     monkeypatch.setattr(
-        "chunkhound.services.realtime_indexing_service.logger.info",
+        "chunkhound.services.realtime.service.logger.info",
         lambda message: info_messages.append(message),
     )
 

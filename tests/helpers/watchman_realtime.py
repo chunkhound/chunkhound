@@ -5,12 +5,14 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-import chunkhound.services.realtime_indexing_service as realtime_service_module
+import chunkhound.services.realtime.service as realtime_service_module
 import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.adapters import WatchmanRealtimeAdapter
+from chunkhound.services.realtime.service import RealtimeIndexingService
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
 
 
 def build_watchman_service(target_dir: Path) -> tuple[RealtimeIndexingService, object]:
@@ -130,8 +132,8 @@ def prepend_poisoned_python_shims(
 async def start_isolated_watchman_translation(
     service: RealtimeIndexingService, target_dir: Path
 ) -> object:
-    adapter = realtime_service_module.WatchmanRealtimeAdapter(service)
-    primary_filter = realtime_service_module.RealtimePathFilter(
+    adapter = WatchmanRealtimeAdapter(service)
+    primary_filter = RealtimePathFilter(
         config=service.config,
         root_path=target_dir,
     )

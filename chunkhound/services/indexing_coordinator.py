@@ -21,9 +21,15 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TYPE_CHECKING, cast
+
+
+if TYPE_CHECKING:
+    from chunkhound.services.directory_indexing_service import IndexingStats
 
 from loguru import logger
+
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from rich.progress import Progress, TaskID
 
 from chunkhound.core.detection import detect_language
@@ -100,8 +106,7 @@ class _StatResult:
 
 
 class _IgnoreMatcher(Protocol):
-    def matches(self, path: Path, is_dir: bool = False) -> bool:
-        ...
+    def matches(self, path: Path, is_dir: bool = False) -> bool: ...
 
 
 def _mem_available_bytes() -> int:
@@ -158,6 +163,31 @@ def _calculate_worker_count(file_count: int, cpu_count: int) -> int:
         return min(cpu_count, MAX_WORKERS_MEDIUM_BATCH, file_count)
     else:
         return min(cpu_count, MAX_WORKERS_LARGE_BATCH, file_count)
+
+
+async def run_batch_compaction_boundary(
+    coordinator: "IndexingCoordinator",
+    stats: "IndexingStats | None" = None,
+) -> None:
+    """Run one mandatory batch-compaction boundary and enforce its contract.
+
+    Shared implementation used by both ``Database.process_directory`` (legacy)
+    and ``DirectoryIndexingService.process_directory`` (canonical). Raises
+    RuntimeError on failure. Skips silently when the provider reports
+    compaction as unsupported. Updates ``stats.db_compactions`` when provided.
+    """
+    compaction = await coordinator.compact_database_with_metrics()
+    status = compaction.get("status")
+    if status == "success":
+        if stats is not None:
+            stats.db_compactions += 1
+        return
+    if status == "skipped":
+        return
+    raise RuntimeError(
+        "Batch database compaction failed: "
+        f"{compaction.get('error', compaction)}"
+    )
 
 
 class IndexingCoordinator(BaseService):
@@ -1487,13 +1517,6 @@ class IndexingCoordinator(BaseService):
                 if task.total:
                     self.progress.update(parse_task, completed=task.total)
 
-            # Optimize tables after parsing/chunking (only if fragmentation warrants it)
-            if agg_total_chunks > 0 and self._db.should_optimize(
-                operation="post-chunking"
-            ):
-                logger.debug("Optimizing database after chunking phase...")
-                self._db.optimize_tables()
-
             # Record startup profile if enabled (before heavy parse+store dominates totals)
             if _t0 is not None:
                 try:
@@ -1546,8 +1569,12 @@ class IndexingCoordinator(BaseService):
             if agg_skipped_paths:
                 reason_counts: dict[str, int] = {}
                 for _, reason in agg_skipped_paths:
-                    reason_counts[reason or "unknown"] = reason_counts.get(reason or "unknown", 0) + 1
-                breakdown = ", ".join(f"{r}: {c}" for r, c in sorted(reason_counts.items()))
+                    reason_counts[reason or "unknown"] = (
+                        reason_counts.get(reason or "unknown", 0) + 1
+                    )
+                breakdown = ", ".join(
+                    f"{r}: {c}" for r, c in sorted(reason_counts.items())
+                )
                 logger.info(
                     f"Skipped {len(agg_skipped_paths)} file(s) during parsing ({breakdown}). "
                     f"These are now recorded in the DB and won't be re-scanned unless their content changes. "
@@ -1571,12 +1598,6 @@ class IndexingCoordinator(BaseService):
 
             # Note: Embedding generation is handled separately via generate_missing_embeddings()
             # to provide a unified progress experience
-
-            # FINAL: Unified optimization (CHECKPOINT + HNSW compact + full compaction)
-            # Only run if fragmentation warrants it
-            if self._db.should_optimize(operation="post-indexing"):
-                logger.info("Running final database optimization...")
-                self._db.optimize_tables()
 
             # Check for disk limit exceeded errors
             for error in agg_errors:
@@ -1613,12 +1634,6 @@ class IndexingCoordinator(BaseService):
                 }
             else:
                 return {"status": "error", "error": str(e)}
-
-    def finalize_optimization(self) -> None:
-        """Run post-embedding optimization if warranted."""
-        if self._db.should_optimize(operation="post-embedding"):
-            logger.info("Running post-embedding database optimization...")
-            self._db.optimize_tables()
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
         """Safely extract file ID from either dict or File model."""
@@ -1701,6 +1716,71 @@ class IndexingCoordinator(BaseService):
             Dictionary with file, chunk, and embedding counts
         """
         return await self._db.get_stats_async()
+
+    async def compact_database_with_metrics(self) -> dict[str, Any]:
+        """Compact the database file unconditionally and return metrics.
+
+        This is the batch-indexing contract used at fixed phase boundaries.
+        Threshold-gated background maintenance belongs in the provider's
+        `compact_if_needed*` APIs instead.
+
+        Returns:
+            Dict with status, size_before, size_after, reduction_pct.
+        """
+        db_path = str(self._db.db_path)
+        if db_path == ":memory:":
+            size_before = 0
+        else:
+            try:
+                size_before = os.path.getsize(db_path)
+            except OSError:
+                size_before = 0
+
+        try:
+            compacted_size = await self._db.compact_database_async()
+        except NotImplementedError:
+            return {"status": "skipped", "reason": "No compaction support"}
+        except Exception as e:
+            log_if_not_mcp("error", f"Database compaction failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+        reduction_pct = (
+            ((size_before - compacted_size) / size_before * 100.0)
+            if size_before > 0
+            else 0.0
+        )
+        return {
+            "status": "success",
+            "size_before": size_before,
+            "size_after": compacted_size,
+            "reduction_pct": reduction_pct,
+        }
+
+    async def compact_if_needed(self) -> dict[str, Any]:
+        """Compact the database if fragmentation exceeds threshold.
+
+        Thin wrapper around the provider's threshold-gated
+        ``compact_if_needed_async()``.  Returns a status dict for the
+        caller's progress/logging layer.
+
+        Returns:
+            Dict with ``status`` ("success" | "skipped" | "error") and
+            ``compacted`` (bool).
+        """
+        try:
+            compacted = await self._db.compact_if_needed_async()
+            if compacted:
+                return {"status": "success", "compacted": True}
+            return {
+                "status": "skipped",
+                "compacted": False,
+                "reason": "below threshold",
+            }
+        except NotImplementedError:
+            return {"status": "skipped", "compacted": False, "reason": "unsupported"}
+        except Exception as e:
+            log_if_not_mcp("error", f"Database compact_if_needed failed: {e}")
+            return {"status": "error", "compacted": False, "error": str(e)}
 
     async def remove_file(self, file_path: str) -> int:
         """Remove a file and all its chunks from the database.
@@ -1790,7 +1870,6 @@ class IndexingCoordinator(BaseService):
             result = await embedding_service.generate_missing_embeddings(
                 exclude_patterns=exclude_patterns
             )
-            self.finalize_optimization()
             return result
 
         except Exception as e:
@@ -2322,9 +2401,11 @@ class IndexingCoordinator(BaseService):
                 if _idx is not None
                 else False,
             }
-            workspace_root_only_gitignore = bool(
-                getattr(_idx, "workspace_gitignore_nonrepo", False)
-            ) if _idx is not None else False
+            workspace_root_only_gitignore = (
+                bool(getattr(_idx, "workspace_gitignore_nonrepo", False))
+                if _idx is not None
+                else False
+            )
             # Provide precomputed repo roots to parallel workers so they can
             # avoid re-detecting per process
             try:
@@ -2383,9 +2464,11 @@ class IndexingCoordinator(BaseService):
                     sources = indexing_config.resolve_ignore_sources()
                 else:
                     sources = ["gitignore"]
-                workspace_root_only_gitignore = bool(
-                    getattr(indexing_config, "workspace_gitignore_nonrepo", False)
-                ) if indexing_config is not None else False
+                workspace_root_only_gitignore = (
+                    bool(getattr(indexing_config, "workspace_gitignore_nonrepo", False))
+                    if indexing_config is not None
+                    else False
+                )
                 repo_roots = self._get_or_detect_repo_roots(
                     directory,
                     eff,

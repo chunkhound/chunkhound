@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,9 @@ warnings.filterwarnings(
 
 import duckdb
 from loguru import logger
+
+from chunkhound.utils.logging_guard import log_if_not_mcp
+from chunkhound.utils.windows_constants import _unlink_compacted
 
 
 class DuckDBConnectionManager:
@@ -92,8 +96,15 @@ class DuckDBConnectionManager:
 
             # Connect to database with WAL validation
             # Thread safety is now handled by DuckDBProvider's executor pattern
+            # Gate recovery on read-only mode — a read-only observer must never
+            # mutate compaction artifacts or attempt WAL replay.
             if not self._read_only:
+                self._recover_interrupted_compaction()
                 self._preemptive_wal_cleanup()
+            else:
+                logger.debug(
+                    "Read-only mode — skipping compaction recovery and WAL cleanup"
+                )
             self._connect_with_wal_validation()
 
             logger.info("DuckDB connection established")
@@ -173,6 +184,57 @@ class DuckDBConnectionManager:
 
         return any(indicator in error_msg for indicator in corruption_indicators)
 
+    def _recover_interrupted_compaction(self) -> None:
+        """Restore a live DB if a prior compaction crashed mid-swap."""
+        if self.is_memory_db:
+            return
+
+        db_path = Path(self.db_path)
+        backup_path = db_path.with_suffix(db_path.suffix + ".compact_backup")
+        staged_path = db_path.with_suffix(db_path.suffix + ".compact_new")
+        wal_backup = backup_path.with_suffix(".compact_backup.wal")
+        wal_path = db_path.with_suffix(db_path.suffix + ".wal")
+
+        live_missing_or_empty = True
+        if db_path.exists():
+            try:
+                live_missing_or_empty = db_path.stat().st_size == 0
+            except OSError:
+                live_missing_or_empty = True
+
+        if backup_path.exists() and live_missing_or_empty:
+            msg = (
+                "WARNING: Recovering DuckDB database from interrupted "
+                f"compaction backup: {backup_path}"
+            )
+            if os.environ.get("CHUNKHOUND_MCP_MODE") == "1":
+                # Crash recovery is significant — surface to stderr even in
+                # MCP mode (loguru sinks are disabled by stdio.py).
+                print(msg, file=sys.stderr)
+            else:
+                logger.warning(msg)
+            try:
+                db_path.unlink(missing_ok=True)
+                os.replace(backup_path, db_path)
+                if wal_backup.exists():
+                    wal_path.unlink(missing_ok=True)
+                    os.replace(wal_backup, wal_path)
+            except OSError as error:
+                raise RuntimeError(
+                    "Failed to recover interrupted DuckDB compaction from "
+                    f"{backup_path}: {error}"
+                ) from error
+
+        if not live_missing_or_empty:
+            for stale_path in (backup_path, wal_backup):
+                stale_path.unlink(missing_ok=True)
+
+        for stale_path in (
+            staged_path,
+            staged_path.with_suffix(staged_path.suffix + ".wal"),
+        ):
+            _unlink_compacted(stale_path)
+
     def _preemptive_wal_cleanup(self) -> None:
         """Proactively check for and clean up potentially corrupted WAL files.
 
@@ -215,7 +277,8 @@ class DuckDBConnectionManager:
                 test_conn.execute("SET hnsw_enable_experimental_persistence = true")
             except Exception:
                 pass  # If VSS unavailable, ATTACH may still work for non-HNSW DBs
-            test_conn.execute(f"ATTACH '{self.db_path}' AS validation_db")
+            escaped = str(self.db_path).replace("'", "''")
+            test_conn.execute(f"ATTACH '{escaped}' AS validation_db")
             test_conn.execute("SELECT 1").fetchone()
             test_conn.execute("DETACH validation_db")
             logger.debug("WAL file validation passed")
@@ -266,7 +329,8 @@ class DuckDBConnectionManager:
 
             # Now attach the database file - this will trigger WAL replay
             # with extension loaded
-            recovery_conn.execute(f"ATTACH '{db_path}' AS recovery_db")
+            escaped = str(db_path).replace("'", "''")
+            recovery_conn.execute(f"ATTACH '{escaped}' AS recovery_db")
 
             # Verify tables are accessible
             recovery_conn.execute("SELECT COUNT(*) FROM recovery_db.files").fetchone()
@@ -316,24 +380,16 @@ class DuckDBConnectionManager:
                 ):
                     # Force checkpoint before close to ensure durability
                     self.connection.execute("CHECKPOINT")
-                    # Only log in non-MCP mode to avoid JSON-RPC interference
-                    if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                        logger.debug("Database checkpoint completed before disconnect")
+                    log_if_not_mcp("debug", "Database checkpoint completed before disconnect")
                 else:
-                    if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                        logger.debug(
-                            "Skipping checkpoint before disconnect (already done)"
-                        )
+                    log_if_not_mcp("debug", "Skipping checkpoint before disconnect (already done)")
             except Exception as e:
-                # Only log errors in non-MCP mode
-                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.error(f"Checkpoint failed during disconnect: {e}")
+                log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")
                 # Continue with close - don't block shutdown
             finally:
                 self.connection.close()
                 self.connection = None
-                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                    logger.info("DuckDB connection closed")
+                log_if_not_mcp("info", "DuckDB connection closed")
 
     def _load_extensions(self) -> None:
         """Load required DuckDB extensions with macOS x86 crash prevention."""

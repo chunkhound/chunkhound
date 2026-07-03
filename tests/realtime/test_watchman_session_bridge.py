@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import chunkhound.watchman.session as watchman_session_module
-from chunkhound.services.realtime_indexing_service import WatchmanRealtimeAdapter
+from chunkhound.services.realtime.adapters import WatchmanRealtimeAdapter
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
     WatchmanCliSession,
