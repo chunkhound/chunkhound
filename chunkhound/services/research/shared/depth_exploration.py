@@ -16,9 +16,13 @@ Key Invariants:
 """
 
 import asyncio
-from typing import Any, cast
+from time import perf_counter
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
 
 from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.database_factory import DatabaseServices
@@ -47,10 +51,11 @@ from chunkhound.services.research.shared.models import (
     IMPORT_DEFAULT_SCORE,
     ResearchContext,
 )
+from chunkhound.services.research.shared.progress_mixin import ProgressEmitterMixin
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
 
 
-class DepthExplorationService:
+class DepthExplorationService(ProgressEmitterMixin):
     """Service for exploring existing coverage from multiple angles.
 
     Unlike gap detection (which finds missing external references), depth
@@ -58,6 +63,8 @@ class DepthExplorationService:
     already in coverage. This mimics follow-up question behavior
     while maintaining coverage-first philosophy.
     """
+
+    _default_depth = 2  # all gap_step events are nested under the current phase
 
     def __init__(
         self,
@@ -67,6 +74,7 @@ class DepthExplorationService:
         config: ResearchConfig,
         import_resolver: Any | None = None,
         import_context_service: ImportContextService | None = None,
+        progress: "TreeProgressDisplay | None" = None,
     ):
         """Initialize depth exploration service.
 
@@ -77,6 +85,7 @@ class DepthExplorationService:
             config: Research configuration
             import_resolver: Optional ImportResolverService for import resolution
             import_context_service: Optional ImportContextService for header injection
+            progress: Optional TreeProgressDisplay for terminal UI (None for MCP)
         """
         self._llm_manager = llm_manager
         self._embedding_manager = embedding_manager
@@ -84,6 +93,7 @@ class DepthExplorationService:
         self._config = config
         self._import_resolver = import_resolver
         self._import_context_service = import_context_service
+        self._progress = progress
         self._unified_search = UnifiedSearch(db_services, embedding_manager, config)
 
     async def explore_coverage_depth(
@@ -116,19 +126,36 @@ class DepthExplorationService:
                 "chunks_added": 0,
             }
 
+        t_total = perf_counter()
         logger.info(
             f"Phase 1.5: Depth exploration starting with {len(covered_chunks)} chunks"
         )
+        await self._emit_event(
+            "gap_step",
+            f"Phase 1.5 depth exploration: {len(covered_chunks)} chunks → analyzing...",
+        )
 
         # Step 1: Group chunks by file and select top-K files
+        t = perf_counter()
         file_to_chunks = self._group_chunks_by_file(covered_chunks)
         top_files = self._select_top_files(
             file_to_chunks, self._config.max_exploration_files
         )
         logger.info(f"Step 1.5.1: Selected {len(top_files)} top files for exploration")
+        await self._emit_event(
+            "gap_step",
+            f"Step 1.5.1: Selected {len(top_files)} top files for exploration",
+            duration=perf_counter() - t,
+        )
 
         if not top_files:
             logger.info("No files selected for exploration")
+            elapsed = perf_counter() - t_total
+            await self._emit_event(
+                "gap_step",
+                "Depth exploration complete: no files selected",
+                duration=elapsed,
+            )
             return covered_chunks, {
                 "files_explored": 0,
                 "queries_generated": 0,
@@ -136,6 +163,7 @@ class DepthExplorationService:
             }
 
         # Step 2: Generate exploration queries for each file (parallel)
+        t = perf_counter()
         (
             exploration_queries,
             generation_metrics,
@@ -148,9 +176,21 @@ class DepthExplorationService:
             f"across {len(exploration_queries)} files "
             f"({generation_metrics.success_count}/{generation_metrics.total_operations} files succeeded)"
         )
+        await self._emit_event(
+            "gap_step",
+            f"Step 1.5.2: Generated {total_queries} queries"
+            f" across {len(exploration_queries)} files",
+            duration=perf_counter() - t,
+        )
 
         if not any(exploration_queries.values()):
             logger.info("No exploration queries generated")
+            elapsed = perf_counter() - t_total
+            await self._emit_event(
+                "gap_step",
+                "Depth exploration complete: no queries generated",
+                duration=elapsed,
+            )
             return covered_chunks, {
                 "files_explored": len(top_files),
                 "queries_generated": 0,
@@ -158,20 +198,34 @@ class DepthExplorationService:
             }
 
         # Step 3: Execute unified search for each query (parallel, independent)
+        t = perf_counter()
         exploration_results = await self._execute_exploration_queries(
             root_query, exploration_queries, phase1_threshold, path_filter
         )
         total_results = sum(len(r) for r in exploration_results)
         logger.info(f"Step 1.5.3: Exploration searches returned {total_results} chunks")
+        await self._emit_event(
+            "gap_step",
+            f"Step 1.5.3: Exploration searches returned {total_results} chunks",
+            duration=perf_counter() - t,
+        )
 
         # Step 4: Global deduplication (SYNC POINT)
+        t = perf_counter()
         unified_exploration_chunks = self._global_dedup(exploration_results)
         logger.info(
             f"Step 1.5.4: Global dedup: {total_results} -> "
             f"{len(unified_exploration_chunks)} unique exploration chunks"
         )
+        await self._emit_event(
+            "gap_step",
+            f"Step 1.5.4: Global dedup: {total_results}"
+            f" → {len(unified_exploration_chunks)} unique chunks",
+            duration=perf_counter() - t,
+        )
 
         # Step 5: Merge with coverage chunks
+        t = perf_counter()
         expanded_chunks = self._merge_coverage(
             covered_chunks, unified_exploration_chunks
         )
@@ -181,10 +235,17 @@ class DepthExplorationService:
             f"{len(unified_exploration_chunks)} -> {len(expanded_chunks)} total "
             f"({chunks_added} new chunks)"
         )
+        await self._emit_event(
+            "gap_step",
+            f"Step 1.5.5: Final merge: {len(covered_chunks)}"
+            f" + {len(unified_exploration_chunks)} → {len(expanded_chunks)} total",
+            duration=perf_counter() - t,
+        )
 
         # Step 6: Import resolution (if enabled)
         import_chunks_added = 0
         if self._config.import_resolution_enabled and self._import_resolver:
+            t = perf_counter()
             import_chunks = await resolve_and_fetch_imports(
                 chunks=expanded_chunks,
                 import_resolver=self._import_resolver,
@@ -200,13 +261,32 @@ class DepthExplorationService:
                     f"Step 1.5.6: Import resolution: added {import_chunks_added} chunks "
                     f"from {len({c.get('file_path') for c in import_chunks})} import files"
                 )
+            # Always emit — shows time even when import resolution returns nothing
+            await self._emit_event(
+                "gap_step",
+                f"Step 1.5.6: Import resolution: +{import_chunks_added} chunks",
+                duration=perf_counter() - t,
+            )
+
+        total_added = chunks_added + import_chunks_added
+        elapsed_total = perf_counter() - t_total
+        logger.info(
+            f"Phase 1.5: Depth exploration complete in {elapsed_total:.2f}s — "
+            f"+{total_added} chunks added ({len(expanded_chunks)} total)"
+        )
+        await self._emit_event(
+            "gap_step",
+            f"Depth exploration complete: +{total_added} chunks added"
+            f" ({len(expanded_chunks)} total)",
+            duration=elapsed_total,
+        )
 
         stats = {
             "files_explored": len(top_files),
             "queries_generated": total_queries,
             "exploration_chunks_found": total_results,
             "exploration_chunks_unique": len(unified_exploration_chunks),
-            "chunks_added": chunks_added,
+            "chunks_added": total_added,  # expansion chunks + import resolution chunks
             "import_chunks_added": import_chunks_added,
             "total_chunks": len(expanded_chunks),
             "query_generation_failures": generation_metrics.to_dict(),

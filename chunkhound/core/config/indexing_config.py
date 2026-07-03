@@ -569,6 +569,24 @@ class IndexingConfig(BaseModel):
                 out.append(pat)
         return out
 
+    def reset_user_include_exclude(self) -> None:
+        """Reset include/exclude state to library defaults (mutates in place).
+
+        Resets: `include`, `exclude`, `exclude_sentinel`, `exclude_mode`,
+        `exclude_user_supplied`. Other ignore knobs (`chignore_file`,
+        `workspace_gitignore_*`, `gitignore_backend`) are untouched.
+
+        Use when filters loaded from `.chunkhound.json`, `--config`, env vars,
+        or global config must not apply to a runtime-supplied path (e.g., a
+        tempdir of fetched pages in `_quickresearch`).
+        """
+        defaults = IndexingConfig()
+        self.include = list(defaults.include)
+        self.exclude = list(defaults.exclude)
+        self.exclude_sentinel = None
+        self.exclude_mode = None
+        self.exclude_user_supplied = False
+
     @classmethod
     def extract_cli_overrides(cls, args: Any) -> dict[str, Any]:
         """Extract indexing config from CLI arguments."""

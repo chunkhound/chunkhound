@@ -11,6 +11,9 @@ from chunkhound.core.types.common import ChunkId
 from chunkhound.core.utils import DEFAULT_CHARS_PER_TOKEN, estimate_tokens
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
+from chunkhound.providers.database.duckdb.schema_constants import (
+    EMBEDDING_TABLE_SIMILAR_PATTERN,
+)
 
 from .base_service import BaseService
 
@@ -985,9 +988,10 @@ class EmbeddingService(BaseService):
     def _get_all_embedding_tables(self) -> list[str]:
         """Get list of all embedding tables (dimension-specific)."""
         try:
-            tables = self._db.execute_query("""
+            tables = self._db.execute_query(f"""
                 SELECT table_name FROM information_schema.tables
-                WHERE table_name LIKE 'embeddings_%'
+                WHERE table_schema = 'main'
+                  AND table_name SIMILAR TO '{EMBEDDING_TABLE_SIMILAR_PATTERN}'
             """)
             return [table["table_name"] for table in tables]
         except Exception as e:

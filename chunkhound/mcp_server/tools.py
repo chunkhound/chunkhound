@@ -93,10 +93,23 @@ class Tool:
     requires_embeddings: bool = False
     requires_llm: bool = False
     requires_reranker: bool = False
+    requires_db: bool = False
 
 
 # Tool registry - populated by @register_tool decorator
 TOOL_REGISTRY: dict[str, Tool] = {}
+
+
+def tool_requires_db(tool_name: str) -> bool:
+    """Return True when the tool implementation needs DB services.
+
+    This is the daemon/session boundary: non-DB tools must not trigger
+    provider reconnect/open work just because an MCP client called them.
+    """
+    tool = TOOL_REGISTRY.get(tool_name)
+    if tool is None:
+        return True  # Conservative: assume DB needed for unknown tools
+    return tool.requires_db
 
 
 def _python_type_to_json_schema_type(type_hint: Any) -> dict[str, Any]:
@@ -299,6 +312,7 @@ def register_tool(
             requires_embeddings=requires_embeddings,
             requires_llm=requires_llm,
             requires_reranker=requires_reranker,
+            requires_db="services" in inspect.signature(func).parameters,
         )
 
         return func
@@ -497,8 +511,7 @@ USE FOR:
 - Inspecting backend-neutral realtime health and resync state
 - Debugging degraded daemon behavior without opening log files
 
-OUTPUT: {status, query_ready, scan_progress}
-NOTE: Query readiness is derived from scan state on this branch."""
+OUTPUT: {status, query_ready, scan_progress}"""
 
 WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, build a transient in-memory index over the fetched pages, and run deep research to produce a cited answer. Use when the question requires external documentation, library references, or up-to-date web content — not for searching the local codebase (use `code_research` for that). High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
 
@@ -890,7 +903,9 @@ async def websearch_impl(
             mapping=mapping,
         )
 
-        cmd = build_quickresearch_argv_core(query, tmpdir, config)
+        cmd = build_quickresearch_argv_core(
+            query, tmpdir, config, parent_pid=os.getpid()
+        )
         # Scrub CHUNKHOUND_MCP_MODE so the child's RichOutputFormatter.error()
         # is not silenced — we rely on its stderr output to populate the
         # MCPError tail on subprocess failure.

@@ -469,6 +469,22 @@ class Config(BaseModel):
             if self.embedding and not self.embedding.is_provider_configured():
                 errors.append("Embedding provider not properly configured")
 
+        if self.database.read_only:
+            # _quickresearch always uses a :memory: DB (see quickresearch.py),
+            # so a project-level read_only setting inherited via --config is
+            # structurally inapplicable — accept it here and let the connection
+            # manager drop read_only for :memory: paths.
+            if command not in ("mcp", "_quickresearch"):
+                errors.append(
+                    "database.read_only=True is only valid for the 'mcp' subcommand"
+                )
+            elif command == "mcp" and self.database.provider != "duckdb":
+                errors.append(
+                    "database.read_only=True is only supported with the DuckDB "
+                    f"provider (got '{self.database.provider}'). "
+                    "Use the DuckDB provider, or omit --read-only."
+                )
+
         return errors
 
     def get_missing_config(self) -> list[str]:

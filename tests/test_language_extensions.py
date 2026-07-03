@@ -3,7 +3,7 @@
 This test suite ensures that extension lists remain synchronized across:
 - Language.get_all_extensions() in core/types/common.py
 - EXTENSION_TO_LANGUAGE in parsers/parser_factory.py
-- Realtime service fallback in services/realtime_indexing_service.py
+- Realtime service fallback in services/realtime/events.py
 
 These tests prevent the extension list desynchronization bug that caused
 newly added languages (Zig, PHP variants, etc.) to be filtered out during
@@ -16,7 +16,7 @@ import pytest
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import EXTENSION_TO_LANGUAGE
-from chunkhound.services.realtime_indexing_service import SimpleEventHandler
+from chunkhound.services.realtime.events import SimpleEventHandler
 
 
 class TestExtensionConsistency:
@@ -291,6 +291,7 @@ class TestExtensionCoverage:
             ".php", ".phtml", ".php3", ".php4", ".php5", ".phps",  # PHP variants
             ".zig",  # Zig
             ".vue",  # Vue
+            ".ps1", ".psm1",  # PowerShell
         ],
     )
     def test_language_variant_extensions_supported(self, ext):

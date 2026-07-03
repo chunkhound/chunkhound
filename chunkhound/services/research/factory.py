@@ -89,6 +89,7 @@ def _create_v2_service(
         db_services=db_services,
         config=config.research,
         import_resolver=import_resolver,
+        progress=progress,
     )
 
     return PluggableResearchService(
@@ -138,6 +139,7 @@ def _create_v3_service(
         db_services=db_services,
         config=config.research,
         import_resolver=import_resolver,
+        progress=progress,
     )
 
     parallel_strategy = ParallelExplorationStrategy(

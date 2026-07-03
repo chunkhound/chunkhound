@@ -7,10 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-import chunkhound.services.realtime_indexing_service as realtime_service_module
+import chunkhound.services.realtime.service as realtime_service_module
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.adapters import WatchmanRealtimeAdapter
+from chunkhound.services.realtime.service import RealtimeIndexingService
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.watchman import WatchmanScopePlan, WatchmanSubscriptionScope
 from tests.helpers.watchman_realtime import (
     build_watchman_service as _build_watchman_service,
@@ -26,7 +28,9 @@ from tests.helpers.watchman_realtime import (
 )
 from tests.utils.windows_compat import wait_for_indexed
 
-pytestmark = pytest.mark.requires_native_watchman
+# Keep deterministic translation/adapter contract tests runnable without packaged
+# Watchman; mark only tests that start the real Watchman adapter as requiring
+# native Watchman.
 
 
 def _subscription_pdu(
@@ -302,7 +306,7 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
         TrackingSession,
     )
 
-    adapter = realtime_service_module.WatchmanRealtimeAdapter(service)
+    adapter = WatchmanRealtimeAdapter(service)
     adapter._sidecar = FakeSidecar()
     loop = asyncio.get_running_loop()
     started_at = loop.time()
@@ -886,7 +890,7 @@ async def test_watchman_mount_aware_startup_uses_fallback_planning(
         TrackingSession,
     )
 
-    adapter = realtime_service_module.WatchmanRealtimeAdapter(service)
+    adapter = WatchmanRealtimeAdapter(service)
     adapter._sidecar = FakeSidecar()
     try:
         await adapter.start(target_dir, asyncio.get_running_loop())
@@ -930,6 +934,7 @@ async def test_watchman_mount_aware_startup_uses_fallback_planning(
         services.provider.disconnect()
 
 
+@pytest.mark.requires_native_watchman
 @pytest.mark.asyncio
 async def test_watchman_subscription_pdu_indexes_created_file(tmp_path: Path) -> None:
     watch_dir = tmp_path / "watchman_project"
@@ -955,6 +960,7 @@ async def test_watchman_subscription_pdu_indexes_created_file(tmp_path: Path) ->
         services.provider.disconnect()
 
 
+@pytest.mark.requires_native_watchman
 @pytest.mark.asyncio
 async def test_watchman_subscription_pdu_deletes_indexed_file(tmp_path: Path) -> None:
     watch_dir = tmp_path / "watchman_project"
@@ -984,6 +990,7 @@ async def test_watchman_subscription_pdu_deletes_indexed_file(tmp_path: Path) ->
         services.provider.disconnect()
 
 
+@pytest.mark.requires_native_watchman
 @pytest.mark.asyncio
 async def test_watchman_subscription_pdu_deletes_indexed_directory(
     tmp_path: Path,
@@ -1086,6 +1093,7 @@ async def test_watchman_relative_root_mapping_and_filtering(
         services.provider.disconnect()
 
 
+@pytest.mark.requires_native_watchman
 @pytest.mark.asyncio
 async def test_watchman_multi_scope_translation_deduplicates_across_subscriptions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1195,6 +1203,7 @@ async def test_watchman_multi_scope_translation_deduplicates_across_subscription
         services.provider.disconnect()
 
 
+@pytest.mark.requires_native_watchman
 @pytest.mark.asyncio
 async def test_watchman_multi_scope_translation_routes_colliding_subscription_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1296,6 +1305,53 @@ async def test_watchman_multi_scope_translation_routes_colliding_subscription_na
         services.provider.disconnect()
 
 
+@pytest.mark.asyncio
+async def test_watchman_unexpected_file_type_warning_includes_entry_context(
+    tmp_path: Path,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+
+    try:
+        adapter = await _start_isolated_watchman_translation(service, watch_dir)
+        scope = WatchmanSubscriptionScope(
+            requested_path=watch_dir.resolve(),
+            watch_root=watch_dir.resolve(),
+            relative_root=None,
+            scope_kind="primary",
+        )
+
+        adapter._translate_subscription_pdu(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:6",
+                "files": [
+                    {
+                        "name": "src/socket.sock",
+                        "exists": True,
+                        "new": False,
+                        "type": "?",
+                    }
+                ],
+            },
+            scope,
+        )
+
+        stats = await _wait_for_pipeline_count(
+            service, "translation_error_count", 1
+        )
+        warning = stats["last_warning"] or ""
+        assert "Skipping unexpected Watchman file type '?'" in warning
+        assert "name='src/socket.sock'" in warning
+        assert "exists=True" in warning
+        assert "new=False" in warning
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.requires_native_watchman
 @pytest.mark.asyncio
 async def test_watchman_translation_errors_increment_pipeline_counter(
     tmp_path: Path,
@@ -1625,7 +1681,7 @@ async def test_watchman_junction_scope_translation_preserves_logical_path(
         monkeypatch.setattr(realtime_service_module.Path, "resolve", fake_resolve)
         adapter = await _start_isolated_watchman_translation(service, target_dir)
         adapter._scope_path_filters[str(logical_junction)] = (
-            realtime_service_module.RealtimePathFilter(
+            RealtimePathFilter(
                 config=service.config,
                 root_path=logical_junction,
             )
@@ -1706,7 +1762,7 @@ async def test_watchman_junction_scope_filter_uses_logical_scope_root(
         monkeypatch.setattr(realtime_service_module.Path, "resolve", fake_resolve)
         adapter = await _start_isolated_watchman_translation(service, target_dir)
         adapter._scope_path_filters[str(logical_junction)] = (
-            realtime_service_module.RealtimePathFilter(
+            RealtimePathFilter(
                 config=service.config,
                 root_path=logical_junction,
             )

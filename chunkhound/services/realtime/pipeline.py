@@ -2,24 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import gc
-import threading
+import random
 import time
 from collections.abc import Awaitable
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
-from watchdog.observers import Observer
-from watchdog.observers.api import BaseObserver
 
 from chunkhound.core.utils.path_utils import normalize_realtime_path
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.providers.database.duckdb_provider import DuckDBTransactionConflictError
-from chunkhound.services.realtime_path_filter import RealtimePathFilter
-from chunkhound.utils.windows_constants import IS_WINDOWS
+from chunkhound.providers.database.serial_executor import (
+    DatabaseCompactionInProgressError,
+)
 
 from .events import RealtimeMutation, SimpleEventHandler, normalize_file_path
+
 
 class RealtimePipelineMixin:
     def _emit_status_update(self) -> None:
@@ -325,14 +325,14 @@ class RealtimePipelineMixin:
             await asyncio.sleep(delay_seconds)
             if not self._owns_pending_mutation(mutation):
                 self._debug(
-                    "dropped superseded delete retry "
-                    f"path={mutation.path} source_generation="
-                    f"{mutation.source_generation}"
+                    "dropped superseded realtime retry "
+                    f"operation={mutation.operation} path={mutation.path} "
+                    f"source_generation={mutation.source_generation}"
                 )
                 return
-            if self._delete_mutation_is_stale(mutation):
+            if mutation.operation == "delete" and self._delete_mutation_is_stale(mutation):
                 self._debug(
-                    "dropped stale delete retry "
+                    "dropped stale realtime delete retry "
                     f"path={mutation.path} source_generation="
                     f"{mutation.source_generation}"
                 )
@@ -346,7 +346,121 @@ class RealtimePipelineMixin:
         except Exception:
             self._release_pending_mutation(mutation)
             raise
-    def _schedule_delete_retry(self, mutation: RealtimeMutation) -> bool:
+
+    def _schedule_compaction_retry(self, mutation: RealtimeMutation) -> bool:
+        """Retry realtime work later when compaction temporarily owns the DB."""
+        if mutation.retry_count >= self._MAX_RETRY_BUDGET:
+            return False
+
+        retry_mutation = self._build_mutation(
+            mutation.operation,
+            mutation.path,
+            retry_count=mutation.retry_count + 1,
+            source_generation=mutation.source_generation,
+            first_queued_at=mutation.first_queued_at,
+        )
+        if not self._register_pending_mutation(retry_mutation):
+            return True
+
+        base = self._RETRY_BASE_DELAY_SECONDS * (
+            2**mutation.retry_count
+        )
+        delay_seconds = base * random.uniform(0.75, 1.25)
+        self._start_transient_task(
+            self._retry_mutation_after_delay(retry_mutation, delay_seconds)
+        )
+        self._debug(
+            "scheduled compaction-busy retry "
+            f"operation={retry_mutation.operation} path={retry_mutation.path} "
+            f"attempt={retry_mutation.retry_count} after {delay_seconds:.2f}s"
+        )
+        self._emit_status_update()
+        return True
+
+    def _handle_compaction_busy(
+        self, mutation: RealtimeMutation, op_desc: str
+    ) -> bool:
+        """Handle DatabaseCompactionInProgressError for a single mutation.
+
+        Returns True if a retry was scheduled (caller should return/continue).
+        Returns False if the retry budget is exhausted — error is recorded,
+        caller should handle the failure path.
+        """
+        if self._schedule_compaction_retry(mutation):
+            log_if_not_mcp(
+                "info",
+                f"Retrying realtime {op_desc} for {mutation.path} "
+                f"after database compaction "
+                f"(attempt {mutation.retry_count + 1}/"
+                f"{self._MAX_RETRY_BUDGET})",
+            )
+            self._debug(
+                f"retrying {op_desc} after database compaction "
+                f"path={mutation.path} attempt={mutation.retry_count + 1}"
+            )
+            return True
+        error = DatabaseCompactionInProgressError(
+            "Database compaction in progress — retry budget exhausted"
+        )
+        log_if_not_mcp(
+            "error", f"Error during {op_desc} for {mutation.path}: {error}"
+        )
+        self.failed_files.add(str(mutation.path))
+        self._record_processing_error()
+        self._set_error(f"Error during {op_desc} for {mutation.path}: {error}")
+        return False
+
+    def _handle_compaction_busy_batch(
+        self,
+        mutations: list[RealtimeMutation],
+        op_desc: str,
+    ) -> tuple[list[RealtimeMutation], list[RealtimeMutation]]:
+        """Handle DatabaseCompactionInProgressError for a batch of mutations.
+
+        Returns (surviving, exhausted) — surviving mutations have retries
+        scheduled, exhausted mutations have errors recorded.
+        """
+        surviving: list[RealtimeMutation] = []
+        exhausted: list[RealtimeMutation] = []
+
+        for mutation in mutations:
+            if self._schedule_compaction_retry(mutation):
+                surviving.append(mutation)
+            else:
+                exhausted.append(mutation)
+
+        if surviving:
+            log_if_not_mcp(
+                "info",
+                f"Retrying realtime {op_desc} for "
+                f"{len(surviving)} files after database compaction",
+            )
+            self._debug(
+                f"retrying {op_desc} after database compaction "
+                f"count={len(surviving)}"
+            )
+
+        if exhausted:
+            error = DatabaseCompactionInProgressError(
+                "Database compaction in progress — retry budget exhausted"
+            )
+            paths = ", ".join(str(m.path) for m in exhausted[:3])
+            log_if_not_mcp(
+                "error", f"Error during {op_desc} for {paths}: {error}"
+            )
+            for mutation in exhausted:
+                self.failed_files.add(str(mutation.path))
+            self._record_processing_error()
+            self._set_error(f"Error during {op_desc} for {paths}: {error}")
+
+        return surviving, exhausted
+
+    def _schedule_delete_retry(
+        self,
+        mutation: RealtimeMutation,
+        *,
+        delay_seconds: float | None = None,
+    ) -> bool:
         if self._delete_mutation_is_stale(mutation):
             self._debug(
                 "skipped stale delete retry scheduling "
@@ -354,7 +468,7 @@ class RealtimePipelineMixin:
             )
             return True
 
-        if mutation.retry_count >= self._DELETE_CONFLICT_MAX_RETRIES:
+        if mutation.retry_count >= self._MAX_RETRY_BUDGET:
             return False
 
         retry_mutation = self._build_mutation(
@@ -367,9 +481,11 @@ class RealtimePipelineMixin:
         if not self._register_pending_mutation(retry_mutation):
             return True
 
-        delay_seconds = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
-            2**mutation.retry_count
-        )
+        if delay_seconds is None:
+            base = self._RETRY_BASE_DELAY_SECONDS * (
+                2**mutation.retry_count
+            )
+            delay_seconds = base * random.uniform(0.75, 1.25)
         self._start_transient_task(
             self._retry_mutation_after_delay(retry_mutation, delay_seconds)
         )
@@ -1127,7 +1243,7 @@ class RealtimePipelineMixin:
                     "Retrying realtime delete for "
                     f"{mutation.path} after transaction conflict "
                     f"(attempt {mutation.retry_count + 1}/"
-                    f"{self._DELETE_CONFLICT_MAX_RETRIES})"
+                    f"{self._MAX_RETRY_BUDGET})"
                 )
                 self._debug(
                     "retrying delete after transaction conflict "
@@ -1139,6 +1255,9 @@ class RealtimePipelineMixin:
             self.failed_files.add(str(mutation.path))
             self._record_processing_error()
             self._set_error(f"Error removing file {mutation.path}: {error}")
+        except DatabaseCompactionInProgressError:
+            if self._handle_compaction_busy(mutation, "delete"):
+                return
         except Exception as error:
             logger.error(f"Error removing file {mutation.path}: {error}")
             self.failed_files.add(str(mutation.path))
@@ -1196,6 +1315,15 @@ class RealtimePipelineMixin:
             surviving_mutations: list[RealtimeMutation] = []
             exhausted_mutations: list[RealtimeMutation] = []
 
+            # Compute a single shared delay so all retry mutations arrive at the
+            # queue together and can be re-collected into a single batch.
+            # All mutations share the same retry_count — they were collected together.
+            batch_retry_count = executable_mutations[0].retry_count
+            batch_base = self._RETRY_BASE_DELAY_SECONDS * (
+                2**batch_retry_count
+            )
+            batch_delay_seconds = batch_base * random.uniform(0.75, 1.25)
+
             for mutation in executable_mutations:
                 if self._delete_mutation_is_stale(mutation):
                     self._debug(
@@ -1207,7 +1335,9 @@ class RealtimePipelineMixin:
                     finished_mutation_ids.add(mutation.mutation_id)
                     continue
 
-                if self._schedule_delete_retry(mutation):
+                if self._schedule_delete_retry(
+                    mutation, delay_seconds=batch_delay_seconds
+                ):
                     surviving_mutations.append(mutation)
                     continue
 
@@ -1232,6 +1362,8 @@ class RealtimePipelineMixin:
                     self.failed_files.add(str(mutation.path))
                 self._record_processing_error()
                 self._set_error(f"Error removing files {exhausted_paths}: {error}")
+        except DatabaseCompactionInProgressError:
+            self._handle_compaction_busy_batch(executable_mutations, "delete batch")
         except Exception as error:
             logger.error(f"Error removing files {sample_paths}: {error}")
             for mutation in executable_mutations:
@@ -1254,6 +1386,9 @@ class RealtimePipelineMixin:
                 source_generation=mutation.source_generation,
             )
             completed = True
+        except DatabaseCompactionInProgressError:
+            if self._handle_compaction_busy(mutation, "deleted-directory cleanup"):
+                return
         except Exception as error:
             logger.error(
                 f"Error cleaning up deleted directory {mutation.path}: {error}"
@@ -1296,6 +1431,7 @@ class RealtimePipelineMixin:
         """Main processing loop - simple and robust."""
         logger.debug("Starting processing loop")
         buffered_mutation: tuple[RealtimeMutation, bool] | None = None
+        mutation: RealtimeMutation | None = None
 
         while True:
             try:
@@ -1323,6 +1459,13 @@ class RealtimePipelineMixin:
                         indexing_coordinator = self.services.indexing_coordinator
                         await indexing_coordinator.generate_missing_embeddings()
                         completed = True
+                    except DatabaseCompactionInProgressError:
+                        # Delegate to the shared compaction-busy handler:
+                        # schedules retry with backoff, or records permanent
+                        # error (including failed_files) when budget exhausted.
+                        # The finally block handles _record_processing_finished.
+                        if self._handle_compaction_busy(mutation, "embed"):
+                            continue
                     except Exception as error:
                         logger.warning(
                             "Embedding generation failed in realtime "
@@ -1444,11 +1587,39 @@ class RealtimePipelineMixin:
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
                 raise
+            except DatabaseCompactionInProgressError:
+                if mutation is not None and self._schedule_compaction_retry(mutation):
+                    log_if_not_mcp(
+                        "info",
+                        "Retrying realtime "
+                        f"{self._status_operation(mutation.operation)} for "
+                        f"{mutation.path} after database compaction "
+                        f"(attempt {mutation.retry_count + 1}/"
+                        f"{self._MAX_RETRY_BUDGET})",
+                    )
+                    self._debug(
+                        "retrying mutation after database compaction "
+                        f"operation={mutation.operation} path={mutation.path} "
+                        f"attempt={mutation.retry_count + 1}"
+                    )
+                    continue
+                mutation_path = (
+                    mutation.path if mutation is not None else Path("<unknown>")
+                )
+                error = DatabaseCompactionInProgressError(
+                    "Database compaction in progress — retry budget exhausted"
+                )
+                log_if_not_mcp("error", f"Error processing {mutation_path}: {error}")
+                self._record_processing_error()
+                self._set_error(f"Error processing {mutation_path}: {error}")
+                async with self._file_condition:
+                    self.failed_files.add(normalize_file_path(mutation_path))
+                    self._file_condition.notify_all()
             except Exception as error:
                 mutation_path = (
-                    mutation.path if "mutation" in locals() else Path("<unknown>")
+                    mutation.path if mutation is not None else Path("<unknown>")
                 )
-                logger.error(f"Error processing {mutation_path}: {error}")
+                log_if_not_mcp("error", f"Error processing {mutation_path}: {error}")
                 # Track failed files for debugging and monitoring
                 self._record_processing_error()
                 self._set_error(f"Error processing {mutation_path}: {error}")
