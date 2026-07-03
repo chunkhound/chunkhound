@@ -45,6 +45,13 @@ class TestEstimateTokens:
         result = estimate_tokens("hello world", provider="azure_openai")
         assert result > 0
 
+    def test_special_token_literal_does_not_raise(self):
+        """A tiktoken special-token literal must be counted, not crash. #315."""
+        result = estimate_tokens(
+            "def f():  # <|endoftext|>\n    return 1", provider="azure_openai"
+        )
+        assert result > 0
+
     def test_empty_string_returns_zero(self):
         """Empty input short-circuits to 0, bypassing tiktoken entirely."""
         assert (
@@ -74,7 +81,7 @@ class TestEstimateTokensChunking:
 class _FakeEnc:
     """Fake tiktoken encoding — `// 2` distinguishes it from the `// 3` heuristic."""
 
-    def encode(self, text):
+    def encode(self, text, disallowed_special=()):
         return [0] * (len(text) // 2)
 
 

@@ -70,9 +70,11 @@ from chunkhound.parsers.mappings import (
     MakefileMapping,
     MarkdownMapping,
     MatlabMapping,
+    MetalMapping,
     ObjCMapping,
     PDFMapping,
     PHPMapping,
+    PowerShellMapping,
     PythonMapping,
     RustMapping,
     ScssMapping,
@@ -98,6 +100,7 @@ _swift_lang = _get_lang("swift")
 _yaml_lang = _get_lang("yaml")
 _hcl_lang = _get_lang("hcl")
 _dart_lang = _get_lang("dart")
+_powershell_lang = _get_lang("powershell")
 
 
 class _LanguagePackWrapper:
@@ -116,6 +119,7 @@ ts_swift = _LanguagePackWrapper(_swift_lang)
 ts_yaml = _LanguagePackWrapper(_yaml_lang)
 ts_hcl = _LanguagePackWrapper(_hcl_lang)
 ts_dart = _LanguagePackWrapper(_dart_lang)
+ts_powershell = _LanguagePackWrapper(_powershell_lang)
 
 _scss_lang = _get_lang("scss")
 ts_scss: _LanguagePackWrapper | None = (
@@ -210,6 +214,10 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.JAVA: LanguageConfig(ts_java, JavaMapping, True, "java"),
     Language.C: LanguageConfig(ts_c, CMapping, True, "c"),
     Language.CPP: LanguageConfig(ts_cpp, CppMapping, True, "cpp"),
+    # MSL is C++14 — reuse the cpp grammar object, but tag the language "metal"
+    # so identity stays METAL end-to-end (detection → ParseResult → Chunk).
+    # The grammar comes from the ts_cpp module, not this string (cf. JSX→tsx).
+    Language.METAL: LanguageConfig(ts_cpp, MetalMapping, True, "metal"),
     Language.CSHARP: LanguageConfig(
         ts_csharp, CSharpMapping, True, "csharp", pip_package="tree-sitter-c-sharp"
     ),
@@ -238,6 +246,9 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.OBJC: LanguageConfig(ts_objc, ObjCMapping, True, "objc"),
     Language.SQL: LanguageConfig(ts_sql, SqlMapping, True, "sql"),
     Language.SWIFT: LanguageConfig(ts_swift, SwiftMapping, True, "swift"),
+    Language.POWERSHELL: LanguageConfig(
+        ts_powershell, PowerShellMapping, True, "powershell"
+    ),
     # Languages that use TypeScript parser
     Language.VUE: LanguageConfig(
         ts_typescript, VueMapping, True, "vue"
@@ -311,6 +322,7 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".hxx": Language.CPP,
     ".hh": Language.CPP,
     ".h++": Language.CPP,
+    ".metal": Language.METAL,
     # C#
     ".cs": Language.CSHARP,
     ".csx": Language.CSHARP,
@@ -347,6 +359,9 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".swift": Language.SWIFT,
     ".swiftinterface": Language.SWIFT,
     ".lua": Language.LUA,
+    # PowerShell
+    ".ps1": Language.POWERSHELL,
+    ".psm1": Language.POWERSHELL,
     ".vue": Language.VUE,
     ".svelte": Language.SVELTE,
     # Config & Data

@@ -6,6 +6,9 @@ from loguru import logger
 
 from chunkhound.core.models import File
 from chunkhound.core.types.common import Language
+from chunkhound.providers.database.duckdb.schema_constants import (
+    fallback_embedding_tables,
+)
 
 if TYPE_CHECKING:
     from chunkhound.providers.database.duckdb.connection_manager import (
@@ -283,16 +286,12 @@ class DuckDBFileRepository:
 
             # Delete in correct order due to foreign key constraints
             # 1. Delete embeddings first
-            # Delete from all embedding tables
             if self._provider:
                 embedding_tables = self._provider._get_all_embedding_tables()
             else:
-                # Fallback for tests
-                tables = self.connection_manager.connection.execute("""
-                    SELECT table_name FROM information_schema.tables
-                    WHERE table_name LIKE 'embeddings_%'
-                """).fetchall()
-                embedding_tables = [table[0] for table in tables]
+                embedding_tables = fallback_embedding_tables(
+                    self.connection_manager.connection
+                )
 
             for table_name in embedding_tables:
                 self.connection_manager.connection.execute(
@@ -356,12 +355,9 @@ class DuckDBFileRepository:
             if self._provider:
                 embedding_tables = self._provider._get_all_embedding_tables()
             else:
-                # Fallback for tests
-                tables = self.connection_manager.connection.execute("""
-                    SELECT table_name FROM information_schema.tables
-                    WHERE table_name LIKE 'embeddings_%'
-                """).fetchall()
-                embedding_tables = [table[0] for table in tables]
+                embedding_tables = fallback_embedding_tables(
+                    self.connection_manager.connection
+                )
 
             for table_name in embedding_tables:
                 count = self.connection_manager.connection.execute(
@@ -392,9 +388,4 @@ class DuckDBFileRepository:
             return {}
 
     def _maybe_checkpoint(self, force: bool = False) -> None:
-        """Perform checkpoint if needed - delegate to provider."""
-        if self._provider:
-            self._provider._maybe_checkpoint(force)
-        else:
-            # Fallback for tests - no checkpoint needed
-            pass
+        """No-op: DuckDB native auto-checkpoint replaces manual tracking."""

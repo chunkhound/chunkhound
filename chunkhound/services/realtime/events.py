@@ -4,11 +4,10 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
-from watchdog.events import FileSystemEventHandler
 
 from chunkhound.core.config.config import Config
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
@@ -115,8 +114,11 @@ class HotPathPressure:
     last_observed_monotonic: float = 0.0
 
 
-class SimpleEventHandler(FileSystemEventHandler):
-    """Simple sync event handler - no async complexity."""
+class SimpleEventHandler:
+    """Watchdog-compatible event handler without import-time watchdog coupling."""
+
+    def dispatch(self, event: Any) -> None:
+        self.on_any_event(event)
 
     def __init__(
         self,

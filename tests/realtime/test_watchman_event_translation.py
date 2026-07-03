@@ -7,10 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-import chunkhound.services.realtime_indexing_service as realtime_service_module
+import chunkhound.services.realtime.service as realtime_service_module
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.adapters import WatchmanRealtimeAdapter
+from chunkhound.services.realtime.service import RealtimeIndexingService
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.watchman import WatchmanScopePlan, WatchmanSubscriptionScope
 from tests.helpers.watchman_realtime import (
     build_watchman_service as _build_watchman_service,
@@ -304,7 +306,7 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
         TrackingSession,
     )
 
-    adapter = realtime_service_module.WatchmanRealtimeAdapter(service)
+    adapter = WatchmanRealtimeAdapter(service)
     adapter._sidecar = FakeSidecar()
     loop = asyncio.get_running_loop()
     started_at = loop.time()
@@ -888,7 +890,7 @@ async def test_watchman_mount_aware_startup_uses_fallback_planning(
         TrackingSession,
     )
 
-    adapter = realtime_service_module.WatchmanRealtimeAdapter(service)
+    adapter = WatchmanRealtimeAdapter(service)
     adapter._sidecar = FakeSidecar()
     try:
         await adapter.start(target_dir, asyncio.get_running_loop())
@@ -1679,7 +1681,7 @@ async def test_watchman_junction_scope_translation_preserves_logical_path(
         monkeypatch.setattr(realtime_service_module.Path, "resolve", fake_resolve)
         adapter = await _start_isolated_watchman_translation(service, target_dir)
         adapter._scope_path_filters[str(logical_junction)] = (
-            realtime_service_module.RealtimePathFilter(
+            RealtimePathFilter(
                 config=service.config,
                 root_path=logical_junction,
             )
@@ -1760,7 +1762,7 @@ async def test_watchman_junction_scope_filter_uses_logical_scope_root(
         monkeypatch.setattr(realtime_service_module.Path, "resolve", fake_resolve)
         adapter = await _start_isolated_watchman_translation(service, target_dir)
         adapter._scope_path_filters[str(logical_junction)] = (
-            realtime_service_module.RealtimePathFilter(
+            RealtimePathFilter(
                 config=service.config,
                 root_path=logical_junction,
             )

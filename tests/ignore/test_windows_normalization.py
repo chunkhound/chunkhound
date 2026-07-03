@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.services.realtime_indexing_service import normalize_file_path
+from chunkhound.services.realtime.events import normalize_file_path
 
 
 IS_WINDOWS = os.name == "nt"

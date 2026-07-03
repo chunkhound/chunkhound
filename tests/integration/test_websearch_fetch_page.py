@@ -95,7 +95,11 @@ async def chrome_browser() -> AsyncIterator[zd.Browser]:
 
     browser = await zd.start(
         headless=True,
-        browser_args=["--headless=new"],
+        browser_args=[
+            "--headless=new",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+        ],
         browser_executable_path=chrome_path,
     )
     try:
