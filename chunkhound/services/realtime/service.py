@@ -16,19 +16,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from loguru import logger
-from watchdog.observers.api import BaseObserver
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
-from chunkhound.services.realtime_path_filter import (
-    RealtimePathFilter,
-    RealtimePathFilterSettings,
-)
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
     WatchmanCliSession,
     WatchmanScopePlan,
-    WatchmanSubscriptionScope,
     build_watchman_scope_plan,
     build_watchman_subscription_name_for_scope,
     build_watchman_subscription_names_for_scope_plan,
@@ -36,22 +30,17 @@ from chunkhound.watchman import (
     discover_nested_windows_junction_scopes,
 )
 
-from .adapters import (
-    PollingRealtimeAdapter,
-    WatchdogRealtimeAdapter,
-    WatchmanRealtimeAdapter,
-    _default_watchman_health_snapshot,
-)
+from .adapters import _default_watchman_health_snapshot
 from .context import RealtimeServiceContext
 from .events import (
     HotPathPressure,
-    QueueResultCallback,
     RealtimeMutation,
     SimpleEventHandler,
     normalize_file_path,
 )
 from .pipeline import RealtimePipelineMixin
 from .startup import (
+    RealtimeObserver,
     RealtimeStartupMixin,
     RealtimeStartupStatusTracker,
     default_realtime_backend_for_current_install,
@@ -97,8 +86,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     _WATCHDOG_SETUP_TIMEOUT_SECONDS = 5.0
     _MONITORING_READY_TIMEOUT_SECONDS = 10.0
     _POLLING_STARTUP_SETTLE_SECONDS = 0.5
-    _DELETE_CONFLICT_MAX_RETRIES = 5
-    _DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS = 0.1
+    # Retry budget shared by delete-conflict and compaction-busy retries.
+    _MAX_RETRY_BUDGET = 5
+    _RETRY_BASE_DELAY_SECONDS = 0.1
     _DELETE_BATCH_SIZE = 64
     _MUTATION_PRIORITIES = {
         "delete": 0,
@@ -138,41 +128,13 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._effective_backend = "uninitialized"
         self._realtime_context = RealtimeServiceContext(
             self,
-            sidecar_factory=lambda target_dir, debug_sink: PrivateWatchmanSidecar(
-                target_dir,
-                debug_sink=debug_sink,
-            ),
-            session_factory=lambda metadata,
-            sidecar,
-            overflow_handler: WatchmanCliSession(
-                binary_path=Path(metadata.binary_path),
-                socket_path=sidecar.paths.listener_path,
-                statefile_path=sidecar.paths.statefile_path,
-                logfile_path=sidecar.paths.logfile_path,
-                pidfile_path=sidecar.paths.pidfile_path,
-                project_root=sidecar.paths.project_root,
-                debug_sink=self._debug,
-                subscription_overflow_handler=overflow_handler,
-            ),
-            nested_mount_discoverer=lambda watch_path: discover_nested_linux_mount_roots(
-                watch_path
-            ),
-            junction_scope_discoverer=lambda watch_path: discover_nested_windows_junction_scopes(
-                watch_path
-            ),
-            scope_plan_builder=lambda watch_path,
-            watch_project_response,
-            **kwargs: build_watchman_scope_plan(
-                watch_path,
-                watch_project_response,
-                **kwargs,
-            ),
-            subscription_name_builder=lambda **kwargs: build_watchman_subscription_name_for_scope(
-                **kwargs
-            ),
-            subscription_names_builder=lambda **kwargs: build_watchman_subscription_names_for_scope_plan(
-                **kwargs
-            ),
+            sidecar_factory=self._create_watchman_sidecar,
+            session_factory=self._create_watchman_session,
+            nested_mount_discoverer=self._discover_nested_linux_mount_roots,
+            junction_scope_discoverer=self._discover_nested_windows_junction_scopes,
+            scope_plan_builder=self._build_watchman_scope_plan,
+            subscription_name_builder=self._build_watchman_subscription_name,
+            subscription_names_builder=self._build_watchman_subscription_names,
         )
         self._monitor_adapter: RealtimeMonitorAdapter | None = None
         self.watchman_scope_plan: WatchmanScopePlan | None = None
@@ -237,7 +199,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._reserved_follow_up_change_generations: dict[str, int] = {}
         self.scan_iterator: Iterator | None = None
         self.scan_complete = False
-        self.observer: BaseObserver | None = None
+        self.observer: RealtimeObserver | None = None
         self.event_handler: SimpleEventHandler | None = None
         self.watch_path: Path | None = None
         self.process_task: asyncio.Task | None = None
@@ -245,7 +207,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._polling_task: asyncio.Task | None = None
         self._watchdog_setup_task: asyncio.Task | None = None
         self._watchdog_bootstrap_future: (
-            asyncio.Future[tuple[BaseObserver, SimpleEventHandler] | None] | None
+            asyncio.Future[tuple[RealtimeObserver, SimpleEventHandler] | None] | None
         ) = None
         self._watchdog_bootstrap_abort = threading.Event()
         self._resync_dispatch_task: asyncio.Task | None = None
@@ -275,6 +237,63 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._indexed_files: set[str] = set()
         self._removed_files: set[str] = set()
         self._stopping = False
+
+    def _create_watchman_sidecar(
+        self,
+        target_dir: Path,
+        debug_sink: Callable[[str], None] | None,
+    ) -> PrivateWatchmanSidecar:
+        return PrivateWatchmanSidecar(target_dir, debug_sink=debug_sink)
+
+    def _create_watchman_session(
+        self,
+        metadata: Any,
+        sidecar: Any,
+        overflow_handler: Callable[[dict[str, object], int, int], None] | None,
+    ) -> WatchmanCliSession:
+        return WatchmanCliSession(
+            binary_path=Path(metadata.binary_path),
+            socket_path=sidecar.paths.listener_path,
+            statefile_path=sidecar.paths.statefile_path,
+            logfile_path=sidecar.paths.logfile_path,
+            pidfile_path=sidecar.paths.pidfile_path,
+            project_root=sidecar.paths.project_root,
+            debug_sink=self._debug,
+            subscription_overflow_handler=overflow_handler,
+        )
+
+    @staticmethod
+    def _discover_nested_linux_mount_roots(watch_path: Path) -> tuple[Path, ...]:
+        return discover_nested_linux_mount_roots(watch_path)
+
+    @staticmethod
+    def _discover_nested_windows_junction_scopes(watch_path: Path) -> Any:
+        return discover_nested_windows_junction_scopes(watch_path)
+
+    @staticmethod
+    def _build_watchman_scope_plan(
+        watch_path: Path,
+        watch_project_response: dict[str, object],
+        **kwargs: Any,
+    ) -> WatchmanScopePlan:
+        return build_watchman_scope_plan(
+            watch_path,
+            watch_project_response,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _build_watchman_subscription_name(**kwargs: Any) -> str:
+        return build_watchman_subscription_name_for_scope(**kwargs)
+
+    @staticmethod
+    def _build_watchman_subscription_names(**kwargs: Any) -> tuple[str, ...]:
+        return build_watchman_subscription_names_for_scope_plan(**kwargs)
+
+    def _default_realtime_backend_for_current_install(self) -> str:
+        # Keep backend resolution patched through the legacy compatibility
+        # module path, which is still what many tests and callers target.
+        return default_realtime_backend_for_current_install()
 
     @staticmethod
     def _utc_now() -> str:

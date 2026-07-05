@@ -34,9 +34,14 @@ from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as EmbeddingProviderProtocol,
 )
 from chunkhound.llm_manager import LLMManager
+from chunkhound.mcp_server.tools import tool_requires_db
+from chunkhound.providers.database.serial_executor import (
+    DatabaseCompactionInProgressError,
+)
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime import RealtimeStartupStatusTracker
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.service import RealtimeIndexingService
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
 )
@@ -1177,19 +1182,17 @@ class MCPServerBase(ABC):
             finally:
                 self._initialized = False
 
-    async def ensure_services(self) -> DatabaseServices:
-        """Ensure services are initialized and return them.
+    async def ensure_tool_services(self, tool_name: str) -> DatabaseServices:
+        """Return services for one tool without conflating daemon and DB lifecycles.
 
-        Returns:
-            DatabaseServices instance
-
-        Raises:
-            RuntimeError: If services are not initialized
+        Non-DB tools must not trigger provider reconnect/open work. The daemon
+        can serve multiple MCP clients while one authoritative provider instance
+        owns the database lifecycle.
         """
         if not self.services:
             raise RuntimeError("Services not initialized. Call initialize() first.")
-
-        await self._connect_provider()
+        if tool_requires_db(tool_name):
+            await self._connect_provider()
         return self.services
 
     async def _connect_provider(self) -> None:
@@ -1197,13 +1200,33 @@ class MCPServerBase(ABC):
 
         Uses a lock to prevent concurrent connect() calls which would
         leak a DuckDB connection handle.
+
+        During DuckDB compaction the connection is temporarily closed
+        (is_connected \u2192 False).  Non-DB tools (daemon_status, websearch,
+        git history diff search) are handled by ensure_tool_services()
+        which skips reconnect for tools without *requires_db*.
+
+        For DB-backed tools the compaction guard in the provider raises
+        DatabaseCompactionInProgressError, which we re-raise so the
+        calling MCP tool handler returns an explicit error instead of
+        silently returning empty results.  _compact_finalize() restores
+        the connection when compaction finishes.
         """
         if self.services.provider.is_connected:
             return
         async with self._connect_lock:
             if not self.services.provider.is_connected:
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self.services.provider.connect)
+                try:
+                    await loop.run_in_executor(None, self.services.provider.connect)
+                except DatabaseCompactionInProgressError:
+                    log_if_not_mcp(
+                        "info",
+                        "Database compaction in progress \u2014 DB-backed MCP tools will be "
+                        "unavailable until compaction finishes. "
+                        "Non-DB tools (daemon_status, websearch) are unaffected.",
+                    )
+                    raise
 
     def ensure_embedding_manager(self) -> EmbeddingManager:
         """Ensure embedding manager is available and has providers.

@@ -38,6 +38,17 @@ def add_quickresearch_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Optional path filter (e.g., 'src/', 'tests/')",
     )
 
+    # Parent hands down its PID so the orphan watchdog compares against an
+    # authoritative reference instead of a post-fork getppid() snapshot (which
+    # would already be the reparent PID if the parent died during interpreter
+    # startup, and would misidentify a Docker-entrypoint parent as PID 1).
+    p.add_argument(
+        "--parent-pid",
+        type=int,
+        required=True,
+        help=argparse.SUPPRESS,
+    )
+
     add_common_arguments(p)
     add_config_arguments(p, ["embedding", "llm", "research"])
 
