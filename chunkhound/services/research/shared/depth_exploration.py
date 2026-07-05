@@ -551,29 +551,16 @@ Output JSON with queries array."""
             )
             return filtered
 
-        # Flatten queries and execute with bounded concurrency to avoid
-        # thundering-herd on the reranker when all 10 tasks fire simultaneously.
-        tasks = []
+        # Run serially to isolate per-query timing.
+        query_results: list[list[dict]] = []
         for file_path, queries in exploration_queries.items():
             for query in queries:
-                tasks.append(execute_single_query(query, file_path))
-
-        sem = asyncio.Semaphore(3)
-
-        async def bounded(coro):
-            async with sem:
-                return await coro
-
-        results = await asyncio.gather(*[bounded(t) for t in tasks], return_exceptions=True)
-
-        # Process results
-        query_results: list[list[dict]] = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning(f"Exploration query execution failed: {result}")
-                query_results.append([])
-            elif isinstance(result, list):
-                query_results.append(result)
+                try:
+                    result = await execute_single_query(query, file_path)
+                    query_results.append(result)
+                except Exception as exc:
+                    logger.warning(f"Exploration query execution failed: {exc}")
+                    query_results.append([])
 
         return query_results
 

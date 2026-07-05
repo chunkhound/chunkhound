@@ -220,6 +220,7 @@ class UnifiedSearch:
             )
 
             page_size = self._config.initial_page_size if self._config else 30
+            t2 = perf_counter()
             semantic_results, _ = await search_service.search_semantic(
                 query=query,
                 page_size=page_size,
@@ -230,7 +231,10 @@ class UnifiedSearch:
                 time_limit=time_limit,
                 result_limit=result_limit,
             )
-            logger.debug(f"Semantic search returned {len(semantic_results)} chunks")
+            logger.warning(
+                f"Step 2 semantic: {perf_counter() - t2:.3f}s "
+                f"({len(semantic_results)} chunks)"
+            )
 
             # Emit search results event
             await emit_event(
@@ -250,7 +254,12 @@ class UnifiedSearch:
                 "extract_symbols", "Extracting symbols", node_id=node_id, depth=depth
             )
 
+            t3 = perf_counter()
             symbols = await self.extract_symbols_from_chunks(semantic_results)
+            logger.warning(
+                f"Step 3 extract_symbols: {perf_counter() - t3:.3f}s "
+                f"({len(symbols)} symbols)"
+            )
 
             if symbols:
                 # Step 4: Select top symbols (deterministic first-seen order from
@@ -258,11 +267,16 @@ class UnifiedSearch:
                 max_symbols = (
                     self._config.max_symbols if self._config else MAX_SYMBOLS_TO_SEARCH
                 )
+                t4 = perf_counter()
                 logger.debug(
                     f"Step 4: Selecting top {max_symbols} symbols from {len(symbols)} "
                     "extracted symbols"
                 )
                 top_symbols = symbols[:max_symbols]
+                logger.warning(
+                    f"Step 4 select_top: {perf_counter() - t4:.3f}s "
+                    f"({len(top_symbols)} symbols)"
+                )
 
                 # Emit symbol extraction results
                 await emit_event(
@@ -275,7 +289,10 @@ class UnifiedSearch:
                 )
 
                 if top_symbols:
-                    # Step 5: Regex search for top symbols
+                    # Step 5: Regex search for top symbols.
+                    # Per-symbol pagination collects candidates without scoring;
+                    # a single bulk cosine call scores all collected chunks after
+                    # pagination completes (one call per symbol, not per page).
                     # Compute dynamic target using config values with fallback
                     regex_min = (
                         self._config.regex_min_results
@@ -312,12 +329,17 @@ class UnifiedSearch:
                         if chunk_id:
                             semantic_chunk_ids.add(chunk_id)
 
+                    t5 = perf_counter()
                     regex_results = await self.search_by_symbols(
                         top_symbols,
                         target_per_symbol=target_per_symbol,
                         path_filter=path_filter,
                         exclude_ids=semantic_chunk_ids,
                         query=query,
+                    )
+                    logger.warning(
+                        f"Step 5 regex: {perf_counter() - t5:.3f}s "
+                        f"({len(regex_results)} chunks)"
                     )
 
                     # Emit regex search results
@@ -348,8 +370,12 @@ class UnifiedSearch:
             if chunk_id and chunk_id not in unified_map:
                 unified_map[chunk_id] = chunk
 
+        t6 = perf_counter()
         combined_pool = list(unified_map.values())
-        logger.debug(f"Unified to {len(combined_pool)} unique chunks")
+        logger.warning(
+            f"Step 6 unify: {perf_counter() - t6:.3f}s "
+            f"({len(combined_pool)} chunks)"
+        )
 
         # Step 7: Score and rank the combined pool.
         #
@@ -360,7 +386,6 @@ class UnifiedSearch:
         # skip_rerank=False path: rerank the combined pool against the root query
         # using the configured reranking provider (existing behaviour).
         embedding_provider = self._embedding_manager.get_provider()
-        search_service = self._db_services.search_service
 
         if skip_rerank:
             # Regex chunks are scored at the service layer (search_regex_async with
@@ -566,19 +591,32 @@ class UnifiedSearch:
         search_service = self._db_services.search_service
         exclude_ids = exclude_ids or set()
 
+        # Embed the query once upfront so all per-page and per-symbol calls share
+        # the same vector instead of re-embedding on every search_regex_async call.
+        query_vec: list[float] | None = None
+        embedding_provider = None
+        if query:
+            try:
+                embedding_provider = self._embedding_manager.get_provider()
+                query_vec = (await embedding_provider.embed([query]))[0]
+            except Exception as e:
+                logger.warning(f"Failed to embed query for regex scoring: {e}")
+
         async def search_symbol(symbol: str) -> list[dict[str, Any]]:
             """Search for a single symbol asynchronously with pagination.
 
             Implements internal pagination loop to ensure we find target_per_symbol
             UNDISCOVERED chunks (chunks not in exclude_ids), as per spec lines 192-216.
+
+            Scoring strategy: paginate without cosine calls, then score all collected
+            chunks in one bulk call. This avoids N per-page `get_chunk_similarities`
+            round-trips for symbols with many regex matches.
             """
             try:
                 if not symbol.strip():
                     return []
                 pattern = self._build_symbol_regex(symbol)
 
-                # Internal pagination loop: keep fetching pages until we have enough
-                # undiscovered chunks.
                 results: list[dict[str, Any]] = []
                 offset = 0
                 # Use config value if available, fall back to 100 (spec default)
@@ -588,35 +626,72 @@ class UnifiedSearch:
                 # Track all seen chunk IDs (excluded + collected).
                 seen_chunk_ids = exclude_ids.copy()
                 # Safety limit to prevent infinite loops when exclusions are large
-                max_pages = 20
+                max_pages = 10
 
                 pages_fetched = 0
+                consecutive_dry_pages = 0
+                max_consecutive_dry = 3
                 while len(results) < target_per_symbol and pages_fetched < max_pages:
                     page, _ = await search_service.search_regex_async(
                         pattern=pattern,
                         page_size=scan_page_size,
                         offset=offset,
                         path_filter=path_filter,
-                        query=query,
                     )
                     if not page:
                         break  # No more results available from backend
 
-                    # Filter out excluded chunk IDs and collect undiscovered chunks
+                    new_in_page = 0
                     for chunk in page:
                         chunk_id = get_chunk_id(chunk)
                         if chunk_id and chunk_id not in seen_chunk_ids:
                             results.append(chunk)
                             seen_chunk_ids.add(chunk_id)
+                            new_in_page += 1
                             if len(results) >= target_per_symbol:
                                 break
+
+                    # Stop early if the symbol's matches are already covered
+                    if new_in_page == 0:
+                        consecutive_dry_pages += 1
+                        if consecutive_dry_pages >= max_consecutive_dry:
+                            logger.debug(
+                                f"Symbol '{symbol}': {consecutive_dry_pages} consecutive "
+                                f"dry pages, stopping early"
+                            )
+                            break
+                    else:
+                        consecutive_dry_pages = 0
 
                     offset += scan_page_size
                     pages_fetched += 1
 
+                # Score all collected chunks in one bulk call instead of per-page.
+                # This is the key optimization: N pages → 1 cosine round-trip.
+                if results and query_vec is not None and embedding_provider is not None:
+                    result_chunk_ids = [
+                        c["chunk_id"]
+                        for c in results
+                        if isinstance(c.get("chunk_id"), int)
+                    ]
+                    if result_chunk_ids:
+                        try:
+                            scores = await search_service.get_chunk_similarities_async(
+                                result_chunk_ids,
+                                query_vec,
+                                embedding_provider.name,
+                                embedding_provider.model,
+                            )
+                            for c in results:
+                                cid = c.get("chunk_id")
+                                if isinstance(cid, int):
+                                    c["similarity"] = scores.get(cid, 0.0)
+                        except Exception as e:
+                            logger.warning(f"Post-pagination cosine scoring failed: {e}")
+
                 logger.debug(
                     f"Found {len(results)} undiscovered chunks for symbol '{symbol}' "
-                    f"(target: {target_per_symbol})"
+                    f"(target: {target_per_symbol}, pages: {pages_fetched})"
                 )
                 return results
 
