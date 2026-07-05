@@ -392,16 +392,16 @@ class TestMergeCoverage:
     def test_keeps_coverage_chunk_if_higher_score(self, depth_service):
         """Should keep coverage chunk if it has higher score."""
         covered = [
-            {"chunk_id": "c1", "content": "code1", "rerank_score": 0.9},
+            {"chunk_id": "c1", "content": "code1", "similarity": 0.9},
         ]
         exploration = [
-            {"chunk_id": "c1", "content": "code1", "rerank_score": 0.5},
+            {"chunk_id": "c1", "content": "code1", "similarity": 0.5},
         ]
 
         merged = depth_service._merge_coverage(covered, exploration)
 
         assert len(merged) == 1
-        assert merged[0]["rerank_score"] == 0.9
+        assert merged[0]["similarity"] == 0.9
 
     def test_empty_exploration_returns_coverage(self, depth_service):
         """Should return coverage when exploration is empty."""
