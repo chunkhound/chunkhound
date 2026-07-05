@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from argparse import Namespace
+from pathlib import Path
 
 from loguru import logger
 
@@ -116,6 +117,7 @@ def _build_llm_manager_for_cleanup(
     *,
     llm_config: LLMConfig,
     formatter: RichOutputFormatter,
+    target_dir: Path | str | None = None,
 ) -> LLMManager | None:
     try:
         utility_config, synthesis_config = _build_cleanup_provider_configs(llm_config)
@@ -124,7 +126,7 @@ def _build_llm_manager_for_cleanup(
             llm_config=llm_config,
             synthesis_config=synthesis_config,
         )
-        return LLMManager(utility_config, synthesis_config)
+        return LLMManager(utility_config, synthesis_config, target_dir=target_dir)
     except Exception as exc:
         formatter.warning(f"Failed to configure LLM provider: {exc}")
         logger.exception("LLM configuration error")
@@ -139,7 +141,11 @@ def resolve_llm_manager(
     llm_config = _resolve_llm_config_for_cleanup(config=config, formatter=formatter)
     if llm_config is None:
         return None
-    return _build_llm_manager_for_cleanup(llm_config=llm_config, formatter=formatter)
+    return _build_llm_manager_for_cleanup(
+        llm_config=llm_config,
+        formatter=formatter,
+        target_dir=config.target_dir,
+    )
 
 
 def resolve_cleanup_config_and_llm_manager(

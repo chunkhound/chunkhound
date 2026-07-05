@@ -1148,4 +1148,3 @@ def test_llm_config_antigravity_providers():
     assert util_cli["model"] == "gemini-3.5-flash"
     assert synth_cli["provider"] == "antigravity-cli"
     assert synth_cli["model"] == "gemini-3.1-pro"
-

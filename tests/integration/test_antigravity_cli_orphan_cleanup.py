@@ -56,7 +56,7 @@ async def test_antigravity_orphan_child_terminated_after_cancellation(
             child = subprocess.Popen([
                 sys.executable,
                 "-c",
-                "import time; time.sleep(60)",
+                "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
             ])
             pid_file = "{child_pid_file.as_posix()}"
             with open(pid_file, "w", encoding="utf-8") as handle:

@@ -409,6 +409,7 @@ class MCPServerBase(ABC):
                         self.llm_manager = LLMManager(
                             utility_config,
                             synthesis_config,
+                            target_dir=self.config.target_dir,
                         )
                         self.debug_log(
                             f"LLM providers registered: {self.config.llm.provider} "

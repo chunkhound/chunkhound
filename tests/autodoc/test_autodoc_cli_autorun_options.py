@@ -20,7 +20,9 @@ def test_resolve_auto_map_options_defaults_noninteractive(
         audience="end-user",
     )
 
-    options = resolve_auto_map_options(args=args, output_dir=output_dir)
+    options = resolve_auto_map_options(
+        args=args, output_dir=output_dir, target_dir=tmp_path
+    )
 
     assert options.map_out_dir == output_dir.with_name(f"map_{output_dir.name}")
     assert options.comprehensiveness == "medium"
@@ -42,7 +44,9 @@ def test_resolve_auto_map_options_honors_explicit_args(
         audience="balanced",
     )
 
-    options = resolve_auto_map_options(args=args, output_dir=output_dir)
+    options = resolve_auto_map_options(
+        args=args, output_dir=output_dir, target_dir=tmp_path
+    )
 
     assert options.map_out_dir == (tmp_path / "maps").resolve()
     assert options.comprehensiveness == "high"

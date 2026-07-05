@@ -1,5 +1,7 @@
 import asyncio
+from typing import Any
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -50,14 +52,22 @@ class AntigravityCLIProvider(BaseCLIProvider):
 
         request_timeout = timeout if timeout is not None else self._timeout
 
-        import shutil
+        binary_path = shutil.which("agy")
+        if not binary_path:
+            binary_path = shutil.which("antigravity")
 
-        binary = "agy"
-        if not shutil.which("agy") and shutil.which("antigravity"):
-            binary = "antigravity"
+        if not binary_path:
+            # Raise the actionable guidance directly. BaseCLIProvider.complete()
+            # re-raises RuntimeError unchanged, so the user sees this message;
+            # the shutil.which lookup happens before the try block below, so the
+            # in-loop `except FileNotFoundError` handler cannot cover this case.
+            raise RuntimeError(
+                "Antigravity CLI binary ('agy' or 'antigravity') not found. "
+                "Ensure it is installed and configured in your system PATH."
+            )
 
         # Build CLI command
-        cmd = [binary, "--print", "--sandbox"]
+        cmd = [binary_path, "--print", "--sandbox"]
         if self._model:
             cmd.extend(["--model", self._model])
 
@@ -71,9 +81,6 @@ class AntigravityCLIProvider(BaseCLIProvider):
             "USER",
             "LOGNAME",
             "USERPROFILE",
-            "TMPDIR",
-            "TMP",
-            "TEMP",
             "TERM",
             "SHELL",
             "LANG",
@@ -91,10 +98,16 @@ class AntigravityCLIProvider(BaseCLIProvider):
         base_env = {k: v for k, v in os.environ.items() if k in safe_keys}
         env = get_utf8_env(base_env)
 
-        logger.debug(f"Executing CLI command: {' '.join(cmd)} in sandboxed mode")
-
         process = None
         captured_process_pid: int | None = None
+        temp_dir = tempfile.mkdtemp(prefix="chunkhound-antigravity-")
+
+        # Note: We intentionally preserve HOME, USERPROFILE, APPDATA, and LOCALAPPDATA
+        # rather than redirecting them to the temp directory. While this exposes user-level
+        # configuration to the CLI (a documented sandboxing tradeoff), it is strictly
+        # required for the CLI to locate its authentication credentials.
+
+        logger.debug(f"Executing CLI command: {' '.join(cmd)} in sandboxed mode")
         try:
             # Create subprocess with neutral CWD to prevent local config scans
             if sys.platform == "win32":
@@ -107,7 +120,7 @@ class AntigravityCLIProvider(BaseCLIProvider):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=env,
-                    cwd=tempfile.gettempdir(),
+                    cwd=temp_dir,
                     creationflags=create_new_process_group,
                 )
             else:
@@ -117,7 +130,7 @@ class AntigravityCLIProvider(BaseCLIProvider):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=env,
-                    cwd=tempfile.gettempdir(),
+                    cwd=temp_dir,
                     start_new_session=True,
                 )
 
@@ -161,33 +174,67 @@ class AntigravityCLIProvider(BaseCLIProvider):
                 raise RuntimeError(f"Antigravity CLI execution failed: {e}") from e
             raise
         finally:
-            if process and process.returncode is None:
-                await self._kill_process_tree(process, pgid=captured_process_pid)
+            if process:
+                await self._kill_process_tree(
+                    process, pgid=captured_process_pid, env=env
+                )
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     async def _kill_process_tree(
-        self, process: asyncio.subprocess.Process, *, pgid: int | None = None
+        self,
+        process: asyncio.subprocess.Process,
+        *,
+        pgid: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         """Terminate an antigravity subprocess and its descendants."""
-        if process.returncode is not None:
-            return
-
         if sys.platform == "win32":
             try:
-                await asyncio.to_thread(
+                taskkill_path = shutil.which("taskkill") or "taskkill"
+                res = await asyncio.to_thread(
                     subprocess.run,
-                    ["taskkill", "/T", "/PID", str(process.pid), "/F"],
+                    [taskkill_path, "/T", "/PID", str(process.pid), "/F"],
+                    capture_output=True,
                     check=False,
                     timeout=10,
+                    env=env,
                 )
-            except (FileNotFoundError, subprocess.SubprocessError, OSError):
-                logger.debug("Windows taskkill failed during Antigravity CLI cleanup")
+                if res.returncode != 0:
+                    logger.warning(
+                        "Windows taskkill exited with code "
+                        f"{res.returncode}: "
+                        f"{res.stderr.decode('utf-8', errors='ignore')}"
+                    )
+            except (FileNotFoundError, subprocess.SubprocessError, OSError) as e:
+                logger.debug(f"Windows taskkill failed during Antigravity CLI cleanup: {e}")
             try:
                 await asyncio.wait_for(process.wait(), timeout=5)
             except (asyncio.TimeoutError, ProcessLookupError):
-                pass
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    pass
             return
 
         process_group_id = pgid if pgid is not None else process.pid
+        if isinstance(process_group_id, (int, float)) and process_group_id <= 1:
+            logger.warning(
+                f"Invalid process group ID for termination: {process_group_id}. "
+                "Skipping group kill."
+            )
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            return
+
         try:
             os.killpg(process_group_id, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
@@ -198,16 +245,40 @@ class AntigravityCLIProvider(BaseCLIProvider):
         except (asyncio.TimeoutError, ProcessLookupError):
             pass
 
-        if process.returncode is None:
-            try:
-                os.killpg(process_group_id, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+        try:
+            os.killpg(process_group_id, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except (asyncio.TimeoutError, ProcessLookupError):
-                pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
+
+    async def health_check(self) -> dict[str, Any]:
+        """Perform health check by attempting a simple completion.
+
+        This overrides the base class implementation to avoid triggering the
+        max_completion_tokens warning.
+        """
+        try:
+            response = await self.complete(
+                "Say 'OK'",
+                max_completion_tokens=4096,
+                timeout=self.HEALTH_CHECK_TIMEOUT,
+            )
+            return {
+                "status": "healthy",
+                "provider": self.name,
+                "model": self._model,
+                "test_response": response.content[:50],
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "provider": self.name,
+                "error": str(e),
+            }
 
     def get_synthesis_concurrency(self) -> int:
         """Get recommended concurrency for parallel synthesis operations."""

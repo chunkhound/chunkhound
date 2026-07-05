@@ -11,11 +11,11 @@ resolution-markers = [
 
 [[package]]
 name = "absl-py"
-version = "2.4.0"
+version = "2.5.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/64/c7/8de93764ad66968d19329a7e0c147a2bb3c7054c554d4a119111b8f9440f/absl_py-2.4.0.tar.gz", hash = "sha256:8c6af82722b35cf71e0f4d1d47dcaebfff286e27110a99fc359349b247dfb5d4", size = 116543, upload-time = "2026-01-28T10:17:05.322Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d0/4f/d79676ab82f2e42fc3611618139f13a9c4c31d0cff4b486982047679a802/absl_py-2.5.0.tar.gz", hash = "sha256:0c996f25c0490700fadabe6351630f6111534fa0ae252cc6d2014ea3b141135f", size = 118119, upload-time = "2026-07-03T10:57:48.157Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/18/a6/907a406bb7d359e6a63f99c313846d9eec4f7e6f7437809e03aa00fa3074/absl_py-2.4.0-py3-none-any.whl", hash = "sha256:88476fd881ca8aab94ffa78b7b6c632a782ab3ba1cd19c9bd423abc4fb4cd28d", size = 135750, upload-time = "2026-01-28T10:17:04.19Z" },
+    { url = "https://files.pythonhosted.org/packages/58/0a/a10b45aab35b175aded078a462dc8d0c698f5b13946e7cb0869097b78bb6/absl_py-2.5.0-py3-none-any.whl", hash = "sha256:0f17b89f2a4eaaedc4f28c622998aa690564b3012a396a4ffad0821007fe03ba", size = 137410, upload-time = "2026-07-03T10:57:46.735Z" },
 ]
 
 [[package]]
@@ -476,7 +476,6 @@ dependencies = [
     { name = "aiohttp" },
     { name = "anthropic" },
     { name = "duckdb" },
-    { name = "google-antigravity" },
     { name = "google-genai" },
     { name = "httpx" },
     { name = "jsonschema" },
@@ -543,6 +542,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+antigravity = [
+    { name = "google-antigravity" },
+]
 dev = [
     { name = "black" },
     { name = "mypy" },
@@ -585,7 +587,7 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
     { name = "chunkhound-native", marker = "extra == 'native'", specifier = ">=5.2.0" },
     { name = "duckdb", specifier = "==1.4.4" },
-    { name = "google-antigravity", specifier = ">=0.1.3" },
+    { name = "google-antigravity", marker = "extra == 'antigravity'", specifier = ">=0.1.3" },
     { name = "google-genai", specifier = ">=1.51.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jsonschema", specifier = ">=4.0.0" },
@@ -657,7 +659,7 @@ requires-dist = [
     { name = "zendriver", specifier = "==0.15.3" },
     { name = "zstandard", specifier = ">=0.23.0" },
 ]
-provides-extras = ["dev", "native", "test"]
+provides-extras = ["antigravity", "dev", "native", "test"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -982,7 +984,7 @@ wheels = [
 
 [[package]]
 name = "google-antigravity"
-version = "0.1.3"
+version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
@@ -994,11 +996,11 @@ dependencies = [
     { name = "websockets" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1e/65/79a2e49d3356c411854e6211f7e9b9b0b35c8970dc8d095aedfe30e5de91/google_antigravity-0.1.3-py3-none-macosx_11_0_arm64.whl", hash = "sha256:51d170bef7995fe6fd21f1794a96ee545f714a8e7be6c1022f84881b5512fe05", size = 30274137, upload-time = "2026-06-11T20:09:54.392Z" },
-    { url = "https://files.pythonhosted.org/packages/6d/8a/e592d320c0560dde3a346ac6faad414d38670c5a1285890c25fa949ff447/google_antigravity-0.1.3-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:9bef739888bccfa0747fcbc85696c2ee91ee29481405efd5d982c11fe9e211ff", size = 32714515, upload-time = "2026-06-11T20:09:57.575Z" },
-    { url = "https://files.pythonhosted.org/packages/6c/75/decfdc6519d3c5e9e0a2c4b021431ccb5ffb035fa9ccb96098213eee534b/google_antigravity-0.1.3-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:44c3314e544ac4a9ea62779f25e2ae392983ac59b3d4f4f7fc2a68708f98f25c", size = 35787216, upload-time = "2026-06-11T20:10:00.464Z" },
-    { url = "https://files.pythonhosted.org/packages/c2/e7/d12857adc6038f3bad06132e4dce35e809b47b866df4031921cba9c3116d/google_antigravity-0.1.3-py3-none-win_amd64.whl", hash = "sha256:576642f09248f299b5d1dbb672d06ef69c29051e215fa32a7b3b27b54b6227dc", size = 34907976, upload-time = "2026-06-11T20:10:03.69Z" },
-    { url = "https://files.pythonhosted.org/packages/58/68/e33e3f3ced6239c5e8d5198e1e3a99c9406c23fc0dbc99c9f01ddc162d0d/google_antigravity-0.1.3-py3-none-win_arm64.whl", hash = "sha256:808f8d3bda1a0ee64ca49acb83c55c057262379157dcd501d58427d2e9059d9a", size = 31575092, upload-time = "2026-06-11T20:10:06.701Z" },
+    { url = "https://files.pythonhosted.org/packages/15/7c/8d6151f12e4544229754575c6f8a2b57b615aab312440f2db64580af42e0/google_antigravity-0.1.5-py3-none-macosx_11_0_arm64.whl", hash = "sha256:0a12e30836fb6641bc63beaa3e65d3bcbfc39c01a1eb07c7ca7edba317537660", size = 31404545, upload-time = "2026-06-25T14:53:52.586Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/e8/4a85ba4a7be1c35acb18c4f070e5049df6f185547b0c9d6794acbc06a452/google_antigravity-0.1.5-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:a74892f9251e4c2cd9962d8631680aa8266d2e216527dd68cf8ac8de1137c996", size = 33945922, upload-time = "2026-06-25T14:53:55.825Z" },
+    { url = "https://files.pythonhosted.org/packages/6e/18/d89abb1dafe906451c2bd13f0c32917e1d35ba95d2436a06907045a69cfd/google_antigravity-0.1.5-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:ec1ebe4044b92e41f6f1632cfac98bb29f03ef0be52446cb5a67576147148363", size = 37161595, upload-time = "2026-06-25T14:53:58.841Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/5e/c9b6a06f21aeb3547c8194aec11f5fbeffedc0d7973effbace96beca84b2/google_antigravity-0.1.5-py3-none-win_amd64.whl", hash = "sha256:e8707b7fc64c887edf27176b1e8aa52e6cfe50e51dc2d04ef4f57f7ad26f65ee", size = 36188777, upload-time = "2026-06-25T14:54:02.034Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/de/e231b4fec58f9415490fb6223556a6dd0e3278876dd508f5396864e25cb3/google_antigravity-0.1.5-py3-none-win_arm64.whl", hash = "sha256:2830e90139552ef3de7d8775ef0ea8d1a1ec2c0f523a8d1db30132b942deb4a0", size = 32694572, upload-time = "2026-06-25T14:54:05.439Z" },
 ]
 
 [[package]]

@@ -103,7 +103,8 @@ def test_llm_manager_registry_antigravity_providers():
     assert "antigravity-cli" in LLMManager._providers
 
     manager = object.__new__(LLMManager)
-    
+    manager._target_dir = "/fake/workspace"
+
     # Mocking classes to capture arguments
     captured_sdk = {}
     captured_cli = {}
@@ -136,6 +137,7 @@ def test_llm_manager_registry_antigravity_providers():
     assert captured_sdk["api_key"] == "sk-test-key"
     assert captured_sdk["timeout"] == 45
     assert captured_sdk["max_retries"] == 2
+    assert captured_sdk["target_dir"] == "/fake/workspace"
 
     # Verify CLI creation parameters (no key needed)
     manager._create_provider(  # type: ignore[attr-defined]
@@ -148,3 +150,10 @@ def test_llm_manager_registry_antigravity_providers():
     assert captured_cli["model"] == "gemini-3.1-pro"
     assert captured_cli["timeout"] == 60
 
+
+def test_llm_manager_registry_antigravity_sdk_missing_dependency(monkeypatch):
+    from chunkhound.providers.llm import antigravity_llm_provider
+    monkeypatch.setattr(antigravity_llm_provider, "SDK_AVAILABLE", False)
+    
+    with pytest.raises(RuntimeError, match="chunkhound\\[antigravity\\]"):
+        antigravity_llm_provider.AntigravityLLMProvider()
