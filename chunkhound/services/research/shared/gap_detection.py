@@ -875,10 +875,11 @@ Output a single unified query that captures the essential information need."""
         phase1_threshold: float,
         path_filter: str | None,
     ) -> list[list[dict]]:
-        """Step 2.7: Fill gaps in parallel using unified search.
+        """Step 2.7: Fill gaps serially using unified search.
 
-        CRITICAL: Gap fills are INDEPENDENT - no shared mutable state.
-        Each gap fill is a complete unified search with its own deduplication.
+        Serial execution avoids DuckDB thread contention: concurrent gap fills
+        all queue on the single DB executor thread, causing each search's Step 5
+        timer to balloon to N × per-search DB time instead of 1×.
 
         Args:
             root_query: Original research query
@@ -889,31 +890,21 @@ Output a single unified query that captures the essential information need."""
         Returns:
             List of gap result lists (one per gap)
         """
-
-        async def fill_single_gap(gap: UnifiedGap) -> list[dict]:
-            """Fill a single gap independently."""
-            return await self._fill_single_gap(
-                root_query, gap, phase1_threshold, path_filter
-            )
-
-        # Run all gap fills in parallel
-        tasks = [fill_single_gap(gap) for gap in selected_gaps]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Process results
         gap_results: list[list[dict]] = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.warning(
-                    f"Gap fill failed for '{selected_gaps[i].query[:60]}...': {result}"
+        for gap in selected_gaps:
+            try:
+                result = await self._fill_single_gap(
+                    root_query, gap, phase1_threshold, path_filter
                 )
-                gap_results.append([])
-            elif isinstance(result, list):
                 gap_results.append(result)
                 logger.debug(
-                    f"Gap fill complete: '{selected_gaps[i].query[:60]}...' → "
-                    f"{len(result)} chunks"
+                    f"Gap fill complete: '{gap.query[:60]}...' → {len(result)} chunks"
                 )
+            except Exception as exc:
+                logger.warning(
+                    f"Gap fill failed for '{gap.query[:60]}...': {exc}"
+                )
+                gap_results.append([])
 
         return gap_results
 
