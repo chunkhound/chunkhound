@@ -248,7 +248,7 @@ class GapDetectionService(ProgressEmitterMixin):
 
         # Step 2.7: Fill gaps in parallel (INDEPENDENT - no shared mutable state)
         t = perf_counter()
-        gap_results = await self._fill_gaps_parallel(
+        gap_results = await self._fill_gaps_serial(
             root_query, selected_gaps, phase1_threshold, path_filter
         )
         gaps_filled = len([r for r in gap_results if r])
@@ -721,7 +721,14 @@ Output a single unified query that captures the essential information need."""
             unify_cluster(cluster_id, cluster_gaps)
             for cluster_id, cluster_gaps in cluster_map.items()
         ]
-        return list(await asyncio.gather(*tasks))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        unified_gaps: list[UnifiedGap] = []
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.warning(f"Gap unification task failed unexpectedly: {r}")
+            else:
+                unified_gaps.append(r)
+        return unified_gaps
 
     def _select_gaps_by_elbow(self, unified_gaps: list[UnifiedGap]) -> list[UnifiedGap]:
         """Step 2.6: Select gaps using elbow detection on scores.
@@ -845,7 +852,7 @@ Output a single unified query that captures the essential information need."""
         # We want to include the elbow point itself
         return elbow_idx + 1
 
-    async def _fill_gaps_parallel(
+    async def _fill_gaps_serial(
         self,
         root_query: str,
         selected_gaps: list[UnifiedGap],

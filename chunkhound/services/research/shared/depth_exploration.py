@@ -40,6 +40,9 @@ from chunkhound.services.research.shared.chunk_dedup import (
 from chunkhound.services.research.shared.elbow_detection import (
     compute_elbow_threshold,
 )
+from chunkhound.services.research.shared.exploration.elbow_filter import (
+    get_unified_score,
+)
 from chunkhound.services.research.shared.evidence_ledger import (
     CONSTANTS_INSTRUCTION_SHORT,
 )
@@ -327,13 +330,12 @@ class DepthExplorationService(ProgressEmitterMixin):
         Returns:
             List of top file paths
         """
-        # Calculate average score per file — prefer similarity (cosine), fall back to rerank_score
+        # Calculate average score per file using unified priority: rerank_score > similarity > score.
+        # This keeps file ranking consistent whether chunks came from Phase 1 (rerank_score),
+        # Phase 1.5 (similarity), or BFS (score).
         file_scores: dict[str, float] = {}
         for file_path, chunks in file_to_chunks.items():
-            scores = [
-                c.get("similarity", c.get("rerank_score", 0.0))
-                for c in chunks
-            ]
+            scores = [get_unified_score(c) for c in chunks]
             file_scores[file_path] = sum(scores) / len(scores) if scores else 0.0
 
         # Sort by score descending and take top-K
@@ -612,5 +614,5 @@ Output JSON with queries array."""
             Merged and deduplicated chunks
         """
         return merge_chunk_lists(
-            covered_chunks, exploration_chunks, score_field="similarity", log_prefix="Exploration merge"
+            covered_chunks, exploration_chunks, score_fn=get_unified_score, log_prefix="Exploration merge"
         )
