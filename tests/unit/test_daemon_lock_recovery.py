@@ -307,6 +307,8 @@ class TestStopPid:
             _time.sleep(0.1)  # give it a moment to start
             result = stop_pid(proc.pid, timeout=5.0)
             assert result is True
+            proc.wait(timeout=1.0)
+            assert proc.poll() is not None
         finally:
             try:
                 proc.kill()
@@ -556,6 +558,8 @@ class TestStopDaemon:
         try:
             result = discovery.stop_daemon(timeout=5.0)
             assert result is True
+            proc.wait(timeout=1.0)
+            assert proc.poll() is not None
             assert discovery.read_lock() is None
         finally:
             try:
