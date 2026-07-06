@@ -34,6 +34,7 @@ from chunkhound.services.research.shared.chunk_context_builder import (
 )
 from chunkhound.services.research.shared.chunk_dedup import (
     deduplicate_chunks,
+    get_chunk_id,
     merge_chunk_lists,
 )
 from chunkhound.services.research.shared.elbow_detection import (
@@ -511,7 +512,14 @@ Output JSON with queries array."""
             List of result lists (one per query)
         """
 
-        async def execute_single_query(query: str, source_file: str) -> list[dict]:
+        # Accumulate chunk IDs found by previous iterations so that later
+        # iterations skip already-collected chunks during regex pagination,
+        # triggering the consecutive-dry-pages early exit sooner.
+        global_seen: set[int | str] = set()
+
+        async def execute_single_query(
+            query: str, source_file: str, exclude_ids: set[int | str]
+        ) -> list[dict]:
             """Execute a single exploration query."""
             context = ResearchContext(root_query=root_query)
 
@@ -522,6 +530,7 @@ Output JSON with queries array."""
                 skip_rerank=True,
                 path_filter=path_filter,
                 emit_event_callback=self._emit_event,
+                exclude_ids=exclude_ids,
             )
 
             # Apply window expansion if enabled
@@ -556,8 +565,12 @@ Output JSON with queries array."""
         for file_path, queries in exploration_queries.items():
             for query in queries:
                 try:
-                    result = await execute_single_query(query, file_path)
+                    result = await execute_single_query(query, file_path, global_seen)
                     query_results.append(result)
+                    for chunk in result:
+                        cid = get_chunk_id(chunk)
+                        if cid:
+                            global_seen.add(cid)
                 except Exception as exc:
                     logger.warning(f"Exploration query execution failed: {exc}")
                     query_results.append([])

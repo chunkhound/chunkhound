@@ -82,6 +82,7 @@ class UnifiedSearch:
         depth: int | None = None,
         path_filter: str | None = None,
         skip_rerank: bool = False,
+        exclude_ids: set[int | str] | None = None,
     ) -> list[dict[str, Any]]:
         """Perform unified semantic + symbol-based regex search (Steps 2-7).
 
@@ -329,12 +330,16 @@ class UnifiedSearch:
                         if chunk_id:
                             semantic_chunk_ids.add(chunk_id)
 
+                    # Merge caller-supplied exclusions (e.g. global seen set from
+                    # depth exploration) with the current semantic exclusions.
+                    all_exclude_ids = semantic_chunk_ids | (exclude_ids or set())
+
                     t5 = perf_counter()
                     regex_results = await self.search_by_symbols(
                         top_symbols,
                         target_per_symbol=target_per_symbol,
                         path_filter=path_filter,
-                        exclude_ids=semantic_chunk_ids,
+                        exclude_ids=all_exclude_ids,
                         query=query,
                     )
                     logger.warning(
