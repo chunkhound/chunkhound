@@ -626,7 +626,7 @@ class UnifiedSearch:
                 # Track all seen chunk IDs (excluded + collected).
                 seen_chunk_ids = exclude_ids.copy()
                 # Safety limit to prevent infinite loops when exclusions are large
-                max_pages = 10
+                max_pages = 20
 
                 pages_fetched = 0
                 consecutive_dry_pages = 0
