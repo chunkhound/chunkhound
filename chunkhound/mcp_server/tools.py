@@ -857,8 +857,9 @@ async def websearch_impl(
         embedding_manager: Present solely for capability gating
             (requires_embeddings=True); signature-inspected by register_tool.
             Unused in the body — the research stage runs in a subprocess.
-        llm_manager: Present solely for capability gating (requires_llm=True);
-            signature-inspected by register_tool. Unused in the body.
+        llm_manager: Used to expand the user query into 3 DuckDuckGo-optimized
+            variants via the utility LLM. When None (no LLM configured), the
+            expander falls back to a single-query dispatch.
         config: Application configuration; falls back to environment. Its
             source file (if any) is forwarded to the subprocess as --config.
         query: Natural-language or keyword query for DuckDuckGo.
@@ -873,9 +874,10 @@ async def websearch_impl(
         build_quickresearch_argv_core,
         clamp_limit,
         fetch_and_save,
-        search,
+        search_multi,
         websearch_timeout,
     )
+    from chunkhound.utils.websearch_expansion import expand_web_queries
     from chunkhound.utils.websearch_postprocess import replace_paths_with_urls
 
     if config is None:
@@ -883,8 +885,9 @@ async def websearch_impl(
 
     limit = clamp_limit(limit)
 
+    queries = await expand_web_queries(query, llm_manager)
     try:
-        results = await asyncio.to_thread(search, query, limit, None)
+        results = await search_multi(queries, limit, None)
     except urllib.error.URLError as e:
         raise MCPError(f"Web search failed: {e.reason}") from e
     if not results:
