@@ -165,6 +165,48 @@ def test_single_quote_preserving_variant_pads_to_three() -> None:
     ]
 
 
+def test_multi_quote_partial_preservation_filtered_out() -> None:
+    # Multi-quote query: variants that keep only one of the two quoted
+    # phrases are filtered out. Only the variant preserving both survives;
+    # pad fallbacks refill from the raw query (which carries both quotes).
+    llm = _FakeLLMManager(
+        _FakeProvider(
+            {
+                "queries": [
+                    '"foo" migration guide',
+                    '"foo" "bar" compatibility',
+                    '"bar" best practices',
+                ]
+            }
+        )
+    )
+    query = 'compare "foo" vs "bar"'
+    year = datetime.now().year
+    out = _run(we_mod.expand_web_queries(query, llm))
+    assert out == [
+        '"foo" "bar" compatibility',
+        f"{query} {year}",
+        f"{query} best practices",
+    ]
+
+    # Every variant partially preserves — each keeps only one of the two
+    # quoted phrases, so none survive the filter. Slot 0 is seeded with the
+    # raw query and pad fallbacks fill slots 1-2, all carrying both quotes.
+    llm = _FakeLLMManager(
+        _FakeProvider(
+            {
+                "queries": [
+                    '"foo" migration guide',
+                    '"bar" upgrade notes',
+                    '"foo" tutorial',
+                ]
+            }
+        )
+    )
+    out = _run(we_mod.expand_web_queries(query, llm))
+    assert out == [query, f"{query} {year}", f"{query} best practices"]
+
+
 def test_unbalanced_quote_passes_through() -> None:
     # An unbalanced quote yields no extractable phrases, so the filter
     # skips entirely and the LLM's queries pass through unchanged.
