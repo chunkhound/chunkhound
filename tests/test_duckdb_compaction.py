@@ -283,14 +283,14 @@ def populated_db(
                 "chunk_id": chunk_ids[0],
                 "provider": "fake",
                 "model": "fake-embeddings",
-                "embedding": prov._generate_deterministic_vector(f"test_{i}a"),
+                "embedding": prov.generate_deterministic_vector(f"test_{i}a"),
                 "dims": 16,
             },
             {
                 "chunk_id": chunk_ids[1],
                 "provider": "fake",
                 "model": "fake-embeddings",
-                "embedding": prov._generate_deterministic_vector(f"test_{i}b"),
+                "embedding": prov.generate_deterministic_vector(f"test_{i}b"),
                 "dims": 16,
             },
         ]
@@ -445,7 +445,7 @@ class TestCompactDatabase:
                     "model": "fake-embeddings",
                     "embedding": ConstantEmbeddingProvider(
                         dims=16
-                    )._generate_deterministic_vector("post-compaction-embedding"),
+                    ).generate_deterministic_vector("post-compaction-embedding"),
                     "dims": 16,
                 }
             ],
@@ -2177,7 +2177,7 @@ class TestCompactionDataIntegrity:
         """Compaction preserves user-visible regex and semantic search behavior."""
         query_embedding = ConstantEmbeddingProvider(
             dims=16
-        )._generate_deterministic_vector("test_1b")
+        ).generate_deterministic_vector("test_1b")
 
         regex_before, regex_pagination_before = populated_db.search_regex(
             "func_1b",
