@@ -561,31 +561,16 @@ Output JSON with queries array."""
             return filtered
 
         # Run serially to isolate per-query timing.
-        # Per-file dry tracking: if a query for a file returns 0 chunks after
-        # threshold filtering, skip remaining queries for that file — its coverage
-        # is already saturated from prior iterations.
-        max_consecutive_dry_per_file = 1
         query_results: list[list[dict]] = []
         for file_path, queries in exploration_queries.items():
-            consecutive_dry = 0
             for query in queries:
-                if consecutive_dry >= max_consecutive_dry_per_file:
-                    logger.debug(
-                        f"Depth exploration: skipping query for '{file_path}' "
-                        f"({consecutive_dry} consecutive dry queries)"
-                    )
-                    continue
                 try:
                     result = await execute_single_query(query, file_path, global_seen)
                     query_results.append(result)
-                    if result:
-                        consecutive_dry = 0
-                        for chunk in result:
-                            cid = get_chunk_id(chunk)
-                            if cid:
-                                global_seen.add(cid)
-                    else:
-                        consecutive_dry += 1
+                    for chunk in result:
+                        cid = get_chunk_id(chunk)
+                        if cid:
+                            global_seen.add(cid)
                 except Exception as exc:
                     logger.warning(f"Exploration query execution failed: {exc}")
                     query_results.append([])
