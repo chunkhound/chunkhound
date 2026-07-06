@@ -22,8 +22,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import duckdb
-from loguru import logger
-
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
@@ -38,7 +36,6 @@ from chunkhound.providers.database.duckdb.embedding_repository import (
     DuckDBEmbeddingRepository,
 )
 from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
-from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
@@ -47,11 +44,13 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
     _executor_local,
 )
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.utils.windows_constants import (
     IS_WINDOWS,
     WINDOWS_FILE_HANDLE_DELAY,
     _unlink_compacted,
 )
+from loguru import logger
 
 
 def _atomic_replace(src: Path | str, dst: Path | str) -> None:
@@ -85,6 +84,8 @@ from chunkhound.providers.database.duckdb.schema_constants import (
     _FILES_COLUMN_NAMES,
     _FILES_TABLE_COLUMNS,
     _SCHEMA_VERSION_TABLE_COLUMNS,
+    CANONICAL_TABLE_NAMES,
+    VALID_CATALOGS,
     _create_embedding_table_sql,
     _embedding_chunk_id_index_name,
     _embedding_dims_from_table_name,
@@ -96,8 +97,6 @@ from chunkhound.providers.database.duckdb.schema_constants import (
     _embedding_tables_where_clause,
     _embedding_unique_index_name,
     _embeddings_column_names,
-    CANONICAL_TABLE_NAMES,
-    VALID_CATALOGS,
     is_hnsw_index,
 )
 
@@ -926,8 +925,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
 
     def _executor_create_embedding_table_indexes(
-        self, conn: Any, state: dict[str, Any], table_name: str, dims: int,
-        *, create_hnsw: bool = True,
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        table_name: str,
+        dims: int,
+        *,
+        create_hnsw: bool = True,
     ) -> None:
         """Restore the canonical non-table DDL for one embedding table."""
         if create_hnsw:
@@ -1120,9 +1124,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         return current_size / live
 
     @staticmethod
-    def _fragmentation_exceeds_threshold(
-        ratio: float, threshold: float | None
-    ) -> bool:
+    def _fragmentation_exceeds_threshold(ratio: float, threshold: float | None) -> bool:
         """Return True when the fragmentation ratio exceeds the configured threshold."""
         if threshold is None or threshold < 0:
             return False
@@ -1234,7 +1236,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             tgt_conn.execute(f"CREATE SEQUENCE files_id_seq START {max_file_id + 1}")
             tgt_conn.execute(f"CREATE SEQUENCE chunks_id_seq START {max_chunk_id + 1}")
-            tgt_conn.execute(f"CREATE SEQUENCE embeddings_id_seq START {max_embedding_id + 1}")
+            tgt_conn.execute(
+                f"CREATE SEQUENCE embeddings_id_seq START {max_embedding_id + 1}"
+            )
 
             tgt_conn.execute(f"CREATE TABLE files ({_FILES_TABLE_COLUMNS})")
             tgt_conn.execute(f"CREATE TABLE chunks ({_CHUNKS_TABLE_COLUMNS})")
@@ -1321,7 +1325,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                 dims = _embedding_dims_from_table_name(tname)
                 if dims is not None:
                     self._executor_create_embedding_table_indexes(
-                        tgt_conn, state, tname, dims, create_hnsw=False,
+                        tgt_conn,
+                        state,
+                        tname,
+                        dims,
+                        create_hnsw=False,
                     )
 
             tgt_conn.execute("CHECKPOINT")
@@ -1369,9 +1377,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         compacted_size = os.path.getsize(db_path)
         reduction = (
-            (1.0 - compacted_size / original_size) * 100.0
-            if original_size > 0
-            else 0.0
+            (1.0 - compacted_size / original_size) * 100.0 if original_size > 0 else 0.0
         )
         log_if_not_mcp(
             "info",
@@ -1464,9 +1470,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             original_size = self._compact_prepare(
                 conn, state, db_path, backup_path, compacted_path
             )
-            _, had_hnsw = self._compact_copy_data(
-                backup_path, compacted_path, state
-            )
+            _, had_hnsw = self._compact_copy_data(backup_path, compacted_path, state)
             return self._compact_finalize(
                 state,
                 db_path,
@@ -1480,7 +1484,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             log_if_not_mcp("error", f"Compaction failed: {e}")
             try:
                 self._compact_restore(
-                    backup_path, compacted_path, db_path, state,
+                    backup_path,
+                    compacted_path,
+                    db_path,
+                    state,
                     had_hnsw=had_hnsw,
                 )
             except Exception as restore_err:
@@ -1524,6 +1531,12 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT")
         conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS skip_reason TEXT")
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        )
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        )
 
         if self._executor_files_table_needs_rebuild(conn):
             logger.warning("Rebuilding non-canonical files table from shared DDL")
@@ -1551,6 +1564,14 @@ class DuckDBProvider(SerialDatabaseProvider):
             return
 
         conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata TEXT")
+        conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS start_byte INTEGER")
+        conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS end_byte INTEGER")
+        conn.execute(
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        )
+        conn.execute(
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        )
 
         if self._executor_chunks_table_needs_rebuild(conn):
             logger.warning("Rebuilding non-canonical chunks table from shared DDL")
@@ -1600,9 +1621,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 ).fetchone()
                 cv = cur[0] if cur else None
                 if cv is None:
-                    cv = conn.execute(
-                        "SELECT nextval('embeddings_id_seq')"
-                    ).fetchone()[0]
+                    cv = conn.execute("SELECT nextval('embeddings_id_seq')").fetchone()[
+                        0
+                    ]
                 adv = max_eid - int(cv)
                 if adv > 0:
                     conn.execute(
@@ -1652,7 +1673,13 @@ class DuckDBProvider(SerialDatabaseProvider):
             raise
 
     def _executor_migrate_schema(self, conn: Any, state: dict[str, Any]) -> None:
-        """Executor method for schema migrations - runs in DB thread."""
+        """Executor method for schema migrations - runs in DB thread.
+
+        Prerequisite: _executor_materialize_files_table and
+        _executor_materialize_chunks_table must run first — this method
+        references columns (start_byte, end_byte, created_at, updated_at)
+        that those methods add via ALTER TABLE.
+        """
         try:
             # Check if 'size' and 'signature' columns exist and drop them
             columns_info = conn.execute("""
@@ -1718,12 +1745,6 @@ class DuckDBProvider(SerialDatabaseProvider):
 
                 # Recreate indexes (will be done in _executor_create_indexes)
                 logger.info("Successfully migrated chunks table schema")
-
-            # Add metadata column if it doesn't exist (for databases without size/signature migration)
-            conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata TEXT")
-
-            # Add skip_reason column for tracking files skipped during parsing
-            conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS skip_reason TEXT")
 
             for (table_name,) in conn.execute(
                 "SELECT table_name FROM information_schema.tables "
@@ -2554,12 +2575,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
         chunk_rows = self._executor_fetch_rows_as_dicts(
             conn,
-            """
+            f"""
             SELECT *
             FROM chunks
             WHERE file_id IN ({placeholders})
             ORDER BY id
-            """.format(placeholders=placeholders),
+            """,
             unique_file_ids,
         )
         chunk_ids = [int(row["id"]) for row in chunk_rows]
