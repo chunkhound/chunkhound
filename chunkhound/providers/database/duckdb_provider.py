@@ -4189,7 +4189,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         rows = conn.execute(query, [query_embedding, *chunk_ids, provider, model]).fetchall()
         return {int(row[0]): float(row[1]) for row in rows}
 
-
     def find_similar_chunks(
         self,
         chunk_id: int,

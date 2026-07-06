@@ -232,10 +232,6 @@ class UnifiedSearch:
                 time_limit=time_limit,
                 result_limit=result_limit,
             )
-            logger.warning(
-                f"Step 2 semantic: {perf_counter() - t2:.3f}s "
-                f"({len(semantic_results)} chunks)"
-            )
 
             # Emit search results event
             await emit_event(
@@ -244,6 +240,7 @@ class UnifiedSearch:
                 node_id=node_id,
                 depth=depth,
                 chunks=len(semantic_results),
+                duration=perf_counter() - t2,
             )
 
         # Steps 3-5: Symbol extraction, reranking, and regex search
@@ -257,10 +254,6 @@ class UnifiedSearch:
 
             t3 = perf_counter()
             symbols = await self.extract_symbols_from_chunks(semantic_results)
-            logger.warning(
-                f"Step 3 extract_symbols: {perf_counter() - t3:.3f}s "
-                f"({len(symbols)} symbols)"
-            )
 
             if symbols:
                 # Step 4: Select top symbols (deterministic first-seen order from
@@ -268,16 +261,11 @@ class UnifiedSearch:
                 max_symbols = (
                     self._config.max_symbols if self._config else MAX_SYMBOLS_TO_SEARCH
                 )
-                t4 = perf_counter()
                 logger.debug(
                     f"Step 4: Selecting top {max_symbols} symbols from {len(symbols)} "
                     "extracted symbols"
                 )
                 top_symbols = symbols[:max_symbols]
-                logger.warning(
-                    f"Step 4 select_top: {perf_counter() - t4:.3f}s "
-                    f"({len(top_symbols)} symbols)"
-                )
 
                 # Emit symbol extraction results
                 await emit_event(
@@ -287,6 +275,7 @@ class UnifiedSearch:
                     node_id=node_id,
                     depth=depth,
                     symbols=len(symbols),
+                    duration=perf_counter() - t3,
                 )
 
                 if top_symbols:
@@ -342,10 +331,6 @@ class UnifiedSearch:
                         exclude_ids=all_exclude_ids,
                         query=query,
                     )
-                    logger.warning(
-                        f"Step 5 regex: {perf_counter() - t5:.3f}s "
-                        f"({len(regex_results)} chunks)"
-                    )
 
                     # Emit regex search results
                     await emit_event(
@@ -354,6 +339,7 @@ class UnifiedSearch:
                         node_id=node_id,
                         depth=depth,
                         chunks=len(regex_results),
+                        duration=perf_counter() - t5,
                     )
 
         # Step 6: Unify results at chunk level (deduplicate by chunk_id)
@@ -375,12 +361,7 @@ class UnifiedSearch:
             if chunk_id and chunk_id not in unified_map:
                 unified_map[chunk_id] = chunk
 
-        t6 = perf_counter()
         combined_pool = list(unified_map.values())
-        logger.warning(
-            f"Step 6 unify: {perf_counter() - t6:.3f}s "
-            f"({len(combined_pool)} chunks)"
-        )
 
         # Step 7: Score and rank the combined pool.
         #
@@ -393,9 +374,10 @@ class UnifiedSearch:
         embedding_provider = self._embedding_manager.get_provider()
 
         if skip_rerank:
-            # Regex chunks are scored at the service layer (search_regex_async with
-            # query=) so the combined pool already has similarity on every chunk.
-            # Just sort and emit.
+            # Regex chunks are scored via a bulk get_chunk_similarities_async call
+            # inside search_by_symbols (post-pagination, one round-trip per symbol).
+            # Semantic chunks already carry similarity from HNSW search (Step 2).
+            # All chunks in the pool have similarity; just sort and emit.
             t7 = perf_counter()
             combined_pool.sort(key=lambda c: c.get("similarity", 0.0), reverse=True)
             await emit_event(
@@ -430,7 +412,7 @@ class UnifiedSearch:
                             query=rerank_query,
                             documents=documents,
                         )
-                        logger.warning(
+                        logger.debug(
                             f"Step 7 rerank [{i+1}/{len(rerank_queries)}]: "
                             f"{perf_counter() - t_rerank:.3f}s "
                             f"({len(documents)} docs)"
@@ -453,7 +435,7 @@ class UnifiedSearch:
                         )
                         combined_pool[idx]["rerank_score"] = compound_score
 
-                    logger.warning(
+                    logger.debug(
                         f"Step 7 rerank total: {perf_counter() - t_rerank_total:.3f}s "
                         f"({len(rerank_queries)} queries)"
                     )
@@ -466,7 +448,7 @@ class UnifiedSearch:
                         query=rerank_query,
                         documents=documents,
                     )
-                    logger.warning(
+                    logger.debug(
                         f"Step 7 rerank: {perf_counter() - t_rerank:.3f}s "
                         f"({len(combined_pool)} docs)"
                     )
