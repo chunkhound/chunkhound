@@ -560,7 +560,9 @@ Output JSON with queries array."""
             )
             return filtered
 
-        # Run serially to isolate per-query timing.
+        # Run serially: concurrent unified_search calls all queue on the single DB
+        # executor thread, causing each call's Step 5 timer to balloon to N × per-search
+        # DB time instead of 1×.
         query_results: list[list[dict]] = []
         for file_path, queries in exploration_queries.items():
             for query in queries:
