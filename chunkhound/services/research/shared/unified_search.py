@@ -382,7 +382,7 @@ class UnifiedSearch:
             combined_pool.sort(key=lambda c: c.get("similarity", 0.0), reverse=True)
             await emit_event(
                 "search_rerank",
-                f"Cosine-scored {len(combined_pool)} chunks",
+                f"Ranked {len(combined_pool)} chunks by cosine similarity",
                 node_id=node_id,
                 depth=depth,
                 duration=perf_counter() - t7,
@@ -572,7 +572,10 @@ class UnifiedSearch:
             symbols: List of symbol names to search for
             target_per_symbol: Target results per symbol (dynamic, semantic-based)
             path_filter: Optional path filter to limit search scope
-            exclude_ids: Optional set of chunk IDs to exclude (semantic chunks)
+            exclude_ids: Optional set of chunk IDs to skip during regex pagination
+            query: Optional query string; when set, all collected chunks are scored
+                via a single bulk cosine similarity call after pagination completes
+                (one round-trip per symbol, not per page).
 
         Returns:
             List of chunks found via regex search (excluding chunks in exclude_ids)

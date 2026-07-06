@@ -2,7 +2,8 @@
 
 This module provides common chunk deduplication logic used across multiple
 research phases (Phase 1.5 depth exploration, Phase 2 gap detection, Phase 3
-synthesis). The pattern is: deduplicate by chunk_id, keeping highest rerank_score.
+synthesis). The pattern is: deduplicate by chunk_id, keeping the chunk with
+the highest score (configurable field, defaults to rerank_score).
 """
 
 from loguru import logger

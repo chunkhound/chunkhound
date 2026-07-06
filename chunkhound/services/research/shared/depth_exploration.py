@@ -512,9 +512,11 @@ Output JSON with queries array."""
             List of result lists (one per query)
         """
 
-        # Accumulate chunk IDs found by previous iterations so that later
-        # iterations skip already-collected chunks during regex pagination,
+        # Accumulate ALL chunk IDs found by previous iterations (both above and below
+        # threshold) so that later iterations skip them during regex pagination,
         # triggering the consecutive-dry-pages early exit sooner.
+        # Semantic search is unaffected — the same chunk can still be surfaced by
+        # HNSW in a different query context.
         global_seen: set[int | str] = set()
 
         async def execute_single_query(
@@ -538,6 +540,14 @@ Output JSON with queries array."""
                 chunks = await self._unified_search.expand_chunk_windows(
                     chunks, window_lines=self._config.window_expansion_lines
                 )
+
+            # Register all found chunk IDs (before threshold filtering) so that
+            # later iterations skip them in regex pagination even if they fell
+            # below threshold here.
+            for chunk in chunks:
+                cid = get_chunk_id(chunk)
+                if cid:
+                    global_seen.add(cid)
 
             # Compute adaptive threshold
             if chunks:
@@ -569,10 +579,6 @@ Output JSON with queries array."""
                 try:
                     result = await execute_single_query(query, file_path, global_seen)
                     query_results.append(result)
-                    for chunk in result:
-                        cid = get_chunk_id(chunk)
-                        if cid:
-                            global_seen.add(cid)
                 except Exception as exc:
                     logger.warning(f"Exploration query execution failed: {exc}")
                     query_results.append([])

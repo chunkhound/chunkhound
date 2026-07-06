@@ -174,7 +174,6 @@ class SearchService(BaseService):
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
-        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform regex search on code content (synchronous).
 

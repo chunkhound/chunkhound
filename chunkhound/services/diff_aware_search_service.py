@@ -42,7 +42,6 @@ class SearchServiceProtocol(Protocol):
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
-        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]: ...
 
     async def search_regex_async(
@@ -356,10 +355,9 @@ class DiffAwareSearchService:
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
-        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         return self._original.search_regex(
-            pattern, page_size=page_size, offset=offset, path_filter=path_filter, query=query
+            pattern, page_size=page_size, offset=offset, path_filter=path_filter
         )
 
     async def search_regex_async(
