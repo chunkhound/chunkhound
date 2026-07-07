@@ -326,9 +326,10 @@ def _update_index_from_snapshot(
         lines.append(f"{modes[file]} {object_id} 0\t{file}")
     subprocess.run(
         ["git", "update-index", "--index-info"],
-        input="\n".join(lines),
+        # Use bytes mode (no text=True) to prevent Python from translating
+        # \n to \r\n on Windows, which would corrupt --index-info records.
+        input="\n".join(lines).encode("utf-8"),
         check=True,
-        text=True,
     )
 
 
