@@ -1,0 +1,582 @@
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use duckdb::Connection;
+
+use crate::db::DbConfig;
+use crate::error::DbError;
+use crate::types::{BatchResult, ChunkRecord, DbWriterBatch, FileRecord};
+
+pub struct DuckDbHnswBackend {
+    config: DbConfig,
+    conn: Option<Connection>,
+    write_count: u32,
+    has_vss: bool,
+}
+
+#[derive(Debug, Clone)]
+struct HnswIndexInfo {
+    index_name: String,
+    table_name: String,
+    create_sql: Option<String>,
+}
+
+impl DuckDbHnswBackend {
+    pub fn new(config: DbConfig) -> Self {
+        DuckDbHnswBackend {
+            config,
+            conn: None,
+            write_count: 0,
+            has_vss: false,
+        }
+    }
+
+    fn setup_schema(conn: &Connection) -> Result<(), DbError> {
+        conn.execute_batch(
+            "
+            CREATE SEQUENCE IF NOT EXISTS files_id_seq START 1;
+            CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY DEFAULT nextval('files_id_seq'),
+                path TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                extension TEXT,
+                size INTEGER,
+                modified_time TIMESTAMP,
+                content_hash TEXT,
+                language TEXT,
+                skip_reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE SEQUENCE IF NOT EXISTS chunks_id_seq START 1;
+            CREATE TABLE IF NOT EXISTS chunks (
+                id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
+                file_id INTEGER REFERENCES files(id),
+                chunk_type TEXT NOT NULL,
+                symbol TEXT,
+                code TEXT NOT NULL,
+                start_line INTEGER,
+                end_line INTEGER,
+                start_byte INTEGER,
+                end_byte INTEGER,
+                language TEXT,
+                metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq START 1;
+            CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
+            CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
+        ",
+        )?;
+        Ok(())
+    }
+
+    fn try_load_vss(conn: &Connection) -> bool {
+        conn.execute_batch(
+            "INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true;",
+        )
+        .is_ok()
+    }
+
+    fn ensure_embedding_table_dims(conn: &Connection, dims: u32) -> Result<(), DbError> {
+        let table = format!("embeddings_{dims}");
+        conn.execute_batch(&format!(
+            "
+            CREATE TABLE IF NOT EXISTS {table} (
+                id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
+                chunk_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                embedding FLOAT[{dims}],
+                dims INTEGER NOT NULL DEFAULT {dims},
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
+            ON {table} (chunk_id, provider, model);
+        "
+        ))?;
+        Ok(())
+    }
+
+    fn discover_hnsw_indexes(conn: &Connection) -> Result<Vec<HnswIndexInfo>, DbError> {
+        let mut stmt = conn.prepare(
+            "SELECT index_name, table_name, sql FROM duckdb_indexes()
+             WHERE table_name SIMILAR TO 'embeddings_[0-9]+'
+             AND schema_name = 'main'",
+        )?;
+        let rows: Vec<(String, String, Option<String>)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let indexes = rows
+            .into_iter()
+            .filter(|(name, _, sql)| {
+                sql.as_deref()
+                    .map(|s| s.to_uppercase().contains("USING HNSW"))
+                    .unwrap_or(false)
+                    || name.starts_with("hnsw_")
+                    || name.starts_with("idx_hnsw_")
+            })
+            .map(|(name, table, sql)| HnswIndexInfo {
+                index_name: name,
+                table_name: table,
+                create_sql: sql,
+            })
+            .collect();
+        Ok(indexes)
+    }
+
+    fn drop_hnsw_indexes(conn: &Connection, indexes: &[HnswIndexInfo]) -> Result<(), DbError> {
+        for idx in indexes {
+            let safe_name = idx.index_name.replace('"', "\"\"");
+            conn.execute(&format!("DROP INDEX IF EXISTS \"{safe_name}\""), [])?;
+        }
+        Ok(())
+    }
+
+    fn recreate_hnsw_indexes(conn: &Connection, indexes: &[HnswIndexInfo]) -> Result<(), DbError> {
+        for idx in indexes {
+            if let Some(create_sql) = &idx.create_sql {
+                // Ensure idempotent
+                let sql = if create_sql.contains("IF NOT EXISTS") {
+                    create_sql.clone()
+                } else {
+                    create_sql.replacen("CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1)
+                };
+                conn.execute_batch(&sql)?;
+            } else {
+                let safe_idx = idx.index_name.replace('"', "\"\"");
+                let safe_tbl = idx.table_name.replace('"', "\"\"");
+                conn.execute_batch(&format!(
+                    "CREATE INDEX IF NOT EXISTS \"{safe_idx}\" ON \"{safe_tbl}\" USING HNSW (embedding) WITH (metric = 'cosine')"
+                ))?;
+            }
+        }
+        if !indexes.is_empty() {
+            conn.execute_batch("CHECKPOINT")?;
+        }
+        Ok(())
+    }
+
+    fn count_total_embeddings(batch: &DbWriterBatch) -> usize {
+        batch
+            .files
+            .iter()
+            .flat_map(|f| &f.chunks)
+            .filter(|c| {
+                c.embedding
+                    .as_ref()
+                    .map(|e| !e.is_empty())
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    fn collect_unique_dims(batch: &DbWriterBatch) -> HashSet<u32> {
+        batch
+            .files
+            .iter()
+            .flat_map(|f| &f.chunks)
+            .filter_map(|c| c.embedding.as_ref())
+            .filter(|e| !e.is_empty())
+            .map(|e| e.len() as u32)
+            .collect()
+    }
+
+    fn upsert_file(conn: &Connection, file: &FileRecord) -> Result<i64, DbError> {
+        let path = Path::new(&file.path);
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(file.path.as_str())
+            .to_string();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        // DuckDB ON CONFLICT … RETURNING requires the conflict to be on a UNIQUE column.
+        // `path` has UNIQUE NOT NULL, so this is safe.
+        let id: i64 = conn.query_row(
+            "INSERT INTO files (path, name, extension, size, modified_time, content_hash, language)
+             VALUES (?, ?, ?, ?, CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, ?, ?)
+             ON CONFLICT (path) DO UPDATE SET
+                 size = EXCLUDED.size,
+                 modified_time = EXCLUDED.modified_time,
+                 content_hash = EXCLUDED.content_hash,
+                 language = EXCLUDED.language,
+                 updated_at = now()
+             RETURNING id",
+            duckdb::params![
+                file.path,
+                name,
+                ext,
+                file.size_bytes,
+                file.mtime,
+                file.mtime,
+                file.content_hash,
+                file.language,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    fn insert_chunks_for_file(
+        conn: &Connection,
+        file_id: i64,
+        chunks: &[ChunkRecord],
+    ) -> Result<Vec<i64>, DbError> {
+        if chunks.is_empty() {
+            return Ok(vec![]);
+        }
+
+        conn.execute_batch(
+            "CREATE TEMPORARY TABLE IF NOT EXISTS rust_temp_chunks (
+                file_id INTEGER,
+                chunk_type TEXT,
+                symbol TEXT,
+                code TEXT,
+                start_line INTEGER,
+                end_line INTEGER,
+                start_byte INTEGER,
+                end_byte INTEGER,
+                language TEXT,
+                metadata TEXT
+            );
+            DELETE FROM rust_temp_chunks;",
+        )?;
+
+        {
+            let mut stmt = conn.prepare(
+                "INSERT INTO rust_temp_chunks
+                 (file_id, chunk_type, symbol, code, start_line, end_line,
+                  start_byte, end_byte, language, metadata)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )?;
+            for chunk in chunks {
+                stmt.execute(duckdb::params![
+                    file_id,
+                    chunk.chunk_type,
+                    chunk.symbol,
+                    chunk.code,
+                    chunk.start_line,
+                    chunk.end_line,
+                    chunk.start_byte,
+                    chunk.end_byte,
+                    chunk.language,
+                    chunk.metadata,
+                ])?;
+            }
+        }
+
+        let mut stmt = conn.prepare(
+            "INSERT INTO chunks
+             (file_id, chunk_type, symbol, code, start_line, end_line,
+              start_byte, end_byte, language, metadata)
+             SELECT file_id, chunk_type, symbol, code, start_line, end_line,
+                    start_byte, end_byte, language, metadata
+             FROM rust_temp_chunks
+             RETURNING id",
+        )?;
+
+        let ids: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<i64>, _>>()
+            .map_err(DbError::DuckDb)?;
+        Ok(ids)
+    }
+
+    fn insert_embeddings_txn(
+        conn: &Connection,
+        batch: &DbWriterBatch,
+        embedding_pairs: &[(i64, usize, usize)], // (chunk_id, file_idx, chunk_idx)
+    ) -> Result<u64, DbError> {
+        if embedding_pairs.is_empty() {
+            return Ok(0);
+        }
+
+        // Group by dims
+        let mut by_dims: HashMap<u32, Vec<(i64, &ChunkRecord)>> = HashMap::new();
+        for &(chunk_id, file_idx, chunk_idx) in embedding_pairs {
+            let chunk = &batch.files[file_idx].chunks[chunk_idx];
+            if let Some(emb) = &chunk.embedding {
+                if !emb.is_empty() {
+                    by_dims
+                        .entry(emb.len() as u32)
+                        .or_default()
+                        .push((chunk_id, chunk));
+                }
+            }
+        }
+
+        let mut total = 0u64;
+        for (dims, items) in &by_dims {
+            let table = format!("embeddings_{dims}");
+            let temp = format!("rust_temp_emb_{dims}");
+
+            conn.execute_batch(&format!(
+                "CREATE TEMPORARY TABLE IF NOT EXISTS {temp} (
+                    chunk_id INTEGER,
+                    provider TEXT,
+                    model TEXT,
+                    embedding TEXT,
+                    dims INTEGER
+                );
+                DELETE FROM {temp};"
+            ))?;
+
+            {
+                let mut stmt = conn.prepare(&format!(
+                    "INSERT INTO {temp} (chunk_id, provider, model, embedding, dims)
+                     VALUES (?, ?, ?, ?, ?)"
+                ))?;
+                for (chunk_id, chunk) in items {
+                    let emb = chunk.embedding.as_ref().unwrap();
+                    let emb_json = serde_json::to_string(emb).map_err(DbError::Json)?;
+                    stmt.execute(duckdb::params![
+                        chunk_id,
+                        chunk.provider.as_deref().unwrap_or("unknown"),
+                        chunk.model.as_deref().unwrap_or("unknown"),
+                        emb_json,
+                        *dims as i64,
+                    ])?;
+                }
+            }
+
+            let rows = conn.execute(
+                &format!(
+                    "INSERT INTO {table} (chunk_id, provider, model, embedding, dims)
+                     SELECT chunk_id, provider, model, embedding::FLOAT[{dims}], dims
+                     FROM {temp}
+                     ON CONFLICT (chunk_id, provider, model) DO UPDATE
+                     SET embedding = EXCLUDED.embedding, dims = EXCLUDED.dims"
+                ),
+                [],
+            )?;
+            total += rows as u64;
+        }
+        Ok(total)
+    }
+
+    fn write_batch_txn(
+        conn: &Connection,
+        batch: &DbWriterBatch,
+    ) -> Result<(Vec<i64>, u64, Vec<(i64, usize, usize)>), DbError> {
+        // Handle delete_paths
+        for path in &batch.delete_paths {
+            conn.execute(
+                "DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path = ?)",
+                duckdb::params![path],
+            )?;
+            conn.execute("DELETE FROM files WHERE path = ?", duckdb::params![path])?;
+        }
+
+        // Delete chunks for files known to be modified (avoids duplication)
+        for file in &batch.files {
+            if let Some(existing_id) = file.existing_file_id {
+                conn.execute(
+                    "DELETE FROM chunks WHERE file_id = ?",
+                    duckdb::params![existing_id],
+                )?;
+            }
+        }
+
+        // Upsert files → collect file_ids
+        let mut file_ids = Vec::with_capacity(batch.files.len());
+        for file in &batch.files {
+            let fid = Self::upsert_file(conn, file)?;
+            file_ids.push(fid);
+        }
+
+        // Insert chunks per file; collect (chunk_id, file_idx, chunk_idx) for embeddings
+        let mut total_chunks = 0u64;
+        let mut embedding_pairs: Vec<(i64, usize, usize)> = Vec::new();
+
+        for (file_idx, (file, &file_id)) in batch.files.iter().zip(file_ids.iter()).enumerate() {
+            let chunk_ids = Self::insert_chunks_for_file(conn, file_id, &file.chunks)?;
+            total_chunks += chunk_ids.len() as u64;
+
+            for (chunk_idx, chunk_id) in chunk_ids.into_iter().enumerate() {
+                if file.chunks[chunk_idx]
+                    .embedding
+                    .as_ref()
+                    .map(|e| !e.is_empty())
+                    .unwrap_or(false)
+                {
+                    embedding_pairs.push((chunk_id, file_idx, chunk_idx));
+                }
+            }
+        }
+
+        Ok((file_ids, total_chunks, embedding_pairs))
+    }
+}
+
+impl crate::db::DbBackend for DuckDbHnswBackend {
+    fn open(&mut self) -> Result<(), DbError> {
+        // Crash recovery: check for swap_intent file (Invariant 17)
+        let db_path = PathBuf::from(&self.config.db_path);
+        let intent_path = {
+            let mut p = db_path.clone();
+            p.set_extension("duckdb.swap_intent");
+            p
+        };
+        if intent_path.exists() {
+            if let Ok(intent) = std::fs::read_to_string(&intent_path) {
+                match intent.trim() {
+                    "pre-swap" => {
+                        let _ = std::fs::remove_file(&intent_path);
+                    }
+                    "phase1" => {
+                        let old_path = db_path.with_extension("duckdb.old");
+                        if old_path.exists() {
+                            let _ = std::fs::rename(&old_path, &db_path);
+                        }
+                        let _ = std::fs::remove_file(&intent_path);
+                    }
+                    "phase2" => {
+                        let old_path = db_path.with_extension("duckdb.old");
+                        let _ = std::fs::remove_file(&old_path);
+                        let _ = std::fs::remove_file(&intent_path);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let conn = Connection::open(&self.config.db_path)?;
+        self.has_vss = Self::try_load_vss(&conn);
+        Self::setup_schema(&conn)?;
+        self.conn = Some(conn);
+        Ok(())
+    }
+
+    fn close(&mut self) -> Result<(), DbError> {
+        if let Some(conn) = self.conn.as_ref() {
+            let _ = conn.execute_batch("CHECKPOINT");
+        }
+        self.conn = None;
+        Ok(())
+    }
+
+    fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
+        // Step 0: Ensure embedding tables outside txn (Invariant 13)
+        let unique_dims = Self::collect_unique_dims(batch);
+        {
+            let conn = self
+                .conn
+                .as_ref()
+                .ok_or_else(|| DbError::Other("not open".into()))?;
+            for &dims in &unique_dims {
+                Self::ensure_embedding_table_dims(conn, dims)?;
+            }
+        }
+
+        // Step 1: Count embeddings to decide HNSW lifecycle
+        let total_emb = Self::count_total_embeddings(batch);
+
+        // Step 2: Discover + DROP HNSW indexes BEFORE BEGIN (Invariant 14)
+        let hnsw_indexes = {
+            let conn = self
+                .conn
+                .as_ref()
+                .ok_or_else(|| DbError::Other("not open".into()))?;
+            if self.has_vss && total_emb >= 50 {
+                let indexes = Self::discover_hnsw_indexes(conn)?;
+                if !indexes.is_empty() {
+                    Self::drop_hnsw_indexes(conn, &indexes)?;
+                }
+                indexes
+            } else {
+                vec![]
+            }
+        };
+
+        // Step 3: Transaction
+        let (file_ids, chunks_written, embedding_pairs) = {
+            let conn = self
+                .conn
+                .as_ref()
+                .ok_or_else(|| DbError::Other("not open".into()))?;
+            conn.execute_batch("BEGIN")?;
+
+            match Self::write_batch_txn(conn, batch) {
+                Ok(inner) => inner,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    // Try to restore HNSW even on error (Invariant 14)
+                    if !hnsw_indexes.is_empty() {
+                        let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
+                    }
+                    return Err(e);
+                }
+            }
+        };
+
+        // Step 3e: Insert embeddings (still inside txn)
+        let embeddings_written = {
+            let conn = self.conn.as_ref().unwrap();
+            match Self::insert_embeddings_txn(conn, batch, &embedding_pairs) {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    if !hnsw_indexes.is_empty() {
+                        let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
+                    }
+                    return Err(e);
+                }
+            }
+        };
+
+        // Step 4: COMMIT
+        {
+            let conn = self.conn.as_ref().unwrap();
+            if let Err(e) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                if !hnsw_indexes.is_empty() {
+                    let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
+                }
+                return Err(DbError::DuckDb(e));
+            }
+        }
+
+        // Step 5: RECREATE HNSW AFTER COMMIT (Invariant 14)
+        if !hnsw_indexes.is_empty() {
+            let conn = self.conn.as_ref().unwrap();
+            let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
+        }
+
+        self.write_count += 1;
+        Ok(BatchResult {
+            file_ids,
+            chunks_written,
+            embeddings_written,
+        })
+    }
+
+    fn needs_compaction(&mut self) -> Result<bool, DbError> {
+        Ok(self.write_count >= self.config.compaction_batch_threshold)
+    }
+
+    fn run_compaction(&mut self) -> Result<(), DbError> {
+        // Phase 0 compaction: simple CHECKPOINT + VACUUM equivalent via EXPORT/IMPORT
+        // Full 3-phase atomic swap deferred; for now just CHECKPOINT.
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| DbError::Other("not open".into()))?;
+        conn.execute_batch("CHECKPOINT")?;
+        self.write_count = 0;
+        Ok(())
+    }
+}

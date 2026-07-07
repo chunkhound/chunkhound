@@ -8,8 +8,12 @@ name = "chunkhound_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3    = { version = "0.22", features = ["extension-module", "abi3-py310"] }
-ignore  = "0.4"
+pyo3       = { version = "0.22", features = ["extension-module", "abi3-py310"] }
+ignore     = "0.4"
+duckdb     = { version = "1", features = ["bundled"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror  = "1"
 
 [profile.dev]
 opt-level = 0
