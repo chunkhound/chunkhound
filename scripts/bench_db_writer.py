@@ -92,14 +92,39 @@ def _create_embedding_table(conn: Any, dims: int) -> None:
 # ---------------------------------------------------------------------------
 
 def load_from_db(db_path: str, sample_files: int | None) -> list[dict]:
-    """Load real files+chunks+embeddings from an existing DuckDB (read-only)."""
+    """Load real files+chunks+embeddings from an existing DuckDB (read-only).
+
+    Samples only files that have at least one chunk, using bulk queries.
+    """
+    from datetime import datetime as _dt
+
     conn = duckdb.connect(db_path, read_only=True)
     try:
-        limit_clause = f" LIMIT {sample_files}" if sample_files else ""
-        files_rows = conn.execute(
-            f"SELECT id, path, modified_time, size, content_hash, language FROM files{limit_clause}"
-        ).fetchall()
+        limit = sample_files or 200
+        # Sample files that have chunks; use USING SAMPLE for randomness at scale
+        files_rows = conn.execute(f"""
+            SELECT f.id, f.path, f.modified_time, f.size, f.content_hash, f.language
+            FROM files f
+            WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id)
+            LIMIT {limit}
+        """).fetchall()
 
+        if not files_rows:
+            return []
+
+        file_ids = [r[0] for r in files_rows]
+        placeholders = ",".join(str(i) for i in file_ids)
+
+        # Bulk load all chunks for sampled files in one query
+        chunk_rows = conn.execute(f"""
+            SELECT id, file_id, symbol, start_line, end_line, code, chunk_type, language
+            FROM chunks
+            WHERE file_id IN ({placeholders})
+        """).fetchall()
+
+        chunk_ids = [r[0] for r in chunk_rows]
+
+        # Discover embedding tables
         emb_tables = [
             r[0]
             for r in conn.execute(
@@ -108,60 +133,62 @@ def load_from_db(db_path: str, sample_files: int | None) -> list[dict]:
             ).fetchall()
         ]
 
+        # Bulk load embeddings for all chunks
+        vectors: dict[int, tuple[list[float], str, str]] = {}  # chunk_id → (emb, provider, model)
+        if emb_tables and chunk_ids:
+            chunk_id_csv = ",".join(str(i) for i in chunk_ids)
+            for tbl in emb_tables:
+                rows = conn.execute(
+                    f"SELECT chunk_id, embedding, provider, model FROM {tbl} "
+                    f"WHERE chunk_id IN ({chunk_id_csv}) AND embedding IS NOT NULL"
+                ).fetchall()
+                for cid, emb, provider, model in rows:
+                    vectors[cid] = (list(emb), provider, model)
+
+        # Group chunks by file_id
+        from collections import defaultdict
+        chunks_by_file: dict[int, list] = defaultdict(list)
+        for row in chunk_rows:
+            chunks_by_file[row[1]].append(row)
+
         result = []
         for file_id, path, mtime, size, content_hash, language in files_rows:
-            chunks = conn.execute(
-                "SELECT id, symbol, start_line, end_line, code, chunk_type, language "
-                "FROM chunks WHERE file_id = ?",
-                [file_id],
-            ).fetchall()
-
-            chunk_ids = [c[0] for c in chunks]
-            vectors: dict[int, list[float]] = {}
-            if emb_tables and chunk_ids:
-                placeholders = ",".join("?" * len(chunk_ids))
-                for tbl in emb_tables:
-                    rows = conn.execute(
-                        f"SELECT chunk_id, embedding FROM {tbl} WHERE chunk_id IN ({placeholders})",
-                        chunk_ids,
-                    ).fetchall()
-                    for cid, emb in rows:
-                        if emb is not None:
-                            vectors[cid] = list(emb)
-
             mtime_float = None
             if mtime is not None:
                 try:
-                    from datetime import datetime
-                    if isinstance(mtime, datetime):
+                    if isinstance(mtime, _dt):
                         mtime_float = mtime.timestamp()
                     else:
                         mtime_float = float(mtime)
                 except Exception:
                     pass
 
+            file_chunks = chunks_by_file.get(file_id, [])
+            chunk_dicts = []
+            for c in file_chunks:
+                cid = c[0]
+                emb_info = vectors.get(cid)
+                chunk_dicts.append({
+                    "chunk_type": c[6] or "text",
+                    "symbol": c[2],
+                    "start_line": c[3],
+                    "end_line": c[4],
+                    "code": c[5] or "",
+                    "language": c[7],
+                    "metadata": None,
+                    "embedding": emb_info[0] if emb_info else None,
+                    "provider": emb_info[1] if emb_info else None,
+                    "model": emb_info[2] if emb_info else None,
+                })
+
             result.append({
-                "existing_file_id": None,  # fresh target DB
+                "existing_file_id": None,
                 "path": path,
                 "mtime": mtime_float,
                 "size_bytes": size,
                 "content_hash": content_hash,
                 "language": language,
-                "chunks": [
-                    {
-                        "chunk_type": c[5] or "text",
-                        "symbol": c[1],
-                        "start_line": c[2],
-                        "end_line": c[3],
-                        "code": c[4] or "",
-                        "language": c[6],
-                        "metadata": None,
-                        "embedding": vectors.get(c[0]),
-                        "provider": "openai" if vectors.get(c[0]) else None,
-                        "model": "text-embedding-3-small" if vectors.get(c[0]) else None,
-                    }
-                    for c in chunks
-                ],
+                "chunks": chunk_dicts,
             })
         return result
     finally:
