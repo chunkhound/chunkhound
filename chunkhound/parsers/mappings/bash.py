@@ -33,7 +33,8 @@ class BashMapping(BaseMapping):
         """
 
     def get_class_query(self) -> str:
-        """Get tree-sitter query pattern for class definitions (not applicable to Bash)."""
+        """Get tree-sitter query pattern for class definitions
+        (not applicable to Bash)."""
         return ""
 
     def get_comment_query(self) -> str:
@@ -67,11 +68,11 @@ class BashMapping(BaseMapping):
             (function_definition
                 name: (word) @name
             ) @definition
-            
+
             (variable_assignment
                 name: (variable_name) @name
             ) @definition
-            
+
             (for_statement
                 variable: (variable_name) @name
             ) @definition
@@ -82,25 +83,25 @@ class BashMapping(BaseMapping):
         elif concept == UniversalConcept.BLOCK:
             return """
             (compound_statement) @block
-            
+
             (if_statement
                 (compound_statement) @block
             )
-            
+
             (for_statement
                 (do_group
                     (compound_statement) @block
                 )
             )
-            
+
             (while_statement
                 (do_group
                     (compound_statement) @block
                 )
             )
-            
+
             (case_statement) @block
-            
+
             (subshell) @block
             """
 

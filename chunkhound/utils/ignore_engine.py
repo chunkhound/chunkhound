@@ -327,20 +327,20 @@ def _detect_repo_roots(
                     child_resolved / ".git"
                 ).is_file()
                 if child_is_repo:
-                    gitignore_state_by_dir[
-                        child_resolved
-                    ] = _extend_gitignore_prune_state(
-                        root,
-                        child_logical_path,
-                        None,
+                    gitignore_state_by_dir[child_resolved] = (
+                        _extend_gitignore_prune_state(
+                            root,
+                            child_logical_path,
+                            None,
+                        )
                     )
                 elif current_gitignore_state is not None:
-                    gitignore_state_by_dir[
-                        child_resolved
-                    ] = _extend_gitignore_prune_state(
-                        root,
-                        child_logical_path,
-                        current_gitignore_state,
+                    gitignore_state_by_dir[child_resolved] = (
+                        _extend_gitignore_prune_state(
+                            root,
+                            child_logical_path,
+                            current_gitignore_state,
+                        )
                     )
 
         # Repo root if .git dir exists or .git file exists (worktree/submodule)

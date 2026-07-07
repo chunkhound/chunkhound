@@ -66,9 +66,7 @@ class TestWarmReadyTiming:
     def _call_and_assert_emitted(self, server: _TestableMCPServer) -> str:
         """Call the method and return the captured summary message."""
         server._emit_warm_ready_summary_if_ready()
-        assert server._warm_ready_summary_emitted, (
-            "Summary should have been emitted"
-        )
+        assert server._warm_ready_summary_emitted, "Summary should have been emitted"
         assert server._timing_log.call_count == 1
         msg: str = server._timing_log.call_args[0][0]
         return msg
@@ -104,9 +102,7 @@ class TestWarmReadyTiming:
         assert "initial_scan=" not in msg
         assert msg.startswith("summary blocking_startup=")
 
-    def test_skip_and_resync_triggers_summary(
-        self, server: _TestableMCPServer
-    ) -> None:
+    def test_skip_and_resync_triggers_summary(self, server: _TestableMCPServer) -> None:
         """Summary emitted when initial scan is skipped AND resync completed.
 
         Covers the path where ``_warm_ready_initial_scan_skipped_monotonic``
@@ -150,9 +146,7 @@ class TestWarmReadyTiming:
         assert "fresh_instance_resync=3.500s" in msg
         assert "initial_scan=15.000s" in msg
 
-    def test_not_ready_when_scan_not_complete(
-        self, server: _TestableMCPServer
-    ) -> None:
+    def test_not_ready_when_scan_not_complete(self, server: _TestableMCPServer) -> None:
         """Summary NOT emitted when no initial scan completed/skipped.
 
         Covers the guard that returns early when both

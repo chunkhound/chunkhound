@@ -141,10 +141,7 @@ def test_map_hyde_provider_override_requires_explicit_model_on_provider_switch(
     """Provider switches require an explicit model — even within the same family."""
     with pytest.raises(
         ValueError,
-        match=(
-            "map_hyde provider override requires an explicit "
-            "map_hyde_model"
-        ),
+        match=("map_hyde provider override requires an explicit map_hyde_model"),
     ):
         Config(
             target_dir=tmp_path,
@@ -189,10 +186,7 @@ def test_build_llm_metadata_and_map_hyde_rejects_invalid_cross_family_override(
     validation time."""
     with pytest.raises(
         ValueError,
-        match=(
-            "map_hyde provider override requires an explicit "
-            "map_hyde_model"
-        ),
+        match=("map_hyde provider override requires an explicit map_hyde_model"),
     ):
         Config(
             target_dir=tmp_path,

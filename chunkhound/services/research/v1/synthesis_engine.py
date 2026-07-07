@@ -137,7 +137,8 @@ class SynthesisEngine:
 
         Args:
             root_query: Original research query
-            chunks: All chunks from BFS traversal (will be filtered to match budgeted files)
+            chunks: All chunks from BFS traversal
+                (will be filtered to match budgeted files)
             files: Budgeted file contents (subset within token limits)
             context: Research context
             synthesis_budgets: Dynamic budgets based on repository size
@@ -159,8 +160,10 @@ class SynthesisEngine:
 
         logger.info(
             f"Starting single-pass synthesis with {len(files)} files, "
-            f"{len(budgeted_chunks)} chunks (filtered from {original_chunk_count} total, "
-            f"output_limit={max_output_tokens:,})"
+            f"{len(budgeted_chunks)} chunks "
+            f"(filtered from {original_chunk_count}"
+            f" total, output_limit="
+            f"{max_output_tokens:,})"
         )
 
         llm = self._llm_manager.get_synthesis_provider()
@@ -169,14 +172,20 @@ class SynthesisEngine:
         # This should never happen due to earlier validations, but catch it just in case
         if not files:
             logger.error(
-                f"Synthesis called with empty files dict despite {original_chunk_count} chunks. "
-                "This indicates a bug in aggregation or budget management."
+                f"Synthesis called with empty files"
+                f" dict despite {original_chunk_count}"
+                f" chunks. This indicates a bug in"
+                f" aggregation or budget management."
             )
             raise RuntimeError(
-                f"Cannot synthesize answer: no source context available. "
-                f"Found {original_chunk_count} chunks but received 0 files for synthesis. "
-                f"This is a bug - earlier validation should have caught this. "
-                f"Check aggregation and budget management logs."
+                f"Cannot synthesize answer: no source"
+                f" context available. Found"
+                f" {original_chunk_count} chunks but"
+                f" received 0 files for synthesis."
+                f" This is a bug - earlier validation"
+                f" should have caught this. Check"
+                f" aggregation and budget management"
+                f" logs."
             )
 
         # Build source context sections
@@ -192,7 +201,8 @@ class SynthesisEngine:
 
         # Build sections from files (already budgeted)
         for file_path, content in files.items():
-            # If we have chunks for this file, build content with individual line markers
+            # If we have chunks for this file,
+            # build content with individual line markers
             if file_path in chunks_by_file:
                 file_chunks = chunks_by_file[file_path]
                 # Sort chunks by start_line for logical ordering
@@ -247,7 +257,7 @@ class SynthesisEngine:
         output_guidance = build_output_guidance(TARGET_OUTPUT_TOKENS)
 
         # Build comprehensive synthesis prompt
-        system = prompts.SYNTHESIS_SYSTEM_BUILDER(output_guidance)
+        system = prompts.synthesis_system_builder(output_guidance)
 
         # Combine root_query with constants and facts context
         query_with_context = root_query + constants_section + facts_section
@@ -282,13 +292,20 @@ class SynthesisEngine:
 
         if answer_length < MIN_SYNTHESIS_LENGTH:
             logger.error(
-                f"Synthesis returned suspiciously short answer: {answer_length} chars "
-                f"(minimum: {MIN_SYNTHESIS_LENGTH}, finish_reason={response.finish_reason})"
+                f"Synthesis returned suspiciously short"
+                f" answer: {answer_length} chars"
+                f" (minimum: {MIN_SYNTHESIS_LENGTH},"
+                f" finish_reason="
+                f"{response.finish_reason})"
             )
             raise RuntimeError(
-                f"LLM synthesis failed: generated only {answer_length} characters "
-                f"(minimum: {MIN_SYNTHESIS_LENGTH}). finish_reason={response.finish_reason}. "
-                "This indicates an LLM error, content filter, or model refusal."
+                f"LLM synthesis failed: generated"
+                f" only {answer_length} characters"
+                f" (minimum: {MIN_SYNTHESIS_LENGTH})."
+                f" finish_reason="
+                f"{response.finish_reason}."
+                " This indicates an LLM error,"
+                " content filter, or model refusal."
             )
 
         # Append sources footer with file and chunk information
@@ -304,7 +321,9 @@ class SynthesisEngine:
             )
 
         logger.info(
-            f"Single-pass synthesis complete: {llm.estimate_tokens(answer):,} tokens generated"
+            f"Single-pass synthesis complete:"
+            f" {llm.estimate_tokens(answer):,}"
+            f" tokens generated"
         )
 
         return answer
@@ -326,7 +345,8 @@ class SynthesisEngine:
             root_query: Original research query
             chunks: All chunks (will be filtered to cluster files)
             synthesis_budgets: Dynamic budgets based on repository size
-            total_input_tokens: Sum of all cluster tokens (for proportional budget allocation)
+            total_input_tokens: Sum of all cluster
+                tokens (for proportional budget allocation)
             constants_context: Constants ledger context for LLM prompts
             facts_context: Facts ledger context for LLM prompts
 
@@ -345,8 +365,10 @@ class SynthesisEngine:
 
         logger.debug(
             f"Synthesizing cluster {cluster.cluster_id} "
-            f"({len(cluster.file_paths)} files, {len(cluster_chunks)} chunks filtered from {original_chunk_count}, "
-            f"{cluster.total_tokens:,} tokens)"
+            f"({len(cluster.file_paths)} files,"
+            f" {len(cluster_chunks)} chunks filtered"
+            f" from {original_chunk_count},"
+            f" {cluster.total_tokens:,} tokens)"
         )
 
         llm = self._llm_manager.get_synthesis_provider()
@@ -394,7 +416,8 @@ class SynthesisEngine:
         )
 
         # Build cluster-specific synthesis prompt
-        # Proportional output budget: each cluster gets output proportional to its input share
+        # Proportional output budget: each cluster
+        # gets output proportional to its input share
         # This ensures larger clusters (more code) get more output tokens
         cluster_proportion = (
             cluster.total_tokens / total_input_tokens if total_input_tokens > 0 else 1.0
@@ -403,7 +426,8 @@ class SynthesisEngine:
             5000,
             int(synthesis_budgets["output_tokens"] * cluster_proportion),
         )
-        # Cap cluster target to half of TARGET_OUTPUT_TOKENS (clusters combine in reduce)
+        # Cap cluster target to half of
+        # TARGET_OUTPUT_TOKENS (clusters combine in reduce)
         cluster_target = min(cluster_output_tokens, TARGET_OUTPUT_TOKENS // 2)
 
         # Build constants section if available
@@ -502,7 +526,8 @@ Provide a comprehensive analysis focusing on the query."""
         Args:
             root_query: Original research query
             cluster_results: Results from map step (cluster summaries)
-            all_chunks: All chunks from clusters (will be filtered to match synthesized files)
+            all_chunks: All chunks from clusters
+                (will be filtered to match synthesized files)
             all_files: All files that were synthesized across clusters
             synthesis_budgets: Dynamic budgets based on repository size
             constants_context: Constants ledger context for LLM prompts
@@ -529,8 +554,11 @@ Provide a comprehensive analysis focusing on the query."""
 
         logger.info(
             f"Reducing {len(cluster_results)} cluster summaries into final answer "
-            f"(input: {total_input_tokens:,} tokens, output budget: {max_output_tokens:,} tokens, "
-            f"{len(budgeted_chunks)} chunks filtered from {original_chunk_count})"
+            f"(input: {total_input_tokens:,} tokens,"
+            f" output budget: "
+            f"{max_output_tokens:,} tokens,"
+            f" {len(budgeted_chunks)} chunks filtered"
+            f" from {original_chunk_count})"
         )
 
         # Build global file reference map for all clusters
@@ -580,11 +608,14 @@ Provide a comprehensive analysis focusing on the query."""
             facts_section = f"\n\n{facts_context}"
 
         # Build reduce prompt with input size context
-        # The LLM needs to know how much content it's integrating to prioritize effectively
-        system = f"""You are integrating {total_input_tokens:,} tokens of cluster analyses into a final answer.
+        # The LLM needs to know how much content
+        # it's integrating to prioritize effectively
+        system = f"""You are integrating {total_input_tokens:,} tokens
+of cluster analyses into a final answer.
 
 Context:
-- You are synthesizing {len(cluster_results)} cluster analyses totaling ~{total_input_tokens:,} tokens
+- You are synthesizing {len(cluster_results)} cluster analyses
+  totaling ~{total_input_tokens:,} tokens
 - Prioritize the most important insights when consolidating
 
 Your task:
@@ -607,7 +638,10 @@ Your task:
 You have been provided with analyses of different code clusters.
 Synthesize these into a comprehensive, well-organized answer to the query.
 
-NOTE: All citation numbers [N] in the cluster analyses have been remapped to match the global Source References table above. Simply preserve these citations as you integrate the analyses.
+NOTE: All citation numbers [N] in the cluster analyses have
+been remapped to match the global Source References table
+above. Simply preserve these citations as you integrate
+the analyses.
 
 {combined_summaries}
 
@@ -615,7 +649,9 @@ Provide a complete, integrated analysis that addresses the original query."""
 
         logger.debug(
             f"Calling LLM for reduce synthesis "
-            f"(input: {total_input_tokens:,} tokens, max_completion_tokens={max_output_tokens:,})"
+            f"(input: {total_input_tokens:,} tokens,"
+            f" max_completion_tokens="
+            f"{max_output_tokens:,})"
         )
 
         response = await llm.complete(
@@ -632,11 +668,17 @@ Provide a complete, integrated analysis that addresses the original query."""
 
         if answer_length < MIN_SYNTHESIS_LENGTH:
             logger.error(
-                f"Reduce synthesis returned suspiciously short answer: {answer_length} chars"
+                f"Reduce synthesis returned"
+                f" suspiciously short answer:"
+                f" {answer_length} chars"
             )
             raise RuntimeError(
-                f"LLM reduce synthesis failed: generated only {answer_length} characters "
-                f"(minimum: {MIN_SYNTHESIS_LENGTH}). finish_reason={response.finish_reason}."
+                f"LLM reduce synthesis failed:"
+                f" generated only {answer_length}"
+                f" characters (minimum:"
+                f" {MIN_SYNTHESIS_LENGTH})."
+                f" finish_reason="
+                f"{response.finish_reason}."
             )
 
         # Validate citation references are valid
@@ -645,7 +687,9 @@ Provide a complete, integrated analysis that addresses the original query."""
         )
         if invalid_citations:
             logger.warning(
-                f"Found {len(invalid_citations)} invalid citation references after reduce: "
+                f"Found {len(invalid_citations)}"
+                f" invalid citation references"
+                f" after reduce: "
                 f"{invalid_citations[:10]}"
                 + (
                     f" ... and {len(invalid_citations) - 10} more"
@@ -667,7 +711,9 @@ Provide a complete, integrated analysis that addresses the original query."""
             )
 
         logger.info(
-            f"Reduce synthesis complete: {llm.estimate_tokens(answer):,} tokens generated"
+            f"Reduce synthesis complete:"
+            f" {llm.estimate_tokens(answer):,}"
+            f" tokens generated"
         )
 
         return answer

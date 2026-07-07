@@ -643,7 +643,10 @@ class TestEmbedBatchTokenBudget:
 
 
 class TestUpstreamTimeoutRetry:
-    """Test retry logic inside _embed_single_batch_locked by patching asyncio.to_thread."""
+    """
+    Test retry logic inside _embed_single_batch_locked
+    by patching asyncio.to_thread.
+    """
 
     @pytest.mark.asyncio
     async def test_408_in_error_string_retried(self):

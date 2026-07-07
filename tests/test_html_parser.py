@@ -1,9 +1,10 @@
 """Unit tests for HTML parser."""
 
-import pytest
 from pathlib import Path
 
-from chunkhound.core.types.common import Language, ChunkType
+import pytest
+
+from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.parser_factory import ParserFactory
 
 
@@ -45,7 +46,9 @@ def test_parses_semantic_elements_as_block(html_parser):
     assert len(block_chunks) > 0, "No BLOCK chunks found for semantic elements"
     symbols = {c.symbol for c in block_chunks}
     assert any("header" in s for s in symbols), f"header not found in {symbols}"
-    assert any("main" in s or "article" in s or "aside" in s or "footer" in s for s in symbols)
+    assert any(
+        "main" in s or "article" in s or "aside" in s or "footer" in s for s in symbols
+    )
 
 
 def test_parses_custom_elements_as_block(html_parser):
@@ -94,14 +97,22 @@ def test_parses_script_src_as_import(html_parser):
 </head><body></body></html>"""
     chunks = html_parser.parse_content(code, "test.html", file_id=1)
     import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
-    assert len(import_chunks) >= 1, f"Expected IMPORT chunks for script[src], got {import_chunks}"
+    assert len(import_chunks) >= 1, (
+        f"Expected IMPORT chunks for script[src], got {import_chunks}"
+    )
     all_import_symbols = " ".join(c.symbol for c in import_chunks)
-    assert "app.js" in all_import_symbols, f"js/app.js not found in import symbols: {all_import_symbols!r}"
-    assert "lodash" in all_import_symbols, f"lodash not found in import symbols: {all_import_symbols!r}"
+    assert "app.js" in all_import_symbols, (
+        f"js/app.js not found in import symbols: {all_import_symbols!r}"
+    )
+    assert "lodash" in all_import_symbols, (
+        f"lodash not found in import symbols: {all_import_symbols!r}"
+    )
     # External scripts must NOT appear as BLOCK chunks
     block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
     block_symbols = " ".join(c.symbol for c in block_chunks)
-    assert "app.js" not in block_symbols, f"External script wrongly in BLOCK: {block_symbols!r}"
+    assert "app.js" not in block_symbols, (
+        f"External script wrongly in BLOCK: {block_symbols!r}"
+    )
 
 
 def test_parses_inline_script_as_block(html_parser):
@@ -115,7 +126,9 @@ def test_parses_inline_script_as_block(html_parser):
     chunks = html_parser.parse_content(code, "test.html", file_id=1)
     block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
     assert len(block_chunks) > 0, "No BLOCK chunk for inline script"
-    assert any("script" in c.symbol for c in block_chunks), "No script block chunk found"
+    assert any("script" in c.symbol for c in block_chunks), (
+        "No script block chunk found"
+    )
 
 
 def test_parses_inline_style_as_block(html_parser):
@@ -197,7 +210,8 @@ def test_element_name_uses_class_when_no_id(html_parser):
     chunks = html_parser.parse_content(code, "test.html", file_id=1)
     block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
     assert any("article.blog-post" in c.symbol for c in block_chunks), (
-        f"Expected 'article.blog-post' in symbols, got: {[c.symbol for c in block_chunks]}"
+        f"Expected 'article.blog-post' in symbols,"
+        f" got: {[c.symbol for c in block_chunks]}"
     )
 
 
@@ -210,13 +224,19 @@ def test_comprehensive_file(html_parser, comprehensive_html):
     chunk_types = {c.chunk_type for c in chunks}
 
     # Must have BLOCK (semantic elements - cAST may merge adjacent elements)
-    assert ChunkType.BLOCK in chunk_types, f"No BLOCK chunks found. Types: {chunk_types}"
+    assert ChunkType.BLOCK in chunk_types, (
+        f"No BLOCK chunks found. Types: {chunk_types}"
+    )
 
     # Must have COMMENT
-    assert ChunkType.COMMENT in chunk_types, f"No COMMENT chunks found. Types: {chunk_types}"
+    assert ChunkType.COMMENT in chunk_types, (
+        f"No COMMENT chunks found. Types: {chunk_types}"
+    )
 
     # Must have NAMESPACE (DOCTYPE = STRUCTURE)
-    assert ChunkType.NAMESPACE in chunk_types, f"No NAMESPACE/STRUCTURE chunks. Types: {chunk_types}"
+    assert ChunkType.NAMESPACE in chunk_types, (
+        f"No NAMESPACE/STRUCTURE chunks. Types: {chunk_types}"
+    )
 
     # Must have IMPORT (link[rel=stylesheet] imports)
     assert ChunkType.IMPORT in chunk_types, f"No IMPORT chunks. Types: {chunk_types}"
@@ -226,7 +246,9 @@ def test_comprehensive_file(html_parser, comprehensive_html):
 
     # Verify stylesheet imports are captured (may be merged into one chunk)
     import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
-    assert len(import_chunks) >= 1, f"Expected at least 1 import chunk, got {len(import_chunks)}"
+    assert len(import_chunks) >= 1, (
+        f"Expected at least 1 import chunk, got {len(import_chunks)}"
+    )
     import_code = " ".join(c.code for c in import_chunks)
     assert "css" in import_code.lower() or "stylesheet" in import_code.lower(), (
         "No CSS import found in import chunks"
@@ -240,17 +262,20 @@ def test_comprehensive_file(html_parser, comprehensive_html):
 
     # Must have multiple COMMENT chunks
     comment_chunks = [c for c in chunks if c.chunk_type == ChunkType.COMMENT]
-    assert len(comment_chunks) >= 3, f"Expected at least 3 comment chunks, got {len(comment_chunks)}"
+    assert len(comment_chunks) >= 3, (
+        f"Expected at least 3 comment chunks, got {len(comment_chunks)}"
+    )
 
 
 def test_unquoted_attribute_value():
     """_get_attribute handles unquoted attribute values."""
-    from chunkhound.parsers.parser_factory import ParserFactory
     from chunkhound.core.types.common import Language
+    from chunkhound.parsers.parser_factory import ParserFactory
+
     factory = ParserFactory()
     parser = factory.create_parser(Language.HTML)
     # Unquoted id attribute
-    code = '<section id=intro><h1>Hello</h1></section>'
+    code = "<section id=intro><h1>Hello</h1></section>"
     chunks = parser.parse_content(code, "test.html", file_id=1)
     block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
     assert len(block_chunks) > 0, "No BLOCK chunk for section with unquoted id"
@@ -261,8 +286,9 @@ def test_unquoted_attribute_value():
 
 def test_jinja_language_produces_chunks():
     """Language.JINJA (HTML grammar) parses templates and produces BLOCK chunks."""
-    from chunkhound.parsers.parser_factory import ParserFactory
     from chunkhound.core.types.common import Language
+    from chunkhound.parsers.parser_factory import ParserFactory
+
     factory = ParserFactory()
     parser = factory.create_parser(Language.JINJA)
     # Jinja {{ }} expressions are treated as plain text by the HTML grammar
@@ -289,6 +315,7 @@ def test_jinja_language_produces_chunks():
 def test_resolve_import_paths_html(tmp_path):
     """resolve_import_paths resolves a relative href from a full link tag."""
     from chunkhound.parsers.mappings.html import HtmlMapping
+
     html = HtmlMapping()
     (tmp_path / "style.css").write_text("body{}")
     link_tag = '<link rel="stylesheet" href="style.css">'
@@ -300,6 +327,7 @@ def test_resolve_import_paths_html(tmp_path):
 def test_resolve_import_paths_html_query_string(tmp_path):
     """resolve_import_paths strips cache-busting query strings before resolving."""
     from chunkhound.parsers.mappings.html import HtmlMapping
+
     html = HtmlMapping()
     (tmp_path / "style.css").write_text("body{}")
     # href with cache-busting suffix — should still resolve to the bare file
@@ -312,6 +340,7 @@ def test_resolve_import_paths_html_query_string(tmp_path):
 def test_resolve_import_paths_html_fragment(tmp_path):
     """resolve_import_paths strips URL fragments (#...) before resolving."""
     from chunkhound.parsers.mappings.html import HtmlMapping
+
     html = HtmlMapping()
     (tmp_path / "style.css").write_text("body{}")
     link_tag = '<link rel="stylesheet" href="style.css#section">'
@@ -323,11 +352,13 @@ def test_resolve_import_paths_html_fragment(tmp_path):
 def test_resolve_import_paths_html_unquoted_nested(tmp_path):
     """resolve_import_paths resolves unquoted href with a nested path (contains '/')."""
     from chunkhound.parsers.mappings.html import HtmlMapping
+
     html = HtmlMapping()
     assets = tmp_path / "assets"
     assets.mkdir()
     (assets / "style.css").write_text("body{}")
-    # Unquoted attribute value with a path separator — the bug was that '/' terminated matching
+    # Unquoted attribute value with a path separator
+    # — the bug was that '/' terminated matching
     link_tag = "<link rel=stylesheet href=assets/style.css>"
     resolved = html.resolve_import_paths(link_tag, tmp_path, tmp_path / "index.html")
     assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
@@ -335,7 +366,8 @@ def test_resolve_import_paths_html_unquoted_nested(tmp_path):
 
 
 def test_stylesheet_import_name_strips_query_string(html_parser):
-    """IMPORT chunk name for <link rel=stylesheet> strips cache-busting query strings."""
+    """IMPORT chunk name for <link rel=stylesheet>
+    strips cache-busting query strings."""
     code = '<link rel="stylesheet" href="main.css?v=2.0.0">'
     chunks = html_parser.parse_content(code, "test.html", file_id=1)
     import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
@@ -352,13 +384,22 @@ def test_jinja_dynamic_attr_symbol_no_template_expr(html_parser):
     ``section_line1`` (falling back to line number) rather than the noisy
     ``section#{{ section.id }}``.
     """
-    code = '<html><body><section id="{{ section.id }}" class="{{ cls }}">content</section></body></html>'
+    code = (
+        "<html><body>"
+        '<section id="{{ section.id }}"'
+        ' class="{{ cls }}">content'
+        "</section></body></html>"
+    )
     chunks = html_parser.parse_content(code, "test.html", file_id=1)
     block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
     assert len(block_chunks) > 0, "No BLOCK chunks found"
     for chunk in block_chunks:
-        assert "{{" not in chunk.symbol, f"Jinja expression leaked into symbol: {chunk.symbol!r}"
-        assert "}}" not in chunk.symbol, f"Jinja expression leaked into symbol: {chunk.symbol!r}"
+        assert "{{" not in chunk.symbol, (
+            f"Jinja expression leaked into symbol: {chunk.symbol!r}"
+        )
+        assert "}}" not in chunk.symbol, (
+            f"Jinja expression leaked into symbol: {chunk.symbol!r}"
+        )
 
 
 def test_resolve_import_paths_source_file_relative(tmp_path):
@@ -368,6 +409,7 @@ def test_resolve_import_paths_source_file_relative(tmp_path):
     must be resolved from ``views/``, not from the project root.
     """
     from chunkhound.parsers.mappings.html import HtmlMapping
+
     html = HtmlMapping()
     # Create nested structure: views/index.html imports ../static/reset.css
     views_dir = tmp_path / "views"
@@ -385,6 +427,7 @@ def test_resolve_import_paths_source_file_relative(tmp_path):
 def test_resolve_import_paths_script_src(tmp_path):
     """resolve_import_paths resolves <script src=...> to the JS file."""
     from chunkhound.parsers.mappings.html import HtmlMapping
+
     html = HtmlMapping()
     (tmp_path / "app.js").write_text("console.log('hi')")
     script_tag = '<script src="app.js"></script>'
@@ -396,11 +439,14 @@ def test_resolve_import_paths_script_src(tmp_path):
 def test_resolve_import_paths_unquoted_href(tmp_path):
     """resolve_import_paths handles unquoted href attribute values."""
     from chunkhound.parsers.mappings.html import HtmlMapping
+
     html = HtmlMapping()
     (tmp_path / "style.css").write_text("body{}")
     link_tag = "<link rel=stylesheet href=style.css>"
     resolved = html.resolve_import_paths(link_tag, tmp_path, tmp_path / "index.html")
-    assert len(resolved) == 1, f"Expected 1 resolved path for unquoted href, got {resolved}"
+    assert len(resolved) == 1, (
+        f"Expected 1 resolved path for unquoted href, got {resolved}"
+    )
     assert resolved[0] == tmp_path / "style.css"
 
 

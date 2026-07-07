@@ -33,12 +33,7 @@ def _next_form_html(params: dict[str, str]) -> str:
     hidden = "".join(
         f'<input type="hidden" name="{n}" value="{v}">' for n, v in params.items()
     )
-    return (
-        "<form>"
-        f"{hidden}"
-        '<input type="submit" value="Next">'
-        "</form>"
-    )
+    return f'<form>{hidden}<input type="submit" value="Next"></form>'
 
 
 def _page_html(
@@ -192,9 +187,10 @@ def test_fetch_posts_urlencoded_to_ddg_html_endpoint(monkeypatch) -> None:
 
     assert body == "<html>ok</html>"
     assert captured["url"] == "https://html.duckduckgo.com/html/"
-    assert captured["data"] == urllib.parse.urlencode(
-        {"q": "cats & dogs", "b": ""}
-    ).encode()
+    assert (
+        captured["data"]
+        == urllib.parse.urlencode({"q": "cats & dogs", "b": ""}).encode()
+    )
     # Request.header_items() title-cases names.
     assert captured["headers"].get("User-agent") == "Mozilla/5.0"
     assert captured["timeout"] == 30
@@ -213,8 +209,6 @@ def test_fetch_encodes_params_losslessly(monkeypatch, bad_params) -> None:
     ws_mod._fetch(bad_params)
 
     # Round-tripping through parse_qs must restore the input params.
-    decoded = urllib.parse.parse_qs(
-        captured["data"].decode(), keep_blank_values=True
-    )
+    decoded = urllib.parse.parse_qs(captured["data"].decode(), keep_blank_values=True)
     for k, v in bad_params.items():
         assert decoded[k] == [v]

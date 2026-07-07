@@ -4,11 +4,12 @@ Tests core business logic: chunk preservation, content change detection,
 and data integrity using real components without mocks.
 """
 
-import pytest
 from pathlib import Path
+
+import pytest
+
 from chunkhound.core.models import Chunk, Embedding, File
-from chunkhound.core.types.common import Language, FileId
-from chunkhound.core.types.common import ChunkType, LineNumber
+from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
@@ -554,8 +555,12 @@ def test_process_directory_drops_nonstandard_hnsw_indexes_for_excluded_existing_
     # recreation) we accept either name — the real contract is that
     # HNSW search remains functional after excluded-file cleanup.
     remaining_names = [row["index_name"] for row in remaining_indexes]
-    hnsw_on_3 = {n for n in remaining_names if n.startswith("idx_hnsw_3") or n == "alt_live_idx"}
-    assert len(hnsw_on_3) >= 1, f"No HNSW index survived on embeddings_3: {remaining_names}"
+    hnsw_on_3 = {
+        n for n in remaining_names if n.startswith("idx_hnsw_3") or n == "alt_live_idx"
+    }
+    assert len(hnsw_on_3) >= 1, (
+        f"No HNSW index survived on embeddings_3: {remaining_names}"
+    )
     assert "idx_3_chunk_id" in remaining_names
     assert "idx_3_chunk_provider_model_unique" in remaining_names
     assert "idx_3_provider_model" in remaining_names
@@ -698,7 +703,7 @@ def function2():
 
         # Process file twice
         result1 = await coordinator.process_file(test_file)
-        result2 = await coordinator.process_file(test_file)
+        await coordinator.process_file(test_file)
 
         # Should have chunks
         chunks = db.get_chunks_by_file_id(result1["file_id"], as_model=True)
@@ -719,7 +724,7 @@ def function2():
 def calculate_tax(amount):
     return amount * 0.1
 
-def calculate_discount(amount):  
+def calculate_discount(amount):
     return amount * 0.2
 """)
 

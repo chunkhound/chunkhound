@@ -40,12 +40,15 @@ class JSXMapping(JavaScriptMapping):
         self.language = Language.JSX
 
     def get_function_query(self) -> str:
-        """Get tree-sitter query for JSX function definitions including React components.
+        """Get tree-sitter query for JSX function definitions
+        including React components.
 
-        Extends JavaScript function query with React component patterns.
+        Extends JavaScript function query with
+        React component patterns.
 
         Returns:
-            Tree-sitter query string for finding function definitions and React components
+            Tree-sitter query string for finding
+            function definitions and React components
         """
         # Get base JavaScript function query
         base_query = super().get_function_query()

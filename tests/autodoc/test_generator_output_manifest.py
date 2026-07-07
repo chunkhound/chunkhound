@@ -150,5 +150,3 @@ async def test_generate_docsite_requires_llm_manager(
         )
 
     assert not Path("out").exists()
-
-

@@ -228,7 +228,8 @@ def test_custom_build_hook_rejects_unsupported_release_wheel_host(
         hatch_build,
         "_manifest_force_include_entries",
         lambda: pytest.fail(
-            "unsupported release wheel hosts should fail before adding fallback manifests"
+            "unsupported release wheel hosts should fail "
+            "before adding fallback manifests"
         ),
     )
     monkeypatch.setattr(

@@ -535,8 +535,10 @@ class DartMapping(BaseMapping):
         source = content.decode("utf-8")
 
         # Look for const_builtin or final_builtin as SIBLINGS of the declaration list
-        # In Dart AST: const/final keywords are at the same level as static_final_declaration_list
-        # This works for both top-level (parent: program) and class-level (parent: declaration) scopes
+        # In Dart AST: const/final keywords are at the same
+        # level as static_final_declaration_list
+        # This works for both top-level (parent: program)
+        # and class-level (parent: declaration) scopes
         has_const_or_final = False
         decl_parent = def_node.parent
         if decl_parent:

@@ -18,26 +18,28 @@ def _insert_yaml_chunks(provider: DuckDBProvider) -> None:
             language=Language.YAML,
         )
     )
-    provider.insert_chunks_batch([
-        Chunk(
-            file_id=file_id,
-            chunk_type=ChunkType.KEY_VALUE,
-            symbol="a",
-            code="x: 1",
-            start_line=LineNumber(1),
-            end_line=LineNumber(1),
-            language=Language.YAML,
-        ),
-        Chunk(
-            file_id=file_id,
-            chunk_type=ChunkType.BLOCK,
-            symbol="b",
-            code="b:\n  c: 2",
-            start_line=LineNumber(2),
-            end_line=LineNumber(3),
-            language=Language.YAML,
-        ),
-    ])
+    provider.insert_chunks_batch(
+        [
+            Chunk(
+                file_id=file_id,
+                chunk_type=ChunkType.KEY_VALUE,
+                symbol="a",
+                code="x: 1",
+                start_line=LineNumber(1),
+                end_line=LineNumber(1),
+                language=Language.YAML,
+            ),
+            Chunk(
+                file_id=file_id,
+                chunk_type=ChunkType.BLOCK,
+                symbol="b",
+                code="b:\n  c: 2",
+                start_line=LineNumber(2),
+                end_line=LineNumber(3),
+                language=Language.YAML,
+            ),
+        ]
+    )
 
 
 def test_duckdb_chunk_metrics_emitted(tmp_path: Path, monkeypatch):

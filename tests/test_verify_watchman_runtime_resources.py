@@ -22,9 +22,9 @@ def _repo_root() -> Path:
 
 
 def _wheel_name_for_runtime_platform(platform_tag: str) -> str:
-    wheel_platform_tag = watchman_verifier._manifest_wheel_platform_tags(
-        platform_tag
-    )[0]
+    wheel_platform_tag = watchman_verifier._manifest_wheel_platform_tags(platform_tag)[
+        0
+    ]
     return f"chunkhound-0.0.0-py3-none-{wheel_platform_tag}.whl"
 
 
@@ -105,7 +105,9 @@ def _build_synthetic_watchman_wheel(
     repo_root = _repo_root()
     wheel_path = tmp_path / wheel_name
     host_runtime_platform = hatch_build._host_watchman_platform()
-    selected_runtime_platform = runtime_platform or hatch_build._host_watchman_platform()
+    selected_runtime_platform = (
+        runtime_platform or hatch_build._host_watchman_platform()
+    )
     excluded = excluded_paths or set()
     overrides = overridden_text_files or {}
     extras = extra_text_files or {}
@@ -154,7 +156,7 @@ def _build_synthetic_watchman_wheel(
                 if selected_runtime_platform != host_runtime_platform:
                     payload = (
                         f"synthetic non-host runtime payload for {relative_path}\n"
-                    ).encode("utf-8")
+                    ).encode()
                     info.external_attr = 0o644 << 16
                 else:
                     raise FileNotFoundError(source_path)

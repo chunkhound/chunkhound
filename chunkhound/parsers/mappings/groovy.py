@@ -241,7 +241,8 @@ class GroovyMapping(BaseMapping):
                     # Fallback: use the first part of the parameter
                     param_text = self.get_node_text(child, source).strip()
                     if param_text:
-                        # Try to extract type from "Type varName" or just "varName" format
+                        # Extract type from
+                        # "Type varName" or "varName"
                         parts = param_text.split()
                         if len(parts) >= 2:
                             parameters.append(parts[0])
@@ -452,7 +453,8 @@ class GroovyMapping(BaseMapping):
             return False
 
     def clean_comment_text(self, text: str) -> str:
-        """Clean Groovy comment text by removing comment markers and Groovydoc formatting.
+        """Clean Groovy comment text by removing comment markers
+        and Groovydoc formatting.
 
         Args:
             text: Raw comment text
@@ -582,7 +584,8 @@ class GroovyMapping(BaseMapping):
         """Extract constant definitions from Groovy code.
 
         Identifies two types of constants:
-        1. Static final fields: class-level constants (requires both 'static' and 'final')
+        1. Static final fields: class-level constants
+           (requires both 'static' and 'final')
         2. Local final variables: method-scoped constants (requires 'final' modifier)
 
         Supports multiple variable declarators in a single declaration.
@@ -593,7 +596,8 @@ class GroovyMapping(BaseMapping):
             content: Source code as bytes
 
         Returns:
-            List of constant dictionaries with 'name', 'value', and optional 'type' keys,
+            List of constant dictionaries with 'name',
+            'value', and optional 'type' keys,
             or None if no constants found
 
         Examples:
@@ -703,7 +707,9 @@ class GroovyMapping(BaseMapping):
         Returns:
             Path to the imported file (empty list if not found)
         """
-        # Extract class path: import com.example.Foo; or import static com.example.Foo.bar;
+        # Extract class path:
+        # import com.example.Foo;
+        # or import static com.example.Foo.bar;
         match = re.search(r"import\s+(?:static\s+)?([\w.]+);?", import_text)
         if not match:
             return []
@@ -792,7 +798,8 @@ class GroovyMapping(BaseMapping):
             if "name" in captures:
                 return self.get_node_text(captures["name"], source).strip()
 
-            # For field_declaration and local_variable_declaration, extract variable name
+            # For field_declaration and
+            # local_variable_declaration, extract name
             def_node = captures.get("definition")
             if def_node and def_node.type in (
                 "field_declaration",

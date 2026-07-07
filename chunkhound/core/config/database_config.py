@@ -35,20 +35,30 @@ class DatabaseConfig(BaseModel):
     # LanceDB-specific settings
     lancedb_index_type: Literal["auto", "ivf_hnsw_sq", "ivf_rq"] | None = Field(
         default=None,
-        description="LanceDB vector index type: auto (default), ivf_hnsw_sq, or ivf_rq (requires 0.25.3+)",
+        description=(
+            "LanceDB vector index type: "
+            "auto (default), ivf_hnsw_sq, or "
+            "ivf_rq (requires 0.25.3+)"
+        ),
     )
 
     lancedb_optimize_fragment_threshold: int = Field(
         default=100,
         ge=0,
-        description="Minimum fragment count to trigger optimization (0 = always optimize, 50 = aggressive, 100 = balanced, 500 = conservative)",
+        description=(
+            "Minimum fragment count to trigger optimization "
+            "(0 = always optimize, 50 = aggressive, "
+            "100 = balanced, 500 = conservative)"
+        ),
     )
 
     # Disk usage limits
     max_disk_usage_mb: float | None = Field(
         default=None,
         ge=0.0,
-        description="Maximum database size in MB before indexing is stopped (None = no limit)",
+        description=(
+            "Maximum database size in MB before indexing is stopped (None = no limit)"
+        ),
     )
 
     # Read-only mode. The --read-only flag is registered only on the mcp
@@ -78,14 +88,14 @@ class DatabaseConfig(BaseModel):
     )
 
     @field_validator("path")
-    def validate_path(cls, v: Path | None) -> Path | None:
+    def validate_path(cls, v: Path | None) -> Path | None:  # noqa: N805
         """Convert string paths to Path objects."""
         if v is not None and not isinstance(v, Path):
             return Path(v)
         return v
 
     @field_validator("provider")
-    def validate_provider(cls, v: str) -> str:
+    def validate_provider(cls, v: str) -> str:  # noqa: N805
         """Validate database provider selection."""
         valid_providers = ["duckdb", "lancedb"]
         if v not in valid_providers:
@@ -105,7 +115,8 @@ class DatabaseConfig(BaseModel):
         if self.path is None:
             raise ValueError("Database path not configured")
 
-        # Skip directory creation for in-memory databases (":memory:" is invalid on Windows)
+        # Skip directory creation for in-memory databases
+        # (":memory:" is invalid on Windows)
         is_memory = str(self.path) == ":memory:"
 
         # Backwards-compatible handling:
@@ -120,8 +131,9 @@ class DatabaseConfig(BaseModel):
         if self.provider == "duckdb" and not is_memory:
             if self.path.exists() and self.path.is_file():
                 return self.path
-            # Path ends with a known DB extension (.db / .duckdb) — treat as an explicit
-            # database file rather than a directory layout. Create the parent and return as-is.
+            # Path ends with a known DB extension (.db / .duckdb)
+            # — treat as an explicit database file rather than a
+            # directory layout. Create the parent and return as-is.
             if self.path.suffix.lower() in _EXPLICIT_DB_SUFFIXES:
                 if not self.read_only:
                     self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,7 +186,7 @@ class DatabaseConfig(BaseModel):
             "--fragmentation-threshold-pct",
             type=float,
             help="Compaction trigger: %% overhead above estimated live DB size "
-                 "(default: 30%%)",
+            "(default: 30%%)",
         )
 
     @classmethod
@@ -204,7 +216,9 @@ class DatabaseConfig(BaseModel):
         if read_only := os.getenv("CHUNKHOUND_DATABASE__READ_ONLY"):
             config["read_only"] = read_only.lower() in ("true", "1", "yes")
 
-        if threshold_pct := os.getenv("CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT"):
+        if threshold_pct := os.getenv(
+            "CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT"
+        ):
             try:
                 config["fragmentation_threshold_pct"] = float(threshold_pct)
             except ValueError:
@@ -225,8 +239,13 @@ class DatabaseConfig(BaseModel):
             overrides["max_disk_usage_mb"] = args.max_disk_usage_gb * 1024.0
         if getattr(args, "read_only", False):
             overrides["read_only"] = True
-        if hasattr(args, "fragmentation_threshold_pct") and args.fragmentation_threshold_pct is not None:
-            overrides["fragmentation_threshold_pct"] = float(args.fragmentation_threshold_pct)
+        if (
+            hasattr(args, "fragmentation_threshold_pct")
+            and args.fragmentation_threshold_pct is not None
+        ):
+            overrides["fragmentation_threshold_pct"] = float(
+                args.fragmentation_threshold_pct
+            )
         return overrides
 
     def __repr__(self) -> str:
@@ -235,5 +254,7 @@ class DatabaseConfig(BaseModel):
         if self.max_disk_usage_mb is not None:
             parts.append(f"max_disk_usage_mb={self.max_disk_usage_mb}")
         if self.fragmentation_threshold_pct is not None:
-            parts.append(f"fragmentation_threshold_pct={self.fragmentation_threshold_pct}")
+            parts.append(
+                f"fragmentation_threshold_pct={self.fragmentation_threshold_pct}"
+            )
         return f"DatabaseConfig({', '.join(parts)})"

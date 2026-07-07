@@ -13,12 +13,17 @@ DIST = ROOT / "site" / "dist"
 
 @pytest.fixture(scope="session", autouse=True)
 def built_site() -> None:
-    """Build the site once per test session. Set CHUNKHOUND_USE_EXISTING_SITE_DIST=1 to skip and reuse an existing dist."""
+    """
+    Build the site once per test session.
+    Set CHUNKHOUND_USE_EXISTING_SITE_DIST=1
+    to skip and reuse an existing dist.
+    """
     if os.environ.get("CHUNKHOUND_USE_EXISTING_SITE_DIST") == "1":
         if not DIST.exists():
             raise RuntimeError(
                 f"Expected prebuilt site at {DIST}. "
-                f"Run 'npm run build --prefix site' first, or unset CHUNKHOUND_USE_EXISTING_SITE_DIST."
+                f"Run 'npm run build --prefix site' first, "
+                "or unset CHUNKHOUND_USE_EXISTING_SITE_DIST."
             )
         print(f"Reusing existing site dist at {DIST}")
         return
@@ -37,4 +42,6 @@ def built_site() -> None:
         sys.stderr.write(result.stderr)
         result.check_returncode()
     if not (DIST / "index.html").exists():
-        raise RuntimeError(f"Build succeeded but {DIST / 'index.html'} was not produced")
+        raise RuntimeError(
+            f"Build succeeded but {DIST / 'index.html'} was not produced"
+        )

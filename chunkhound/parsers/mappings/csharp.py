@@ -13,6 +13,7 @@ from loguru import logger
 from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.universal_engine import UniversalConcept
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
@@ -130,9 +131,8 @@ class CSharpMapping(BaseMapping):
         (comment) @xml_doc
         """
 
-    def get_query_for_concept(self, concept: "UniversalConcept") -> str | None:
+    def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
         """Get tree-sitter query for universal concept in C#."""
-        from chunkhound.parsers.universal_engine import UniversalConcept
 
         if concept == UniversalConcept.DEFINITION:
             return """
@@ -199,10 +199,9 @@ class CSharpMapping(BaseMapping):
             return None
 
     def extract_name(
-        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept."""
-        from chunkhound.parsers.universal_engine import UniversalConcept
 
         source = content.decode("utf-8")
 
@@ -252,7 +251,7 @@ class CSharpMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept."""
         source = content.decode("utf-8")
@@ -267,10 +266,9 @@ class CSharpMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract C#-specific metadata."""
-        from chunkhound.parsers.universal_engine import UniversalConcept
 
         source = content.decode("utf-8")
         metadata: dict[str, Any] = {}

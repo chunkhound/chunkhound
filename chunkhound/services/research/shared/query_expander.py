@@ -95,7 +95,12 @@ class QueryExpander:
                 "queries": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": f"Array of exactly {NUM_LLM_EXPANDED_QUERIES} expanded search queries (semantically complete sentences)",
+                    "description": (
+                        f"Array of exactly "
+                        f"{NUM_LLM_EXPANDED_QUERIES} "
+                        f"expanded search queries "
+                        f"(semantically complete sentences)"
+                    ),
                 }
             },
             "required": ["queries"],
@@ -120,7 +125,9 @@ class QueryExpander:
         )
 
         logger.debug(
-            f"Query expansion budget: {QUERY_EXPANSION_TOKENS:,} tokens (model: {llm.model})"
+            f"Query expansion budget: "
+            f"{QUERY_EXPANSION_TOKENS:,} tokens "
+            f"(model: {llm.model})"
         )
 
         try:
@@ -136,7 +143,11 @@ class QueryExpander:
             # Validation: expect exactly 2 queries from LLM
             if not expanded or len(expanded) < NUM_LLM_EXPANDED_QUERIES:
                 logger.warning(
-                    f"LLM returned {len(expanded) if expanded else 0} queries, expected {NUM_LLM_EXPANDED_QUERIES}, using original query only"
+                    f"LLM returned "
+                    f"{len(expanded) if expanded else 0} "
+                    f"queries, expected "
+                    f"{NUM_LLM_EXPANDED_QUERIES}, "
+                    f"using original query only"
                 )
                 return [query]
 

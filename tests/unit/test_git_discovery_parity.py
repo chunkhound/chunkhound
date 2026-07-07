@@ -13,8 +13,7 @@ pytestmark = pytest.mark.skipif(
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=check,
     )
@@ -22,7 +21,12 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
 
 def _git_init_and_commit(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=str(repo), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(
+        ["git", "init"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
     _git(repo, "config", "user.email", "ci@example.com")
     _git(repo, "config", "user.name", "CI")
     (repo / "a.py").write_text("print(1)\n")
@@ -38,7 +42,9 @@ def test_git_discovery_import_path_exposes_expected_api(tmp_path: Path) -> None:
     _git_init_and_commit(repo)
 
     includes = ["**/*.py", "**/*.txt"]
-    files, stats = gd.list_repo_files_via_git(repo, repo, includes, config_excludes=[], filter_root=repo)
+    files, stats = gd.list_repo_files_via_git(
+        repo, repo, includes, config_excludes=[], filter_root=repo
+    )
 
     assert any(p.name == "a.py" for p in files)
     assert any(p.name == "b.txt" for p in files)

@@ -526,7 +526,8 @@ class EmbeddingConfig(BaseSettings):
         if azure_deployment := os.getenv("CHUNKHOUND_EMBEDDING__AZURE_DEPLOYMENT"):
             config["azure_deployment"] = azure_deployment
 
-        # Fallback: provider-specific env vars (lower priority than CHUNKHOUND_EMBEDDING__ vars)
+        # Fallback: provider-specific env vars
+        # (lower priority than CHUNKHOUND_EMBEDDING__ vars)
         if "api_key" not in config:
             provider_hint = (
                 config.get("provider")
@@ -547,7 +548,9 @@ class EmbeddingConfig(BaseSettings):
         if rerank_ssl_verify_raw := os.getenv(
             "CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY"
         ):
-            if (rerank_ssl_verify := _parse_env_bool(rerank_ssl_verify_raw)) is not None:
+            if (
+                rerank_ssl_verify := _parse_env_bool(rerank_ssl_verify_raw)
+            ) is not None:
                 config["rerank_ssl_verify"] = rerank_ssl_verify
         if rerank_batch_size := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE"):
             try:

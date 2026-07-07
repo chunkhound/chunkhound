@@ -83,7 +83,9 @@ class TestWatchmanSidecarFallbackGating:
 
     @pytest.mark.asyncio
     async def test_explicit_watchman_raises_on_sidecar_failure(self):
-        """When configured_backend_resolution is 'explicit', sidecar failure raises RuntimeError."""
+        """When configured_backend_resolution is 'explicit',
+        sidecar failure raises RuntimeError.
+        """
         ctx, svc = _make_watchman_context(resolution="explicit")
 
         adapter = WatchmanRealtimeAdapter(ctx)
@@ -105,7 +107,10 @@ class TestWatchmanSidecarFallbackGating:
 
     @pytest.mark.asyncio
     async def test_install_default_falls_back_on_sidecar_failure(self):
-        """When configured_backend_resolution is 'install_default', sidecar failure falls back to polling."""
+        """When configured_backend_resolution is
+        'install_default', sidecar failure
+        falls back to polling.
+        """
         ctx, svc = _make_watchman_context(resolution="install_default")
 
         adapter = WatchmanRealtimeAdapter(ctx)
@@ -128,7 +133,9 @@ class TestWatchmanSidecarFallbackGating:
 
     @pytest.mark.asyncio
     async def test_explicit_watchman_error_propagates_via_start(self):
-        """Verify that start() method wraps the error correctly for explicit Watchman."""
+        """Verify that start() method wraps the error
+        correctly for explicit Watchman.
+        """
         ctx, svc = _make_watchman_context(resolution="explicit")
 
         adapter = WatchmanRealtimeAdapter(ctx)
@@ -199,10 +206,13 @@ class TestRealtimeStartTaskDoneCallback:
             mock_services = MagicMock()
             mock_services.provider.is_connected = False
             mock_create.return_value = mock_services
-            with patch("chunkhound.mcp_server.base.EmbeddingManager"), patch.object(
-                MCPServerBase,
-                "_deferred_connect_and_start",
-                AsyncMock(return_value=None),
+            with (
+                patch("chunkhound.mcp_server.base.EmbeddingManager"),
+                patch.object(
+                    MCPServerBase,
+                    "_deferred_connect_and_start",
+                    AsyncMock(return_value=None),
+                ),
             ):
                 server = _TestServer(config=config)
                 await server.initialize()
@@ -239,10 +249,13 @@ class TestRealtimeStartTaskDoneCallback:
             mock_services = MagicMock()
             mock_services.provider.is_connected = False
             mock_create.return_value = mock_services
-            with patch("chunkhound.mcp_server.base.EmbeddingManager"), patch.object(
-                MCPServerBase,
-                "_deferred_connect_and_start",
-                AsyncMock(return_value=None),
+            with (
+                patch("chunkhound.mcp_server.base.EmbeddingManager"),
+                patch.object(
+                    MCPServerBase,
+                    "_deferred_connect_and_start",
+                    AsyncMock(return_value=None),
+                ),
             ):
                 server = _TestServer(config=config)
                 await server.initialize()
@@ -287,10 +300,13 @@ class TestRealtimeStartTaskDoneCallback:
             mock_services = MagicMock()
             mock_services.provider.is_connected = False
             mock_create.return_value = mock_services
-            with patch("chunkhound.mcp_server.base.EmbeddingManager"), patch.object(
-                MCPServerBase,
-                "_deferred_connect_and_start",
-                AsyncMock(return_value=None),
+            with (
+                patch("chunkhound.mcp_server.base.EmbeddingManager"),
+                patch.object(
+                    MCPServerBase,
+                    "_deferred_connect_and_start",
+                    AsyncMock(return_value=None),
+                ),
             ):
                 server = _TestServer(config=config)
                 await server.initialize()

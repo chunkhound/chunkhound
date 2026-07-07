@@ -1,7 +1,5 @@
 """Tests for embedding utilities."""
 
-import pytest
-
 from chunkhound.core.utils.embedding_utils import format_chunk_for_embedding
 
 
@@ -76,7 +74,9 @@ class TestFormatChunkForEmbedding:
             file_path="src/services/auth/handlers/oauth.py",
             language="python",
         )
-        assert result == "# src/services/auth/handlers/oauth.py (python)\nclass Handler:"
+        assert (
+            result == "# src/services/auth/handlers/oauth.py (python)\nclass Handler:"
+        )
 
     def test_with_various_languages(self):
         """Should work with different language values."""
@@ -183,7 +183,10 @@ class TestFormatChunkForEmbedding:
             language="python",
             constants=[{"name": "URL", "value": '"https://api.example.com"'}],
         )
-        assert result == '# config.py (python) [URL="https://api.example.com"]\nURL = "https://api.example.com"'
+        assert (
+            result
+            == '# config.py (python) [URL="https://api.example.com"]\nURL = "https://api.example.com"'
+        )
 
     def test_constants_edge_case_exactly_5(self):
         """Should not add overflow indicator when exactly 5 constants."""

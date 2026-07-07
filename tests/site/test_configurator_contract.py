@@ -85,14 +85,9 @@ console.log(JSON.stringify(buildChunkhoundConfig(embedding, llm)));
     return run_tsx_json(script)
 
 
-def test_configurator_local_openai_compatible_presets_round_trip_through_backend_config(
-) -> None:
-    ollama_config = Config(
-        **_build_chunkhound_config("ollama-embed", "ollama-llm")
-    )
-    vllm_config = Config(
-        **_build_chunkhound_config("vllm-embed", "vllm-llm")
-    )
+def test_local_openai_presets_round_trip() -> None:
+    ollama_config = Config(**_build_chunkhound_config("ollama-embed", "ollama-llm"))
+    vllm_config = Config(**_build_chunkhound_config("vllm-embed", "vllm-llm"))
 
     assert ollama_config.embedding is not None
     assert ollama_config.embedding.base_url == "http://localhost:11434/v1"
@@ -197,30 +192,20 @@ def test_gemini_llm_configurator_emits_model() -> None:
 def test_deepseek_config_passes_research_validation(
     tmp_path, clean_environment
 ) -> None:
-    errors = _validated_config_errors(
-        tmp_path, "research", "voyageai", "deepseek"
-    )
+    errors = _validated_config_errors(tmp_path, "research", "voyageai", "deepseek")
 
     assert errors == []
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_grok_config_passes_research_validation(
-    tmp_path, clean_environment
-) -> None:
-    errors = _validated_config_errors(
-        tmp_path, "research", "voyageai", "grok"
-    )
+def test_grok_config_passes_research_validation(tmp_path, clean_environment) -> None:
+    errors = _validated_config_errors(tmp_path, "research", "voyageai", "grok")
 
     assert errors == []
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_gemini_config_passes_research_validation(
-    tmp_path, clean_environment
-) -> None:
-    errors = _validated_config_errors(
-        tmp_path, "research", "voyageai", "gemini"
-    )
+def test_gemini_config_passes_research_validation(tmp_path, clean_environment) -> None:
+    errors = _validated_config_errors(tmp_path, "research", "voyageai", "gemini")
 
     assert errors == []

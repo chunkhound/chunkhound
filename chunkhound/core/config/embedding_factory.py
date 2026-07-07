@@ -182,7 +182,8 @@ class EmbeddingProviderFactory:
                 kwargs["rerank_model"] = rerank_model
             if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
-            # rerank_url: resolve relative paths against base_url, then forward absolute URLs only
+            # rerank_url: resolve relative paths against
+            # base_url, then forward absolute URLs only
             if (
                 rerank_url
                 and base_url

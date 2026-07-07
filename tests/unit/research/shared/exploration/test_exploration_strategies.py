@@ -6,14 +6,15 @@ Tests verify that both WideCoverageStrategy and BFSExplorationStrategy:
 3. Can be swapped in research pipelines
 """
 
-import pytest
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from chunkhound.services.research.shared.exploration import (
+    BFSExplorationStrategy,
     ExplorationStrategy,
     WideCoverageStrategy,
-    BFSExplorationStrategy,
 )
 
 
@@ -80,7 +81,9 @@ class TestWideCoverageStrategy:
         return strategy
 
     @pytest.mark.asyncio
-    async def test_explore_returns_tuple(self, mock_strategy: WideCoverageStrategy) -> None:
+    async def test_explore_returns_tuple(
+        self, mock_strategy: WideCoverageStrategy
+    ) -> None:
         """explore() should return (chunks, stats, files) tuple."""
         # Mock internal services
         mock_strategy._depth_exploration.explore_coverage_depth = AsyncMock(
@@ -91,14 +94,15 @@ class TestWideCoverageStrategy:
         )
         mock_strategy._gap_detection.detect_and_fill_gaps = AsyncMock(
             return_value=(
-                [{"chunk_id": "1", "content": "test"}, {"chunk_id": "2", "content": "more"}],
+                [
+                    {"chunk_id": "1", "content": "test"},
+                    {"chunk_id": "2", "content": "more"},
+                ],
                 {"gaps_found": 1, "gaps_filled": 1},
             )
         )
         # Mock file reader to return empty dict (no files found)
-        mock_strategy._file_reader.read_files_with_budget = AsyncMock(
-            return_value={}
-        )
+        mock_strategy._file_reader.read_files_with_budget = AsyncMock(return_value={})
 
         initial_chunks = [{"chunk_id": "0", "content": "initial"}]
         result = await mock_strategy.explore(
@@ -115,7 +119,9 @@ class TestWideCoverageStrategy:
         assert isinstance(files, dict)
 
     @pytest.mark.asyncio
-    async def test_explore_empty_chunks(self, mock_strategy: WideCoverageStrategy) -> None:
+    async def test_explore_empty_chunks(
+        self, mock_strategy: WideCoverageStrategy
+    ) -> None:
         """explore() with empty initial chunks should return empty results."""
         mock_strategy._depth_exploration.explore_coverage_depth = AsyncMock(
             return_value=([], {"chunks_added": 0})
@@ -124,9 +130,7 @@ class TestWideCoverageStrategy:
             return_value=([], {"gaps_found": 0})
         )
         # Mock file reader to return empty dict (no files found)
-        mock_strategy._file_reader.read_files_with_budget = AsyncMock(
-            return_value={}
-        )
+        mock_strategy._file_reader.read_files_with_budget = AsyncMock(return_value={})
 
         result = await mock_strategy.explore(
             root_query="test",
@@ -150,7 +154,8 @@ class TestBFSExplorationStrategy:
 
         embedding_manager = MagicMock()
         # Mock rerank provider with proper return values
-        embedding_manager.get_provider.return_value.get_max_rerank_batch_size.return_value = 100
+        provider = embedding_manager.get_provider.return_value
+        provider.get_max_rerank_batch_size.return_value = 100
         embedding_manager.get_provider.return_value.rerank = AsyncMock(return_value=[])
 
         db_services = MagicMock()
@@ -164,7 +169,9 @@ class TestBFSExplorationStrategy:
         return strategy
 
     @pytest.mark.asyncio
-    async def test_explore_returns_tuple(self, mock_strategy: BFSExplorationStrategy) -> None:
+    async def test_explore_returns_tuple(
+        self, mock_strategy: BFSExplorationStrategy
+    ) -> None:
         """explore() should return (chunks, stats, files) tuple."""
         # Mock unified search
         mock_strategy._unified_search.unified_search = AsyncMock(
@@ -176,7 +183,9 @@ class TestBFSExplorationStrategy:
             return_value=[]
         )
 
-        initial_chunks = [{"chunk_id": "0", "content": "initial", "file_path": "test.py"}]
+        initial_chunks = [
+            {"chunk_id": "0", "content": "initial", "file_path": "test.py"}
+        ]
         result = await mock_strategy.explore(
             root_query="test query",
             initial_chunks=initial_chunks,
@@ -191,7 +200,9 @@ class TestBFSExplorationStrategy:
         assert isinstance(files, dict)
 
     @pytest.mark.asyncio
-    async def test_explore_empty_chunks(self, mock_strategy: BFSExplorationStrategy) -> None:
+    async def test_explore_empty_chunks(
+        self, mock_strategy: BFSExplorationStrategy
+    ) -> None:
         """explore() with empty initial chunks should return early."""
         result = await mock_strategy.explore(
             root_query="test",
@@ -204,14 +215,23 @@ class TestBFSExplorationStrategy:
         assert stats["nodes_explored"] == 0
         assert files == {}
 
-    def test_aggregate_chunks_deduplicates(self, mock_strategy: BFSExplorationStrategy) -> None:
+    def test_aggregate_chunks_deduplicates(
+        self, mock_strategy: BFSExplorationStrategy
+    ) -> None:
         """_aggregate_chunks should deduplicate by chunk_id."""
-        from chunkhound.services.research.shared.exploration.bfs_exploration_strategy import (
-            BFSExplorationNode,
-        )
+        import importlib
 
-        node1 = BFSExplorationNode(query="q1", chunks=[{"chunk_id": "a"}, {"chunk_id": "b"}])
-        node2 = BFSExplorationNode(query="q2", chunks=[{"chunk_id": "b"}, {"chunk_id": "c"}])
+        _m = importlib.import_module(
+            "chunkhound.services.research.shared.exploration.bfs_exploration_strategy"
+        )
+        bfs_exploration_node = _m.BFSExplorationNode
+
+        node1 = bfs_exploration_node(
+            query="q1", chunks=[{"chunk_id": "a"}, {"chunk_id": "b"}]
+        )
+        node2 = bfs_exploration_node(
+            query="q2", chunks=[{"chunk_id": "b"}, {"chunk_id": "c"}]
+        )
 
         result = mock_strategy._aggregate_chunks([node1, node2])
 
@@ -242,15 +262,18 @@ class TestBFSExplorationStrategyInternals:
         self, mock_strategy: BFSExplorationStrategy
     ) -> None:
         """_traverse_bfs_tree should return all visited nodes including root."""
-        from chunkhound.services.research.shared.exploration.bfs_exploration_strategy import (
-            BFSExplorationNode,
+        import importlib
+
+        _m = importlib.import_module(
+            "chunkhound.services.research.shared.exploration.bfs_exploration_strategy"
         )
+        bfs_exploration_node = _m.BFSExplorationNode
         from chunkhound.services.research.shared.models import ResearchContext
 
         # Mock _process_node to return empty children (no traversal)
         mock_strategy._process_node = AsyncMock(return_value=[])
 
-        root = BFSExplorationNode(
+        root = bfs_exploration_node(
             query="test",
             depth=0,
             node_id=1,
@@ -280,15 +303,18 @@ class TestBFSExplorationStrategyInternals:
         self, mock_strategy: BFSExplorationStrategy
     ) -> None:
         """_traverse_bfs_tree should gracefully handle node processing errors."""
-        from chunkhound.services.research.shared.exploration.bfs_exploration_strategy import (
-            BFSExplorationNode,
+        import importlib
+
+        _m = importlib.import_module(
+            "chunkhound.services.research.shared.exploration.bfs_exploration_strategy"
         )
+        bfs_exploration_node = _m.BFSExplorationNode
         from chunkhound.services.research.shared.models import ResearchContext
 
         # Mock _process_node to raise error
         mock_strategy._process_node = AsyncMock(side_effect=Exception("Test error"))
 
-        root = BFSExplorationNode(query="test", depth=0, node_id=1)
+        root = bfs_exploration_node(query="test", depth=0, node_id=1)
         context = ResearchContext(root_query="test")
         global_data: dict[str, Any] = {
             "files_fully_read": set(),
@@ -466,7 +492,8 @@ class TestStrategySwapping:
         embedding_manager = MagicMock()
         llm_manager = MagicMock()
 
-        # Create a custom strategy (e.g., WideCoverageStrategy used in pluggable service)
+        # Create a custom strategy
+        # (e.g., WideCoverageStrategy used in pluggable service)
         custom_strategy = MagicMock(spec=ExplorationStrategy)
         custom_strategy.name = "wide_coverage"
 

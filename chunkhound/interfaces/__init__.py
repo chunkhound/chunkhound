@@ -1,4 +1,5 @@
-"""Interfaces package for ChunkHound - abstract protocols for provider implementations."""
+"""Interfaces package for ChunkHound -
+abstract protocols for provider implementations."""
 
 from .database_provider import DatabaseProvider
 from .embedding_provider import EmbeddingProvider

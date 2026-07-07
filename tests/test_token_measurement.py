@@ -4,15 +4,17 @@ Regression guard: asserts markdown is at least 40% smaller than equivalent JSON.
 Pass -s to see the printed breakdown tables:
   uv run pytest tests/test_token_measurement.py -v -s
 """
-import json
-import pytest
 
+import json
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Realistic mock result — mirrors what result_enhancer produces
 # ---------------------------------------------------------------------------
 
-_REALISTIC_CONTENT = '''def authenticate_user(username: str, password: str) -> Optional[User]:
+_REALISTIC_CONTENT = '''\
+def authenticate_user(username: str, password: str) -> Optional[User]:
     """Authenticate a user with username and password."""
     if not username or not password:
         raise ValueError("Username and password are required")
@@ -33,15 +35,15 @@ def _make_result(i: int = 0) -> dict:
     """Realistic result as returned by result_enhancer.enhance_search_result()."""
     return {
         "chunk_id": 1000 + i,
-        "symbol": f"auth.login.authenticate_user",
-        "name": f"authenticate_user",
+        "symbol": "auth.login.authenticate_user",
+        "name": "authenticate_user",
         "content": _REALISTIC_CONTENT,
-        "code_preview": _REALISTIC_CONTENT[:500],     # partial duplicate
+        "code_preview": _REALISTIC_CONTENT[:500],  # partial duplicate
         "chunk_type": "function",
         "start_line": 10 + i * 30,
         "end_line": 28 + i * 30,
         "line_count": 19,
-        "file_path": f"src/auth/login.py",
+        "file_path": "src/auth/login.py",
         "file_extension": ".py",
         "language": "python",
         "similarity": 0.87,
@@ -52,7 +54,13 @@ def _make_result(i: int = 0) -> dict:
 
 
 def _make_pagination(n: int) -> dict:
-    return {"offset": 0, "page_size": n, "has_more": True, "total": 47, "next_offset": n}
+    return {
+        "offset": 0,
+        "page_size": n,
+        "has_more": True,
+        "total": 47,
+        "next_offset": n,
+    }
 
 
 def _estimate_tokens(text: str) -> int:
@@ -64,19 +72,28 @@ def _estimate_tokens(text: str) -> int:
 # Measurement tests (require -s to see output)
 # ---------------------------------------------------------------------------
 
-class TestTokenReduction:
 
+class TestTokenReduction:
     @pytest.mark.parametrize("n_results", [1, 3, 5, 10])
-    def test_measure_reduction_by_result_count(self, n_results: int, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_measure_reduction_by_result_count(
+        self,
+        n_results: int,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """Compare JSON vs markdown tokens for N results. Fails if reduction < 40%."""
-        # NOTE: before the formatter is implemented this test will ImportError — expected.
-        # Run it after the formatter is done to get real post-change numbers.
+        # NOTE: before the formatter is implemented
+        # this test will ImportError — expected.
+        # Run it after the formatter is done to
+        # get real post-change numbers.
         from chunkhound.mcp_server.tools import format_search_results_markdown
 
         results = [_make_result(i) for i in range(n_results)]
         pagination = _make_pagination(n_results)
 
-        json_str = json.dumps({"results": results, "pagination": pagination}, default=str)
+        json_str = json.dumps(
+            {"results": results, "pagination": pagination},
+            default=str,
+        )
         json_tokens = _estimate_tokens(json_str)
 
         md_str = format_search_results_markdown(results, pagination, "semantic")
@@ -85,12 +102,12 @@ class TestTokenReduction:
         reduction_pct = (1 - md_tokens / json_tokens) * 100
 
         with capsys.disabled():
-            print(f"\n{'-'*52}")
+            print(f"\n{'-' * 52}")
             print(f"  Results:   {n_results}")
             print(f"  JSON:      {json_tokens:>6} tokens  ({len(json_str):>7} chars)")
             print(f"  Markdown:  {md_tokens:>6} tokens  ({len(md_str):>7} chars)")
             print(f"  Reduction: {reduction_pct:>5.1f}%")
-            print(f"{'-'*52}")
+            print(f"{'-' * 52}")
 
         # 40 % threshold is calibrated to a realistic multi-field result that carries
         # metadata.raw_content (full duplicate) and code_preview (partial duplicate).
@@ -106,35 +123,46 @@ class TestTokenReduction:
         result = _make_result()
 
         dropped = [
-            "chunk_id", "chunk_type", "language", "file_extension",
-            "line_count", "is_truncated", "similarity_percentage",
-            "code_preview", "metadata",
+            "chunk_id",
+            "chunk_type",
+            "language",
+            "file_extension",
+            "line_count",
+            "is_truncated",
+            "similarity_percentage",
+            "code_preview",
+            "metadata",
         ]
 
         total_dropped = 0
         with capsys.disabled():
-            print(f"\n{'-'*52}")
+            print(f"\n{'-' * 52}")
             print(f"  {'Field':<30} {'Tokens':>6}")
-            print(f"{'-'*52}")
+            print(f"{'-' * 52}")
             for field in dropped:
                 if field in result:
                     tokens = _estimate_tokens(json.dumps({field: result[field]}))
                     total_dropped += tokens
                     print(f"  {field:<30} {tokens:>6}")
             total_result = _estimate_tokens(json.dumps(result))
-            print(f"{'-'*52}")
+            print(f"{'-' * 52}")
             print(f"  {'TOTAL dropped':<30} {total_dropped:>6}")
             print(f"  {'TOTAL result (JSON)':<30} {total_result:>6}")
-            print(f"  {'Dropped %':<30} {total_dropped/total_result*100:>5.1f}%")
-            print(f"{'-'*52}")
+            print(f"  {'Dropped %':<30} {total_dropped / total_result * 100:>5.1f}%")
+            print(f"{'-' * 52}")
 
         total_result = _estimate_tokens(json.dumps(result))
         assert total_dropped > 0, "Dropped fields must have non-zero token cost"
         assert total_dropped / total_result > 0.5, (
-            f"Dropped fields should account for >50% of tokens, got {total_dropped/total_result:.1%}"
+            f"Dropped fields should account "
+            f"for >50% of tokens, "
+            f"got {total_dropped / total_result:.1%}"
         )
 
-    def test_metadata_duplication_overhead(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_metadata_duplication_overhead(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """Show how much metadata.raw_content duplicates the content field."""
         result = _make_result()
         content_tokens = _estimate_tokens(result["content"])
@@ -142,14 +170,26 @@ class TestTokenReduction:
         code_preview_tokens = _estimate_tokens(json.dumps(result["code_preview"]))
 
         with capsys.disabled():
-            print(f"\n{'-'*52}")
+            print(f"\n{'-' * 52}")
             print(f"  content tokens:            {content_tokens:>6}")
-            print(f"  metadata.raw_content:      {metadata_tokens:>6}  (full duplicate)")
-            print(f"  code_preview:              {code_preview_tokens:>6}  (partial duplicate)")
-            print(f"  Total duplication:         {metadata_tokens + code_preview_tokens:>6} tokens")
-            print(f"{'-'*52}")
+            print(
+                f"  metadata.raw_content:      {metadata_tokens:>6}  (full duplicate)"
+            )
+            print(
+                f"  code_preview:              "
+                f"{code_preview_tokens:>6}  "
+                f"(partial duplicate)"
+            )
+            print(
+                f"  Total duplication:         "
+                f"{metadata_tokens + code_preview_tokens:>6} "
+                f"tokens"
+            )
+            print(f"{'-' * 52}")
 
         assert metadata_tokens >= content_tokens, (
-            "metadata.raw_content should be at least as large as content (it's a full copy)"
+            "metadata.raw_content should be "
+            "at least as large as content "
+            "(it's a full copy)"
         )
         assert code_preview_tokens > 0, "code_preview must have non-zero token cost"

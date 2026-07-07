@@ -274,7 +274,8 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
                 if name_node:
                     return self.get_node_text(name_node, source)
             elif node.type == "method_definition":
-                # Find the method name (can be identifier, string, computed_property_name)
+                # Find the method name (can be identifier,
+                # string, computed_property_name)
                 for i in range(node.child_count):
                     child = node.child(i)
                     if child and child.type in [
@@ -506,7 +507,8 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             source: Source code string
 
         Returns:
-            List of access modifiers (public, private, protected, static, readonly, etc.)
+            List of access modifiers (public, private,
+            protected, static, readonly, etc.)
         """
         if node is None:
             return []
@@ -642,7 +644,8 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             if node_text.strip() in ["{", "}", "(", ")", ";", ",", "export", "import"]:
                 return False
 
-            # For functions, check if they're likely React components starting with uppercase
+            # For functions, check if they're likely
+            # React components starting with uppercase
             if (
                 node.type in ["function_declaration", "variable_declarator"]
                 and node_text

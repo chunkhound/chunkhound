@@ -55,9 +55,7 @@ class TestRespondWithStartupError:
             patch.object(sys, "stdout", fake_stdout),
             _patch_select([fake_stdin]),
         ):
-            _respond_with_startup_error(
-                Exception("Could not set lock on database")
-            )
+            _respond_with_startup_error(Exception("Could not set lock on database"))
 
         resp = json.loads(fake_stdout.getvalue().strip())
         assert "kill" in resp["error"]["message"]
@@ -119,7 +117,10 @@ class TestRespondWithStartupError:
         assert "new error" in log_content
 
     def test_no_output_when_stdin_empty(self):
-        """When no initialize request is pending, nothing should be written to stdout."""
+        """
+        When no initialize request is pending,
+        nothing should be written to stdout.
+        """
         fake_stdout = io.StringIO()
 
         with (

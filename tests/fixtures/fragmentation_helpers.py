@@ -228,5 +228,8 @@ def verify_no_duplicate_chunk_ids(results: list[dict[str, Any]]) -> tuple[bool, 
             duplicates.add(cid)
         seen.add(cid)
 
-    error_msg = f"Found {len(chunk_ids) - len(unique_ids)} duplicate chunk_ids: {list(duplicates)}"
+    error_msg = (
+        f"Found {len(chunk_ids) - len(unique_ids)} "
+        f"duplicate chunk_ids: {list(duplicates)}"
+    )
     return False, error_msg

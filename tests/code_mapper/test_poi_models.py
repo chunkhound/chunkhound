@@ -6,4 +6,3 @@ def test_code_mapper_poi_carries_mode_and_text() -> None:
 
     assert poi.mode == "architectural"
     assert poi.text == "Core flow"
-

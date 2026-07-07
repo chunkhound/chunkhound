@@ -49,8 +49,7 @@ def get_global_excludes_file() -> Path | None:
         # Run git config WITHOUT the isolation env to read user config
         proc = subprocess.run(
             ["git", "config", "--global", "--get", "core.excludesFile"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
             text=True,
             timeout=5,
@@ -86,8 +85,7 @@ def run_git(
         proc = subprocess.run(
             cmd,
             cwd=str(cwd) if cwd else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
             env=env,
             timeout=timeout_s

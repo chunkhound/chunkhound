@@ -60,9 +60,9 @@ def test_imports_extracted_from_scss_with_interpolation(service):
     imports = service.get_file_imports("styles/theme.scss", SCSS_WITH_INTERPOLATION)
 
     import_text = "\n".join(imports)
-    assert "@import" in import_text or "@use" in import_text or "@forward" in import_text, (
-        "No imports found — preprocess_for_ast() was likely bypassed"
-    )
+    assert (
+        "@import" in import_text or "@use" in import_text or "@forward" in import_text
+    ), "No imports found — preprocess_for_ast() was likely bypassed"
     assert any('"variables"' in line or "variables" in line for line in imports)
     assert any("sass:math" in line for line in imports)
     assert any("sass:color" in line for line in imports)
@@ -92,9 +92,14 @@ def test_clear_cache_removes_scss_entry(service):
 
 
 def test_interpolation_content_not_present_in_output(service):
-    """Chunk content should reflect the original source, not preprocessed placeholders."""
+    """
+    Chunk content should reflect the original
+    source, not preprocessed placeholders.
+    """
     imports = service.get_file_imports("styles/theme.scss", SCSS_WITH_INTERPOLATION)
     for line in imports:
         # Preprocessing replaces #{...} with same-length placeholders like __SCSS_0__.
         # Import chunks should not contain those placeholders.
-        assert "__SCSS_" not in line, f"Preprocessor placeholder leaked into output: {line!r}"
+        assert "__SCSS_" not in line, (
+            f"Preprocessor placeholder leaked into output: {line!r}"
+        )

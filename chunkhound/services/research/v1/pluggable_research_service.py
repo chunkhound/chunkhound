@@ -80,7 +80,8 @@ class PluggableResearchService(ProgressEmitterMixin):
             exploration_strategy: Exploration strategy for chunk discovery (required).
                 Uses strategy.explore() after initial search to expand coverage.
             tool_name: Name of the MCP tool (used in followup suggestions)
-            progress: Optional TreeProgressDisplay instance for terminal UI (None for MCP)
+            progress: Optional TreeProgressDisplay instance
+                for terminal UI (None for MCP)
             path_filter: Optional path filter to limit research scope
             config: Optional ResearchConfig for query expansion settings.
                 If None, falls back to hardcoded constants.
@@ -103,7 +104,8 @@ class PluggableResearchService(ProgressEmitterMixin):
             config=config,
         )
 
-        # Store exploration strategy (required - pluggable algorithm for chunk discovery)
+        # Store exploration strategy (required -
+        # pluggable algorithm for chunk discovery)
         self._exploration_strategy = exploration_strategy
 
     @property
@@ -151,7 +153,9 @@ class PluggableResearchService(ProgressEmitterMixin):
         # Emit configuration info
         await self._emit_event(
             "main_info",
-            f"Max depth: {max_depth}, output budget: {synthesis_budgets['output_tokens'] // 1000}k tokens",
+            f"Max depth: {max_depth},"
+            f" output budget:"
+            f" {synthesis_budgets['output_tokens'] // 1000}k tokens",
         )
 
         # Phase 1: Initial search
@@ -189,7 +193,8 @@ class PluggableResearchService(ProgressEmitterMixin):
             max_depth=1,
         )
 
-        # Use default threshold (0.0) since v1 doesn't use elbow detection for exploration cutoff
+        # Use default threshold (0.0) since v1 doesn't
+        # use elbow detection for exploration cutoff
         phase1_threshold = 0.0
 
         (
@@ -205,7 +210,9 @@ class PluggableResearchService(ProgressEmitterMixin):
         )
 
         logger.info(
-            f"Exploration complete: {exploration_stats.get('chunks_total', len(expanded_chunks))} total chunks, "
+            f"Exploration complete:"
+            f" {exploration_stats.get('chunks_total', len(expanded_chunks))}"
+            f" total chunks, "
             f"{exploration_stats.get('nodes_explored', 0)} nodes explored, "
             f"{exploration_stats.get('files_read', len(file_contents))} files read"
         )
@@ -232,7 +239,8 @@ class PluggableResearchService(ProgressEmitterMixin):
         # Early return: no context found (avoid scary synthesis error when empty)
         if not aggregated.get("chunks") and not aggregated.get("files"):
             logger.info(
-                "No chunks or files aggregated; skipping synthesis and returning guidance"
+                "No chunks or files aggregated; skipping"
+                " synthesis and returning guidance"
             )
             await self._emit_event(
                 "synthesis_skip",
@@ -243,7 +251,8 @@ class PluggableResearchService(ProgressEmitterMixin):
                 f"No relevant code context found for: '{query}'.\n\n"
                 "Try a more code-specific question. Helpful patterns:\n"
                 "- Name files or modules (e.g., 'services/deep_research_service.py')\n"
-                "- Mention classes/functions (e.g., 'DeepResearchService._single_pass_synthesis')\n"
+                "- Mention classes/functions"
+                " (e.g., 'DeepResearchService._single_pass_synthesis')\n"
                 "- Include keywords that appear in code (constants, config keys)\n"
             )
             return {
@@ -257,7 +266,8 @@ class PluggableResearchService(ProgressEmitterMixin):
                 },
             }
 
-        # Pass pre-filtered chunks to synthesis (elbow detection done in exploration strategies)
+        # Pass pre-filtered chunks to synthesis
+        # (elbow detection done in exploration strategies)
         (
             prioritized_chunks,
             budgeted_files,
@@ -297,7 +307,9 @@ class PluggableResearchService(ProgressEmitterMixin):
         if evidence_ledger.facts_count > 0 or evidence_ledger.constants_count > 0:
             await self._emit_event(
                 "evidence_ledger",
-                f"Evidence: {evidence_ledger.constants_count} constants, {evidence_ledger.facts_count} facts",
+                f"Evidence:"
+                f" {evidence_ledger.constants_count} constants,"
+                f" {evidence_ledger.facts_count} facts",
                 evidence_table=evidence_ledger.format_progress_table(),
                 constants_count=evidence_ledger.constants_count,
                 facts_count=evidence_ledger.facts_count,
@@ -337,16 +349,19 @@ class PluggableResearchService(ProgressEmitterMixin):
 
             semaphore = asyncio.Semaphore(max_concurrency)
 
-            # Calculate total input tokens across all clusters for proportional budget allocation
+            # Calculate total input tokens across all
+            # clusters for proportional budget allocation
             total_input_tokens = sum(cluster.total_tokens for cluster in cluster_groups)
 
             async def map_with_semaphore(cluster: ClusterGroup) -> dict[str, Any]:
                 async with semaphore:
                     # Get cluster-specific facts context
                     cluster_files = set(cluster.file_paths)
-                    cluster_facts_context = evidence_ledger.get_facts_map_prompt_context(
-                        cluster_files,
-                        cluster_id=cluster.cluster_id,
+                    cluster_facts_context = (
+                        evidence_ledger.get_facts_map_prompt_context(
+                            cluster_files,
+                            cluster_id=cluster.cluster_id,
+                        )
                     )
                     return await self._synthesis_engine._map_synthesis_on_cluster(
                         cluster,
@@ -481,7 +496,9 @@ class PluggableResearchService(ProgressEmitterMixin):
                 "queries": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": f"Array of exactly {num_queries} expanded search queries (semantically complete sentences)",
+                    "description": f"Array of exactly {num_queries}"
+                    " expanded search queries"
+                    " (semantically complete sentences)",
                 }
             },
             "required": ["queries"],
@@ -506,7 +523,9 @@ class PluggableResearchService(ProgressEmitterMixin):
         )
 
         logger.debug(
-            f"Query expansion budget: {QUERY_EXPANSION_TOKENS:,} tokens (model: {llm.model})"
+            f"Query expansion budget:"
+            f" {QUERY_EXPANSION_TOKENS:,} tokens"
+            f" (model: {llm.model})"
         )
 
         try:
@@ -522,7 +541,10 @@ class PluggableResearchService(ProgressEmitterMixin):
             # Validation: expect exactly num_queries from LLM
             if not expanded or len(expanded) < num_queries:
                 logger.warning(
-                    f"LLM returned {len(expanded) if expanded else 0} queries, expected {num_queries}, using original query only"
+                    f"LLM returned"
+                    f" {len(expanded) if expanded else 0}"
+                    f" queries, expected {num_queries},"
+                    f" using original query only"
                 )
                 return [query]
 
@@ -594,11 +616,13 @@ class PluggableResearchService(ProgressEmitterMixin):
     ) -> dict[str, str]:
         """Read files containing chunks within token budget (Step 8).
 
-        Per algorithm: Limit overall data to adaptive budget (or legacy MAX_FILE_CONTENT_TOKENS).
+        Per algorithm: Limit overall data to adaptive
+        budget (or legacy MAX_FILE_CONTENT_TOKENS).
 
         Args:
             chunks: List of chunks
-            max_tokens: Maximum tokens for file contents (uses adaptive budget if provided)
+            max_tokens: Maximum tokens for file contents
+                (uses adaptive budget if provided)
 
         Returns:
             Dictionary mapping file paths to contents (limited to budget)
@@ -674,11 +698,10 @@ class PluggableResearchService(ProgressEmitterMixin):
                         start_line = chunk.get("start_line", 1)
                         end_line = chunk.get("end_line", 1)
 
-                        # Use smart boundary detection to expand to complete functions/classes
-                        expanded_start, expanded_end = (
-                            expand_to_natural_boundaries(
-                                lines, start_line, end_line, chunk, file_path
-                            )
+                        # Use smart boundary detection
+                        # to expand to complete functions/classes
+                        expanded_start, expanded_end = expand_to_natural_boundaries(
+                            lines, start_line, end_line, chunk, file_path
                         )
 
                         # Skip chunks with invalid boundary expansion
@@ -687,13 +710,15 @@ class PluggableResearchService(ProgressEmitterMixin):
                                 f"Skipping chunk with invalid boundaries: "
                                 f"{file_path}:{start_line}-{end_line}"
                             )
-                            continue  # (0,0) = out-of-bounds chunk; skip rather than pass bad slice to LLM
+                            continue  # (0,0) = out-of-bounds chunk;
+                            # skip rather than pass bad slice to LLM
 
                         # Store expanded range in chunk for later deduplication
                         chunk["expanded_start_line"] = expanded_start
                         chunk["expanded_end_line"] = expanded_end
 
-                        # Extract chunk with smart boundaries (convert 1-indexed to 0-indexed)
+                        # Extract chunk with smart boundaries
+                        # (convert 1-indexed to 0-indexed)
                         start_idx = max(0, expanded_start - 1)
                         end_idx = min(len(lines), expanded_end)
 
@@ -722,11 +747,15 @@ class PluggableResearchService(ProgressEmitterMixin):
                 logger.warning(f"Failed to read file {file_path}: {e}")
                 continue
 
-        # FAIL-FAST: Validate that at least some files were loaded if chunks were provided
-        # This prevents silent data loss where searches find chunks but synthesis gets no code
+        # FAIL-FAST: Validate that at least some files
+        # were loaded if chunks were provided
+        # This prevents silent data loss where searches
+        # find chunks but synthesis gets no code
         if chunks and not file_contents:
             raise RuntimeError(
-                f"DATA LOSS DETECTED: Found {len(chunks)} chunks across {len(files_to_chunks)} files "
+                f"DATA LOSS DETECTED: Found"
+                f" {len(chunks)} chunks across"
+                f" {len(files_to_chunks)} files "
                 f"but failed to read ANY file contents. "
                 f"Possible causes: "
                 f"(1) Token budget exhausted ({budget_limit:,} tokens insufficient), "
@@ -736,7 +765,9 @@ class PluggableResearchService(ProgressEmitterMixin):
             )
 
         logger.debug(
-            f"File reading complete: Loaded {len(file_contents)} files with {total_tokens:,} tokens "
+            f"File reading complete:"
+            f" Loaded {len(file_contents)} files"
+            f" with {total_tokens:,} tokens "
             f"(limit: {budget_limit:,})"
         )
         return file_contents
@@ -776,7 +807,9 @@ class PluggableResearchService(ProgressEmitterMixin):
                 - stats: Statistics about aggregation
         """
         logger.info(
-            f"Aggregating {len(chunks)} chunks and {len(file_contents)} files from exploration"
+            f"Aggregating {len(chunks)} chunks"
+            f" and {len(file_contents)} files"
+            f" from exploration"
         )
 
         # Deduplicate chunks by chunk_id
@@ -811,8 +844,10 @@ class PluggableResearchService(ProgressEmitterMixin):
     def _calculate_synthesis_budgets(self) -> dict[str, int]:
         """Calculate synthesis token budgets.
 
-        Output budget is FIXED at 30k tokens for reasoning models (includes thinking + output).
-        Input budget is determined by elbow detection (relevance-based filtering), not repo size.
+        Output budget is FIXED at 30k tokens for reasoning
+        models (includes thinking + output).
+        Input budget is determined by elbow detection
+        (relevance-based filtering), not repo size.
 
         Returns:
             Dictionary with output_tokens (fixed at 30k for LLM output limit)

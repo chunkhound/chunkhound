@@ -40,7 +40,6 @@ def _unlink_compacted(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-
 def get_utf8_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     """Get environment variables with Windows UTF-8 settings.
 

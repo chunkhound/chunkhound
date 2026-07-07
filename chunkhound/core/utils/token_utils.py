@@ -50,7 +50,9 @@ def _encoding_for_model_safe(model: str) -> "tiktoken.Encoding | None":
         # operator distinguish "blocked network" from "bad input" in logs.
         logger.warning(
             "tiktoken failed for model {!r} ({}: {}); using char-count heuristic",
-            model, type(e).__name__, e,
+            model,
+            type(e).__name__,
+            e,
         )
         return None
 
@@ -69,7 +71,8 @@ def _cl100k_base_safe() -> "tiktoken.Encoding | None":
         # See _encoding_for_model_safe for why this is broad.
         logger.warning(
             "tiktoken cl100k_base download failed ({}: {}); using char-count heuristic",
-            type(e).__name__, e,
+            type(e).__name__,
+            e,
         )
         return None
 
@@ -170,9 +173,7 @@ def _uses_openai_tokenizer(provider: str, base_url: str | None) -> bool:
     return provider == "openai" and is_official_openai_endpoint(base_url)
 
 
-def _estimate_tokens_openai(
-    text: str, model: str, cl100k_fallback_ok: bool
-) -> int:
+def _estimate_tokens_openai(text: str, model: str, cl100k_fallback_ok: bool) -> int:
     """Use tiktoken for exact OpenAI token counting, with safe fallback.
 
     cl100k_fallback_ok controls what happens when tiktoken can't resolve

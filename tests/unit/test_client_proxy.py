@@ -491,9 +491,7 @@ async def test_orphan_watchdog_triggers_shutdown_when_orphaned(
 ) -> None:
     """When _is_orphaned returns True, the watchdog triggers clean shutdown."""
     proxy, discovery, writer = _make_proxy(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        client_proxy_module.ClientProxy, "_ORPHAN_POLL_INTERVAL", 0.0
-    )
+    monkeypatch.setattr(client_proxy_module.ClientProxy, "_ORPHAN_POLL_INTERVAL", 0.0)
     monkeypatch.setattr(proxy, "_is_orphaned", lambda: True)
 
     stdin_cancelled = asyncio.Event()

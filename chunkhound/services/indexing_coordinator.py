@@ -21,15 +21,12 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Protocol, TYPE_CHECKING, cast
-
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from chunkhound.services.directory_indexing_service import IndexingStats
 
 from loguru import logger
-
-from chunkhound.utils.logging_guard import log_if_not_mcp
 from rich.progress import Progress, TaskID
 
 from chunkhound.core.detection import detect_language
@@ -59,6 +56,7 @@ from chunkhound.utils.file_patterns import (
     walk_subtree_worker,
 )
 from chunkhound.utils.hashing import compute_file_hash
+from chunkhound.utils.logging_guard import log_if_not_mcp
 
 from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
@@ -185,8 +183,7 @@ async def run_batch_compaction_boundary(
     if status == "skipped":
         return
     raise RuntimeError(
-        "Batch database compaction failed: "
-        f"{compaction.get('error', compaction)}"
+        f"Batch database compaction failed: {compaction.get('error', compaction)}"
     )
 
 
@@ -294,7 +291,8 @@ class IndexingCoordinator(BaseService):
         if language not in self._parser_cache:
             if language in self._language_parsers:
                 parser = self._language_parsers[language]
-                # Parser setup() already called during registration - no need to call again
+                # Parser setup() already called during registration
+                # - no need to call again
                 self._parser_cache[language] = parser
             else:
                 return None
@@ -574,7 +572,8 @@ class IndexingCoordinator(BaseService):
                     )
                 except Exception:
                     logger.warning(
-                        "Failed to record skipped file in DB; next run will re-evaluate",
+                        "Failed to record skipped file in DB;"
+                        " next run will re-evaluate",
                         exc_info=True,
                     )
                 return {"status": "skipped", "reason": result.error, "chunks": 0}
@@ -593,15 +592,18 @@ class IndexingCoordinator(BaseService):
 
             # Generate embeddings if needed
             # CRITICAL FIX: Wrap embedding generation in transaction with checkpoint
-            # RATIONALE: Embeddings must be checkpointed to be visible to semantic search
+            # RATIONALE: Embeddings must be checkpointed to be
+            # visible to semantic search
             # BUG: Previously inserted into WAL without checkpoint, invisible to queries
             embeddings_generated = 0
             embedding_error = None
             if not skip_embeddings and self._embedding_provider:
                 if stats["chunk_ids_needing_embeddings"]:
                     # Generate embeddings
-                    # NOTE: Transaction management is handled internally by the database provider
-                    # to avoid transaction context issues during concurrent operations
+                    # NOTE: Transaction management is handled
+                    # internally by the database provider
+                    # to avoid transaction context issues during
+                    # concurrent operations
                     try:
                         embeddings_generated = await self._generate_embeddings(
                             stats["chunk_ids_needing_embeddings"],
@@ -612,7 +614,8 @@ class IndexingCoordinator(BaseService):
                         expected_embeddings = len(stats["chunk_ids_needing_embeddings"])
                         if embeddings_generated < expected_embeddings:
                             embedding_error = (
-                                f"Only generated {embeddings_generated}/{expected_embeddings} embeddings. "
+                                f"Only generated {embeddings_generated}"
+                                f"/{expected_embeddings} embeddings. "
                                 f"Some chunks may have empty content."
                             )
                             logger.warning(f"[IndexCoord] {embedding_error}")
@@ -663,7 +666,8 @@ class IndexingCoordinator(BaseService):
 
         Args:
             files: List of file paths to process
-            config_file_size_threshold_kb: Skip structured config files (JSON/YAML/TOML) larger than this (KB)
+            config_file_size_threshold_kb: Skip structured config
+                files (JSON/YAML/TOML) larger than this (KB)
 
         Returns:
             List of ParsedFileResult objects with parsed chunks and metadata
@@ -713,16 +717,18 @@ class IndexingCoordinator(BaseService):
         # - If timeouts are enabled and no explicit max_concurrent given,
         #   auto-scale to cpu_count (clamped to a safe upper bound).
         # - Otherwise, use heuristic based on file count with existing caps.
-        SAFE_MAX = 32
+        safe_max = 32
         if timeout_s_probe > 0 and max_concurrent <= 0:
-            num_workers = max(1, min(cpu_count, SAFE_MAX))
+            num_workers = max(1, min(cpu_count, safe_max))
         else:
             num_workers = _calculate_worker_count(file_count, cpu_count)
             if max_concurrent > 0:
                 num_workers = max(1, min(num_workers, max_concurrent))
 
         logger.debug(
-            f"Parsing {file_count} files with {num_workers} workers (timeout={timeout_s_probe}s, max_concurrent={max_concurrent or 'auto'})"
+            f"Parsing {file_count} files with {num_workers} workers"
+            f" (timeout={timeout_s_probe}s,"
+            f" max_concurrent={max_concurrent or 'auto'})"
         )
 
         # Fast path for single-file processing: avoid creating a ProcessPoolExecutor
@@ -768,16 +774,21 @@ class IndexingCoordinator(BaseService):
 
             return results
 
-        # Heuristic: increase batch granularity when per-file timeouts are enabled to avoid long silent stalls
-        # (long stalls happen when large batches contain many files that each hit the timeout)
+        # Heuristic: increase batch granularity when per-file
+        # timeouts are enabled to avoid long silent stalls
+        # (long stalls happen when large batches contain many files
+        # that each hit the timeout)
         dynamic_factor = 8 if timeout_s_probe > 0 else 4
         target_batches = max(num_workers * dynamic_factor, 1)
-        # Compute base size from target_batches then clamp to [MIN_BATCH, file_count]
-        # Use smaller minimum when timeouts are enabled to surface progress more frequently
-        MIN_BATCH = 16 if timeout_s_probe > 0 else 128
+        # Compute base size from target_batches then clamp to
+        # [min_batch, file_count]
+        # Use smaller minimum when timeouts are enabled to surface
+        # progress more frequently
+        min_batch = 16 if timeout_s_probe > 0 else 128
         base = max(1, math.ceil(len(files) / target_batches))
-        batch_size = min(len(files), max(MIN_BATCH, base))
-        # Additional clamp: target ~60s worst-case batch wall time when timeouts are enabled
+        batch_size = min(len(files), max(min_batch, base))
+        # Additional clamp: target ~60s worst-case batch wall time
+        # when timeouts are enabled
         if timeout_s_probe > 0:
             target_secs = 60.0
             per_file_cap = max(4, int(target_secs / max(0.001, timeout_s_probe)))
@@ -834,7 +845,8 @@ class IndexingCoordinator(BaseService):
                         else:
                             on_batch(batch_result)
                     except Exception:
-                        # Re-raise all exceptions from on_batch to propagate disk limit errors
+                        # Re-raise all exceptions from on_batch to
+                        # propagate disk limit errors
                         raise
 
         return all_results
@@ -842,9 +854,10 @@ class IndexingCoordinator(BaseService):
     def _check_disk_usage_limit(self) -> DiskUsageLimitExceededError | None:
         """Check if database size exceeds configured limit.
 
-        For directory-based databases (e.g., LanceDB), calculates total size of all files
-        in the directory recursively. For file-based databases (e.g., DuckDB), checks
-        the main database file size.
+        For directory-based databases (e.g., LanceDB), calculates
+        total size of all files in the directory recursively. For
+        file-based databases (e.g., DuckDB), checks the main
+        database file size.
 
         Returns:
             DiskUsageLimitExceededError if limit exceeded, None otherwise
@@ -1058,7 +1071,8 @@ class IndexingCoordinator(BaseService):
                     )
                 except Exception:
                     logger.warning(
-                        "Failed to record skipped file in DB; next run will re-evaluate",
+                        "Failed to record skipped file in DB;"
+                        " next run will re-evaluate",
                         exc_info=True,
                     )
                 if file_task is not None and self.progress:
@@ -1208,13 +1222,15 @@ class IndexingCoordinator(BaseService):
         exclude_patterns: list[str] | None = None,
         config_file_size_threshold_kb: int = 20,
     ) -> dict[str, Any]:
-        """Process all supported files in a directory with batch optimization and consistency checks.
+        """Process all supported files in a directory with
+        batch optimization and consistency checks.
 
         Args:
             directory: Directory path to process
             patterns: Optional file patterns to include
             exclude_patterns: Optional file patterns to exclude
-            config_file_size_threshold_kb: Skip structured config files (JSON/YAML/TOML) larger than this (KB)
+            config_file_size_threshold_kb: Skip structured config files
+                (JSON/YAML/TOML) larger than this (KB)
 
         Returns:
             Dictionary with processing statistics
@@ -1223,9 +1239,10 @@ class IndexingCoordinator(BaseService):
         # cleanup. Wrong-root reopens must not do any destructive work.
         # Validate against the provider's authoritative base_directory so the
         # sidecar stays consistent with connect-time validation across
-        # normalization differences (e.g. macOS /var ↔ /private/var, Windows
-        # 8.3 short-name expansion) that can otherwise cause the caller-passed
-        # `directory` to diverge from the already-validated provider base.
+        # normalization differences (e.g. macOS /var ↔ /private/var,
+        # Windows 8.3 short-name expansion) that can otherwise cause the
+        # caller-passed `directory` to diverge from the already-validated
+        # provider base.
         ensure_root = getattr(self._db, "ensure_indexed_root_identity", None)
         if callable(ensure_root):
             get_base = getattr(self._db, "get_base_directory", None)
@@ -1247,7 +1264,8 @@ class IndexingCoordinator(BaseService):
             if not files:
                 return {"status": "no_files", "files_processed": 0, "total_chunks": 0}
 
-            # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files
+            # Phase 2: Reconciliation - Ensure database consistency
+            # by removing orphaned files
             cleaned_files = 0
             do_cleanup = True
             if self.config and getattr(self.config, "indexing", None) is not None:
@@ -1262,7 +1280,8 @@ class IndexingCoordinator(BaseService):
                 logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
 
             logger.debug(
-                f"Directory consistency: {len(files)} files discovered, {cleaned_files} orphaned files cleaned"
+                f"Directory consistency: {len(files)} files discovered,"
+                f" {cleaned_files} orphaned files cleaned"
             )
 
             # Phase 2.5: Change detection (skip unchanged files unless force_reindex)
@@ -1342,7 +1361,8 @@ class IndexingCoordinator(BaseService):
                         rel = self._get_relative_path(f).as_posix()
                         db_tuple = db_meta_map.get(rel)
                         if db_tuple is None:
-                            # Fallback for providers without execute_query() (e.g., fake or limited providers)
+                            # Fallback for providers without execute_query()
+                            # (e.g., fake or limited providers)
                             try:
                                 rec = await self._db.get_file_by_path_async(
                                     rel, as_model=False
@@ -1396,19 +1416,23 @@ class IndexingCoordinator(BaseService):
                             )
                             same_mtime = abs(smt - float(st.st_mtime)) <= mtime_eps
                             if same_size and same_mtime:
-                                # Fast skip - trust filesystem metadata (mtime+size match)
+                                # Fast skip - trust filesystem metadata
+                                # (mtime+size match)
                                 skipped_unchanged += 1
                                 reasons["ok"] += 1
                             else:
-                                # Size or mtime changed - verify if content actually changed via checksum
+                                # Size or mtime changed - verify if
+                                # content actually changed via checksum
                                 cur_hash = self._compute_hash_with_fallback(f)
 
                                 if db_hash and cur_hash and db_hash == cur_hash:
-                                    # False positive - metadata changed but content didn't
+                                    # False positive - metadata changed
+                                    # but content didn't
                                     skipped_unchanged += 1
                                     reasons["ok"] += 1
                                 else:
-                                    # Content actually changed (or hash unavailable) - reindex
+                                    # Content actually changed
+                                    # (or hash unavailable) - reindex
                                     precomputed_hashes[str(f.resolve())] = cur_hash
                                     files_to_process_with_hashes.append((f, cur_hash))
                                     if not same_size:
@@ -1418,7 +1442,8 @@ class IndexingCoordinator(BaseService):
                                     if cur_hash is None:
                                         reasons["error"] += 1
                         else:
-                            # New file not in DB - compute hash for skip optimization on next run
+                            # New file not in DB - compute hash
+                            # for skip optimization on next run
                             cur_hash = self._compute_hash_with_fallback(f)
                             precomputed_hashes[str(f.resolve())] = cur_hash
                             files_to_process_with_hashes.append((f, cur_hash))
@@ -1441,9 +1466,14 @@ class IndexingCoordinator(BaseService):
                 _t5 = _t.perf_counter() if _t0 is not None else None
                 if debug_skip:
                     logger.warning(
-                        f"Skip-check summary: ok={reasons['ok']} not_found={reasons['not_found']} "
-                        f"size_mismatch={reasons['size']} mtime_mismatch={reasons['mtime']} error={reasons['error']} "
-                        f"mtime_eps={mtime_eps} files_to_process={len(files_to_process)} total={len(files)}"
+                        f"Skip-check summary: ok={reasons['ok']}"
+                        f" not_found={reasons['not_found']} "
+                        f"size_mismatch={reasons['size']}"
+                        f" mtime_mismatch={reasons['mtime']}"
+                        f" error={reasons['error']} "
+                        f"mtime_eps={mtime_eps}"
+                        f" files_to_process={len(files_to_process)}"
+                        f" total={len(files)}"
                     )
 
             # Phase 3: Parse + Store
@@ -1501,9 +1531,11 @@ class IndexingCoordinator(BaseService):
                 agg_errors.extend(stats_part.get("errors", []))
                 agg_skipped_paths.extend(stats_part.get("skipped_paths", []))
 
-            # Parse files (streaming progress as batches complete and store concurrently)
+            # Parse files (streaming progress as batches complete
+            # and store concurrently)
             # Pass files_to_process directly - preserves hash for each file
-            # Results flow to storage via on_batch=_on_batch_store; return value unused.
+            # Results flow to storage via on_batch=_on_batch_store;
+            # return value unused.
             await self._process_files_in_batches(
                 files_to_process,
                 config_file_size_threshold_kb,
@@ -1517,7 +1549,8 @@ class IndexingCoordinator(BaseService):
                 if task.total:
                     self.progress.update(parse_task, completed=task.total)
 
-            # Record startup profile if enabled (before heavy parse+store dominates totals)
+            # Record startup profile if enabled
+            # (before heavy parse+store dominates totals)
             if _t0 is not None:
                 try:
                     self._startup_profile = {
@@ -1576,9 +1609,13 @@ class IndexingCoordinator(BaseService):
                     f"{r}: {c}" for r, c in sorted(reason_counts.items())
                 )
                 logger.info(
-                    f"Skipped {len(agg_skipped_paths)} file(s) during parsing ({breakdown}). "
-                    f"These are now recorded in the DB and won't be re-scanned unless their content changes. "
-                    f"Add paths to .gitignore or set ignore patterns to exclude them permanently."
+                    f"Skipped {len(agg_skipped_paths)}"
+                    f" file(s) during parsing ({breakdown}). "
+                    f"These are now recorded in the DB and"
+                    f" won't be re-scanned unless their"
+                    f" content changes. "
+                    f"Add paths to .gitignore or set ignore"
+                    f" patterns to exclude them permanently."
                 )
                 for path, reason in agg_skipped_paths:
                     logger.debug(f"Skipped file: {path} (reason: {reason})")
@@ -1596,7 +1633,8 @@ class IndexingCoordinator(BaseService):
                 if task.total:
                     self.progress.update(store_task, completed=task.total)
 
-            # Note: Embedding generation is handled separately via generate_missing_embeddings()
+            # Note: Embedding generation is handled separately via
+            # generate_missing_embeddings()
             # to provide a unified progress experience
 
             # Check for disk limit exceeded errors
@@ -1831,7 +1869,8 @@ class IndexingCoordinator(BaseService):
         """Generate embeddings for chunks that don't have them.
 
         Args:
-            exclude_patterns: Optional file patterns to exclude from embedding generation
+            exclude_patterns: Optional file patterns to exclude from
+                embedding generation
 
         Returns:
             Dictionary with generation results
@@ -1926,7 +1965,8 @@ class IndexingCoordinator(BaseService):
             # Log metrics for empty chunks
             if empty_count > 0:
                 logger.debug(
-                    f"Filtered {empty_count} empty text chunks before embedding generation"
+                    f"Filtered {empty_count} empty text chunks"
+                    f" before embedding generation"
                 )
 
             if not valid_chunk_data:
@@ -1939,7 +1979,8 @@ class IndexingCoordinator(BaseService):
             valid_chunk_ids = [chunk_id for chunk_id, _, _ in valid_chunk_data]
             texts = [text for _, _, text in valid_chunk_data]
 
-            # Generate embeddings (progress tracking handled by missing embeddings phase)
+            # Generate embeddings (progress tracking handled by
+            # missing embeddings phase)
             embedding_results = await self._embedding_provider.embed_batch(texts)
 
             # Store embeddings in database
@@ -1955,9 +1996,12 @@ class IndexingCoordinator(BaseService):
                     }
                 )
 
-            # CRITICAL FIX: Ensure clean transaction state before database insertion
-            # In concurrent scenarios, the executor thread may have an aborted transaction
-            # from a previous operation. Try insertion, and if we get a transaction error,
+            # CRITICAL FIX: Ensure clean transaction state before
+            # database insertion
+            # In concurrent scenarios, the executor thread may have
+            # an aborted transaction
+            # from a previous operation. Try insertion, and if we
+            # get a transaction error,
             # clean up and retry once.
             try:
                 result = self._db.insert_embeddings_batch(
@@ -1994,7 +2038,9 @@ class IndexingCoordinator(BaseService):
             text_sizes = [len(text) for text in texts] if "texts" in locals() else []
             max_chars = max(text_sizes) if text_sizes else 0
             logger.error(
-                f"[IndexCoord] Failed to generate embeddings (chunks: {len(text_sizes)}, max_chars: {max_chars}): {e}"
+                f"[IndexCoord] Failed to generate embeddings"
+                f" (chunks: {len(text_sizes)},"
+                f" max_chars: {max_chars}): {e}"
             )
             return 0
 
@@ -2075,7 +2121,8 @@ class IndexingCoordinator(BaseService):
                     # Check if this directory should be excluded
                     rel_path = item.relative_to(directory)
                     should_skip = False
-                    # Prefer effective_excludes for early pruning; fall back to provided list
+                    # Prefer effective_excludes for early pruning;
+                    # fall back to provided list
                     prune_patterns = effective_excludes or exclude_patterns
                     for pattern in prune_patterns:
                         if pattern.startswith("**/") and pattern.endswith("/**"):
@@ -2171,7 +2218,8 @@ class IndexingCoordinator(BaseService):
                             if rr.resolve().is_relative_to(sres):
                                 roots_for_subtree.append(rr)
                         except Exception:
-                            # Fallback for Python versions without is_relative_to or resolution issues
+                            # Fallback for Python versions without
+                            # is_relative_to or resolution issues
                             try:
                                 rr.resolve().relative_to(sres)
                                 roots_for_subtree.append(rr)
@@ -2230,7 +2278,7 @@ class IndexingCoordinator(BaseService):
                 logger.error(f"  ... and {len(all_errors) - 5} more errors")
 
         # Scan files in the root directory itself (not in subdirs) using helper
-        root_gitignore_patterns = parent_gitignores.get(directory, [])
+        parent_gitignores.get(directory, [])
         # Build or reuse local repo-aware engine for the root directory scan
         local_engine = self._get_or_build_ignore_engine(
             root=directory,
@@ -2295,7 +2343,8 @@ class IndexingCoordinator(BaseService):
         parallel_discovery: bool | None = None,
         use_inode_ordering: bool = False,
     ) -> list[Path]:
-        """Discover files in directory matching patterns with efficient exclude filtering.
+        """Discover files in directory matching patterns with
+        efficient exclude filtering.
 
         PERFORMANCE: Automatically selects parallel vs sequential discovery based on:
         - Config setting (parallel_discovery)
@@ -2304,14 +2353,22 @@ class IndexingCoordinator(BaseService):
 
         Args:
             directory: Directory to search
-            patterns: File patterns to include (REQUIRED - must be provided by configuration layer)
-            exclude_patterns: File patterns to exclude (optional - will load from config if None)
-            parallel_discovery: Enable parallel directory traversal (default: from config)
-                - Activates when >= min_dirs_for_parallel top-level directories exist
-                - Scales workers based on number of subdirectories (max: max_discovery_workers)
-                - Falls back to sequential for small directory structures
-            use_inode_ordering: Sort directories by inode for improved disk locality (default: False)
-                - Beneficial on rotational drives (HDDs) to reduce seek time
+            patterns: File patterns to include (REQUIRED - must be
+                provided by configuration layer)
+            exclude_patterns: File patterns to exclude (optional -
+                will load from config if None)
+            parallel_discovery: Enable parallel directory traversal
+                (default: from config)
+                - Activates when >= min_dirs_for_parallel top-level
+                  directories exist
+                - Scales workers based on number of subdirectories
+                  (max: max_discovery_workers)
+                - Falls back to sequential for small directory
+                  structures
+            use_inode_ordering: Sort directories by inode for improved
+                disk locality (default: False)
+                - Beneficial on rotational drives (HDDs) to reduce
+                  seek time
                 - Minimal benefit on SSDs
                 - Slight overhead from stat() calls per directory
 
@@ -2330,7 +2387,8 @@ class IndexingCoordinator(BaseService):
         if not exclude_patterns:
             exclude_patterns = []
 
-        # Prepare IgnoreEngine parameters (defer heavy engine build unless sequential path is taken)
+        # Prepare IgnoreEngine parameters (defer heavy engine
+        # build unless sequential path is taken)
         engine_args: dict[str, Any] | None = None
         ignore_engine_obj: _IgnoreMatcher | None = None
         indexing_config = self._indexing_config_or_none()
@@ -2359,7 +2417,8 @@ class IndexingCoordinator(BaseService):
                 )
 
                 cfg_excludes = _Idx._default_excludes()
-            # Dynamically exclude the database path when it lives under the target directory
+            # Dynamically exclude the database path when it lives
+            # under the target directory
             try:
                 dbp = getattr(self._db, "db_path", None)
                 if dbp:
@@ -2367,7 +2426,8 @@ class IndexingCoordinator(BaseService):
                     dir_res = directory.resolve()
                     try:
                         rel = dbp_res.relative_to(dir_res)
-                        # If DB path is a directory, exclude the whole subtree; if file, exclude the file
+                        # If DB path is a directory, exclude the
+                        # whole subtree; if file, exclude the file
                         if dbp_res.is_dir():
                             rp = rel.as_posix()
                             cfg_excludes.extend(
@@ -2545,7 +2605,8 @@ class IndexingCoordinator(BaseService):
                 fallback_to_python=(not git_only_mode),
             )
             logger.debug(
-                f"Git discovery returned: {len(files_git) if files_git is not None else 'None'} files"
+                f"Git discovery returned:"
+                f" {len(files_git) if files_git is not None else 'None'} files"
             )
             # If Git enumeration succeeded (not None), return the result.
             # An empty list means git ran but no files matched after
@@ -2571,7 +2632,8 @@ class IndexingCoordinator(BaseService):
                 discovered_files = await self._discover_files_parallel(
                     directory, patterns, exclude_patterns, use_inode_ordering
                 )
-                # Check if parallel succeeded (returns files) or signaled fallback (returns None)
+                # Check if parallel succeeded (returns files)
+                # or signaled fallback (returns None)
                 if discovered_files is not None:
                     # Parallel discovery returns pre-sorted results (via heapq.merge)
                     try:
@@ -2587,7 +2649,8 @@ class IndexingCoordinator(BaseService):
 
                 error_traceback = traceback.format_exc()
                 logger.warning(
-                    f"Parallel discovery failed for {directory}, falling back to sequential:\n"
+                    f"Parallel discovery failed for {directory},"
+                    f" falling back to sequential:\n"
                     f"  Error: {type(e).__name__}: {e}\n"
                     f"  Traceback (last 3 frames):\n"
                     f"{''.join(traceback.format_tb(e.__traceback__)[-3:])}"
@@ -2596,7 +2659,8 @@ class IndexingCoordinator(BaseService):
                 # Fall through to sequential
 
         # Sequential discovery (fallback or explicitly requested)
-        # Build the ignore engine only now (avoid heavy pre-build when parallel succeeds)
+        # Build the ignore engine only now (avoid heavy pre-build
+        # when parallel succeeds)
         if engine_args is not None and ignore_engine_obj is None:
             try:
                 ignore_engine_obj = self._get_or_build_ignore_engine(
@@ -2635,7 +2699,8 @@ class IndexingCoordinator(BaseService):
     ) -> list[Path] | None:
         """Enumerate files using `git ls-files` per repo when available.
 
-        Falls back (returns None) when Git is missing, errors occur, or no repos are found.
+        Falls back (returns None) when Git is missing, errors occur,
+        or no repos are found.
         Always applies ChunkHound include patterns and config/default excludes on top
         of Git results. Non-repo portions of the directory are scanned using the
         Python walker while pruning repo subtrees.
@@ -2722,7 +2787,8 @@ class IndexingCoordinator(BaseService):
             prune_gitfile_roots = False
             workspace_root_only_gitignore = False
 
-        # Detect repo roots under directory (pruned by effective_excludes) with cache reuse
+        # Detect repo roots under directory (pruned by
+        # effective_excludes) with cache reuse
         try:
             repo_roots = self._get_or_detect_repo_roots(
                 directory,
@@ -2755,9 +2821,11 @@ class IndexingCoordinator(BaseService):
         for rr in repo_roots:
             try:
                 # Determine the subtree to list for this repo root
-                # If the requested directory is an ancestor of the repo root, list the whole repo (start at rr)
-                # If the repo root is an ancestor of the requested directory, limit to that subdir
-                # Otherwise (disjoint), skip (shouldn't occur with our detection)
+                # If the requested directory is an ancestor of the repo
+                # root, list the whole repo (start at rr)
+                # If the repo root is an ancestor of the requested
+                # directory, limit to that subdir
+                # Otherwise (disjoint), skip (shouldn't occur)
                 start_for_repo = rr
                 try:
                     directory.resolve().relative_to(rr.resolve())
@@ -2799,12 +2867,14 @@ class IndexingCoordinator(BaseService):
         # Scan non-repo areas by pruning repo subtrees during walk
         if fallback_to_python:
             try:
-                # Build a fast set of immediate children to prune, but do a general prune inside walker too
+                # Build a fast set of immediate children to prune,
+                # but do a general prune inside walker too
                 parent_gitignores: dict[Path, list[str]] = {
                     directory: _load_gi(directory, directory)
                 }
-                # Build a repo-aware engine so we can control whether the workspace (non-repo)
-                # side honors the CH root .gitignore (root-only) or ignores it entirely.
+                # Build a repo-aware engine so we can control whether
+                # the workspace (non-repo) side honors the CH root
+                # .gitignore (root-only) or ignores it entirely.
                 indexing_config = self._indexing_config_or_none()
                 try:
                     wr_only = (
@@ -2820,7 +2890,8 @@ class IndexingCoordinator(BaseService):
                     )
                 except Exception:
                     wr_only = False
-                # Simple overlay prefixes (directory-only) parsed from root .gitignore (best-effort)
+                # Simple overlay prefixes (directory-only) parsed from
+                # root .gitignore (best-effort)
                 overlay_prefixes: list[str] = []
                 if wr_only:
                     try:
@@ -2870,7 +2941,7 @@ class IndexingCoordinator(BaseService):
                     ignore_engine=local_engine,
                 )
 
-                # Remove any files that are inside detected repo roots to avoid duplicates
+                # Remove any files inside detected repo roots to avoid duplicates
                 pruned_non_repo: list[Path] = []
                 for fp in non_repo_files:
                     try:
@@ -3011,11 +3082,14 @@ class IndexingCoordinator(BaseService):
         Args:
             directory: Root directory to walk
             patterns: File patterns to include
-            exclude_patterns: Patterns to exclude (applied to both files and directories)
-            use_inode_ordering: Sort directories by inode to reduce disk seeks (default: False)
+            exclude_patterns: Patterns to exclude (applied to both files
+            and directories)
+            use_inode_ordering: Sort directories by inode to reduce
+                disk seeks (default: False)
 
         Returns:
-            List of file paths that match include patterns and don't match exclude patterns
+            List of file paths matching include patterns
+            and not matching exclude patterns
         """
         # Resolve directory path once at the beginning for consistent comparison
         directory = directory.resolve()

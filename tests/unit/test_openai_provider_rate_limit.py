@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Minimal fake exception hierarchy
 # ---------------------------------------------------------------------------
@@ -107,8 +106,9 @@ class TestRetryAfterHeader:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             result = await provider._embed_batch_internal(["hello"])
 
@@ -142,8 +142,9 @@ class TestRetryAfterHeader:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["hi"])
 
@@ -174,8 +175,9 @@ class TestRetryAfterHeader:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["hi"])
 
@@ -212,8 +214,9 @@ class TestRetryAfterBodyParse:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["hello"])
 
@@ -242,8 +245,9 @@ class TestRetryAfterBodyParse:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["x"])
 
@@ -271,8 +275,9 @@ class TestRetryAfterBodyParse:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["x"])
 
@@ -306,8 +311,9 @@ class TestExponentialBackoffFallback:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["hello"])
 
@@ -318,7 +324,10 @@ class TestExponentialBackoffFallback:
 
     @pytest.mark.asyncio
     async def test_exponential_backoff_capped_at_120s(self):
-        """Exponential backoff never exceeds 120 s + jitter regardless of retry_delay."""
+        """
+        Exponential backoff never exceeds
+        120 s + jitter regardless of retry_delay.
+        """
         provider, fake_openai, mod = _make_provider(retry_attempts=2, retry_delay=200.0)
 
         call_count = 0
@@ -338,8 +347,9 @@ class TestExponentialBackoffFallback:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["x"])
 
@@ -359,8 +369,9 @@ class TestExponentialBackoffFallback:
         async def fake_sleep(_):
             pass
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             with pytest.raises(_FakeRateLimitError):
                 await provider._embed_batch_internal(["x"])

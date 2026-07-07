@@ -1,18 +1,24 @@
-import os
 from pathlib import Path
 
 import pytest
 
 from chunkhound.utils.file_patterns import (
     should_exclude_path,
-    should_include_file,
     walk_directory_tree,
 )
 
 
 def test_exclude_double_star_segment_wildcard_venv():
     base = Path("/workspaces/project")
-    p = base / ".venv-docling" / "lib" / "python3.11" / "site-packages" / "pkg" / "mod.py"
+    p = (
+        base
+        / ".venv-docling"
+        / "lib"
+        / "python3.11"
+        / "site-packages"
+        / "pkg"
+        / "mod.py"
+    )
     patterns = ["**/.venv*/**"]
     assert should_exclude_path(p, base, patterns, {}) is True
 
@@ -38,7 +44,9 @@ async def test_walk_directory_tree_prunes_wildcard_dir_segments(tmp_path: Path):
     (tmp_path / "src" / "a.py").write_text("print('ok')\n", encoding="utf-8")
 
     # .venv-docling subtree (should be pruned)
-    venv_pkg = tmp_path / ".venv-docling" / "lib" / "python3.11" / "site-packages" / "pkg"
+    venv_pkg = (
+        tmp_path / ".venv-docling" / "lib" / "python3.11" / "site-packages" / "pkg"
+    )
     venv_pkg.mkdir(parents=True)
     (venv_pkg / "b.py").write_text("# venv\n", encoding="utf-8")
 
@@ -67,4 +75,3 @@ async def test_walk_directory_tree_prunes_wildcard_dir_segments(tmp_path: Path):
     rels = sorted([f.relative_to(tmp_path).as_posix() for f in files])
     # Only the src/a.py file should be present
     assert rels == ["src/a.py"], f"unexpected files discovered: {rels}"
-

@@ -198,7 +198,8 @@ class WideCoverageStrategy:
         path_filter: str | None = None,
         constants_context: str = "",
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Execute wide coverage exploration without elbow filtering (for parallel mode).
+        """Execute wide coverage exploration without
+        elbow filtering (for parallel mode).
 
         Returns raw chunks from depth exploration and gap detection without
         elbow detection or file reading. The caller (ParallelExplorationStrategy)

@@ -571,7 +571,8 @@ class TestVueParserIntegration:
 
         # Template chunks should have cross-reference metadata
         chunks_with_refs = [
-            c for c in template_chunks
+            c
+            for c in template_chunks
             if c.metadata and "script_references" in c.metadata
         ]
 
@@ -590,7 +591,8 @@ class TestVueParserIntegration:
 
         # Check for undefined references
         chunks_with_undefined = [
-            c for c in template_chunks
+            c
+            for c in template_chunks
             if c.metadata and "undefined_references" in c.metadata
         ]
 
@@ -619,12 +621,14 @@ class TestVueParserIntegration:
 
         # Find template chunks with references
         template_chunks = [
-            c for c in chunks
+            c
+            for c in chunks
             if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         chunks_with_refs = [
-            c for c in template_chunks
+            c
+            for c in template_chunks
             if c.metadata and "script_references" in c.metadata
         ]
 
@@ -649,12 +653,14 @@ class TestVueParserIntegration:
 
         # Find template chunks with references
         template_chunks = [
-            c for c in chunks
+            c
+            for c in chunks
             if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         chunks_with_refs = [
-            c for c in template_chunks
+            c
+            for c in template_chunks
             if c.metadata and "script_references" in c.metadata
         ]
 

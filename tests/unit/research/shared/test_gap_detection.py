@@ -13,7 +13,6 @@ from chunkhound.services.research.shared.gap_detection import GapDetectionServic
 from chunkhound.services.research.shared.gap_models import UnifiedGap
 from tests.fixtures.fake_providers import FakeLLMProvider
 
-
 # -----------------------------------------------------------------------------
 # Fixtures
 # -----------------------------------------------------------------------------
@@ -78,7 +77,9 @@ def research_config():
 
 
 @pytest.fixture
-def gap_service(mock_llm_manager, mock_embedding_manager, mock_db_services, research_config):
+def gap_service(
+    mock_llm_manager, mock_embedding_manager, mock_db_services, research_config
+):
     """Create gap detection service with mocked dependencies."""
     return GapDetectionService(
         llm_manager=mock_llm_manager,

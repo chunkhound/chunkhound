@@ -78,14 +78,16 @@ class TestRealtimeFailures:
         # Wait for initial scan to complete
         await asyncio.sleep(1.0)
 
-        # Now create file AFTER initial scan - should only be caught by real-time monitoring
+        # Now create file AFTER initial scan
+        # - should only be caught by real-time monitoring
         test_file = watch_dir / "realtime_test.py"
         test_file.write_text("def realtime_test(): pass")
 
         # Wait for debounce delay (0.5s) + processing + database commit
         await asyncio.sleep(2.0)
 
-        # If threading integration works, file should be processed by real-time monitoring
+        # If threading integration works, file should
+        # be processed by real-time monitoring
         # Use resolved path to match what the real-time service stores
         file_record = services.provider.get_file_by_path(str(test_file.resolve()))
         assert file_record is not None, (
@@ -98,7 +100,8 @@ class TestRealtimeFailures:
     async def test_indexing_coordinator_skip_embeddings_not_implemented(
         self, realtime_setup
     ):
-        """Test that IndexingCoordinator.process_file doesn't support skip_embeddings parameter."""
+        """Test that IndexingCoordinator.process_file
+        doesn't support skip_embeddings parameter."""
         service, watch_dir, _, services = realtime_setup
 
         # Try to call process_file with skip_embeddings directly
@@ -117,8 +120,7 @@ class TestRealtimeFailures:
             )
         except TypeError as e:
             pytest.fail(
-                f"IndexingCoordinator.process_file doesn't support "
-                f"skip_embeddings: {e}"
+                f"IndexingCoordinator.process_file doesn't support skip_embeddings: {e}"
             )
 
     @pytest.mark.asyncio
@@ -139,7 +141,8 @@ class TestRealtimeFailures:
         # Wait for debounce delay + buffer to let the task complete and clean up
         await asyncio.sleep(2.0)
         assert len(service._pending_debounce) == 0, (
-            f"Stale debounce entries after processing: {list(service._pending_debounce)}"
+            f"Stale debounce entries after processing:"
+            f" {list(service._pending_debounce)}"
         )
         assert len(service._debounce_tasks) == 0, (
             f"Leaked debounce tasks after processing: {len(service._debounce_tasks)}"
@@ -193,7 +196,9 @@ class TestRealtimeFailures:
         # Use platform-appropriate timeout for Windows CI polling mode
         service.reset_file_tracking(subdir_file)
         subdir_file.write_text("def nested(): pass")
-        found = await service.wait_for_file_indexed(subdir_file, timeout=get_fs_event_timeout())
+        found = await service.wait_for_file_indexed(
+            subdir_file, timeout=get_fs_event_timeout()
+        )
         assert found, "Nested files should be detected by recursive monitoring"
 
         await service.stop()
@@ -209,14 +214,18 @@ class TestRealtimeFailures:
         # Wait for file to be indexed
         service.reset_file_tracking(test_file)
         test_file.write_text("def to_be_deleted(): pass")
-        found = await service.wait_for_file_indexed(test_file, timeout=get_fs_event_timeout())
+        found = await service.wait_for_file_indexed(
+            test_file, timeout=get_fs_event_timeout()
+        )
         assert found, "File should be processed initially"
 
         # Delete the file
         # Wait for deletion processing
         service.reset_file_tracking(test_file)
         test_file.unlink()
-        removed = await service.wait_for_file_removed(test_file, timeout=get_fs_event_timeout())
+        removed = await service.wait_for_file_removed(
+            test_file, timeout=get_fs_event_timeout()
+        )
         assert removed, "Deleted files should be removed from database"
 
         await service.stop()

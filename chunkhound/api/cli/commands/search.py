@@ -80,13 +80,17 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
         force_strategy = "multi_hop"
 
     # Guard: force_strategy flags are incompatible with commit-scoped diff search
-    if force_strategy and any([
-        getattr(args, "commit_range", None),
-        getattr(args, "commit_hash", None),
-        getattr(args, "last_n_commits", None),
-    ]):
+    if force_strategy and any(
+        [
+            getattr(args, "commit_range", None),
+            getattr(args, "commit_hash", None),
+            getattr(args, "last_n_commits", None),
+        ]
+    ):
         formatter.error(
-            "--commit-range/--commit-hash/--last-n cannot be combined with --single-hop/--multi-hop."
+            "--commit-range/--commit-hash/--last-n "
+            "cannot be combined with "
+            "--single-hop/--multi-hop."
         )
         sys.exit(1)
 
@@ -99,7 +103,9 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
     if args.regex and any(v for _, v in _diff_flags):
         used = ", ".join(f for f, v in _diff_flags if v)
         formatter.warning(
-            f"--regex ignores git diff flags ({used}); diff search requires semantic mode."
+            f"--regex ignores git diff flags "
+            f"({used}); diff search requires "
+            f"semantic mode."
         )
 
     try:
@@ -124,9 +130,11 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
         else:
             # CLI-specific: When force_strategy is set for semantic search,
             # call the service directly to pass the force_strategy parameter.
-            # NOTE: this path bypasses search_impl, so diff injection (_inject_diff_service)
-            # is skipped. The guard above (line 83) blocks --force-strategy with commit
-            # params to prevent silent no-diff behaviour. Tracked for follow-up.
+            # NOTE: this path bypasses search_impl, so diff
+            # injection (_inject_diff_service) is skipped. The
+            # guard above (line 83) blocks --force-strategy with
+            # commit params to prevent silent no-diff behaviour.
+            # Tracked for follow-up.
             if not embedding_manager or not embedding_manager.list_providers():
                 raise Exception(
                     "No embedding providers available. "

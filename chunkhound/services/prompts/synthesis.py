@@ -30,7 +30,8 @@ def get_system_message(output_guidance: str) -> str:
     Returns:
         Complete system message for synthesis
     """
-    return f"""Expert researcher synthesizing complete analysis. All relevant source material from BFS exploration provided.
+    return f"""Expert researcher synthesizing complete analysis.
+All relevant source material from BFS exploration provided.
 
 {output_guidance}
 
@@ -73,7 +74,8 @@ Draft notes:
 - "Pattern: adaptive depth, prevents context degradation"
 - "Trade-off: completeness vs speed, chose bounded limit"
 
-Then produce full analysis with complete details, reference citations [N], step-by-step breakdown.
+Then produce full analysis with complete details,
+reference citations [N], step-by-step breakdown.
 
 **Key principle:** Think in concise drafts, write comprehensive output.
 </reasoning_strategy>
@@ -206,10 +208,12 @@ USER_TEMPLATE = """Question: {root_query}
 Complete Source Context:
 {source_context}
 
-Provide comprehensive analysis answering the question using ALL source material provided.
+Provide comprehensive analysis answering the question
+using ALL source material provided.
 
 REASONING APPROACH:
-First, analyze the source material using Chain of Draft (minimal draft notes, 5-7 words per insight):
+First, analyze the source material using Chain of Draft
+(minimal draft notes, 5-7 words per insight):
 - Identify entry points and core mechanisms
 - Extract key values with locations
 - Note patterns and trade-offs

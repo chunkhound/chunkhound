@@ -167,10 +167,13 @@ class SwiftMapping(BaseMapping):
                 # Add prefix for protocols
                 if node.type == "protocol_declaration":
                     type_name = f"protocol {type_name}"
-                # For class_declaration, check the keyword child to determine actual type
+                # For class_declaration, check the keyword child
+                # to determine actual type
                 elif node.type == "class_declaration":
-                    # Only add prefix for actors (to distinguish from classes)
-                    # Other types (struct, enum, class) don't get prefixes in symbol names
+                    # Only add prefix for actors (to distinguish
+                    # from classes)
+                    # Other types (struct, enum, class) don't get
+                    # prefixes in symbol names
                     for child in node.children:
                         if child.type == "actor":
                             type_name = f"actor {type_name}"
@@ -363,7 +366,8 @@ class SwiftMapping(BaseMapping):
             source: Source code string
 
         Returns:
-            Access modifier string (public, private, internal, fileprivate, open) or None
+            Access modifier string (public, private, internal,
+            fileprivate, open) or None
         """
         if node is None:
             return None
@@ -541,12 +545,14 @@ class SwiftMapping(BaseMapping):
                     return self.extract_function_name(def_node, source)
 
                 # Classes, structs, protocols, enums, actors, extensions
-                # Note: class_declaration is used for classes, structs, enums, actors, and extensions
+                # Note: class_declaration is used for classes, structs,
+                # enums, actors, and extensions
                 elif def_node.type in (
                     "class_declaration",
                     "protocol_declaration",
                 ):
-                    # Check if it's an extension (uses class_declaration with extension keyword child)
+                    # Check if it's an extension (uses class_declaration
+                    # with extension keyword child)
                     if def_node.type == "class_declaration":
                         for child in def_node.children:
                             if child.type == "extension":
@@ -667,7 +673,8 @@ class SwiftMapping(BaseMapping):
                     if self.find_child_by_type(def_node, "?"):
                         metadata["failable"] = True
 
-                # For class_declaration (handles classes, structs, enums, actors, extensions)
+                # For class_declaration (handles classes, structs,
+                # enums, actors, extensions)
                 elif def_node.type == "class_declaration":
                     # Determine actual kind by checking keyword child
                     declaration_kind = "class"  # default
@@ -765,7 +772,8 @@ class SwiftMapping(BaseMapping):
             content: Source file content as bytes
 
         Returns:
-            List of dictionaries with "name", "value", and optionally "type" keys, or None
+            List of dictionaries with "name", "value",
+            and optionally "type" keys, or None
         """
         source = content.decode("utf-8")
         constants: list[dict[str, str]] = []

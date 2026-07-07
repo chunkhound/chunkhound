@@ -10,6 +10,7 @@ def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     import psutil
+
     try:
         return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
     except psutil.NoSuchProcess:
@@ -23,6 +24,7 @@ def process_create_time(pid: int) -> float | None:
     if pid <= 0:
         return None
     import psutil
+
     try:
         return float(psutil.Process(pid).create_time())
     except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):

@@ -1,7 +1,5 @@
 """Tests for OpenAI endpoint detection utilities."""
 
-import pytest
-
 from chunkhound.core.utils.openai_utils import (
     is_azure_openai_endpoint,
     is_official_openai_endpoint,

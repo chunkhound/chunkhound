@@ -90,6 +90,7 @@ def clear_claude_cache(sentinel: str | None = None) -> None:
 
 # ── Public resolution entry point ────────────────────────────────────────
 
+
 def resolve_claude_model(
     requested: str | None,
     api_key: str | None = None,
@@ -167,6 +168,7 @@ def resolve_claude_cli_model(requested: str | None) -> str:
 
 # ── API discovery ────────────────────────────────────────────────────────
 
+
 def _get_env_override(config: ClaudeSentinelConfig) -> str | None:
     """Return a non-empty CHUNKHOUND Claude model override, if configured."""
     env_override = os.getenv(config["env_var"])
@@ -207,9 +209,7 @@ def _discover_latest_model(
         client = Anthropic(api_key=resolved_key)
         models = client.models.list(limit=100, timeout=10)
         matches = [
-            model
-            for model in models
-            if config["filter"](getattr(model, "id", ""))
+            model for model in models if config["filter"](getattr(model, "id", ""))
         ]
         if not matches:
             return None
@@ -228,6 +228,7 @@ def _cache_identity_for_api_key(api_key: str) -> str:
 
 
 # ── Sorting helper ───────────────────────────────────────────────────────
+
 
 def _model_sort_key(model: Any) -> tuple[datetime, str]:
     """Sort key: newest ``created_at`` first, model ID as tiebreaker."""

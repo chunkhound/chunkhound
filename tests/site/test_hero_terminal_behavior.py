@@ -6,7 +6,8 @@ from tests.site.tsx_runner import run_tsx_json
 def test_hero_terminal_remeasures_after_font_settling() -> None:
     script = """
 class FakeElement {
-  constructor({ id = '', className = '', rect = null, closestMap = new Map(), clientWidth = 320 } = {}) {
+  constructor({ id = '', className = '', rect = null,
+    closestMap = new Map(), clientWidth = 320 } = {}) {
     this.id = id;
     this.className = className;
     this.rect = rect || { top: 0, bottom: 200, height: 200 };
@@ -54,7 +55,8 @@ class FakeMeasureElement extends FakeElement {
     super();
   }
   getBoundingClientRect() {
-    return { height: globalThis.measureHeight, top: 0, bottom: globalThis.measureHeight };
+    return { height: globalThis.measureHeight,
+      top: 0, bottom: globalThis.measureHeight };
   }
 }
 
@@ -126,7 +128,9 @@ const fontsReady = new Promise((resolve) => {
 globalThis.measureHeight = 120;
 
 const card = new FakeElement({ className: 'terminal-card' });
-const container = new FakeElement({ id: 'terminal-lines', closestMap: new Map([['.terminal-card', card]]) });
+const container = new FakeElement({
+  id: 'terminal-lines',
+  closestMap: new Map([['.terminal-card', card]]) });
 const document = new FakeDocument(container, fontsReady);
 const window = new FakeWindow();
 
@@ -161,7 +165,8 @@ console.log(JSON.stringify({ initialHeight, afterFontsHeight }));
 def test_hero_terminal_restarts_after_pagehide_and_pageshow() -> None:
     script = """
 class FakeElement {
-  constructor({ id = '', className = '', rect = null, closestMap = new Map(), clientWidth = 320 } = {}) {
+  constructor({ id = '', className = '', rect = null,
+    closestMap = new Map(), clientWidth = 320 } = {}) {
     this.id = id;
     this.className = className;
     this.rect = rect || { top: 0, bottom: 200, height: 200 };
@@ -274,7 +279,9 @@ class FakeIntersectionObserver {
 }
 
 const card = new FakeElement({ className: 'terminal-card' });
-const container = new FakeElement({ id: 'terminal-lines', closestMap: new Map([['.terminal-card', card]]) });
+const container = new FakeElement({
+  id: 'terminal-lines',
+  closestMap: new Map([['.terminal-card', card]]) });
 const document = new FakeDocument(container);
 const window = new FakeWindow();
 

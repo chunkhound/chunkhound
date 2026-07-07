@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.providers.llm.codex_cli_provider import CODEX_DEFAULT_SYNTHESIS_MODEL, CodexCLIProvider
+from chunkhound.providers.llm.codex_cli_provider import (
+    CodexCLIProvider,
+)
 
 
 @pytest.mark.integration
@@ -30,8 +32,7 @@ def test_codex_exec_help_available():
         env["CODEX_HOME"] = overlay
         proc = subprocess.run(
             [codex_bin, "exec", "--help"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             env=env,
             timeout=30,
             check=False,
@@ -41,7 +42,9 @@ def test_codex_exec_help_available():
 
     # `--help` should succeed and print usage text
     combined = (proc.stdout + proc.stderr).decode("utf-8", errors="ignore").lower()
-    assert proc.returncode == 0, f"codex exec --help failed: rc={proc.returncode}, out={combined!r}"
+    assert proc.returncode == 0, (
+        f"codex exec --help failed: rc={proc.returncode}, out={combined!r}"
+    )
     assert "usage" in combined and "codex exec" in combined, (
         "Help output did not contain expected usage text. Output was: " + combined
     )
@@ -61,13 +64,12 @@ def test_codex_exec_simple_prompt():
 
     env = os.environ.copy()
 
-    prompt = 'Output exactly the uppercase string OK and nothing else.'
+    prompt = "Output exactly the uppercase string OK and nothing else."
 
     def run_cmd(args):
         return subprocess.run(
             args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             env=env,
             timeout=120,
             check=False,
@@ -90,10 +92,14 @@ def test_codex_exec_simple_prompt():
         # Verify overlay config enforces our requirements
         cfg = Path(overlay) / "config.toml"
         content = cfg.read_text(encoding="utf-8") if cfg.exists() else ""
-        assert "history" in content and "persistence" in content and "none" in content.lower(), (
-            "Overlay config.toml does not disable history persistence."
+        assert (
+            "history" in content
+            and "persistence" in content
+            and "none" in content.lower()
+        ), "Overlay config.toml does not disable history persistence."
+        assert "mcp_servers" not in content.lower(), (
+            "Overlay config.toml must not define MCP servers."
         )
-        assert "mcp_servers" not in content.lower(), "Overlay config.toml must not define MCP servers."
         assert f'model = "{cheapest_model}"' in content, (
             f"Overlay config.toml must set model to {cheapest_model}."
         )
@@ -103,7 +109,13 @@ def test_codex_exec_simple_prompt():
 
         # Try explicit model/effort flags first; gracefully remove if unsupported
         base = [codex_bin, "exec", prompt]
-        flags = ["--model", cheapest_model, "--model-reasoning-effort", "low", "--skip-git-repo-check"]
+        flags = [
+            "--model",
+            cheapest_model,
+            "--model-reasoning-effort",
+            "low",
+            "--skip-git-repo-check",
+        ]
 
         def try_exec(args):
             p = run_cmd(args)
@@ -114,26 +126,48 @@ def test_codex_exec_simple_prompt():
             )
 
         proc, out, err = try_exec(base + flags)
-        if proc.returncode != 0 and "unexpected argument '--model-reasoning-effort'" in err:
+        if (
+            proc.returncode != 0
+            and "unexpected argument '--model-reasoning-effort'" in err
+        ):
             flags = ["--model", cheapest_model, "--skip-git-repo-check"]
             proc, out, err = try_exec(base + flags)
         if proc.returncode != 0 and "unexpected argument '--model'" in err:
             # Try only skip-git flag
             proc, out, err = try_exec(base + ["--skip-git-repo-check"])
-        if proc.returncode != 0 and "unexpected argument '--skip-git-repo-check'" in err:
+        if (
+            proc.returncode != 0
+            and "unexpected argument '--skip-git-repo-check'" in err
+        ):
             # Last resort: no flags at all
             proc, out, err = try_exec(base)
 
         # If not authenticated, xfail instead of failing the suite
-        auth_hints = ("login", "authenticate", "not logged in", "sign in", "unauthorized")
+        auth_hints = (
+            "login",
+            "authenticate",
+            "not logged in",
+            "sign in",
+            "unauthorized",
+        )
         if proc.returncode != 0 and any(h in err for h in auth_hints):
             pytest.xfail("Codex CLI not authenticated in this environment.")
 
-        account_hints = ("not supported", "invalid_request_error", "chatgpt account", "subscription required")
+        account_hints = (
+            "not supported",
+            "invalid_request_error",
+            "chatgpt account",
+            "subscription required",
+        )
         if proc.returncode != 0 and any(h in err for h in account_hints):
-            pytest.xfail("Model not supported for this account type — requires OpenAI API account.")
+            pytest.xfail(
+                "Model not supported for this account type "
+                "— requires OpenAI API account."
+            )
 
-        assert proc.returncode == 0, f"codex exec failed: rc={proc.returncode}, stderr={err!r}"
+        assert proc.returncode == 0, (
+            f"codex exec failed: rc={proc.returncode}, stderr={err!r}"
+        )
         assert out, "codex exec produced no output"
         assert out.strip() == "OK" or "ok" in out.lower(), (
             f"Unexpected output from codex exec. Expected 'OK', got: {out!r}"
@@ -187,8 +221,7 @@ def test_codex_exec_status_reports_overlay_model(monkeypatch):
 
         proc = subprocess.run(
             [codex_bin, "exec", "--skip-git-repo-check", "/status"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             env=env,
             timeout=120,
             check=False,
@@ -197,7 +230,13 @@ def test_codex_exec_status_reports_overlay_model(monkeypatch):
         out = proc.stdout.decode("utf-8", errors="ignore")
         err = proc.stderr.decode("utf-8", errors="ignore").lower()
 
-        auth_hints = ("login", "authenticate", "not logged in", "sign in", "unauthorized")
+        auth_hints = (
+            "login",
+            "authenticate",
+            "not logged in",
+            "sign in",
+            "unauthorized",
+        )
         if proc.returncode != 0 and any(h in err for h in auth_hints):
             pytest.xfail("Codex CLI not authenticated in this environment.")
 

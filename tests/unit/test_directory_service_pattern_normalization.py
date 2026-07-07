@@ -24,6 +24,7 @@ class _DummyConfig:
 @pytest.mark.asyncio
 async def test_patterns_not_double_prefixed(tmp_path: Path):
     coord = AsyncMock()
+
     async def _process_directory(
         directory,
         patterns=None,

@@ -175,7 +175,9 @@ class LuaMapping(BaseMapping):
             if "definition" in captures:
                 def_node = captures["definition"]
                 if def_node.type == "variable_declaration":
-                    # Navigate: variable_declaration -> assignment_statement -> variable_list -> identifier
+                    # Navigate: variable_declaration ->
+                    # assignment_statement ->
+                    # variable_list -> identifier
                     for child in def_node.children:
                         if child.type == "assignment_statement":
                             for subchild in child.children:
@@ -478,7 +480,9 @@ class LuaMapping(BaseMapping):
         if not def_node or def_node.type != "variable_declaration":
             return None
 
-        # Navigate: variable_declaration -> assignment_statement -> variable_list -> identifier
+        # Navigate: variable_declaration ->
+        # assignment_statement ->
+        # variable_list -> identifier
         for child in def_node.children:
             if child.type == "assignment_statement":
                 var_list = self.find_child_by_type(child, "variable_list")

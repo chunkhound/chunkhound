@@ -40,9 +40,7 @@ class TestAwaitStartupBarrier:
         server = _TestableMCPServer(config)
         # Ensure _scan_progress has a valid "realtime" key so
         # _set_startup_failure / _record_realtime_failure don't crash.
-        server._scan_progress["realtime"] = (
-            server._default_realtime_scan_status()
-        )
+        server._scan_progress["realtime"] = server._default_realtime_scan_status()
         return server
 
     # ------------------------------------------------------------------
@@ -53,7 +51,9 @@ class TestAwaitStartupBarrier:
     async def test_non_strict_barrier_returns_cleanly(self, config: Any) -> None:
         """When requires_strict_startup_barrier() is False, no RuntimeError."""
         server = await self._make_server(config)
-        with patch.object(server, "requires_strict_startup_barrier", return_value=False):
+        with patch.object(
+            server, "requires_strict_startup_barrier", return_value=False
+        ):
             await server.await_startup_barrier()
             # Should complete without raising
 
@@ -86,9 +86,7 @@ class TestAwaitStartupBarrier:
         server = await self._make_server(config)
         with patch.object(server, "requires_strict_startup_barrier", return_value=True):
             server._deferred_start_task = None
-            with pytest.raises(
-                RuntimeError, match="before deferred startup began"
-            ):
+            with pytest.raises(RuntimeError, match="before deferred startup began"):
                 await server.await_startup_barrier()
 
     # ------------------------------------------------------------------
@@ -111,9 +109,7 @@ class TestAwaitStartupBarrier:
             server._deferred_start_task = asyncio.create_task(_cancelled())
             # _realtime_start_task intentionally None – not reached
 
-            with pytest.raises(
-                RuntimeError, match="was cancelled before readiness"
-            ):
+            with pytest.raises(RuntimeError, match="was cancelled before readiness"):
                 await server.await_startup_barrier()
 
     # ------------------------------------------------------------------
@@ -121,9 +117,7 @@ class TestAwaitStartupBarrier:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_fails_on_deferred_startup_failure_message(
-        self, config: Any
-    ) -> None:
+    async def test_fails_on_deferred_startup_failure_message(self, config: Any) -> None:
         """Path 3: _startup_failure_message is set after deferred task completes."""
         server = await self._make_server(config)
         with patch.object(server, "requires_strict_startup_barrier", return_value=True):
@@ -178,9 +172,7 @@ class TestAwaitStartupBarrier:
             server._startup_failure_message = None
             server._realtime_start_task = asyncio.create_task(_cancelled())
 
-            with pytest.raises(
-                RuntimeError, match="was cancelled before readiness"
-            ):
+            with pytest.raises(RuntimeError, match="was cancelled before readiness"):
                 await server.await_startup_barrier()
 
     # ------------------------------------------------------------------
@@ -211,9 +203,7 @@ class TestAwaitStartupBarrier:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_fails_on_current_startup_failure_message(
-        self, config: Any
-    ) -> None:
+    async def test_fails_on_current_startup_failure_message(self, config: Any) -> None:
         """Path 7: _current_startup_failure_message() is set after realtime task.
 
         Both tasks complete successfully, but _current_startup_failure_message

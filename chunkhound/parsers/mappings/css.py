@@ -72,7 +72,8 @@ class CssMapping(BaseMapping):
         """Return True if rule_set is :root or * containing custom properties.
 
         Handles comma-separated selector lists such as ``:root, [data-bs-theme=light]``
-        (Bootstrap theme tokens) by checking whether any selector part is ``:root`` or ``*``.
+        (Bootstrap theme tokens) by checking whether
+        any selector part is ``:root`` or ``*``.
 
         Note: reads the raw selectors node text directly instead of calling
         ``selector_text()`` because that helper truncates at 60 characters — a selector
@@ -190,11 +191,14 @@ class CssMapping(BaseMapping):
                 metadata["selector"] = selector_text(node, content)
                 is_root_vars = self._is_root_vars(node, content)
                 metadata["is_root_vars"] = is_root_vars
-                # :root/:* var blocks are STRUCTURE (namespace); plain rule sets are blocks.
+                # :root/:* var blocks are STRUCTURE (namespace);
+                # plain rule sets are blocks.
                 metadata["chunk_type_hint"] = "namespace" if is_root_vars else "block"
                 if is_root_vars:
-                    # Prevent :root/:* var blocks from merging with adjacent rule-set chunks.
-                    # DEFINITION↔STRUCTURE is a valid pair for OOP languages (class+method);
+                    # Prevent :root/:* var blocks from merging
+                    # with adjacent rule-set chunks.
+                    # DEFINITION↔STRUCTURE is a valid pair
+                    # for OOP languages (class+method);
                     # CSS needs the per-chunk override instead of a global exclusion.
                     metadata["prevent_merge_across_concepts"] = True
         return metadata

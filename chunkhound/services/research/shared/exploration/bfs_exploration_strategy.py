@@ -179,7 +179,9 @@ class BFSExplorationStrategy:
             for (node, node_ctx), children_result in zip(node_contexts, children_lists):
                 if isinstance(children_result, Exception):
                     logger.error(
-                        f"{log_prefix} node failed for '{node.query[:50]}...': {children_result}"
+                        f"{log_prefix} node failed for "
+                        f"'{node.query[:50]}...': "
+                        f"{children_result}"
                     )
                     continue
 
@@ -588,7 +590,8 @@ class BFSExplorationStrategy:
                 range(start_line, end_line + 1)
             )
 
-            # Mark as "explored" if we've seen 50+ lines (heuristic to prevent re-exploration)
+            # Mark as "explored" if we've seen 50+ lines
+            # (heuristic to prevent re-exploration)
             if len(coverage[file_path]) > 50:
                 global_explored_data["files_explored"].add(file_path)
 
@@ -874,8 +877,11 @@ class BFSExplorationStrategy:
                         batch_file_paths
                     ):
                         logger.warning(
-                            f"Batch {batch_idx + 1} returned invalid index "
-                            f"{batch_relative_idx} (valid range: 0-{len(batch_file_paths) - 1}), "
+                            f"Batch {batch_idx + 1} "
+                            f"returned invalid index "
+                            f"{batch_relative_idx} "
+                            f"(valid range: "
+                            f"0-{len(batch_file_paths) - 1}), "
                             f"skipping"
                         )
                         continue

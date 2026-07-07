@@ -1,9 +1,10 @@
 """Unit tests for CSS parser."""
 
-import pytest
 from pathlib import Path
 
-from chunkhound.core.types.common import Language, ChunkType
+import pytest
+
+from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.parser_factory import ParserFactory
 
 
@@ -39,7 +40,8 @@ def test_parses_rule_set_as_definition(css_parser):
 
 
 def test_parses_root_variables_as_structure(css_parser):
-    """:root rule with custom properties is extracted as NAMESPACE with symbol containing ':root_vars'.
+    """:root rule with custom properties is extracted
+    as NAMESPACE with symbol containing ':root_vars'.
 
     The chunk_type_hint 'namespace' in metadata maps to ChunkType.NAMESPACE,
     distinguishing these design-token blocks from regular rule sets (ChunkType.BLOCK).
@@ -124,16 +126,23 @@ def test_parses_import_as_import(css_parser):
 
 
 def test_import_with_media_query_symbol_is_path_only(css_parser):
-    """@import with a media query returns only the path as symbol, not the media qualifier."""
+    """@import with a media query returns only the path
+    as symbol, not the media qualifier."""
     code = '@import "reset.css" screen, print;\n@import url("base.css") all;'
     chunks = css_parser.parse_content(code, "test.css", file_id=1)
     import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
     assert len(import_chunks) > 0, "No IMPORT chunks"
     # Chunks may be merged; join all symbols and verify media qualifiers are absent.
     all_symbols = " ".join(c.symbol for c in import_chunks)
-    assert "screen" not in all_symbols, f"Media qualifier 'screen' leaked into symbol: {all_symbols}"
-    assert "print" not in all_symbols, f"Media qualifier 'print' leaked into symbol: {all_symbols}"
-    assert "all" not in all_symbols, f"Media qualifier 'all' leaked into symbol: {all_symbols}"
+    assert "screen" not in all_symbols, (
+        f"Media qualifier 'screen' leaked into symbol: {all_symbols}"
+    )
+    assert "print" not in all_symbols, (
+        f"Media qualifier 'print' leaked into symbol: {all_symbols}"
+    )
+    assert "all" not in all_symbols, (
+        f"Media qualifier 'all' leaked into symbol: {all_symbols}"
+    )
     assert "reset" in all_symbols, f"Expected 'reset' in symbol, got: {all_symbols}"
 
 
@@ -210,9 +219,9 @@ def test_comprehensive_file(css_parser, comprehensive_css):
 
     # @media, @keyframes, @supports may be merged with inner content;
     # check that the constructs appear somewhere in the chunk code
-    assert "@media" in all_code, f"@media not found in chunk code"
-    assert "@keyframes" in all_code, f"@keyframes not found in chunk code"
-    assert "@supports" in all_code, f"@supports not found in chunk code"
+    assert "@media" in all_code, "@media not found in chunk code"
+    assert "@keyframes" in all_code, "@keyframes not found in chunk code"
+    assert "@supports" in all_code, "@supports not found in chunk code"
 
     # :root vars → NAMESPACE with symbol containing ':root_vars'
     ns_symbols = {c.symbol for c in chunks if c.chunk_type == ChunkType.NAMESPACE}
@@ -222,11 +231,14 @@ def test_comprehensive_file(css_parser, comprehensive_css):
 
     # Check import symbols
     import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
-    assert len(import_chunks) >= 1, f"Expected at least 1 import, got {len(import_chunks)}"
+    assert len(import_chunks) >= 1, (
+        f"Expected at least 1 import, got {len(import_chunks)}"
+    )
 
 
 def test_parses_star_variables_chunk_type(css_parser):
-    """* rule with custom properties produces a NAMESPACE chunk with is_root_vars=True."""
+    """* rule with custom properties produces a
+    NAMESPACE chunk with is_root_vars=True."""
     code = """* {
   --margin: 0;
   --padding: 0;
@@ -242,6 +254,7 @@ def test_parses_star_variables_chunk_type(css_parser):
 def test_comment_query_is_valid():
     """CssMapping.get_comment_query returns a non-empty CSS comment query."""
     from chunkhound.parsers.mappings.css import CssMapping
+
     css = CssMapping()
     query = css.get_comment_query()
     assert query, "get_comment_query returned empty string"
@@ -251,10 +264,13 @@ def test_comment_query_is_valid():
 def test_resolve_import_paths_url(tmp_path):
     """resolve_import_paths strips url(...) wrapper and resolves the path."""
     from chunkhound.parsers.mappings.css import CssMapping
+
     css = CssMapping()
     # Create a real file for the resolver to find
     (tmp_path / "reset.css").write_text("*{margin:0}")
-    resolved = css.resolve_import_paths('url("reset.css")', tmp_path, tmp_path / "style.css")
+    resolved = css.resolve_import_paths(
+        'url("reset.css")', tmp_path, tmp_path / "style.css"
+    )
     assert len(resolved) == 1
     assert resolved[0] == tmp_path / "reset.css"
 
@@ -262,14 +278,18 @@ def test_resolve_import_paths_url(tmp_path):
 def test_resolve_import_paths_not_found(tmp_path):
     """resolve_import_paths returns empty list when the file does not exist."""
     from chunkhound.parsers.mappings.css import CssMapping
+
     css = CssMapping()
-    resolved = css.resolve_import_paths('"nonexistent.css"', tmp_path, tmp_path / "style.css")
+    resolved = css.resolve_import_paths(
+        '"nonexistent.css"', tmp_path, tmp_path / "style.css"
+    )
     assert resolved == []
 
 
 def test_resolve_import_paths_url_with_spaces(tmp_path):
     """resolve_import_paths handles url( path ) with internal spaces."""
     from chunkhound.parsers.mappings.css import CssMapping
+
     css = CssMapping()
     (tmp_path / "reset.css").write_text("*{margin:0}")
     # url() with spaces around the path — broken by naive split()[0]
@@ -288,6 +308,7 @@ def test_root_vars_not_merged_with_adjacent_rule(css_parser):
     neighbouring rule sets, losing the design-token NAMESPACE chunk.
     """
     from chunkhound.core.types.common import ChunkType
+
     code = """:root {
   --primary: #3498db;
   --secondary: #2ecc71;
@@ -329,15 +350,20 @@ body { margin: 0; }
 """
     chunks = css_parser.parse_content(code, "bootstrap.css", file_id=1)
     from chunkhound.core.types.common import ChunkType
+
     ns_chunks = [c for c in chunks if c.chunk_type == ChunkType.NAMESPACE]
     assert len(ns_chunks) >= 1, (
-        f"Expected NAMESPACE chunk for ':root, [data-bs-theme=light]', got {[c.symbol for c in chunks]}"
+        f"Expected NAMESPACE chunk for"
+        f" ':root, [data-bs-theme=light]',"
+        f" got {[c.symbol for c in chunks]}"
     )
 
 
 def test_resolve_import_paths_source_file_relative(tmp_path):
-    """CSS import resolution uses the importing file's directory, not the project root."""
+    """CSS import resolution uses the importing
+    file's directory, not the project root."""
     from chunkhound.parsers.mappings.css import CssMapping
+
     css = CssMapping()
     # src/styles/main.css imports ../tokens/colors.css (relative to src/styles/)
     styles_dir = tmp_path / "src" / "styles"
@@ -356,6 +382,7 @@ def test_resolve_import_paths_source_file_relative(tmp_path):
 def test_resolve_import_paths_query_string(tmp_path):
     """resolve_import_paths strips ?query from import URL before resolving."""
     from chunkhound.parsers.mappings.css import CssMapping
+
     css = CssMapping()
     (tmp_path / "theme.css").write_text(":root{--color:red}")
     resolved = css.resolve_import_paths(
@@ -368,6 +395,7 @@ def test_resolve_import_paths_query_string(tmp_path):
 def test_resolve_import_paths_fragment(tmp_path):
     """resolve_import_paths strips #fragment from import URL before resolving."""
     from chunkhound.parsers.mappings.css import CssMapping
+
     css = CssMapping()
     (tmp_path / "theme.css").write_text(":root{--color:red}")
     resolved = css.resolve_import_paths(
@@ -378,13 +406,15 @@ def test_resolve_import_paths_fragment(tmp_path):
 
 
 def test_root_vars_tail_position_in_selector_list(css_parser):
-    """:root appearing after the 60-char truncation point is still classified as NAMESPACE.
+    """:root appearing after the 60-char truncation
+    point is still classified as NAMESPACE.
 
     Before the fix, _is_root_vars() called selector_text() which truncates at 60 chars.
     A selector list where :root appears after position 60 would have been misclassified
     as a plain DEFINITION block, losing the design-token NAMESPACE chunk.
     """
     from chunkhound.core.types.common import ChunkType
+
     # `:root` appears well past the 60-char cutoff
     long_prefix = ".very-long-vendor-specific-selector-name-exceeding-sixty-chars"
     assert len(long_prefix) > 60

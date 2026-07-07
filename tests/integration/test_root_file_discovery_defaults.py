@@ -6,13 +6,12 @@ at the project root is discovered without any custom include/exclude rules.
 """
 
 import pytest
-from pathlib import Path
 
+from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
-from chunkhound.core.config.indexing_config import IndexingConfig
 
 
 @pytest.mark.asyncio
@@ -52,4 +51,3 @@ async def test_root_file_discovered_with_default_patterns(tmp_path):
     assert root_file in files, (
         f"Root-level file not discovered. Files: {[p.name for p in files]}"
     )
-

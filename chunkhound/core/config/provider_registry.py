@@ -15,6 +15,7 @@ To add a new OpenAI-compatible provider you must also touch:
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 
 
@@ -35,6 +36,7 @@ class OpenAICompatibleSpec:
         docs_url: External API documentation URL
         auth_url: Authentication portal URL
     """
+
     name: str
     default_base_url: str
     supports_structured_outputs: bool = True

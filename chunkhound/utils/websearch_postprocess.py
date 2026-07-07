@@ -15,7 +15,5 @@ def replace_paths_with_urls(text: str, mapping: dict[str, str]) -> str:
     (basename is a directory component, not the leaf).
     """
     for filename, url in mapping.items():
-        text = re.sub(
-            rf"(?<!\w){re.escape(filename)}(?![\w/])", url, text
-        )
+        text = re.sub(rf"(?<!\w){re.escape(filename)}(?![\w/])", url, text)
     return text

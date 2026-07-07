@@ -1,4 +1,5 @@
-"""Service layer for ChunkHound - business logic coordination and dependency injection."""
+"""Service layer for ChunkHound -
+business logic coordination and dependency injection."""
 
 from .base_service import BaseService
 from .embedding_service import EmbeddingService

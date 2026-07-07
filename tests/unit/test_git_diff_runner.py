@@ -1,4 +1,5 @@
 """Unit tests for chunkhound.core.git_diff.runner."""
+
 import asyncio
 from pathlib import Path
 from unittest.mock import patch
@@ -21,7 +22,9 @@ class FakeProcess:
         pass
 
 
-def make_fake_process(stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0) -> FakeProcess:
+def make_fake_process(
+    stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0
+) -> FakeProcess:
     return FakeProcess(stdout, stderr, returncode)
 
 
@@ -81,7 +84,10 @@ async def test_unsafe_ref_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_option_injection_rejected() -> None:
-    """--cached and other git options must be rejected even though they pass the char regex."""
+    """
+    --cached and other git options must be rejected
+    even though they pass the char regex.
+    """
     for bad_ref in ("--cached", "--staged", "-p", "--no-index"):
         with pytest.raises(ValueError, match="Unsafe git ref rejected"):
             await run_git_diff(bad_ref, Path("/tmp"))
@@ -90,14 +96,16 @@ async def test_option_injection_rejected() -> None:
 @pytest.mark.asyncio
 async def test_root_commit_uses_empty_tree(tmp_path: Path) -> None:
     """<hash>^..<hash> failing with 'unknown revision' triggers empty-tree retry."""
-    HASH = "a" * 40
-    EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    hash_val = "a" * 40
+    empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
     root_fail = make_fake_process(
         stdout=b"",
         stderr=b"fatal: ambiguous argument 'aaaa^': unknown revision or path",
         returncode=128,
     )
-    root_success = make_fake_process(stdout=b"diff --git a/f b/f\n+hello", stderr=b"", returncode=0)
+    root_success = make_fake_process(
+        stdout=b"diff --git a/f b/f\n+hello", stderr=b"", returncode=0
+    )
 
     call_count = 0
 
@@ -109,7 +117,7 @@ async def test_root_commit_uses_empty_tree(tmp_path: Path) -> None:
         return root_success
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        result = await run_git_diff(f"{HASH}^..{HASH}", tmp_path)
+        result = await run_git_diff(f"{hash_val}^..{hash_val}", tmp_path)
 
     assert "hello" in result
     assert call_count == 2
@@ -126,19 +134,19 @@ async def test_root_commit_uses_empty_tree(tmp_path: Path) -> None:
         return root_success
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec_capture):
-        await run_git_diff(f"{HASH}^..{HASH}", tmp_path)
+        await run_git_diff(f"{hash_val}^..{hash_val}", tmp_path)
 
     assert second_call_args is not None
     # Range is a single string arg like "4b825d...aaaa..." — check substring
     range_arg = second_call_args[2]  # ("git", "diff", "<range>", ...)
-    assert EMPTY_TREE in range_arg
-    assert HASH in range_arg
+    assert empty_tree in range_arg
+    assert hash_val in range_arg
 
 
 @pytest.mark.asyncio
 async def test_root_commit_retry_also_fails(tmp_path: Path) -> None:
     """If empty-tree retry also fails, the error from the retry is raised."""
-    HASH = "b" * 40
+    hash_val = "b" * 40
     root_fail = make_fake_process(
         stdout=b"",
         stderr=b"fatal: unknown revision bbbb^",
@@ -159,7 +167,7 @@ async def test_root_commit_retry_also_fails(tmp_path: Path) -> None:
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         with pytest.raises(ValueError, match="git diff failed"):
-            await run_git_diff(f"{HASH}^..{HASH}", tmp_path)
+            await run_git_diff(f"{hash_val}^..{hash_val}", tmp_path)
 
     assert call_count == 2
 
@@ -167,7 +175,7 @@ async def test_root_commit_retry_also_fails(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_non_root_failure_not_retried(tmp_path: Path) -> None:
     """Unrelated git failures (no 'unknown revision') are not retried."""
-    HASH = "c" * 40
+    hash_val = "c" * 40
     fail = make_fake_process(
         stdout=b"",
         stderr=b"fatal: bad object HEAD~999",
@@ -183,6 +191,6 @@ async def test_non_root_failure_not_retried(tmp_path: Path) -> None:
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         with pytest.raises(ValueError, match="git diff failed"):
-            await run_git_diff(f"{HASH}^..{HASH}", tmp_path)
+            await run_git_diff(f"{hash_val}^..{hash_val}", tmp_path)
 
     assert call_count == 1  # no retry

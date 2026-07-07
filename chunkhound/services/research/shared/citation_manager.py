@@ -1,7 +1,8 @@
 """Citation management for deep research synthesis.
 
 This module handles all citation-related operations for the deep research service,
-including reference mapping, citation remapping, validation, and source footer generation.
+including reference mapping, citation remapping,
+validation, and source footer generation.
 
 Citation System Architecture:
 - File Reference Map: Maps file paths to sequential reference numbers [1], [2], [3]...

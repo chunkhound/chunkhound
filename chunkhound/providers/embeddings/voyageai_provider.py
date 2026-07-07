@@ -1,4 +1,7 @@
-"""VoyageAI embedding provider implementation for ChunkHound - concrete embedding provider using VoyageAI API."""
+"""VoyageAI embedding provider implementation for ChunkHound.
+
+Concrete embedding provider using VoyageAI API.
+"""
 
 import asyncio
 import os
@@ -202,7 +205,8 @@ class VoyageAIEmbeddingProvider:
             retry_attempts: Number of retry attempts for failed requests
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
-            rerank_batch_size: Max documents per rerank batch (overrides default of 1000)
+            rerank_batch_size: Max documents per rerank batch
+                (overrides default of 1000)
             base_url: Custom API base URL (overrides https://api.voyageai.com/v1)
             rerank_url: Separate reranker endpoint URL (absolute http/https).
                 When set, reranking uses HTTP instead of the VoyageAI SDK.
@@ -366,7 +370,7 @@ class VoyageAIEmbeddingProvider:
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for a list of texts with automatic retry on network errors.
+        """Generate embeddings with automatic retry on network errors.
 
         Internally sub-batches to self._batch_size so that custom endpoints
         (e.g. Azure ML) are never overwhelmed by a single oversized request.
@@ -378,7 +382,8 @@ class VoyageAIEmbeddingProvider:
         if not validated_texts:
             return []
 
-        # Sub-batch when input exceeds batch_size (protects custom/low-throughput endpoints)
+        # Sub-batch when input exceeds batch_size
+        # (protects custom/low-throughput endpoints)
         if len(validated_texts) > self._batch_size:
             all_embeddings: list[list[float]] = []
             for i in range(0, len(validated_texts), self._batch_size):
@@ -430,7 +435,8 @@ class VoyageAIEmbeddingProvider:
                 else:
                     if category is not None:
                         logger.error(
-                            f"VoyageAI embedding failed after {self._retry_attempts} attempts: {e}"
+                            f"VoyageAI embedding failed after "
+                            f"{self._retry_attempts} attempts: {e}"
                         )
                     else:
                         logger.error(
@@ -668,7 +674,8 @@ class VoyageAIEmbeddingProvider:
         for attempt in range(self._retry_attempts):
             try:
                 logger.debug(
-                    f"VoyageAI reranking {len(documents)} documents with model {self._rerank_model}"
+                    f"VoyageAI reranking {len(documents)} documents "
+                    f"with model {self._rerank_model}"
                 )
 
                 result = await asyncio.to_thread(
@@ -697,7 +704,8 @@ class VoyageAIEmbeddingProvider:
                         logger.warning(f"Skipping invalid rerank result: {item}")
 
                 logger.debug(
-                    f"VoyageAI reranked {len(documents)} documents, got {len(rerank_results)} results"
+                    f"VoyageAI reranked {len(documents)} documents, "
+                    f"got {len(rerank_results)} results"
                 )
                 return rerank_results
 
@@ -722,7 +730,8 @@ class VoyageAIEmbeddingProvider:
                 else:
                     if category is not None:
                         logger.error(
-                            f"VoyageAI reranking failed after {self._retry_attempts} attempts: {e}"
+                            f"VoyageAI reranking failed after "
+                            f"{self._retry_attempts} attempts: {e}"
                         )
                     else:
                         logger.error(
@@ -822,10 +831,14 @@ class VoyageAIEmbeddingProvider:
     def _parse_rerank_response(
         self, data: dict, num_documents: int
     ) -> list[RerankResult]:
-        """Parse reranker HTTP response (Cohere or TEI format) into RerankResult list."""
+        """Parse reranker HTTP response into RerankResult list.
+
+        Supports Cohere and TEI formats.
+        """
         if "results" not in data:
             raise ValueError(
-                f"Invalid rerank response: missing 'results' field. Got: {list(data.keys())}"
+                f"Invalid rerank response: missing 'results' field. "
+                f"Got: {list(data.keys())}"
             )
 
         results = []

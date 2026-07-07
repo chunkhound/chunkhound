@@ -1,6 +1,5 @@
-"""Tests for embedded SQL detection with parameterized queries from various frameworks."""
-
-import pytest
+"""Tests for embedded SQL detection with
+parameterized queries from various frameworks."""
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import ParserFactory
@@ -11,7 +10,7 @@ class TestParameterizedQueries:
 
     def test_python_mysqldb_percent_s(self):
         """Test Python MySQLdb/MySQL Connector style (%s placeholders)."""
-        code = '''
+        code = """
 import mysql.connector
 
 def get_user(user_id):
@@ -21,7 +20,7 @@ def get_user(user_id):
 def insert_user(name, email):
     sql = "INSERT INTO users (name, email) VALUES (%s, %s)"
     cursor.execute(sql, (name, email))
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.PYTHON, detect_embedded_sql=True)
@@ -42,7 +41,7 @@ def insert_user(name, email):
 
     def test_python_psycopg2_percent_s(self):
         """Test Python psycopg2 (PostgreSQL) style (%s and %(name)s)."""
-        code = '''
+        code = """
 import psycopg2
 
 def get_users_by_status(status, limit):
@@ -53,7 +52,7 @@ def get_users_by_status(status, limit):
 def update_user_email(user_id, email):
     query = "UPDATE users SET email = %(email)s WHERE id = %(user_id)s"
     cursor.execute(query, {"email": email, "user_id": user_id})
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.PYTHON, detect_embedded_sql=True)
@@ -73,7 +72,7 @@ def update_user_email(user_id, email):
 
     def test_python_sqlite3_question_mark(self):
         """Test Python sqlite3 style (? placeholders)."""
-        code = '''
+        code = """
 import sqlite3
 
 def find_by_id(conn, user_id):
@@ -85,7 +84,7 @@ def batch_insert(conn, users):
     sql = "INSERT INTO users (name, email, age) VALUES (?, ?, ?)"
     cursor = conn.cursor()
     cursor.executemany(sql, users)
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.PYTHON, detect_embedded_sql=True)
@@ -100,7 +99,7 @@ def batch_insert(conn, users):
 
     def test_java_jdbc_question_mark(self):
         """Test Java JDBC style (? placeholders)."""
-        code = '''
+        code = """
 public class UserDao {
     public User findById(Connection conn, int id) throws SQLException {
         String sql = "SELECT * FROM users WHERE id = ?";
@@ -126,7 +125,7 @@ public class UserDao {
         stmt.executeUpdate();
     }
 }
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.JAVA, detect_embedded_sql=True)
@@ -141,7 +140,7 @@ public class UserDao {
 
     def test_javascript_pg_dollar_placeholders(self):
         """Test JavaScript node-postgres style ($1, $2, etc.)."""
-        code = '''
+        code = """
 const { Pool } = require('pg');
 const pool = new Pool();
 
@@ -154,7 +153,8 @@ async function getUserById(userId) {
 }
 
 async function insertUser(name, email, age) {
-    const query = "INSERT INTO users (name, email, age) VALUES ($1, $2, $3) RETURNING id";
+    const query = "INSERT INTO users (name, email, age)"
+        + " VALUES ($1, $2, $3) RETURNING id";
     const result = await pool.query(query, [name, email, age]);
     return result.rows[0].id;
 }
@@ -169,7 +169,7 @@ async function searchUsers(searchTerm, limit, offset) {
     const result = await pool.query(sql, [`%${searchTerm}%`, limit, offset]);
     return result.rows;
 }
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.JAVASCRIPT, detect_embedded_sql=True)
@@ -186,11 +186,15 @@ async function searchUsers(searchTerm, limit, offset) {
         assert all(f"${i}" in insert_chunk.code for i in [1, 2, 3])
 
         search_chunk = next(c for c in embedded if "ILIKE" in c.code.upper())
-        assert "$1" in search_chunk.code and "$2" in search_chunk.code and "$3" in search_chunk.code
+        assert (
+            "$1" in search_chunk.code
+            and "$2" in search_chunk.code
+            and "$3" in search_chunk.code
+        )
 
     def test_javascript_mysql2_question_mark(self):
         """Test JavaScript mysql2 style (? placeholders)."""
-        code = '''
+        code = """
 const mysql = require('mysql2/promise');
 
 async function getUser(connection, userId) {
@@ -205,7 +209,7 @@ async function updateUserStatus(connection, userId, status) {
     const sql = 'UPDATE users SET status = ?, updated_at = NOW() WHERE id = ?';
     await connection.execute(sql, [status, userId]);
 }
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.JAVASCRIPT, detect_embedded_sql=True)
@@ -220,7 +224,7 @@ async function updateUserStatus(connection, userId, status) {
 
     def test_csharp_sqlcommand_at_params(self):
         """Test C# SqlCommand style (@param placeholders)."""
-        code = '''
+        code = """
 using System.Data.SqlClient;
 
 public class UserRepository
@@ -263,7 +267,7 @@ public class UserRepository
         }
     }
 }
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.CSHARP, detect_embedded_sql=True)
@@ -273,18 +277,24 @@ public class UserRepository
         assert len(embedded) >= 3
 
         # Check for @ placeholders
-        select_chunk = next(c for c in embedded if "SELECT" in c.code.upper() and "@userId" in c.code)
+        select_chunk = next(
+            c for c in embedded if "SELECT" in c.code.upper() and "@userId" in c.code
+        )
         assert "@userId" in select_chunk.code
 
         update_chunk = next(c for c in embedded if "UPDATE" in c.code.upper())
-        assert "@name" in update_chunk.code and "@email" in update_chunk.code and "@id" in update_chunk.code
+        assert (
+            "@name" in update_chunk.code
+            and "@email" in update_chunk.code
+            and "@id" in update_chunk.code
+        )
 
         search_chunk = next(c for c in embedded if "LIKE @searchTerm" in c.code)
         assert "@searchTerm" in search_chunk.code and "@maxResults" in search_chunk.code
 
     def test_go_pq_dollar_placeholders(self):
         """Test Go pq (PostgreSQL) style ($1, $2, etc.)."""
-        code = '''
+        code = """
 package main
 
 import (
@@ -319,7 +329,7 @@ func searchUsers(db *sql.DB, searchTerm string, limit, offset int) ([]User, erro
     rows, err := db.Query(query, "%"+searchTerm+"%", limit, offset)
     // ... scan rows
 }
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.GO, detect_embedded_sql=True)
@@ -334,7 +344,7 @@ func searchUsers(db *sql.DB, searchTerm string, limit, offset int) ([]User, erro
 
     def test_php_pdo_named_placeholders(self):
         """Test PHP PDO style (:param placeholders)."""
-        code = '''<?php
+        code = """<?php
 class UserRepository {
     private $pdo;
 
@@ -369,7 +379,7 @@ class UserRepository {
         return $stmt->fetchAll();
     }
 }
-?>'''
+?>"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.PHP, detect_embedded_sql=True)
@@ -379,18 +389,24 @@ class UserRepository {
         assert len(embedded) >= 3
 
         # Check for named placeholders with colons
-        select_chunk = next(c for c in embedded if "SELECT" in c.code.upper() and ":user_id" in c.code)
+        select_chunk = next(
+            c for c in embedded if "SELECT" in c.code.upper() and ":user_id" in c.code
+        )
         assert ":user_id" in select_chunk.code
 
         update_chunk = next(c for c in embedded if "UPDATE" in c.code.upper())
-        assert ":name" in update_chunk.code and ":email" in update_chunk.code and ":id" in update_chunk.code
+        assert (
+            ":name" in update_chunk.code
+            and ":email" in update_chunk.code
+            and ":id" in update_chunk.code
+        )
 
         search_chunk = next(c for c in embedded if "LIKE :search" in c.code)
         assert ":search" in search_chunk.code and ":limit" in search_chunk.code
 
     def test_php_mysqli_question_mark(self):
         """Test PHP MySQLi style (? placeholders)."""
-        code = '''<?php
+        code = """<?php
 class UserDao {
     private $mysqli;
 
@@ -409,7 +425,7 @@ class UserDao {
         return $stmt->insert_id;
     }
 }
-?>'''
+?>"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.PHP, detect_embedded_sql=True)
@@ -424,7 +440,7 @@ class UserDao {
 
     def test_rust_tokio_postgres_dollar_placeholders(self):
         """Test Rust tokio-postgres style ($1, $2, etc.)."""
-        code = '''
+        code = """
 use tokio_postgres::{Client, Error};
 
 async fn get_user_by_id(client: &Client, user_id: i32) -> Result<User, Error> {
@@ -449,7 +465,10 @@ async fn insert_user(client: &Client, name: &str, email: &str) -> Result<i64, Er
     Ok(row.get(0))
 }
 
-async fn update_user_email(client: &Client, user_id: i32, new_email: &str) -> Result<u64, Error> {
+async fn update_user_email(
+    client: &Client, user_id: i32,
+    new_email: &str,
+) -> Result<u64, Error> {
     let updated = client
         .execute(
             "UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2",
@@ -458,7 +477,7 @@ async fn update_user_email(client: &Client, user_id: i32, new_email: &str) -> Re
         .await?;
     Ok(updated)
 }
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.RUST, detect_embedded_sql=True)
@@ -478,8 +497,9 @@ async fn update_user_email(client: &Client, user_id: i32, new_email: &str) -> Re
         assert "$1" in update_chunk.code and "$2" in update_chunk.code
 
     def test_typescript_typeorm_style(self):
-        """Test TypeScript TypeORM query builder (not detected - uses builder pattern)."""
-        code = '''
+        """Test TypeScript TypeORM query builder
+        (not detected - uses builder pattern)."""
+        code = """
 import { getRepository } from 'typeorm';
 
 async function getUserById(userId: number) {
@@ -501,7 +521,7 @@ async function complexQuery(status: string, minAge: number) {
     `;
     return await getRepository(User).query(sql, [status, minAge]);
 }
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.TYPESCRIPT, detect_embedded_sql=True)
@@ -518,7 +538,7 @@ async function complexQuery(status: string, minAge: number) {
 
     def test_mixed_placeholder_styles(self):
         """Test that different placeholder styles don't interfere."""
-        python_code = '''
+        python_code = """
 # MySQL style
 query1 = "SELECT * FROM users WHERE id = %s AND status = %s"
 
@@ -527,7 +547,7 @@ query2 = "SELECT * FROM users WHERE id = %(user_id)s"
 
 # SQLite style
 query3 = "SELECT * FROM users WHERE id = ?"
-'''
+"""
 
         factory = ParserFactory()
         parser = factory.create_parser(Language.PYTHON, detect_embedded_sql=True)
@@ -539,4 +559,6 @@ query3 = "SELECT * FROM users WHERE id = ?"
         # Each should maintain its placeholder style
         assert any("%s" in c.code and "status" in c.code for c in embedded)
         assert any("%(user_id)s" in c.code for c in embedded)
-        assert any("?" in c.code and "%s" not in c.code and "$" not in c.code for c in embedded)
+        assert any(
+            "?" in c.code and "%s" not in c.code and "$" not in c.code for c in embedded
+        )

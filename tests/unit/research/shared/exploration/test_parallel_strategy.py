@@ -8,9 +8,9 @@ Tests verify that:
 5. File reading happens after elbow filtering
 """
 
-import pytest
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from chunkhound.services.research.shared.exploration import (
     ExplorationStrategy,
@@ -109,9 +109,7 @@ class TestParallelExplorationStrategy:
         mock_strategy._wide.explore_raw = AsyncMock(
             return_value=([], {"chunks_before": 0, "chunks_after": 0})
         )
-        mock_strategy._file_reader.read_files_with_budget = AsyncMock(
-            return_value={}
-        )
+        mock_strategy._file_reader.read_files_with_budget = AsyncMock(return_value={})
 
         initial_chunks = [{"chunk_id": "0"}]
         await mock_strategy.explore(
@@ -142,9 +140,7 @@ class TestParallelExplorationStrategy:
                 {"chunks_after": 1},
             )
         )
-        mock_strategy._file_reader.read_files_with_budget = AsyncMock(
-            return_value={}
-        )
+        mock_strategy._file_reader.read_files_with_budget = AsyncMock(return_value={})
 
         chunks, stats, _ = await mock_strategy.explore(
             root_query="test",
@@ -175,9 +171,7 @@ class TestParallelExplorationStrategy:
                 {"chunks_before": 1, "chunks_after": 2, "gaps_filled": 1},
             )
         )
-        mock_strategy._file_reader.read_files_with_budget = AsyncMock(
-            return_value={}
-        )
+        mock_strategy._file_reader.read_files_with_budget = AsyncMock(return_value={})
 
         _, stats, _ = await mock_strategy.explore(
             root_query="test",
@@ -259,9 +253,7 @@ class TestParallelExplorationStrategy:
                 {"chunks_after": 1},
             )
         )
-        mock_strategy._file_reader.read_files_with_budget = AsyncMock(
-            return_value={}
-        )
+        mock_strategy._file_reader.read_files_with_budget = AsyncMock(return_value={})
 
         chunks, stats, _ = await mock_strategy.explore(
             root_query="test",

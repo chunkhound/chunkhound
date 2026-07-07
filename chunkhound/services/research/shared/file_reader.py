@@ -1,13 +1,15 @@
 """File reading utilities for deep research service.
 
-This module provides token-budget-aware file reading functionality for the deep research service.
+This module provides token-budget-aware file reading
+functionality for the deep research service.
 It handles:
 - Reading files within token budgets
 - Smart boundary expansion to complete function/class definitions
 - Detection of fully read vs partial files
 - Chunk range calculation with context expansion
 
-The FileReader class is responsible for efficiently loading file contents while respecting
+The FileReader class is responsible for efficiently
+loading file contents while respecting
 token limits and ensuring code completeness for better synthesis quality.
 """
 
@@ -107,7 +109,8 @@ class FileReader:
                 estimated_tokens = llm.estimate_tokens(content)
 
                 if estimated_tokens <= budget:
-                    # File fits in budget, check against overall limit (skip if unlimited)
+                    # File fits in budget, check against
+                    # overall limit (skip if unlimited)
                     if (
                         budget_limit is None
                         or total_tokens + estimated_tokens <= budget_limit
@@ -131,26 +134,30 @@ class FileReader:
                         start_line = chunk.get("start_line", 1)
                         end_line = chunk.get("end_line", 1)
 
-                        # Use smart boundary detection to expand to complete functions/classes
-                        expanded_start, expanded_end = (
-                            expand_to_natural_boundaries(
-                                lines, start_line, end_line, chunk, file_path
-                            )
+                        # Use smart boundary detection to
+                        # expand to complete functions/classes
+                        expanded_start, expanded_end = expand_to_natural_boundaries(
+                            lines, start_line, end_line, chunk, file_path
                         )
 
                         if expanded_start == 0 and expanded_end == 0:
                             logger.warning(
-                                f"Skipping chunk with invalid boundaries in {file_path}: "
+                                f"Skipping chunk with"
+                                f" invalid boundaries"
+                                f" in {file_path}: "
                                 f"start_line={start_line}, end_line={end_line} "
                                 f"(file has {len(lines)} lines)"
                             )
-                            continue  # (0,0) = out-of-bounds chunk; skip rather than emit garbled slice
+                            continue
+                            # (0,0) = out-of-bounds chunk;
+                            # skip rather than emit garbled slice
 
                         # Store expanded range in chunk for later deduplication
                         chunk["expanded_start_line"] = expanded_start
                         chunk["expanded_end_line"] = expanded_end
 
-                        # Extract chunk with smart boundaries (convert 1-indexed to 0-indexed)
+                        # Extract chunk with smart boundaries
+                        # (convert 1-indexed to 0-indexed)
                         start_idx = max(0, expanded_start - 1)
                         end_idx = min(len(lines), expanded_end)
 
@@ -182,14 +189,18 @@ class FileReader:
                 logger.warning(f"Failed to read file {file_path}: {e}")
                 continue
 
-        # FAIL-FAST: Validate that at least some files were loaded if chunks were provided
-        # This prevents silent data loss where searches find chunks but synthesis gets no code
+        # FAIL-FAST: Validate that at least some files
+        # were loaded if chunks were provided
+        # This prevents silent data loss where searches
+        # find chunks but synthesis gets no code
         if chunks and not file_contents:
             budget_desc = (
                 "unlimited" if budget_limit is None else f"{budget_limit:,} tokens"
             )
             raise RuntimeError(
-                f"DATA LOSS DETECTED: Found {len(chunks)} chunks across {len(files_to_chunks)} files "
+                f"DATA LOSS DETECTED: Found {len(chunks)}"
+                f" chunks across {len(files_to_chunks)}"
+                f" files "
                 f"but failed to read ANY file contents. "
                 f"Possible causes: "
                 f"(1) Token budget exhausted ({budget_desc}), "
@@ -200,7 +211,9 @@ class FileReader:
 
         limit_desc = "unlimited" if budget_limit is None else f"{budget_limit:,}"
         logger.debug(
-            f"File reading complete: Loaded {len(file_contents)} files with {total_tokens:,} tokens "
+            f"File reading complete: Loaded"
+            f" {len(file_contents)} files with"
+            f" {total_tokens:,} tokens "
             f"(limit: {limit_desc})"
         )
         return file_contents

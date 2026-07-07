@@ -66,11 +66,15 @@ def build_llm_metadata_and_map_hyde(
                 llm_meta["map_hyde_reasoning_effort"] = str(
                     map_hyde_cfg["reasoning_effort"]
                 )
-        except (OSError, RuntimeError, TypeError, ValueError, ConfigurationError) as exc:
+        except (
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            ConfigurationError,
+        ) as exc:
             logger.warning(f"Code Mapper: invalid HyDE planning provider: {exc}")
-            raise ValueError(
-                f"Invalid map_hyde configuration: {exc}"
-            ) from exc
+            raise ValueError(f"Invalid map_hyde configuration: {exc}") from exc
 
     if map_hyde_provider is None:
         if provider := map_hyde_cfg.get("provider"):

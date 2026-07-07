@@ -732,7 +732,8 @@ class PHPMapping(BaseMapping):
                                 ]
 
                                 if len(arg_nodes) >= 2:
-                                    # First argument is the constant name (usually a string)
+                                    # First argument is the constant name
+                                    # (usually a string)
                                     const_name_text = self.get_node_text(
                                         arg_nodes[0], source
                                     ).strip()

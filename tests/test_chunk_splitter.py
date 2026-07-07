@@ -65,6 +65,7 @@ def test_cast_config_defaults() -> None:
 def test_cast_config_rejects_zero_min_chunk_size() -> None:
     """min_chunk_size=0 would cause infinite loop in _emergency_split."""
     import pytest
+
     with pytest.raises(ValueError, match="min_chunk_size must be >= 1"):
         CASTConfig(min_chunk_size=0)
 
@@ -88,7 +89,8 @@ def test_chunk_metrics_line_counting() -> None:
 def test_validate_and_split_within_limit() -> None:
     """Chunk at exactly max_chunk_size returns unchanged."""
     splitter = ChunkSplitter()
-    # "x = 1" has 3 non-whitespace chars (x, =, 1); 400 lines -> 1200 nws = exactly at limit
+    # "x = 1" has 3 non-whitespace chars (x, =, 1);
+    # 400 lines -> 1200 nws = exactly at limit
     content = "\n".join(["x = 1"] * 400)
     chunk = _make_chunk(content)
     result = splitter.validate_and_split(chunk)
@@ -186,7 +188,9 @@ def test_emergency_split_preserves_metadata() -> None:
 
 
 def test_makefile_within_limit_rule_passes_through() -> None:
-    """Within-limit rule chunk returns unchanged (short-circuits without calling super)."""
+    """Within-limit rule chunk returns unchanged
+    (short-circuits without calling super).
+    """
     splitter = MakefileChunkSplitter()
     content = "install: all\n\tcp src /dst"
     chunk = _make_chunk(
@@ -303,7 +307,9 @@ def test_makefile_split_falls_back_to_emergency_for_huge_recipe_line() -> None:
         assert part.start_line >= chunk.start_line
         assert part.end_line <= chunk.end_line
     for a, b in zip(result, result[1:]):
-        assert b.start_line >= a.start_line  # non-decreasing; equal when span < sub-chunks
+        assert (
+            b.start_line >= a.start_line
+        )  # non-decreasing; equal when span < sub-chunks
 
 
 def test_makefile_split_emergency_preserves_rule_target_metadata() -> None:
@@ -339,11 +345,15 @@ def test_makefile_split_emergency_preserves_rule_target_metadata() -> None:
         assert part.start_line >= chunk.start_line
         assert part.end_line <= chunk.end_line
     for a, b in zip(result, result[1:]):
-        assert b.start_line >= a.start_line  # non-decreasing; equal when span < sub-chunks
+        assert (
+            b.start_line >= a.start_line
+        )  # non-decreasing; equal when span < sub-chunks
 
 
 def test_makefile_split_emergency_part1_preserves_rule_target() -> None:
-    """Emergency-split of Part 1 (target + oversized recipe) propagates rule_target to all sub-chunks.
+    """
+        Emergency-split of Part 1 (target + oversized
+        recipe) propagates rule_target to all sub-chunks.
 
     When Part 1 itself exceeds the size limit, _emergency_split is invoked on it.
     Since rule_target is now set on all parts (including Part 1), _emergency_split
@@ -377,7 +387,9 @@ def test_makefile_split_emergency_part1_preserves_rule_target() -> None:
         assert part.start_line >= chunk.start_line
         assert part.end_line <= chunk.end_line
     for a, b in zip(result, result[1:]):
-        assert b.start_line >= a.start_line  # non-decreasing; equal when span < sub-chunks
+        assert (
+            b.start_line >= a.start_line
+        )  # non-decreasing; equal when span < sub-chunks
 
 
 def test_split_by_lines_simple_no_overlap_when_span_narrow() -> None:
@@ -423,7 +435,9 @@ def test_emergency_split_respects_token_limit_for_whitespace_heavy_content() -> 
     result = splitter.validate_and_split(chunk)
 
     for part in result:
-        assert estimate_tokens_chunking(part.content) <= splitter.config.safe_token_limit
+        assert (
+            estimate_tokens_chunking(part.content) <= splitter.config.safe_token_limit
+        )
 
 
 def test_split_by_lines_boundary_chunk2_equals_end_line() -> None:

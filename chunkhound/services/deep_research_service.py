@@ -1,7 +1,8 @@
 """Deep Research Service for ChunkHound - Backwards compatibility wrapper.
 
 This module provides backwards compatibility for the DeepResearchService class.
-The actual implementation has been moved to chunkhound.services.research.v1.pluggable_research_service.
+The actual implementation has been moved to
+chunkhound.services.research.v1.pluggable_research_service.
 
 Use PluggableResearchService directly from chunkhound.services.research.v1 for new code.
 """

@@ -58,7 +58,7 @@ def get_supported_languages() -> list[Language]:
     """Return all languages that have parser support."""
     langs = {lang for lang in EXTENSION_TO_LANGUAGE.values()}
     # Deterministic ordering by enum value
-    return sorted(langs, key=lambda l: l.value)
+    return sorted(langs, key=lambda lang: lang.value)
 
 
 def parse_languages_arg(arg: str) -> list[Language]:
@@ -395,7 +395,8 @@ def _build_language_syntax_samples(language: Language) -> dict[str, str]:
             "  async search(query, opts = {}) {\n"
             "    const params = { q: query, ...opts };\n"
             "    const url = `${this.#endpoint}/search`;\n"
-            '    const res = await fetch(url, { method: "POST", body: JSON.stringify(params) });\n'
+            "    const res = await fetch(url, "
+            '{ method: "POST", body: JSON.stringify(params) });\n'
             "    return res?.ok ? res.json() : [];\n"
             "  }\n"
             "}\n\n"
@@ -416,9 +417,13 @@ def _build_language_syntax_samples(language: Language) -> dict[str, str]:
             "  score: number;\n"
             "  signal: RankSignal;\n"
             "}\n\n"
-            "export function rerank<T>(values: T[], score: (v: T) => number): RankedResult<T>[] {\n"
+            "export function rerank<T>(values: T[], "
+            "score: (v: T) => number): "
+            "RankedResult<T>[] {\n"
             "  return values\n"
-            "    .map((v) => ({ value: v, score: score(v), signal: RankSignal.Medium }))\n"
+            "    .map((v) => ({ value: v, "
+            "score: score(v), signal: "
+            "RankSignal.Medium }))\n"
             "    .sort((a, b) => b.score - a.score);\n"
             "}\n"
         )

@@ -24,11 +24,13 @@ class YamlMapping(BaseMapping):
 
     # BaseMapping required methods
     def get_function_query(self) -> str:
-        """Get tree-sitter query pattern for function definitions (not applicable to YAML)."""
+        """Get tree-sitter query pattern for function definitions
+        (not applicable to YAML)."""
         return ""
 
     def get_class_query(self) -> str:
-        """Get tree-sitter query pattern for class definitions (not applicable to YAML)."""
+        """Get tree-sitter query pattern for class definitions
+        (not applicable to YAML)."""
         return ""
 
     def get_comment_query(self) -> str:
@@ -38,7 +40,8 @@ class YamlMapping(BaseMapping):
         """
 
     def extract_function_name(self, node: Node | None, source: str) -> str:
-        """Extract function name from a function definition node (not applicable to YAML)."""
+        """Extract function name from a function definition node
+        (not applicable to YAML)."""
         return ""
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
@@ -55,12 +58,12 @@ class YamlMapping(BaseMapping):
                 key: (flow_node) @key
                 value: (_) @value
             ) @definition
-            
+
             (flow_pair
                 key: (flow_node) @key
                 value: (_) @value
             ) @definition
-            
+
             (block_sequence_item
                 (flow_node) @item
             ) @definition
@@ -69,13 +72,13 @@ class YamlMapping(BaseMapping):
         elif concept == UniversalConcept.BLOCK:
             return """
             (block_mapping) @definition
-            
+
             (flow_mapping) @definition
-            
+
             (block_sequence) @definition
-            
+
             (flow_sequence) @definition
-            
+
             (document) @definition
             """
 
@@ -97,7 +100,7 @@ class YamlMapping(BaseMapping):
         elif concept == UniversalConcept.STRUCTURE:
             return """
             (document) @definition
-            
+
             (stream) @definition
             """
 

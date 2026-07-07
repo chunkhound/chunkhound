@@ -175,7 +175,8 @@ class SerialDatabaseProvider(ABC):
             )
 
             # Get registry and register self as database provider
-            # NOTE: ProviderRegistry.register_provider expects an instance, not a factory.
+            # NOTE: ProviderRegistry.register_provider
+            # expects an instance, not a factory.
             # Using a lambda here caused the registry to hold a function object, leading
             # to AttributeError when services attempted to call provider.connect().
             # Register the instance directly to maintain correct type semantics.
@@ -200,7 +201,8 @@ class SerialDatabaseProvider(ABC):
 
         except Exception as e:
             logger.error(f"Failed to initialize service layer components: {e}")
-            # Don't raise the exception, just log it - allows test initialization to continue
+            # Don't raise the exception, just log it
+            # - allows test initialization to continue
 
     # Default _executor_* methods that subclasses can override
 
@@ -606,8 +608,10 @@ class SerialDatabaseProvider(ABC):
                 result["error_count"] = len(errors)
 
             logger.info(
-                f"Directory processing complete: {files_processed}/{len(unique_files)} files, "
-                f"{total_chunks} chunks, {total_embeddings} embeddings"
+                f"Directory processing complete: "
+                f"{files_processed}/{len(unique_files)} files, "
+                f"{total_chunks} chunks, "
+                f"{total_embeddings} embeddings"
             )
 
             return result

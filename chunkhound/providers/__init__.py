@@ -1,4 +1,5 @@
-"""Providers package for ChunkHound - concrete implementations of abstract interfaces."""
+"""Providers package for ChunkHound -
+concrete implementations of abstract interfaces."""
 
 from .database import DuckDBProvider
 from .embeddings import OpenAIEmbeddingProvider

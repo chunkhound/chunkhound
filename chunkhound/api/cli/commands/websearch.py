@@ -23,7 +23,9 @@ from chunkhound.utils.websearch_postprocess import replace_paths_with_urls
 from ..utils.rich_output import RichOutputFormatter
 
 
-def _build_quickresearch_argv(args: argparse.Namespace, tmpdir: Path, config: Config) -> list[str]:
+def _build_quickresearch_argv(
+    args: argparse.Namespace, tmpdir: Path, config: Config
+) -> list[str]:
     """Build argv to invoke _quickresearch as a subprocess, forwarding relevant args."""
     from ..parsers.common_arguments import build_forwarded_argv
     from ..parsers.quickresearch_parser import add_quickresearch_subparser
@@ -34,13 +36,15 @@ def _build_quickresearch_argv(args: argparse.Namespace, tmpdir: Path, config: Co
     cmd = build_quickresearch_argv_core(
         args.query, tmpdir, config, parent_pid=os.getpid()
     )
-    cmd.extend(build_forwarded_argv(
-        qr_parser,
-        args,
-        # path_filter: defensive — forwarding would zero out results (flat tmpdir).
-        # parent_pid: emitted explicitly above; skip to avoid double-forwarding.
-        skip_dests={"help", "path_filter", "config", "parent_pid"},
-    ))
+    cmd.extend(
+        build_forwarded_argv(
+            qr_parser,
+            args,
+            # path_filter: defensive — forwarding would zero out results (flat tmpdir).
+            # parent_pid: emitted explicitly above; skip to avoid double-forwarding.
+            skip_dests={"help", "path_filter", "config", "parent_pid"},
+        )
+    )
     return cmd
 
 
@@ -61,9 +65,7 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         # 10 = empty results (distinct from 1=fetch error, 124=timeout, and
         # the _quickresearch returncode passthrough below).
         sys.exit(10)
-    formatter.progress_indicator(
-        f"Found {len(results)} results, fetching content..."
-    )
+    formatter.progress_indicator(f"Found {len(results)} results, fetching content...")
     # ignore_cleanup_errors: subprocess may briefly retain handles after exit
     # on Windows/network FS; a cleanup OSError would shadow sys.exit(returncode).
     # The OS reaps $TMPDIR anyway.

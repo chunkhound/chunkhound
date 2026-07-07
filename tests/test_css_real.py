@@ -1,9 +1,10 @@
 """Real-world CSS parser tests using normalize.css and Bootstrap 5."""
 
-import pytest
 from pathlib import Path
 
-from chunkhound.core.types.common import Language, ChunkType
+import pytest
+
+from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.parser_factory import ParserFactory
 
 REAL_CSS_DIR = Path(__file__).parent / "fixtures" / "real" / "css"
@@ -15,6 +16,7 @@ def css_parser():
 
 
 # --- normalize.css tests ---
+
 
 @pytest.fixture
 def normalize_chunks(css_parser):
@@ -53,7 +55,8 @@ def test_normalize_no_media_queries(normalize_chunks):
     block_chunks = [c for c in normalize_chunks if c.chunk_type == ChunkType.BLOCK]
     media_chunks = [c for c in block_chunks if "@media" in (c.symbol or "")]
     assert len(media_chunks) == 0, (
-        f"normalize.css has no @media but parser found: {[c.symbol for c in media_chunks]}"
+        "normalize.css has no @media but parser "
+        "found: {[c.symbol for c in media_chunks]}"
     )
 
 
@@ -66,6 +69,7 @@ def test_normalize_extracts_multiple_rules(normalize_chunks):
 
 # --- bootstrap.css tests ---
 
+
 @pytest.fixture
 def bootstrap_chunks(css_parser):
     path = REAL_CSS_DIR / "bootstrap.css"
@@ -76,11 +80,12 @@ def bootstrap_chunks(css_parser):
 
 def test_bootstrap_extracts_root_block(bootstrap_chunks):
     # Bootstrap uses ':root,\n[data-bs-theme=light]' as selector (not plain ':root')
-    # so _is_root_vars doesn't match; the block is emitted as BLOCK with the selector as symbol
+    # so _is_root_vars doesn't match; the block
+    # is emitted as BLOCK with the selector as symbol
     block_chunks = [c for c in bootstrap_chunks if c.chunk_type == ChunkType.BLOCK]
     root_chunks = [c for c in block_chunks if ":root" in (c.symbol or "")]
     assert len(root_chunks) > 0, (
-        f"No ':root' rule found; symbols sample: {[c.symbol for c in block_chunks[:30]]}"
+        "No ':root' rule found; symbols sample: {[c.symbol for c in block_chunks[:30]]}"
     )
 
 

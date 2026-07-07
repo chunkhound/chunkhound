@@ -271,8 +271,8 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         + _make_large_statements("    $x = 1")
         + "\n    return $x\n}",
         # Normal
-        'function Get-Greeting {\n'
-        '    param([string]$Name)\n'
+        "function Get-Greeting {\n"
+        "    param([string]$Name)\n"
         '    return "Hello, $Name"\n}',
     ),
     Language.BASH: (
@@ -398,9 +398,7 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         ".sql",
         # Large: many-column CREATE TABLE triggers splitting
         "CREATE TABLE large_table (\n"
-        + ",\n".join(
-            f"    col_{i} VARCHAR(255) NOT NULL DEFAULT ''" for i in range(80)
-        )
+        + ",\n".join(f"    col_{i} VARCHAR(255) NOT NULL DEFAULT ''" for i in range(80))
         + "\n);",
         # Normal: simple CREATE TABLE
         "CREATE TABLE users (\n"
@@ -422,9 +420,7 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
     Language.CSS: (
         ".css",
         # Large CSS with many rules
-        ".container {\n"
-        + _make_large_statements("  color: red;")
-        + "\n}",
+        ".container {\n" + _make_large_statements("  color: red;") + "\n}",
         # Normal
         ".container {\n  display: flex;\n  color: blue;\n}",
     ),
@@ -456,8 +452,10 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
     ),
     Language.GIT_DIFF: (
         ".patch",
-        # Large diff — in-memory pseudo-language, no file parser; uses same text fallback
-        "diff --git a/foo.py b/foo.py\n" + _make_large_statements("+    line of diff content"),
+        # Large diff — in-memory pseudo-language,
+        # no file parser; uses same text fallback
+        "diff --git a/foo.py b/foo.py\n"
+        + _make_large_statements("+    line of diff content"),
         # Normal
         "diff --git a/foo.py b/foo.py\n+added line\n-removed line\n",
     ),
@@ -466,17 +464,32 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Large FUNCTION_BLOCK - triggers line-based split
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<TcPlcObject Version="1.1.0.1">\n'
-        '  <POU Name="FB_Large" Id="{00000000-0000-0000-0000-000000000001}" SpecialFunc="None">\n'
-        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Large\nVAR\nEND_VAR\n]]></Declaration>\n"
+        '  <POU Name="FB_Large" '
+        'Id="{00000000-0000-0000-0000-000000000001}" '
+        'SpecialFunc="None">\n'
+        "    <Declaration><![CDATA["
+        "FUNCTION_BLOCK FB_Large\n"
+        "VAR\nEND_VAR\n"
+        "]]></Declaration>\n"
         "    <Implementation>\n      <ST><![CDATA["
         + _make_large_statements("    nX := nX + 1;")
         + "]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>",
         # Normal - small FUNCTION_BLOCK, no over-splitting
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<TcPlcObject Version="1.1.0.1">\n'
-        '  <POU Name="FB_Greet" Id="{00000000-0000-0000-0000-000000000002}" SpecialFunc="None">\n'
-        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Greet\nVAR\nEND_VAR\n]]></Declaration>\n"
-        "    <Implementation>\n      <ST><![CDATA[nX := 1;\n]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>",
+        '  <POU Name="FB_Greet" '
+        'Id="{00000000-0000-0000-0000-000000000002}" '
+        'SpecialFunc="None">\n'
+        "    <Declaration><![CDATA["
+        "FUNCTION_BLOCK FB_Greet\n"
+        "VAR\nEND_VAR\n"
+        "]]></Declaration>\n"
+        "    <Implementation>\n"
+        "      <ST><![CDATA[nX := 1;\n"
+        "]]></ST>\n"
+        "    </Implementation>\n"
+        "  </POU>\n"
+        "</TcPlcObject>",
     ),
 }
 

@@ -112,7 +112,8 @@ class DuckDBConnectionManager:
             # Load required extensions
             self._load_extensions()
 
-            # Note: Schema and index creation is now handled by DuckDBProvider's executor
+            # Note: Schema and index creation is now
+            # handled by DuckDBProvider's executor
 
             logger.info("DuckDB connection manager initialization complete")
 
@@ -267,7 +268,8 @@ class DuckDBConnectionManager:
         # Validate WAL by attaching the database via an in-memory connection with VSS
         # pre-loaded. A direct duckdb.connect(file) would crash with
         # "pure virtual function called" if the WAL contains HNSW index operations
-        # and VSS is not yet loaded — that crash is a C++ abort, not a catchable exception.
+        # and VSS is not yet loaded — that crash is a
+        # C++ abort, not a catchable exception.
         test_conn = None
         try:
             test_conn = duckdb.connect(":memory:")
@@ -380,9 +382,13 @@ class DuckDBConnectionManager:
                 ):
                     # Force checkpoint before close to ensure durability
                     self.connection.execute("CHECKPOINT")
-                    log_if_not_mcp("debug", "Database checkpoint completed before disconnect")
+                    log_if_not_mcp(
+                        "debug", "Database checkpoint completed before disconnect"
+                    )
                 else:
-                    log_if_not_mcp("debug", "Skipping checkpoint before disconnect (already done)")
+                    log_if_not_mcp(
+                        "debug", "Skipping checkpoint before disconnect (already done)"
+                    )
             except Exception as e:
                 log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")
                 # Continue with close - don't block shutdown

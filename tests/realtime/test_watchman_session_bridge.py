@@ -266,6 +266,7 @@ def test_scope_plan_subscription_names_preserve_logical_root_when_resolved_elsew
         "chunkhound-live-indexing--linked-workspace",
     )
 
+
 def test_watchman_cli_session_queue_overflow_reports_drop_and_calls_handler(
     tmp_path: Path,
 ) -> None:
@@ -298,9 +299,7 @@ def test_watchman_cli_session_queue_overflow_reports_drop_and_calls_handler(
         health["watchman_session_last_warning"]
         == "Watchman subscription queue full; dropped a raw subscription PDU"
     )
-    assert overflow_calls == [
-        (overflow_payload, 1, session.subscription_queue.maxsize)
-    ]
+    assert overflow_calls == [(overflow_payload, 1, session.subscription_queue.maxsize)]
 
 
 @pytest.mark.asyncio
@@ -624,9 +623,7 @@ async def test_watchman_cli_session_start_uses_one_shot_scope_planning(
             )
             return await super().startup_watch_project_once(target_path)
 
-        async def startup_watch_roots_once(
-            self, roots
-        ) -> tuple[Path, ...]:
+        async def startup_watch_roots_once(self, roots) -> tuple[Path, ...]:
             operations.append(
                 ("startup_watch_roots_once", tuple(str(root) for root in roots))
             )

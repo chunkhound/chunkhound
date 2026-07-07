@@ -345,7 +345,13 @@ class ResearchConfig(BaseSettings):
         parser.add_argument(
             "--research-algorithm",
             choices=["v1", "v2", "v3"],
-            help="Research algorithm version (v1=BFS exploration, v2=hybrid v1 synthesis + wide coverage exploration, v3=parallel BFS + wide coverage)",
+            help=(
+                "Research algorithm version "
+                "(v1=BFS exploration, "
+                "v2=hybrid v1 synthesis + wide coverage "
+                "exploration, "
+                "v3=parallel BFS + wide coverage)"
+            ),
         )
         parser.add_argument(
             "--exhaustive-mode",
@@ -432,9 +438,7 @@ class ResearchConfig(BaseSettings):
         if exp_query_tokens := os.getenv(
             "CHUNKHOUND_RESEARCH_DEPTH_EXPLORATION_MAX_COMPLETION_TOKENS"
         ):
-            config["depth_exploration_max_completion_tokens"] = int(
-                exp_query_tokens
-            )
+            config["depth_exploration_max_completion_tokens"] = int(exp_query_tokens)
 
         if min_gaps := os.getenv("CHUNKHOUND_RESEARCH_MIN_GAPS"):
             config["min_gaps"] = int(min_gaps)

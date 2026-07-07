@@ -177,7 +177,7 @@ def test_cleanup_accepts_local_openai_compatible_llm_without_api_key(
             "provider": "openai",
             "model": "llama3.2",
             "base_url": "http://localhost:11434/v1",
-        }
+        },
     )
     formatter = RichOutputFormatter()
 
@@ -199,7 +199,7 @@ def test_cleanup_rejects_custom_openai_compatible_llm_without_explicit_model(
         llm={
             "provider": "openai",
             "base_url": "http://localhost:11434/v1",
-        }
+        },
     )
     formatter = RichOutputFormatter()
 

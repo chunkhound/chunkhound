@@ -12,8 +12,6 @@ Test Categories:
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from chunkhound.services.research.shared.chunk_context_builder import (
     ChunkContextBuilder,
     get_chunk_text,
@@ -116,8 +114,18 @@ class TestBuildChunkSummary:
         """Multiple chunks should each be formatted on separate lines."""
         builder = ChunkContextBuilder()
         chunks = [
-            {"start_line": 1, "end_line": 10, "symbol": "func_a", "content": "def func_a(): pass"},
-            {"start_line": 12, "end_line": 20, "symbol": "func_b", "content": "def func_b(): pass"},
+            {
+                "start_line": 1,
+                "end_line": 10,
+                "symbol": "func_a",
+                "content": "def func_a(): pass",
+            },
+            {
+                "start_line": 12,
+                "end_line": 20,
+                "symbol": "func_b",
+                "content": "def func_b(): pass",
+            },
         ]
 
         result = builder.build_chunk_summary(chunks)
@@ -131,7 +139,12 @@ class TestBuildChunkSummary:
         """Should respect max_chunks parameter."""
         builder = ChunkContextBuilder()
         chunks = [
-            {"start_line": i, "end_line": i + 5, "symbol": f"func_{i}", "content": f"def func_{i}(): pass"}
+            {
+                "start_line": i,
+                "end_line": i + 5,
+                "symbol": f"func_{i}",
+                "content": f"def func_{i}(): pass",
+            }
             for i in range(10)
         ]
 
@@ -145,9 +158,7 @@ class TestBuildChunkSummary:
     def test_missing_line_numbers_shows_question_marks(self):
         """Missing line numbers should show '?' as placeholder."""
         builder = ChunkContextBuilder()
-        chunks = [
-            {"content": "some code here"}
-        ]
+        chunks = [{"content": "some code here"}]
 
         result = builder.build_chunk_summary(chunks)
 
@@ -157,9 +168,7 @@ class TestBuildChunkSummary:
         """Content preview should be truncated at 200 characters."""
         builder = ChunkContextBuilder()
         long_content = "x" * 500
-        chunks = [
-            {"start_line": 1, "end_line": 10, "content": long_content}
-        ]
+        chunks = [{"start_line": 1, "end_line": 10, "content": long_content}]
 
         result = builder.build_chunk_summary(chunks)
 
@@ -176,9 +185,7 @@ class TestBuildCodeContextWithImports:
     def test_single_chunk_without_imports(self):
         """Single chunk without import service should format content only."""
         builder = ChunkContextBuilder()
-        chunks = [
-            {"file_path": "/src/main.py", "content": "def main(): pass"}
-        ]
+        chunks = [{"file_path": "/src/main.py", "content": "def main(): pass"}]
 
         result = builder.build_code_context_with_imports(chunks, max_tokens=1000)
 
@@ -219,9 +226,7 @@ class TestBuildCodeContextWithImports:
         ]
 
         builder = ChunkContextBuilder(import_context_service=mock_import_service)
-        chunks = [
-            {"file_path": "/src/main.py", "content": "def main(): pass"}
-        ]
+        chunks = [{"file_path": "/src/main.py", "content": "def main(): pass"}]
 
         result = builder.build_code_context_with_imports(chunks, max_tokens=2000)
 
@@ -236,9 +241,7 @@ class TestBuildCodeContextWithImports:
         mock_import_service.get_file_imports.side_effect = Exception("Parse error")
 
         builder = ChunkContextBuilder(import_context_service=mock_import_service)
-        chunks = [
-            {"file_path": "/src/main.py", "content": "def main(): pass"}
-        ]
+        chunks = [{"file_path": "/src/main.py", "content": "def main(): pass"}]
 
         # Should not raise
         result = builder.build_code_context_with_imports(chunks, max_tokens=2000)
@@ -257,8 +260,7 @@ class TestTokenBudgetEnforcement:
         builder = ChunkContextBuilder()
         # Large content that would exceed budget
         chunks = [
-            {"file_path": f"/src/file_{i}.py", "content": "x" * 1000}
-            for i in range(10)
+            {"file_path": f"/src/file_{i}.py", "content": "x" * 1000} for i in range(10)
         ]
 
         # Very small budget
@@ -291,9 +293,7 @@ class TestTokenBudgetEnforcement:
         mock_llm_manager.get_utility_provider.return_value = mock_provider
 
         builder = ChunkContextBuilder(llm_manager=mock_llm_manager)
-        chunks = [
-            {"file_path": "/src/main.py", "content": "def main(): pass"}
-        ]
+        chunks = [{"file_path": "/src/main.py", "content": "def main(): pass"}]
 
         result = builder.build_code_context_with_imports(chunks, max_tokens=100)
 
@@ -316,9 +316,7 @@ class TestEdgeCases:
     def test_chunk_with_missing_file_path(self):
         """Chunk without file_path should use 'unknown'."""
         builder = ChunkContextBuilder()
-        chunks = [
-            {"content": "orphan code"}
-        ]
+        chunks = [{"content": "orphan code"}]
 
         result = builder.build_code_context_with_imports(chunks, max_tokens=1000)
 
@@ -328,9 +326,7 @@ class TestEdgeCases:
     def test_chunk_with_empty_content(self):
         """Chunk with empty content should still format correctly."""
         builder = ChunkContextBuilder()
-        chunks = [
-            {"file_path": "/src/empty.py", "content": ""}
-        ]
+        chunks = [{"file_path": "/src/empty.py", "content": ""}]
 
         result = builder.build_code_context_with_imports(chunks, max_tokens=1000)
 
@@ -339,9 +335,7 @@ class TestEdgeCases:
     def test_none_fields_handled(self):
         """Should handle None values in chunk fields."""
         builder = ChunkContextBuilder()
-        chunks = [
-            {"file_path": None, "content": None}
-        ]
+        chunks = [{"file_path": None, "content": None}]
 
         # Should not raise
         result = builder.build_chunk_summary(chunks)
@@ -391,10 +385,7 @@ class TestBuildFileGroupedContext:
     def test_respects_per_file_token_budget(self):
         """Should respect token budget per file."""
         builder = ChunkContextBuilder()
-        chunks = [
-            {"file_path": "/src/a.py", "content": "x" * 1000}
-            for _ in range(5)
-        ]
+        chunks = [{"file_path": "/src/a.py", "content": "x" * 1000} for _ in range(5)]
 
         # Small per-file budget
         result = builder.build_file_grouped_context(chunks, max_tokens=50)
@@ -408,9 +399,7 @@ class TestBuildFileGroupedContext:
         mock_import_service.get_file_imports.return_value = ["import os"]
 
         builder = ChunkContextBuilder(import_context_service=mock_import_service)
-        chunks = [
-            {"file_path": "/src/main.py", "content": "def main(): pass"}
-        ]
+        chunks = [{"file_path": "/src/main.py", "content": "def main(): pass"}]
 
         result = builder.build_file_grouped_context(
             chunks, max_tokens=1000, include_imports=False

@@ -1,11 +1,13 @@
 import asyncio
-from pathlib import Path
 
 import pytest
 
 
 def test_lancedb_checksums_saved_on_first_index(lancedb_provider, tmp_path):
-    """Verify checksums are computed and saved during first indexing pass with LanceDB."""
+    """
+    Verify checksums are computed and saved
+    during first indexing pass with LanceDB.
+    """
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
     from chunkhound.utils.hashing import compute_file_hash
 
@@ -16,7 +18,9 @@ def test_lancedb_checksums_saved_on_first_index(lancedb_provider, tmp_path):
         p.write_text(f"# Test file {i}\nprint('hello')\n")
         test_files.append(p)
 
-    coord = IndexingCoordinator(database_provider=lancedb_provider, base_directory=tmp_path)
+    coord = IndexingCoordinator(
+        database_provider=lancedb_provider, base_directory=tmp_path
+    )
 
     # First indexing pass - files are new
     result1 = asyncio.run(
@@ -24,7 +28,9 @@ def test_lancedb_checksums_saved_on_first_index(lancedb_provider, tmp_path):
     )
 
     assert result1["files_processed"] == 3, "Should process 3 new files"
-    assert result1.get("skipped_unchanged", 0) == 0, "No files should be skipped on first pass"
+    assert result1.get("skipped_unchanged", 0) == 0, (
+        "No files should be skipped on first pass"
+    )
 
     # Verify checksums were saved in database
     for p in test_files:
@@ -39,7 +45,9 @@ def test_lancedb_checksums_saved_on_first_index(lancedb_provider, tmp_path):
 
         # Verify checksum matches actual file content
         expected_hash = compute_file_hash(p)
-        assert db_hash == expected_hash, f"Checksum for {rel_path} should match actual content"
+        assert db_hash == expected_hash, (
+            f"Checksum for {rel_path} should match actual content"
+        )
 
     # Second indexing pass - files unchanged
     result2 = asyncio.run(
@@ -47,11 +55,17 @@ def test_lancedb_checksums_saved_on_first_index(lancedb_provider, tmp_path):
     )
 
     # Files should be skipped on second pass
-    assert result2["files_processed"] == 0, "No files should be processed on second pass"
-    assert result2.get("skipped_unchanged", 0) == 3, "All 3 files should be skipped on second pass"
+    assert result2["files_processed"] == 0, (
+        "No files should be processed on second pass"
+    )
+    assert result2.get("skipped_unchanged", 0) == 3, (
+        "All 3 files should be skipped on second pass"
+    )
 
 
-def test_lancedb_checksum_skip_unchanged(lancedb_provider, tmp_path, monkeypatch: pytest.MonkeyPatch):
+def test_lancedb_checksum_skip_unchanged(
+    lancedb_provider, tmp_path, monkeypatch: pytest.MonkeyPatch
+):
     """Verify LanceDB skips files with matching checksums."""
     from chunkhound.core.models.file import File
     from chunkhound.core.types.common import Language
@@ -76,12 +90,16 @@ def test_lancedb_checksum_skip_unchanged(lancedb_provider, tmp_path, monkeypatch
         lancedb_provider.insert_file(f)
         files.append(p)
 
-    coord = IndexingCoordinator(database_provider=lancedb_provider, base_directory=tmp_path)
+    coord = IndexingCoordinator(
+        database_provider=lancedb_provider, base_directory=tmp_path
+    )
 
     # Avoid parsing: record what would be parsed
     called = []
 
-    async def _fake(files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None):
+    async def _fake(
+        files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None
+    ):
         called.append(list(files))
         return []
 
@@ -89,7 +107,10 @@ def test_lancedb_checksum_skip_unchanged(lancedb_provider, tmp_path, monkeypatch
 
     result = asyncio.run(
         coord.process_directory(
-            tmp_path, patterns=["**/*.txt"], exclude_patterns=[], config_file_size_threshold_kb=20
+            tmp_path,
+            patterns=["**/*.txt"],
+            exclude_patterns=[],
+            config_file_size_threshold_kb=20,
         )
     )
 

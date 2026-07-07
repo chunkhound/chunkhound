@@ -5,15 +5,17 @@ must be persisted in the `files` table with a `skip_reason`.  On the next run,
 change-detection finds the record, sees the metadata is unchanged, and does NOT
 re-queue the file for parsing — eliminating the repeated re-scan penalty.
 """
+
 import pytest
-from pathlib import Path
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
-_PATTERNS = ["**/*"]  # discover all files; binary/unknown filtering happens in batch_processor
+_PATTERNS = [
+    "**/*"
+]  # discover all files; binary/unknown filtering happens in batch_processor
 
 
 @pytest.fixture
@@ -26,8 +28,12 @@ def coordinator(tmp_path):
 
 @pytest.mark.asyncio
 async def test_skipped_file_is_recorded_in_db(coordinator, tmp_path):
-    """A file skipped at parse time (unknown extension) gets a DB record with skip_reason."""
-    # .xyzunk has no registered parser → Language.UNKNOWN → skip with "Unknown file type"
+    """
+    A file skipped at parse time (unknown extension)
+    gets a DB record with skip_reason.
+    """
+    # .xyzunk has no registered parser →
+    # Language.UNKNOWN → skip with "Unknown file type"
     unknown = tmp_path / "data.xyzunk"
     unknown.write_text("some content\n")
 

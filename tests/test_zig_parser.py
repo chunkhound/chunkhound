@@ -42,7 +42,7 @@ def test_zig_function_parsing(parser_factory):
     # Should extract chunks containing function code
     assert len(chunks) > 0, "Should extract at least one chunk"
     function_chunks = [c for c in chunks if "add" in c.code or "multiply" in c.code]
-    assert len(function_chunks) > 0, f"Should find chunks with function code"
+    assert len(function_chunks) > 0, "Should find chunks with function code"
 
 
 def test_zig_struct_parsing(parser_factory):
@@ -70,7 +70,7 @@ def test_zig_struct_parsing(parser_factory):
     # Should extract chunks containing struct code
     assert len(chunks) > 0, "Should extract at least one chunk"
     struct_chunks = [c for c in chunks if "Point" in c.code or "Rectangle" in c.code]
-    assert len(struct_chunks) > 0, f"Should find chunks with struct code"
+    assert len(struct_chunks) > 0, "Should find chunks with struct code"
 
 
 def test_zig_enum_parsing(parser_factory):
@@ -97,7 +97,7 @@ def test_zig_enum_parsing(parser_factory):
     # Should extract chunks containing enum code
     assert len(chunks) > 0, "Should extract at least one chunk"
     enum_chunks = [c for c in chunks if "Color" in c.code or "Direction" in c.code]
-    assert len(enum_chunks) > 0, f"Should find chunks with enum code"
+    assert len(enum_chunks) > 0, "Should find chunks with enum code"
 
 
 def test_zig_import_parsing(parser_factory):
@@ -115,7 +115,7 @@ def test_zig_import_parsing(parser_factory):
     # Should extract chunks containing import code
     assert len(chunks) > 0, "Should extract at least one chunk"
     import_chunks = [c for c in chunks if "@import" in c.code]
-    assert len(import_chunks) > 0, f"Should find chunks with import statements"
+    assert len(import_chunks) > 0, "Should find chunks with import statements"
 
 
 def test_zig_comment_parsing(parser_factory):
@@ -136,7 +136,9 @@ def test_zig_comment_parsing(parser_factory):
 
     # Should find comments
     comment_chunks = [c for c in chunks if "comment" in c.symbol.lower()]
-    assert len(comment_chunks) >= 1, f"Expected at least 1 comment, found {len(comment_chunks)}"
+    assert len(comment_chunks) >= 1, (
+        f"Expected at least 1 comment, found {len(comment_chunks)}"
+    )
 
 
 def test_zig_variable_parsing(parser_factory):
@@ -153,8 +155,12 @@ def test_zig_variable_parsing(parser_factory):
 
     # Should extract chunks containing variable code
     assert len(chunks) > 0, "Should extract at least one chunk"
-    var_chunks = [c for c in chunks if any(name in c.code for name in ["PI", "counter", "VERSION"])]
-    assert len(var_chunks) > 0, f"Should find chunks with variable declarations"
+    var_chunks = [
+        c
+        for c in chunks
+        if any(name in c.code for name in ["PI", "counter", "VERSION"])
+    ]
+    assert len(var_chunks) > 0, "Should find chunks with variable declarations"
 
 
 def test_zig_complex_code(parser_factory):
@@ -212,7 +218,8 @@ def test_zig_function_metadata(parser_factory):
 
     code = """
     pub fn publicFunc(a: i32, b: i32) i32 {
-        // cAST merges adjacent siblings when combined size < max_chunk_size (1200 chars).
+        // cAST merges adjacent siblings when combined
+        // size < max_chunk_size (1200 chars).
         // This function has enough content to prevent merging.
         var result: i32 = 0;
         var counter: i32 = 0;
@@ -282,7 +289,9 @@ def test_zig_function_metadata(parser_factory):
     priv_func = next((c for c in func_chunks if "privateFunc" in c.code), None)
     assert priv_func is not None, "Should find privateFunc"
     assert priv_func.metadata.get("kind") == "function"
-    assert priv_func.metadata.get("visibility") is None, "Private function should not have visibility"
+    assert priv_func.metadata.get("visibility") is None, (
+        "Private function should not have visibility"
+    )
 
 
 def test_zig_struct_metadata(parser_factory):
@@ -324,7 +333,9 @@ def test_zig_struct_metadata(parser_factory):
     priv_struct = next((c for c in struct_chunks if "PrivateStruct" in c.code), None)
     assert priv_struct is not None, "Should find PrivateStruct"
     assert priv_struct.metadata.get("kind") == "struct"
-    assert priv_struct.metadata.get("visibility") is None, "Private struct should not have visibility"
+    assert priv_struct.metadata.get("visibility") is None, (
+        "Private struct should not have visibility"
+    )
 
 
 def test_zig_variable_metadata(parser_factory):
@@ -400,12 +411,17 @@ def test_zig_comment_metadata(parser_factory):
     assert len(comment_chunks) >= 1, "Should find at least one comment chunk"
 
     # Check for doc comment
-    doc_comment = next((c for c in comment_chunks if c.metadata.get("comment_type") == "doc"), None)
+    doc_comment = next(
+        (c for c in comment_chunks if c.metadata.get("comment_type") == "doc"), None
+    )
     if doc_comment:
         assert doc_comment.metadata.get("is_doc_comment") is True
 
     # Check for module doc comment
-    module_doc = next((c for c in comment_chunks if c.metadata.get("comment_type") == "module_doc"), None)
+    module_doc = next(
+        (c for c in comment_chunks if c.metadata.get("comment_type") == "module_doc"),
+        None,
+    )
     if module_doc:
         assert module_doc.metadata.get("is_doc_comment") is True
 
@@ -473,7 +489,7 @@ def test_zig_chunk_types(parser_factory):
     chunks = parser.parse_content(code, "test.zig", FileId(1))
 
     # Verify we have different chunk types
-    chunk_types = {c.chunk_type for c in chunks}
+    {c.chunk_type for c in chunks}
 
     # Should have at least some of these chunk types
     has_function = any(c.chunk_type == ChunkType.FUNCTION for c in chunks)
@@ -507,7 +523,9 @@ def test_zig_union_parsing(parser_factory):
     assert len(union_chunks) > 0, "Should find union declarations"
 
     # Verify public union metadata
-    value_union = next((c for c in chunks if "Value" in c.code and "union" in c.code), None)
+    value_union = next(
+        (c for c in chunks if "Value" in c.code and "union" in c.code), None
+    )
     if value_union and value_union.metadata.get("kind") == "union":
         assert value_union.metadata.get("visibility") == "pub"
 
@@ -569,7 +587,9 @@ def test_zig_error_handling(parser_factory):
     # Verify try/defer/errdefer appear in code
     caller_chunk = next((c for c in chunks if "caller" in c.code), None)
     assert caller_chunk is not None, "Should find caller function"
-    assert "try" in caller_chunk.code or "defer" in caller_chunk.code, "Should contain error handling keywords"
+    assert "try" in caller_chunk.code or "defer" in caller_chunk.code, (
+        "Should contain error handling keywords"
+    )
 
 
 def test_zig_comptime_features(parser_factory):
@@ -597,7 +617,9 @@ def test_zig_comptime_features(parser_factory):
     assert any("inlineFunc" in c.code for c in chunks), "Should find inline function"
 
     # Should extract test blocks
-    test_chunks = [c for c in chunks if "test" in c.code.lower() and "basic test" in c.code]
+    test_chunks = [
+        c for c in chunks if "test" in c.code.lower() and "basic test" in c.code
+    ]
     assert len(test_chunks) > 0, "Should find test block"
 
 
@@ -661,8 +683,12 @@ def test_zig_function_symbol_names(parser_factory):
     symbols = {c.symbol for c in chunks}
 
     assert "add" in symbols, f"Expected 'add' in symbols, got: {sorted(symbols)}"
-    assert "subtract" in symbols, f"Expected 'subtract' in symbols, got: {sorted(symbols)}"
-    assert "multiply" in symbols, f"Expected 'multiply' in symbols, got: {sorted(symbols)}"
+    assert "subtract" in symbols, (
+        f"Expected 'subtract' in symbols, got: {sorted(symbols)}"
+    )
+    assert "multiply" in symbols, (
+        f"Expected 'multiply' in symbols, got: {sorted(symbols)}"
+    )
 
 
 def test_zig_struct_symbol_names(parser_factory):
@@ -741,8 +767,12 @@ def test_zig_variable_symbol_names(parser_factory):
     symbols = {c.symbol for c in chunks}
 
     assert "PI" in symbols, f"Expected 'PI' in symbols, got: {sorted(symbols)}"
-    assert "globalCounter" in symbols, f"Expected 'globalCounter' in symbols, got: {sorted(symbols)}"
-    assert "VERSION" in symbols, f"Expected 'VERSION' in symbols, got: {sorted(symbols)}"
+    assert "globalCounter" in symbols, (
+        f"Expected 'globalCounter' in symbols, got: {sorted(symbols)}"
+    )
+    assert "VERSION" in symbols, (
+        f"Expected 'VERSION' in symbols, got: {sorted(symbols)}"
+    )
 
 
 def test_zig_import_symbol_names(parser_factory):
@@ -778,11 +808,13 @@ def test_zig_import_symbol_names(parser_factory):
     """
 
     chunks = parser.parse_content(code, "test.zig", FileId(1))
-    symbols = {c.symbol for c in chunks}
+    {c.symbol for c in chunks}
 
     # Import symbols might be named differently, so check they exist
     import_chunks = [c for c in chunks if "@import" in c.code]
-    assert len(import_chunks) >= 3, f"Expected at least 3 import chunks, got {len(import_chunks)}"
+    assert len(import_chunks) >= 3, (
+        f"Expected at least 3 import chunks, got {len(import_chunks)}"
+    )
 
 
 def test_zig_realistic_module(parser_factory):
@@ -848,7 +880,9 @@ def test_zig_realistic_module(parser_factory):
         }
 
         pub fn validate(self: *const Config) bool {
-            return self.max_retries > 0 and self.timeout_ms > 0 and self.buffer_size > 0;
+            return (self.max_retries > 0
+                and self.timeout_ms > 0
+                and self.buffer_size > 0);
         }
 
         pub fn withRetries(self: Config, retries: u32) Config {
@@ -989,12 +1023,16 @@ def test_zig_realistic_module(parser_factory):
 
     # Verify metadata for some chunks
     func_chunks = [c for c in chunks if c.chunk_type == ChunkType.FUNCTION]
-    assert len(func_chunks) >= 3, f"Should find at least 3 functions, found {len(func_chunks)}"
+    assert len(func_chunks) >= 3, (
+        f"Should find at least 3 functions, found {len(func_chunks)}"
+    )
 
     # Verify public function has visibility metadata
     read_file_func = next((c for c in func_chunks if "readFile" in c.code), None)
     if read_file_func:
-        assert read_file_func.metadata.get("visibility") == "pub", "readFile should be public"
+        assert read_file_func.metadata.get("visibility") == "pub", (
+            "readFile should be public"
+        )
 
 
 def test_zig_file_extension_detection():

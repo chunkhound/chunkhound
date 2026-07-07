@@ -53,7 +53,8 @@ class MarkdownMapping(BaseMapping):
     def get_class_query(self) -> str:
         """Get tree-sitter query pattern for Markdown sections.
 
-        In Markdown, sections (defined by headers) are the closest equivalent to classes.
+        In Markdown, sections (defined by headers) are
+        the closest equivalent to classes.
         Captures both ATX and Setext style headers.
 
         Returns:
@@ -505,7 +506,8 @@ class MarkdownMapping(BaseMapping):
         Since Markdown uses tree-sitter, we map concepts to existing queries.
         """
         if concept == UniversalConcept.DEFINITION:
-            # Combine heading and code block queries - these are the main "definitions" in markdown
+            # Combine heading and code block queries - these
+            # are the main "definitions" in markdown
             heading_query = self.get_heading_query()
             function_query = self.get_function_query()
 
@@ -630,7 +632,8 @@ class MarkdownMapping(BaseMapping):
                 return "unnamed_comment"
 
         elif concept == UniversalConcept.IMPORT:
-            # Link reference definitions only (inline links/images aren't reliably parseable)
+            # Link reference definitions only
+            # (inline links/images aren't reliably parseable)
             link_node = self._find_definition_node(captures)
             if link_node:
                 if link_node.type == "link_reference_definition":

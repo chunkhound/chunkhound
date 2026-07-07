@@ -25,19 +25,19 @@ class JsonMapping(BaseMapping):
 
     # BaseMapping required methods
     def get_function_query(self) -> str:
-        """Get tree-sitter query pattern for function definitions (not applicable to JSON)."""
+        """Get tree-sitter query pattern for function definitions."""
         return ""
 
     def get_class_query(self) -> str:
-        """Get tree-sitter query pattern for class definitions (not applicable to JSON)."""
+        """Get tree-sitter query pattern for class definitions."""
         return ""
 
     def get_comment_query(self) -> str:
-        """Get tree-sitter query pattern for comments (JSON doesn't support comments)."""
+        """Get tree-sitter query pattern for comments."""
         return ""
 
     def extract_function_name(self, node: Node | None, source: str) -> str:
-        """Extract function name from a function definition node (not applicable to JSON)."""
+        """Extract function name from a function definition node."""
         return ""
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
@@ -54,15 +54,15 @@ class JsonMapping(BaseMapping):
             # Match individual key-value pairs and primitive values as definitions
             return """
                 (pair) @definition
-                
+
                 (string) @definition
-                
+
                 (number) @definition
-                
+
                 (true) @definition
-                
+
                 (false) @definition
-                
+
                 (null) @definition
             """
 
@@ -70,7 +70,7 @@ class JsonMapping(BaseMapping):
             # Match small container structures
             return """
                 (object) @definition
-                
+
                 (array) @definition
             """
 
@@ -250,7 +250,8 @@ class JsonMapping(BaseMapping):
             metadata["parse_error"] = str(e)
             metadata["is_valid_json"] = False
         else:
-            # Store formatted version in metadata for cases where pretty-printed JSON is needed
+            # Store formatted version in metadata
+            # for cases where pretty-printed JSON is needed
             try:
                 metadata["formatted_json"] = json.dumps(data, indent=2)
             except Exception:

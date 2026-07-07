@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import pytest
 import yaml  # type: ignore[import-untyped]
+
 from tests.utils import SUBPROCESS_ENV_ALLOWLIST as _SUBPROCESS_ENV_ALLOWLIST
 from tests.utils.git_repo import (
     commit_all as _commit_all,

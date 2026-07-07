@@ -10,4 +10,3 @@ def test_extract_description_strips_ordered_list_marker() -> None:
     )
 
     assert _extract_description(markdown) == "First item"
-

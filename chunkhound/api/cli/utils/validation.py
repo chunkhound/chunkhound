@@ -58,7 +58,7 @@ def validate_provider_args(
             3) Set CHUNKHOUND_EMBEDDING__PROVIDER environment variable
             4) Add provider to .chunkhound.json config file
             5) Use --no-embeddings to skip embeddings entirely.
-            
+
             For more information, see: https://chunkhound.ai/docs/configuration/
             """
         )

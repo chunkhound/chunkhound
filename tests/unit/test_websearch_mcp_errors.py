@@ -107,9 +107,7 @@ def patched(monkeypatch):
         return p
 
     monkeypatch.setattr(ws_mod, "build_quickresearch_argv_core", _stub_build_argv)
-    monkeypatch.setattr(
-        "chunkhound.mcp_server.tools.tempfile.mkdtemp", capture_mkdtemp
-    )
+    monkeypatch.setattr("chunkhound.mcp_server.tools.tempfile.mkdtemp", capture_mkdtemp)
     return captured
 
 
@@ -167,9 +165,7 @@ async def test_partial_fetch_warnings_render_bullets(monkeypatch, patched):
     monkeypatch.setattr(ws_mod, "fetch_and_save", fetch_with_warnings)
 
     fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _make_fake_exec(fake_proc))
 
     result = await tools_mod.websearch_impl(
         embedding_manager=None,
@@ -203,9 +199,7 @@ async def test_multiline_warning_keeps_blockquote(monkeypatch, patched):
     monkeypatch.setattr(ws_mod, "fetch_and_save", fetch_with_multiline_warning)
 
     fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _make_fake_exec(fake_proc))
 
     result = await tools_mod.websearch_impl(
         embedding_manager=None,
@@ -233,9 +227,7 @@ async def test_subprocess_nonzero_exit_raises_mcperror(monkeypatch, patched):
         stderr=b"bad config traceback line-N",
         returncode=2,
     )
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _make_fake_exec(fake_proc))
 
     with pytest.raises(MCPError) as exc:
         await tools_mod.websearch_impl(
@@ -251,9 +243,7 @@ async def test_subprocess_nonzero_exit_raises_mcperror(monkeypatch, patched):
 
 
 @pytest.mark.asyncio
-async def test_subprocess_nonzero_exit_strips_traceback_frames(
-    monkeypatch, patched
-):
+async def test_subprocess_nonzero_exit_strips_traceback_frames(monkeypatch, patched):
     monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
     monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
 
@@ -267,9 +257,7 @@ async def test_subprocess_nonzero_exit_strips_traceback_frames(
         ),
         returncode=2,
     )
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _make_fake_exec(fake_proc))
 
     with pytest.raises(MCPError) as exc:
         await tools_mod.websearch_impl(
@@ -292,7 +280,9 @@ async def test_subprocess_nonzero_exit_strips_traceback_frames(
     "stderr_bytes, expected_substrings, unexpected_substrings",
     [
         pytest.param(
-            b"Traceback (most recent call last):\n  File '/x.py', line 1\n    raise SystemExit(1)\n",
+            b"Traceback (most recent call last):\n"
+            b"  File '/x.py', line 1\n"
+            b"    raise SystemExit(1)\n",
             ["SystemExit(1)"],
             ["Traceback", "File '/x.py'", "raise SystemExit(1)"],
             id="all-traceback-no-error-line",
@@ -322,9 +312,7 @@ async def test_subprocess_nonzero_exit_strips_traceback_variants(
         stderr=stderr_bytes,
         returncode=2,
     )
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _make_fake_exec(fake_proc))
 
     with pytest.raises(MCPError) as exc:
         await tools_mod.websearch_impl(
@@ -354,9 +342,7 @@ async def test_subprocess_stderr_truncates_long_output(monkeypatch, patched):
         stderr=long_stderr,
         returncode=2,
     )
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _make_fake_exec(fake_proc))
 
     with pytest.raises(MCPError) as exc:
         await tools_mod.websearch_impl(
@@ -367,7 +353,9 @@ async def test_subprocess_stderr_truncates_long_output(monkeypatch, patched):
         )
 
     msg = str(exc.value)
-    assert len(msg) <= 600  # "Research subprocess failed (exit 2): " prefix + truncated content
+    assert (
+        len(msg) <= 600
+    )  # "Research subprocess failed (exit 2): " prefix + truncated content
     # Verify content preserved (not blank)
     assert "xYz" in msg
 
@@ -379,9 +367,7 @@ async def test_timeout_raises_mcperror_and_cleans_up(monkeypatch, patched):
     monkeypatch.setattr(ws_mod, "websearch_timeout", lambda: 0.05)
 
     fake_proc = _FakeProc(hang=True)
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _make_fake_exec(fake_proc))
 
     with pytest.raises(MCPError) as exc:
         await tools_mod.websearch_impl(
@@ -400,16 +386,12 @@ async def test_timeout_raises_mcperror_and_cleans_up(monkeypatch, patched):
 
 
 @pytest.mark.asyncio
-async def test_cancellation_kills_subprocess_and_cleans_tempdir(
-    monkeypatch, patched
-):
+async def test_cancellation_kills_subprocess_and_cleans_tempdir(monkeypatch, patched):
     monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
     monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
 
     fake_proc = _FakeProc(hang=True)
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _make_fake_exec(fake_proc))
 
     task = asyncio.create_task(
         tools_mod.websearch_impl(
@@ -467,9 +449,7 @@ async def test_answer_rewrites_filenames_to_source_urls(monkeypatch, patched):
         stdout=b"see a.invalid_.md and b.invalid_.pdf for details",
         returncode=0,
     )
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _make_fake_exec(fake_proc))
 
     result = await tools_mod.websearch_impl(
         embedding_manager=None,
@@ -496,9 +476,7 @@ async def test_limit_clamped_to_range(monkeypatch, patched):
     monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
 
     fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _make_fake_exec(fake_proc))
 
     await tools_mod.websearch_impl(
         embedding_manager=None,

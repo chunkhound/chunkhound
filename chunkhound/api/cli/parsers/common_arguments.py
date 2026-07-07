@@ -130,7 +130,8 @@ def build_forwarded_argv(
 
 
 def add_git_diff_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add mutually-exclusive git commit-range arguments shared by search and research."""
+    """Add mutually-exclusive git commit-range arguments
+    shared by search and research."""
     diff_group = parser.add_mutually_exclusive_group()
     diff_group.add_argument(
         "--commit-range",

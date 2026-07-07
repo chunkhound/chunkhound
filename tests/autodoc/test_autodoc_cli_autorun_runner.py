@@ -61,4 +61,3 @@ async def test_autorun_code_mapper_for_autodoc_returns_plan_out_dir(
     assert called["map_context"] == options.map_context
     assert called["comprehensiveness"] == options.comprehensiveness
     assert called["audience"] == options.audience
-

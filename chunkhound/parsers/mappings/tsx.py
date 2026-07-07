@@ -36,12 +36,15 @@ class TSXMapping(TypeScriptMapping):
         BaseMapping.__init__(self, Language.TSX)
 
     def get_function_query(self) -> str:
-        """Get tree-sitter query for TSX function definitions including typed React components.
+        """Get tree-sitter query for TSX function definitions
+        including typed React components.
 
-        Extends TypeScript function query with React component patterns.
+        Extends TypeScript function query with
+        React component patterns.
 
         Returns:
-            Tree-sitter query string for finding function definitions and React components
+            Tree-sitter query string for finding
+            function definitions and React components
         """
         # Get base TypeScript function query
         base_query = super().get_function_query()
@@ -66,7 +69,7 @@ class TSXMapping(TypeScriptMapping):
         ) @component.definition
 
         (variable_declarator
-            name: (identifier) @component.name  
+            name: (identifier) @component.name
             value: (arrow_function
                 body: (statement_block
                     (return_statement
@@ -96,7 +99,7 @@ class TSXMapping(TypeScriptMapping):
         """
         return """
         (jsx_element
-            open_tag: (jsx_opening_element 
+            open_tag: (jsx_opening_element
                 name: (_) @jsx.element_name
             )
         ) @jsx.element
@@ -148,7 +151,7 @@ class TSXMapping(TypeScriptMapping):
             )
         ) @hook.typed_declaration
 
-        ; Regular hook variable declarations  
+        ; Regular hook variable declarations
         (variable_declarator
             name: (_) @hook.variable
             value: (call_expression
@@ -181,7 +184,8 @@ class TSXMapping(TypeScriptMapping):
         """Get tree-sitter query for TSX comments including JSX comment syntax.
 
         Returns:
-            Tree-sitter query string for finding comments including TSDoc and JSX comments
+            Tree-sitter query string for finding comments
+            including TSDoc and JSX comments
         """
         base_query = super().get_comment_query()
 

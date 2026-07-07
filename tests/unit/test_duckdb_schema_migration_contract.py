@@ -22,8 +22,8 @@ from pathlib import Path
 
 import duckdb
 import pytest
-from chunkhound.core.models import Embedding
 
+from chunkhound.core.models import Embedding
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
 pytest.importorskip("duckdb")
@@ -115,7 +115,9 @@ def canonical_sequence_db(tmp_path: Path) -> Path:
                 end_line INTEGER,
                 language TEXT,
                 metadata TEXT
-                -- NOTE: intentionally omitting start_byte, end_byte, created_at, updated_at
+                -- NOTE: intentionally omitting
+                -- start_byte, end_byte,
+                -- created_at, updated_at
             )
         """)
         conn.execute("""
@@ -123,8 +125,12 @@ def canonical_sequence_db(tmp_path: Path) -> Path:
             VALUES (1, 'helper.py', 'helper.py', '.py', 10, CURRENT_TIMESTAMP, 'python')
         """)
         conn.execute("""
-            INSERT INTO chunks (id, file_id, symbol, start_line, end_line, code, chunk_type, language)
-            VALUES (1, 1, 'helper', 1, 1, 'def helper(): pass', 'function', 'python')
+            INSERT INTO chunks (id, file_id, symbol,
+                start_line, end_line, code,
+                chunk_type, language)
+            VALUES (1, 1, 'helper', 1, 1,
+                'def helper(): pass',
+                'function', 'python')
         """)
     finally:
         conn.close()
@@ -366,7 +372,8 @@ class TestSchemaAutoCreate:
     def test_canonical_columns_added_without_rebuild(
         self, canonical_sequence_db: Path, tmp_path: Path
     ) -> None:
-        """Existing DB with correct sequence defaults gets canonical columns via ALTER TABLE only.
+        """Existing DB with correct sequence defaults
+        gets canonical columns via ALTER TABLE only.
 
         This exercises the ALTER TABLE path in _executor_materialize_files_table
         and _executor_materialize_chunks_table — the rebuild path is tested by
@@ -451,7 +458,8 @@ class TestSchemaAutoCreate:
             provider.disconnect()
 
     def test_legacy_size_signature_columns_are_removed(self, tmp_path: Path) -> None:
-        """Legacy 'size' and 'signature' columns on chunks are removed during migration."""
+        """Legacy 'size' and 'signature' columns
+        on chunks are removed during migration."""
         db_path = tmp_path / "legacy_size_sig.duckdb"
 
         conn = duckdb.connect(str(db_path))
@@ -484,12 +492,18 @@ class TestSchemaAutoCreate:
                     metadata TEXT,
                     size INTEGER,
                     signature TEXT
-                    -- NOTE: intentionally omitting start_byte, end_byte, created_at, updated_at
+                    -- NOTE: intentionally omitting
+                    -- start_byte, end_byte,
+                    -- created_at, updated_at
                 )
             """)
             conn.execute("""
-                INSERT INTO files (id, path, name, extension, size, modified_time, language)
-                VALUES (1, 'helper.py', 'helper.py', '.py', 10, CURRENT_TIMESTAMP, 'python')
+                INSERT INTO files (id, path, name,
+                    extension, size,
+                    modified_time, language)
+                VALUES (1, 'helper.py', 'helper.py',
+                    '.py', 10,
+                    CURRENT_TIMESTAMP, 'python')
             """)
             conn.execute("""
                 INSERT INTO chunks (

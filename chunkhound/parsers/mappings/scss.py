@@ -25,6 +25,7 @@ from chunkhound.parsers.mappings._shared.css_family_helpers import (
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
+
 def _preprocess_scss_interpolations(content: str) -> str:
     """Replace SCSS ``#{...}`` interpolations with same-length placeholders.
 
@@ -301,7 +302,7 @@ class ScssMapping(BaseMapping):
         text = import_text
         for prefix in ("@forward", "@use", "@import"):
             if text.startswith(prefix):
-                text = text[len(prefix):].strip().rstrip(";").strip()
+                text = text[len(prefix) :].strip().rstrip(";").strip()
                 break
         # @import supports comma-separated paths; @use/@forward do not.
         # Splitting on "," is safe here: path tokens are quoted strings and

@@ -64,7 +64,6 @@ def _is_loss_of_sync_request(call: RequestCall, reason: str) -> bool:
     )
 
 
-
 @pytest.mark.asyncio
 async def test_watchman_fresh_instance_requests_resync_without_incremental_translation(
     tmp_path: Path,
@@ -83,9 +82,7 @@ async def test_watchman_fresh_instance_requests_resync_without_incremental_trans
     request_calls: list[RequestCall] = []
     original_request_resync = service.request_resync
 
-    async def resync_callback(
-        reason: str, details: dict[str, object] | None
-    ) -> None:
+    async def resync_callback(reason: str, details: dict[str, object] | None) -> None:
         del reason, details
 
     async def recording_request_resync(
@@ -180,9 +177,7 @@ async def test_watchman_recrawl_warning_requests_resync_without_incremental_tran
     request_calls: list[RequestCall] = []
     original_request_resync = service.request_resync
 
-    async def resync_callback(
-        reason: str, details: dict[str, object] | None
-    ) -> None:
+    async def resync_callback(reason: str, details: dict[str, object] | None) -> None:
         del reason, details
 
     async def recording_request_resync(
@@ -269,9 +264,7 @@ async def test_watchman_subscription_queue_overflow_requests_resync_and_degrades
     callback_calls: list[tuple[str, dict[str, object] | None]] = []
     callback_event = asyncio.Event()
 
-    async def resync_callback(
-        reason: str, details: dict[str, object] | None
-    ) -> None:
+    async def resync_callback(reason: str, details: dict[str, object] | None) -> None:
         callback_calls.append((reason, details))
         if (
             isinstance(details, dict)
@@ -376,9 +369,7 @@ async def test_watchman_unexpected_session_exit_requests_resync_and_restores_mon
     request_calls: list[RequestCall] = []
     original_request_resync = service.request_resync
 
-    async def resync_callback(
-        reason: str, details: dict[str, object] | None
-    ) -> None:
+    async def resync_callback(reason: str, details: dict[str, object] | None) -> None:
         del reason, details
 
     async def recording_request_resync(
@@ -456,9 +447,7 @@ async def test_watchman_reconnect_status_reports_retrying_then_restored(
     service, services = _build_watchman_service(watch_dir)
     callback_event = asyncio.Event()
 
-    async def resync_callback(
-        reason: str, details: dict[str, object] | None
-    ) -> None:
+    async def resync_callback(reason: str, details: dict[str, object] | None) -> None:
         assert reason == "realtime_loss_of_sync"
         assert details is not None
         callback_event.set()
@@ -535,9 +524,7 @@ async def test_watchman_reconnect_restore_requests_post_restore_reconciliation(
     post_restore_request_completed = asyncio.Event()
     original_request_resync = service.request_resync
 
-    async def resync_callback(
-        reason: str, details: dict[str, object] | None
-    ) -> None:
+    async def resync_callback(reason: str, details: dict[str, object] | None) -> None:
         del reason, details
 
     async def recording_request_resync(

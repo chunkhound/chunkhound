@@ -1,9 +1,10 @@
 """Real-world HTML parser tests using Python docs page."""
 
-import pytest
 from pathlib import Path
 
-from chunkhound.core.types.common import Language, ChunkType
+import pytest
+
+from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.parser_factory import ParserFactory
 
 REAL_HTML_DIR = Path(__file__).parent / "fixtures" / "real" / "html"
@@ -16,6 +17,7 @@ def html_parser():
 
 # --- python-docs.html tests ---
 
+
 @pytest.fixture
 def python_docs_chunks(html_parser):
     path = REAL_HTML_DIR / "python-docs.html"
@@ -25,7 +27,9 @@ def python_docs_chunks(html_parser):
 
 
 def test_python_docs_has_doctype(python_docs_chunks):
-    namespace_chunks = [c for c in python_docs_chunks if c.chunk_type == ChunkType.NAMESPACE]
+    namespace_chunks = [
+        c for c in python_docs_chunks if c.chunk_type == ChunkType.NAMESPACE
+    ]
     assert len(namespace_chunks) > 0, "Expected DOCTYPE as NAMESPACE chunk"
     assert any("doctype" in (c.symbol or "").lower() for c in namespace_chunks), (
         f"Expected 'doctype' symbol; found: {[c.symbol for c in namespace_chunks]}"
@@ -42,9 +46,7 @@ def test_python_docs_has_nav_block(python_docs_chunks):
 
 def test_python_docs_has_stylesheet_imports(python_docs_chunks):
     import_chunks = [c for c in python_docs_chunks if c.chunk_type == ChunkType.IMPORT]
-    assert len(import_chunks) > 0, (
-        "Expected <link rel='stylesheet'> as IMPORT chunks"
-    )
+    assert len(import_chunks) > 0, "Expected <link rel='stylesheet'> as IMPORT chunks"
 
 
 def test_python_docs_has_script_blocks(python_docs_chunks):
@@ -66,8 +68,20 @@ def test_python_docs_has_semantic_elements(python_docs_chunks):
     block_chunks = [c for c in python_docs_chunks if c.chunk_type == ChunkType.BLOCK]
     symbols = [c.symbol or "" for c in block_chunks]
     semantic_found = [
-        s for s in symbols
-        if any(tag in s.lower() for tag in ("section", "article", "main", "header", "footer", "nav", "aside"))
+        s
+        for s in symbols
+        if any(
+            tag in s.lower()
+            for tag in (
+                "section",
+                "article",
+                "main",
+                "header",
+                "footer",
+                "nav",
+                "aside",
+            )
+        )
     ]
     assert len(semantic_found) > 0, (
         f"Expected at least one semantic element BLOCK; found: {symbols[:20]}"

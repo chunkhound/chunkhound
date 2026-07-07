@@ -31,13 +31,7 @@ def test_python_top_level_assignment_dict_chunked():
 
 
 def test_python_top_level_assignment_list_chunked():
-    code = (
-        "import os\n"
-        "SETTINGS = [\n"
-        "  os.getenv('SERVICE_URL'),\n"
-        "  'fallback'\n"
-        "]\n"
-    )
+    code = "import os\nSETTINGS = [\n  os.getenv('SERVICE_URL'),\n  'fallback'\n]\n"
     chunks = _parse(code, "settings.py")
     assert len(chunks) > 0
     assert any("SERVICE_URL" in c.code for c in chunks)

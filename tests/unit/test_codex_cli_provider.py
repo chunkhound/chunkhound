@@ -46,7 +46,6 @@ def test_codex_cli_model_resolution_discovery_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chunkhound.providers.llm.codex_cli_provider import (
-        CODEX_DEFAULT_SYNTHESIS_MODEL,
         CodexCLIProvider,  # type: ignore[attr-defined]
     )
 
@@ -163,5 +162,6 @@ def test_codex_cli_model_discovery_priority_selection(
 def test_default_timeout():
     """Default timeout resolves to DEFAULT_LLM_TIMEOUT."""
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+
     p = CodexCLIProvider()
     assert p.timeout == DEFAULT_LLM_TIMEOUT

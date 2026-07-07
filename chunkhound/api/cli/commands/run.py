@@ -90,8 +90,10 @@ async def _handle_daemon_lock_conflict(
     formatter.warning(f"ChunkHound daemon (pid={pid}) is unresponsive.")
     try:
         reply = (
-            await asyncio.to_thread(input, "Kill it and continue indexing? [Y/n]: ")
-        ).strip().lower()
+            (await asyncio.to_thread(input, "Kill it and continue indexing? [Y/n]: "))
+            .strip()
+            .lower()
+        )
     except (EOFError, KeyboardInterrupt):
         return False
 
@@ -447,9 +449,7 @@ def _validate_run_arguments(
             if not provider:
                 formatter.error("No embedding provider configured.")
                 formatter.info("To fix this, you can:")
-                formatter.info(
-                    "  1. Generate a config at https://chunkhound.ai"
-                )
+                formatter.info("  1. Generate a config at https://chunkhound.ai")
                 formatter.info("  2. Create .chunkhound.json manually")
                 formatter.info("  3. Use --no-embeddings to skip embeddings")
                 return False

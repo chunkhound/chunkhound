@@ -11,7 +11,6 @@ from typing import NewType
 
 from chunkhound.parsers._grammar_availability import SCSS_AVAILABLE
 
-
 # String-based type aliases for better semantic clarity
 ProviderName = NewType("ProviderName", str)  # e.g., "openai"
 ModelName = NewType("ModelName", str)  # e.g., "text-embedding-3-small"
@@ -148,7 +147,6 @@ class ChunkType(Enum):
             ChunkType.PARAGRAPH,
             ChunkType.CODE_BLOCK,
         }
-
 
 
 class Language(Enum):

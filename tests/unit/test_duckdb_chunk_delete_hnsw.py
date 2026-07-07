@@ -68,10 +68,7 @@ def test_process_file_avoids_in_transaction_hnsw_guard_for_modified_chunk_delete
 
         test_file = tmp_path / "modified.py"
         test_file.write_text(
-            "def keep():\n"
-            "    return 1\n\n"
-            "def replace_me():\n"
-            "    return 2\n"
+            "def keep():\n    return 1\n\ndef replace_me():\n    return 2\n"
         )
 
         initial_result = asyncio.run(
@@ -119,10 +116,7 @@ def test_process_file_avoids_in_transaction_hnsw_guard_for_modified_chunk_delete
         )
 
         test_file.write_text(
-            "def keep():\n"
-            "    return 1\n\n"
-            "def replaced():\n"
-            "    return 3\n"
+            "def keep():\n    return 1\n\ndef replaced():\n    return 3\n"
         )
 
         updated_result = asyncio.run(
@@ -133,14 +127,20 @@ def test_process_file_avoids_in_transaction_hnsw_guard_for_modified_chunk_delete
             label.startswith("delete_chunks_batch(") for label in guard_labels
         ), guard_labels
         assert _get_hnsw_index_names(provider) == initial_indexes
-        assert provider.execute_query(
-            "SELECT COUNT(*) AS count FROM chunks WHERE id IN (?, ?)",
-            initial_chunk_ids,
-        )[0]["count"] == 0
-        assert provider.execute_query(
-            "SELECT COUNT(*) AS count FROM embeddings_3 WHERE chunk_id IN (?, ?)",
-            initial_chunk_ids,
-        )[0]["count"] == 0
+        assert (
+            provider.execute_query(
+                "SELECT COUNT(*) AS count FROM chunks WHERE id IN (?, ?)",
+                initial_chunk_ids,
+            )[0]["count"]
+            == 0
+        )
+        assert (
+            provider.execute_query(
+                "SELECT COUNT(*) AS count FROM embeddings_3 WHERE chunk_id IN (?, ?)",
+                initial_chunk_ids,
+            )[0]["count"]
+            == 0
+        )
 
         updated_chunks = provider.get_chunks_by_file_id(
             updated_result["file_id"], as_model=False
@@ -180,10 +180,7 @@ def test_reindex_with_existing_hnsw_does_not_crash_connection(
 
         test_file = tmp_path / "sample.py"
         test_file.write_text(
-            "def alpha():\n"
-            "    return 1\n\n"
-            "def beta():\n"
-            "    return 2\n"
+            "def alpha():\n    return 1\n\ndef beta():\n    return 2\n"
         )
 
         first_result = asyncio.run(
@@ -206,10 +203,7 @@ def test_reindex_with_existing_hnsw_does_not_crash_connection(
         # Modify the file so re-indexing deletes old chunks while HNSW indexes exist.
         # Before the fix this triggered the CreateDeltaIndex assertion failure.
         test_file.write_text(
-            "def alpha():\n"
-            "    return 1\n\n"
-            "def gamma():\n"
-            "    return 3\n"
+            "def alpha():\n    return 1\n\ndef gamma():\n    return 3\n"
         )
 
         second_result = asyncio.run(
@@ -218,9 +212,7 @@ def test_reindex_with_existing_hnsw_does_not_crash_connection(
         assert second_result["status"] == "success"
 
         # Connection must still be usable — it would be dead if CreateDeltaIndex fired.
-        live_count = provider.execute_query(
-            "SELECT COUNT(*) AS count FROM chunks", []
-        )
+        live_count = provider.execute_query("SELECT COUNT(*) AS count FROM chunks", [])
         assert live_count[0]["count"] > 0
 
         assert _get_hnsw_index_names(provider) == hnsw_indexes
@@ -240,10 +232,7 @@ def test_delete_chunks_batch_still_uses_hnsw_guard_outside_transaction(
 
         test_file = tmp_path / "outside_guard.py"
         test_file.write_text(
-            "def keep():\n"
-            "    return 1\n\n"
-            "def replace_me():\n"
-            "    return 2\n"
+            "def keep():\n    return 1\n\ndef replace_me():\n    return 2\n"
         )
 
         result = asyncio.run(coordinator.process_file(test_file, skip_embeddings=True))
@@ -286,9 +275,12 @@ def test_delete_chunks_batch_still_uses_hnsw_guard_outside_transaction(
         assert any(
             label.startswith("delete_chunks_batch(") for label in guard_labels
         ), guard_labels
-        assert provider.execute_query(
-            "SELECT COUNT(*) AS count FROM embeddings_3",
-            [],
-        )[0]["count"] == 0
+        assert (
+            provider.execute_query(
+                "SELECT COUNT(*) AS count FROM embeddings_3",
+                [],
+            )[0]["count"]
+            == 0
+        )
     finally:
         provider.disconnect(skip_checkpoint=True)

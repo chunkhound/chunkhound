@@ -57,7 +57,8 @@ def expand_to_natural_boundaries(
     metadata = chunk.get("metadata", {})
     chunk_kind = metadata.get("kind") or chunk.get("symbol_type", "")
 
-    # If this chunk is marked as a complete function/class/method, use its exact boundaries
+    # If this chunk is marked as a complete
+    # function/class/method, use its exact boundaries
     if chunk_kind in (
         "function",
         "method",
@@ -139,7 +140,8 @@ def expand_to_natural_boundaries(
                 # Look backward for function signature
                 for j in range(i, max(0, i - 10), -1):
                     sig_line = lines[j].strip()
-                    # Heuristic: function signatures often have (...) or start with keywords
+                    # Heuristic: function signatures often
+                    # have (...) or start with keywords
                     if "(" in sig_line and (")" in sig_line or j < i):
                         expanded_start = j
                         break

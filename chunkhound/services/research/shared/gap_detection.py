@@ -523,7 +523,8 @@ class GapDetectionService(ProgressEmitterMixin):
                 )
 
                 # Build constants section if available
-                # Note: Gap detection uses inline instruction in prompt, not separate section
+                # Note: Gap detection uses inline
+                # instruction in prompt, not separate section
                 constants_section = ""
                 if constants_context:
                     constants_section = f"\n{constants_context}\n"
@@ -664,7 +665,8 @@ Output JSON with gaps array."""
             if len(cluster_gaps) == 1:
                 # Single gap, no need to unify
                 gap = cluster_gaps[0]
-                # Apply same scoring formula: vote_count * avg_confidence * (1 + 0.3 * shard_bonus)
+                # Apply same scoring formula:
+                # vote_count * avg_confidence * (1 + 0.3 * shard_bonus)
                 vote_count = 1
                 avg_confidence = gap.confidence
                 shard_bonus = 1 / (1 + gap.source_shard)

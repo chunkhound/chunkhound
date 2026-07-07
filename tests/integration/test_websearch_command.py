@@ -101,9 +101,7 @@ async def test_websearch_command_urlerror_exits_1(monkeypatch, patched) -> None:
 
 
 @pytest.mark.asyncio
-async def test_websearch_command_empty_results_exits_10(
-    monkeypatch, patched
-) -> None:
+async def test_websearch_command_empty_results_exits_10(monkeypatch, patched) -> None:
     monkeypatch.setattr(ws_mod, "search", _stub_search([]))
 
     errors: list[str] = []
@@ -188,7 +186,8 @@ async def test_websearch_command_fetch_and_save_receives_only_urls(
 
     monkeypatch.setattr(ws_mod, "fetch_and_save", capturing_fetch)
     monkeypatch.setattr(
-        ws_mod.subprocess, "run",
+        ws_mod.subprocess,
+        "run",
         lambda cmd, **kw: type("R", (), {"returncode": 0, "stdout": ""})(),
     )
 
@@ -249,7 +248,10 @@ async def test_websearch_command_forwards_boolean_optional_negative(
 async def test_websearch_command_forwards_config_flags_end_to_end(
     patched_capturing,
 ) -> None:
-    """Scalar flags and a positive boolean-optional round-trip through the real builder."""
+    """
+    Scalar flags and a positive boolean-optional
+    round-trip through the real builder.
+    """
     from chunkhound.core.config.config import Config
 
     args = _make_args(

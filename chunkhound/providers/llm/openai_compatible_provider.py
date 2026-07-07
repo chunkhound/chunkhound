@@ -72,7 +72,8 @@ class OpenAICompatibleProvider(LLMProvider):
             base_url: Base URL (defaults to subclass implementation)
             ssl_verify: Verify TLS certificates for HTTP requests. When False, disables
                 TLS verification for the resolved base URL. Ignored when no base URL is
-                set (explicit or provider-resolved). Only disable for self-signed / local
+                set (explicit or provider-resolved).
+                Only disable for self-signed / local
                 endpoints.
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
@@ -106,7 +107,9 @@ class OpenAICompatibleProvider(LLMProvider):
         self._synthesis_concurrency = synthesis_concurrency
 
         # Use provided base_url, or default_base_url, or subclass override
-        effective_base_url = base_url or default_base_url or self._get_default_base_url()
+        effective_base_url = (
+            base_url or default_base_url or self._get_default_base_url()
+        )
 
         # Initialize OpenAI-compatible client
         api_key_value = api_key

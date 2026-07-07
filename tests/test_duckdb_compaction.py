@@ -13,9 +13,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
-from loguru import logger
-
 import pytest
+from loguru import logger
 
 duckdb = pytest.importorskip("duckdb")
 
@@ -614,12 +613,17 @@ class TestCompactionCopyBehavior:
         assert "idx_3_chunk_id" in index_names
         assert "idx_3_provider_model" in index_names
         assert "idx_3_chunk_provider_model_unique" in index_names
-        assert _fetch_scalar(file_backed_db.db_path, "SELECT COUNT(*) FROM embeddings_3") == 1
+        assert (
+            _fetch_scalar(file_backed_db.db_path, "SELECT COUNT(*) FROM embeddings_3")
+            == 1
+        )
 
     def test_compaction_does_not_create_hnsw_when_source_had_none(
         self, file_backed_db: DuckDBProvider
     ) -> None:
-        """Compaction preserves the no-HNSW state for embedding tables copied mid-index."""
+        """Compaction preserves the no-HNSW state for
+        embedding tables copied mid-index.
+        """
         _insert_minimal_chunks(file_backed_db)
         _seed_embedding_dims_3_without_indexes(file_backed_db)
 
@@ -724,8 +728,7 @@ class TestCompactionCrashRecovery:
 
         assert os.path.exists(db_path), "Original DB should be restored"
         assert (
-            _fetch_scalar(db_path, "SELECT COUNT(*) FROM information_schema.tables")
-            > 0
+            _fetch_scalar(db_path, "SELECT COUNT(*) FROM information_schema.tables") > 0
         )
         _assert_db_integrity(db_path)
 
@@ -792,7 +795,10 @@ class TestCompactionCrashRecovery:
             recovered.disconnect()
 
         stderr_out = captured.getvalue()
-        assert "Recovering DuckDB database from interrupted compaction backup" in stderr_out
+        assert (
+            "Recovering DuckDB database from interrupted compaction backup"
+            in stderr_out
+        )
         assert str(backup_path) in stderr_out
 
     def test_finalize_failure_restores_original_db_and_cleans_artifacts(
@@ -948,9 +954,7 @@ class TestCompactionCrashRecovery:
             compacted_path.write_bytes(b"GARBAGE" * 1000)
             return result
 
-        monkeypatch.setattr(
-            file_backed_db, "_compact_copy_data", _corrupted_copy
-        )
+        monkeypatch.setattr(file_backed_db, "_compact_copy_data", _corrupted_copy)
 
         with pytest.raises(Exception):
             file_backed_db.compact_database()
@@ -1413,7 +1417,10 @@ class TestFragmentationThresholdBoundaries:
     ) -> None:
         """Every boundary of the fragmentation threshold decision formula."""
         # Pure static function — no I/O or instance state needed.
-        assert DuckDBProvider._fragmentation_exceeds_threshold(ratio, threshold) is expected
+        assert (
+            DuckDBProvider._fragmentation_exceeds_threshold(ratio, threshold)
+            is expected
+        )
 
 
 # ── Index flow compaction points ─────────────────────────────────────────
@@ -1488,7 +1495,9 @@ class TestIndexFlowCompaction:
             )
         )
         coordinator = SimpleNamespace(
-            compact_database_with_metrics=AsyncMock(side_effect=_compact_database_with_metrics)
+            compact_database_with_metrics=AsyncMock(
+                side_effect=_compact_database_with_metrics
+            )
         )
 
         stats = await _Service(coordinator, config).process_directory(
@@ -1835,10 +1844,14 @@ class TestDatabaseProcessDirectoryCompactionContract:
 
         coordinator = SimpleNamespace(
             process_directory=AsyncMock(side_effect=_process_directory),
-            compact_database_with_metrics=AsyncMock(side_effect=_compact_database_with_metrics),
+            compact_database_with_metrics=AsyncMock(
+                side_effect=_compact_database_with_metrics
+            ),
         )
         embedding_service = SimpleNamespace(
-            generate_missing_embeddings=AsyncMock(side_effect=_generate_missing_embeddings)
+            generate_missing_embeddings=AsyncMock(
+                side_effect=_generate_missing_embeddings
+            )
         )
         db = Database.__new__(Database)
         db._indexing_coordinator = coordinator
@@ -1868,9 +1881,7 @@ class TestDatabaseProcessDirectoryCompactionContract:
             ),
             compact_database_with_metrics=AsyncMock(),
         )
-        embedding_service = SimpleNamespace(
-            generate_missing_embeddings=AsyncMock()
-        )
+        embedding_service = SimpleNamespace(generate_missing_embeddings=AsyncMock())
         db = Database.__new__(Database)
         db._indexing_coordinator = coordinator
         db._embedding_service = embedding_service
@@ -2213,8 +2224,7 @@ class TestCompactionDataIntegrity:
             for result in regex_after
         )
         assert any(
-            result.get("file_path") == "test_1.py"
-            and result.get("symbol") == "func_1b"
+            result.get("file_path") == "test_1.py" and result.get("symbol") == "func_1b"
             for result in semantic_after
         )
 
@@ -2624,9 +2634,7 @@ class TestAutoCompactionMaintenance:
             captured_timeouts.append(default_timeout)
             return original_execute(provider, operation_name, *args, **kwargs)
 
-        monkeypatch.setattr(
-            file_backed_db._executor, "execute_sync", _tracking_execute
-        )
+        monkeypatch.setattr(file_backed_db._executor, "execute_sync", _tracking_execute)
 
         file_backed_db.compact_if_needed()
         assert len(captured_timeouts) >= 1
@@ -2778,6 +2786,7 @@ class TestConcurrentCompactionGuard:
         )
         assert file_id > 0
 
+
 def test_atomic_replace_retries_transient_windows_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2878,7 +2887,9 @@ def test_unlink_compacted_posix_propagates_all_errors(
 def test_compaction_succeeds_with_windows_flag(
     file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Full compaction succeeds when IS_WINDOWS=True (drain delay + resilient cleanup)."""
+    """Full compaction succeeds when IS_WINDOWS=True
+    (drain delay + resilient cleanup).
+    """
     db_path = Path(cast(str, file_backed_db.db_path))
     monkeypatch.setattr(duckdb_provider_module, "IS_WINDOWS", True)
 
@@ -2952,7 +2963,12 @@ class TestIsHnswIndex:
 
     def test_ddl_with_using_hnsw(self) -> None:
         """CREATE INDEX ... USING HNSW is detected regardless of index name."""
-        assert is_hnsw_index("alt_live_idx", "CREATE INDEX alt_live_idx ON t USING HNSW (col)") is True
+        assert (
+            is_hnsw_index(
+                "alt_live_idx", "CREATE INDEX alt_live_idx ON t USING HNSW (col)"
+            )
+            is True
+        )
 
     def test_ddl_case_insensitive(self) -> None:
         """USING HNSW detection is case-insensitive."""
@@ -3052,13 +3068,21 @@ def test_non_cosine_hnsw_metric_survives_index_rebuild(
             [],
         )
 
-        before = [i for i in db.get_existing_vector_indexes() if i["index_name"] == "idx_hnsw_3"]
+        before = [
+            i
+            for i in db.get_existing_vector_indexes()
+            if i["index_name"] == "idx_hnsw_3"
+        ]
         assert len(before) == 1
         assert before[0]["metric"] == "l2sq"
 
         db._execute_in_db_thread_sync("delete_chunks_batch", [original_chunk_id])
 
-        after = [i for i in db.get_existing_vector_indexes() if i["index_name"] == "idx_hnsw_3"]
+        after = [
+            i
+            for i in db.get_existing_vector_indexes()
+            if i["index_name"] == "idx_hnsw_3"
+        ]
         assert len(after) == 1
         assert after[0]["metric"] == "l2sq"
     finally:

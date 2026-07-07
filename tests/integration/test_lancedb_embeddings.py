@@ -6,18 +6,13 @@ chunks with NULL embedding columns.
 """
 
 import asyncio
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 def test_lancedb_embeddings_stored_during_indexing(lancedb_provider, tmp_path):
     """Verify embeddings are stored in LanceDB during indexing with mock provider."""
-    from chunkhound.core.models import Chunk
-    from chunkhound.core.types.common import ChunkType, Language
-
     # Need to insert a file first for foreign key
-    from chunkhound.core.models import File
+    from chunkhound.core.models import Chunk, File
+    from chunkhound.core.types.common import ChunkType, Language
 
     test_file = File(
         path="test.py",
@@ -82,10 +77,14 @@ def test_lancedb_embeddings_stored_during_indexing(lancedb_provider, tmp_path):
 
     # Verify embeddings are retrievable
     for i, chunk_id in enumerate(chunk_ids):
-        embedding = lancedb_provider.get_embedding_by_chunk_id(chunk_id, "test", "test-model")
+        embedding = lancedb_provider.get_embedding_by_chunk_id(
+            chunk_id, "test", "test-model"
+        )
         assert embedding is not None, f"Embedding for chunk {chunk_id} should exist"
-        assert embedding.vector is not None, f"Embedding vector should not be None"
-        assert len(embedding.vector) == embedding_dim, f"Embedding should have {embedding_dim} dimensions"
+        assert embedding.vector is not None, "Embedding vector should not be None"
+        assert len(embedding.vector) == embedding_dim, (
+            f"Embedding should have {embedding_dim} dimensions"
+        )
 
 
 def test_lancedb_indexing_flow_creates_chunks(lancedb_provider, tmp_path):
@@ -140,11 +139,9 @@ def test_lancedb_embedding_update_finds_chunks(lancedb_provider, tmp_path):
     This specifically tests the fix for the bug where .search() failed to
     find chunks with NULL embedding columns.
     """
-    from chunkhound.core.models import Chunk
-    from chunkhound.core.types.common import ChunkType, Language
-
     # Need to insert a file first for foreign key
-    from chunkhound.core.models import File
+    from chunkhound.core.models import Chunk, File
+    from chunkhound.core.types.common import ChunkType, Language
 
     test_file = File(
         path="test.py",
@@ -202,7 +199,7 @@ def test_lancedb_embedding_update_finds_chunks(lancedb_provider, tmp_path):
     for chunk_id in chunk_ids:
         emb = lancedb_provider.get_embedding_by_chunk_id(chunk_id, "test", "test-model")
         assert emb is not None, f"Embedding for chunk {chunk_id} should be retrievable"
-        assert emb.vector is not None, f"Embedding vector should not be None"
+        assert emb.vector is not None, "Embedding vector should not be None"
 
 
 def test_lancedb_find_similar_chunks_basic(lancedb_provider, tmp_path):

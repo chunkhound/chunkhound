@@ -273,7 +273,10 @@ def test_delete_files_batch_raises_typed_conflict_inside_outer_transaction(
 
         with pytest.raises(
             DuckDBTransactionConflictError,
-            match="delete_files_batch cannot run while another DuckDB transaction is active",
+            match=(
+                "delete_files_batch cannot run while "
+                "another DuckDB transaction is active"
+            ),
         ):
             provider._executor_delete_files_batch(
                 provider.connection,

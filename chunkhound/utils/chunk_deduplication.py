@@ -21,11 +21,13 @@ def deduplicate_chunks(
     chunks: Sequence[Chunk | dict],
     language: Language | str | None = None,
 ) -> list[Chunk | dict]:
-    """Deduplicate chunks using hash-based exact match + interval tree substring detection.
+    """Deduplicate chunks using hash-based exact match +
+    interval tree substring detection.
 
     Args:
         chunks: List of Chunk objects or chunk dictionaries
-        language: Optional language for language-specific exemptions (Language enum or string)
+        language: Optional language for language-specific
+            exemptions (Language enum or string)
 
     Returns:
         Deduplicated list of chunks (same type as input)
@@ -99,7 +101,8 @@ def _remove_substring_overlaps(chunks: Sequence[Chunk | dict]) -> list[Chunk | d
 
     Uses interval tree for O(n log n) performance instead of O(n²) nested loops.
     """
-    # Build interval tree: sorted list of (start_line, end_line, chunk) for DEFINITION/STRUCTURE
+    # Build interval tree: sorted list of
+    # (start_line, end_line, chunk) for DEFINITION/STRUCTURE
     definitions = []
     blocks = []
     other = []
@@ -120,7 +123,8 @@ def _remove_substring_overlaps(chunks: Sequence[Chunk | dict]) -> list[Chunk | d
     # Sort definitions by start line for binary search
     definitions.sort(key=lambda c: _get_start_line(c))
 
-    # Check each BLOCK chunk for substring containment in overlapping DEFINITION/STRUCTURE
+    # Check each BLOCK chunk for substring containment
+    # in overlapping DEFINITION/STRUCTURE
     final = other + definitions  # Keep all non-BLOCK chunks
 
     for block in blocks:
@@ -203,7 +207,6 @@ _CONCEPT_SPECIFICITY = {
     "TABLE": 2,
     "OBJECT": 2,
     "ARRAY": 1,
-    "BLOCK": 1,
 }
 
 

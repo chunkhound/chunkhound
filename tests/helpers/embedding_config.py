@@ -12,8 +12,8 @@ from chunkhound.embeddings import EmbeddingManager
 def _find_config_file() -> Path | None:
     """Find .chunkhound.json in current or parent directory."""
     search_paths = [
-        Path(".chunkhound.json"),      # Current directory
-        Path("../.chunkhound.json"),   # Parent directory
+        Path(".chunkhound.json"),  # Current directory
+        Path("../.chunkhound.json"),  # Parent directory
     ]
 
     for config_file in search_paths:
@@ -95,7 +95,7 @@ def get_embedding_config_for_tests() -> dict | None:
     config_file = _find_config_file()
     if config_file:
         try:
-            with open(config_file, 'r', encoding='utf-8') as f:
+            with open(config_file, encoding="utf-8") as f:
                 config_data = json.load(f)
 
             embedding_config = config_data.get("embedding", {})
@@ -103,19 +103,31 @@ def get_embedding_config_for_tests() -> dict | None:
             # Merge with config, but don't override env vars
             if "api_key" not in config and (api_key := embedding_config.get("api_key")):
                 config["api_key"] = api_key
-            if "provider" not in config and (provider := embedding_config.get("provider")):
+            if "provider" not in config and (
+                provider := embedding_config.get("provider")
+            ):
                 config["provider"] = provider
             if "model" not in config and (model := embedding_config.get("model")):
                 config["model"] = model
-            if "base_url" not in config and (base_url := embedding_config.get("base_url")):
+            if "base_url" not in config and (
+                base_url := embedding_config.get("base_url")
+            ):
                 config["base_url"] = base_url
-            if "rerank_model" not in config and (rerank_model := embedding_config.get("rerank_model")):
+            if "rerank_model" not in config and (
+                rerank_model := embedding_config.get("rerank_model")
+            ):
                 config["rerank_model"] = rerank_model
-            if "rerank_url" not in config and (rerank_url := embedding_config.get("rerank_url")):
+            if "rerank_url" not in config and (
+                rerank_url := embedding_config.get("rerank_url")
+            ):
                 config["rerank_url"] = rerank_url
-            if "rerank_format" not in config and (rerank_format := embedding_config.get("rerank_format")):
+            if "rerank_format" not in config and (
+                rerank_format := embedding_config.get("rerank_format")
+            ):
                 config["rerank_format"] = rerank_format
-            if "rerank_batch_size" not in config and (rerank_batch_size := embedding_config.get("rerank_batch_size")):
+            if "rerank_batch_size" not in config and (
+                rerank_batch_size := embedding_config.get("rerank_batch_size")
+            ):
                 try:
                     config["rerank_batch_size"] = int(rerank_batch_size)
                 except ValueError:
@@ -163,8 +175,12 @@ def build_embedding_config_from_dict(config_dict: dict | None) -> dict | None:
 
     # Optional fields - propagate only if present
     optional_fields = [
-        "model", "base_url",
-        "rerank_model", "rerank_url", "rerank_format", "rerank_batch_size"
+        "model",
+        "base_url",
+        "rerank_model",
+        "rerank_url",
+        "rerank_format",
+        "rerank_batch_size",
     ]
     for field in optional_fields:
         if field in config_dict:
@@ -173,7 +189,9 @@ def build_embedding_config_from_dict(config_dict: dict | None) -> dict | None:
     return embedding_config
 
 
-def create_embedding_manager_for_tests(config_dict: dict | None) -> EmbeddingManager | None:
+def create_embedding_manager_for_tests(
+    config_dict: dict | None,
+) -> EmbeddingManager | None:
     """
     Create EmbeddingManager from discovered config using production factory.
 

@@ -91,7 +91,14 @@ def get_thread_local_state() -> dict[str, Any]:
 
 # Write-operation prefixes — only mutations cause fragmentation, so only
 # they should trigger post-operation compaction sampling.
-_SAMPLEABLE_WRITE_PREFIXES = ("insert", "delete", "update", "upsert", "remove", "process")
+_SAMPLEABLE_WRITE_PREFIXES = (
+    "insert",
+    "delete",
+    "update",
+    "upsert",
+    "remove",
+    "process",
+)
 
 
 def _should_sample_auto_compaction(operation_name: str) -> bool:

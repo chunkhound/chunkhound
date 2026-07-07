@@ -556,9 +556,8 @@ class PrivateWatchmanSidecar:
                 else:
                     ready_paths.append(self.paths.statefile_path)
 
-            if (
-                all(path.exists() for path in ready_paths)
-                and await asyncio.to_thread(self._probe_ready_sync)
+            if all(path.exists() for path in ready_paths) and await asyncio.to_thread(
+                self._probe_ready_sync
             ):
                 return
 
@@ -623,18 +622,12 @@ class PrivateWatchmanSidecar:
         return False
 
     def _ready_timeout_seconds(self) -> float:
-        if (
-            self._runtime is not None
-            and not listener_path_is_filesystem(self._runtime)
-        ):
+        if self._runtime is not None and not listener_path_is_filesystem(self._runtime):
             return self._NAMED_PIPE_READY_TIMEOUT_SECONDS
         return self._READY_TIMEOUT_SECONDS
 
     def _probe_timeout_seconds(self) -> float:
-        if (
-            self._runtime is not None
-            and not listener_path_is_filesystem(self._runtime)
-        ):
+        if self._runtime is not None and not listener_path_is_filesystem(self._runtime):
             return self._NAMED_PIPE_PROBE_TIMEOUT_SECONDS
         return self._PROBE_TIMEOUT_SECONDS
 

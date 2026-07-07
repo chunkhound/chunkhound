@@ -4,7 +4,13 @@ from chunkhound.core.config.config import Config
 
 
 def test_cleanup_rejects_cleanup_override_missing_required_provider_settings() -> None:
-    with pytest.raises(ValueError, match="autodoc_cleanup provider override requires an explicit autodoc_cleanup_model"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "autodoc_cleanup provider override "
+            "requires an explicit autodoc_cleanup_model"
+        ),
+    ):
         Config(
             llm={
                 "provider": "codex-cli",
@@ -14,7 +20,13 @@ def test_cleanup_rejects_cleanup_override_missing_required_provider_settings() -
 
 
 def test_cleanup_rejects_cross_family_override_without_explicit_model() -> None:
-    with pytest.raises(ValueError, match="autodoc_cleanup provider override requires an explicit autodoc_cleanup_model"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "autodoc_cleanup provider override "
+            "requires an explicit autodoc_cleanup_model"
+        ),
+    ):
         Config(
             llm={
                 "provider": "openai",

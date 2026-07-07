@@ -17,7 +17,10 @@ class _StubCLIProvider(BaseCLIProvider):
 
 @pytest.mark.asyncio
 async def test_internal_runtime_error_not_double_wrapped_complete():
-    """RuntimeError from empty-response check must pass through unwrapped in complete()."""
+    """
+    RuntimeError from empty-response check
+    must pass through unwrapped in complete().
+    """
     provider = _StubCLIProvider()
 
     with pytest.raises(RuntimeError) as exc:
@@ -30,7 +33,10 @@ async def test_internal_runtime_error_not_double_wrapped_complete():
 
 @pytest.mark.asyncio
 async def test_internal_runtime_error_not_double_wrapped_complete_structured():
-    """RuntimeError from empty-response check must pass through unwrapped in complete_structured()."""
+    """
+    RuntimeError from empty-response check must
+    pass through unwrapped in complete_structured().
+    """
     provider = _StubCLIProvider()
 
     with pytest.raises(RuntimeError) as exc:

@@ -33,48 +33,50 @@ class TestBatchTiming:
     def test_embed_api_ms(self):
         """Verify embedding API duration is correctly calculated."""
         timing = BatchTiming(
-            batch_index=0, chunk_count=30, start_time=1000.0,
-            embed_api_start=1000.1, embed_api_end=1000.9
+            batch_index=0,
+            chunk_count=30,
+            start_time=1000.0,
+            embed_api_start=1000.1,
+            embed_api_end=1000.9,
         )
         assert abs(timing.embed_api_ms - 800.0) < 0.01
 
     def test_embed_api_ms_without_start(self):
         """Verify embed_api_ms returns 0 when start is not set."""
         timing = BatchTiming(
-            batch_index=0, chunk_count=30, start_time=1000.0,
-            embed_api_end=1000.9
+            batch_index=0, chunk_count=30, start_time=1000.0, embed_api_end=1000.9
         )
         assert timing.embed_api_ms == 0.0
 
     def test_embed_api_ms_without_end(self):
         """Verify embed_api_ms returns 0 when end is not set."""
         timing = BatchTiming(
-            batch_index=0, chunk_count=30, start_time=1000.0,
-            embed_api_start=1000.1
+            batch_index=0, chunk_count=30, start_time=1000.0, embed_api_start=1000.1
         )
         assert timing.embed_api_ms == 0.0
 
     def test_db_insert_ms(self):
         """Verify database insert duration is correctly calculated."""
         timing = BatchTiming(
-            batch_index=0, chunk_count=30, start_time=1000.0,
-            db_insert_start=1001.0, db_insert_end=1001.2
+            batch_index=0,
+            chunk_count=30,
+            start_time=1000.0,
+            db_insert_start=1001.0,
+            db_insert_end=1001.2,
         )
         assert abs(timing.db_insert_ms - 200.0) < 0.01
 
     def test_db_insert_ms_without_start(self):
         """Verify db_insert_ms returns 0 when start is not set."""
         timing = BatchTiming(
-            batch_index=0, chunk_count=30, start_time=1000.0,
-            db_insert_end=1001.2
+            batch_index=0, chunk_count=30, start_time=1000.0, db_insert_end=1001.2
         )
         assert timing.db_insert_ms == 0.0
 
     def test_db_insert_ms_without_end(self):
         """Verify db_insert_ms returns 0 when end is not set."""
         timing = BatchTiming(
-            batch_index=0, chunk_count=30, start_time=1000.0,
-            db_insert_start=1001.0
+            batch_index=0, chunk_count=30, start_time=1000.0, db_insert_start=1001.0
         )
         assert timing.db_insert_ms == 0.0
 
@@ -220,8 +222,10 @@ class TestPerfAnalyzer:
         # Use synthetic data to avoid time.sleep
         for i in range(10):
             timing = BatchTiming(
-                batch_index=i, chunk_count=30,
-                start_time=float(i), end_time=float(i) + 0.1,
+                batch_index=i,
+                chunk_count=30,
+                start_time=float(i),
+                end_time=float(i) + 0.1,
             )
             collector.batches.append(timing)
 
@@ -270,15 +274,19 @@ class TestPerfAnalyzer:
         # Normal batches
         for i in range(9):
             timing = BatchTiming(
-                batch_index=i, chunk_count=30,
-                start_time=float(i), end_time=float(i) + 0.1,
+                batch_index=i,
+                chunk_count=30,
+                start_time=float(i),
+                end_time=float(i) + 0.1,
             )
             collector.batches.append(timing)
 
         # High latency outlier
         outlier = BatchTiming(
-            batch_index=9, chunk_count=30,
-            start_time=9.0, end_time=10.0,
+            batch_index=9,
+            chunk_count=30,
+            start_time=9.0,
+            end_time=10.0,
         )
         collector.batches.append(outlier)
 
@@ -308,8 +316,10 @@ class TestPerfAnalyzer:
         # All batches with exactly the same timing
         for i in range(10):
             timing = BatchTiming(
-                batch_index=i, chunk_count=30,
-                start_time=float(i), end_time=float(i) + 0.1,  # All 100ms
+                batch_index=i,
+                chunk_count=30,
+                start_time=float(i),
+                end_time=float(i) + 0.1,  # All 100ms
             )
             collector.batches.append(timing)
 
@@ -344,8 +354,10 @@ class TestPerfAnalyzer:
         collector = BatchMetricsCollector()
         for i in range(5):
             timing = BatchTiming(
-                batch_index=i, chunk_count=30,
-                start_time=float(i), end_time=float(i) + 0.1,
+                batch_index=i,
+                chunk_count=30,
+                start_time=float(i),
+                end_time=float(i) + 0.1,
             )
             collector.batches.append(timing)
 
@@ -366,8 +378,10 @@ class TestPerfAnalyzer:
         # Insert batches out of order
         for i in [5, 2, 8, 0, 3, 7, 1, 4, 6, 9]:
             timing = BatchTiming(
-                batch_index=i, chunk_count=30,
-                start_time=float(i), end_time=float(i) + 0.1 + (i * 0.01),
+                batch_index=i,
+                chunk_count=30,
+                start_time=float(i),
+                end_time=float(i) + 0.1 + (i * 0.01),
             )
             collector.batches.append(timing)
 
@@ -568,7 +582,8 @@ class TestPerfAnalyzerWarnings:
         # Create synthetic data with clear degradation trend
         for i in range(10):
             timing = BatchTiming(
-                batch_index=i, chunk_count=30,
+                batch_index=i,
+                chunk_count=30,
                 start_time=float(i),
                 end_time=float(i) + 0.1 + (i * 0.05),  # Increasing latency
             )
@@ -588,15 +603,19 @@ class TestPerfAnalyzerWarnings:
         # Normal batches
         for i in range(9):
             timing = BatchTiming(
-                batch_index=i, chunk_count=30,
-                start_time=float(i), end_time=float(i) + 0.1,
+                batch_index=i,
+                chunk_count=30,
+                start_time=float(i),
+                end_time=float(i) + 0.1,
             )
             collector.batches.append(timing)
 
         # Outlier with very high latency
         outlier = BatchTiming(
-            batch_index=9, chunk_count=30,
-            start_time=9.0, end_time=20.0,  # Very high
+            batch_index=9,
+            chunk_count=30,
+            start_time=9.0,
+            end_time=20.0,  # Very high
         )
         collector.batches.append(outlier)
 

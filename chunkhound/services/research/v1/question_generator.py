@@ -88,7 +88,8 @@ class QuestionGenerator:
             chunks: Chunks found
             global_explored_data: Global state with all explored chunks/files
             exploration_gist: Pre-built exploration gist (for efficiency)
-            max_input_tokens: Maximum tokens for LLM input (uses adaptive budget if provided)
+            max_input_tokens: Maximum tokens for LLM input
+                (uses adaptive budget if provided)
             depth: Current depth in BFS traversal
             max_depth: Maximum depth for this codebase
             constants_context: Constants ledger context for follow-up generation
@@ -112,7 +113,9 @@ class QuestionGenerator:
                 "questions": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": f"Array of 0-{MAX_FOLLOWUP_QUESTIONS} follow-up questions",
+                    "description": (
+                        f"Array of 0-{MAX_FOLLOWUP_QUESTIONS} follow-up questions"
+                    ),
                 }
             },
             "required": ["questions"],
@@ -143,7 +146,10 @@ class QuestionGenerator:
                     if remaining_tokens > 500:  # Only include if meaningful
                         chars_to_include = remaining_tokens * 4  # ~4 chars per token
                         source_context.append(
-                            f"Source: {path}\n{'=' * 60}\n{content[:chars_to_include]}...\n{'=' * 60}"
+                            f"Source: {path}\n"
+                            f"{'=' * 60}\n"
+                            f"{content[:chars_to_include]}...\n"
+                            f"{'=' * 60}"
                         )
                     break
 
@@ -152,7 +158,9 @@ class QuestionGenerator:
                 f"(budget: {max_tokens_for_context})"
             )
             source_content = (
-                "\n\n".join(source_context) if source_context else "No source material loaded"
+                "\n\n".join(source_context)
+                if source_context
+                else "No source material loaded"
             )
         elif chunks:
             # Build context from chunks when file_contents not available
@@ -180,7 +188,10 @@ class QuestionGenerator:
         # Also include chunk snippets for context
         chunks_preview = "\n".join(
             [
-                f"- {chunk.get('file_path', 'unknown')}:{chunk.get('start_line', '?')}-{chunk.get('end_line', '?')} ({chunk.get('symbol', 'no symbol')})"
+                f"- {chunk.get('file_path', 'unknown')}"
+                f":{chunk.get('start_line', '?')}"
+                f"-{chunk.get('end_line', '?')}"
+                f" ({chunk.get('symbol', 'no symbol')})"
                 for chunk in chunks[:10]
             ]
         )
@@ -290,7 +301,10 @@ class QuestionGenerator:
         # If filtering reduced below target, skip synthesis
         if len(filtered_nodes) <= target_count:
             logger.debug(
-                f"After quality filtering, {len(filtered_nodes)} questions remain (<= target {target_count}), skipping synthesis"
+                f"After quality filtering,"
+                f" {len(filtered_nodes)} questions remain"
+                f" (<= target {target_count}),"
+                f" skipping synthesis"
             )
             return filtered_nodes
 
@@ -316,12 +330,20 @@ class QuestionGenerator:
             "properties": {
                 "reasoning": {
                     "type": "string",
-                    "description": "Brief explanation of synthesis strategy and why these questions explore different unexplored aspects",
+                    "description": (
+                        "Brief explanation of synthesis strategy"
+                        " and why these questions explore"
+                        " different unexplored aspects"
+                    ),
                 },
                 "questions": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": f"Array of 1 to {target_count} synthesized research questions, each exploring a distinct aspect",
+                    "description": (
+                        f"Array of 1 to {target_count}"
+                        " synthesized research questions,"
+                        " each exploring a distinct aspect"
+                    ),
                 },
             },
             "required": ["reasoning", "questions"],
@@ -338,7 +360,9 @@ class QuestionGenerator:
         )
 
         logger.debug(
-            f"Question synthesis budget: {QUESTION_SYNTHESIS_TOKENS:,} tokens (model: {llm.model})"
+            f"Question synthesis budget:"
+            f" {QUESTION_SYNTHESIS_TOKENS:,} tokens"
+            f" (model: {llm.model})"
         )
 
         try:
@@ -357,8 +381,11 @@ class QuestionGenerator:
             # Validate that we got at least some questions
             if not synthesized_queries or len(synthesized_queries) == 0:
                 logger.warning(
-                    f"LLM returned empty questions array despite explicit requirement. "
-                    f"Reasoning provided: '{reasoning}'. Falling back to truncated node list."
+                    "LLM returned empty questions array"
+                    " despite explicit requirement."
+                    f" Reasoning provided: '{reasoning}'."
+                    " Falling back to truncated"
+                    " node list."
                 )
                 return synthesis_nodes[:target_count]
 
@@ -379,12 +406,15 @@ class QuestionGenerator:
 
             if not synthesized_nodes:
                 logger.warning(
-                    "All synthesized questions were empty, falling back to first N nodes"
+                    "All synthesized questions were empty,"
+                    " falling back to first N nodes"
                 )
                 return nodes[:target_count]
 
             logger.info(
-                f"Synthesized {len(nodes)} questions into {len(synthesized_nodes)} new research directions"
+                f"Synthesized {len(nodes)} questions"
+                f" into {len(synthesized_nodes)}"
+                f" new research directions"
             )
 
             return synthesized_nodes
@@ -430,7 +460,9 @@ class QuestionGenerator:
         )
 
         logger.debug(
-            f"Question filtering budget: {QUESTION_FILTERING_TOKENS:,} tokens (model: {llm.model})"
+            f"Question filtering budget:"
+            f" {QUESTION_FILTERING_TOKENS:,} tokens"
+            f" (model: {llm.model})"
         )
 
         try:
@@ -447,7 +479,9 @@ class QuestionGenerator:
 
             if filtered:
                 logger.debug(
-                    f"Filtered {len(questions)} follow-ups to {len(filtered)} relevant ones"
+                    f"Filtered {len(questions)}"
+                    f" follow-ups to {len(filtered)}"
+                    f" relevant ones"
                 )
                 return filtered[:MAX_FOLLOWUP_QUESTIONS]
         except Exception as e:

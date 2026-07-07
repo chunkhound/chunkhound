@@ -37,9 +37,7 @@ async def test_code_mapper_overview_only_uses_config_dir_as_root_and_sets_defaul
         return "1. Example\n", ["Example"]
 
     def explode_verify_database_exists(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError(
-            "verify_database_exists should not run in overview-only"
-        )
+        raise AssertionError("verify_database_exists should not run in overview-only")
 
     monkeypatch.setattr(
         code_mapper_pipeline,
@@ -94,9 +92,7 @@ async def test_code_mapper_does_not_override_explicit_db_path_from_config_file(
         return "1. Example\n", ["Example"]
 
     def explode_verify_database_exists(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError(
-            "verify_database_exists should not run in overview-only"
-        )
+        raise AssertionError("verify_database_exists should not run in overview-only")
 
     monkeypatch.setattr(
         code_mapper_pipeline,

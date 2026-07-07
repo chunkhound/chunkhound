@@ -95,7 +95,11 @@ def terminate_processes_using_root(
             continue
         try:
             open_files = process.open_files()
-        except (AttributeError, psutil_module.NoSuchProcess, psutil_module.AccessDenied):
+        except (
+            AttributeError,
+            psutil_module.NoSuchProcess,
+            psutil_module.AccessDenied,
+        ):
             open_files = []
         if any(
             isinstance(getattr(open_file, "path", None), str)

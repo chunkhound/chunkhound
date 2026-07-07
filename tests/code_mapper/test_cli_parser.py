@@ -31,9 +31,7 @@ def test_map_parser_defaults_and_flags() -> None:
     assert args.combined is None
     assert args.audience == "balanced"
 
-    args = parser.parse_args(
-        ["map", "src", "--out", "out", "--plan", "--verbose"]
-    )
+    args = parser.parse_args(["map", "src", "--out", "out", "--plan", "--verbose"])
 
     assert args.path == Path("src")
     assert args.overview_only is True

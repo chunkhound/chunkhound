@@ -78,9 +78,7 @@ class TestClaudeCodeCLIProvider:
         assert provider.model == "claude-sonnet-4-6-20260217"
 
     @pytest.mark.asyncio
-    async def test_complete_uses_cli_alias_for_sentinel(
-        self, mock_subprocess
-    ):
+    async def test_complete_uses_cli_alias_for_sentinel(self, mock_subprocess):
         """Sentinels reach the subprocess as bare Claude CLI aliases."""
         provider = ClaudeCodeCLIProvider(model=CLAUDE_SONNET_SENTINEL)
         mock_process = AsyncMock()
@@ -114,9 +112,7 @@ class TestClaudeCodeCLIProvider:
         assert cmd[cmd.index("--model") + 1] == "claude-opus-4-7-20260416"
 
     @pytest.mark.asyncio
-    async def test_complete_uses_explicit_full_model_name(
-        self, mock_subprocess
-    ):
+    async def test_complete_uses_explicit_full_model_name(self, mock_subprocess):
         """Explicit Claude model names must reach the CLI unchanged."""
         provider = ClaudeCodeCLIProvider(model="claude-sonnet-4-5-20250929")
         mock_process = AsyncMock()

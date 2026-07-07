@@ -62,8 +62,7 @@ def sanitize_watchman_subscription_suffix(value: str) -> str:
     parts: list[str] = []
     for chunk in PurePosixPath(candidate).parts:
         normalized_chunk = "".join(
-            character.lower() if character.isalnum() else "-"
-            for character in chunk
+            character.lower() if character.isalnum() else "-" for character in chunk
         ).strip("-")
         if normalized_chunk:
             parts.append(normalized_chunk)
@@ -338,9 +337,7 @@ class WatchmanCliSession:
         self._ensure_process_running()
         return await self._send_command(["watch-project", str(target_path.resolve())])
 
-    async def startup_watch_project_once(
-        self, target_path: Path
-    ) -> dict[str, object]:
+    async def startup_watch_project_once(self, target_path: Path) -> dict[str, object]:
         return await self._run_one_shot_command(
             ["watch-project", str(target_path.resolve())]
         )

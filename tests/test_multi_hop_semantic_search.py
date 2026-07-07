@@ -71,8 +71,9 @@ def _build_python_coordinator(
 
 @pytest.mark.fast
 @pytest.mark.asyncio
-async def test_search_service_selects_single_hop_when_provider_lacks_reranking(
-) -> None:
+async def test_search_service_selects_single_hop_when_provider_lacks_reranking() -> (
+    None
+):
     """Without reranking, search should not expand beyond initial results."""
     scenario = build_multi_hop_scenario(supports_reranking=False)
     search_service = _build_search_service(scenario.db, scenario.provider)
@@ -705,7 +706,10 @@ async def test_path_filter_like_patterns_against_duckdb(tmp_path: Path) -> None:
     assert all(
         result.get("file_path", "").startswith("src/lib/")
         for result in lib_regex_results
-    ), f"src/lib filter matched wrong paths: {[r['file_path'] for r in lib_regex_results]}"
+    ), (
+        "src/lib filter matched wrong paths: "
+        "{[r['file_path'] for r in lib_regex_results]}"
+    )
     assert any(
         result.get("file_path", "") == "src/lib/util.py" for result in lib_regex_results
     ), "src/lib filter should match src/lib/util.py"
@@ -729,9 +733,7 @@ async def test_path_filter_like_patterns_against_duckdb(tmp_path: Path) -> None:
     ), "path_filter='module.py' should match module.py"
 
     # ── Also verify via search_semantic (exercises a different executor) ──
-    query_embedding = await embedding_provider.embed_single(
-        "path-filter-like-target"
-    )
+    query_embedding = await embedding_provider.embed_single("path-filter-like-target")
 
     lib_sem_results, _ = db.search_semantic(
         query_embedding=query_embedding,
@@ -741,8 +743,7 @@ async def test_path_filter_like_patterns_against_duckdb(tmp_path: Path) -> None:
         path_filter="src/lib",
     )
     assert all(
-        result.get("file_path", "").startswith("src/lib/")
-        for result in lib_sem_results
+        result.get("file_path", "").startswith("src/lib/") for result in lib_sem_results
     ), f"semantic src/lib filter leaked: {[r['file_path'] for r in lib_sem_results]}"
 
     py_sem_results, _ = db.search_semantic(
@@ -846,8 +847,7 @@ async def test_search_by_embedding_enforces_path_filter_component_boundary(
     )
     assert scoped_results
     assert all(
-        result.get("file_path", "").startswith("repo_a/")
-        for result in scoped_results
+        result.get("file_path", "").startswith("repo_a/") for result in scoped_results
     )
 
 

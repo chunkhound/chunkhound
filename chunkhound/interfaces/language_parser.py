@@ -1,4 +1,5 @@
-"""LanguageParser protocol for ChunkHound - abstract interface for language parsing implementations."""
+"""LanguageParser protocol for ChunkHound -
+abstract interface for language parsing implementations."""
 
 from collections.abc import Callable
 from dataclasses import dataclass

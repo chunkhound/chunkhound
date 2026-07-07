@@ -61,7 +61,7 @@ def test_large_batch_insert_parameterizes_special_chars_and_preserves_indexes(
             {
                 "chunk_id": chunk_id,
                 "provider": "o'reilly;--",
-                "model": "model\"quote",
+                "model": 'model"quote',
                 "embedding": [float(chunk_id), float(chunk_id) + 0.1, 9.0],
                 "dims": 3,
             }
@@ -320,14 +320,17 @@ def test_legacy_embeddings_migration_coalesces_duplicate_rows(
     provider = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
     provider.connect()
     try:
-        assert provider.execute_query(
-            """
+        assert (
+            provider.execute_query(
+                """
             SELECT COUNT(*) AS count
             FROM information_schema.tables
             WHERE table_name = 'embeddings'
             """,
-            [],
-        )[0]["count"] == 0
+                [],
+            )[0]["count"]
+            == 0
+        )
 
         migrated_rows = provider.execute_query(
             """
@@ -377,25 +380,19 @@ def test_repository_large_batch_uses_true_upsert_contract(tmp_path: Path) -> Non
             for chunk_id in range(1, 61)
         ]
 
-        assert (
-            provider._embedding_repository.insert_embeddings_batch(
-                first_payload,
-                batch_size=50,
-                connection=provider.connection,
-            )
-            == len(first_payload)
-        )
+        assert provider._embedding_repository.insert_embeddings_batch(
+            first_payload,
+            batch_size=50,
+            connection=provider.connection,
+        ) == len(first_payload)
         original_row = _get_embedding_rows(provider, 1, "test", "mini")
         assert len(original_row) == 1
 
-        assert (
-            provider._embedding_repository.insert_embeddings_batch(
-                second_payload,
-                batch_size=50,
-                connection=provider.connection,
-            )
-            == len(second_payload)
-        )
+        assert provider._embedding_repository.insert_embeddings_batch(
+            second_payload,
+            batch_size=50,
+            connection=provider.connection,
+        ) == len(second_payload)
 
         updated_rows = _get_embedding_rows(provider, 1, "test", "mini")
         count = provider.execute_query(
@@ -460,9 +457,7 @@ def test_schema_migration_backfills_unique_index_and_deduplicates_rows(
             """,
             [],
         )
-        assert {
-            row["index_name"] for row in index_names
-        } >= {
+        assert {row["index_name"] for row in index_names} >= {
             "idx_3_chunk_provider_model_unique",
             "idx_3_provider_model",
             "idx_hnsw_3",
@@ -475,17 +470,20 @@ def test_schema_migration_backfills_unique_index_and_deduplicates_rows(
         original_row_id = rows[0]["id"]
         assert list(rows[0]["embedding"]) == [4.0, 5.0, 6.0]
 
-        assert migrated_provider.insert_embeddings_batch(
-            [
-                {
-                    "chunk_id": 1,
-                    "provider": "legacy",
-                    "model": "mini",
-                    "embedding": [7.0, 8.0, 9.0],
-                    "dims": 3,
-                }
-            ]
-        ) == 1
+        assert (
+            migrated_provider.insert_embeddings_batch(
+                [
+                    {
+                        "chunk_id": 1,
+                        "provider": "legacy",
+                        "model": "mini",
+                        "embedding": [7.0, 8.0, 9.0],
+                        "dims": 3,
+                    }
+                ]
+            )
+            == 1
+        )
 
         updated_rows = _get_embedding_rows(migrated_provider, 1, "legacy", "mini")
         assert len(updated_rows) == 1
@@ -550,9 +548,10 @@ def test_connect_upgrades_legacy_embeddings_1536_before_unique_index_creation(
 
         assert len(rows) == 1
         assert rows[0]["embedding"][:3] == pytest.approx([2.0, 2.0, 2.0])
-        assert {
-            row["index_name"] for row in indexes
-        } >= {"idx_1536_chunk_provider_model_unique", "idx_hnsw_1536"}
+        assert {row["index_name"] for row in indexes} >= {
+            "idx_1536_chunk_provider_model_unique",
+            "idx_hnsw_1536",
+        }
     finally:
         migrated_provider.disconnect(skip_checkpoint=True)
 
@@ -648,7 +647,9 @@ def test_repository_fallback_batch_failure_rolls_back_without_hnsw(
         connection_manager.connection.execute("INSERT INTO chunks (id) VALUES (1), (2)")
         repository = DuckDBEmbeddingRepository(connection_manager, provider=None)
 
-        def _fail_after_first_write(conn, upsert_sql: str, batch_rows: list[tuple]) -> None:
+        def _fail_after_first_write(
+            conn, upsert_sql: str, batch_rows: list[tuple]
+        ) -> None:
             conn.executemany(upsert_sql, batch_rows[:1])
             raise RuntimeError("forced no-hnsw repository batch failure")
 
@@ -923,9 +924,12 @@ def test_provider_batch_failure_rolls_back_without_hnsw(
 ) -> None:
     pytest.importorskip("duckdb")
 
-    provider = DuckDBProvider(db_path=tmp_path / "provider.duckdb", base_directory=tmp_path)
+    provider = DuckDBProvider(
+        db_path=tmp_path / "provider.duckdb", base_directory=tmp_path
+    )
     provider.connect()
     try:
+
         class FailingConnection:
             def __init__(self, real_conn) -> None:
                 self._real_conn = real_conn
@@ -1200,8 +1204,6 @@ def test_provider_legacy_embedding_upgrade_joins_existing_transaction(
             [1, "fallback", "mini"],
         )
         assert len(rolled_back_rows) == 1
-        assert list(rolled_back_rows[0]["embedding"]) == pytest.approx(
-            [1.0, 2.0, 3.0]
-        )
+        assert list(rolled_back_rows[0]["embedding"]) == pytest.approx([1.0, 2.0, 3.0])
     finally:
         provider.disconnect(skip_checkpoint=True)

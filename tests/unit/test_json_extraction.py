@@ -19,23 +19,23 @@ class TestExtractJsonFromResponse:
         assert extract_json_from_response(content) == '{"key": "value"}'
 
     def test_json_code_block(self):
-        content = "```json\n{\"key\": \"value\"}\n```"
+        content = '```json\n{"key": "value"}\n```'
         assert extract_json_from_response(content) == '{"key": "value"}'
 
     def test_generic_code_block(self):
-        content = "```\n{\"key\": \"value\"}\n```"
+        content = '```\n{"key": "value"}\n```'
         assert extract_json_from_response(content) == '{"key": "value"}'
 
     def test_nested_code_blocks_takes_first(self):
-        content = "```json\n{\"first\": 1}\n```\n```json\n{\"second\": 2}\n```"
+        content = '```json\n{"first": 1}\n```\n```json\n{"second": 2}\n```'
         assert extract_json_from_response(content) == '{"first": 1}'
 
     def test_skips_non_json_code_block_before_valid_json(self):
-        content = "```text\nnot json\n```\n```json\n{\"second\": 2}\n```"
+        content = '```text\nnot json\n```\n```json\n{"second": 2}\n```'
         assert extract_json_from_response(content) == '{"second": 2}'
 
     def test_falls_back_to_raw_content_when_code_blocks_are_not_json(self):
-        content = '```text\nnot json\n```\n{\"fallback\": true}'
+        content = '```text\nnot json\n```\n{"fallback": true}'
         expected = '```text\nnot json\n```\n{"fallback": true}'
         assert extract_json_from_response(content) == expected
 
@@ -88,7 +88,7 @@ class TestParseAndValidateStructuredJson:
             "properties": {"value": {"type": "integer"}},
             "required": ["value"],
         }
-        content = "```json\n{\"value\": 42}\n```"
+        content = '```json\n{"value": 42}\n```'
         result = parse_and_validate_structured_json(content, schema)
         assert result == {"value": 42}
 
@@ -98,7 +98,7 @@ class TestParseAndValidateStructuredJson:
             "properties": {"value": {"type": "integer"}},
             "required": ["value"],
         }
-        content = "```text\nignore me\n```\n```json\n{\"value\": 42}\n```"
+        content = '```text\nignore me\n```\n```json\n{"value": 42}\n```'
         result = parse_and_validate_structured_json(content, schema)
         assert result == {"value": 42}
 
@@ -150,9 +150,7 @@ class TestParseAndValidateStructuredJson:
             "additionalProperties": False,
         }
         with pytest.raises(ValueError, match="schema validation failed"):
-            parse_and_validate_structured_json(
-                '{"items": [{"label": 7}]}', schema
-            )
+            parse_and_validate_structured_json('{"items": [{"label": 7}]}', schema)
 
     def test_error_includes_json_path(self):
         schema = {
@@ -170,7 +168,7 @@ class TestParseAndValidateStructuredJson:
     def test_rejects_non_dict_top_level(self):
         schema = {"type": "object"}
         with pytest.raises(ValueError, match="Expected JSON object"):
-            parse_and_validate_structured_json('[1, 2, 3]', schema)
+            parse_and_validate_structured_json("[1, 2, 3]", schema)
 
     def test_rejects_invalid_format(self):
         schema = {
@@ -185,7 +183,7 @@ class TestParseAndValidateStructuredJson:
     def test_rejects_invalid_json(self):
         schema = {"type": "object"}
         with pytest.raises(json.JSONDecodeError):
-            parse_and_validate_structured_json('not json at all', schema)
+            parse_and_validate_structured_json("not json at all", schema)
 
     def test_nested_object_passes(self):
         schema = {
@@ -212,9 +210,7 @@ class TestParseAndValidateStructuredJson:
     def test_array_of_strings_passes(self):
         schema = {
             "type": "object",
-            "properties": {
-                "tags": {"type": "array", "items": {"type": "string"}}
-            },
+            "properties": {"tags": {"type": "array", "items": {"type": "string"}}},
             "required": ["tags"],
         }
         result = parse_and_validate_structured_json(

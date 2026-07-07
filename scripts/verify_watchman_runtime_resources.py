@@ -18,9 +18,7 @@ from scripts import watchman_verifier_cleanup
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WATCHMAN_RUNTIME_ROOT = _REPO_ROOT / "chunkhound" / "watchman_runtime"
-_LIVE_MUTATION_TIMEOUT_ENV = (
-    "CHUNKHOUND_WATCHMAN_RUNTIME_VERIFY_LIVE_TIMEOUT_SECONDS"
-)
+_LIVE_MUTATION_TIMEOUT_ENV = "CHUNKHOUND_WATCHMAN_RUNTIME_VERIFY_LIVE_TIMEOUT_SECONDS"
 _RUNTIME_SLOT_PREFIX = "chunkhound/watchman_runtime/platforms/"
 _RUNTIME_MANIFEST_SUFFIX = "/manifest.json"
 
@@ -95,8 +93,7 @@ def _runtime_platforms_in_wheel(
     )
     if not discovered:
         raise RuntimeError(
-            "Wheel is missing a required Watchman runtime manifest: "
-            f"{wheel_path}"
+            f"Wheel is missing a required Watchman runtime manifest: {wheel_path}"
         )
 
     supported = set(_supported_runtime_platforms())

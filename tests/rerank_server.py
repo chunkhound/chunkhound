@@ -3,7 +3,7 @@
 
 import asyncio
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import web
@@ -80,7 +80,9 @@ class MockRerankServer:
                 )
 
             request_format = "tei" if has_texts else "cohere"
-            documents = body.get("texts" if request_format == "tei" else "documents", [])
+            documents = body.get(
+                "texts" if request_format == "tei" else "documents", []
+            )
             query = body.get("query", "")
             top_n = body.get("top_n")
 
@@ -143,8 +145,7 @@ class MockRerankServer:
         if scenario.response_format == "tei":
             return {
                 "results": [
-                    {"index": result.index, "score": result.score}
-                    for result in results
+                    {"index": result.index, "score": result.score} for result in results
                 ]
             }
 
@@ -156,7 +157,9 @@ class MockRerankServer:
                 ]
             }
 
-        raise ValueError(f"Unsupported mock response format: {scenario.response_format}")
+        raise ValueError(
+            f"Unsupported mock response format: {scenario.response_format}"
+        )
 
     async def start(self) -> None:
         """Start the aiohttp server."""

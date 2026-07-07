@@ -12,6 +12,7 @@ from loguru import logger
 from chunkhound.core.config.config import Config
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
 
+
 def normalize_file_path(path: Path | str) -> str:
     """Single source of truth for path normalization across ChunkHound."""
     return str(Path(path).resolve())
@@ -87,7 +88,6 @@ def _enqueue_realtime_event(
             False,
             type(error).__name__,
         )
-
 
 
 @dataclass(frozen=True, slots=True)

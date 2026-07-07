@@ -54,7 +54,8 @@ class HclMapping(BaseMapping):
         - Comments: `comment`
         """
         if concept == UniversalConcept.DEFINITION:
-            # Capture attribute key/value pairs and object elements (but not blocks here)
+            # Capture attribute key/value pairs and
+            # object elements (but not blocks here)
             return """
             (attribute
                 (identifier) @key
@@ -69,7 +70,8 @@ class HclMapping(BaseMapping):
             """
 
         if concept == UniversalConcept.BLOCK:
-            # Only use explicit HCL blocks as containers (avoid noisy body/object captures)
+            # Only use explicit HCL blocks as containers
+            # (avoid noisy body/object captures)
             return """
             (block) @definition
             """
@@ -257,7 +259,8 @@ class HclMapping(BaseMapping):
     def _block_header(self, node: Node, content: bytes) -> tuple[str, list[str]]:
         """Extract block type and labels from a `block` node.
 
-        Structure: identifier (type), then 0..n labels (string_lit or identifier) until `{`.
+        Structure: identifier (type), then 0..n labels
+        (string_lit or identifier) until `{`.
         """
         src = self._decode(content)
         if node.type != "block" or node.child_count == 0:
@@ -427,7 +430,8 @@ class HclMapping(BaseMapping):
             content: Source file content as bytes
 
         Returns:
-            List of dicts with 'name', 'value', and optional 'type' keys, or None if not applicable
+            List of dicts with 'name', 'value', and
+            optional 'type' keys, or None if not applicable
         """
         if concept != UniversalConcept.DEFINITION:
             return None

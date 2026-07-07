@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-import chunkhound.services.realtime.service as realtime_service_module
 import pytest
 
 from chunkhound.core.config.config import Config

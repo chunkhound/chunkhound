@@ -114,8 +114,10 @@ globalThis.window = window;
 const toggle = new FakeElement('toggle', document);
 const scrim = new FakeElement('scrim', document);
 const filter = new FakeElement('filter', document);
-const firstLink = new FakeElement('first-link', document, { href: '/docs/getting-started/' });
-const lastLink = new FakeElement('last-link', document, { href: '/docs/configuration/' });
+const firstLink = new FakeElement(
+  'first-link', document, { href: '/docs/getting-started/' });
+const lastLink = new FakeElement(
+  'last-link', document, { href: '/docs/configuration/' });
 const sidebar = new FakeSidebar(document, filter, [firstLink, lastLink]);
 const inertTargets = [
   new FakeElement('wordmark', document),
@@ -344,8 +346,10 @@ globalThis.window = window;
 const toggle = new FakeElement('toggle', document);
 const scrim = new FakeElement('scrim', document);
 const filter = new FakeElement('filter', document);
-const visibleLink = new FakeElement('visible-link', document, { href: '/docs/getting-started/' });
-const hiddenLink = new FakeElement('hidden-link', document, { href: '/docs/configuration/' });
+const visibleLink = new FakeElement(
+  'visible-link', document, { href: '/docs/getting-started/' });
+const hiddenLink = new FakeElement(
+  'hidden-link', document, { href: '/docs/configuration/' });
 hiddenLink.style.display = 'none';
 const sidebar = new FakeSidebar(document, filter, [visibleLink, hiddenLink]);
 

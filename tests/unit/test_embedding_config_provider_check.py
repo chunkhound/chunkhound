@@ -57,7 +57,9 @@ class TestIsProviderConfigured:
         assert cfg.is_provider_configured() is False
 
     def test_openai_explicit_official_url_without_key(self):
-        cfg = EmbeddingConfig(provider="openai", base_url="https://api.openai.com/v1", api_key=None)
+        cfg = EmbeddingConfig(
+            provider="openai", base_url="https://api.openai.com/v1", api_key=None
+        )
         assert cfg.is_provider_configured() is False
 
     def test_voyageai_official_without_key(self):
@@ -84,7 +86,10 @@ class TestFactoryRejectsUnconfigured:
 
 
 class TestFactoryCreatesProvider:
-    """Verify EmbeddingProviderFactory.create_provider() returns real provider instances."""
+    """
+    Verify EmbeddingProviderFactory.create_provider()
+    returns real provider instances.
+    """
 
     def test_factory_creates_provider_with_custom_endpoint_no_key(self):
         cfg = EmbeddingConfig(
@@ -126,7 +131,9 @@ async def test_openai_provider_initializes_custom_endpoint_without_api_key(
     monkeypatch.setattr(
         openai_provider_module,
         "openai",
-        SimpleNamespace(AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI),
+        SimpleNamespace(
+            AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI
+        ),
     )
 
     provider = OpenAIEmbeddingProvider(
@@ -169,7 +176,9 @@ async def test_openai_provider_applies_explicit_ssl_verify_false(
     monkeypatch.setattr(
         openai_provider_module,
         "openai",
-        SimpleNamespace(AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI),
+        SimpleNamespace(
+            AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI
+        ),
     )
     monkeypatch.setattr(openai_provider_module.httpx, "AsyncClient", _fake_async_client)
 
@@ -205,7 +214,9 @@ async def test_openai_provider_ignores_ssl_verify_without_base_url(
     monkeypatch.setattr(
         openai_provider_module,
         "openai",
-        SimpleNamespace(AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI),
+        SimpleNamespace(
+            AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI
+        ),
     )
 
     provider = OpenAIEmbeddingProvider(api_key="sk-test", ssl_verify=False)
@@ -218,7 +229,10 @@ async def test_openai_provider_ignores_ssl_verify_without_base_url(
 async def test_openai_rerank_ssl_override_applies_without_embedding_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """rerank_ssl_verify must work for explicit rerank_url even on official embeddings."""
+    """
+    rerank_ssl_verify must work for explicit
+    rerank_url even on official embeddings.
+    """
 
     captured_verify: dict[str, object] = {}
 
@@ -254,7 +268,9 @@ async def test_openai_rerank_ssl_override_applies_without_embedding_base_url(
     monkeypatch.setattr(
         openai_provider_module,
         "openai",
-        SimpleNamespace(AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI),
+        SimpleNamespace(
+            AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI
+        ),
     )
     monkeypatch.setattr(openai_provider_module.httpx, "AsyncClient", _fake_async_client)
 

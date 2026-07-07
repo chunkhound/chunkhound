@@ -172,7 +172,9 @@ class FactExtractor:
 
         # Parse source: accept both new-style (source + location)
         # and old-style (file_path + start_line + end_line)
-        source = (item.get("source") or "").strip() or (item.get("file_path") or "").strip()
+        source = (item.get("source") or "").strip() or (
+            item.get("file_path") or ""
+        ).strip()
         location_raw = (item.get("location") or "").strip()
         url = (item.get("url") or "").strip() or None
         has_new_style_fields = any(key in item for key in ("source", "location", "url"))

@@ -14,9 +14,9 @@ Scenario:
 """
 
 import os
+from pathlib import Path
 
 import pytest
-from pathlib import Path
 
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.types.common import Language

@@ -46,10 +46,13 @@ class GeminiLLMProvider(LLMProvider):
         Args:
             api_key: Google AI API key (get from https://aistudio.google.com/apikey)
             model: Model name to use (passed through to SDK without interpretation)
-            thinking_level: Thinking depth for Gemini 3+ series ("low", "medium", "high").
+            thinking_level: Thinking depth for Gemini 3+
+            series ("low", "medium", "high").
                 When set, forwarded as ``thinking_level`` to the SDK.
             thinking_budget: Fixed thinking token budget for Gemini 2.5+ series.
-                When set, forwarded as ``ThinkingConfig(thinking_budget=...)`` to the SDK.
+                When set, forwarded as
+                ``ThinkingConfig(thinking_budget=...)``
+                to the SDK.
             timeout: Request timeout in seconds (Gemini reasoning can be slow)
             max_retries: Number of retry attempts for failed requests
         """
@@ -350,7 +353,9 @@ class GeminiLLMProvider(LLMProvider):
             if finish_reason in ("MAX_TOKENS", "FINISHREASON_MAX_TOKENS"):
                 raise RuntimeError(
                     "Gemini structured completion truncated - token limit exceeded. "
-                    "This indicates insufficient max_completion_tokens for the structured output. "
+                    "This indicates insufficient "
+                    "max_completion_tokens for the "
+                    "structured output. "
                     "Consider increasing the token limit or reducing input context."
                 )
 

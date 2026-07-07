@@ -2,7 +2,8 @@
 
 This module provides quality control mechanisms for synthesis outputs including:
 - Verbosity filtering: Remove common LLM meta-commentary and defensive patterns
-- Quality validation: Check for theoretical placeholders, citation density, and vague measurements
+- Quality validation: Check for theoretical
+  placeholders, citation density, and vague measurements
 - Citation validation: Ensure proper numbered reference citations
 - Citation sorting: Sort consecutive citation sequences for readability
 
@@ -54,12 +55,20 @@ class QualityValidator:
             r"However, it should be mentioned that\s+",
             r"Please note that\s+",
             r"As mentioned (?:earlier|above|previously),?\s+",
-            # Remove standalone "No information found" lines from body (keep in "Missing:" context)
+            # Remove standalone "No information found"
+            # lines from body (keep in "Missing:" context)
             r"^No information (?:was )?found (?:for|about)[^\n]+\n",
             r"^Unfortunately, the (?:code|analysis) does not (?:show|provide)[^\n]+\n",
             # Remove vague precision statements
-            r"The (?:exact|precise|specific) (?:implementation|details?|mechanism|values?) (?:is|are) not (?:provided|documented|shown|clear|available) in the (?:code|analysis)[,.]?\s*",
-            r"(?:More|Additional) (?:research|investigation|analysis|context) (?:is|would be) (?:needed|required)[,.]?\s*",
+            r"The (?:exact|precise|specific)"
+            r" (?:implementation|details?|mechanism|values?)"
+            r" (?:is|are) not"
+            r" (?:provided|documented|shown|clear|available)"
+            r" in the (?:code|analysis)[,.]?\s*",
+            r"(?:More|Additional)"
+            r" (?:research|investigation|analysis|context)"
+            r" (?:is|would be)"
+            r" (?:needed|required)[,.]?\s*",
         ]
 
         filtered = text
@@ -122,17 +131,23 @@ class QualityValidator:
 
         if answer_tokens > 1000 and citation_count < 5:
             warnings.append(
-                f"QUALITY: Low citation density ({citation_count} citations in {answer_tokens} tokens). "
+                f"QUALITY: Low citation density"
+                f" ({citation_count} citations in"
+                f" {answer_tokens} tokens). "
                 "Output may lack concrete code references."
             )
             logger.warning(
-                f"Low citation density: {citation_count} citations in {answer_tokens} tokens"
+                f"Low citation density:"
+                f" {citation_count} citations in"
+                f" {answer_tokens} tokens"
             )
 
         # Check 3: Excessive length
         if answer_tokens > target_tokens * 1.5:
             warnings.append(
-                f"QUALITY: Output is verbose ({answer_tokens:,} tokens vs {target_tokens:,} target). "
+                f"QUALITY: Output is verbose"
+                f" ({answer_tokens:,} tokens vs"
+                f" {target_tokens:,} target). "
                 "May need tighter prompting."
             )
             logger.warning(
@@ -186,8 +201,12 @@ class QualityValidator:
 
         # Log citation metrics
         logger.info(
-            f"Citation metrics: {citation_count} citations found in {answer_length:,} chars "
-            f"({answer_lines} lines), density={citation_density:.1f} citations/100 lines"
+            f"Citation metrics: {citation_count}"
+            f" citations found in"
+            f" {answer_length:,} chars "
+            f"({answer_lines} lines),"
+            f" density={citation_density:.1f}"
+            f" citations/100 lines"
         )
 
         # Sample citations for debugging (show first 3)
@@ -196,7 +215,8 @@ class QualityValidator:
             logger.debug(f"Sample citations: {', '.join(sample_citations)}")
 
         if not citations and chunks:
-            # Answer missing inline citations - footer provides separate comprehensive listing
+            # Answer missing inline citations
+            # footer provides separate comprehensive listing
             # Enhanced warning with context
             if answer_length == 0:
                 logger.warning(
@@ -205,7 +225,8 @@ class QualityValidator:
                 )
             elif answer_length < 200:
                 logger.warning(
-                    f"LLM answer suspiciously short ({answer_length} chars) and missing "
+                    f"LLM answer suspiciously short"
+                    f" ({answer_length} chars) and missing "
                     f"reference citations [N] in analysis body"
                 )
             else:
@@ -218,7 +239,8 @@ class QualityValidator:
             # Has some citations but density is low
             logger.warning(
                 f"Low citation density: {citation_density:.1f} citations/100 lines "
-                f"({citation_count} total citations). Consider reviewing prompt emphasis."
+                f"({citation_count} total citations)."
+                f" Consider reviewing prompt emphasis."
             )
 
         # Sort citation sequences for improved readability

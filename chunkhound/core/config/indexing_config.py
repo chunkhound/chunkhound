@@ -53,7 +53,9 @@ class IndexingConfig(BaseModel):
     max_file_size_mb: int = Field(default=10, description="Internal file size limit")
     config_file_size_threshold_kb: int = Field(
         default=20,
-        description="Skip structured config files (JSON/YAML/TOML) larger than this (KB)",
+        description=(
+            "Skip structured config files (JSON/YAML/TOML) larger than this (KB)"
+        ),
     )
     chunk_overlap: int = Field(default=50, description="Internal chunk overlap")
     min_chunk_size: int = Field(default=50, description="Internal min chunk size")
@@ -74,8 +76,7 @@ class IndexingConfig(BaseModel):
     per_file_timeout_seconds: float = Field(
         default=3.0,
         description=(
-            "Maximum seconds to spend parsing a single file "
-            "(0 disables timeout)"
+            "Maximum seconds to spend parsing a single file (0 disables timeout)"
         ),
     )
     per_file_timeout_min_size_kb: int = Field(
@@ -96,11 +97,17 @@ class IndexingConfig(BaseModel):
     # Parallel discovery settings
     parallel_discovery: bool = Field(
         default=True,
-        description="Enable parallel directory traversal for large codebases (auto-disabled for <4 top-level dirs)",
+        description=(
+            "Enable parallel directory traversal for "
+            "large codebases (auto-disabled for "
+            "<4 top-level dirs)"
+        ),
     )
     min_dirs_for_parallel: int = Field(
         default=4,
-        description="Minimum top-level directories required to activate parallel discovery",
+        description=(
+            "Minimum top-level directories required to activate parallel discovery"
+        ),
     )
     max_discovery_workers: int = Field(
         default=16,
@@ -253,7 +260,9 @@ class IndexingConfig(BaseModel):
     # Realtime backend controls how filesystem change monitoring is performed.
     realtime_backend: Literal["watchman", "watchdog", "polling"] = Field(
         default_factory=default_realtime_backend_for_current_install,
-        description="Realtime backend for filesystem monitoring: watchman|watchdog|polling",
+        description=(
+            "Realtime backend for filesystem monitoring: watchman|watchdog|polling"
+        ),
     )
 
     # When true, also load the CH root's .gitignore as a global overlay in addition
@@ -272,7 +281,7 @@ class IndexingConfig(BaseModel):
     )
 
     @field_validator("include", "exclude")
-    def validate_patterns(cls, v: list[str]) -> list[str]:
+    def validate_patterns(cls, v: list[str]) -> list[str]:  # noqa: N805
         """Validate glob patterns."""
         if not isinstance(v, list):
             raise ValueError("Patterns must be a list")
@@ -315,7 +324,9 @@ class IndexingConfig(BaseModel):
         parser.add_argument(
             "--no-cleanup",
             action="store_true",
-            help="Skip cleanup of orphaned database records for files no longer present",
+            help=(
+                "Skip cleanup of orphaned database records for files no longer present"
+            ),
         )
 
         parser.add_argument(
@@ -485,7 +496,11 @@ class IndexingConfig(BaseModel):
             config["detect_embedded_sql"] = sql_detect.lower() in ("true", "1", "yes")
 
         if index_unknown := os.getenv("CHUNKHOUND_INDEXING__INDEX_UNKNOWN_FILES"):
-            config["index_unknown_files"] = index_unknown.lower() in ("true", "1", "yes")
+            config["index_unknown_files"] = index_unknown.lower() in (
+                "true",
+                "1",
+                "yes",
+            )
 
         return config
 
@@ -542,7 +557,8 @@ class IndexingConfig(BaseModel):
             self.exclude_mode and self.exclude_mode.lower() == "gitignore_only"
         ):
             return ["gitignore"]
-        # 2) User provided exclude list (detect either explicit flag or any deviation from defaults)
+        # 2) User provided exclude list (detect either
+        # explicit flag or any deviation from defaults)
         if getattr(self, "exclude_user_supplied", False):
             mode = (self.exclude_mode or "combined").lower()
             if mode == "config_only":

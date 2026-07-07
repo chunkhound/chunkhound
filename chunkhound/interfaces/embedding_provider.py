@@ -1,4 +1,5 @@
-"""EmbeddingProvider protocol for ChunkHound - abstract interface for embedding implementations."""
+"""EmbeddingProvider protocol for ChunkHound -
+abstract interface for embedding implementations."""
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -44,7 +45,8 @@ class EmbeddingProvider(Protocol):
 
     @property
     def model(self) -> str:
-        """Model name (e.g., 'text-embedding-3-small', 'sentence-transformers/all-MiniLM-L6-v2')."""
+        """Model name (e.g., 'text-embedding-3-small',
+        'sentence-transformers/all-MiniLM-L6-v2')."""
         ...
 
     @property
@@ -239,8 +241,10 @@ class EmbeddingProvider(Protocol):
         """Get recommended number of concurrent batches for this provider.
 
         Returns:
-            Optimal concurrent batch count based on provider's rate limits.
-            Examples: VoyageAI=40 (2000 RPM), OpenAI=8 (tier-based), Ollama=16 (local GPU)
+            Optimal concurrent batch count based on
+            provider's rate limits. Examples:
+            VoyageAI=40 (2000 RPM), OpenAI=8
+            (tier-based), Ollama=16 (local GPU)
         """
         ...
 

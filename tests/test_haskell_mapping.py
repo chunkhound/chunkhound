@@ -1,6 +1,4 @@
-import pytest
-
-from chunkhound.core.types.common import FileId, Language, ChunkType
+from chunkhound.core.types.common import ChunkType, FileId, Language
 from chunkhound.parsers.parser_factory import get_parser_factory
 
 
@@ -31,10 +29,7 @@ def test_haskell_captures_pattern_synonyms_signature_and_equation():
 
 
 def test_haskell_captures_top_level_bind_and_function():
-    content = (
-        "const = 42\n"
-        "add x y = x + y\n"
-    )
+    content = "const = 42\nadd x y = x + y\n"
 
     chunks = parse_haskell(content)
     function_names = {c.symbol for c in chunks if c.chunk_type == ChunkType.FUNCTION}
@@ -50,12 +45,7 @@ def test_haskell_captures_top_level_bind_and_function():
 
 def test_haskell_captures_class_and_instance_methods():
     content = (
-        "class C a where\n"
-        "  m :: a -> a\n"
-        "  m x = x\n"
-        "\n"
-        "instance C Int where\n"
-        "  m x = x\n"
+        "class C a where\n  m :: a -> a\n  m x = x\n\ninstance C Int where\n  m x = x\n"
     )
 
     chunks = parse_haskell(content)

@@ -585,8 +585,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         except asyncio.TimeoutError:
             cmd_ctx = self._describe_command_context(model=model, use_json=use_json)
             error = RuntimeError(
-                f"OpenCode CLI command timed out after {request_timeout}s "
-                f"({cmd_ctx})"
+                f"OpenCode CLI command timed out after {request_timeout}s ({cmd_ctx})"
             )
             return _PhaseResult(action="timeout", error=error, attempts_used=1)
 

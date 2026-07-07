@@ -8,7 +8,9 @@ class _FakeDB:
     def __init__(self, records):
         self._records = records  # rel_path -> dict
         self.updated = []
-        self._next_id = max([rec.get("id", 0) for rec in records.values()], default=0) + 1
+        self._next_id = (
+            max([rec.get("id", 0) for rec in records.values()], default=0) + 1
+        )
 
     def get_file_by_path(self, path: str, as_model: bool = False):
         return self._records.get(path)
@@ -102,23 +104,32 @@ class _Cfg:
     indexing = _Indexing()
 
 
-def test_checksum_verify_populate_and_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Test new checksum behavior: skip on mtime+size match, verify on mtime/size change."""
+def test_checksum_verify_populate_and_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """
+    Test new checksum behavior: skip on mtime+size
+    match, verify on mtime/size change.
+    """
     from chunkhound.core.types.common import Language
-    from chunkhound.services.indexing_coordinator import IndexingCoordinator
     from chunkhound.services.batch_processor import ParsedFileResult
+    from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
     # Create a file (not in DB yet)
     p = tmp_path / "a.txt"
     p.write_text("hello world")
-    st = p.stat()
+    p.stat()
     rel = p.relative_to(tmp_path).as_posix()
 
     # Start with empty DB
     db = _FakeDB({})
-    coord = IndexingCoordinator(database_provider=db, base_directory=tmp_path, config=_Cfg())
+    coord = IndexingCoordinator(
+        database_provider=db, base_directory=tmp_path, config=_Cfg()
+    )
 
-    async def _fake_parse(files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None):
+    async def _fake_parse(
+        files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None
+    ):
         # Simulate one ParsedFileResult success for each file
         results = []
         for item in files:
@@ -164,7 +175,7 @@ def test_checksum_verify_populate_and_skip(tmp_path: Path, monkeypatch: pytest.M
 
     # Third run: change size (different content)
     p.write_text("hello world!")  # Different size
-    st2 = p.stat()
+    p.stat()
 
     res3 = asyncio.run(
         coord.process_directory(tmp_path, patterns=["**/*.txt"], exclude_patterns=[])

@@ -7,7 +7,9 @@ from chunkhound.code_mapper.orchestrator import CodeMapperOrchestrator
 from chunkhound.core.config.config import Config
 
 
-def test_orchestrator_resolves_dot_to_cwd_within_target_dir(tmp_path: Path, monkeypatch) -> None:
+def test_orchestrator_resolves_dot_to_cwd_within_target_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
     workspace_root = tmp_path / "workspace"
     project_dir = workspace_root / "chunkhound"
     project_dir.mkdir(parents=True, exist_ok=True)
