@@ -28,6 +28,78 @@ from typing import Any
 import duckdb
 
 # ---------------------------------------------------------------------------
+# Production batch-size logic (mirrors indexing_coordinator._determine_db_batch_size)
+# ---------------------------------------------------------------------------
+
+def _mem_available_bytes() -> int:
+    try:
+        import psutil
+        return int(getattr(psutil.virtual_memory(), "available", 0)) or 0
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) * 1024
+    except Exception:
+        pass
+    return 0
+
+
+def determine_batch_size(files: list[dict]) -> int:
+    """Compute a file-level batch size matching production memory behaviour.
+
+    Priority:
+      1. CHUNKHOUND_DB_BATCH_SIZE env var (interpreted as files/batch)
+      2. Dynamic: budget 10% of available RAM against estimated bytes per file
+         (code + embedding floats × 4 B + overhead), clamped to [100, 5000] files.
+
+    The production indexer uses a chunk-level batch size [1000, 20000]; we
+    convert to file-level here because the benchmark iterates over files.
+    """
+    try:
+        env_bs = int(os.environ.get("CHUNKHOUND_DB_BATCH_SIZE", "0") or "0")
+        if env_bs > 0:
+            return max(1, min(env_bs, 20000))
+    except Exception:
+        pass
+
+    if not files:
+        return 1000
+
+    avail = _mem_available_bytes()
+    if avail <= 0:
+        avail = 512 * 1024 * 1024
+    budget = int(avail * 0.10)
+    budget = max(64 * 1024 * 1024, min(budget, 512 * 1024 * 1024))
+
+    # Estimate bytes per file from a sample (code + embedding storage + overhead)
+    sample_files = files[: min(50, len(files))]
+    total_bytes = 0
+    total_counted = 0
+    for f in sample_files:
+        for c in f.get("chunks", []):
+            code_bytes = len((c.get("code") or "").encode("utf-8", errors="ignore"))
+            emb = c.get("embedding")
+            emb_bytes = len(emb) * 4 if emb else 0  # float32
+            total_bytes += code_bytes + emb_bytes + 512  # 512 B overhead per chunk
+            total_counted += 1
+
+    if total_counted == 0:
+        return 1000
+
+    avg_bytes_per_chunk = max(512, total_bytes // total_counted)
+    avg_chunks_per_file = total_counted / len(sample_files)
+    avg_bytes_per_file = max(1024, int(avg_bytes_per_chunk * avg_chunks_per_file))
+
+    est = max(1, budget // avg_bytes_per_file)
+    return max(100, min(int(est), 5000))
+
+
+# ---------------------------------------------------------------------------
 # Schema helpers
 # ---------------------------------------------------------------------------
 
@@ -366,15 +438,20 @@ def _python_write_files(conn: Any, files: list[dict]) -> tuple[int, int]:
     return total_chunks, total_embs
 
 
-def run_python_path(files: list[dict], db_path: str) -> dict:
-    """Run the Python direct write path and return timing metrics."""
+def run_python_path(files: list[dict], db_path: str, batch_size: int) -> dict:
+    """Run the Python direct write path in production-sized batches."""
     rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     t0 = time.perf_counter()
 
     conn = duckdb.connect(db_path)
     try:
         conn.execute(_CREATE_SCHEMA)
-        total_chunks, total_embs = _python_write_files(conn, files)
+        total_chunks = total_embs = 0
+        for i in range(0, len(files), batch_size):
+            batch = files[i : i + batch_size]
+            c, e = _python_write_files(conn, batch)
+            total_chunks += c
+            total_embs += e
         conn.execute("CHECKPOINT")
     finally:
         conn.close()
@@ -397,8 +474,8 @@ def run_python_path(files: list[dict], db_path: str) -> dict:
 # Rust path
 # ---------------------------------------------------------------------------
 
-def run_rust_path(files: list[dict], db_path: str) -> dict:
-    """Run the Rust RustDbWriter path and return timing metrics."""
+def run_rust_path(files: list[dict], db_path: str, batch_size: int) -> dict:
+    """Run the Rust RustDbWriter path in production-sized batches."""
     try:
         from chunkhound_native import RustDbWriter
     except ImportError:
@@ -412,7 +489,12 @@ def run_rust_path(files: list[dict], db_path: str) -> dict:
     writer = RustDbWriter(db_config)
     writer.open()
     try:
-        result = writer.write_batch({"files": files, "delete_paths": []})
+        total_chunks = total_embs = 0
+        for i in range(0, len(files), batch_size):
+            batch = files[i : i + batch_size]
+            result = writer.write_batch({"files": batch, "delete_paths": []})
+            total_chunks += result.get("chunks_written", 0)
+            total_embs += result.get("embeddings_written", 0)
     finally:
         writer.close()
 
@@ -422,9 +504,9 @@ def run_rust_path(files: list[dict], db_path: str) -> dict:
 
     return {
         "wall": wall,
-        "chunks": result.get("chunks_written", 0),
+        "chunks": total_chunks,
         "files": len(files),
-        "embs": result.get("embeddings_written", 0),
+        "embs": total_embs,
         "rss_delta_kb": rss_after - rss_before,
         "db_bytes": db_size,
     }
@@ -624,6 +706,9 @@ def main() -> None:
         print("No data to benchmark.")
         sys.exit(1)
 
+    batch_size = determine_batch_size(files)
+    print(f"  Batch size: {batch_size:,} files/batch (production heuristic)")
+
     best_py: dict | None = None
     best_rust: dict | None = None
 
@@ -637,7 +722,7 @@ def main() -> None:
             os.unlink(py_db)  # DuckDB creates fresh DB if file absent
             try:
                 print("Running Python direct path ...", end=" ", flush=True)
-                py_r = run_python_path(files, py_db)
+                py_r = run_python_path(files, py_db, batch_size)
                 if "error" not in py_r:
                     print(f"{py_r['wall']:.3f}s")
                 else:
@@ -658,7 +743,7 @@ def main() -> None:
             os.unlink(rust_db)  # DuckDB creates fresh DB if file absent
             try:
                 print("Running Rust path ...", end=" ", flush=True)
-                rust_r = run_rust_path(files, rust_db)
+                rust_r = run_rust_path(files, rust_db, batch_size)
                 if "error" not in rust_r:
                     print(f"{rust_r['wall']:.3f}s")
                 else:
