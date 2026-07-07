@@ -947,8 +947,12 @@ async def websearch_impl(
             mapping=mapping,
         )
 
+        # Positional query is the RAW user input; the LLM-normalized
+        # ``search_query`` steers only DDG variants + the follow-up footer.
+        # Feeding a lossy normalization to deep research would silently
+        # degrade the answer with no signal.
         cmd = build_quickresearch_argv_core(
-            expansion.search_query, tmpdir, config,
+            query, tmpdir, config,
             parent_pid=os.getpid(),
             previous_query=previous_query,
         )

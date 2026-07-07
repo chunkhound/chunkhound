@@ -35,9 +35,10 @@ def _build_quickresearch_argv(
 ) -> list[str]:
     """Build argv to invoke _quickresearch as a subprocess, forwarding relevant args.
 
-    ``query`` accepts the normalized ``search_query`` (falls back to raw); the
-    caller passes it explicitly so ``args.query`` stays untouched for error
-    paths. ``previous_query`` is likewise pre-coerced by the caller.
+    ``query`` is the raw user query — the LLM-normalized ``search_query`` is
+    reserved for the DDG variants and footer, since lossy normalization would
+    silently narrow the research prompt (only outright empty/whitespace/LLM
+    failures fall back to raw). ``previous_query`` is pre-coerced by the caller.
     """
     from ..parsers.common_arguments import build_forwarded_argv
     from ..parsers.quickresearch_parser import add_quickresearch_subparser
@@ -123,9 +124,13 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         # subprocess wrapper is still the cleanest way to capture stdout for
         # path-rewriting and enforce the wall-clock timeout — using the same
         # path on both surfaces avoids divergence.
+        # Positional query is the RAW user input; the LLM-normalized
+        # ``search_query`` steers only DDG variants + the follow-up footer.
+        # Feeding a lossy normalization to deep research would silently
+        # degrade the answer with no signal.
         cmd = _build_quickresearch_argv(
             args, tmpdir, config,
-            query=expansion.search_query,
+            query=args.query,
             previous_query=previous_query,
         )
         # QUIET routes the child's progress display to stderr (inherited here, so

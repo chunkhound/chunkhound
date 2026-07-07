@@ -400,10 +400,15 @@ async def test_websearch_cli_empty_previous_query_treated_as_none(
 
 
 @pytest.mark.asyncio
-async def test_websearch_cli_subprocess_gets_normalized_search_query(
+async def test_websearch_cli_subprocess_gets_raw_query(
     patched_capturing, monkeypatch
 ) -> None:
-    """`_quickresearch` positional query is `search_query`, not raw input."""
+    """`_quickresearch` positional is the RAW query, not the LLM-normalized form.
+
+    A lossy normalization (e.g. dropping keywords) would silently narrow the
+    downstream deep-research prompt. The normalized ``search_query`` steers
+    only DDG variants and the follow-up footer.
+    """
     from chunkhound.utils.websearch_expansion import WebExpansionResult
 
     async def canned_expand(query, llm_manager, previous_query=None):
@@ -420,7 +425,7 @@ async def test_websearch_cli_subprocess_gets_normalized_search_query(
 
     cmd = patched_capturing["captured"]["cmd"]
     idx = cmd.index("_quickresearch")
-    assert cmd[idx + 1] == "normalized form"
+    assert cmd[idx + 1] == "raw user input"
 
 
 @pytest.mark.asyncio

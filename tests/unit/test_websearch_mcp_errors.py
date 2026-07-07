@@ -517,6 +517,51 @@ async def test_websearch_mcp_empty_previous_query_treated_as_none(
 
 
 @pytest.mark.asyncio
+async def test_websearch_mcp_subprocess_gets_raw_query(monkeypatch, patched):
+    """MCP subprocess positional is the RAW query, not the LLM-normalized form.
+
+    Deep research would silently degrade if handed a lossy normalization; the
+    normalized ``search_query`` is reserved for DDG variants and the footer.
+    """
+    from chunkhound.utils import websearch_expansion as we_mod
+    from chunkhound.utils.websearch_expansion import WebExpansionResult
+
+    async def canned_expand(query, llm_manager, previous_query=None):
+        return WebExpansionResult(
+            queries=["v1", "v2", "v3"], search_query="normalized form"
+        )
+
+    # `websearch_impl` lazy-imports `expand_web_queries` inside the function,
+    # so patch on the source module — patching `tools_mod` would not hit the
+    # local binding created by the `from ... import` statement.
+    monkeypatch.setattr(we_mod, "expand_web_queries", canned_expand)
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    captured: dict[str, object] = {}
+
+    def capturing_build(query, tmpdir, config, parent_pid, previous_query=None):
+        captured["query"] = query
+        return ["/bin/true"]
+
+    monkeypatch.setattr(ws_mod, "build_quickresearch_argv_core", capturing_build)
+
+    fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    await tools_mod.websearch_impl(
+        embedding_manager=None,
+        llm_manager=None,
+        config=None,
+        query="raw user input",
+    )
+
+    assert captured["query"] == "raw user input"
+
+
+@pytest.mark.asyncio
 async def test_websearch_mcp_previous_query_reaches_subprocess(
     monkeypatch, patched
 ):
