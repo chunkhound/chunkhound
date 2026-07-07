@@ -39,18 +39,20 @@ def _extract_quoted_phrases(q: str) -> list[str]:
     return _QUOTE_RE.findall(q)
 
 
-def _preserves_quotes(proc: str, originals: list[str]) -> bool:
-    """Whether ``proc`` keeps at least one of ``originals`` inside its own quotes.
+def _preserves_quotes(variant: str, user_quotes: list[str]) -> bool:
+    """Whether ``variant`` keeps every phrase in ``user_quotes`` inside its own quotes.
 
     Per-variant predicate — the caller filters bad variants individually
-    instead of discarding the whole batch.
+    instead of discarding the whole batch. Partial preservation fails: a
+    variant that drops any quoted phrase from a multi-quote query is
+    rejected so padding can supply a quote-preserving replacement.
     """
-    proc_quotes = _extract_quoted_phrases(proc)
-    if not proc_quotes:
+    variant_quotes = _extract_quoted_phrases(variant)
+    if not variant_quotes:
         return False
     # Substring, not equality: a variant that quotes a tighter phrase (e.g.
     # "React 19.1" for the user's "React 19") still preserves the intent.
-    return any(o in pq for o in originals for pq in proc_quotes)
+    return all(any(uq in vq for vq in variant_quotes) for uq in user_quotes)
 
 
 def _build_context_lines(query: str, previous_query: str | None) -> str:
@@ -172,9 +174,9 @@ async def expand_web_queries(
     # Filter variants that dropped quoted phrases.
     # Runs before padding so the pad fallbacks — which interpolate the raw
     # ``query`` and thus preserve its quotes — naturally fill any gaps.
-    originals = _extract_quoted_phrases(query)
-    if originals:
-        kept = [q for q in queries if _preserves_quotes(q, originals)]
+    user_quotes = _extract_quoted_phrases(query)
+    if user_quotes:
+        kept = [q for q in queries if _preserves_quotes(q, user_quotes)]
         if not kept:
             logger.warning(
                 "Websearch query expansion dropped quoted phrases in all "

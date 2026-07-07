@@ -5,20 +5,38 @@ import heapq
 import math
 import random
 import re
-from collections.abc import AsyncIterator
-from typing import Any, cast
+from collections.abc import AsyncIterator, Sequence
+from typing import Any, TypedDict, cast
 
 import httpx
 from loguru import logger
+from typing_extensions import NotRequired
 
 from chunkhound.core.config.embedding_config import (
     RERANK_BASE_URL_REQUIRED,
     validate_rerank_configuration,
 )
-from chunkhound.core.utils.openai_utils import is_azure_openai_endpoint
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.core.exceptions.core import ValidationError
+from chunkhound.core.exceptions.embedding import (
+    EmbeddingConfigurationError,
+    EmbeddingDimensionError,
+    EmbeddingProviderError,
+)
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
+from chunkhound.core.utils.openai_utils import (
+    is_azure_openai_endpoint,
+    is_official_openai_endpoint,
+)
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
+from chunkhound.providers.embeddings.shared_utils import (
+    apply_client_side_truncation,
+    build_dimension_request_param,
+    build_runtime_supported_dimensions,
+    validate_embedding_dims,
+    validate_positive_output_dims,
+    validate_runtime_output_dims_config,
+)
 
 from .batch_utils import handle_token_limit_error
 
@@ -36,7 +54,7 @@ except ImportError:
 # Research: https://www.baseten.co/blog/day-zero-benchmarks-for-qwen-3
 # Batch sizes optimized for throughput on GPU inference (A100 baseline)
 # Rerank limits: 32-128 per batch based on model size to prevent OOM
-QWEN_MODEL_CONFIG = {
+QWEN_MODEL_CONFIG: dict[str, dict[str, int]] = {
     # Qwen3 Embedding Models (via Ollama)
     # Batch sizes balanced for GPU memory and throughput
     "dengcao/Qwen3-Embedding-0.6B:Q5_K_M": {
@@ -169,6 +187,53 @@ def _validate_qwen_model_config() -> None:
 # Validate configuration at module load
 _validate_qwen_model_config()
 
+class OpenAIModelConfig(TypedDict):
+    """Static config for a known OpenAI embedding model.
+
+    Fields:
+        dims: Default output dimension.
+        native_dims: Full/native embedding dimension.
+        distance: Distance metric (always "cosine" for OpenAI).
+        max_tokens: Maximum tokens per request.
+        matryoshka: Whether the model supports variable-dimension output.
+        min_dims: Minimum supported dimension (only meaningful when matryoshka=True).
+    """
+
+    dims: int
+    native_dims: int
+    distance: str
+    max_tokens: int
+    matryoshka: NotRequired[bool]
+    min_dims: NotRequired[int]
+
+
+# Model-specific configuration for OpenAI models
+# matryoshka flag indicates support for variable output dimensions
+OPENAI_MODEL_CONFIG: dict[str, OpenAIModelConfig] = {
+    "text-embedding-3-small": {
+        "dims": 1536,
+        "native_dims": 1536,
+        "distance": "cosine",
+        "max_tokens": 8191,
+        "matryoshka": True,
+        "min_dims": 1,
+    },
+    "text-embedding-3-large": {
+        "dims": 3072,
+        "native_dims": 3072,
+        "distance": "cosine",
+        "max_tokens": 8191,
+        "matryoshka": True,
+        "min_dims": 1,
+    },
+    "text-embedding-ada-002": {
+        "dims": 1536,
+        "native_dims": 1536,
+        "distance": "cosine",
+        "max_tokens": 8191,
+    },
+}
+
 
 class OpenAIEmbeddingProvider:
     """OpenAI embedding provider using text-embedding-3-small by default.
@@ -195,7 +260,7 @@ class OpenAIEmbeddingProvider:
         self,
         api_key: str | None = None,
         base_url: str | None = None,
-        model: str = "text-embedding-3-small",
+        model: str = OPENAI_DEFAULT_MODEL,
         rerank_model: str | None = None,
         rerank_url: str = "/rerank",
         rerank_format: str = "auto",
@@ -205,6 +270,8 @@ class OpenAIEmbeddingProvider:
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        output_dims: int | None = None,
+        client_side_truncation: bool = False,
         ssl_verify: bool = True,
         rerank_ssl_verify: bool | None = None,
         api_version: str | None = None,
@@ -226,6 +293,13 @@ class OpenAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+            output_dims: Output embedding dimension. Official OpenAI endpoints
+                use documented model semantics for fail-fast validation. Custom
+                OpenAI-compatible endpoints are trusted instead, even under
+                known OpenAI model names, so runtime behavior decides whether
+                the configuration is actually compatible.
+            client_side_truncation: Truncate embeddings client-side instead of
+                using the API dimensions parameter. Requires output_dims.
             ssl_verify: Verify TLS certificates for requests sent via base_url
             rerank_ssl_verify: Verify TLS certificates for rerank requests.
                 Defaults to ssl_verify when unset.
@@ -260,7 +334,12 @@ class OpenAIEmbeddingProvider:
         self._retry_delay = retry_delay
         self._max_tokens = max_tokens
         self._rerank_batch_size = rerank_batch_size
+        self._output_dims = output_dims
+        self._client_side_truncation = client_side_truncation
+        self._discovered_native_dims: int | None = None
+        self._warned_default_dims = False
         self._ssl_verify = ssl_verify
+        self._client: Any | None = None
         self._rerank_ssl_verify: bool = (
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
         )
@@ -288,23 +367,12 @@ class OpenAIEmbeddingProvider:
         self._configure_qwen_batch_sizes(model, rerank_model, batch_size)
 
         # Model-specific configuration for OpenAI models
-        self._model_config = {
-            "text-embedding-3-small": {
-                "dims": 1536,
-                "distance": "cosine",
-                "max_tokens": 8191,
-            },
-            "text-embedding-3-large": {
-                "dims": 3072,
-                "distance": "cosine",
-                "max_tokens": 8191,
-            },
-            "text-embedding-ada-002": {
-                "dims": 1536,
-                "distance": "cosine",
-                "max_tokens": 8191,
-            },
-        }
+        self._model_config = OPENAI_MODEL_CONFIG
+
+        # Known models get fail-fast init validation. Unknown/custom models
+        # skip all output_dims validation here so advanced users can point at
+        # compatible endpoints and get descriptive embed-time errors instead.
+        self._validate_output_dims_config()
 
         # Usage statistics
         self._usage_stats = {
@@ -314,9 +382,8 @@ class OpenAIEmbeddingProvider:
             "errors": 0,
         }
 
-        # Initialize OpenAI client lazily to avoid TaskGroup errors on Ubuntu
-        # Creating AsyncOpenAI in __init__ can fail when no event loop is running
-        self._client = None
+        # Initialize OpenAI client lazily to avoid TaskGroup errors on Ubuntu.
+        # Any keeps the optional dependency boundary local to this provider.
         self._client_initialized = False
 
     def _configure_qwen_batch_sizes(
@@ -333,7 +400,7 @@ class OpenAIEmbeddingProvider:
             batch_size: User-requested batch size
         """
         # Detect Qwen models
-        qwen_config = None
+        qwen_config: dict[str, int] | None = None
         model_lower = model.lower()
         rerank_model_lower = (rerank_model or "").lower()
 
@@ -344,7 +411,7 @@ class OpenAIEmbeddingProvider:
                 logger.info(f"Detected Qwen embedding model: {model}")
 
         # Check if rerank model is a Qwen model
-        qwen_rerank_config = None
+        qwen_rerank_config: dict[str, int] | None = None
         if rerank_model and (
             "qwen" in rerank_model_lower or rerank_model in QWEN_MODEL_CONFIG
         ):
@@ -353,6 +420,8 @@ class OpenAIEmbeddingProvider:
                 logger.info(f"Detected Qwen reranker model: {rerank_model}")
 
         # Apply Qwen batch size limits if detected
+        self._qwen_model_config: dict[str, int] | None = None
+        self._qwen_rerank_config: dict[str, int] | None = None
         if qwen_config:
             # Apply min(user_batch_size, model_max_batch) pattern from VoyageAI
             effective_batch_size = min(batch_size, qwen_config["max_texts_per_batch"])
@@ -386,8 +455,6 @@ class OpenAIEmbeddingProvider:
             return
 
         # Only require API key for official OpenAI API
-        from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
-
         is_openai_official = is_official_openai_endpoint(self._base_url)
         if is_openai_official and not self._api_key:
             raise ValueError("OpenAI API key is required for official OpenAI API")
@@ -398,7 +465,10 @@ class OpenAIEmbeddingProvider:
             # OpenAI client requires a string value, provide placeholder for custom endpoints
             api_key_value = "not-required"
 
-        client_kwargs = {"api_key": api_key_value, "timeout": self._timeout}
+        client_kwargs: dict[str, Any] = {
+            "api_key": api_key_value,
+            "timeout": self._timeout,
+        }
 
         if self._base_url:
             client_kwargs["base_url"] = self._base_url
@@ -474,12 +544,265 @@ class OpenAIEmbeddingProvider:
             return self._azure_deployment or self._model
         return self._model
 
+    def _trust_runtime_output_dims(self, base_url: str | None = None) -> bool:
+        """Return True when runtime behavior should override static model semantics.
+
+        Custom OpenAI-compatible endpoints may legally repurpose known OpenAI
+        model names while supporting different truncation behavior. For those
+        endpoints we validate only generic shape constraints here and let the
+        live response prove compatibility.
+        """
+        return not is_official_openai_endpoint(
+            self._base_url if base_url is None else base_url
+        )
+
+    def _validate_output_dims_config_for(
+        self,
+        *,
+        model: str,
+        base_url: str | None,
+        output_dims: int | None,
+        client_side_truncation: bool,
+    ) -> None:
+        """Validate output-dims semantics for a concrete config snapshot."""
+        validated_output_dims = validate_runtime_output_dims_config(
+            output_dims,
+            client_side_truncation,
+            model=model,
+            context="init-time validation",
+        )
+        if validated_output_dims is None:
+            return
+
+        if self._trust_runtime_output_dims(base_url) or model not in self._model_config:
+            return
+
+        cfg = self._model_config[model]
+        native_dims = cfg.get("native_dims", 1536)
+        if not cfg.get("matryoshka", False):
+            if validated_output_dims != native_dims:
+                raise EmbeddingConfigurationError(
+                    f"Model '{model}' does not support output_dims="
+                    f"{validated_output_dims}. Use the native dimension {native_dims}."
+                )
+            return
+
+        min_dims = cfg.get("min_dims", 1)
+        if not min_dims <= validated_output_dims <= native_dims:
+            raise EmbeddingConfigurationError(
+                f"Model '{model}' supports output_dims in the range "
+                f"{min_dims}-{native_dims}, got {validated_output_dims}."
+            )
+
+    def _validate_output_dims_config(self) -> None:
+        """Validate output_dims config and reject missing dims for client-side truncation."""
+        self._validate_output_dims_config_for(
+            model=self._model,
+            base_url=self._base_url,
+            output_dims=self._output_dims,
+            client_side_truncation=self._client_side_truncation,
+        )
+
+    def _reset_runtime_output_dims_state(self) -> None:
+        """Clear runtime-derived dimension caches after config changes."""
+        self._discovered_native_dims = None
+        self._warned_default_dims = False
+
+    def _build_embedding_request_kwargs(
+        self, texts: list[str], timeout: int
+    ) -> dict[str, Any]:
+        """Build embedding request kwargs for the current truncation mode.
+
+        Official OpenAI endpoints only get ``dimensions`` when the published
+        model contract supports server-side truncation. Custom endpoints are
+        trusted instead: if users ask for server-side truncation, pass it
+        through and let the live response validate the contract.
+        """
+        embed_kwargs: dict[str, Any] = {
+            "model": self._get_deployment_model(),
+            "input": texts,
+            "timeout": timeout,
+        }
+        output_dims = self._validate_runtime_output_dims_config()
+        dim_param = build_dimension_request_param(
+            output_dims, self._client_side_truncation
+        )
+        if (
+            dim_param is not None
+            and not self._trust_runtime_output_dims()
+            and self._model in self._model_config
+            and not self._model_config[self._model].get(
+                "matryoshka", False
+            )
+        ):
+            dim_param = None
+        if dim_param is not None:
+            embed_kwargs["dimensions"] = dim_param
+        return embed_kwargs
+
+    def _validate_runtime_output_dims_config(self) -> int | None:
+        """Validate embed-time output_dims config for paths that skip init checks.
+
+        Unknown/custom OpenAI models intentionally skip init-time validation
+        so advanced users can point at compatible endpoints. Embed-time
+        validation turns invalid configs into EmbeddingConfigurationError
+        before request dispatch.
+        """
+        return validate_runtime_output_dims_config(
+            self._output_dims,
+            self._client_side_truncation,
+            model=self._model,
+            context="runtime truncation",
+        )
+
+    def _validate_client_side_truncation_runtime_config(
+        self, raw_dim: int, output_dims: int
+    ) -> int:
+        """Return a validated output_dims for runtime client-side truncation.
+
+        Args:
+            raw_dim: Native dimension from the API response.
+            output_dims: Positive validated target dimension from embed-time config.
+
+        Raises:
+            EmbeddingDimensionError: If output_dims exceeds the API-returned
+                raw dimension.
+        """
+        if output_dims > raw_dim:
+            raise EmbeddingDimensionError(
+                f"client_side_truncation output_dims={output_dims} exceeds "
+                f"API response dimension {raw_dim} for model '{self._model}'"
+            )
+        return output_dims
+
+    def _expected_validation_response_dims(self) -> int:
+        """Expected API response dimension when not in the trusted-runtime path.
+
+        Returns native_dims for client-side truncation, else dims
+        (which reflects output_dims if configured, or model-native dims).
+        """
+        return self.native_dims if self._client_side_truncation else self.dims
+
+    def _uses_static_model_dims(self) -> bool:
+        """Return True only when official OpenAI metadata is authoritative."""
+        return not self._trust_runtime_output_dims() and self._model in self._model_config
+
+    def _cache_runtime_native_dims(
+        self, actual_dims: int, *, server_side_truncation: bool
+    ) -> None:
+        """Cache native dims only when the response is known to be untruncated."""
+        # Race-safe: concurrent async tasks set the same value from the same
+        # API response. A double-write of the same int is harmless.
+        if self._discovered_native_dims is not None or server_side_truncation:
+            return
+        if self._trust_runtime_output_dims() or self._model not in self._model_config:
+            self._discovered_native_dims = actual_dims
+
+    def _required_output_dims_for_client_truncation(self) -> int:
+        """Return validated client-side truncation dims as a concrete int."""
+        output_dims = self._validate_runtime_output_dims_config()
+        if output_dims is None:
+            raise EmbeddingConfigurationError(
+                f"Model '{self._model}' has client_side_truncation=True but output_dims is not set."
+            )
+        return output_dims
+
+    def _validation_probe_matches_runtime_contract(self, response: Any) -> bool:
+        """Validate probe responses using the same dims rules as embed()."""
+        if len(response.data) != 1:
+            return False
+
+        actual_dims = len(response.data[0].embedding)
+        server_side_truncation = (
+            self._output_dims is not None and not self._client_side_truncation
+        )
+
+        if self._client_side_truncation:
+            output_dims = self._required_output_dims_for_client_truncation()
+            self._validate_client_side_truncation_runtime_config(
+                actual_dims, output_dims
+            )
+            self._cache_runtime_native_dims(
+                actual_dims,
+                server_side_truncation=server_side_truncation,
+            )
+            if self._trust_runtime_output_dims():
+                return True
+            return actual_dims == self.native_dims
+
+        self._cache_runtime_native_dims(
+            actual_dims,
+            server_side_truncation=server_side_truncation,
+        )
+        if self._trust_runtime_output_dims() and self._output_dims is None:
+            return True
+        return actual_dims == self._expected_validation_response_dims()
+
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
-        if self._model in self._model_config:
+        """Actual output dimension (reflects matryoshka config if set).
+
+        Returns a 1536 pre-discovery fallback until the first embed() call
+        discovers the runtime dimension for models whose static OpenAI
+        metadata is unavailable or intentionally bypassed for this endpoint.
+        """
+        if self._output_dims is not None:
+            return self._output_dims
+        if self._uses_static_model_dims():
             return self._model_config[self._model]["dims"]
+        if self._discovered_native_dims is not None:
+            return self._discovered_native_dims
+        if not self._warned_default_dims:
+            self._warned_default_dims = True
+            logger.warning(
+                f"Using default dims=1536 for model '{self._model}' until "
+                "first embed() call discovers the runtime dimension for "
+                "this endpoint."
+            )
         return 1536  # Default for most OpenAI models
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension.
+
+        Custom OpenAI-compatible endpoints become runtime-authoritative after
+        the first untruncated response instead of reusing OpenAI's published
+        metadata for the same model name.
+        """
+        if self._uses_static_model_dims():
+            return self._model_config[self._model].get("native_dims", 1536)
+        if self._discovered_native_dims is not None:
+            return self._discovered_native_dims
+        return 1536
+
+    @property
+    def supported_dimensions(self) -> Sequence[int]:
+        """Valid output dimensions for this model.
+
+        Matryoshka models return ``range()`` for efficiency.
+        Use ``in`` for membership checks, not equality.
+        """
+        if self._uses_static_model_dims():
+            cfg = self._model_config[self._model]
+            if cfg.get("matryoshka", False):
+                min_dims = cfg.get("min_dims", 1)
+                native = cfg.get("native_dims", 1536)
+                return range(min_dims, native + 1)
+            return [self.native_dims]
+        return build_runtime_supported_dimensions(
+            self._discovered_native_dims,
+            self._client_side_truncation,
+        )
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        return self._output_dims
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
+        return self._client_side_truncation
 
     @property
     def distance(self) -> str:
@@ -513,6 +836,8 @@ class OpenAIEmbeddingProvider:
             timeout=self._timeout,
             retry_attempts=self._retry_attempts,
             retry_delay=self._retry_delay,
+            output_dims=self.output_dims,
+            client_side_truncation=self.client_side_truncation,
         )
 
     @property
@@ -550,31 +875,40 @@ class OpenAIEmbeddingProvider:
             self._client = None
         logger.info("OpenAI embedding provider shutdown")
 
+    def _endpoint_requires_api_key(self) -> bool:
+        """Return True when the endpoint type mandates an API key.
+
+        Azure and official OpenAI endpoints require authentication;
+        custom OpenAI-compatible endpoints (Ollama, vLLM, etc.) do not.
+        """
+        return is_azure_openai_endpoint(self._azure_endpoint) or is_official_openai_endpoint(
+            self._base_url
+        )
+
     def is_available(self) -> bool:
         """Check if the provider is available and properly configured."""
         if not OPENAI_AVAILABLE:
             return False
-
-        # Azure OpenAI always requires API key and api_version
+        if not self._endpoint_requires_api_key():
+            return True
         if is_azure_openai_endpoint(self._azure_endpoint):
             return self._api_key is not None and self._api_version is not None
-
-        # Import the utility function (following existing pattern)
-        from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
-
-        # Use the same logic as _ensure_client() and config validation
-        if is_official_openai_endpoint(self._base_url):
-            return self._api_key is not None
-        else:
-            # Custom endpoints don't require API key
-            return True
+        return self._api_key is not None
 
     async def health_check(self) -> dict[str, Any]:
         """Perform health check and return status information."""
-        status = {
+        auth_required = self._endpoint_requires_api_key()
+        auth_configured = True
+        if auth_required:
+            auth_configured = self._api_key is not None
+            if is_azure_openai_endpoint(self._azure_endpoint):
+                auth_configured = auth_configured and self._api_version is not None
+        status: dict[str, Any] = {
             "provider": self.name,
             "model": self.model,
             "available": self.is_available(),
+            "authentication_required": auth_required,
+            "authentication_configured": auth_configured,
             "api_key_configured": self._api_key is not None,
             "client_initialized": self._client is not None,
             "errors": [],
@@ -583,10 +917,10 @@ class OpenAIEmbeddingProvider:
         if not self.is_available():
             if not OPENAI_AVAILABLE:
                 status["errors"].append("OpenAI package not installed")
-            if not self._api_key:
+            if auth_required and not self._api_key:
                 status["errors"].append("API key not configured")
-            if not self._client:
-                status["errors"].append("Client not initialized")
+            if is_azure_openai_endpoint(self._azure_endpoint) and not self._api_version:
+                status["errors"].append("API version not configured")
             return status
 
         try:
@@ -613,6 +947,9 @@ class OpenAIEmbeddingProvider:
         try:
             # Always use token-aware batching
             return await self.embed_batch(validated_texts)
+
+        except EmbeddingProviderError:
+            raise  # Domain errors (dim mismatch, config) — not transient failures
 
         except Exception as e:
             self._usage_stats["errors"] += 1
@@ -657,8 +994,8 @@ class OpenAIEmbeddingProvider:
             return []
 
         # Use token-aware batching
-        all_embeddings = []
-        current_batch = []
+        all_embeddings: list[list[float]] = []
+        current_batch: list[str] = []
         current_tokens = 0
         token_limit = self.get_model_token_limit() - 100  # Safety margin
 
@@ -717,17 +1054,19 @@ class OpenAIEmbeddingProvider:
                 )
 
                 response = await self._client.embeddings.create(
-                    model=self._get_deployment_model(),
-                    input=texts,
-                    timeout=self._timeout,
+                    **self._build_embedding_request_kwargs(texts, self._timeout)
                 )
 
                 # Extract embeddings from response, sorted by original input order
                 # OpenAI API does not guarantee response order - each data object
                 # has an 'index' field indicating its position in the input array
                 embeddings: list[list[float] | None] = [None] * len(texts)
+                raw_dim: int | None = None
                 for data in response.data:
-                    embeddings[data.index] = data.embedding
+                    embedding = data.embedding
+                    if raw_dim is None:
+                        raw_dim = len(embedding)
+                    embeddings[data.index] = embedding
 
                 # Validate all indices were filled (defensive check)
                 if None in embeddings:
@@ -736,6 +1075,22 @@ class OpenAIEmbeddingProvider:
                         f"OpenAI API returned incomplete embeddings, missing indices: {missing}"
                     )
 
+                # Client-side truncation is the escape hatch for custom endpoints
+                # that ignore/don't support OpenAI's dimensions param, so validate
+                # the runtime config explicitly instead of relying on cast()/TypeError.
+                if self._client_side_truncation:
+                    output_dims = self._validate_client_side_truncation_runtime_config(
+                        cast(int, raw_dim),
+                        self._required_output_dims_for_client_truncation(),
+                    )
+                    logger.debug(
+                        f"Applying client-side truncation: {cast(int, raw_dim)}→{output_dims}"
+                    )
+                    truncated_embeddings = apply_client_side_truncation(
+                        cast(list[list[float]], embeddings), output_dims
+                    )
+                    embeddings = cast(list[list[float] | None], truncated_embeddings)
+
                 # Update usage statistics
                 self._usage_stats["requests_made"] += 1
                 self._usage_stats["embeddings_generated"] += len(embeddings)
@@ -743,7 +1098,29 @@ class OpenAIEmbeddingProvider:
                     self._usage_stats["tokens_used"] += response.usage.total_tokens
 
                 logger.debug(f"Successfully generated {len(embeddings)} embeddings")
+
+                # Discover native dims and validate output dims (INV-1).
+                # Custom endpoints may reuse official model names, so runtime
+                # discovery must stay authoritative whenever the response is
+                # known to be untruncated.
+                actual_dims = len(cast(list[float], embeddings[0]))
+                server_side_truncation = (
+                    self._output_dims is not None and not self._client_side_truncation
+                )
+                self._cache_runtime_native_dims(
+                    cast(int, raw_dim),
+                    server_side_truncation=server_side_truncation,
+                )
+                if self._discovered_native_dims == raw_dim and not server_side_truncation:
+                    logger.debug(
+                        f"Discovered native embedding dimension: {self._discovered_native_dims}"
+                    )
+                validate_embedding_dims(actual_dims, self.dims, model=self._model)
+
                 return cast(list[list[float]], embeddings)
+
+            except EmbeddingProviderError:
+                raise
 
             except Exception as rate_error:
                 if (
@@ -775,9 +1152,7 @@ class OpenAIEmbeddingProvider:
                         if m:
                             retry_after = min(float(m.group(1)), 120.0)
                     if retry_after is None:
-                        retry_after = min(
-                            self._retry_delay * (2**attempt), 120.0
-                        )
+                        retry_after = min(self._retry_delay * (2**attempt), 120.0)
                     jitter = random.uniform(0, min(retry_after * 0.1, 5.0))
                     total_delay = retry_after + jitter
                     if attempt < self._retry_attempts - 1:
@@ -827,7 +1202,7 @@ class OpenAIEmbeddingProvider:
                     )
                 ):
                     # Log detailed connection error information
-                    error_details = {
+                    error_details: dict[str, Any] = {
                         "error_type": type(rate_error).__name__,
                         "error_message": str(rate_error),
                         "base_url": self._base_url,
@@ -933,6 +1308,9 @@ class OpenAIEmbeddingProvider:
             "provider": self.name,
             "model": self.model,
             "dimensions": self.dims,
+            "native_dims": self.native_dims,
+            "output_dims": self.output_dims,
+            "client_side_truncation": self.client_side_truncation,
             "distance_metric": self.distance,
             "batch_size": self.batch_size,
             "max_tokens": self.max_tokens,
@@ -952,10 +1330,33 @@ class OpenAIEmbeddingProvider:
             "errors": 0,
         }
 
-    def update_config(self, **kwargs) -> None:
+    def update_config(self, **kwargs: Any) -> None:
         """Update provider configuration."""
+        next_model = kwargs.get("model", self._model)
+        next_base_url = kwargs.get("base_url", self._base_url)
+        next_output_dims = self._output_dims
+        if "output_dims" in kwargs:
+            next_output_dims = validate_positive_output_dims(
+                kwargs["output_dims"], model=next_model
+            )
+        next_client_side_truncation = kwargs.get(
+            "client_side_truncation", self._client_side_truncation
+        )
+        if {
+            "model",
+            "base_url",
+            "output_dims",
+            "client_side_truncation",
+        } & kwargs.keys():
+            self._validate_output_dims_config_for(
+                model=next_model,
+                base_url=next_base_url,
+                output_dims=next_output_dims,
+                client_side_truncation=next_client_side_truncation,
+            )
+
         if "model" in kwargs:
-            self._model = kwargs["model"]
+            self._model = next_model
         if "batch_size" in kwargs:
             self._batch_size = kwargs["batch_size"]
         if "timeout" in kwargs:
@@ -968,14 +1369,18 @@ class OpenAIEmbeddingProvider:
             self._max_tokens = kwargs["max_tokens"]
         if "api_key" in kwargs:
             self._api_key = kwargs["api_key"]
-            # Reset client to force re-initialization with new API key
             self._client = None
             self._client_initialized = False
         if "base_url" in kwargs:
-            self._base_url = kwargs["base_url"]
-            # Reset client to force re-initialization with new base URL
+            self._base_url = next_base_url
             self._client = None
             self._client_initialized = False
+        if "output_dims" in kwargs:
+            self._output_dims = next_output_dims
+        if "client_side_truncation" in kwargs:
+            self._client_side_truncation = next_client_side_truncation
+        if {"model", "base_url"} & kwargs.keys():
+            self._reset_runtime_output_dims_state()
 
     def get_supported_distances(self) -> list[str]:
         """Get list of supported distance metrics."""
@@ -996,20 +1401,26 @@ class OpenAIEmbeddingProvider:
         return 8191  # Default OpenAI limit
 
     async def validate_api_key(self) -> bool:
-        """Validate API key with the service."""
-        if not self._client or not self._api_key:
+        """Validate connectivity (and API key where required) with the service."""
+        if self._endpoint_requires_api_key() and not self._api_key:
             return False
 
         try:
-            # Test with a minimal request
+            await self._ensure_client()
+            if not self._client:
+                return False
             response = await self._client.embeddings.create(
-                model=self._get_deployment_model(), input=["test"], timeout=5
+                **self._build_embedding_request_kwargs(["test"], 5)
             )
-            return (
-                len(response.data) == 1 and len(response.data[0].embedding) == self.dims
-            )
+            return self._validation_probe_matches_runtime_contract(response)
+        except EmbeddingDimensionError as e:
+            logger.error(f"OpenAI embedding validation failed (dimension mismatch): {e}")
+            return False
+        except EmbeddingConfigurationError as e:
+            logger.error(f"OpenAI embedding validation failed (configuration error): {e}")
+            return False
         except Exception as e:
-            logger.error(f"API key validation failed: {e}")
+            logger.error(f"OpenAI embedding validation failed: {e}")
             return False
 
     def get_rate_limits(self) -> dict[str, Any]:
@@ -1117,7 +1528,7 @@ class OpenAIEmbeddingProvider:
         elif format_to_use == "cohere":
             # Cohere format: requires model, uses "documents" field
             # Validation already done in __init__, so we know model is present
-            payload = {
+            payload: dict[str, Any] = {
                 "model": self._rerank_model,
                 "query": query,
                 "documents": documents,
@@ -1132,17 +1543,17 @@ class OpenAIEmbeddingProvider:
         else:  # auto mode
             # Try Cohere first if model is set, otherwise TEI
             if self._rerank_model:
-                payload = {
+                auto_payload: dict[str, Any] = {
                     "model": self._rerank_model,
                     "query": query,
                     "documents": documents,
                 }
                 if top_k is not None:
-                    payload["top_n"] = top_k
+                    auto_payload["top_n"] = top_k
                 logger.debug(
                     f"Auto-detecting format, trying Cohere first (model: {self._rerank_model})"
                 )
-                return payload
+                return auto_payload
             else:
                 logger.debug("Auto-detecting format, trying TEI first (no model set)")
                 return {"query": query, "texts": documents}
@@ -1242,6 +1653,8 @@ class OpenAIEmbeddingProvider:
                         query, batch_documents, top_k=None
                     )
                     break  # Success - exit retry loop
+                except EmbeddingProviderError:
+                    raise
                 except Exception as e:
                     # Classify error as retryable or not
                     error_str = str(e).lower()
@@ -1351,6 +1764,7 @@ class OpenAIEmbeddingProvider:
             rerank_endpoint = self._rerank_url
         else:
             # Relative path - combine with base_url
+            assert self._base_url is not None
             base_url = self._base_url.rstrip("/")
             rerank_url = self._rerank_url.lstrip("/")
             rerank_endpoint = f"{base_url}/{rerank_url}"
@@ -1363,7 +1777,7 @@ class OpenAIEmbeddingProvider:
             # Make API request with timeout using httpx directly
             # since OpenAI client doesn't support custom endpoints well
 
-            client_kwargs = {"timeout": self._timeout}
+            client_kwargs: dict[str, Any] = {"timeout": self._timeout}
             if not self._effective_rerank_ssl_verify(rerank_endpoint):
                 client_kwargs["verify"] = False
                 logger.debug(
@@ -1479,15 +1893,17 @@ class OpenAIEmbeddingProvider:
             )
             return []
 
+        normalized_response = cast(dict[str, Any], response_data)
+
         # Validate response has results
         # Note: Bare array responses are normalized to {"results": [...]} before this point
-        if "results" not in response_data:
+        if "results" not in normalized_response:
             raise ValueError(
                 "Invalid rerank response: missing 'results' field. "
                 "Expected dict with 'results' key or bare array (auto-normalized)."
             )
 
-        results = response_data["results"]
+        results = normalized_response["results"]
         if not isinstance(results, list):
             raise ValueError("Invalid rerank response: 'results' must be a list")
 
