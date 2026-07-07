@@ -204,6 +204,17 @@ ignore = []
 [tool.ruff.lint.per-file-ignores]
 # Tool descriptions are LLM-facing strings — wrapping them breaks formatting
 "chunkhound/mcp_server/tools.py" = ["E501"]
+# Deferred imports after conditional checks or lazy-load patterns
+"chunkhound/providers/database/duckdb_provider.py" = ["E402"]
+"chunkhound/providers/database/duckdb/connection_manager.py" = ["E402"]
+"chunkhound/registry/__init__.py" = ["E402"]
+"chunkhound/services/batch_processor.py" = ["E402"]
+"chunkhound/parsers/mappings/html.py" = ["E402"]
+"chunkhound/services/deep_research_service.py" = ["E402"]
+"chunkhound/services/research/v1/__init__.py" = ["E402"]
+# Test files with pytest.importorskip() patterns
+"tests/test_duckdb_compaction.py" = ["E402"]
+"tests/test_mcp_search_markdown.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.10"
