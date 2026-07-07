@@ -20,6 +20,9 @@ from .synthesis import (
 from .synthesis import USER_TEMPLATE as SYNTHESIS_USER
 from .synthesis import get_system_message as SYNTHESIS_SYSTEM_BUILDER
 from .websearch_expansion import (
+    FOLLOWUP_EXAMPLES as WEBSEARCH_EXPANSION_FOLLOWUP_EXAMPLES,
+)
+from .websearch_expansion import (
     INSTRUCTIONS_BASELINE as WEBSEARCH_EXPANSION_INSTRUCTIONS_BASELINE,
 )
 from .websearch_expansion import (
@@ -46,4 +49,5 @@ __all__ = [
     "WEBSEARCH_EXPANSION_USER",
     "WEBSEARCH_EXPANSION_INSTRUCTIONS_BASELINE",
     "WEBSEARCH_EXPANSION_INSTRUCTIONS_FOLLOWUP",
+    "WEBSEARCH_EXPANSION_FOLLOWUP_EXAMPLES",
 ]

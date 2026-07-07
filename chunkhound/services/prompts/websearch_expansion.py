@@ -3,10 +3,12 @@
 
 Emits exactly 3 web-optimized query variants plus a normalized ``search_query``
 form. Two-branch template: baseline (single-shot) or follow-up (previous-query
-aware). The follow-up-mode ``context_lines``/``instructions_block``/
-``follow_up_examples`` slots are populated in Python by
-``chunkhound/utils/websearch_expansion.py`` so this file stays free of
-runtime conditionals.
+aware). All prompt text lives here as plain-string constants; the builder in
+``chunkhound/utils/websearch_expansion.py`` selects between the baseline and
+follow-up variants and resolves ``{current_year}`` on the follow-up examples,
+so each slot value reaching the outer template is fully-substituted plain
+text — mirroring the ``build_follow_up_section`` pattern in
+``chunkhound/services/prompts/synthesis.py``.
 """
 
 SYSTEM_MESSAGE = "Rewrite the user query into effective DuckDuckGo search queries."
@@ -32,7 +34,7 @@ Transform the input into effective DuckDuckGo search queries by:
 
 <EXAMPLES>
 {follow_up_examples}Example 1 - Docker container orchestration:
-Query: "Docker container orchestration"
+<query>Docker container orchestration</query>
 Output: {{
   "queries": [
     "Docker container orchestration",
@@ -43,7 +45,7 @@ Output: {{
 }}
 
 Example 2 - Natural language question:
-Query: "What are the best ways to optimize React performance?"
+<query>What are the best ways to optimize React performance?</query>
 Output: {{
   "queries": [
     "React performance optimization techniques {current_year}",
@@ -54,7 +56,7 @@ Output: {{
 }}
 
 Example 3 - Keyword dump:
-Query: "python async await concurrency parallelism"
+<query>python async await concurrency parallelism</query>
 Output: {{
   "queries": [
     "python async await concurrency patterns",
@@ -103,3 +105,34 @@ When previous_query exists:
 
 IMPORTANT: Always generate EXACTLY 3 queries - no more, no less.
 </INSTRUCTIONS>"""
+
+
+# Prepended to `<EXAMPLES>` in follow-up mode; rendered once via `.format()`
+# in the utils builder, then substituted verbatim into the outer template.
+FOLLOWUP_EXAMPLES = """Example (with previous context) — React:
+<previous_query>React hooks best practices 2024</previous_query>
+<query>React hooks performance optimization</query>
+Analysis: "React hooks" overlaps, "performance optimization" is new
+Output: {{
+  "queries": [
+    "React hooks performance optimization",
+    "useMemo useCallback performance patterns {current_year}",
+    "React rendering optimization strategies {current_year}"
+  ],
+  "search_query": "React hooks performance optimization"
+}}
+
+Example (with previous context) — Node:
+<previous_query>node js memory leak production</previous_query>
+<query>chrome devtools heap snapshot nodejs</query>
+Analysis: "nodejs" and "heap memory" overlap, "chrome devtools heap snapshot" is new
+Output: {{
+  "queries": [
+    "chrome devtools heap snapshot nodejs",
+    "chrome devtools heap profiling techniques {current_year}",
+    "memory snapshot interpretation guide nodejs"
+  ],
+  "search_query": "chrome devtools heap snapshot nodejs"
+}}
+
+"""

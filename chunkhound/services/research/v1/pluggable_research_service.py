@@ -131,10 +131,10 @@ class PluggableResearchService(ProgressEmitterMixin):
 
         Args:
             query: Research question to investigate
-            previous_query: Internal single-hop chaining hook; only the
-                websearch chain populates it. When set, the synthesis engine
-                frames map/reduce/single-pass outputs in the prior topic's
-                context. Empty / None means un-chained (baseline path).
+            previous_query: Single-hop chaining hook populated only by the
+                websearch chaining path. When set, the synthesis stage frames
+                map/reduce/single-pass outputs in the prior topic's context.
+                Empty / None means un-chained (baseline path).
 
         Returns:
             Dictionary with answer and metadata

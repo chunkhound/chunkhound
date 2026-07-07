@@ -6,7 +6,7 @@ Covers:
 - Per-variant quote-preservation filtering with pad-based recovery
 - ``search_query`` normalization: present / empty / missing / non-string /
   whitespace-only — every non-useful shape collapses to raw ``query``.
-- ``previous_query`` steering: ``Previous Query:`` line inside
+- ``previous_query`` steering: ``<previous_query>`` tag inside
   ``<CURRENT_CONTEXT>``, empty-string coercion, quoted-previous-query
   survival through the prompt.
 """
@@ -271,7 +271,7 @@ def test_previous_query_appears_in_prompt() -> None:
         )
     )
     rendered = provider.calls[0]["prompt"]
-    assert 'Previous Query: "prior topic"' in rendered
+    assert "<previous_query>prior topic</previous_query>" in rendered
 
 
 def test_baseline_prompt_omits_previous_query_line() -> None:
@@ -279,7 +279,7 @@ def test_baseline_prompt_omits_previous_query_line() -> None:
     llm = _FakeLLMManager(provider)
     _run(we_mod.expand_web_queries("current only", llm))
     rendered = provider.calls[0]["prompt"]
-    assert "Previous Query:" not in rendered
+    assert "<previous_query>" not in rendered
 
 
 def test_empty_previous_query_treated_as_none() -> None:
@@ -287,7 +287,7 @@ def test_empty_previous_query_treated_as_none() -> None:
     llm = _FakeLLMManager(provider)
     _run(we_mod.expand_web_queries("current only", llm, previous_query=""))
     rendered = provider.calls[0]["prompt"]
-    assert "Previous Query:" not in rendered
+    assert "<previous_query>" not in rendered
 
 
 def test_quoted_previous_query_survives_in_prompt() -> None:
@@ -295,7 +295,8 @@ def test_quoted_previous_query_survives_in_prompt() -> None:
 
     The `_preserves_quotes` filter only guards the current `query` — this
     test locks the guarantee that at minimum the raw quoted text of
-    `previous_query` reaches the LLM.
+    `previous_query` reaches the LLM. Tag delimiters (not quotes) frame the
+    value so embedded caller quotes don't collide with the delimiter.
     """
     provider = _FakeProvider({"queries": ["a", "b", "c"], "search_query": "hello"})
     llm = _FakeLLMManager(provider)
@@ -307,6 +308,6 @@ def test_quoted_previous_query_survives_in_prompt() -> None:
         )
     )
     rendered = provider.calls[0]["prompt"]
-    # Outer quotes come from the template's `Previous Query: "{previous_query}"`
-    # slot, inner quotes come from the caller's input.
-    assert 'Previous Query: ""DuckDB performance tuning""' in rendered
+    assert (
+        '<previous_query>"DuckDB performance tuning"</previous_query>' in rendered
+    )

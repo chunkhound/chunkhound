@@ -34,10 +34,9 @@ async def run_research(
 ) -> None:
     """Run deep_research_impl with TreeProgressDisplay and print result.
 
-    ``previous_query`` is an internal single-hop chaining hook used only by
-    the ``_quickresearch`` subprocess path (websearch chain). The visible
-    ``chunkhound research`` CLI never sets it and it is hidden from
-    ``code_research``'s MCP schema via the skip-list in ``mcp_server/tools.py``.
+    ``previous_query`` is the websearch chain's single-hop framing hook;
+    the ``chunkhound research`` CLI never sets it. See
+    ``deep_research_impl`` for schema-visibility details.
     """
     progress_output = (
         sys.stderr if os.environ.get("CHUNKHOUND_QUICKRESEARCH_QUIET") else sys.stdout

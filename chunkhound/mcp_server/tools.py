@@ -804,11 +804,12 @@ async def deep_research_impl(
         vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
 
     Note:
-        ``previous_query`` is an internal single-hop chaining hook consumed
-        only by the ``_quickresearch`` subprocess (websearch chain). It is
-        marked ``Annotated[..., InternalOnly()]`` so the schema generator
-        omits it from ``code_research``'s MCP schema, and is intentionally
-        absent from the ``Args:`` block above.
+        ``previous_query`` is the single-hop chaining hook for the websearch
+        chain, supplied only via the ``_quickresearch`` subprocess path. The
+        public entry point is the ``websearch`` MCP tool's ``previous_query``;
+        here it's marked ``Annotated[..., InternalOnly()]`` so the schema
+        generator omits it from ``code_research``'s MCP schema, and it's
+        intentionally absent from the ``Args:`` block above.
 
     Returns:
         Dict with answer and metadata

@@ -54,9 +54,14 @@ def _preserves_quotes(proc: str, originals: list[str]) -> bool:
 
 
 def _build_context_lines(query: str, previous_query: str | None) -> str:
+    # Tag delimiters (not quotes) so inputs containing double quotes don't
+    # produce malformed `""..."" ` sequences the LLM has to disambiguate.
     if previous_query:
-        return f'Query: "{query}"\nPrevious Query: "{previous_query}"'
-    return f'Query: "{query}"'
+        return (
+            f"<query>{query}</query>\n"
+            f"<previous_query>{previous_query}</previous_query>"
+        )
+    return f"<query>{query}</query>"
 
 
 def _build_instructions_block(previous_query: str | None) -> str:
@@ -68,36 +73,9 @@ def _build_instructions_block(previous_query: str | None) -> str:
 def _build_follow_up_examples(current_year: int, previous_query: str | None) -> str:
     if not previous_query:
         return ""
-    # f-string interpolation runs now; the returned literal `{` / `}` chars
-    # then pass through the outer `.format()` verbatim (substituted values are
-    # not re-parsed as format slots).
-    return f"""Example (with previous context) — React:
-Previous: "React hooks best practices 2024"
-Current: "React hooks performance optimization"
-Analysis: "React hooks" overlaps, "performance optimization" is new
-Output: {{
-  "queries": [
-    "React hooks performance optimization",
-    "useMemo useCallback performance patterns {current_year}",
-    "React rendering optimization strategies {current_year}"
-  ],
-  "search_query": "React hooks performance optimization"
-}}
-
-Example (with previous context) — Node:
-Previous: "node js memory leak production"
-Current: "chrome devtools heap snapshot nodejs"
-Analysis: "nodejs" and "heap memory" overlap, "chrome devtools heap snapshot" is new
-Output: {{
-  "queries": [
-    "chrome devtools heap snapshot nodejs",
-    "chrome devtools heap profiling techniques {current_year}",
-    "memory snapshot interpretation guide nodejs"
-  ],
-  "search_query": "chrome devtools heap snapshot nodejs"
-}}
-
-"""
+    return prompts.WEBSEARCH_EXPANSION_FOLLOWUP_EXAMPLES.format(
+        current_year=current_year
+    )
 
 
 async def expand_web_queries(
