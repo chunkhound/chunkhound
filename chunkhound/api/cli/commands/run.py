@@ -100,7 +100,10 @@ async def _handle_daemon_lock_conflict(
 
     formatter.info(f"Stopping daemon (pid={pid})…")
     if not await asyncio.to_thread(discovery.stop_daemon, timeout=10.0):
-        formatter.error(f"Daemon (pid={pid}) did not stop within 10 s. Aborting.")
+        formatter.error(
+            f"Daemon (pid={pid}) did not stop after a 10 s graceful timeout "
+            "plus force-kill fallback. Aborting."
+        )
         return False
     formatter.success("Daemon stopped.")
     return True

@@ -1,6 +1,7 @@
 """Tests for EmbeddingConfig.is_provider_configured() contract and provider creation."""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -62,6 +63,14 @@ class TestIsProviderConfigured:
 
     def test_voyageai_official_without_key(self):
         cfg = EmbeddingConfig(provider="voyageai", api_key=None)
+        assert cfg.is_provider_configured() is False
+
+    def test_voyageai_explicit_official_url_without_key(self):
+        cfg = EmbeddingConfig(
+            provider="voyageai",
+            base_url="https://api.voyageai.com/v1",
+            api_key=None,
+        )
         assert cfg.is_provider_configured() is False
 
     def test_voyageai_custom_endpoint_without_key(self):
@@ -139,6 +148,143 @@ async def test_openai_provider_initializes_custom_endpoint_without_api_key(
     assert provider.is_available() is True
     assert captured["api_key"] == "not-required"
     assert captured["base_url"] == "http://localhost:11434/v1"
+
+
+@pytest.mark.parametrize(
+    ("provider_kwargs", "expected"),
+    [
+        ({"model": "text-embedding-3-small", "api_key": None}, False),
+        (
+            {
+                "base_url": "http://localhost:11434/v1",
+                "model": "nomic-embed-text",
+                "api_key": None,
+            },
+            True,
+        ),
+        (
+            {
+                "azure_endpoint": "https://my-resource.openai.azure.com",
+                "api_key": None,
+                "api_version": "2024-02-01",
+                "model": "text-embedding-3-small",
+            },
+            False,
+        ),
+        (
+            {
+                "azure_endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "az-key",
+                "api_version": None,
+                "model": "text-embedding-3-small",
+            },
+            False,
+        ),
+    ],
+)
+def test_openai_provider_is_available_auth_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_kwargs: dict[str, object],
+    expected: bool,
+):
+    """Availability should follow the endpoint auth contract."""
+    monkeypatch.setattr(openai_provider_module, "OPENAI_AVAILABLE", True)
+
+    provider = OpenAIEmbeddingProvider(**provider_kwargs)
+
+    assert provider.is_available() is expected
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_health_check_reports_keyless_custom_endpoint_as_configured(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Health check should report auth as satisfied without inventing an API key."""
+    monkeypatch.setattr(openai_provider_module, "OPENAI_AVAILABLE", True)
+
+    provider = OpenAIEmbeddingProvider(
+        base_url="http://localhost:11434/v1",
+        model="nomic-embed-text",
+        api_key=None,
+    )
+    provider.embed_single = AsyncMock(return_value=[0.1, 0.2, 0.3])
+    provider._discovered_native_dims = 3
+
+    result = await provider.health_check()
+
+    assert result["available"] is True
+    assert result["authentication_required"] is False
+    assert result["authentication_configured"] is True
+    assert result["api_key_configured"] is False
+    assert result["errors"] == []
+    assert result["connectivity"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_health_check_reports_missing_official_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Official OpenAI health check should fail fast when the API key is missing."""
+    monkeypatch.setattr(openai_provider_module, "OPENAI_AVAILABLE", True)
+
+    provider = OpenAIEmbeddingProvider(
+        model="text-embedding-3-small",
+        api_key=None,
+    )
+
+    result = await provider.health_check()
+
+    assert result["available"] is False
+    assert result["authentication_required"] is True
+    assert result["authentication_configured"] is False
+    assert result["api_key_configured"] is False
+    assert "API key not configured" in result["errors"]
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_health_check_reports_missing_azure_api_version(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Azure health check should require API version in addition to the API key."""
+    monkeypatch.setattr(openai_provider_module, "OPENAI_AVAILABLE", True)
+
+    provider = OpenAIEmbeddingProvider(
+        azure_endpoint="https://my-resource.openai.azure.com",
+        api_key="az-key",
+        api_version=None,
+        model="text-embedding-3-small",
+    )
+
+    result = await provider.health_check()
+
+    assert result["available"] is False
+    assert result["authentication_required"] is True
+    assert result["authentication_configured"] is False
+    assert result["api_key_configured"] is True
+    assert "API version not configured" in result["errors"]
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_health_check_reports_missing_azure_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Azure health check should report missing API key explicitly."""
+    monkeypatch.setattr(openai_provider_module, "OPENAI_AVAILABLE", True)
+
+    provider = OpenAIEmbeddingProvider(
+        azure_endpoint="https://my-resource.openai.azure.com",
+        api_key=None,
+        api_version="2024-02-01",
+        model="text-embedding-3-small",
+    )
+
+    result = await provider.health_check()
+
+    assert result["available"] is False
+    assert result["authentication_required"] is True
+    assert result["authentication_configured"] is False
+    assert result["api_key_configured"] is False
+    assert "API key not configured" in result["errors"]
 
 
 @pytest.mark.asyncio

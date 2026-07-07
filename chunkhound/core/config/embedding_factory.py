@@ -81,6 +81,8 @@ class EmbeddingProviderFactory:
         rerank_url = config.get("rerank_url", "/rerank")
         rerank_format = config.get("rerank_format", "auto")
         rerank_batch_size = config.get("rerank_batch_size")
+        output_dims = config.get("output_dims")
+        client_side_truncation = config.get("client_side_truncation", False)
         ssl_verify = config.get("ssl_verify", True)
         rerank_ssl_verify = config.get("rerank_ssl_verify")
 
@@ -108,7 +110,9 @@ class EmbeddingProviderFactory:
                 f"Creating OpenAI provider: model={model}, "
                 f"base_url={base_url}, api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-                f"rerank_batch_size={rerank_batch_size}"
+                f"rerank_batch_size={rerank_batch_size}, "
+                f"output_dims={output_dims}, "
+                f"client_side_truncation={client_side_truncation}"
             )
 
         try:
@@ -120,6 +124,8 @@ class EmbeddingProviderFactory:
                 rerank_url=rerank_url,
                 rerank_format=rerank_format,
                 rerank_batch_size=rerank_batch_size,
+                output_dims=output_dims,
+                client_side_truncation=client_side_truncation,
                 ssl_verify=ssl_verify,
                 rerank_ssl_verify=rerank_ssl_verify,
                 api_version=api_version,
@@ -148,6 +154,8 @@ class EmbeddingProviderFactory:
         model = config.get("model")
         rerank_model = config.get("rerank_model")
         rerank_batch_size = config.get("rerank_batch_size")
+        output_dims = config.get("output_dims")
+        client_side_truncation = config.get("client_side_truncation", False)
         rerank_url = config.get("rerank_url")
         rerank_format = config.get("rerank_format", "auto")
         max_concurrent_batches = config.get("max_concurrent_batches")
@@ -182,6 +190,10 @@ class EmbeddingProviderFactory:
                 kwargs["rerank_model"] = rerank_model
             if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
+            if output_dims is not None:
+                kwargs["output_dims"] = output_dims
+            if client_side_truncation:
+                kwargs["client_side_truncation"] = True
             # rerank_url: resolve relative paths against base_url, then forward absolute URLs only
             if (
                 rerank_url
