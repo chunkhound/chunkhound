@@ -8,59 +8,14 @@ from loguru import logger
 
 from chunkhound.api.cli.utils import verify_database_exists
 from chunkhound.core.config.config import Config
-from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
-from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.mcp_server.tools import deep_research_impl
 
+from ..utils.provider_setup import setup_embedding_manager, setup_llm_manager
 from ..utils.rich_output import RichOutputFormatter
 from ..utils.tree_progress import TreeProgressDisplay
-
-
-def setup_embedding_llm(
-    formatter: RichOutputFormatter, config: Config
-) -> tuple[EmbeddingManager, LLMManager | None]:
-    """Set up embedding and LLM managers with error handling."""
-    embedding_manager = EmbeddingManager()
-
-    try:
-        if config.embedding:
-            provider = EmbeddingProviderFactory.create_provider(config.embedding)
-            embedding_manager.register_provider(provider, set_default=True)
-    except ValueError as e:
-        formatter.error(f"Embedding provider setup failed: {e}")
-        formatter.info(
-            "Configure an embedding provider via:\n"
-            "1. Create .chunkhound.json with embedding configuration, OR\n"
-            "2. Set CHUNKHOUND_EMBEDDING__API_KEY environment variable"
-        )
-        sys.exit(1)
-    except Exception as e:
-        formatter.error(f"Unexpected error setting up embedding provider: {e}")
-        logger.exception("Full error details:")
-        sys.exit(1)
-
-    llm_manager: LLMManager | None = None
-    try:
-        if config.llm:
-            utility_config, synthesis_config = config.llm.get_provider_configs()
-            llm_manager = LLMManager(utility_config, synthesis_config)
-    except (ValueError, ConfigurationError) as e:
-        formatter.error(f"LLM provider setup failed: {e}")
-        formatter.info(
-            "Configure an LLM provider via:\n"
-            "1. Create .chunkhound.json with llm configuration, OR\n"
-            "2. Set CHUNKHOUND_LLM_API_KEY environment variable"
-        )
-        sys.exit(1)
-    except Exception as e:
-        formatter.error(f"Unexpected error setting up LLM provider: {e}")
-        logger.exception("Full error details:")
-        sys.exit(1)
-
-    return embedding_manager, llm_manager
 
 
 async def run_research(
@@ -124,7 +79,8 @@ async def research_command(args: argparse.Namespace, config: Config) -> None:
         formatter.error(str(e))
         sys.exit(1)
 
-    embedding_manager, llm_manager = setup_embedding_llm(formatter, config)
+    embedding_manager = setup_embedding_manager(formatter, config)
+    llm_manager = setup_llm_manager(formatter, config)
 
     # Registry is configured in create_services().
     # Avoid double configuration here — opening the DB twice causes a self-lock.

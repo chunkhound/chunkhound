@@ -23,6 +23,7 @@ def test_git_wrapper_sets_sanitized_env(
         env=None,
         timeout=None,
         text=None,
+        capture_output=None,
     ):
         captured["args"] = args
         captured["cwd"] = cwd

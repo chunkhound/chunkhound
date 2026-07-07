@@ -108,7 +108,12 @@ def create_large_array_content(language: Language, item_count: int = 150) -> str
             if pkg_type == 0:
                 dependencies.append(f'"duckdb>={i % 3}.{i % 10}.0"')
             elif pkg_type == 1:
-                pkg = "tree-sitter-"["python", "rust", "go", "java"][i % 4]
+                pkg = [
+                    "tree-sitter-python",
+                    "tree-sitter-rust",
+                    "tree-sitter-go",
+                    "tree-sitter-java",
+                ][i % 4]
                 dependencies.append(
                     f'"{pkg}>={i % 2}.{i % 20}.0,<{(i % 2) + 1}.{(i % 20) + 5}.0"'
                 )

@@ -9,8 +9,9 @@ from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 
+from ..utils.provider_setup import setup_embedding_manager, setup_llm_manager
 from ..utils.rich_output import RichOutputFormatter
-from .research import run_research, setup_embedding_llm
+from .research import run_research
 
 _ORPHAN_POLL_INTERVAL = 2.0
 
@@ -82,7 +83,8 @@ async def quickresearch_command(args: argparse.Namespace, config: Config) -> Non
         # ignore knobs (workspace_gitignore_*, chignore_file) are de-facto inert.
         config.indexing.reset_user_include_exclude()
 
-        embedding_manager, llm_manager = setup_embedding_llm(formatter, config)
+        embedding_manager = setup_embedding_manager(formatter, config)
+        llm_manager = setup_llm_manager(formatter, config)
 
         # Single create_services call owns the only :memory: connection.
         # Unlike file-backed DBs (where a second connection hits the same data and

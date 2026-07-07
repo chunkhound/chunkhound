@@ -307,6 +307,8 @@ class TestStopPid:
             _time.sleep(0.1)  # give it a moment to start
             result = stop_pid(proc.pid, timeout=5.0)
             assert result is True
+            proc.wait(timeout=1.0)
+            assert proc.poll() is not None
         finally:
             try:
                 proc.kill()
@@ -338,29 +340,45 @@ class TestStopPid:
         mock_proc.terminate.assert_called_once()
         mock_proc.kill.assert_called_once()
 
-    def test_force_kill_uses_remaining_timeout_budget(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="signal.SIG_IGN is POSIX-only",
+    )
+    def test_force_kill_has_separate_deadline_on_exhausted_timeout(self):
+        """A process that ignores SIGTERM is killed via SIGKILL even when the
+        graceful timeout is very short — Phase 2 gets its own deadline
+        independent of what Phase 1 consumed."""
         from chunkhound.daemon.process import stop_pid
 
-        alive_states = iter([True, True, True])
-        monotonic_values = iter([0.0, 10.0, 10.0])
-        mock_proc = MagicMock()
-
-        monkeypatch.setattr(
-            "chunkhound.daemon.process.pid_alive", lambda pid: next(alive_states)
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-u",
+                "-c",
+                "import signal, sys, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "sys.stdout.write('ready\\n'); sys.stdout.flush(); "
+                "time.sleep(60)",
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
         )
-        monkeypatch.setattr(
-            "chunkhound.daemon.process.time.monotonic",
-            lambda: next(monotonic_values),
-        )
-        monkeypatch.setattr("chunkhound.daemon.process.time.sleep", lambda _: None)
-
-        with patch("psutil.Process", return_value=mock_proc):
-            assert stop_pid(12345, timeout=10.0) is False
-
-        mock_proc.terminate.assert_called_once()
-        mock_proc.kill.assert_called_once()
+        try:
+            assert proc.stdout is not None
+            assert proc.stdout.readline().strip() == "ready"
+            # timeout=0.5 means Phase 1 has only 0.5s for SIGTERM.
+            # SIGTERM is ignored, so Phase 2's 2s deadline must still
+            # succeed independently.
+            result = stop_pid(proc.pid, timeout=0.5)
+            assert result is True
+            proc.wait(timeout=1.0)
+            assert proc.poll() is not None
+        finally:
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +558,8 @@ class TestStopDaemon:
         try:
             result = discovery.stop_daemon(timeout=5.0)
             assert result is True
+            proc.wait(timeout=1.0)
+            assert proc.poll() is not None
             assert discovery.read_lock() is None
         finally:
             try:

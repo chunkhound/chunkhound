@@ -153,9 +153,8 @@ async function getUserById(userId) {
 }
 
 async function insertUser(name, email, age) {
-    const query = "INSERT INTO users (name, email, age)"
-        + " VALUES ($1, $2, $3) RETURNING id";
-    const result = await pool.query(query, [name, email, age]);
+    const q = "INSERT INTO users (name, email, age) VALUES ($1, $2, $3) RETURNING id";
+    const result = await pool.query(q, [name, email, age]);
     return result.rows[0].id;
 }
 
