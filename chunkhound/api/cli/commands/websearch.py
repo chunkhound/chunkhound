@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -25,8 +26,19 @@ from ..utils.provider_setup import setup_llm_manager
 from ..utils.rich_output import RichOutputFormatter
 
 
-def _build_quickresearch_argv(args: argparse.Namespace, tmpdir: Path, config: Config) -> list[str]:
-    """Build argv to invoke _quickresearch as a subprocess, forwarding relevant args."""
+def _build_quickresearch_argv(
+    args: argparse.Namespace,
+    tmpdir: Path,
+    config: Config,
+    query: str,
+    previous_query: str | None,
+) -> list[str]:
+    """Build argv to invoke _quickresearch as a subprocess, forwarding relevant args.
+
+    ``query`` accepts the normalized ``search_query`` (falls back to raw); the
+    caller passes it explicitly so ``args.query`` stays untouched for error
+    paths. ``previous_query`` is likewise pre-coerced by the caller.
+    """
     from ..parsers.common_arguments import build_forwarded_argv
     from ..parsers.quickresearch_parser import add_quickresearch_subparser
 
@@ -34,20 +46,26 @@ def _build_quickresearch_argv(args: argparse.Namespace, tmpdir: Path, config: Co
     qr_parser = add_quickresearch_subparser(_tmp.add_subparsers())
 
     cmd = build_quickresearch_argv_core(
-        args.query, tmpdir, config, parent_pid=os.getpid()
+        query, tmpdir, config,
+        parent_pid=os.getpid(),
+        previous_query=previous_query,
     )
     cmd.extend(build_forwarded_argv(
         qr_parser,
         args,
         # path_filter: defensive — forwarding would zero out results (flat tmpdir).
         # parent_pid: emitted explicitly above; skip to avoid double-forwarding.
-        skip_dests={"help", "path_filter", "config", "parent_pid"},
+        # previous_query: emitted explicitly above; skip to avoid double-forwarding.
+        skip_dests={"help", "path_filter", "config", "parent_pid", "previous_query"},
     ))
     return cmd
 
 
 async def websearch_command(args: argparse.Namespace, config: Config) -> None:
     """Fetch DuckDuckGo results for the given query."""
+    # Empty-string → None coercion at the surface boundary, so every
+    # downstream consumer sees the two-valued "real string or None" contract.
+    previous_query = args.previous_query or None
     formatter = RichOutputFormatter(verbose=getattr(args, "verbose", False))
     llm_manager = setup_llm_manager(formatter, config)
 
@@ -58,9 +76,11 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         )
 
     try:
-        queries = await expand_web_queries(args.query, llm_manager)
+        expansion = await expand_web_queries(
+            args.query, llm_manager, previous_query=previous_query
+        )
         results = await search_multi(
-            queries,
+            expansion.queries,
             args.limit,
             formatter.progress_indicator,
             failure_callback=_on_query_failure,
@@ -103,7 +123,11 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         # subprocess wrapper is still the cleanest way to capture stdout for
         # path-rewriting and enforce the wall-clock timeout — using the same
         # path on both surfaces avoids divergence.
-        cmd = _build_quickresearch_argv(args, tmpdir, config)
+        cmd = _build_quickresearch_argv(
+            args, tmpdir, config,
+            query=expansion.search_query,
+            previous_query=previous_query,
+        )
         # QUIET routes the child's progress display to stderr (inherited here, so
         # the user still sees it live) and frees stdout to carry only the answer
         # we need to capture and rewrite.
@@ -131,4 +155,15 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         except subprocess.CalledProcessError as e:
             formatter.error(f"Research failed (exit {e.returncode})")
             sys.exit(e.returncode)
-    formatter.text_block(replace_paths_with_urls(result.stdout, mapping))
+    answer = replace_paths_with_urls(result.stdout, mapping)
+    current_query = expansion.search_query
+    # Surface-scoped chain footer: emit only the CLI incantation so users
+    # never see a tool-call form that isn't runnable at the shell.
+    # shlex.quote protects embedded double-quotes so quoted phrases in the
+    # search_query survive copy-paste — the whole point of _preserves_quotes.
+    footer = (
+        "\n\n---\n"
+        f'**Continue exploring:** Run `chunkhound websearch "[follow-up]" '
+        f'--previous-query {shlex.quote(current_query)}`'
+    )
+    formatter.text_block(answer + footer)

@@ -41,6 +41,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         "verbose": False,
         "debug": False,
         "config": None,
+        "previous_query": None,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -75,7 +76,7 @@ def patched(monkeypatch):
         created.append(p)
         return p
 
-    def fake_argv(args, tmpdir, config):
+    def fake_argv(args, tmpdir, config, query, previous_query):
         return ["/bin/true"]
 
     monkeypatch.setattr(ws_mod, "_build_quickresearch_argv", fake_argv)
@@ -293,8 +294,223 @@ def test_build_quickresearch_argv_unit_boolean_optional(tmp_path) -> None:
     from chunkhound.core.config.config import Config
 
     args = _make_args(llm_ssl_verify=False, ssl_verify=True)
-    cmd = ws_mod._build_quickresearch_argv(args, tmp_path, Config())
+    cmd = ws_mod._build_quickresearch_argv(
+        args, tmp_path, Config(), query="q", previous_query=None
+    )
     assert "--no-llm-ssl-verify" in cmd
     assert "--ssl-verify" in cmd
     assert "--llm-ssl-verify" not in cmd
     assert "True" not in cmd and "False" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# `--previous-query` chain plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_build_quickresearch_argv_previous_query_appended(tmp_path) -> None:
+    """`previous_query` becomes ``--previous-query <val>`` in subprocess argv."""
+    from chunkhound.core.config.config import Config
+
+    args = _make_args()
+    cmd = ws_mod._build_quickresearch_argv(
+        args, tmp_path, Config(),
+        query="normalized q",
+        previous_query="prior topic",
+    )
+    assert "--previous-query" in cmd
+    assert cmd[cmd.index("--previous-query") + 1] == "prior topic"
+
+
+def test_build_quickresearch_argv_omits_previous_query_when_none(tmp_path) -> None:
+    from chunkhound.core.config.config import Config
+
+    args = _make_args()
+    cmd = ws_mod._build_quickresearch_argv(
+        args, tmp_path, Config(), query="q", previous_query=None
+    )
+    assert "--previous-query" not in cmd
+
+
+def test_build_quickresearch_argv_normalized_query_replaces_positional(tmp_path) -> None:
+    """The positional ``query`` arg on _quickresearch is the normalized form."""
+    from chunkhound.core.config.config import Config
+
+    args = _make_args(query="raw user input")
+    cmd = ws_mod._build_quickresearch_argv(
+        args, tmp_path, Config(),
+        query="normalized form",
+        previous_query=None,
+    )
+    # The query positional is the third element after [python, -m, module,
+    # "_quickresearch"] — validate the normalized form landed there.
+    idx = cmd.index("_quickresearch")
+    assert cmd[idx + 1] == "normalized form"
+
+
+@pytest.mark.asyncio
+async def test_websearch_cli_previous_query_reaches_expansion(monkeypatch, patched) -> None:
+    """CLI --previous-query flows into ``expand_web_queries``."""
+    captured: dict[str, object] = {}
+
+    async def capturing_expand(query, llm_manager, previous_query=None):
+        captured["query"] = query
+        captured["previous_query"] = previous_query
+        from chunkhound.utils.websearch_expansion import WebExpansionResult
+        return WebExpansionResult(queries=[query], search_query=query)
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", capturing_expand)
+    monkeypatch.setattr(ws_core_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _noop_fetch_and_save)
+    monkeypatch.setattr(
+        ws_mod.subprocess, "run",
+        lambda cmd, **kw: type("R", (), {"returncode": 0, "stdout": ""})(),
+    )
+
+    await ws_mod.websearch_command(
+        _make_args(previous_query="prior"), config=None
+    )
+
+    assert captured["previous_query"] == "prior"
+
+
+@pytest.mark.asyncio
+async def test_websearch_cli_empty_previous_query_treated_as_none(
+    monkeypatch, patched
+) -> None:
+    """Empty ``--previous-query ''`` coerces to None at the surface boundary."""
+    captured: dict[str, object] = {}
+
+    async def capturing_expand(query, llm_manager, previous_query=None):
+        captured["previous_query"] = previous_query
+        from chunkhound.utils.websearch_expansion import WebExpansionResult
+        return WebExpansionResult(queries=[query], search_query=query)
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", capturing_expand)
+    monkeypatch.setattr(ws_core_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _noop_fetch_and_save)
+    monkeypatch.setattr(
+        ws_mod.subprocess, "run",
+        lambda cmd, **kw: type("R", (), {"returncode": 0, "stdout": ""})(),
+    )
+
+    await ws_mod.websearch_command(_make_args(previous_query=""), config=None)
+
+    assert captured["previous_query"] is None
+
+
+@pytest.mark.asyncio
+async def test_websearch_cli_subprocess_gets_normalized_search_query(
+    patched_capturing, monkeypatch
+) -> None:
+    """`_quickresearch` positional query is `search_query`, not raw input."""
+    from chunkhound.utils.websearch_expansion import WebExpansionResult
+
+    async def canned_expand(query, llm_manager, previous_query=None):
+        return WebExpansionResult(
+            queries=["v1", "v2", "v3"], search_query="normalized form"
+        )
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", canned_expand)
+
+    from chunkhound.core.config.config import Config
+    await ws_mod.websearch_command(
+        _make_args(query="raw user input"), config=Config()
+    )
+
+    cmd = patched_capturing["captured"]["cmd"]
+    idx = cmd.index("_quickresearch")
+    assert cmd[idx + 1] == "normalized form"
+
+
+@pytest.mark.asyncio
+async def test_websearch_cli_footer_uses_shell_form(patched_capturing, monkeypatch) -> None:
+    """CLI footer contains the shell command; NOT the MCP tool-call form."""
+    from chunkhound.utils.websearch_expansion import WebExpansionResult
+
+    async def canned_expand(query, llm_manager, previous_query=None):
+        return WebExpansionResult(
+            queries=["v1", "v2", "v3"], search_query="cur norm"
+        )
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", canned_expand)
+
+    def fake_run(cmd, **kwargs):
+        class _R:
+            returncode = 0
+            stdout = "answer body"
+        return _R()
+
+    monkeypatch.setattr(ws_mod.subprocess, "run", fake_run)
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        ws_mod.RichOutputFormatter,
+        "text_block",
+        lambda self, text: printed.append(text),
+    )
+
+    from chunkhound.core.config.config import Config
+    await ws_mod.websearch_command(_make_args(query="raw"), config=Config())
+
+    assert printed, "expected exactly one text_block call"
+    output = printed[-1]
+    # CLI shell-form incantation appears; MCP tool-call form does NOT.
+    # shlex.quote wraps "cur norm" in single quotes (contains a space).
+    assert (
+        "chunkhound websearch \"[follow-up]\" --previous-query 'cur norm'"
+        in output
+    )
+    assert "websearch(query:" not in output
+    # `Continue exploring:` marker survives — emitted unconditionally.
+    assert "Continue exploring:" in output
+
+
+@pytest.mark.asyncio
+async def test_websearch_cli_footer_shell_escapes_embedded_quotes(
+    patched_capturing, monkeypatch
+) -> None:
+    """CLI footer must survive a `search_query` that contains double quotes.
+
+    `_preserves_quotes` explicitly keeps quoted phrases through expansion;
+    naive f-string interpolation of `--previous-query "{current_query}"`
+    would break the shell command on copy-paste. shlex.quote fixes this.
+    """
+    from chunkhound.utils.websearch_expansion import WebExpansionResult
+
+    async def canned_expand(query, llm_manager, previous_query=None):
+        return WebExpansionResult(
+            queries=["v1", "v2", "v3"],
+            search_query='compare "React 19" vs Vue',
+        )
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", canned_expand)
+
+    def fake_run(cmd, **kwargs):
+        class _R:
+            returncode = 0
+            stdout = "answer body"
+        return _R()
+
+    monkeypatch.setattr(ws_mod.subprocess, "run", fake_run)
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        ws_mod.RichOutputFormatter,
+        "text_block",
+        lambda self, text: printed.append(text),
+    )
+
+    from chunkhound.core.config.config import Config
+    await ws_mod.websearch_command(_make_args(query="raw"), config=Config())
+
+    output = printed[-1]
+    # Extract the emitted --previous-query token and round-trip through the
+    # shell lexer — the parsed value must equal the original search_query.
+    import shlex
+    marker = "--previous-query "
+    tail = output[output.index(marker) + len(marker):]
+    # Emitted form terminates at the closing backtick of the footer.
+    emitted = tail.split("`", 1)[0].strip()
+    (parsed,) = shlex.split(emitted)
+    assert parsed == 'compare "React 19" vs Vue'

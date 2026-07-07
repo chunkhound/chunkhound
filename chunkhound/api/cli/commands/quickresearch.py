@@ -114,6 +114,11 @@ async def quickresearch_command(args: argparse.Namespace, config: Config) -> Non
             f"Researching {args.path}"
             + (f" (filter: {args.path_filter})" if args.path_filter else "")
         )
+        # Defensive re-coercion at the subprocess boundary: `argparse` treats
+        # an absent flag as None (fine), but a hand-crafted `--previous-query
+        # ''` argv would yield an empty string that should still mean "no
+        # chain".
+        previous_query = args.previous_query or None
         await run_research(
             services,
             embedding_manager,
@@ -122,6 +127,7 @@ async def quickresearch_command(args: argparse.Namespace, config: Config) -> Non
             args.path_filter,
             config,
             formatter,
+            previous_query=previous_query,
         )
     finally:
         if watchdog_stop is not None:

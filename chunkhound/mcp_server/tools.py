@@ -8,6 +8,7 @@ The registry pattern ensures consistent tool metadata and behavior.
 
 import asyncio
 import inspect
+import json
 import os
 import re
 import shutil
@@ -17,7 +18,16 @@ import urllib.error
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TypedDict, Union, cast, get_args, get_origin
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    TypedDict,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+)
 
 try:
     from typing import NotRequired  # type: ignore[attr-defined]
@@ -210,6 +220,16 @@ def _extract_param_descriptions_from_docstring(func: Callable) -> dict[str, str]
     return descriptions
 
 
+class InternalOnly:
+    """Marker for parameters that must be hidden from the MCP schema.
+
+    Use as ``Annotated[T, InternalOnly()]`` on an implementation parameter
+    that the function accepts but that MCP clients must never see in
+    ``tools/list``. ``_generate_json_schema_from_signature`` drops any
+    parameter carrying this marker before emitting the schema.
+    """
+
+
 def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
     """Generate JSON Schema from function signature.
 
@@ -238,13 +258,17 @@ def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
         ):
             continue
 
-        # Get type hint
-        type_hint = (
+        # Get type hint and detect Annotated[..., InternalOnly()] opt-out
+        annotation: Any = (
             param.annotation if param.annotation != inspect.Parameter.empty else Any
         )
+        if hasattr(annotation, "__metadata__"):
+            if any(isinstance(m, InternalOnly) for m in annotation.__metadata__):
+                continue
+            annotation = annotation.__origin__
 
         # Convert to JSON Schema type
-        schema = _python_type_to_json_schema_type(type_hint)
+        schema = _python_type_to_json_schema_type(annotation)
 
         # Add description if available from docstring
         if param_name in param_descriptions:
@@ -513,7 +537,10 @@ USE FOR:
 
 OUTPUT: {status, query_ready, scan_progress}"""
 
-WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, build a transient in-memory index over the fetched pages, and run deep research to produce a cited answer. Use when the question requires external documentation, library references, or up-to-date web content — not for searching the local codebase (use `code_research` for that). High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
+WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, build a transient in-memory index over the fetched pages, and run deep research to produce a cited answer. \
+Use when the question requires external documentation, library references, or up-to-date web content — not for searching the local codebase (use `code_research` for that). \
+For follow-up questions, pass the prior query as previous_query — the expander then targets new dimensions instead of re-exploring the same ground, and the synthesizer interprets the current question in the prior topic's context. \
+High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
 
 
 # =============================================================================
@@ -759,6 +786,7 @@ async def deep_research_impl(
     commit_hash: str | None = None,
     last_n_commits: int | None = None,
     vector_source: str = "diff",
+    previous_query: Annotated[str | None, InternalOnly()] = None,
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -774,6 +802,13 @@ async def deep_research_impl(
         commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
         last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
         vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
+
+    Note:
+        ``previous_query`` is an internal single-hop chaining hook consumed
+        only by the ``_quickresearch`` subprocess (websearch chain). It is
+        marked ``Annotated[..., InternalOnly()]`` so the schema generator
+        omits it from ``code_research``'s MCP schema, and is intentionally
+        absent from the ``Args:`` block above.
 
     Returns:
         Dict with answer and metadata
@@ -827,7 +862,7 @@ async def deep_research_impl(
         path_filter=path,
     )
 
-    result = await research_service.deep_research(query)
+    result = await research_service.deep_research(query, previous_query=previous_query)
     if truncation_warning:
         answer = result.get("answer", "")
         result["answer"] = f"> **Note:** {truncation_warning}\n\n{answer}"
@@ -847,6 +882,7 @@ async def websearch_impl(
     config: Config | None,
     query: str,
     limit: int = 30,
+    previous_query: str | None = None,
 ) -> str:
     """Search the web, fetch results, and run deep research over them.
 
@@ -863,6 +899,7 @@ async def websearch_impl(
         config: Application configuration; falls back to environment. Its
             source file (if any) is forwarded to the subprocess as --config.
         query: Natural-language or keyword query for DuckDuckGo.
+        previous_query: Previous query to build context and chain knowledge (optional).
         limit: Number of results to fetch. Clamped to [1, 100]. Default 30.
 
     Returns:
@@ -882,12 +919,15 @@ async def websearch_impl(
 
     if config is None:
         config = Config.from_environment()
+    # Empty-string → None coercion at the surface boundary, so every
+    # downstream consumer sees the two-valued "real string or None" contract.
+    previous_query = previous_query or None
 
     limit = clamp_limit(limit)
 
-    queries = await expand_web_queries(query, llm_manager)
+    expansion = await expand_web_queries(query, llm_manager, previous_query=previous_query)
     try:
-        results = await search_multi(queries, limit, None)
+        results = await search_multi(expansion.queries, limit, None)
     except urllib.error.URLError as e:
         raise MCPError(f"Web search failed: {e.reason}") from e
     if not results:
@@ -907,7 +947,9 @@ async def websearch_impl(
         )
 
         cmd = build_quickresearch_argv_core(
-            query, tmpdir, config, parent_pid=os.getpid()
+            expansion.search_query, tmpdir, config,
+            parent_pid=os.getpid(),
+            previous_query=previous_query,
         )
         # Scrub CHUNKHOUND_MCP_MODE so the child's RichOutputFormatter.error()
         # is not silenced — we rely on its stderr output to populate the
@@ -951,7 +993,17 @@ async def websearch_impl(
             "> - " + w.replace("\n", "\n> ") for w in warnings
         )
     ) if warnings else ""
-    return f"{answer}{warn_block}"
+    current_query = expansion.search_query
+    # Surface-scoped chain footer: emit only the MCP tool-call form so
+    # clients don't see a shell command they can't execute.
+    # json.dumps escapes embedded double-quotes so quoted phrases in the
+    # search_query survive copy-paste — the whole point of _preserves_quotes.
+    footer = (
+        "\n\n---\n"
+        f'**Continue exploring:** Use `websearch(query: "[follow-up]", '
+        f'previous_query: {json.dumps(current_query)})`'
+    )
+    return f"{answer}{warn_block}{footer}"
 
 
 # =============================================================================

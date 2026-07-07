@@ -805,6 +805,7 @@ def build_quickresearch_argv_core(
     tmpdir: Path,
     config: Config,
     parent_pid: int,
+    previous_query: str | None = None,
 ) -> list[str]:
     """Build argv to invoke _quickresearch as a subprocess.
 
@@ -814,6 +815,9 @@ def build_quickresearch_argv_core(
 
     ``parent_pid`` is the caller's own PID (``os.getpid()``); the child uses
     it as the reference for its orphan watchdog.
+
+    ``previous_query`` — single-hop chain payload, ``None``/empty omits the
+    flag entirely (truthy guard mirrors ``--config``).
     """
     cmd: list[str] = [
         sys.executable,
@@ -826,4 +830,6 @@ def build_quickresearch_argv_core(
     source = config.config_file or config.local_config_file
     if source is not None:
         cmd.extend(["--config", str(Path(source).resolve())])
+    if previous_query:
+        cmd.extend(["--previous-query", previous_query])
     return cmd

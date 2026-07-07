@@ -3,11 +3,11 @@
 import pytest
 
 from chunkhound.interfaces.embedding_provider import RerankResult
-from chunkhound.llm_manager import LLMManager
 from chunkhound.services.clustering_service import ClusterGroup
 from chunkhound.services.research import SynthesisEngine
-from chunkhound.services.research.shared.citation_manager import CitationManager
-from tests.fixtures.fake_providers import FakeEmbeddingProvider, FakeLLMProvider
+from chunkhound.services.research.shared.models import ResearchContext
+from tests.fixtures.fake_providers import FakeEmbeddingProvider
+from tests.unit.research.conftest import FakeParent
 
 
 class _OutOfBoundsEmbeddingProvider(FakeEmbeddingProvider):
@@ -15,81 +15,10 @@ class _OutOfBoundsEmbeddingProvider(FakeEmbeddingProvider):
         return [RerankResult(index=len(documents) + 5, score=1.0)]
 
 
-class _FakeEmbeddingManager:
-    def __init__(self, provider):
-        self._provider = provider
-
-    def get_provider(self):  # noqa: ANN001 - test stub
-        return self._provider
-
-
-class _FakeParent:
-    def __init__(self, provider):
-        self._embedding_manager = _FakeEmbeddingManager(provider)
-        self._citation_manager = CitationManager()
-
-    async def _emit_event(self, *args, **kwargs):  # noqa: ANN001 - test stub
-        return None
-
-
-class _CapturingFakeLLMProvider(FakeLLMProvider):
-    def __init__(self):
-        super().__init__()
-        self.calls: list[dict[str, object]] = []
-
-    async def complete(
-        self,
-        prompt: str,
-        system: str | None = None,
-        max_completion_tokens: int = 4096,
-        timeout: int | None = None,
-    ):
-        self.calls.append(
-            {
-                "prompt": prompt,
-                "system": system,
-                "max_completion_tokens": max_completion_tokens,
-                "timeout": timeout,
-            }
-        )
-        return await super().complete(
-            prompt,
-            system=system,
-            max_completion_tokens=max_completion_tokens,
-            timeout=timeout,
-        )
-
-
-@pytest.fixture()
-def llm_manager(monkeypatch):
-    fake_provider = FakeLLMProvider()
-
-    def _fake_create_provider(self, config):  # noqa: ANN001 - test stub
-        return fake_provider
-
-    monkeypatch.setattr(LLMManager, "_create_provider", _fake_create_provider)
-    utility_config = {"provider": "fake", "model": "fake-gpt"}
-    synthesis_config = {"provider": "fake", "model": "fake-gpt"}
-    return LLMManager(utility_config, synthesis_config)
-
-
-@pytest.fixture()
-def capturing_llm_manager(monkeypatch):
-    fake_provider = _CapturingFakeLLMProvider()
-
-    def _fake_create_provider(self, config):  # noqa: ANN001 - test stub
-        return fake_provider
-
-    monkeypatch.setattr(LLMManager, "_create_provider", _fake_create_provider)
-    utility_config = {"provider": "fake", "model": "fake-gpt"}
-    synthesis_config = {"provider": "fake", "model": "fake-gpt"}
-    return LLMManager(utility_config, synthesis_config), fake_provider
-
-
 @pytest.mark.asyncio
 async def test_rerank_out_of_bounds_falls_back(llm_manager):
     embedding_provider = _OutOfBoundsEmbeddingProvider()
-    parent = _FakeParent(embedding_provider)
+    parent = FakeParent(embedding_provider)
     engine = SynthesisEngine(
         llm_manager, database_services=object(), parent_service=parent
     )
@@ -125,7 +54,7 @@ async def test_map_synthesis_uses_output_budget_for_cluster_allocation(
     capturing_llm_manager,
 ):
     llm_manager, fake_provider = capturing_llm_manager
-    parent = _FakeParent(FakeEmbeddingProvider())
+    parent = FakeParent(FakeEmbeddingProvider())
     engine = SynthesisEngine(
         llm_manager, database_services=object(), parent_service=parent
     )
@@ -147,8 +76,8 @@ async def test_map_synthesis_uses_output_budget_for_cluster_allocation(
 
     await engine._map_synthesis_on_cluster(
         cluster=cluster,
-        root_query="synthesis test",
         chunks=chunks,
+        context=ResearchContext(root_query="synthesis test"),
         synthesis_budgets={"output_tokens": 30_000},
         total_input_tokens=100_000,
     )

@@ -49,6 +49,14 @@ def add_quickresearch_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
+    # Internal-only: populated by the websearch subprocess when chaining. Not
+    # advertised — no help text, kept out of user-facing surfaces.
+    p.add_argument(
+        "--previous-query",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+
     add_common_arguments(p)
     add_config_arguments(p, ["embedding", "llm", "research"])
 

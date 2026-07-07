@@ -21,11 +21,17 @@ class ResearchServiceProtocol(Protocol):
     ResearchServiceFactory.create() to instantiate implementations.
     """
 
-    async def deep_research(self, query: str) -> dict[str, Any]:
+    async def deep_research(
+        self, query: str, previous_query: str | None = None
+    ) -> dict[str, Any]:
         """Execute research on a query.
 
         Args:
             query: Research query to investigate
+            previous_query: Internal single-hop chaining hook used by the
+                websearch chain. When set, the synthesis stage frames the
+                answer in the prior topic's context. Empty / None means
+                un-chained (baseline path — behavior identical to today).
 
         Returns:
             Dict with answer, citations, stats, and optional fields

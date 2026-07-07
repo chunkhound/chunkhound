@@ -192,6 +192,10 @@ class ResearchContext:
     root_query: str
     ancestors: list[str] = field(default_factory=list)
     traversal_path: list[str] = field(default_factory=list)
+    # Single-hop chaining hook; populated only on the websearch chain path
+    # (via `websearch_impl` / `_quickresearch --previous-query`). Consumed by
+    # the synthesis engine's three follow-up-note injection sites.
+    previous_query: str | None = None
 
 
 def build_output_guidance(target_tokens: int = TARGET_OUTPUT_TOKENS) -> str:

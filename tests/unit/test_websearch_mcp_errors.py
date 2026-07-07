@@ -82,7 +82,7 @@ async def _stub_fetch_and_save_noop(
     return None
 
 
-def _stub_build_argv(query, tmpdir, config, parent_pid):
+def _stub_build_argv(query, tmpdir, config, parent_pid, previous_query=None):
     # Argv content is irrelevant — subprocess is patched out.
     return ["/bin/true"]
 
@@ -482,6 +482,127 @@ async def test_answer_rewrites_filenames_to_source_urls(monkeypatch, patched):
     assert "https://b.invalid/" in result
     assert "a.invalid_.md" not in result
     assert "b.invalid_.pdf" not in result
+
+
+@pytest.mark.asyncio
+async def test_websearch_mcp_empty_previous_query_treated_as_none(
+    monkeypatch, patched
+):
+    """MCP `previous_query=""` collapses to None → no --previous-query in argv."""
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    captured: dict[str, object] = {}
+
+    def capturing_build(query, tmpdir, config, parent_pid, previous_query=None):
+        captured["previous_query"] = previous_query
+        return ["/bin/true"]
+
+    monkeypatch.setattr(ws_mod, "build_quickresearch_argv_core", capturing_build)
+
+    fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    await tools_mod.websearch_impl(
+        embedding_manager=None,
+        llm_manager=None,
+        config=None,
+        query="q",
+        previous_query="",
+    )
+
+    assert captured["previous_query"] is None
+
+
+@pytest.mark.asyncio
+async def test_websearch_mcp_previous_query_reaches_subprocess(
+    monkeypatch, patched
+):
+    """MCP `previous_query="prior"` forwards to `build_quickresearch_argv_core`."""
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    captured: dict[str, object] = {}
+
+    def capturing_build(query, tmpdir, config, parent_pid, previous_query=None):
+        captured["previous_query"] = previous_query
+        return ["/bin/true"]
+
+    monkeypatch.setattr(ws_mod, "build_quickresearch_argv_core", capturing_build)
+
+    fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    await tools_mod.websearch_impl(
+        embedding_manager=None,
+        llm_manager=None,
+        config=None,
+        query="q",
+        previous_query="prior topic",
+    )
+
+    assert captured["previous_query"] == "prior topic"
+
+
+@pytest.mark.asyncio
+async def test_websearch_mcp_footer_uses_tool_call_form(monkeypatch, patched):
+    """MCP footer contains the tool-call form; NOT the CLI shell form."""
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    fake_proc = _FakeProc(stdout=b"answer body", returncode=0)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    result = await tools_mod.websearch_impl(
+        embedding_manager=None,
+        llm_manager=None,
+        config=None,
+        query="raw",
+    )
+
+    assert 'websearch(query: "[follow-up]", previous_query: "raw")' in result
+    assert "chunkhound websearch" not in result
+    assert "Continue exploring:" in result
+
+
+@pytest.mark.asyncio
+async def test_websearch_mcp_footer_json_escapes_embedded_quotes(monkeypatch, patched):
+    """MCP footer must survive a `search_query` containing double quotes.
+
+    `_preserves_quotes` explicitly keeps quoted phrases through expansion;
+    naive f-string interpolation of `previous_query: "{current_query}"`
+    would emit invalid tool-call syntax on copy-paste. json.dumps fixes this.
+    """
+    import json
+
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    fake_proc = _FakeProc(stdout=b"answer body", returncode=0)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    # llm_manager=None → expand_web_queries falls back to search_query=query,
+    # so the embedded quotes propagate straight to the footer.
+    tricky = 'compare "React 19" vs Vue'
+    result = await tools_mod.websearch_impl(
+        embedding_manager=None,
+        llm_manager=None,
+        config=None,
+        query=tricky,
+    )
+
+    # json.dumps is deterministic, so verify the exact escaped literal appears
+    # in the footer's tool-call form.
+    expected = f'previous_query: {json.dumps(tricky)})`'
+    assert expected in result, f"expected {expected!r} in: {result!r}"
 
 
 @pytest.mark.asyncio
