@@ -38,11 +38,15 @@ async def test_code_mapper_duckdb_scope_real_db(
         {"file_path": "scope/b.py", "start_line": 1, "end_line": 2},
     ]
     patch_code_mapper_dependencies(
-        monkeypatch, referenced_files=referenced_files, referenced_chunks=referenced_chunks
+        monkeypatch,
+        referenced_files=referenced_files,
+        referenced_chunks=referenced_chunks,
     )
 
     out_dir = tmp_path / "out"
-    await run_code_mapper(scope_path=repo_root / "scope", out_dir=out_dir, config=config)
+    await run_code_mapper(
+        scope_path=repo_root / "scope", out_dir=out_dir, config=config
+    )
 
     combined_docs = list(out_dir.glob("*_code_mapper.md"))
     assert combined_docs, "Expected combined Code Mapper document"
@@ -91,7 +95,9 @@ async def test_duckdb_scope_stats_sanity(tmp_path: Path) -> None:
                 self.provider = provider
 
         services = Services(provider)
-        scope_files, scope_chunks, scoped_set = compute_db_scope_stats(services, "scope")
+        scope_files, scope_chunks, scoped_set = compute_db_scope_stats(
+            services, "scope"
+        )
         root_files, root_chunks, _ = compute_db_scope_stats(services, "/")
 
         assert scope_files < root_files

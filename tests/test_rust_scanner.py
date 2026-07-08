@@ -1,14 +1,16 @@
 import pytest
-from pathlib import Path
 
 try:
     from chunkhound_native import scan_files as _scan_files
+
     _RUST_AVAILABLE = True
 except (ImportError, AttributeError):
     _scan_files = None
     _RUST_AVAILABLE = False
 
-requires_rust = pytest.mark.skipif(not _RUST_AVAILABLE, reason="Rust extension not built")
+requires_rust = pytest.mark.skipif(
+    not _RUST_AVAILABLE, reason="Rust extension not built"
+)
 
 
 @requires_rust
@@ -64,9 +66,7 @@ def test_python_fallback_when_rust_disabled(tmp_path):
     original = fp._USE_RUST
     fp._USE_RUST = False
     try:
-        files, _ = fp.walk_directory_tree(
-            tmp_path, tmp_path, ["**/*.py"], [], {}
-        )
+        files, _ = fp.walk_directory_tree(tmp_path, tmp_path, ["**/*.py"], [], {})
     finally:
         fp._USE_RUST = original
 
@@ -75,7 +75,10 @@ def test_python_fallback_when_rust_disabled(tmp_path):
 
 @requires_rust
 def test_walk_directory_tree_uses_rust_path(tmp_path):
-    """Integration: env-var gate + _fnmatch_to_gitignore + scan_files all wired together."""
+    """
+    Integration: env-var gate + _fnmatch_to_gitignore
+    + scan_files all wired together.
+    """
     import chunkhound.utils.file_patterns as fp
 
     (tmp_path / "a.py").write_text("x = 1")
@@ -150,7 +153,9 @@ def test_exact_names_parity(tmp_path):
 
     fp._USE_RUST = False
     try:
-        python_files, _ = fp.walk_directory_tree(tmp_path, tmp_path, ["Makefile"], [], {})
+        python_files, _ = fp.walk_directory_tree(
+            tmp_path, tmp_path, ["Makefile"], [], {}
+        )
     finally:
         fp._USE_RUST = original
 
@@ -178,6 +183,7 @@ def test_max_files_forces_python_path(tmp_path, monkeypatch):
 def test_native_extra_has_exact_names():
     """Installed chunkhound-native wheel must expose the exact_names parameter."""
     import inspect
+
     sig = inspect.signature(_scan_files)
     assert "exact_names" in sig.parameters, (
         "chunkhound-native wheel is too old — missing exact_names. "

@@ -8,12 +8,13 @@ from pathlib import Path
 def _run_simulate(root: Path, include: list[str]) -> list[str]:
     env = os.environ.copy()
     env["CHUNKHOUND_NO_RICH"] = "1"
-    env["CHUNKHOUND_INDEXING__DISCOVERY_BACKEND"] = "python"  # force python walker (non-repo)
+    env["CHUNKHOUND_INDEXING__DISCOVERY_BACKEND"] = (
+        "python"  # force python walker (non-repo)
+    )
     env["CHUNKHOUND_INDEXING__INCLUDE"] = ",".join(include)
     p = subprocess.run(
         ["uv", "run", "chunkhound", "index", "--simulate", str(root), "--sort", "path"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=env,
         timeout=90,
@@ -44,7 +45,9 @@ def test_include_prefix_prune_skips_unrelated_top_dirs(tmp_path: Path) -> None:
     assert "node_modules/lib/nm.ts" not in s
 
 
-def test_heavy_dirs_prune_skips_node_modules_but_respects_explicit_include(tmp_path: Path) -> None:
+def test_heavy_dirs_prune_skips_node_modules_but_respects_explicit_include(
+    tmp_path: Path,
+) -> None:
     ws = tmp_path / "ws2"
     (ws / "node_modules" / "foo").mkdir(parents=True, exist_ok=True)
     (ws / "src").mkdir(parents=True, exist_ok=True)

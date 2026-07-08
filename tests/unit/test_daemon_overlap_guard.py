@@ -48,6 +48,39 @@ def _write_registry_payload(entry_path: Path, data: dict[str, object]) -> None:
     entry_path.write_text(json.dumps(data))
 
 
+class _FakeProcess:
+    """Shared fake subprocess.Popen for daemon discovery tests.
+
+    Tracks lifecycle calls. terminate() and kill() set returncode only
+    when it is currently None, so callers that pre-set returncode (e.g.,
+    via poll_return) are not overridden.
+    """
+
+    def __init__(self, *, poll_return: int | None = None) -> None:
+        self.terminate_calls = 0
+        self.wait_calls = 0
+        self.kill_calls = 0
+        self.returncode: int | None = poll_return
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        if self.returncode is None:
+            self.returncode = -15
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        self.wait_calls += 1
+        return self.returncode if self.returncode is not None else -15
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        if self.returncode is None:
+            self.returncode = -9
+
+
 def _atomic_write_race_worker(
     path_str: str,
     start_event: multiprocessing.synchronize.Event,
@@ -202,7 +235,7 @@ def test_windows_ipc_address_changes_with_runtime_dir(
     assert address_a != address_b
 
 
-def test_windows_startup_ipc_avoids_live_sibling_port_without_registry(
+def test_windows_startup_ipc_address_avoids_live_sibling_port_collision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -747,10 +780,6 @@ async def test_ensure_daemon_running_publishes_registry_entry_authoritatively(
 
     fake_address = "tcp:127.0.0.1:54997"
 
-    class _FakeProcess:
-        def poll(self) -> int | None:
-            return None
-
     log_path = discovery.get_daemon_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.touch()
@@ -762,7 +791,10 @@ async def test_ensure_daemon_running_publishes_registry_entry_authoritatively(
         # daemon would — but deliberately never publish a registry entry, so
         # the proxy-side write is the only thing that can close the gap.
         discovery.write_lock(os.getpid(), fake_address, auth_token="token")
-        return DaemonStartupHandle(process=_FakeProcess(), log_path=log_path)  # type: ignore[arg-type]
+        return DaemonStartupHandle(
+            process=_FakeProcess(),
+            log_path=log_path,
+        )  # type: ignore[arg-type]
 
     async def fake_connectable(address: str) -> bool:
         return address == fake_address
@@ -810,26 +842,6 @@ async def test_find_or_start_daemon_terminates_child_when_registry_publish_fails
 
     fake_address = "tcp:127.0.0.1:54998"
 
-    class _FakeProcess:
-        def __init__(self) -> None:
-            self.terminate_calls = 0
-            self.wait_calls = 0
-            self.returncode = None
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-        def terminate(self) -> None:
-            self.terminate_calls += 1
-            self.returncode = -15
-
-        def wait(self, timeout: float | None = None) -> int:
-            self.wait_calls += 1
-            return -15
-
-        def kill(self) -> None:
-            self.returncode = -9
-
     fake_process = _FakeProcess()
     log_path = discovery.get_daemon_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -840,7 +852,10 @@ async def test_find_or_start_daemon_terminates_child_when_registry_publish_fails
     ) -> DaemonStartupHandle:
         del args, socket_path
         discovery.write_lock(os.getpid(), fake_address, auth_token="token")
-        return DaemonStartupHandle(process=fake_process, log_path=log_path)  # type: ignore[arg-type]
+        return DaemonStartupHandle(
+            process=fake_process,
+            log_path=log_path,
+        )  # type: ignore[arg-type]
 
     async def fake_connectable(address: str) -> bool:
         return address == fake_address
@@ -861,6 +876,41 @@ async def test_find_or_start_daemon_terminates_child_when_registry_publish_fails
     assert not discovery.get_registry_entry_path().exists()
 
 
+def test_discovery_startup_timeout_honors_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon discovery timeout contract must follow the env override."""
+    monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "12.5")
+    assert discovery_module._read_startup_timeout() == 12.5
+
+
+def test_discovery_startup_timeout_default_when_no_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon discovery timeout defaults to 30s when no env override."""
+    monkeypatch.delenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", raising=False)
+    assert discovery_module._read_startup_timeout() == 30.0
+
+
+def test_discovery_startup_timeout_rejects_invalid_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon discovery timeout env must fail loudly when malformed."""
+    monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "not-a-number")
+    with pytest.raises(ValueError, match="must be a number"):
+        discovery_module._read_startup_timeout()
+
+
+def test_discovery_startup_timeout_rejects_non_positive_or_non_finite_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon discovery timeout env must be finite and strictly positive."""
+    for raw in ("0", "-1", "nan", "inf"):
+        monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", raw)
+        with pytest.raises(ValueError, match="finite positive number"):
+            discovery_module._read_startup_timeout()
+
+
 @pytest.mark.asyncio
 async def test_find_or_start_daemon_terminates_detached_child_on_startup_timeout(
     monkeypatch: pytest.MonkeyPatch,
@@ -872,12 +922,17 @@ async def test_find_or_start_daemon_terminates_detached_child_on_startup_timeout
     project_dir.mkdir()
     discovery = DaemonDiscovery(project_dir)
 
-    class _FakeProcess:
+    class _TimeoutFakeProcess:
+        """Fake process that raises TimeoutExpired on first wait, then exits.
+
+        Simulates a child that ignores SIGTERM and must be SIGKILLed.
+        """
+
         def __init__(self) -> None:
             self.terminate_calls = 0
             self.kill_calls = 0
             self.wait_calls = 0
-            self.returncode = None
+            self.returncode: int | None = None
 
         def poll(self) -> int | None:
             return self.returncode
@@ -895,12 +950,12 @@ async def test_find_or_start_daemon_terminates_detached_child_on_startup_timeout
         def kill(self) -> None:
             self.kill_calls += 1
 
-    fake_process = _FakeProcess()
+    fake_process = _TimeoutFakeProcess()
     log_path = discovery.get_daemon_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(discovery_module, "_STARTUP_TIMEOUT", 0.05)
+    monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "0.05")
     monkeypatch.setattr(discovery, "_reuse_live_daemon", AsyncMock(return_value=None))
     monkeypatch.setattr(discovery, "_acquire_cross_runtime_startup_lock", lambda: True)
     monkeypatch.setattr(discovery, "_release_cross_runtime_startup_lock", lambda: None)

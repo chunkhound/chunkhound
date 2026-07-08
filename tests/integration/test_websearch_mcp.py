@@ -75,12 +75,14 @@ async def test_websearch_registry_isolation():
 
         helpers_dir = Path("tests/helpers").resolve()
         prior_pp = os.environ.get("PYTHONPATH", "")
-        env = get_safe_subprocess_env({
-            **os.environ,
-            "PYTHONPATH": f"{helpers_dir}{os.pathsep}{prior_pp}",
-            "CH_TEST_WEBSEARCH_STUB": "1",
-            "CHUNKHOUND_MCP_MODE": "1",
-        })
+        env = get_safe_subprocess_env(
+            {
+                **os.environ,
+                "PYTHONPATH": f"{helpers_dir}{os.pathsep}{prior_pp}",
+                "CH_TEST_WEBSEARCH_STUB": "1",
+                "CHUNKHOUND_MCP_MODE": "1",
+            }
+        )
 
         await run_index(temp_dir, cfg_path, db_path)
 
@@ -168,7 +170,7 @@ async def test_websearch_registry_isolation():
                 f"follow-up search returned no hits — registry may have been "
                 f"polluted by websearch: {search_text!r}"
             )
-            paths = re.findall(r'^## `([^`]+)`', search_text, re.MULTILINE)
+            paths = re.findall(r"^## `([^`]+)`", search_text, re.MULTILINE)
             assert any(p.endswith("app.py") for p in paths), (
                 f"follow-up search did not return the indexed project file; "
                 f"paths={paths!r}"

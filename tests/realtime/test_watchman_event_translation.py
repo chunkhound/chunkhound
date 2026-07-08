@@ -53,6 +53,7 @@ def _subscription_pdu(
         ],
     }
 
+
 async def _wait_for_pipeline_count(
     service: RealtimeIndexingService, field: str, minimum: int
 ) -> dict[str, object]:
@@ -183,9 +184,7 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
                 f"{target_path}"
             )
 
-        async def startup_watch_roots_once(
-            self, roots: list[Path]
-        ) -> tuple[Path, ...]:
+        async def startup_watch_roots_once(self, roots: list[Path]) -> tuple[Path, ...]:
             raise AssertionError(
                 f"unexpected one-shot watch during prepared startup: {roots!r}"
             )
@@ -368,13 +367,12 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
             for message in debug_messages
         )
         assert any(
-            "RT: watchman scope discovery: windows junction scopes count=0"
-            in message
+            "RT: watchman scope discovery: windows junction scopes count=0" in message
             for message in debug_messages
         )
         assert any(
-            "RT: watchman scope discovery: watch roots mode=prepared_session "
-            "count=1" in message
+            "RT: watchman scope discovery: watch roots mode=prepared_session count=1"
+            in message
             and str(nested_mount) in message
             for message in debug_messages
         )
@@ -480,9 +478,7 @@ async def test_watchman_start_preserves_logical_root_for_junction_scope_discover
                 f"{target_path}"
             )
 
-        async def startup_watch_roots_once(
-            self, roots: list[Path]
-        ) -> tuple[Path, ...]:
+        async def startup_watch_roots_once(self, roots: list[Path]) -> tuple[Path, ...]:
             raise AssertionError(
                 f"unexpected one-shot watch during prepared startup: {roots!r}"
             )
@@ -764,9 +760,7 @@ async def test_watchman_mount_aware_startup_uses_fallback_planning(
             )
             return {"watch": str(target_path.resolve()), "relative_path": None}
 
-        async def startup_watch_roots_once(
-            self, roots: list[Path]
-        ) -> tuple[Path, ...]:
+        async def startup_watch_roots_once(self, roots: list[Path]) -> tuple[Path, ...]:
             operations.append(
                 (
                     "startup_watch_roots_once",
@@ -924,8 +918,7 @@ async def test_watchman_mount_aware_startup_uses_fallback_planning(
         assert adapter._session is TrackingSession._created_sessions[0]
         assert adapter._sessions == TrackingSession._created_sessions
         assert any(
-            "RT: watchman scope discovery: watch roots mode=one_shot count=1"
-            in message
+            "RT: watchman scope discovery: watch roots mode=one_shot count=1" in message
             and str(nested_mount) in message
             for message in debug_messages
         )
@@ -1338,9 +1331,7 @@ async def test_watchman_unexpected_file_type_warning_includes_entry_context(
             scope,
         )
 
-        stats = await _wait_for_pipeline_count(
-            service, "translation_error_count", 1
-        )
+        stats = await _wait_for_pipeline_count(service, "translation_error_count", 1)
         warning = stats["last_warning"] or ""
         assert "Skipping unexpected Watchman file type '?'" in warning
         assert "name='src/socket.sock'" in warning
@@ -1409,9 +1400,7 @@ async def test_watchman_scope_mapping_failure_requests_resync(
     callback_calls: list[tuple[str, dict[str, object] | None]] = []
     callback_event = asyncio.Event()
 
-    async def resync_callback(
-        reason: str, details: dict[str, object] | None
-    ) -> None:
+    async def resync_callback(reason: str, details: dict[str, object] | None) -> None:
         callback_calls.append((reason, details))
         callback_event.set()
 
@@ -1475,9 +1464,7 @@ async def test_watchman_scope_mapping_failure_requests_resync(
         assert stats["watchman_loss_of_sync"]["translation_failure_count"] == 1
         assert stats["watchman_loss_of_sync"]["last_reason"] == "scope_mapping_failure"
         assert stats["watchman_loss_of_sync"]["last_details"] == callback_calls[0][1]
-        assert (
-            "did not map to a known scope" in (stats["last_warning"] or "")
-        )
+        assert "did not map to a known scope" in (stats["last_warning"] or "")
     finally:
         await service.stop()
         services.provider.disconnect()
@@ -1493,9 +1480,7 @@ async def test_watchman_translation_failure_requests_resync(
     callback_calls: list[tuple[str, dict[str, object] | None]] = []
     callback_event = asyncio.Event()
 
-    async def resync_callback(
-        reason: str, details: dict[str, object] | None
-    ) -> None:
+    async def resync_callback(reason: str, details: dict[str, object] | None) -> None:
         callback_calls.append((reason, details))
         callback_event.set()
 
@@ -1556,9 +1541,7 @@ async def test_watchman_translation_failure_requests_resync(
         assert stats["watchman_loss_of_sync"]["translation_failure_count"] == 1
         assert stats["watchman_loss_of_sync"]["last_reason"] == "translation_failure"
         assert stats["watchman_loss_of_sync"]["last_details"] == callback_calls[0][1]
-        assert (
-            "without a valid name" in (stats["last_warning"] or "")
-        )
+        assert "without a valid name" in (stats["last_warning"] or "")
     finally:
         await service.stop()
         services.provider.disconnect()
@@ -1680,11 +1663,9 @@ async def test_watchman_junction_scope_translation_preserves_logical_path(
     try:
         monkeypatch.setattr(realtime_service_module.Path, "resolve", fake_resolve)
         adapter = await _start_isolated_watchman_translation(service, target_dir)
-        adapter._scope_path_filters[str(logical_junction)] = (
-            RealtimePathFilter(
-                config=service.config,
-                root_path=logical_junction,
-            )
+        adapter._scope_path_filters[str(logical_junction)] = RealtimePathFilter(
+            config=service.config,
+            root_path=logical_junction,
         )
 
         file_path = logical_junction / "src" / "junctioned.py"
@@ -1761,11 +1742,9 @@ async def test_watchman_junction_scope_filter_uses_logical_scope_root(
     try:
         monkeypatch.setattr(realtime_service_module.Path, "resolve", fake_resolve)
         adapter = await _start_isolated_watchman_translation(service, target_dir)
-        adapter._scope_path_filters[str(logical_junction)] = (
-            RealtimePathFilter(
-                config=service.config,
-                root_path=logical_junction,
-            )
+        adapter._scope_path_filters[str(logical_junction)] = RealtimePathFilter(
+            config=service.config,
+            root_path=logical_junction,
         )
 
         blocked_file = logical_junction / "generated" / "blocked.py"

@@ -2,7 +2,8 @@
 
 This package contains the core domain models and types that form the foundation
 of the ChunkHound architecture. These models are independent of infrastructure
-concerns and provide a clean separation between business logic and implementation details.
+concerns and provide a clean separation between business
+logic and implementation details.
 
 Modules:
     models: Domain models for File, Chunk, and Embedding entities
@@ -38,4 +39,6 @@ __all__ = [
     "ModelError",
     "EmbeddingError",
     "ParsingError",
+    # Version
+    "__version__",
 ]

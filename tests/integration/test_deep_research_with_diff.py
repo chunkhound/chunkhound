@@ -23,7 +23,6 @@ import pytest
 from chunkhound.embeddings import EmbeddingManager, LocalEmbeddingResult
 from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -57,6 +56,7 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
 
     async def _embed(texts: list[str]) -> LocalEmbeddingResult:
         import math
+
         vec = [1.0 / math.sqrt(dim)] * dim
         return LocalEmbeddingResult(
             embeddings=[vec[:] for _ in texts],
@@ -71,6 +71,7 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
     # Also wire embed_texts on the manager itself so the injection block works
     async def _embed_texts(texts: list[str]) -> LocalEmbeddingResult:
         import math
+
         vec = [1.0 / math.sqrt(dim)] * dim
         return LocalEmbeddingResult(
             embeddings=[vec[:] for _ in texts],
@@ -173,9 +174,7 @@ async def test_deep_research_injects_diff_service_on_commit_range():
     # The factory must have received a DiffAwareSearchService as search_service
     received_services = captured.get("db_services")
     assert received_services is not None, "ResearchServiceFactory.create was not called"
-    assert isinstance(
-        received_services.search_service, DiffAwareSearchService
-    ), (
+    assert isinstance(received_services.search_service, DiffAwareSearchService), (
         f"Expected DiffAwareSearchService, got {type(received_services.search_service)}"
     )
 

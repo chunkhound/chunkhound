@@ -389,11 +389,13 @@ class ObjCMapping(BaseMapping):
             (property_declaration) @definition
 
             ; Capture #define macros at any scope
-            ; Note: Tree-sitter queries search entire tree by default (top-level, function-scoped, nested blocks)
+            ; Note: Tree-sitter queries search entire tree by default
+            ; (top-level, function-scoped, nested blocks)
             (preproc_def) @definition
 
             ; Capture const declarations at any scope
-            ; This pattern matches declarations at ALL nesting levels (top-level, methods, nested blocks, etc.)
+            ; This pattern matches declarations at ALL nesting levels
+            ; (top-level, methods, nested blocks, etc.)
             (declaration
                 (type_qualifier)
             ) @definition
@@ -697,7 +699,9 @@ class ObjCMapping(BaseMapping):
         """Resolve Objective-C include to file path.
 
         Args:
-            import_text: The import statement text (e.g., '#include "file.h"' or '#import "file.h"')
+            import_text: The import statement text
+                (e.g., '#include "file.h"' or
+                '#import "file.h"')
             base_dir: Base directory of the codebase
             source_file: Path to the file containing the import
 
@@ -720,5 +724,6 @@ class ObjCMapping(BaseMapping):
                 if full_path.exists():
                     return [full_path]
 
-        # System includes (#include <...> or #import <...>) - external, return empty list
+        # System includes (#include <...> or #import <...>)
+        # - external, return empty list
         return []

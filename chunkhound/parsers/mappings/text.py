@@ -25,19 +25,19 @@ class TextMapping(BaseMapping):
 
     # BaseMapping required methods
     def get_function_query(self) -> str:
-        """Get tree-sitter query pattern for function definitions (not applicable to text)."""
+        """Get tree-sitter query pattern for function definitions."""
         return ""
 
     def get_class_query(self) -> str:
-        """Get tree-sitter query pattern for class definitions (not applicable to text)."""
+        """Get tree-sitter query pattern for class definitions."""
         return ""
 
     def get_comment_query(self) -> str:
-        """Get tree-sitter query pattern for comments (text files don't have formal comments)."""
+        """Get tree-sitter query pattern for comments."""
         return ""
 
     def extract_function_name(self, node: Node | None, source: str) -> str:
-        """Extract function name from a function definition node (not applicable to text)."""
+        """Extract function name from a function definition node."""
         return ""
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
@@ -180,7 +180,11 @@ class TextMapping(BaseMapping):
             paragraphs = self._split_into_paragraphs(source)
             if len(paragraphs) > 1:
                 # Return a representative block or summary
-                return f"Document with {len(paragraphs)} paragraphs:\n\n{paragraphs[0][:200]}..."
+                return (
+                    f"Document with {len(paragraphs)} "
+                    f"paragraphs:\n\n"
+                    f"{paragraphs[0][:200]}..."
+                )
             else:
                 return source
 

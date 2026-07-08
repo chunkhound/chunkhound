@@ -9,7 +9,7 @@ import pathlib
 import subprocess
 import tempfile
 
-from tests.site.tsx_runner import ROOT, NPM, sanitized_subprocess_env
+from tests.site.tsx_runner import NPM, ROOT, sanitized_subprocess_env
 
 SYNC_SCRIPT = ROOT / "site" / "scripts" / "sync-changelog.mjs"
 
@@ -24,10 +24,10 @@ CHANGELOG_CONTENT = """# Changelog
 """
 
 EXPECTED_FRONTMATTER_LINES = (
-    'layout: ../../layouts/DocsLayout.astro',
+    "layout: ../../layouts/DocsLayout.astro",
     'title: "Changelog"',
     'description: "Release history and breaking changes for ChunkHound."',
-    'order: 4',
+    "order: 4",
     'section: "manual"',
 )
 

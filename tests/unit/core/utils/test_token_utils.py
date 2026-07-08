@@ -55,8 +55,7 @@ class TestEstimateTokens:
     def test_empty_string_returns_zero(self):
         """Empty input short-circuits to 0, bypassing tiktoken entirely."""
         assert (
-            estimate_tokens("", provider="openai", model="text-embedding-3-small")
-            == 0
+            estimate_tokens("", provider="openai", model="text-embedding-3-small") == 0
         )
 
 
@@ -86,7 +85,10 @@ class _FakeEnc:
 
 
 class TestEstimateTokensFallback:
-    """Contract tests for tiktoken gating and heuristic fallback in estimate_tokens()."""
+    """
+    Contract tests for tiktoken gating and
+    heuristic fallback in estimate_tokens().
+    """
 
     @pytest.fixture(autouse=True)
     def _clear_tiktoken_caches(self):
@@ -99,12 +101,11 @@ class TestEstimateTokensFallback:
     @pytest.fixture
     def tiktoken_unknown_model(self, monkeypatch):
         """encoding_for_model raises KeyError; get_encoding returns the // 2 stub."""
+
         def _raise_keyerror(model):
             raise KeyError(f"unknown model: {model}")
 
-        monkeypatch.setattr(
-            token_utils.tiktoken, "encoding_for_model", _raise_keyerror
-        )
+        monkeypatch.setattr(token_utils.tiktoken, "encoding_for_model", _raise_keyerror)
         monkeypatch.setattr(
             token_utils.tiktoken, "get_encoding", lambda name: _FakeEnc()
         )
@@ -145,15 +146,14 @@ class TestEstimateTokensFallback:
 
     def test_network_failure_falls_back_to_heuristic(self, monkeypatch):
         """Simulated blocked BPE download → char heuristic (no stall, no raise)."""
+
         def _raise_connerror(*args, **kwargs):
             raise ConnectionError("network blocked")
 
         monkeypatch.setattr(
             token_utils.tiktoken, "encoding_for_model", _raise_connerror
         )
-        monkeypatch.setattr(
-            token_utils.tiktoken, "get_encoding", _raise_connerror
-        )
+        monkeypatch.setattr(token_utils.tiktoken, "get_encoding", _raise_connerror)
 
         text = "a" * 60
         result = estimate_tokens(

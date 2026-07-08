@@ -158,9 +158,7 @@ def test_main_settles_before_running_queries(
         events.append("handshake")
         return ["regex"]
 
-    async def fake_settle_before_measurement(
-        *_args: Any, **_kwargs: Any
-    ) -> None:
+    async def fake_settle_before_measurement(*_args: Any, **_kwargs: Any) -> None:
         events.append("settle")
 
     async def fake_run_queries(

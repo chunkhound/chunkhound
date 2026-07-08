@@ -39,13 +39,18 @@ async def test_truncation_warning_preserves_dict_return_type():
         ),
         patch(
             "chunkhound.mcp_server.tools._inject_diff_service",
-            new=AsyncMock(return_value=(mock_services, "diff too large, truncated to 500 lines")),
+            new=AsyncMock(
+                return_value=(mock_services, "diff too large, truncated to 500 lines")
+            ),
         ),
         patch(
             "chunkhound.mcp_server.tools.ResearchServiceFactory.create",
             return_value=mock_research_service,
         ),
-        patch("chunkhound.mcp_server.tools.Config.from_environment", return_value=MagicMock()),
+        patch(
+            "chunkhound.mcp_server.tools.Config.from_environment",
+            return_value=MagicMock(),
+        ),
     ):
         result = await deep_research_impl(
             services=mock_services,
@@ -55,9 +60,13 @@ async def test_truncation_warning_preserves_dict_return_type():
             commit_range="HEAD~1..HEAD",
         )
 
-    assert isinstance(result, dict), "truncation_warning path must not convert result to str"
+    assert isinstance(result, dict), (
+        "truncation_warning path must not convert result to str"
+    )
     assert "> **Note:**" in result["answer"], "warning must be prepended to answer"
-    assert "original answer text" in result["answer"], "original answer must be preserved"
+    assert "original answer text" in result["answer"], (
+        "original answer must be preserved"
+    )
 
 
 @pytest.mark.asyncio
@@ -78,7 +87,10 @@ async def test_no_truncation_warning_returns_dict_unchanged():
             "chunkhound.mcp_server.tools.ResearchServiceFactory.create",
             return_value=mock_research_service,
         ),
-        patch("chunkhound.mcp_server.tools.Config.from_environment", return_value=MagicMock()),
+        patch(
+            "chunkhound.mcp_server.tools.Config.from_environment",
+            return_value=MagicMock(),
+        ),
     ):
         result = await deep_research_impl(
             services=mock_services,

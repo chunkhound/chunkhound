@@ -36,4 +36,3 @@ def test_compute_db_scope_stats_root_scope_uses_none_prefix() -> None:
     assert files_total == 5
     assert chunks_total == 25
     assert scoped_files == set()
-

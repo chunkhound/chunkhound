@@ -24,7 +24,8 @@ from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
 # Default synthesis-grade reasoning model for Codex CLI.
-# Update here when OpenAI releases a newer synthesis model — this is the single source of truth.
+# Update here when OpenAI releases a newer synthesis model
+# — this is the single source of truth.
 # Use CHUNKHOUND_CODEX_DEFAULT_MODEL env var to override at runtime.
 CODEX_DEFAULT_SYNTHESIS_MODEL = "gpt-5.1-codex"
 

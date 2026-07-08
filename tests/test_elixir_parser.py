@@ -223,16 +223,24 @@ end
         chunks = parser.parse_file(f, FileId(1))
 
         all_content = " ".join(c.code for c in chunks)
-        for keyword in ["use GenServer", "import Ecto.Changeset",
-                         "alias MyApp.Repo", "require Logger"]:
+        for keyword in [
+            "use GenServer",
+            "import Ecto.Changeset",
+            "alias MyApp.Repo",
+            "require Logger",
+        ]:
             assert keyword in all_content, f"Expected '{keyword}' in parsed content"
 
         # Verify import chunks have ChunkType.IMPORT
         import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
         assert len(import_chunks) > 0, "Expected at least one IMPORT chunk"
         import_content = " ".join(c.code for c in import_chunks)
-        for keyword in ["use GenServer", "import Ecto.Changeset",
-                         "alias MyApp.Repo", "require Logger"]:
+        for keyword in [
+            "use GenServer",
+            "import Ecto.Changeset",
+            "alias MyApp.Repo",
+            "require Logger",
+        ]:
             assert keyword in import_content, (
                 f"Expected '{keyword}' in IMPORT chunks, got: {import_content}"
             )

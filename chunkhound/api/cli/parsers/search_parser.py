@@ -4,7 +4,11 @@ import argparse
 from pathlib import Path
 from typing import Any, cast
 
-from .common_arguments import add_common_arguments, add_config_arguments, add_git_diff_arguments
+from .common_arguments import (
+    add_common_arguments,
+    add_config_arguments,
+    add_git_diff_arguments,
+)
 
 
 def add_search_subparser(subparsers: Any) -> argparse.ArgumentParser:

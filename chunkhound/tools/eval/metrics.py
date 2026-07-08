@@ -175,7 +175,7 @@ def format_human_summary(result: EvalResult) -> None:
     print(f"\nMRR: {result.global_metrics.mrr:.3f}")
 
     print("\nPer-language metrics:")
-    for language in sorted(result.languages, key=lambda l: l.value):
+    for language in sorted(result.languages, key=lambda lang: lang.value):
         lang_metrics = result.per_language.get(language.value)
         if not lang_metrics:
             continue

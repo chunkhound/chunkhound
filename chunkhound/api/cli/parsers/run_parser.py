@@ -168,7 +168,8 @@ def add_run_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="With --simulate: sort output by path or size (desc for largest first)",
     )
 
-    # Debug ignores: print ignore context for troubleshooting without breaking JSON output
+    # Debug ignores: print ignore context for troubleshooting
+    # without breaking JSON output
     run_parser.add_argument(
         "--debug-ignores",
         action="store_true",
@@ -196,7 +197,9 @@ def add_run_subparser(subparsers: Any) -> argparse.ArgumentParser:
         "--profile-startup",
         action="store_true",
         help=(
-            "Emit startup phase timings (discovery/cleanup/change-scan) as JSON to stderr; "
+            "Emit startup phase timings "
+            "(discovery/cleanup/change-scan) as JSON "
+            "to stderr; "
             "minimal overhead when enabled"
         ),
     )

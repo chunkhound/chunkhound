@@ -199,7 +199,8 @@ async def _cluster_and_evaluate(
         logger.error(f"Failed to initialize LLM provider: {exc}")
         raise
 
-    # Configure registry and database services (ensures SerialDatabaseProvider invariants)
+    # Configure registry and database services
+    # (ensures SerialDatabaseProvider invariants)
     create_services(
         db_path=config.database.path,
         config=config,

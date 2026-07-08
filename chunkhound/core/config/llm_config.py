@@ -938,13 +938,15 @@ class LLMConfig(BaseSettings):
         return None
 
     def _is_custom_openai_endpoint(self) -> bool:
-        """Return whether this config targets a non-official OpenAI-compatible endpoint."""
+        """Return whether this config targets a non-official
+        OpenAI-compatible endpoint."""
         return not is_official_openai_endpoint(self.base_url)
 
     def _require_explicit_model_for_custom_openai(
         self, roles: tuple[str, ...]
     ) -> list[str]:
-        """Return roles that rely on a custom OpenAI endpoint without valid model selection."""
+        """Return roles that rely on a custom OpenAI endpoint
+        without valid model selection."""
         if not self._is_custom_openai_endpoint():
             return []
 
@@ -1011,7 +1013,8 @@ class LLMConfig(BaseSettings):
         if registry_provider_roles:
             roles_text = ", ".join(registry_provider_roles)
             missing.append(
-                f"explicit model selection required for registry provider roles: {roles_text}"
+                f"explicit model selection required for "
+                f"registry provider roles: {roles_text}"
             )
 
         custom_endpoint_roles = [
@@ -1151,7 +1154,10 @@ class LLMConfig(BaseSettings):
             "--llm-map-hyde-provider",
             type=_parse_llm_provider_arg,
             metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
-            help="Override provider for Code Mapper HyDE planning (falls back to synthesis)",
+            help=(
+                "Override provider for Code Mapper HyDE "
+                "planning (falls back to synthesis)"
+            ),
         )
         parser.add_argument(
             "--llm-map-hyde-model",

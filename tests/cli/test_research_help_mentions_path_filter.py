@@ -13,4 +13,3 @@ def test_research_help_mentions_path_filter() -> None:
     proc = _run(["chunkhound", "research", "--help"])
     assert proc.returncode == 0, proc.stderr
     assert "--path-filter" in proc.stdout
-

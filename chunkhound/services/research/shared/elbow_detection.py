@@ -81,7 +81,8 @@ def find_elbow_kneedle(sorted_scores: list[float]) -> int | None:
     # Validate elbow is significant (distance > 1% of normalized range)
     if distances[elbow_idx] < 0.01:
         logger.debug(
-            f"Kneedle: Elbow not significant (distance={distances[elbow_idx]:.4f} < 0.01)"
+            f"Kneedle: Elbow not significant "
+            f"(distance={distances[elbow_idx]:.4f} < 0.01)"
         )
         return None  # Elbow not significant enough
 

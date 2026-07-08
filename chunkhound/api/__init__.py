@@ -2,4 +2,4 @@
 
 from chunkhound.version import __version__
 
-__all__: list[str] = []
+__all__: list[str] = ["__version__"]

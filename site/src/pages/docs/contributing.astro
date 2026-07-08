@@ -56,9 +56,51 @@ import DocsLayout from "../../layouts/DocsLayout.astro";
         <li>Makes minimal, targeted changes</li>
     </ul>
 
+    <h3>Install commit hooks</h3>
+    <p>
+        ChunkHound uses <code>pre-commit</code> hooks to catch Python lint and
+        formatting issues before review. Install them once after cloning:
+    </p>
+    <DocCode code={`uv run python scripts/pre_commit.py install`} />
+    <p><code>make install-hooks</code> is a convenience wrapper for the same command.</p>
+    <p>
+        The installer writes to Git's active hooks directory, so it respects
+        <code>core.hooksPath</code> automatically. If you already manage your
+        own <code>pre-commit</code> hook there, either chain
+        <code>uv run python scripts/pre_commit.py run-staged</code> from that
+        hook or rerun the installer with <code>--overwrite-hook</code>.
+    </p>
+    <DocCode code={`uv run python scripts/pre_commit.py install --overwrite-hook`} />
+    <p>The installed hooks run Ruff in this order:</p>
+    <ul>
+        <li><code>ruff-check --fix</code> on the staged <code>.py</code> and <code>.pyi</code> snapshot</li>
+        <li><code>ruff-format</code> on the staged <code>.py</code> and <code>.pyi</code> snapshot</li>
+    </ul>
+    <p>
+        The hook finds staged Python files via <code>git diff --cached</code>,
+        runs Ruff on the staged snapshot, and compares file hashes before and
+        after to detect auto-fixes. If Ruff rewrites any staged files, the
+        commit stops on purpose so you can review the staged diff and commit
+        again. For partially staged files, the fixed content stays in the index
+        while unrelated unstaged edits remain unstaged.
+        This keeps the final commit explicit while still letting deterministic
+        tools clean up AI-generated noise.
+    </p>
+    <DocsCallout title="Commit flow with hooks" variant="info">
+        <p>
+            Hooks are fast local guardrails, not the final authority. You can
+            always rerun them manually with <code>uv run python scripts/pre_commit.py run-files &lt;paths&gt;</code>.
+            CI re-checks every PR with the same Ruff rules and requires the
+            committed <code>.py</code> and <code>.pyi</code> files to already be
+            clean. If Ruff would rewrite a pushed file, CI fails and tells you
+            to review the diff and commit the fix locally. In an emergency,
+            <code>git commit --no-verify</code> skips hooks entirely — but CI will still catch any issues.
+        </p>
+    </DocsCallout>
+
     <h3>Testing ladder</h3>
     <p>Run the right checks at each stage:</p>
-    <DocCode code={`# Before every commit — smoke tests (~10 seconds)\nuv run pytest tests/test_smoke.py -v -n auto\n\n# Before pushing to a PR — full suite + quality gate\nuv run ruff check chunkhound       # lint\nuv run ruff format chunkhound      # format\nuv run mypy chunkhound             # type check\nuv run pytest tests/ -v            # full tests`} />
+    <DocCode code={`# Before every commit — hooks run automatically on staged Python files\n# If they rewrite files, review the staged diff and commit again\n\n# Before every commit — smoke tests (~10 seconds)\nuv run pytest tests/test_smoke.py -v -n auto\n\n# Before pushing to a PR — full suite + quality gate\nmake lint                          # repo-wide Ruff check\nuv run mypy chunkhound             # type check\nuv run pytest tests/ -v            # full tests`} />
 
     <h3>Commit messages</h3>
     <p>
@@ -108,9 +150,10 @@ import DocsLayout from "../../layouts/DocsLayout.astro";
     <h3>Getting to merge</h3>
     <ol>
         <li>
-            <strong>Keep CI green.</strong> All tests must pass before every
-            review round, including the first. Reviewers will not look at a PR
-            with failing tests.
+            <strong>Keep CI green.</strong> All required checks must pass before
+            every review round, including lint on changed <code>.py</code> and
+            <code>.pyi</code> files and the full test suite. Reviewers will not
+            look at a PR with failing CI.
         </li>
         <li>
             <strong>Stay rebased.</strong> It is your responsibility to keep

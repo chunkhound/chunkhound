@@ -21,4 +21,3 @@ def test_python_assignment_maps_to_variable_chunk_type():
     assert foo.metadata.get("node_type") == "assignment"
     assert foo.metadata.get("kind") == "variable"
     assert foo.chunk_type == ChunkType.VARIABLE
-

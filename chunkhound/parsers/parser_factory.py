@@ -44,8 +44,8 @@ import tree_sitter_zig as ts_zig
 from tree_sitter_language_pack import get_language as _get_lang
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers._grammar_availability import SCSS_AVAILABLE
 from chunkhound.interfaces.language_parser import LanguageParser
+from chunkhound.parsers._grammar_availability import SCSS_AVAILABLE
 from chunkhound.parsers.concept_extractor import LanguageMapping
 from chunkhound.parsers.mappings import (
     BashMapping,
@@ -60,9 +60,9 @@ from chunkhound.parsers.mappings import (
     HaskellMapping,
     HclMapping,
     HtmlMapping,
-    JinjaMapping,
     JavaMapping,
     JavaScriptMapping,
+    JinjaMapping,
     JsonMapping,
     JSXMapping,
     KotlinMapping,
@@ -266,7 +266,10 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.HTML: LanguageConfig(ts_html, HtmlMapping, True, "html"),
     Language.CSS: LanguageConfig(ts_css, CssMapping, True, "css"),
     Language.SCSS: LanguageConfig(
-        ts_scss, ScssMapping, SCSS_AVAILABLE, "scss",
+        ts_scss,
+        ScssMapping,
+        SCSS_AVAILABLE,
+        "scss",
         pip_package="tree-sitter-language-pack",
     ),
     # JINJA uses the HTML grammar as a best-effort approximation.

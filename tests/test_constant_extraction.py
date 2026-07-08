@@ -10,7 +10,6 @@ from chunkhound.core.types.common import FileId, Language
 from chunkhound.parsers.parser_factory import ParserFactory
 from chunkhound.parsers.universal_engine import UniversalConcept
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -74,10 +73,12 @@ def parse_file_constants(tmp_path):
 WORKING_LANGUAGES = {
     Language.C,  # preproc_def and const declarations captured by DEFINITION
     Language.CPP,
-    Language.CSHARP,  # field_declaration and local_declaration_statement captured by DEFINITION
+    Language.CSHARP,  # field_declaration and
+    # local_declaration_statement captured by DEFINITION
     Language.DART,
     Language.GO,
-    Language.GROOVY,  # field_declaration and local_variable_declaration captured by DEFINITION
+    Language.GROOVY,  # field_declaration and
+    # local_variable_declaration captured by DEFINITION
     Language.HASKELL,
     Language.JAVA,
     Language.KOTLIN,  # property_declaration captured by DEFINITION
@@ -108,7 +109,12 @@ NOT_IMPLEMENTED_LANGUAGES = {
         # Go: const declaration (WORKS)
         pytest.param(Language.GO, "const MAX = 100", ["MAX"], id="go"),
         # Java: static final field (WORKS)
-        pytest.param(Language.JAVA, "class Test { public static final int MAX = 100; }", ["MAX"], id="java"),
+        pytest.param(
+            Language.JAVA,
+            "class Test { public static final int MAX = 100; }",
+            ["MAX"],
+            id="java",
+        ),
         # Rust: const item (WORKS)
         pytest.param(Language.RUST, "const MAX: i32 = 100;", ["MAX"], id="rust"),
         # Swift: let at module level (WORKS)
@@ -126,7 +132,12 @@ NOT_IMPLEMENTED_LANGUAGES = {
         # === NOT YET IMPLEMENTED ===
         pytest.param(Language.PYTHON, "MAX_VALUE = 100", ["MAX_VALUE"], id="python"),
         pytest.param(Language.C, "#define MAX 100", ["MAX"], id="c"),
-        pytest.param(Language.CSHARP, "class Test { public const int MAX = 100; }", ["MAX"], id="csharp"),
+        pytest.param(
+            Language.CSHARP,
+            "class Test { public const int MAX = 100; }",
+            ["MAX"],
+            id="csharp",
+        ),
         pytest.param(Language.TYPESCRIPT, "const MAX = 100;", ["MAX"], id="typescript"),
         pytest.param(Language.JAVASCRIPT, "const MAX = 100;", ["MAX"], id="javascript"),
         # === WORKING LANGUAGES (continued) ===
@@ -134,7 +145,12 @@ NOT_IMPLEMENTED_LANGUAGES = {
         pytest.param(Language.LUA, "local MAX = 100", ["MAX"], id="lua"),
         # === NOT YET IMPLEMENTED (continued) ===
         pytest.param(Language.DART, "const MAX = 100;", ["MAX"], id="dart"),
-        pytest.param(Language.GROOVY, "class Test { static final int MAX = 100 }", ["MAX"], id="groovy"),
+        pytest.param(
+            Language.GROOVY,
+            "class Test { static final int MAX = 100 }",
+            ["MAX"],
+            id="groovy",
+        ),
     ],
 )
 def test_basic_constant_extraction(parse_constants, language, code, expected_names):
@@ -154,7 +170,6 @@ def test_basic_constant_extraction(parse_constants, language, code, expected_nam
 # Python UPPER_SNAKE_CASE Pattern Tests
 # Tests UPPER_SNAKE_CASE constant detection via module-level assignment capture.
 # =============================================================================
-
 
 
 @pytest.mark.parametrize(
@@ -229,7 +244,9 @@ def test_python_no_duplicate_constants_for_dict_assignment(parse_constants):
     constants = parse_constants(code, Language.PYTHON)
     config_constants = [c for c in constants if c["name"] == "CONFIG"]
     assert len(config_constants) == 1, (
-        f"Expected exactly 1 CONFIG constant, got {len(config_constants)}: {config_constants}"
+        f"Expected exactly 1 CONFIG constant, "
+        f"got {len(config_constants)}: "
+        f"{config_constants}"
     )
 
 
@@ -239,7 +256,9 @@ def test_python_no_duplicate_constants_for_list_assignment(parse_constants):
     constants = parse_constants(code, Language.PYTHON)
     options_constants = [c for c in constants if c["name"] == "OPTIONS"]
     assert len(options_constants) == 1, (
-        f"Expected exactly 1 OPTIONS constant, got {len(options_constants)}: {options_constants}"
+        f"Expected exactly 1 OPTIONS constant, "
+        f"got {len(options_constants)}: "
+        f"{options_constants}"
     )
 
 
@@ -251,13 +270,12 @@ def test_python_no_duplicate_constants_for_list_assignment(parse_constants):
 # =============================================================================
 
 
-
 @pytest.mark.parametrize(
     "code",
     [
         "class T { public static final int MAX = 100; }",
         "class T { static final int MAX = 100; }",
-        "class T { private static final String NAME = \"test\"; }",
+        'class T { private static final String NAME = "test"; }',
     ],
     ids=["public_static_final", "static_final", "private_static_final_string"],
 )
@@ -277,7 +295,13 @@ def test_java_static_final_should_extract(parse_constants, code):
         "class T { public final int MAX = 100; }",  # missing static
         "class T { int MAX = 100; }",  # neither
     ],
-    ids=["static_only", "public_static_only", "final_only", "public_final_only", "neither"],
+    ids=[
+        "static_only",
+        "public_static_only",
+        "final_only",
+        "public_final_only",
+        "neither",
+    ],
 )
 def test_java_partial_modifiers_not_extracted(parse_constants, code):
     """Test Java fields without both static AND final are not extracted."""
@@ -285,7 +309,6 @@ def test_java_partial_modifiers_not_extracted(parse_constants, code):
     # These should not be extracted (and aren't, because nothing is extracted)
     has_max = any(c["name"] == "MAX" for c in constants)
     assert not has_max, f"Should not extract constant for: {code}"
-
 
 
 def test_java_enum_members(parse_constants):
@@ -308,7 +331,6 @@ public enum Status {
 # NOTE: C preproc_def is NOT captured by DEFINITION queries. C++ captures
 # const/constexpr declarations but not #define macros directly.
 # =============================================================================
-
 
 
 @pytest.mark.parametrize(
@@ -334,7 +356,11 @@ def test_c_object_macros_should_extract(parse_constants, code, expected_name):
         "#define MAX(a,b) ((a)>(b)?(a):(b))",
         "#define SQUARE(n) ((n)*(n))",
     ],
-    ids=["function_macro_single_param", "function_macro_two_params", "function_macro_square"],
+    ids=[
+        "function_macro_single_param",
+        "function_macro_two_params",
+        "function_macro_square",
+    ],
 )
 def test_c_function_like_macros_not_extracted(parse_constants, code):
     """Test C function-like macros are not extracted."""
@@ -343,7 +369,9 @@ def test_c_function_like_macros_not_extracted(parse_constants, code):
     # (Currently nothing is extracted for C, so this passes)
     macro_name = code.split()[1].split("(")[0]
     names = {c["name"] for c in constants}
-    assert macro_name not in names, f"Should not extract function-like macro '{macro_name}'"
+    assert macro_name not in names, (
+        f"Should not extract function-like macro '{macro_name}'"
+    )
 
 
 @pytest.mark.parametrize(
@@ -373,7 +401,8 @@ void my_function() {
     constants = parse_constants(code, Language.C)
     names = {c["name"] for c in constants}
     assert "FUNC_CONST" in names, f"Expected FUNC_CONST in {names}"
-    # Note: MESSAGE is a pointer declarator, may not be captured by simple identifier query
+    # Note: MESSAGE is a pointer declarator, may not
+    # be captured by simple identifier query
 
 
 def test_c_nested_block_const(parse_constants):
@@ -403,7 +432,7 @@ void func() {
     constants = parse_constants(code, Language.C)
     names = {c["name"] for c in constants}
     assert "CONSTANT" in names, f"Expected CONSTANT in {names}"
-    assert "regular" not in names, f"Should not extract non-const variable"
+    assert "regular" not in names, "Should not extract non-const variable"
 
 
 @pytest.mark.parametrize(
@@ -446,7 +475,9 @@ const (
 """
     constants = parse_constants(code, Language.GO)
     names = {c["name"] for c in constants}
-    assert "FIRST" in names or len(constants) >= 1, f"Expected const block constants, got: {names}"
+    assert "FIRST" in names or len(constants) >= 1, (
+        f"Expected const block constants, got: {names}"
+    )
 
 
 def test_go_const_with_iota(parse_constants):
@@ -534,7 +565,9 @@ def test_rust_mutable_let_binding_not_extracted(parse_constants):
     code = "let mut counter = 0;"
     constants = parse_constants(code, Language.RUST)
     names = {c["name"] for c in constants}
-    assert "counter" not in names, f"Should not extract mutable let binding 'counter', got {names}"
+    assert "counter" not in names, (
+        f"Should not extract mutable let binding 'counter', got {names}"
+    )
 
 
 def test_rust_immutable_let_with_type(parse_constants):
@@ -572,14 +605,12 @@ let mut mutable2: i32 = 400;
 # =============================================================================
 
 
-
 def test_typescript_const_declaration(parse_constants):
     """Test TypeScript const declaration (not yet implemented)."""
     code = "const MAX = 100;"
     constants = parse_constants(code, Language.TYPESCRIPT)
     names = {c["name"] for c in constants}
     assert "MAX" in names
-
 
 
 def test_typescript_const_with_type(parse_constants):
@@ -590,7 +621,6 @@ def test_typescript_const_with_type(parse_constants):
     max_const = next((c for c in constants if c["name"] == "MAX"), None)
     if max_const and "type" in max_const:
         assert "number" in max_const["type"]
-
 
 
 def test_typescript_enum_members(parse_constants):
@@ -607,7 +637,6 @@ enum Color {
     assert "RED" in names, f"Expected enum constants, got: {names}"
 
 
-
 def test_javascript_multi_const(parse_constants):
     """Test JavaScript multiple const declarations (not yet implemented)."""
     code = "const A = 1, B = 2, C = 3;"
@@ -621,7 +650,6 @@ def test_javascript_multi_const(parse_constants):
 # NOTE: C# field_declaration is NOT captured as standalone DEFINITION concepts.
 # These tests document desired behavior.
 # =============================================================================
-
 
 
 @pytest.mark.parametrize(
@@ -656,7 +684,6 @@ def test_csharp_partial_modifiers_not_extracted(parse_constants, code):
     has_max = any(c["name"] == "MAX" for c in constants)
     # These should not be extracted (and aren't, because nothing is extracted)
     assert not has_max, f"Should not extract constant for: {code}"
-
 
 
 def test_csharp_enum_members(parse_constants):
@@ -701,8 +728,8 @@ class Test {
 """
     constants = parse_constants(code, Language.CSHARP)
     names = {c["name"] for c in constants}
-    assert "regularVar" not in names, f"Should not extract non-const local variable"
-    assert "message" not in names, f"Should not extract non-const local variable"
+    assert "regularVar" not in names, "Should not extract non-const local variable"
+    assert "message" not in names, "Should not extract non-const local variable"
 
 
 # =============================================================================
@@ -718,7 +745,9 @@ def test_value_truncation_at_50_chars(parse_constants):
     constants = parse_constants(code, Language.PYTHON)
     if constants:
         value = constants[0].get("value", "")
-        assert len(value) <= 50, f"Value should be truncated to 50 chars, got {len(value)}"
+        assert len(value) <= 50, (
+            f"Value should be truncated to 50 chars, got {len(value)}"
+        )
 
 
 def test_value_exactly_50_chars_not_truncated(parse_constants):
@@ -767,9 +796,11 @@ def my_function():
 def test_constants_from_method_body_java(parse_constants):
     """Test that constants inside Java method bodies ARE extracted.
 
-    NOTE: As of the current implementation, Java extracts from local_variable_declaration
-    which includes method-scoped variables. Static final fields and local final variables
-    with UPPER_CASE names are both extracted.
+    NOTE: As of the current implementation, Java
+    extracts from local_variable_declaration which
+    includes method-scoped variables. Static final
+    fields and local final variables with UPPER_CASE
+    names are both extracted.
     """
     code = """
 class Test {
@@ -826,7 +857,6 @@ const (
     assert len(constants) >= 1
 
 
-
 def test_typescript_multiple_const_in_block(parse_constants):
     """Test TypeScript multiple const declarations (not yet implemented)."""
     code = """
@@ -861,7 +891,9 @@ def test_type_annotation_extraction(parse_constants, language, code, expected_ty
     if constants:
         const = constants[0]
         if "type" in const:
-            assert expected_type in const["type"], f"Expected type '{expected_type}' in {const}"
+            assert expected_type in const["type"], (
+                f"Expected type '{expected_type}' in {const}"
+            )
 
 
 # =============================================================================
@@ -869,7 +901,6 @@ def test_type_annotation_extraction(parse_constants, language, code, expected_ty
 # NOTE: These test the full file parsing pipeline. Some fail because
 # constant extraction is not yet implemented for those languages.
 # =============================================================================
-
 
 
 def test_constants_in_parsed_file_python(parse_file_constants):
@@ -884,7 +915,6 @@ DEFAULT_TIMEOUT = 30
     assert len(names.intersection({"MAX_VALUE", "API_KEY", "DEFAULT_TIMEOUT"})) >= 1
 
 
-
 def test_java_constants_in_parsed_file(parse_file_constants):
     """Test Java constants flow through file parsing pipeline (not yet implemented)."""
     code = """
@@ -895,14 +925,14 @@ public class Config {
 """
     constants = parse_file_constants(code, "Config.java", Language.JAVA)
     names = {c["name"] for c in constants}
-    assert (
-        "MAX_CONNECTIONS" in names or "API_URL" in names
-    ), f"Expected Java constants, got: {names}"
-
+    assert "MAX_CONNECTIONS" in names or "API_URL" in names, (
+        f"Expected Java constants, got: {names}"
+    )
 
 
 def test_typescript_constants_in_parsed_file(parse_file_constants):
-    """Test TypeScript constants flow through file parsing pipeline (not yet implemented)."""
+    """Test TypeScript constants flow through file
+    parsing pipeline (not yet implemented)."""
     code = """
 export const API_VERSION = "v2.1.0";
 export const MAX_RETRIES = 3;
@@ -1076,7 +1106,7 @@ def test_objc_non_const_variable_not_extracted(parse_constants):
     constants = parse_constants(code, Language.OBJC)
     names = {c["name"] for c in constants}
     assert "CONSTANT" in names, f"Expected CONSTANT in {names}"
-    assert "regular" not in names, f"Should not extract non-const variable"
+    assert "regular" not in names, "Should not extract non-const variable"
 
 
 def test_haskell_top_level_constant(parse_constants):
@@ -1128,7 +1158,6 @@ def test_haskell_nested_let_in_where(parse_constants):
 # --- NOT YET IMPLEMENTED ---
 
 
-
 def test_kotlin_const_val(parse_constants):
     """Test Kotlin const val extraction (WORKS)."""
     code = "const val MAX = 100"
@@ -1164,7 +1193,7 @@ fun myFunction() {
     constants = parse_constants(code, Language.KOTLIN)
     names = {c["name"] for c in constants}
     assert "LOCAL_CONST" in names, f"Expected LOCAL_CONST in {names}"
-    assert "localVar" not in names, f"Should not extract var"
+    assert "localVar" not in names, "Should not extract var"
 
 
 def test_kotlin_class_property_val(parse_constants):
@@ -1178,7 +1207,7 @@ class MyClass {
     constants = parse_constants(code, Language.KOTLIN)
     names = {c["name"] for c in constants}
     assert "CLASS_PROPERTY" in names, f"Expected CLASS_PROPERTY in {names}"
-    assert "classVar" not in names, f"Should not extract var"
+    assert "classVar" not in names, "Should not extract var"
 
 
 def test_kotlin_companion_object_constants(parse_constants):
@@ -1197,14 +1226,12 @@ class MyClass {
     assert "COMPANION_VAL" in names, f"Expected COMPANION_VAL in {names}"
 
 
-
 def test_dart_const_declaration(parse_constants):
     """Test Dart const declaration."""
     code = "const MAX = 100;"
     constants = parse_constants(code, Language.DART)
     names = {c["name"] for c in constants}
     assert "MAX" in names
-
 
 
 def test_groovy_static_final(parse_constants):
@@ -1285,7 +1312,7 @@ end
     names = {c["name"] for c in constants}
     # Should extract MAX_VALUE (UPPER_CASE) but not min_value (lowercase)
     assert "MAX_VALUE" in names, f"Expected MAX_VALUE in {names}"
-    assert "min_value" not in names, f"Should not extract lowercase variable"
+    assert "min_value" not in names, "Should not extract lowercase variable"
 
 
 def test_matlab_multiple_constants_in_function(parse_constants):
@@ -1316,7 +1343,9 @@ end
 """
     constants = parse_constants(code, Language.MATLAB)
     names = {c["name"] for c in constants}
-    assert "MAX_VALUE" in names or "PI_APPROX" in names, f"Expected property constants, got {names}"
+    assert "MAX_VALUE" in names or "PI_APPROX" in names, (
+        f"Expected property constants, got {names}"
+    )
 
 
 def test_matlab_mixed_case_not_extracted(parse_constants):
@@ -1348,7 +1377,9 @@ end
     constants = parse_constants(code, Language.MATLAB)
     names = {c["name"] for c in constants}
     # Should extract from both outer and nested functions
-    assert "OUTER_CONSTANT" in names or "INNER_CONSTANT" in names, f"Expected nested constants, got {names}"
+    assert "OUTER_CONSTANT" in names or "INNER_CONSTANT" in names, (
+        f"Expected nested constants, got {names}"
+    )
 
 
 def test_matlab_script_level_constants(parse_constants):
@@ -1365,7 +1396,7 @@ lowercase_var = 1;
     assert "SCRIPT_CONSTANT" in names, f"Expected SCRIPT_CONSTANT in {names}"
     assert "API_KEY" in names, f"Expected API_KEY in {names}"
     # Should not extract lowercase variables
-    assert "lowercase_var" not in names, f"Should not extract lowercase variable"
+    assert "lowercase_var" not in names, "Should not extract lowercase variable"
 
 
 def test_matlab_mixed_script_and_function_constants(parse_constants):
@@ -1398,7 +1429,9 @@ end
     constants = parse_file_constants(code, "config.m", Language.MATLAB)
     names = {c["name"] for c in constants}
     expected = {"MAX_CONNECTIONS", "API_URL", "TIMEOUT"}
-    assert len(expected.intersection(names)) >= 1, f"Expected MATLAB constants, got {names}"
+    assert len(expected.intersection(names)) >= 1, (
+        f"Expected MATLAB constants, got {names}"
+    )
 
 
 # =============================================================================
@@ -1417,7 +1450,13 @@ end
         ("local MAX123 = 1", True),
         ("local A = 1", True),  # Single letter uppercase
     ],
-    ids=["max_value", "api_key_v2", "private_underscore", "max_with_numbers", "single_letter"],
+    ids=[
+        "max_value",
+        "api_key_v2",
+        "private_underscore",
+        "max_with_numbers",
+        "single_letter",
+    ],
 )
 def test_lua_upper_snake_case_valid(parse_constants, code, should_extract):
     """Test Lua UPPER_SNAKE_CASE constant detection (valid patterns)."""

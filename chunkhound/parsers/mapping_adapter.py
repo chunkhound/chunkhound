@@ -62,7 +62,8 @@ class MappingAdapter(LanguageMapping):
             if class_query.strip():
                 queries.append(class_query.strip())
 
-            # Check for additional definition patterns (e.g., field_declaration for Java)
+            # Check for additional definition patterns
+            # (e.g., field_declaration for Java)
             if hasattr(self.base_mapping, "get_definition_query"):
                 definition_query = self.base_mapping.get_definition_query()
                 if definition_query and definition_query.strip():
@@ -259,9 +260,11 @@ class MappingAdapter(LanguageMapping):
             "comment",
         ]
 
-        # File-level and large container nodes that should never be returned as definitions
-        # These would create oversized chunks containing entire files or large code sections
-        FILE_LEVEL_NODES = {
+        # File-level and large container nodes that should
+        # never be returned as definitions. These would create
+        # oversized chunks containing entire files or large
+        # code sections.
+        file_level_nodes = {
             # File-level nodes
             "module",
             "source_file",
@@ -287,7 +290,7 @@ class MappingAdapter(LanguageMapping):
 
         # Fallback: return first non-file-level capture
         for node in captures.values():
-            if node.type not in FILE_LEVEL_NODES:
+            if node.type not in file_level_nodes:
                 return node
 
         # If only file-level captures found, return None to skip this concept

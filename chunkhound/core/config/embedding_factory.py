@@ -194,7 +194,8 @@ class EmbeddingProviderFactory:
                 kwargs["output_dims"] = output_dims
             if client_side_truncation:
                 kwargs["client_side_truncation"] = True
-            # rerank_url: resolve relative paths against base_url, then forward absolute URLs only
+            # rerank_url: resolve relative paths against
+            # base_url, then forward absolute URLs only
             if (
                 rerank_url
                 and base_url

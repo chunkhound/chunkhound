@@ -45,7 +45,8 @@ class TestVueTemplateMapping:
     def test_get_query_for_concept_structure(self):
         """Test getting query for STRUCTURE concept."""
         query = self.mapping.get_query_for_concept(UniversalConcept.STRUCTURE)
-        # Components are now handled in DEFINITION query, so STRUCTURE query may be empty
+        # Components are now handled in DEFINITION query,
+        # so STRUCTURE query may be empty
         assert query is not None
         # STRUCTURE query is now empty since components moved to DEFINITION
         assert query == ""
@@ -115,9 +116,7 @@ class TestVueParserTemplateDirectives:
         chunks = self.parser.parse_file(self.fixture_path, FileId(1))
 
         # Find v-for directive chunks
-        vfor_chunks = [
-            c for c in chunks if c.metadata.get("directive_type") == "v-for"
-        ]
+        vfor_chunks = [c for c in chunks if c.metadata.get("directive_type") == "v-for"]
 
         # Should find at least one v-for directive
         assert len(vfor_chunks) > 0
@@ -142,7 +141,9 @@ class TestVueParserTemplateDirectives:
         assert len(event_chunks) > 0
         # Check that event names are extracted
         event_names = [
-            c.metadata.get("event_name") for c in event_chunks if "event_name" in c.metadata
+            c.metadata.get("event_name")
+            for c in event_chunks
+            if "event_name" in c.metadata
         ]
         assert event_names, "No event names extracted from event handler chunks"
         assert "click" in event_names or "submit" in event_names
@@ -182,7 +183,9 @@ class TestVueParserTemplateDirectives:
         assert len(vmodel_chunks) > 0
 
         # Check plain v-model="message" (present in fixture)
-        plain_vmodel = [c for c in vmodel_chunks if c.metadata.get("model_binding") == "message"]
+        plain_vmodel = [
+            c for c in vmodel_chunks if c.metadata.get("model_binding") == "message"
+        ]
         assert len(plain_vmodel) == 1
         assert plain_vmodel[0].metadata.get("modifiers") == []
         assert "script_references" in plain_vmodel[0].metadata
@@ -204,12 +207,15 @@ class TestVueParserTemplateDirectives:
         assert len(component_chunks) > 0
         # Check that component names are extracted
         component_names = [
-            c.metadata.get("component_name") for c in component_chunks if "component_name" in c.metadata
+            c.metadata.get("component_name")
+            for c in component_chunks
+            if "component_name" in c.metadata
         ]
-        assert component_names, "No component names extracted from component usage chunks"
+        assert component_names, (
+            "No component names extracted from component usage chunks"
+        )
         assert any(
-            name in component_names
-            for name in ["UserProfile", "BaseButton", "Modal"]
+            name in component_names for name in ["UserProfile", "BaseButton", "Modal"]
         )
 
     def test_parse_interpolations(self):
@@ -233,7 +239,7 @@ class TestVueParserTemplateDirectives:
 
     def test_parse_simple_template(self):
         """Test parsing a simple template with basic directives."""
-        simple_vue = '''<template>
+        simple_vue = """<template>
   <div v-if="show">
     <p>{{ message }}</p>
     <button @click="handleClick">Click me</button>
@@ -244,7 +250,7 @@ class TestVueParserTemplateDirectives:
 const show = ref(true)
 const message = ref('Hello')
 const handleClick = () => console.log('clicked')
-</script>'''
+</script>"""
 
         chunks = self.parser.parse_content(simple_vue)
 
@@ -262,13 +268,13 @@ const handleClick = () => console.log('clicked')
         # Force template parser to None to test fallback
         parser.template_parser = None
 
-        simple_vue = '''<template>
+        simple_vue = """<template>
   <div>{{ message }}</div>
 </template>
 
 <script setup>
 const message = ref('Hello')
-</script>'''
+</script>"""
 
         chunks = parser.parse_content(simple_vue)
 
@@ -291,7 +297,7 @@ class TestVueTemplateMetadata:
 
     def test_conditional_directive_metadata(self):
         """Test metadata extraction for conditional directives."""
-        vue_content = '''<template>
+        vue_content = """<template>
   <div v-if="isActive">Active</div>
   <div v-else-if="isLoading">Loading</div>
 </template>
@@ -299,7 +305,7 @@ class TestVueTemplateMetadata:
 <script setup>
 const isActive = ref(true)
 const isLoading = ref(false)
-</script>'''
+</script>"""
 
         chunks = self.parser.parse_content(vue_content)
         template_chunks = [
@@ -314,7 +320,7 @@ const isLoading = ref(false)
 
     def test_loop_directive_metadata(self):
         """Test metadata extraction for loop directives."""
-        vue_content = '''<template>
+        vue_content = """<template>
   <ul>
     <li v-for="item in items" :key="item.id">{{ item.name }}</li>
   </ul>
@@ -322,7 +328,7 @@ const isLoading = ref(false)
 
 <script setup>
 const items = ref([{ id: 1, name: 'Item 1' }])
-</script>'''
+</script>"""
 
         chunks = self.parser.parse_content(vue_content)
         template_chunks = [
@@ -331,12 +337,12 @@ const items = ref([{ id: 1, name: 'Item 1' }])
 
         # Check that v-for directive is properly extracted
         assert any(
-            chunk.metadata.get("directive_type") == "v-for"
-            for chunk in template_chunks
+            chunk.metadata.get("directive_type") == "v-for" for chunk in template_chunks
         )
         # Check that loop metadata is extracted
         vfor_chunks = [
-            chunk for chunk in template_chunks
+            chunk
+            for chunk in template_chunks
             if chunk.metadata.get("directive_type") == "v-for"
         ]
         for chunk in vfor_chunks:
@@ -345,7 +351,7 @@ const items = ref([{ id: 1, name: 'Item 1' }])
 
     def test_all_chunks_have_vue_metadata(self):
         """Test that all template chunks have vue-specific metadata."""
-        vue_content = '''<template>
+        vue_content = """<template>
   <div>
     <p>{{ message }}</p>
   </div>
@@ -353,7 +359,7 @@ const items = ref([{ id: 1, name: 'Item 1' }])
 
 <script setup>
 const message = ref('Hello')
-</script>'''
+</script>"""
 
         chunks = self.parser.parse_content(vue_content)
 
@@ -364,14 +370,14 @@ const message = ref('Hello')
 
     def test_v_else_directive_metadata(self):
         """Test metadata extraction for bare v-else directives."""
-        vue_content = '''<template>
+        vue_content = """<template>
   <div v-if="condition">Content</div>
   <div v-else>Else content</div>
 </template>
 
 <script setup>
 const condition = ref(true)
-</script>'''
+</script>"""
 
         chunks = self.parser.parse_content(vue_content)
         template_chunks = [
@@ -385,7 +391,8 @@ const condition = ref(true)
         )
         # Check that v-else chunk has deterministic name (not "unnamed")
         v_else_chunks = [
-            chunk for chunk in template_chunks
+            chunk
+            for chunk in template_chunks
             if chunk.metadata.get("directive_type") == "v-else"
         ]
         for chunk in v_else_chunks:

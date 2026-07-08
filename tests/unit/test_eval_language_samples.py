@@ -55,4 +55,3 @@ def test_create_corpus_creates_files_and_queries(tmp_path: Path) -> None:
         for rel in query.relevant_paths:
             target = (project_dir / rel).resolve()
             assert target in path_set
-

@@ -17,7 +17,8 @@ class ChunkDiff:
 
 
 class ChunkCacheService:
-    """Service for comparing chunks based on direct content comparison to minimize embedding regeneration."""
+    """Service for comparing chunks based on direct
+    content comparison to minimize embedding regeneration."""
 
     def __init__(self) -> None:
         """Initialize chunk cache service."""

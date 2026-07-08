@@ -11,8 +11,8 @@ from chunkhound.services.realtime.adapters.watchman import WatchmanRealtimeAdapt
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.watchman import PrivateWatchmanSidecar, WatchmanSubscriptionScope
 from chunkhound.watchman.session import WatchmanCliSession
-from chunkhound.watchman_runtime import resolve_packaged_watchman_runtime
 from chunkhound.watchman_runtime import bridge as bridge_module
+from chunkhound.watchman_runtime import resolve_packaged_watchman_runtime
 
 
 class _ExplodingStream:

@@ -407,7 +407,9 @@ def format_search_results_markdown(
 
         heading = " ".join(parts)
         # Use a fence longer than any backtick run in the content (CommonMark §6.1).
-        max_run = max((len(m.group()) for m in _BACKTICK_RUN_RE.finditer(content)), default=0)
+        max_run = max(
+            (len(m.group()) for m in _BACKTICK_RUN_RE.finditer(content)), default=0
+        )
         fence = "`" * max(3, max_run + 1)
         block = f"{heading}\n\n{fence}{lang_hint}\n{content}\n{fence}"
         blocks.append(block)
@@ -528,7 +530,9 @@ def _resolve_commit_range(
 ) -> str | None:
     """Resolve mutually-exclusive commit inputs to a single git revision range."""
     if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
-        raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
+        raise ValueError(
+            "Provide at most one of: commit_range, commit_hash, last_n_commits."
+        )
     if commit_hash is not None:
         return f"{commit_hash}^..{commit_hash}"
     if last_n_commits is not None:
@@ -551,7 +555,11 @@ async def _git_cwd_from_services(services: DatabaseServices) -> Path:
         db_path = Path(services.provider.db_path)
         start = db_path if db_path.is_dir() else db_path.parent
         proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(start), "rev-parse", "--show-toplevel",
+            "git",
+            "-C",
+            str(start),
+            "rev-parse",
+            "--show-toplevel",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -560,6 +568,7 @@ async def _git_cwd_from_services(services: DatabaseServices) -> Path:
             return Path(stdout.decode("utf-8", errors="replace").strip())
     except Exception:
         from loguru import logger as _log
+
         _log.debug("git rev-parse failed from {}, falling back", start, exc_info=True)
 
     # Fallback: project markers, then bare cwd
@@ -584,7 +593,9 @@ async def _inject_diff_service(
     callers must surface this to the MCP client so the LLM knows results are partial.
     """
     if vector_source not in ("diff", "db", "both"):
-        raise ValueError(f"Invalid vector_source: {vector_source!r}. Must be 'diff', 'db', or 'both'.")
+        raise ValueError(
+            f"Invalid vector_source: {vector_source!r}. Must be 'diff', 'db', or 'both'."
+        )
 
     # Local imports avoid circular dependency: tools → git_diff → (nothing in tools)
     from loguru import logger as _log
@@ -676,7 +687,9 @@ async def search_impl(
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
 
-    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+    effective_commit_range = _resolve_commit_range(
+        commit_range, commit_hash, last_n_commits
+    )
 
     if type == "semantic":
         # Validate embedding manager for semantic search
@@ -688,11 +701,16 @@ async def search_impl(
             )
 
     truncation_warning: str | None = None
-    if effective_commit_range is not None and type == "semantic" and vector_source != "db":
-        services, truncation_warning = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
+    if (
+        effective_commit_range is not None
+        and type == "semantic"
+        and vector_source != "db"
+    ):
+        services, truncation_warning = await _inject_diff_service(
+            services, effective_commit_range, vector_source, embedding_manager
+        )
 
     if type == "semantic":
-
         # Get default provider/model
         try:
             provider_obj = embedding_manager.get_provider()
@@ -805,11 +823,15 @@ async def deep_research_impl(
             "Configure a rerank_model in your embedding configuration."
         )
 
-    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+    effective_commit_range = _resolve_commit_range(
+        commit_range, commit_hash, last_n_commits
+    )
 
     truncation_warning: str | None = None
     if effective_commit_range is not None and vector_source != "db":
-        services, truncation_warning = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
+        services, truncation_warning = await _inject_diff_service(
+            services, effective_commit_range, vector_source, embedding_manager
+        )
 
     # Create default config from environment if not provided
     if config is None:
@@ -928,9 +950,7 @@ async def websearch_impl(
                 proc.communicate(), timeout=timeout_s
             )
         except asyncio.TimeoutError:
-            raise MCPError(
-                f"websearch timed out after {timeout_s:.0f}s"
-            ) from None
+            raise MCPError(f"websearch timed out after {timeout_s:.0f}s") from None
         if proc.returncode != 0:
             tail = _summarize_subprocess_stderr(stderr)
             raise MCPError(
@@ -946,11 +966,13 @@ async def websearch_impl(
     answer = replace_paths_with_urls(answer, mapping).rstrip()
     # Warnings may be multi-line; prefix every line to keep the blockquote.
     warn_block = (
-        "\n\n> **Fetch warnings:**\n"
-        + "\n".join(
-            "> - " + w.replace("\n", "\n> ") for w in warnings
+        (
+            "\n\n> **Fetch warnings:**\n"
+            + "\n".join("> - " + w.replace("\n", "\n> ") for w in warnings)
         )
-    ) if warnings else ""
+        if warnings
+        else ""
+    )
     return f"{answer}{warn_block}"
 
 
@@ -1049,7 +1071,9 @@ async def execute_tool(
                     "has_more": True,
                     "next_offset": pagination.get("offset", 0) + len(results_list),
                 }
-                md = format_search_results_markdown(results_list, pagination, search_type)
+                md = format_search_results_markdown(
+                    results_list, pagination, search_type
+                )
             # If the single remaining result still exceeds the limit, truncate its content.
             if results_list and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
                 result_copy = dict(results_list[0])
@@ -1058,13 +1082,23 @@ async def execute_tool(
                 # two fence lines of max_run+1 backticks each) means the 300-char reserve
                 # can be wildly insufficient; re-render and shrink until the actual output fits.
                 max_content_chars = max(0, MAX_RESPONSE_TOKENS * 3 - 300)
-                result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
-                md = format_search_results_markdown([result_copy], pagination, search_type)
-                while estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0:
+                result_copy["content"] = (
+                    content[:max_content_chars] + "\n\n[... truncated ...]"
+                )
+                md = format_search_results_markdown(
+                    [result_copy], pagination, search_type
+                )
+                while (
+                    estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0
+                ):
                     excess_chars = (estimate_tokens(md) - MAX_RESPONSE_TOKENS) * 3
                     max_content_chars = max(0, max_content_chars - excess_chars - 1)
-                    result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
-                    md = format_search_results_markdown([result_copy], pagination, search_type)
+                    result_copy["content"] = (
+                        content[:max_content_chars] + "\n\n[... truncated ...]"
+                    )
+                    md = format_search_results_markdown(
+                        [result_copy], pagination, search_type
+                    )
             if diff_warnings:
                 warning_block = "\n".join(f"> **Warning:** {w}" for w in diff_warnings)
                 md = f"{warning_block}\n\n{md}"

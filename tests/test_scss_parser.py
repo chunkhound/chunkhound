@@ -1,9 +1,10 @@
 """Unit tests for SCSS parser."""
 
-import pytest
 from pathlib import Path
 
-from chunkhound.core.types.common import Language, ChunkType
+import pytest
+
+from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.parser_factory import ParserFactory
 
 
@@ -193,7 +194,7 @@ def test_use_with_alias_symbol_is_path_only(scss_parser):
     symbols = {c.symbol for c in import_chunks}
     assert any("colors" in s for s in symbols), f"colors not in {symbols}"
     assert any("typography" in s for s in symbols), f"typography not in {symbols}"
-    assert not any(" as " in s or 'as c' in s or '"' in s for s in symbols), (
+    assert not any(" as " in s or "as c" in s or '"' in s for s in symbols), (
         f"Alias or quotes leaked into symbol: {symbols}"
     )
 
@@ -204,7 +205,11 @@ def test_parses_comments(scss_parser):
     Note: Single-line // comments are not captured by the tree-sitter SCSS grammar's
     comment query. Only /* */ block comments produce COMMENT chunks.
     """
-    code = "/* Block comment */\n$var: red;\n/* Another block comment */\n.btn { color: $var; }"
+    code = (
+        "/* Block comment */\n$var: red;"
+        "\n/* Another block comment */"
+        "\n.btn { color: $var; }"
+    )
     chunks = scss_parser.parse_content(code, "test.scss", file_id=1)
     comment_chunks = [c for c in chunks if c.chunk_type == ChunkType.COMMENT]
     assert len(comment_chunks) > 0, "No COMMENT chunks found for /* */ comments"
@@ -233,13 +238,17 @@ def test_comprehensive_file(scss_parser, comprehensive_scss):
     chunk_types = {c.chunk_type for c in chunks}
 
     # Must have FUNCTION (at least @mixin)
-    assert ChunkType.FUNCTION in chunk_types, f"No FUNCTION chunks. Types: {chunk_types}"
+    assert ChunkType.FUNCTION in chunk_types, (
+        f"No FUNCTION chunks. Types: {chunk_types}"
+    )
 
     # Must have BLOCK (rule_sets, @media, @keyframes, @include, etc.)
     assert ChunkType.BLOCK in chunk_types, f"No BLOCK chunks. Types: {chunk_types}"
 
     # Must have NAMESPACE (STRUCTURE: $variables)
-    assert ChunkType.NAMESPACE in chunk_types, f"No NAMESPACE/STRUCTURE. Types: {chunk_types}"
+    assert ChunkType.NAMESPACE in chunk_types, (
+        f"No NAMESPACE/STRUCTURE. Types: {chunk_types}"
+    )
 
     # Must have IMPORT (@import, @use, @forward)
     assert ChunkType.IMPORT in chunk_types, f"No IMPORT chunks. Types: {chunk_types}"
@@ -259,11 +268,13 @@ def test_comprehensive_file(scss_parser, comprehensive_scss):
 
     # Check imports are captured (may be merged into one chunk)
     import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
-    assert len(import_chunks) >= 1, f"Expected at least 1 import, got {len(import_chunks)}"
-    import_code = " ".join(c.symbol for c in import_chunks)
-    assert "variables" in import_code or "math" in import_code or "sass" in import_code, (
-        f"Expected @import/@use targets in {import_code}"
+    assert len(import_chunks) >= 1, (
+        f"Expected at least 1 import, got {len(import_chunks)}"
     )
+    import_code = " ".join(c.symbol for c in import_chunks)
+    assert (
+        "variables" in import_code or "math" in import_code or "sass" in import_code
+    ), f"Expected @import/@use targets in {import_code}"
 
 
 def test_interpolated_custom_props_not_empty(scss_parser):
@@ -288,7 +299,8 @@ def test_interpolated_custom_props_not_empty(scss_parser):
     block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
     # Both rule sets are captured (cAST may merge adjacent small rules into one chunk)
     assert len(block_chunks) >= 1, (
-        f"Expected >=1 BLOCK chunk for interpolated custom-prop file, got {len(block_chunks)}"
+        f"Expected >=1 BLOCK chunk for interpolated"
+        f" custom-prop file, got {len(block_chunks)}"
     )
     all_code = " ".join(c.code for c in block_chunks)
     # Both selectors appear in the extracted code
@@ -317,6 +329,7 @@ def test_parses_while_as_block(scss_parser):
 def test_resolve_import_paths_partial(tmp_path):
     """resolve_import_paths resolves SCSS underscore-prefixed partials."""
     from chunkhound.parsers.mappings.scss import ScssMapping
+
     scss = ScssMapping()
     # Create the partial file (underscore prefix convention)
     (tmp_path / "_colors.scss").write_text("$primary: red;")
@@ -329,9 +342,12 @@ def test_resolve_import_paths_partial(tmp_path):
 def test_resolve_import_paths_direct(tmp_path):
     """resolve_import_paths resolves a direct SCSS path first."""
     from chunkhound.parsers.mappings.scss import ScssMapping
+
     scss = ScssMapping()
     (tmp_path / "variables.scss").write_text("$size: 16px;")
-    resolved = scss.resolve_import_paths("variables.scss", tmp_path, tmp_path / "main.scss")
+    resolved = scss.resolve_import_paths(
+        "variables.scss", tmp_path, tmp_path / "main.scss"
+    )
     assert len(resolved) == 1
     assert resolved[0] == tmp_path / "variables.scss"
 
@@ -339,16 +355,27 @@ def test_resolve_import_paths_direct(tmp_path):
 def test_resolve_import_paths_builtin_sass_module(tmp_path):
     """resolve_import_paths returns [] for built-in Sass modules (sass:xxx)."""
     from chunkhound.parsers.mappings.scss import ScssMapping
+
     scss = ScssMapping()
     # Built-in modules have no filesystem path — should return empty, not error
-    assert scss.resolve_import_paths('@use "sass:math"', tmp_path, tmp_path / "main.scss") == []
-    assert scss.resolve_import_paths('@use "sass:color"', tmp_path, tmp_path / "main.scss") == []
-    assert scss.resolve_import_paths('@use "sass:list"', tmp_path, tmp_path / "main.scss") == []
+    assert (
+        scss.resolve_import_paths('@use "sass:math"', tmp_path, tmp_path / "main.scss")
+        == []
+    )
+    assert (
+        scss.resolve_import_paths('@use "sass:color"', tmp_path, tmp_path / "main.scss")
+        == []
+    )
+    assert (
+        scss.resolve_import_paths('@use "sass:list"', tmp_path, tmp_path / "main.scss")
+        == []
+    )
 
 
 def test_preprocess_scss_deep_nesting():
     """Interpolation preprocessor handles arbitrarily nested braces."""
     from chunkhound.parsers.mappings.scss import _preprocess_scss_interpolations
+
     # Three levels of nesting
     source = ".a { --#{fn(#{inner($x)})}name: red; }"
     result = _preprocess_scss_interpolations(source)
@@ -364,6 +391,7 @@ def test_preprocess_scss_deep_nesting():
 def test_preprocess_scss_interpolation_with_quoted_brace():
     """Preprocessor does not prematurely close on } inside a string argument."""
     from chunkhound.parsers.mappings.scss import _preprocess_scss_interpolations
+
     # The } inside "a}" is part of a string, not the interpolation close
     source = '.a { --#{if($c, "a}", "b")}name: red; }'
     result = _preprocess_scss_interpolations(source)
@@ -375,6 +403,7 @@ def test_preprocess_scss_interpolation_with_quoted_brace():
 def test_preprocess_scss_preserves_newlines():
     """Preprocessor keeps newlines intact to preserve AST line numbers."""
     from chunkhound.parsers.mappings.scss import _preprocess_scss_interpolations
+
     source = ".a {\n  --#{$var\n}name: red;\n}"
     result = _preprocess_scss_interpolations(source)
     assert result.count("\n") == source.count("\n"), "Newline count changed"
@@ -383,6 +412,7 @@ def test_preprocess_scss_preserves_newlines():
 def test_preprocess_scss_no_interpolation_unchanged():
     """Content without any #{...} passes through unchanged."""
     from chunkhound.parsers.mappings.scss import _preprocess_scss_interpolations
+
     source = ".a { color: red; }"
     assert _preprocess_scss_interpolations(source) == source
 
@@ -390,23 +420,29 @@ def test_preprocess_scss_no_interpolation_unchanged():
 def test_resolve_import_paths_comma_separated(tmp_path):
     """@import "a", "b"; resolves both paths."""
     from chunkhound.parsers.mappings.scss import ScssMapping
+
     scss = ScssMapping()
     (tmp_path / "_variables.scss").write_text("$size: 16px;")
     (tmp_path / "_mixins.scss").write_text("@mixin flex{display:flex}")
     resolved = scss.resolve_import_paths(
         '@import "variables", "mixins"', tmp_path, tmp_path / "main.scss"
     )
-    assert len(resolved) == 2, f"Expected 2 resolved paths for comma import, got {resolved}"
+    assert len(resolved) == 2, (
+        f"Expected 2 resolved paths for comma import, got {resolved}"
+    )
     names = {p.name for p in resolved}
     assert "_variables.scss" in names
     assert "_mixins.scss" in names
 
 
 def test_resolve_import_paths_source_file_relative(tmp_path):
-    """SCSS import resolution uses the importing file's directory, not the project root."""
+    """SCSS import resolution uses the importing
+    file's directory, not the project root."""
     from chunkhound.parsers.mappings.scss import ScssMapping
+
     scss = ScssMapping()
-    # src/components/button.scss imports ../../tokens/colors (relative to src/components/)
+    # src/components/button.scss imports
+    # ../../tokens/colors (relative to src/components/)
     comp_dir = tmp_path / "src" / "components"
     comp_dir.mkdir(parents=True)
     tokens_dir = tmp_path / "tokens"

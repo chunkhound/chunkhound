@@ -19,6 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 build env
 try:
     from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 except ModuleNotFoundError:  # pragma: no cover - local test env without hatchling
+
     class BuildHookInterface:
         pass
 

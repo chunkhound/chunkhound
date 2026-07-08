@@ -102,8 +102,7 @@ def parse_and_validate_structured_json(
         error_path = ".".join(str(part) for part in exc.absolute_path)
         location = f" at {error_path}" if error_path else ""
         raise ValueError(
-            f"Structured output schema validation failed{location}: "
-            f"{exc.message}"
+            f"Structured output schema validation failed{location}: {exc.message}"
         ) from exc
 
     return parsed

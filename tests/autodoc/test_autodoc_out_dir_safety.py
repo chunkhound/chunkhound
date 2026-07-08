@@ -7,9 +7,11 @@ from types import SimpleNamespace
 import pytest
 
 from chunkhound.api.cli.commands import autodoc as autodoc_command
-from chunkhound.api.cli.commands import autodoc_cleanup
-from chunkhound.api.cli.commands import autodoc_generate
-from chunkhound.api.cli.commands import autodoc_prompts
+from chunkhound.api.cli.commands import (
+    autodoc_cleanup,
+    autodoc_generate,
+    autodoc_prompts,
+)
 from chunkhound.core.config.config import Config
 
 

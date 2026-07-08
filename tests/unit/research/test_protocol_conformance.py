@@ -5,9 +5,6 @@ the ResearchServiceProtocol interface.
 """
 
 import inspect
-from typing import Any, get_type_hints
-
-import pytest
 
 from chunkhound.services.research.protocol import ResearchServiceProtocol
 from chunkhound.services.research.v1.pluggable_research_service import (
@@ -21,9 +18,11 @@ class TestResearchServiceProtocolConformance:
     def test_pluggable_research_service_is_protocol_instance(self) -> None:
         """PluggableResearchService should be recognized as protocol instance."""
         # Protocol conformance check (runtime_checkable)
-        assert issubclass(PluggableResearchService, ResearchServiceProtocol) or isinstance(
-            PluggableResearchService, type
-        ), "PluggableResearchService should implement ResearchServiceProtocol"
+        assert issubclass(
+            PluggableResearchService, ResearchServiceProtocol
+        ) or isinstance(PluggableResearchService, type), (
+            "PluggableResearchService should implement ResearchServiceProtocol"
+        )
 
     def test_deep_research_method_exists(self) -> None:
         """PluggableResearchService should have deep_research method."""
@@ -48,7 +47,7 @@ class TestResearchServiceProtocolConformance:
         # Check query is str type
         query_param = sig.parameters["query"]
         if query_param.annotation != inspect.Parameter.empty:
-            assert query_param.annotation == str, "query parameter should be str"
+            assert query_param.annotation is str, "query parameter should be str"
 
     def test_protocol_has_required_method(self) -> None:
         """ResearchServiceProtocol should define deep_research."""

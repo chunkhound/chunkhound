@@ -2,8 +2,9 @@
 """Test PHP helper methods for metadata extraction."""
 
 from pathlib import Path
-from chunkhound.parsers.parser_factory import ParserFactory
+
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.parser_factory import ParserFactory
 
 test_php = """<?php
 
@@ -51,14 +52,20 @@ try:
     # Debug: Show all chunks
     print("=== All Chunks ===")
     for i, chunk in enumerate(chunks):
-        print(f"{i+1}. {chunk.chunk_type.value}: {chunk.symbol}")
+        print(f"{i + 1}. {chunk.chunk_type.value}: {chunk.symbol}")
         if chunk.metadata:
             print(f"   Metadata: {chunk.metadata}")
     print()
 
     # Look for chunks with detailed metadata
     for chunk in chunks:
-        if chunk.metadata and chunk.metadata.get("kind") in ("class", "method", "function", "interface", "trait"):
+        if chunk.metadata and chunk.metadata.get("kind") in (
+            "class",
+            "method",
+            "function",
+            "interface",
+            "trait",
+        ):
             print(f"\n{chunk.chunk_type.value.upper()}: {chunk.symbol}")
             print(f"  Kind: {chunk.metadata.get('kind')}")
 
@@ -68,11 +75,11 @@ try:
 
             # Modifiers
             if chunk.metadata.get("is_static"):
-                print(f"  Static: Yes")
+                print("  Static: Yes")
             if chunk.metadata.get("is_abstract"):
-                print(f"  Abstract: Yes")
+                print("  Abstract: Yes")
             if chunk.metadata.get("is_final"):
-                print(f"  Final: Yes")
+                print("  Final: Yes")
 
             # Parameters
             if "parameters" in chunk.metadata:
@@ -92,12 +99,30 @@ try:
 
     # Check specific features
     checks = [
-        (any("visibility" in c.metadata for c in chunks if c.metadata), "Visibility modifiers"),
-        (any(c.metadata.get("is_static") for c in chunks if c.metadata), "Static modifier"),
-        (any(c.metadata.get("is_abstract") for c in chunks if c.metadata), "Abstract modifier"),
-        (any(c.metadata.get("is_final") for c in chunks if c.metadata), "Final modifier"),
-        (any("parameters" in c.metadata for c in chunks if c.metadata), "Parameter extraction"),
-        (any("return_type" in c.metadata for c in chunks if c.metadata), "Return type extraction"),
+        (
+            any("visibility" in c.metadata for c in chunks if c.metadata),
+            "Visibility modifiers",
+        ),
+        (
+            any(c.metadata.get("is_static") for c in chunks if c.metadata),
+            "Static modifier",
+        ),
+        (
+            any(c.metadata.get("is_abstract") for c in chunks if c.metadata),
+            "Abstract modifier",
+        ),
+        (
+            any(c.metadata.get("is_final") for c in chunks if c.metadata),
+            "Final modifier",
+        ),
+        (
+            any("parameters" in c.metadata for c in chunks if c.metadata),
+            "Parameter extraction",
+        ),
+        (
+            any("return_type" in c.metadata for c in chunks if c.metadata),
+            "Return type extraction",
+        ),
     ]
 
     for passed, check_name in checks:
@@ -107,4 +132,5 @@ try:
 except Exception as e:
     print(f"\n❌ Error: {e}")
     import traceback
+
     traceback.print_exc()

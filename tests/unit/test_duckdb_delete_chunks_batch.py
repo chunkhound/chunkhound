@@ -1,8 +1,8 @@
 from pathlib import Path
 
+from chunkhound.core.models import Chunk, File
+from chunkhound.core.types.common import ChunkType, FilePath, Language, LineNumber
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-from chunkhound.core.models import File, Chunk
-from chunkhound.core.types.common import FilePath, Language, ChunkType, LineNumber
 
 
 def test_delete_chunks_batch_removes_only_selected(tmp_path: Path):
@@ -36,4 +36,3 @@ def test_delete_chunks_batch_removes_only_selected(tmp_path: Path):
     remaining_ids = {row["id"] for row in remaining}
     assert len(remaining_ids) == 3
     assert set(to_delete).isdisjoint(remaining_ids)
-

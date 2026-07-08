@@ -213,7 +213,6 @@ def test_registry_provider_without_model_is_not_configured():
     ]
 
 
-
 def test_registry_provider_missing_model_raises_configuration_error():
     cfg = LLMConfig(provider="deepseek", api_key=SecretStr("sk-test"))
 
@@ -829,8 +828,7 @@ def test_non_reasoning_providers_drop_global_effort_from_provider_configs():
     assert "reasoning_effort" not in synthesis_config
 
 
-def test_get_provider_config_for_role_propagates_structured_outputs_to_secondary_role(
-) -> None:
+def test_role_propagates_structured_outputs_to_secondary() -> None:
     cfg = LLMConfig(
         provider="deepseek",
         api_key="sk-test",
@@ -877,9 +875,7 @@ def test_role_config_does_not_propagate_structured_outputs_across_provider_switc
     assert "supports_structured_outputs" not in role_cfg
 
 
-def test_role_config_does_not_propagate_structured_outputs_across_registry_providers() -> (
-    None
-):
+def test_role_no_propagate_structured_outputs_across_registry() -> None:
     """
     Registry providers in the same OpenAI-compatible family (e.g., DeepSeek and
     Grok) must NOT inherit each other's ``supports_structured_outputs`` -- the
@@ -934,8 +930,9 @@ def test_get_provider_config_for_role_synthesis_propagates_structured_outputs() 
     assert role_cfg["supports_structured_outputs"] is False
 
 
-def test_get_provider_config_for_role_supports_structured_outputs_none_is_omitted(
-) -> None:
+def test_get_provider_config_for_role_supports_structured_outputs_none_is_omitted() -> (
+    None
+):
     """When ``supports_structured_outputs`` is None (default), it must not appear
     in any role config to avoid leaking provider-agnostic defaults."""
     cfg = LLMConfig(
@@ -1061,11 +1058,10 @@ def test_get_provider_config_for_role_strips_api_key_for_no_key_provider_switch(
     assert "api_key" not in role_cfg
 
 
-
-
-
 def test_provider_family_grouping() -> None:
-    """Verify _provider_family groups registry-based OpenAI-compatible providers together."""
+    """Verify _provider_family groups registry-based
+    OpenAI-compatible providers together.
+    """
     cfg = LLMConfig(
         provider="openai",
         utility_model="gpt-5-nano",

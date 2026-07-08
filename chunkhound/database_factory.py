@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from chunkhound.services.diff_aware_search_service import SearchServiceProtocol
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
-    from chunkhound.services.search_service import SearchService
 
 
 class DatabaseServices(NamedTuple):
@@ -96,9 +95,9 @@ def create_services(
     # Avoid double-configuring the registry (which can open the DB twice and lock it).
     registry = get_registry()
     try:
-        existing_cfg = registry.get_config()
+        registry.get_config()
     except Exception:
-        existing_cfg = None
+        pass
 
     # Always (re)configure the registry with an effective per-call config so that
     # tests using distinct temporary directories get an IndexingCoordinator whose
@@ -138,7 +137,8 @@ def create_services(
             if provider:
                 registry.register_provider("embedding", provider, singleton=True)
         except Exception:
-            # If no provider in embedding_manager, registry will handle provider creation
+            # If no provider in embedding_manager,
+            # registry will handle provider creation
             pass
 
     return DatabaseServices(

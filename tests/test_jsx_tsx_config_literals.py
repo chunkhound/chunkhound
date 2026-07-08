@@ -28,13 +28,7 @@ def test_tsx_named_export_const_object_literal_chunked():
 
 
 def test_jsx_export_default_array_literal_chunked():
-    code = (
-        "export default [\n"
-        "  process.env.SERVICE_URL,\n"
-        "  'a'\n"
-        "];\n"
-    )
+    code = "export default [\n  process.env.SERVICE_URL,\n  'a'\n];\n"
     chunks = _parse(code, "config.jsx", Language.JSX)
     assert len(chunks) > 0
     assert any("SERVICE_URL" in c.code for c in chunks)
-

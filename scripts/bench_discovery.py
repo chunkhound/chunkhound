@@ -40,8 +40,7 @@ def _run_simulate(path: Path, backend: str) -> tuple[list[str], dict]:
             "--sort",
             "path",
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=env,
     )
@@ -50,7 +49,9 @@ def _run_simulate(path: Path, backend: str) -> tuple[list[str], dict]:
     for ln in (p.stderr or "").splitlines()[::-1]:
         try:
             obj = json.loads(ln)
-            if isinstance(obj, dict) and ("discovery_ms" in obj or "startup_profile" in obj):
+            if isinstance(obj, dict) and (
+                "discovery_ms" in obj or "startup_profile" in obj
+            ):
                 prof = obj.get("startup_profile", obj)
                 break
         except Exception:
@@ -59,12 +60,22 @@ def _run_simulate(path: Path, backend: str) -> tuple[list[str], dict]:
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(repo), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=check)
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=check,
+    )
 
 
 def _git_init_commit(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=str(repo), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(
+        ["git", "init"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
     _git(repo, "config", "user.email", "ci@example.com")
     _git(repo, "config", "user.name", "CI")
     _git(repo, "add", "-A")
@@ -80,25 +91,33 @@ def _generate_heavy_workspace(scale: int = 1) -> Path:
     """Create a mixed workspace with repos + non-repo datasets; deterministic."""
     temp = Path(tempfile.mkdtemp(prefix="bench-discovery-"))
     ws = temp / "ws"
-    # repoA with tracked-under-ignored artifacts
-    repoA = ws / "repoA"
-    _w(repoA / ".gitignore", "\n".join(["runs/", "node_modules/", ".venv/", "dist/"]) + "\n")
+    # repo_a with tracked-under-ignored artifacts
+    repo_a = ws / "repo_a"
+    _w(
+        repo_a / ".gitignore",
+        "\n".join(["runs/", "node_modules/", ".venv/", "dist/"]) + "\n",
+    )
     # Source
     for i in range(100 * scale):
-        _w(repoA / "src" / "pkg" / f"m{i:03d}.py", f"def f{i}():\n    return {i}\n")
-    _git_init_commit(repoA)
+        _w(repo_a / "src" / "pkg" / f"m{i:03d}.py", f"def f{i}():\n    return {i}\n")
+    _git_init_commit(repo_a)
     # Force-track artifacts in ignored runs/
     for t in range(20 * scale):
-        p = repoA / "runs" / f"job{t:03d}" / f"kept{t:03d}.md"
+        p = repo_a / "runs" / f"job{t:03d}" / f"kept{t:03d}.md"
         _w(p, f"# kept {t}\n")
-    _git(repoA, "add", "-f", *[f"runs/job{t:03d}/kept{t:03d}.md" for t in range(20 * scale)])
-    _git(repoA, "commit", "-m", "keep tracked under ignored", check=False)
+    _git(
+        repo_a,
+        "add",
+        "-f",
+        *[f"runs/job{t:03d}/kept{t:03d}.md" for t in range(20 * scale)],
+    )
+    _git(repo_a, "commit", "-m", "keep tracked under ignored", check=False)
 
-    # repoB plain
-    repoB = ws / "repoB"
+    # repo_b plain
+    repo_b = ws / "repo_b"
     for i in range(100 * scale):
-        _w(repoB / "web" / "lib" / f"u{i:03d}.ts", f"export const v{i} = {i};\n")
-    _git_init_commit(repoB)
+        _w(repo_b / "web" / "lib" / f"u{i:03d}.ts", f"export const v{i} = {i};\n")
+    _git_init_commit(repo_b)
 
     # Non-repo datasets
     for i in range(200 * scale):
@@ -131,10 +150,20 @@ def bench_target(path: Path, trials: int = 1) -> dict[str, Any]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Benchmark discovery backends")
-    ap.add_argument("--dirs", nargs="*", type=Path, help="Real directories to benchmark")
-    ap.add_argument("--synthetic", action="store_true", help="Also generate and benchmark a heavy synthetic workspace")
-    ap.add_argument("--scale", type=int, default=1, help="Scale factor for synthetic generation")
-    ap.add_argument("--trials", type=int, default=1, help="Trials per target (report each)")
+    ap.add_argument(
+        "--dirs", nargs="*", type=Path, help="Real directories to benchmark"
+    )
+    ap.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Also generate and benchmark a heavy synthetic workspace",
+    )
+    ap.add_argument(
+        "--scale", type=int, default=1, help="Scale factor for synthetic generation"
+    )
+    ap.add_argument(
+        "--trials", type=int, default=1, help="Trials per target (report each)"
+    )
     args = ap.parse_args()
 
     reports: list[dict[str, Any]] = []

@@ -331,7 +331,8 @@ class CppMapping(BaseMapping):
         # Find template_parameter_list
         param_list = self.find_child_by_type(node, "template_parameter_list")
         if param_list:
-            # Look for type_parameter_declaration and template_template_parameter_declaration
+            # Look for type_parameter_declaration and
+            # template_template_parameter_declaration
             for child in self.walk_tree(param_list):
                 if child and child.type in (
                     "type_parameter_declaration",
@@ -907,7 +908,8 @@ class CppMapping(BaseMapping):
         # Extract variable name and initializer value
         for child in self.walk_tree(def_node):
             if child and child.type == "init_declarator":
-                # Get the identifier (variable name) - may be nested in pointer_declarator
+                # Get the identifier (variable name)
+                # - may be nested in pointer_declarator
                 name = ""
                 for id_child in self.walk_tree(child):
                     if id_child and id_child.type == "identifier":

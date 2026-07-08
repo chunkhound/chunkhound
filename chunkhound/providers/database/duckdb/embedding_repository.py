@@ -257,7 +257,8 @@ class DuckDBEmbeddingRepository:
         *,
         manage_transaction: bool = True,
     ) -> str:
-        """Create the dimension-specific embedding table when no provider is available."""
+        """Create the dimension-specific embedding table
+        when no provider is available."""
         table_name = _embedding_table_name(dims)
         result = conn.execute(
             "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
@@ -376,7 +377,8 @@ class DuckDBEmbeddingRepository:
     ) -> int:
         """Insert multiple embedding vectors with HNSW index optimization.
 
-        For large batches (>= batch_size threshold), uses the Context7-recommended optimization:
+        For large batches (>= batch_size threshold), uses
+        the Context7-recommended optimization:
         1. Drop HNSW indexes to avoid insert slowdown (60s+ -> 5s for 300 items)
         2. Use parameterized ON CONFLICT upserts for new and existing embeddings
         3. Recreate HNSW indexes after bulk operations
@@ -384,7 +386,8 @@ class DuckDBEmbeddingRepository:
         Expected speedup: 10-20x faster for large batches (90s -> 5-10s).
 
         Args:
-            embeddings_data: List of dicts with keys: chunk_id, provider, model, embedding, dims
+            embeddings_data: List of dicts with keys:
+                chunk_id, provider, model, embedding, dims
             batch_size: Threshold for HNSW optimization (default: 50)
             connection: Optional database connection to use (for transaction contexts)
             manage_transaction: Whether this helper should own the batch transaction
@@ -403,7 +406,9 @@ class DuckDBEmbeddingRepository:
         hnsw_threshold = batch_size if batch_size is not None else 50
         actual_batch_size = len(embeddings_data)
         logger.debug(
-            f"🔄 Starting optimized batch insert of {actual_batch_size} embeddings (HNSW threshold: {hnsw_threshold})"
+            f"🔄 Starting optimized batch insert of"
+            f" {actual_batch_size} embeddings"
+            f" (HNSW threshold: {hnsw_threshold})"
         )
 
         # Auto-detect embedding dimensions from first embedding
@@ -451,11 +456,16 @@ class DuckDBEmbeddingRepository:
         # Log the optimization decision for debugging
         if use_hnsw_optimization:
             logger.debug(
-                f"🚀 Large batch: using HNSW optimization ({actual_batch_size} >= {hnsw_threshold})"
+                f"🚀 Large batch: using HNSW"
+                f" optimization ({actual_batch_size}"
+                f" >= {hnsw_threshold})"
             )
         else:
             logger.debug(
-                f"🔍 Small batch: preserving HNSW indexes for semantic search ({actual_batch_size} < {hnsw_threshold})"
+                f"🔍 Small batch: preserving HNSW"
+                f" indexes for semantic search"
+                f" ({actual_batch_size}"
+                f" < {hnsw_threshold})"
             )
 
         try:
@@ -469,7 +479,10 @@ class DuckDBEmbeddingRepository:
 
             if use_hnsw_optimization:
                 logger.debug(
-                    f"🔧 Large batch detected ({actual_batch_size} embeddings >= {hnsw_threshold}), applying HNSW optimization"
+                    f"🔧 Large batch detected"
+                    f" ({actual_batch_size} embeddings"
+                    f" >= {hnsw_threshold}),"
+                    f" applying HNSW optimization"
                 )
 
                 dropped_indexes: list[dict[str, Any]] = []
@@ -479,7 +492,9 @@ class DuckDBEmbeddingRepository:
                 ):
                     dropped_indexes = [
                         index_info
-                        for index_info in self._provider_instance.get_existing_vector_indexes()
+                        for index_info in (
+                            self._provider_instance.get_existing_vector_indexes()
+                        )
                         if index_info["table_name"] == table_name
                     ]
 
@@ -495,12 +510,16 @@ class DuckDBEmbeddingRepository:
                     total_inserted = len(batch_rows)
                     insert_time = time.time() - insert_start
                     logger.debug(
-                        f"✅ Parameterized UPSERT completed in {insert_time:.3f}s ({total_inserted / insert_time:.1f} emb/s)"
+                        f"✅ Parameterized UPSERT"
+                        f" completed in {insert_time:.3f}s"
+                        f" ({total_inserted / insert_time:.1f}"
+                        f" emb/s)"
                     )
 
                     if dropped_indexes:
                         logger.debug(
-                            "📈 Recreating exact HNSW indexes after bulk embedding upsert"
+                            "📈 Recreating exact HNSW indexes"
+                            " after bulk embedding upsert"
                         )
                         for index_info in dropped_indexes:
                             self._recreate_existing_index(conn, index_info)
@@ -523,7 +542,9 @@ class DuckDBEmbeddingRepository:
                                 f"{rollback_error}"
                             ) from rollback_error
                     raise RuntimeError(
-                        "insert_embeddings_batch failed while enforcing strict HNSW restore: "
+                        "insert_embeddings_batch failed"
+                        " while enforcing strict HNSW"
+                        " restore: "
                         f"{e}"
                     ) from e
 
@@ -537,7 +558,11 @@ class DuckDBEmbeddingRepository:
 
                     small_time = time.time() - small_start
                     logger.debug(
-                        f"✅ Small parameterized UPSERT batch completed in {small_time:.3f}s ({len(embeddings_data) / small_time:.1f} emb/s)"
+                        f"✅ Small parameterized UPSERT"
+                        f" batch completed in"
+                        f" {small_time:.3f}s"
+                        f" ({len(embeddings_data) / small_time:.1f}"
+                        f" emb/s)"
                     )
                     total_inserted = len(embeddings_data)
                 except Exception as e:
@@ -553,8 +578,10 @@ class DuckDBEmbeddingRepository:
                     logger.error(f"Small VALUES batch failed: {e}")
                     raise
 
-                # Ensure HNSW indexes exist for semantic search after small batch insert
-                # Note: _ensure_embedding_table_exists automatically creates standard HNSW indexes
+                # Ensure HNSW indexes exist for semantic
+                # search after small batch insert
+                # Note: _ensure_embedding_table_exists
+                # automatically creates standard HNSW indexes
                 # This check verifies the index exists for this dimension
                 if self._provider_instance and hasattr(
                     self._provider_instance, "get_existing_vector_indexes"
@@ -569,21 +596,31 @@ class DuckDBEmbeddingRepository:
 
                     if not index_exists:
                         logger.warning(
-                            f"🔍 No HNSW index found for {dims}D embeddings, creating one now"
+                            f"🔍 No HNSW index found for"
+                            f" {dims}D embeddings,"
+                            f" creating one now"
                         )
-                        # Create the missing HNSW index for semantic search functionality
+                        # Create the missing HNSW index
+                        # for semantic search functionality
                         try:
                             self._provider_instance.create_vector_index(
                                 provider, model, dims, "cosine"
                             )
                             logger.info(
-                                f"✅ Created missing HNSW index for {provider}/{model} ({dims}D)"
+                                f"✅ Created missing HNSW"
+                                f" index for"
+                                f" {provider}/{model}"
+                                f" ({dims}D)"
                             )
                         except Exception as e:
                             logger.error(
-                                f"❌ Failed to create HNSW index for {provider}/{model} ({dims}D): {e}"
+                                f"❌ Failed to create HNSW"
+                                f" index for"
+                                f" {provider}/{model}"
+                                f" ({dims}D): {e}"
                             )
-                            # Continue - data is inserted, just no index optimization for search
+                            # Continue - data is inserted,
+                            # just no index optimization
 
                 # Update progress for small batch completion
                 logger.debug(f"✅ Stored {actual_batch_size} embeddings successfully")
@@ -597,11 +634,20 @@ class DuckDBEmbeddingRepository:
 
             if use_hnsw_optimization:
                 logger.debug(
-                    f"🏆 HNSW-optimized batch insert: {total_inserted} embeddings in {insert_time:.3f}s ({total_inserted / insert_time:.1f} embeddings/sec) - Expected 10-20x speedup achieved!"
+                    f"🏆 HNSW-optimized batch insert:"
+                    f" {total_inserted} embeddings in"
+                    f" {insert_time:.3f}s"
+                    f" ({total_inserted / insert_time:.1f}"
+                    f" embeddings/sec) - Expected"
+                    f" 10-20x speedup achieved!"
                 )
             else:
                 logger.debug(
-                    f"🎯 Standard batch insert: {total_inserted} embeddings in {insert_time:.3f}s ({total_inserted / insert_time:.1f} embeddings/sec)"
+                    f"🎯 Standard batch insert:"
+                    f" {total_inserted} embeddings in"
+                    f" {insert_time:.3f}s"
+                    f" ({total_inserted / insert_time:.1f}"
+                    f" embeddings/sec)"
                 )
 
             # Checkpoint management is handled by the provider's executor pattern
@@ -670,7 +716,8 @@ class DuckDBEmbeddingRepository:
     def get_existing_embeddings(
         self, chunk_ids: list[int], provider: str, model: str
     ) -> set[int]:
-        """Get set of chunk IDs that already have embeddings for given provider/model."""
+        """Get set of chunk IDs that already have
+        embeddings for given provider/model."""
         if self.connection is None:
             raise RuntimeError("No database connection")
 

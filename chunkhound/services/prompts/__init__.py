@@ -14,7 +14,7 @@ from .question_synthesis import SYSTEM_MESSAGE as QUESTION_SYNTHESIS_SYSTEM
 from .question_synthesis import USER_TEMPLATE as QUESTION_SYNTHESIS_USER
 from .synthesis import CITATION_REQUIREMENTS
 from .synthesis import USER_TEMPLATE as SYNTHESIS_USER
-from .synthesis import get_system_message as SYNTHESIS_SYSTEM_BUILDER
+from .synthesis import get_system_message as synthesis_system_builder
 from .websearch_expansion import SYSTEM_MESSAGE as WEBSEARCH_EXPANSION_SYSTEM
 from .websearch_expansion import USER_TEMPLATE as WEBSEARCH_EXPANSION_USER
 
@@ -27,7 +27,7 @@ __all__ = [
     "QUESTION_SYNTHESIS_USER",
     "QUESTION_FILTERING_SYSTEM",
     "QUESTION_FILTERING_USER",
-    "SYNTHESIS_SYSTEM_BUILDER",
+    "synthesis_system_builder",
     "SYNTHESIS_USER",
     "CITATION_REQUIREMENTS",
     "WEBSEARCH_EXPANSION_SYSTEM",

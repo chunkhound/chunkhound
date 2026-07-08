@@ -121,7 +121,9 @@ class BudgetCalculator:
 
         logger.debug(
             f"Synthesis budgets for ~{estimated_loc:,} LOC: "
-            f"input={input_tokens:,}, output={OUTPUT_TOKENS_WITH_REASONING:,}, total={total_tokens:,}"
+            f"input={input_tokens:,}, "
+            f"output={OUTPUT_TOKENS_WITH_REASONING:,}, "
+            f"total={total_tokens:,}"
         )
 
         return {
@@ -207,8 +209,12 @@ class BudgetCalculator:
         )
 
         logger.debug(
-            f"Adaptive budgets for depth {depth}/{max_depth} ({'leaf' if is_leaf else 'internal'}): "
-            f"file={file_content_tokens:,}, input={llm_input_tokens:,}, output={answer_tokens:,}, "
+            f"Adaptive budgets for depth "
+            f"{depth}/{max_depth} "
+            f"({'leaf' if is_leaf else 'internal'}): "
+            f"file={file_content_tokens:,}, "
+            f"input={llm_input_tokens:,}, "
+            f"output={answer_tokens:,}, "
             f"followup={followup_output_tokens:,}"
         )
 

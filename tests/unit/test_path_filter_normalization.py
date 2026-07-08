@@ -15,6 +15,7 @@ from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 # _validate_and_normalize_path_filter
 # ---------------------------------------------------------------------------
 
+
 def _normalize(path: str | None) -> str | None:
     """Shorthand to call the static normalize method."""
     return DuckDBProvider._validate_and_normalize_path_filter(path)
@@ -116,17 +117,20 @@ class TestNormalizeBackslashes:
 
 
 class TestNormalizeRejectsDangerous:
-    @pytest.mark.parametrize("dangerous", [
-        "..",
-        "~",
-        "*",
-        "?",
-        "[",
-        "]",
-        "\0",
-        "\n",
-        "\r",
-    ])
+    @pytest.mark.parametrize(
+        "dangerous",
+        [
+            "..",
+            "~",
+            "*",
+            "?",
+            "[",
+            "]",
+            "\0",
+            "\n",
+            "\r",
+        ],
+    )
     def test_rejects_dangerous_pattern(self, dangerous: str) -> None:
         with pytest.raises(ValueError, match="contains forbidden pattern"):
             _normalize(f"src/{dangerous}/file.py")
@@ -135,6 +139,7 @@ class TestNormalizeRejectsDangerous:
 # ---------------------------------------------------------------------------
 # _build_path_like_pattern
 # ---------------------------------------------------------------------------
+
 
 def _like(path: str) -> str:
     """Shorthand to call the static LIKE builder."""

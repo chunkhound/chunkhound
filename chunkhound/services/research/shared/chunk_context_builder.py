@@ -116,7 +116,8 @@ class ChunkContextBuilder:
         Examples:
             >>> builder = ChunkContextBuilder()
             >>> chunks = [
-            ...     {"start_line": 1, "end_line": 10, "symbol": "main", "content": "def main():..."}
+            ...     {"start_line": 1, "end_line": 10,
+            ...      "symbol": "main", "content": "def main():..."}
             ... ]
             >>> builder.build_chunk_summary(chunks)
             '- Lines 1-10 (main): def main():...'

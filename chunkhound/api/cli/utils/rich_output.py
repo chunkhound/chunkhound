@@ -40,9 +40,7 @@ class RichOutputFormatter:
         # the captured payload.
         self._quiet_stdout = bool(os.environ.get("CHUNKHOUND_QUICKRESEARCH_QUIET"))
         if self._terminal_compatible:
-            self.console = (
-                Console(file=sys.stderr) if self._quiet_stdout else Console()
-            )
+            self.console = Console(file=sys.stderr) if self._quiet_stdout else Console()
         else:
             self.console = None
         self._progress: Progress | None = None
@@ -72,7 +70,7 @@ class RichOutputFormatter:
 
             # Test Rich console creation
             try:
-                test_console = Console()
+                Console()
                 # Simple test - try to create a text object
                 Text("test")
                 return True
@@ -146,7 +144,8 @@ class RichOutputFormatter:
             self.progress_indicator(message)
         except Exception:
             # Ultimate fallback - bypass all Rich formatting
-            # Note: escape() not needed here since this is typically internal progress messages
+            # Note: escape() not needed here since this is
+            # typically internal progress messages
             print(f"[PROGRESS] {message}", file=self._fallback_stream())
 
     def section_header(self, title: str) -> None:
@@ -413,7 +412,10 @@ class RichOutputFormatter:
                     timeout_table.add_row(fp)
                 timeout_panel = Panel(
                     timeout_table,
-                    title=f"[bold yellow]Skipped Due to Timeout ({len(skipped_timeouts)})[/bold yellow]",
+                    title=(
+                        f"[bold yellow]Skipped Due to Timeout "
+                        f"({len(skipped_timeouts)})[/bold yellow]"
+                    ),
                     border_style="yellow",
                     padding=(1, 2),
                 )
@@ -437,11 +439,19 @@ class RichOutputFormatter:
 
         if self.console is not None:
             self.console.print(
-                f"[dim]Initial stats: {stats.get('files', 0)} files, {stats.get('chunks', 0)} chunks, {stats.get('embeddings', 0)} embeddings[/dim]"
+                f"[dim]Initial stats: "
+                f"{stats.get('files', 0)} files, "
+                f"{stats.get('chunks', 0)} chunks, "
+                f"{stats.get('embeddings', 0)} "
+                f"embeddings[/dim]"
             )
         else:
             print(
-                f"Initial stats: {stats.get('files', 0)} files, {stats.get('chunks', 0)} chunks, {stats.get('embeddings', 0)} embeddings",
+                f"Initial stats: "
+                f"{stats.get('files', 0)} files, "
+                f"{stats.get('chunks', 0)} chunks, "
+                f"{stats.get('embeddings', 0)} "
+                f"embeddings",
                 file=self._fallback_stream(),
             )
 

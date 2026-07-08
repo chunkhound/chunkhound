@@ -4,12 +4,91 @@ import asyncio
 import json
 import os
 import sys
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from scripts import verify_watchman_live_indexing_e2e as live_verifier
+
+
+class _FakeStreamReader:
+    async def read(self, n: int = -1) -> bytes:
+        return b""
+
+    async def readline(self) -> bytes:
+        return b""
+
+
+class _FakeStreamWriter:
+    def close(self) -> None:
+        pass
+
+    async def wait_closed(self) -> None:
+        pass
+
+    def write(self, data: bytes) -> None:
+        pass
+
+    async def drain(self) -> None:
+        pass
+
+
+class _FakeDaemonProcess:
+    def __init__(self) -> None:
+        self.stdin = _FakeStreamWriter()
+        self.stdout = _FakeStreamReader()
+        self.stderr = _FakeStreamReader()
+        self.returncode: int | None = None
+
+    def terminate(self) -> None:
+        self.returncode = -15
+
+    async def wait(self) -> int:
+        return self.returncode or 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+class _FakeClient:
+    """Shared fake JSON-RPC client for verifier contract tests.
+
+    Records all requests/notifications and returns configured responses.
+    """
+
+    def __init__(self, responses: list[dict[str, object]] | None = None) -> None:
+        self.calls = 0
+        self.requests: list[tuple[str, dict[str, object] | None, float]] = []
+        self.notifications: list[tuple[str, dict[str, object] | None]] = []
+        self.closed = False
+        self._responses = responses or []
+
+    async def send_request(
+        self,
+        method: str,
+        params: dict[str, object] | None = None,
+        timeout: float = 5.0,
+    ) -> dict[str, object]:
+        self.requests.append((method, params, timeout))
+        if self.calls < len(self._responses):
+            response = self._responses[self.calls]
+            self.calls += 1
+            return {"content": [{"type": "text", "text": json.dumps(response)}]}
+        self.calls += 1
+        return {}
+
+    async def send_notification(
+        self, method: str, params: dict[str, object] | None = None
+    ) -> None:
+        self.notifications.append((method, params))
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def _async_noop(_delay: float) -> None:
+    return None
 
 
 def test_prepare_release_runs_watchman_release_verifiers_in_order() -> None:
@@ -48,10 +127,7 @@ def test_rollout_gate_workflow_runs_single_aggregate_fallback_proof() -> None:
         pytest.skip("PyYAML not available")
 
     workflow_path = (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "ci.yml"
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
     )
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     jobs = workflow["jobs"]
@@ -76,8 +152,7 @@ def test_rollout_gate_workflow_runs_single_aggregate_fallback_proof() -> None:
     )
 
     step_runs = [
-        (step.get("name", ""), step.get("run", ""))
-        for step in rollout_gate["steps"]
+        (step.get("name", ""), step.get("run", "")) for step in rollout_gate["steps"]
     ]
     joined_runs = "\n".join(run for _, run in step_runs)
     assert "--require-supported-matrix" in joined_runs, (
@@ -123,14 +198,40 @@ def test_prepare_release_keeps_ci_owned_publish_contract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_wait_for_ready_requires_nested_watchman_health(monkeypatch) -> None:
+async def test_wait_for_ready_requires_watchman_ready_state(monkeypatch) -> None:
     responses = [
         {
             "status": "ready",
             "scan_progress": {
                 "realtime": {
-                    "watchman_connection_state": "connected",
-                    "watchman_subscription_count": 1,
+                    "watchman_sidecar_state": "running",
+                    "effective_backend": "watchman",
+                }
+            },
+        },
+    ]
+
+    monkeypatch.setattr(live_verifier.asyncio, "sleep", _async_noop)
+
+    client = _FakeClient(responses)
+    status = await live_verifier._wait_for_ready(client)
+
+    assert client.calls == 1
+    assert status["scan_progress"]["realtime"]["watchman_sidecar_state"] == "running"
+    assert status["scan_progress"]["realtime"]["effective_backend"] == "watchman"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_ready_retries_until_watchman_contract_is_explicit(
+    monkeypatch,
+) -> None:
+    responses = [
+        {
+            "status": "ready",
+            "scan_progress": {
+                "realtime": {
+                    "watchman_sidecar_state": "running",
+                    "effective_backend": "polling",
                 }
             },
         },
@@ -139,64 +240,24 @@ async def test_wait_for_ready_requires_nested_watchman_health(monkeypatch) -> No
             "scan_progress": {
                 "realtime": {
                     "watchman_sidecar_state": "running",
-                    "watchman_connection_state": "connected",
-                    "watchman_subscription_count": 1,
-                    "watchman_subscription_names": ["chunkhound-live-indexing"],
-                    "watchman_scopes": [
-                        {
-                            "subscription_name": "chunkhound-live-indexing",
-                            "scope_kind": "primary",
-                            "requested_path": "/repo",
-                            "watch_root": "/repo",
-                            "relative_root": None,
-                        }
-                    ],
-                    "watchman_loss_of_sync": {
-                        "count": 0,
-                        "fresh_instance_count": 0,
-                        "recrawl_count": 0,
-                        "disconnect_count": 0,
-                        "translation_failure_count": 0,
-                        "subscription_pdu_dropped_count": 0,
-                        "last_reason": None,
-                        "last_at": None,
-                        "last_details": None,
-                    },
+                    "effective_backend": "watchman",
                 }
             },
         },
     ]
+    _sleep_counter = SimpleNamespace(value=0)
 
-    class FakeClient:
-        def __init__(self) -> None:
-            self.calls = 0
+    async def _counting_sleep(_delay: float) -> None:
+        _sleep_counter.value += 1
 
-        async def send_request(
-            self, method: str, params: dict[str, object], timeout: float
-        ) -> dict[str, object]:
-            del method, params, timeout
-            response = responses[self.calls]
-            self.calls += 1
-            return {"content": [{"type": "text", "text": json.dumps(response)}]}
+    monkeypatch.setattr(live_verifier.asyncio, "sleep", _counting_sleep)
 
-    async def fake_sleep(_delay: float) -> None:
-        return None
-
-    monkeypatch.setattr(live_verifier.asyncio, "sleep", fake_sleep)
-
-    client = FakeClient()
+    client = _FakeClient(responses)
     status = await live_verifier._wait_for_ready(client)
 
     assert client.calls == 2
-    assert status["scan_progress"]["realtime"]["watchman_scopes"] == [
-        {
-            "subscription_name": "chunkhound-live-indexing",
-            "scope_kind": "primary",
-            "requested_path": "/repo",
-            "watch_root": "/repo",
-            "relative_root": None,
-        }
-    ]
+    assert _sleep_counter.value == 1
+    assert status["scan_progress"]["realtime"]["effective_backend"] == "watchman"
 
 
 @pytest.mark.asyncio
@@ -213,27 +274,45 @@ async def test_wait_for_ready_accepts_only_polling_fallback_mode(
         },
     }
 
-    class FakeClient:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def send_request(
-            self, method: str, params: dict[str, object], timeout: float
-        ) -> dict[str, object]:
-            del method, params, timeout
-            self.calls += 1
-            return {"content": [{"type": "text", "text": json.dumps(response)}]}
-
-    async def fake_sleep(_delay: float) -> None:
+    async def _failing_sleep(_delay: float) -> None:
         raise AssertionError("Polling fallback mode should return immediately")
 
-    monkeypatch.setattr(live_verifier.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(live_verifier.asyncio, "sleep", _failing_sleep)
 
-    client = FakeClient()
+    client = _FakeClient([response])
     status = await live_verifier._wait_for_ready(client)
 
     assert client.calls == 1
     assert status["scan_progress"]["realtime"]["effective_backend"] == "polling"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_ready_times_out_when_daemon_never_ready(
+    monkeypatch,
+) -> None:
+    """Contract: _wait_for_ready must raise RuntimeError when the daemon
+    never reaches a ready state within _READY_TIMEOUT_SECONDS."""
+    response = {
+        "status": "starting",
+        "scan_progress": {
+            "realtime": {},
+        },
+    }
+
+    monotonic_values = iter([0.0, 0.0, 1.0])
+
+    def fake_monotonic() -> float:
+        return next(monotonic_values, 1.0)
+
+    monkeypatch.setattr(live_verifier.asyncio, "sleep", _async_noop)
+    monkeypatch.setattr(live_verifier, "_READY_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(live_verifier.time, "monotonic", fake_monotonic)
+
+    client = _FakeClient([response])
+    with pytest.raises(RuntimeError, match="Timed out waiting for ready daemon"):
+        await live_verifier._wait_for_ready(client)
+
+    assert client.calls == 1
 
 
 @pytest.mark.asyncio
@@ -551,25 +630,18 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
         async def read(self) -> bytes:
             return b""
 
-    class FakeClient:
-        def __init__(self) -> None:
-            self.closed = False
-
-        async def close(self) -> None:
-            self.closed = True
-
     class FakeProc:
         def __init__(self) -> None:
             self.stderr = FakeReader()
 
-    default_client = FakeClient()
+    default_client = _FakeClient()
 
     async def fake_start_proxy_client(
         *,
         chunkhound_exe: Path,
         project_dir: Path,
         env: dict[str, str],
-    ) -> tuple[FakeProc, FakeClient]:
+    ) -> tuple[FakeProc, _FakeClient]:
         default_project_dirs.append(project_dir)
         assert chunkhound_exe.is_file()
         config = json.loads(
@@ -582,7 +654,7 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
         return FakeProc(), default_client
 
     async def fake_wait_for_daemon_status(
-        client: FakeClient,
+        client: _FakeClient,
         *,
         predicate,
         description: str,
@@ -782,7 +854,9 @@ def test_rewrite_watchman_source_urls_rewrites_manifest_sources(tmp_path: Path) 
     )
 
 
-def test_clean_room_env_injects_runtime_dir(tmp_path: Path, monkeypatch) -> None:
+def test_clean_room_env_injects_runtime_dir_and_startup_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
     venv_dir = tmp_path / "venv"
     runtime_dir = tmp_path / "runtime"
     bin_dir = venv_dir / ("Scripts" if os.name == "nt" else "bin")
@@ -799,7 +873,24 @@ def test_clean_room_env_injects_runtime_dir(tmp_path: Path, monkeypatch) -> None
     assert env["CHUNKHOUND_DAEMON_REGISTRY_DIR"] == str(
         runtime_dir / "daemon-user-registry"
     )
+    assert env["CHUNKHOUND_DAEMON_STARTUP_TIMEOUT"] == "60.0"
     assert env["TEST_FLAG"] == "1"
+
+
+def test_clean_room_env_preserves_existing_startup_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    venv_dir = tmp_path / "venv"
+    bin_dir = venv_dir / ("Scripts" if os.name == "nt" else "bin")
+    bin_dir.mkdir(parents=True)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), "/usr/bin"]))
+
+    env = live_verifier._clean_room_env(
+        venv_dir,
+        extra_env={"CHUNKHOUND_DAEMON_STARTUP_TIMEOUT": "75.0"},
+    )
+
+    assert env["CHUNKHOUND_DAEMON_STARTUP_TIMEOUT"] == "75.0"
 
 
 @pytest.mark.asyncio
@@ -841,38 +932,6 @@ async def test_verify_wheel_uses_clean_room_runtime_env(
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"Unexpected subprocess call: {args}")
 
-    class FakePipe:
-        async def read(self) -> bytes:
-            return b""
-
-    class FakeProcess:
-        def __init__(self) -> None:
-            self.stderr = FakePipe()
-
-    class FakeClient:
-        def __init__(self, process: object) -> None:
-            del process
-
-        async def start(self) -> None:
-            return None
-
-        async def send_request(
-            self,
-            method: str,
-            params: dict[str, object] | None = None,
-            timeout: float = 5.0,
-        ) -> dict[str, object]:
-            del method, params, timeout
-            return {}
-
-        async def send_notification(
-            self, method: str, params: dict[str, object] | None = None
-        ) -> None:
-            del method, params
-
-        async def close(self) -> None:
-            return None
-
     async def fake_create_subprocess_exec_safe(
         *args: str,
         stdin: object = None,
@@ -880,70 +939,47 @@ async def test_verify_wheel_uses_clean_room_runtime_env(
         stderr: object = None,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
-    ) -> FakeProcess:
+    ) -> _FakeDaemonProcess:
         del args, stdin, stdout, stderr, cwd
         assert env is not None
         captured_env.update(env)
-        return FakeProcess()
+        return _FakeDaemonProcess()
 
     ready_status = {
         "scan_progress": {
             "realtime": {
                 "watchman_sidecar_state": "running",
+                "effective_backend": "watchman",
                 "watchman_pid": 1,
                 "watchman_binary_path": "/tmp/watchman",
-                "watchman_subscription_names": ["chunkhound-live-indexing"],
-                "watchman_subscription_pdu_count": 1,
-                "watchman_scopes": [
-                    {
-                        "subscription_name": "chunkhound-live-indexing",
-                        "scope_kind": "primary",
-                        "requested_path": "/repo",
-                        "watch_root": "/repo",
-                        "relative_root": None,
-                    }
-                ],
-                "watchman_loss_of_sync": {
-                    "count": 0,
-                    "fresh_instance_count": 0,
-                    "recrawl_count": 0,
-                    "disconnect_count": 0,
-                    "translation_failure_count": 0,
-                    "subscription_pdu_dropped_count": 0,
-                    "last_reason": None,
-                    "last_at": None,
-                    "last_details": None,
-                },
             }
         }
     }
 
-    async def fake_wait_for_ready(client: object) -> dict[str, object]:
-        del client
+    async def fake_verify_daemon_startup(
+        client: object, *, expected_venv_dir: Path
+    ) -> dict[str, object]:
+        del client, expected_venv_dir
         return ready_status
 
-    async def fake_wait_for_search_hit(client: object, query: str) -> None:
-        del client, query
-        return None
+    async def fake_verify_live_mutation(
+        client: object,
+        *,
+        ready_realtime: dict[str, object],
+        live_file: Path,
+        live_symbol: str,
+    ) -> None:
+        del client, ready_realtime, live_file, live_symbol
 
     monkeypatch.setattr(live_verifier.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        live_verifier,
-        "_create_subprocess_exec_safe",
-        fake_create_subprocess_exec_safe,
-    )
-    monkeypatch.setattr(live_verifier, "SubprocessJsonRpcClient", FakeClient)
-    monkeypatch.setattr(live_verifier, "_wait_for_ready", fake_wait_for_ready)
-    monkeypatch.setattr(live_verifier, "_wait_for_search_hit", fake_wait_for_search_hit)
-    monkeypatch.setattr(
-        live_verifier,
-        "_assert_sidecar_uses_installed_runtime",
-        lambda realtime, *, venv_dir: None,
+        live_verifier, "_create_subprocess_exec_safe", fake_create_subprocess_exec_safe
     )
     monkeypatch.setattr(
-        live_verifier,
-        "_parse_tool_json",
-        lambda result: ready_status,
+        live_verifier, "_verify_daemon_startup", fake_verify_daemon_startup
+    )
+    monkeypatch.setattr(
+        live_verifier, "_verify_live_mutation", fake_verify_live_mutation
     )
     monkeypatch.setattr(
         live_verifier,
@@ -973,8 +1009,9 @@ async def test_verify_wheel_proves_live_searchability_in_polling_fallback(
     wheel_path = tmp_path / "chunkhound.whl"
     wheel_path.write_text("wheel", encoding="utf-8")
     work_root = tmp_path / "fallback-work-root"
-    wrote_live_file = False
     search_queries: list[str] = []
+    expected_live_file = work_root / "custom-live.py"
+    expected_live_symbol = "custom_live_symbol"
 
     monkeypatch.setattr(
         live_verifier.tempfile,
@@ -1005,40 +1042,6 @@ async def test_verify_wheel_proves_live_searchability_in_polling_fallback(
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"Unexpected subprocess call: {args}")
 
-    class FakePipe:
-        async def read(self) -> bytes:
-            return b""
-
-    class FakeProcess:
-        def __init__(self) -> None:
-            self.stderr = FakePipe()
-
-    class FakeClient:
-        def __init__(self, process: object) -> None:
-            del process
-            self.requests = 0
-
-        async def start(self) -> None:
-            return None
-
-        async def send_request(
-            self,
-            method: str,
-            params: dict[str, object] | None = None,
-            timeout: float = 5.0,
-        ) -> dict[str, object]:
-            del method, params, timeout
-            self.requests += 1
-            return {}
-
-        async def send_notification(
-            self, method: str, params: dict[str, object] | None = None
-        ) -> None:
-            del method, params
-
-        async def close(self) -> None:
-            return None
-
     async def fake_create_subprocess_exec_safe(
         *args: str,
         stdin: object = None,
@@ -1046,9 +1049,9 @@ async def test_verify_wheel_proves_live_searchability_in_polling_fallback(
         stderr: object = None,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
-    ) -> FakeProcess:
+    ) -> _FakeDaemonProcess:
         del args, stdin, stdout, stderr, env, cwd
-        return FakeProcess()
+        return _FakeDaemonProcess()
 
     ready_status = {
         "scan_progress": {
@@ -1059,63 +1062,40 @@ async def test_verify_wheel_proves_live_searchability_in_polling_fallback(
         }
     }
 
-    async def fake_wait_for_ready(client: object) -> dict[str, object]:
-        del client
+    async def fake_verify_daemon_startup(
+        client: object, *, expected_venv_dir: Path
+    ) -> dict[str, object]:
+        del client, expected_venv_dir
         return ready_status
 
-    async def fake_wait_for_search_hit(client: object, query: str) -> None:
+    async def fake_wait_for_search_hit(client: object, *, query: str) -> None:
         del client
         search_queries.append(query)
-        return None
-
-    def fake_parse_tool_json(_result: object) -> dict[str, object]:
-        return ready_status
-
-    def fake_write_project(project_dir: Path) -> tuple[Path, str]:
-        live_file = project_dir / "pkg" / "live.py"
-        return live_file, "fallback_live_symbol"
 
     monkeypatch.setattr(live_verifier.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        live_verifier,
-        "_create_subprocess_exec_safe",
-        fake_create_subprocess_exec_safe,
+        live_verifier, "_create_subprocess_exec_safe", fake_create_subprocess_exec_safe
     )
-    monkeypatch.setattr(live_verifier, "SubprocessJsonRpcClient", FakeClient)
-    monkeypatch.setattr(live_verifier, "_wait_for_ready", fake_wait_for_ready)
+    monkeypatch.setattr(
+        live_verifier, "_verify_daemon_startup", fake_verify_daemon_startup
+    )
     monkeypatch.setattr(live_verifier, "_wait_for_search_hit", fake_wait_for_search_hit)
-    monkeypatch.setattr(live_verifier, "_parse_tool_json", fake_parse_tool_json)
-    monkeypatch.setattr(live_verifier, "_write_project", fake_write_project)
     monkeypatch.setattr(
         live_verifier,
-        "_terminate_processes_using_root",
-        lambda root: None,
+        "_write_project",
+        lambda project_dir: (expected_live_file, expected_live_symbol),
     )
     monkeypatch.setattr(
-        live_verifier,
-        "_remove_tree_with_retries",
-        lambda root: None,
+        live_verifier, "_terminate_processes_using_root", lambda root: None
     )
-
-    original_write_text = Path.write_text
-
-    def recording_write_text(
-        self: Path,
-        data: str,
-        *args: object,
-        **kwargs: object,
-    ) -> int:
-        nonlocal wrote_live_file
-        if self.name == "live.py" and "fallback_live_symbol" in data:
-            wrote_live_file = True
-        return original_write_text(self, data, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", recording_write_text)
+    monkeypatch.setattr(live_verifier, "_remove_tree_with_retries", lambda root: None)
 
     await live_verifier._verify_wheel(wheel_path)
 
-    assert wrote_live_file
-    assert search_queries == ["fallback_live_symbol"]
+    assert expected_live_file.exists(), f"Live file not written: {expected_live_file}"
+    content = expected_live_file.read_text(encoding="utf-8")
+    assert "return 'live'" in content
+    assert search_queries == [expected_live_symbol]
 
 
 def test_mcp_env_prefers_installed_venv_and_clears_repo_python_state(
@@ -1157,81 +1137,22 @@ def test_mcp_command_args_disable_embeddings_for_regex_only_validation(
     )
 
 
-def test_resolve_native_watchman_process_accepts_matching_binary_path(
+def test_assert_sidecar_uses_installed_runtime_accepts_matching_binary_on_windows(
+    tmp_path: Path,
     monkeypatch,
 ) -> None:
+    venv_dir = tmp_path / "venv"
+    binary = tmp_path / "watchman.exe"
+    binary.write_text("", encoding="utf-8")
     process = SimpleNamespace(
-        cmdline=lambda: ["/tmp/runtime/watchman", "--foreground"],
-        environ=lambda: {"PATH": "/tmp/venv/bin:/usr/bin", "VIRTUAL_ENV": "/tmp/venv"},
+        environ=lambda: {"VIRTUAL_ENV": str(venv_dir)},
+        cmdline=lambda: [str(binary), "--foreground"],
     )
     monkeypatch.setattr(
         live_verifier.psutil,
         "Process",
         lambda pid: process if pid == 123 else None,
     )
-
-    resolved = live_verifier._resolve_native_watchman_process(
-        123,
-        expected_binary_path="/tmp/runtime/watchman",
-    )
-
-    assert resolved is process
-
-
-def test_resolve_native_watchman_process_normalizes_path_variants(
-    monkeypatch,
-) -> None:
-    process = SimpleNamespace(
-        cmdline=lambda: [r"C:\Runtime\WATCHMAN.EXE", "--foreground"],
-        environ=lambda: {
-            "PATH": r"C:\venv\Scripts;C:\Windows\System32",
-            "VIRTUAL_ENV": r"C:\venv",
-        },
-    )
-    monkeypatch.setattr(
-        live_verifier.psutil,
-        "Process",
-        lambda pid: process if pid == 456 else None,
-    )
-    monkeypatch.setattr(
-        live_verifier.os.path,
-        "normcase",
-        lambda value: str(value).replace("/", "\\").lower(),
-    )
-    monkeypatch.setattr(
-        live_verifier.os.path,
-        "normpath",
-        lambda value: str(value).replace("/", "\\"),
-    )
-
-    resolved = live_verifier._resolve_native_watchman_process(
-        456,
-        expected_binary_path="C:/Runtime/watchman.exe",
-    )
-
-    assert resolved is process
-
-
-def test_assert_sidecar_uses_installed_runtime_accepts_runtime_bin_then_venv_on_windows(
-    monkeypatch,
-) -> None:
-    process = SimpleNamespace(
-        environ=lambda: {
-            "PATH": (r"C:\runtime\bin;C:\venv\Scripts;C:\Windows\System32"),
-            "VIRTUAL_ENV": r"C:\venv",
-        }
-    )
-    monkeypatch.setattr(
-        live_verifier,
-        "_resolve_native_watchman_process",
-        lambda pid, expected_binary_path: process,
-    )
-    monkeypatch.setattr(
-        live_verifier,
-        "_python_path",
-        lambda venv_dir: PureWindowsPath(r"C:\venv\Scripts\python.exe"),
-    )
-    monkeypatch.setattr(live_verifier.os, "pathsep", ";", raising=False)
     monkeypatch.setattr(
         live_verifier.os.path,
         "normcase",
@@ -1246,10 +1167,368 @@ def test_assert_sidecar_uses_installed_runtime_accepts_runtime_bin_then_venv_on_
     live_verifier._assert_sidecar_uses_installed_runtime(
         {
             "watchman_pid": 123,
-            "watchman_binary_path": r"C:\runtime\bin\watchman.exe",
+            "watchman_binary_path": str(binary),
         },
-        venv_dir=Path(r"C:\venv"),
+        expected_venv_dir=venv_dir,
     )
+
+
+def test_assert_sidecar_uses_installed_runtime_rejects_wrong_virtualenv(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    venv_dir = tmp_path / "venv"
+    wrong_venv_dir = tmp_path / "other-venv"
+    binary = tmp_path / "watchman"
+    binary.write_text("", encoding="utf-8")
+    process = SimpleNamespace(
+        environ=lambda: {"VIRTUAL_ENV": str(wrong_venv_dir)},
+        cmdline=lambda: [str(binary), "--foreground"],
+    )
+    monkeypatch.setattr(live_verifier.psutil, "Process", lambda pid: process)
+
+    with pytest.raises(RuntimeError, match="wrong installed-wheel virtualenv"):
+        live_verifier._assert_sidecar_uses_installed_runtime(
+            {
+                "watchman_pid": 123,
+                "watchman_binary_path": str(binary),
+            },
+            expected_venv_dir=venv_dir,
+        )
+
+
+def test_assert_sidecar_uses_installed_runtime_rejects_bridge_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    venv_dir = tmp_path / "venv"
+    binary = tmp_path / "watchman"
+    binary.write_text("", encoding="utf-8")
+    process = SimpleNamespace(
+        environ=lambda: {"VIRTUAL_ENV": str(venv_dir)},
+        cmdline=lambda: [
+            str(binary),
+            "-m",
+            "chunkhound.watchman_runtime.bridge",
+        ],
+    )
+    monkeypatch.setattr(live_verifier.psutil, "Process", lambda pid: process)
+
+    with pytest.raises(RuntimeError, match="bridge"):
+        live_verifier._assert_sidecar_uses_installed_runtime(
+            {
+                "watchman_pid": 123,
+                "watchman_binary_path": str(binary),
+            },
+            expected_venv_dir=venv_dir,
+        )
+
+
+def test_assert_sidecar_uses_installed_runtime_rejects_cmdline_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    venv_dir = tmp_path / "venv"
+    binary = tmp_path / "watchman"
+    other_binary = tmp_path / "other-watchman"
+    binary.write_text("", encoding="utf-8")
+    other_binary.write_text("", encoding="utf-8")
+    process = SimpleNamespace(
+        environ=lambda: {"VIRTUAL_ENV": str(venv_dir)},
+        cmdline=lambda: [str(other_binary), "--foreground"],
+    )
+    monkeypatch.setattr(live_verifier.psutil, "Process", lambda pid: process)
+
+    with pytest.raises(RuntimeError, match="expected native daemon binary"):
+        live_verifier._assert_sidecar_uses_installed_runtime(
+            {
+                "watchman_pid": 123,
+                "watchman_binary_path": str(binary),
+            },
+            expected_venv_dir=venv_dir,
+        )
+
+
+def test_assert_sidecar_uses_installed_runtime_rejects_invalid_pid(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="Invalid Watchman sidecar pid"):
+        live_verifier._assert_sidecar_uses_installed_runtime(
+            {
+                "watchman_pid": 0,
+                "watchman_binary_path": str(tmp_path / "watchman"),
+            },
+            expected_venv_dir=tmp_path / "venv",
+        )
+
+
+def test_assert_sidecar_uses_installed_runtime_rejects_missing_binary_path(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="did not report a native binary path"):
+        live_verifier._assert_sidecar_uses_installed_runtime(
+            {
+                "watchman_pid": 123,
+                "watchman_binary_path": "",
+            },
+            expected_venv_dir=tmp_path / "venv",
+        )
+
+
+def test_assert_sidecar_uses_installed_runtime_rejects_non_file_binary_path(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="not a file on disk"):
+        live_verifier._assert_sidecar_uses_installed_runtime(
+            {
+                "watchman_pid": 123,
+                "watchman_binary_path": str(tmp_path / "missing-watchman"),
+            },
+            expected_venv_dir=tmp_path / "venv",
+        )
+
+
+@pytest.mark.asyncio
+async def test_verify_daemon_startup_initializes_and_validates_watchman_contract(
+    monkeypatch,
+) -> None:
+    ready_status = {
+        "scan_progress": {
+            "realtime": {
+                "watchman_sidecar_state": "running",
+                "effective_backend": "watchman",
+            }
+        }
+    }
+    validated_realtime: list[tuple[dict[str, object], Path]] = []
+
+    async def fake_wait_for_ready(_client: object) -> dict[str, object]:
+        return ready_status
+
+    def fake_assert_sidecar_uses_installed_runtime(
+        realtime: dict[str, object], *, expected_venv_dir: Path
+    ) -> None:
+        validated_realtime.append((realtime, expected_venv_dir))
+
+    client = _FakeClient()
+    monkeypatch.setattr(live_verifier, "_wait_for_ready", fake_wait_for_ready)
+    monkeypatch.setattr(
+        live_verifier,
+        "_assert_sidecar_uses_installed_runtime",
+        fake_assert_sidecar_uses_installed_runtime,
+    )
+
+    expected_venv_dir = Path("/tmp/venv")
+    status = await live_verifier._verify_daemon_startup(
+        client,
+        expected_venv_dir=expected_venv_dir,
+    )
+
+    assert status is ready_status
+    assert client.requests == [
+        (
+            "initialize",
+            live_verifier._MCP_INIT_PARAMS,
+            live_verifier._MCP_INITIALIZE_TIMEOUT_SECONDS,
+        )
+    ]
+    assert client.notifications == [("notifications/initialized", {})]
+    assert validated_realtime == [
+        (ready_status["scan_progress"]["realtime"], expected_venv_dir)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_verify_daemon_startup_accepts_polling_without_sidecar_validation(
+    monkeypatch,
+) -> None:
+    ready_status = {
+        "scan_progress": {
+            "realtime": {
+                "watchman_sidecar_state": "stopped",
+                "effective_backend": "polling",
+            }
+        }
+    }
+
+    async def fake_wait_for_ready(_client: object) -> dict[str, object]:
+        return ready_status
+
+    def fail_sidecar_validation(
+        realtime: dict[str, object], *, expected_venv_dir: Path
+    ) -> None:
+        del realtime, expected_venv_dir
+        raise AssertionError("sidecar validation should not run for polling")
+
+    client = _FakeClient()
+    monkeypatch.setattr(live_verifier, "_wait_for_ready", fake_wait_for_ready)
+    monkeypatch.setattr(
+        live_verifier,
+        "_assert_sidecar_uses_installed_runtime",
+        fail_sidecar_validation,
+    )
+
+    status = await live_verifier._verify_daemon_startup(
+        client,
+        expected_venv_dir=Path("/tmp/venv"),
+    )
+
+    assert status is ready_status
+    assert client.requests == [
+        (
+            "initialize",
+            live_verifier._MCP_INIT_PARAMS,
+            live_verifier._MCP_INITIALIZE_TIMEOUT_SECONDS,
+        )
+    ]
+    assert client.notifications == [("notifications/initialized", {})]
+
+
+@pytest.mark.asyncio
+async def test_verify_daemon_startup_rejects_unexpected_ready_backend(
+    monkeypatch,
+) -> None:
+    ready_status = {
+        "scan_progress": {
+            "realtime": {
+                "watchman_sidecar_state": "running",
+                "effective_backend": "watchdog",
+            }
+        }
+    }
+
+    async def fake_wait_for_ready(_client: object) -> dict[str, object]:
+        return ready_status
+
+    client = _FakeClient()
+    monkeypatch.setattr(live_verifier, "_wait_for_ready", fake_wait_for_ready)
+    with pytest.raises(RuntimeError, match="unexpected backend state"):
+        await live_verifier._verify_daemon_startup(
+            client,
+            expected_venv_dir=Path("/tmp/venv"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_verify_live_mutation_waits_for_search_and_keeps_watchman_running(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_file = tmp_path / "src" / "live.py"
+    live_symbol = "live_symbol"
+    search_queries: list[str] = []
+
+    client = _FakeClient()
+
+    async def fake_wait_for_search_hit(_client: object, *, query: str) -> None:
+        search_queries.append(query)
+
+    ready_status = {
+        "scan_progress": {
+            "realtime": {
+                "watchman_sidecar_state": "running",
+                "effective_backend": "watchman",
+            }
+        }
+    }
+
+    monkeypatch.setattr(live_verifier, "_wait_for_search_hit", fake_wait_for_search_hit)
+    monkeypatch.setattr(live_verifier, "_parse_tool_json", lambda result: ready_status)
+
+    await live_verifier._verify_live_mutation(
+        client,
+        ready_realtime={
+            "watchman_sidecar_state": "running",
+            "effective_backend": "watchman",
+        },
+        live_file=live_file,
+        live_symbol=live_symbol,
+    )
+
+    assert live_file.exists()
+    assert "return 'live'" in live_file.read_text(encoding="utf-8")
+    assert search_queries == [live_symbol]
+    assert client.requests == [
+        (
+            "tools/call",
+            {"name": "daemon_status", "arguments": {}},
+            15.0,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_verify_live_mutation_fails_when_watchman_drops_after_search_hit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_file = tmp_path / "src" / "live.py"
+
+    async def fake_wait_for_search_hit(_client: object, *, query: str) -> None:
+        del query
+
+    stale_status = {
+        "scan_progress": {
+            "realtime": {
+                "watchman_sidecar_state": "stopped",
+                "effective_backend": "polling",
+            }
+        }
+    }
+
+    monkeypatch.setattr(live_verifier, "_wait_for_search_hit", fake_wait_for_search_hit)
+    monkeypatch.setattr(live_verifier, "_parse_tool_json", lambda result: stale_status)
+
+    with pytest.raises(RuntimeError, match="lost running state"):
+        await live_verifier._verify_live_mutation(
+            _FakeClient(),
+            ready_realtime={
+                "watchman_sidecar_state": "running",
+                "effective_backend": "watchman",
+            },
+            live_file=live_file,
+            live_symbol="live_symbol",
+        )
+
+
+@pytest.mark.asyncio
+async def test_verify_live_mutation_polling_contract_only_waits_for_search_hit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_file = tmp_path / "src" / "live.py"
+    search_queries: list[str] = []
+
+    class _RaisingFakeClient:
+        async def send_request(
+            self,
+            method: str,
+            params: dict[str, object],
+            timeout: float,
+        ) -> dict[str, object]:
+            raise AssertionError("polling fallback must not re-query daemon_status")
+
+    async def fake_wait_for_search_hit(_client: object, *, query: str) -> None:
+        search_queries.append(query)
+
+    monkeypatch.setattr(
+        live_verifier,
+        "_wait_for_search_hit",
+        fake_wait_for_search_hit,
+    )
+
+    await live_verifier._verify_live_mutation(
+        _RaisingFakeClient(),
+        ready_realtime={
+            "watchman_sidecar_state": "stopped",
+            "effective_backend": "polling",
+        },
+        live_file=live_file,
+        live_symbol="polling_live_symbol",
+    )
+
+    assert live_file.exists()
+    assert search_queries == ["polling_live_symbol"]
 
 
 def test_remove_tree_with_retries_terminates_windows_processes_using_root(

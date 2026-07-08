@@ -15,7 +15,9 @@ from chunkhound.core.types.common import ChunkType, Language
 class TestLanceDBMetadataRoundtrip:
     """Test metadata persistence through LanceDB operations."""
 
-    def test_chunk_metadata_survives_insert_and_search(self, lancedb_provider, tmp_path):
+    def test_chunk_metadata_survives_insert_and_search(
+        self, lancedb_provider, tmp_path
+    ):
         """Verify chunk metadata is preserved through insert and regex search."""
         # Create test file
         test_file = File(
@@ -116,10 +118,14 @@ class TestLanceDBMetadataRoundtrip:
         assert len(results) == 2, f"Expected 2 chunks, got {len(results)}"
         for result in results:
             assert "metadata" in result, "Each result should have metadata"
-            assert "constants" in result["metadata"], "Each result should have constants"
+            assert "constants" in result["metadata"], (
+                "Each result should have constants"
+            )
             assert len(result["metadata"]["constants"]) == 1
 
-    def test_chunk_without_metadata_returns_empty_dict(self, lancedb_provider, tmp_path):
+    def test_chunk_without_metadata_returns_empty_dict(
+        self, lancedb_provider, tmp_path
+    ):
         """Verify chunks without metadata return empty dict (not None)."""
         # Create test file
         test_file = File(
@@ -156,7 +162,9 @@ class TestLanceDBMetadataRoundtrip:
 
         # Metadata should be empty dict, not None
         assert "metadata" in result
-        assert result["metadata"] == {}, f"Expected empty dict, got {result['metadata']}"
+        assert result["metadata"] == {}, (
+            f"Expected empty dict, got {result['metadata']}"
+        )
 
 
 class TestMetadataInAllChunks:
@@ -207,7 +215,9 @@ class TestDuckDBMetadataRoundtrip:
         """Create DuckDB provider for testing."""
         from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
-        provider = DuckDBProvider(db_path=tmp_path / "test.duckdb", base_directory=tmp_path)
+        provider = DuckDBProvider(
+            db_path=tmp_path / "test.duckdb", base_directory=tmp_path
+        )
         provider.connect()
         yield provider
         provider.disconnect()
@@ -241,7 +251,8 @@ class TestDuckDBMetadataRoundtrip:
             symbol="constants_block",
             metadata=metadata,
         )
-        # Use batch insert (production path) - single insert_chunk missing metadata in DuckDB
+        # Use batch insert (production path)
+        # - single insert_chunk missing metadata in DuckDB
         duckdb_provider.insert_chunks_batch([chunk])
 
         # Search for the chunk
@@ -314,7 +325,9 @@ class TestDuckDBMetadataRoundtrip:
         assert len(results) == 2, f"Expected 2 chunks, got {len(results)}"
         for result in results:
             assert "metadata" in result, "Each result should have metadata"
-            assert "constants" in result["metadata"], "Each result should have constants"
+            assert "constants" in result["metadata"], (
+                "Each result should have constants"
+            )
             assert len(result["metadata"]["constants"]) == 1
 
     def test_chunk_without_metadata_returns_empty_dict(self, duckdb_provider, tmp_path):
@@ -355,7 +368,9 @@ class TestDuckDBMetadataRoundtrip:
 
         # Metadata should be empty dict, not None
         assert "metadata" in result
-        assert result["metadata"] == {}, f"Expected empty dict, got {result['metadata']}"
+        assert result["metadata"] == {}, (
+            f"Expected empty dict, got {result['metadata']}"
+        )
 
 
 class TestDuckDBMetadataInAllChunks:
@@ -366,7 +381,9 @@ class TestDuckDBMetadataInAllChunks:
         """Create DuckDB provider for testing."""
         from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
-        provider = DuckDBProvider(db_path=tmp_path / "test.duckdb", base_directory=tmp_path)
+        provider = DuckDBProvider(
+            db_path=tmp_path / "test.duckdb", base_directory=tmp_path
+        )
         provider.connect()
         yield provider
         provider.disconnect()

@@ -79,7 +79,7 @@ def test_block_scalar_untouched():
         next: ok
         """
     )
-    assert '{{ .Values.foo }}' in sanitized.text
+    assert "{{ .Values.foo }}" in sanitized.text
     assert any(line.startswith("data: |-") for line in sanitized.text.splitlines())
     assert len(sanitized.text.splitlines()) == len(original.splitlines())
 
@@ -101,13 +101,9 @@ def test_pre_skip_templated_key():
 
 def test_pre_skip_block_scalar_threshold(monkeypatch):
     from chunkhound.parsers import yaml_template_sanitizer as ys
+
     monkeypatch.setattr(ys, "_BLOCK_SCALAR_TPL_THRESHOLD", 2, raising=False)
-    text = (
-        "data: |-\n"
-        "  {{- if .Values.a }}\n"
-        "  {{- include \"x\" . }}\n"
-        "  {{- end }}\n"
-    )
+    text = 'data: |-\n  {{- if .Values.a }}\n  {{- include "x" . }}\n  {{- end }}\n'
     sanitized = ys.sanitize_helm_templates(text)
     assert sanitized.pre_skip is True
     assert sanitized.pre_skip_reason == "block_scalar_template_heavy"

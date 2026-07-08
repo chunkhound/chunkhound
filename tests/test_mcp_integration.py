@@ -1,7 +1,8 @@
 """Integration tests that use actual MCP server components.
 
 These tests verify the real integration path that users experience:
-Filesystem Event → Watchdog → AsyncHandler → IndexingCoordinator → Database → Search Tools
+Filesystem Event → Watchdog → AsyncHandler
+→ IndexingCoordinator → Database → Search Tools
 """
 
 import asyncio
@@ -14,18 +15,17 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
-from chunkhound.mcp_server.tools import execute_tool, search_impl
+from chunkhound.mcp_server.tools import search_impl
 from chunkhound.services.realtime.service import RealtimeIndexingService
+from tests.helpers.embedding_config import (
+    build_embedding_config_from_dict,
+    create_embedding_manager_for_tests,
+    get_api_key_for_tests,
+    get_embedding_config_for_tests,
+)
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     realtime_backend_for_tests,
-)
-
-from tests.helpers.embedding_config import (
-    get_api_key_for_tests,
-    get_embedding_config_for_tests,
-    build_embedding_config_from_dict,
-    create_embedding_manager_for_tests,
 )
 
 
@@ -133,7 +133,8 @@ def unique_mcp_test_function():
         new_count = len(new_results.get("results", []))
 
         assert new_count > initial_count, (
-            f"MCP semantic search should find new file (was {initial_count}, now {new_count})"
+            f"MCP semantic search should find new file"
+            f" (was {initial_count}, now {new_count})"
         )
 
     @pytest.mark.asyncio
@@ -230,7 +231,9 @@ def delete_test_unique_function():
 """)
 
         # Wait for processing
-        found = await realtime_service.wait_for_file_indexed(delete_file, timeout=get_fs_event_timeout())
+        found = await realtime_service.wait_for_file_indexed(
+            delete_file, timeout=get_fs_event_timeout()
+        )
         assert found, "File should be indexed"
 
         # Verify content is searchable
@@ -242,15 +245,18 @@ def delete_test_unique_function():
             page_size=10,
             offset=0,
         )
-        assert len(before_delete.get("results", [])) > 0, \
+        assert len(before_delete.get("results", [])) > 0, (
             "File should be indexed and searchable before deletion"
+        )
 
         # Delete the file
         realtime_service.reset_file_tracking(delete_file)
         delete_file.unlink()
 
         # Wait for deletion processing
-        removed = await realtime_service.wait_for_file_removed(delete_file, timeout=get_fs_event_timeout())
+        removed = await realtime_service.wait_for_file_removed(
+            delete_file, timeout=get_fs_event_timeout()
+        )
         assert removed, "File should be removed"
 
         # Verify content is no longer searchable
@@ -262,8 +268,9 @@ def delete_test_unique_function():
             page_size=10,
             offset=0,
         )
-        assert len(after_delete.get("results", [])) == 0, \
+        assert len(after_delete.get("results", [])) == 0, (
             "Content should not be found after deletion"
+        )
 
     @pytest.mark.asyncio
     async def test_file_modification_detection_comprehensive(self, mcp_setup):
@@ -340,7 +347,9 @@ class NewlyAddedClass:
         # Key assertions for content-based change detection
 
         assert modified_chunk_count >= initial_chunk_count, (
-            f"Chunk count should not decrease (was {initial_chunk_count}, now {modified_chunk_count})"
+            f"Chunk count should not decrease"
+            f" (was {initial_chunk_count},"
+            f" now {modified_chunk_count})"
         )
 
         # Check if new content is searchable
@@ -365,7 +374,8 @@ class NewlyAddedClass:
 
     @pytest.mark.asyncio
     async def test_file_modification_with_filesystem_ops(self, mcp_setup):
-        """Test modification using different filesystem operations to ensure OS detection."""
+        """Test modification using different filesystem
+        operations to ensure OS detection."""
         services, realtime_service, watch_dir, _, _ = mcp_setup
         import os
 

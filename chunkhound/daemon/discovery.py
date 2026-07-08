@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import secrets
 import socket
@@ -63,7 +64,24 @@ _WINDOWS_PORT_BASE = 49_152
 _WINDOWS_PORT_SPAN = 16_384
 # Startup polling interval and timeout
 _STARTUP_POLL_INTERVAL = 0.1
-_STARTUP_TIMEOUT = 30.0
+
+
+def _read_startup_timeout() -> float:
+    raw = os.environ.get("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "30.0")
+    try:
+        timeout = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"CHUNKHOUND_DAEMON_STARTUP_TIMEOUT must be a number, got {raw!r}"
+        )
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(
+            "CHUNKHOUND_DAEMON_STARTUP_TIMEOUT must be a finite positive "
+            f"number, got {raw!r}"
+        )
+    return timeout
+
+
 _WINDOWS_REPLACE_RETRIES = 20
 _WINDOWS_REPLACE_RETRY_DELAY = 0.01
 
@@ -150,8 +168,7 @@ def _runtime_dir_identity(runtime_dir: Path) -> str:
 def _runtime_scoped_transport_hash(project_dir: Path, runtime_dir: Path) -> str:
     """Return a stable transport hash scoped to the canonical root and runtime."""
     identity = (
-        f"{_project_dir_identity(project_dir)}|"
-        f"{_runtime_dir_identity(runtime_dir)}"
+        f"{_project_dir_identity(project_dir)}|{_runtime_dir_identity(runtime_dir)}"
     )
     return hashlib.sha256(identity.encode()).hexdigest()
 
@@ -718,6 +735,26 @@ class DaemonDiscovery:
             "completed_duration_seconds": completed_duration_seconds,
         }
 
+    @staticmethod
+    def _format_startup_context_text(
+        startup_context: dict[str, object],
+    ) -> list[str]:
+        """Format startup context dict into human-readable diagnostic lines."""
+        lines: list[str] = []
+        if startup_context.get("startup_completed") is True:
+            lines.append("Daemon startup status: completed")
+        else:
+            last_phase = startup_context.get("last_phase")
+            if isinstance(last_phase, str) and last_phase:
+                lines.append(f"Last known startup phase: {last_phase}")
+            elapsed_seconds = startup_context.get("elapsed_seconds")
+            if isinstance(elapsed_seconds, float):
+                lines.append(f"Elapsed startup duration so far: {elapsed_seconds:.3f}s")
+            last_error = startup_context.get("last_error")
+            if isinstance(last_error, str) and last_error:
+                lines.append(f"Last startup error: {last_error}")
+        return lines
+
     def format_startup_failure(
         self,
         *,
@@ -732,21 +769,7 @@ class DaemonDiscovery:
         effective_log_path = log_path or self.get_daemon_log_path()
         startup_context = self._startup_failure_context(effective_log_path)
         if startup_context is not None:
-            context_lines: list[str] = []
-            if startup_context.get("startup_completed") is True:
-                context_lines.append("Daemon startup status: completed")
-            else:
-                last_phase = startup_context.get("last_phase")
-                if isinstance(last_phase, str) and last_phase:
-                    context_lines.append(f"Last known startup phase: {last_phase}")
-                elapsed_seconds = startup_context.get("elapsed_seconds")
-                if isinstance(elapsed_seconds, float):
-                    context_lines.append(
-                        f"Elapsed startup duration so far: {elapsed_seconds:.3f}s"
-                    )
-                last_error = startup_context.get("last_error")
-                if isinstance(last_error, str) and last_error:
-                    context_lines.append(f"Last startup error: {last_error}")
+            context_lines = self._format_startup_context_text(startup_context)
             if context_lines:
                 message = f"{message}\n" + "\n".join(context_lines)
         log_tail = self._tail_daemon_log(effective_log_path)
@@ -1162,17 +1185,18 @@ class DaemonDiscovery:
 
         Raises:
             RuntimeError: If the daemon does not become reachable within
-                          ``_STARTUP_TIMEOUT`` seconds.
+                          the configured startup timeout.
         """
+        startup_timeout = _read_startup_timeout()
         initial_address = self.get_ipc_address()
         existing_address = await self._reuse_live_daemon(
             initial_address,
-            _STARTUP_TIMEOUT,
+            startup_timeout,
         )
         if existing_address is not None:
             return existing_address
 
-        deadline = time.monotonic() + _STARTUP_TIMEOUT
+        deadline = time.monotonic() + startup_timeout
         while time.monotonic() < deadline:
             # User-scoped per-root startup barrier: closes the concurrent
             # cross-runtime startup race where two proxies under different
@@ -1278,10 +1302,9 @@ class DaemonDiscovery:
                                     lock.get("socket_path", initial_address)
                                 )
                                 actual_pid = lock.get("pid")
-                                if (
-                                    isinstance(actual_pid, int)
-                                    and await self._socket_connectable(actual_address)
-                                ):
+                                if isinstance(
+                                    actual_pid, int
+                                ) and await self._socket_connectable(actual_address):
                                     # Final checkpoint: daemon may have crashed
                                     # during the startup barrier (publish happens
                                     # before barrier in daemon/server.py).
@@ -1333,7 +1356,7 @@ class DaemonDiscovery:
                             self.format_startup_failure(
                                 prefix=(
                                     f"ChunkHound daemon did not start within "
-                                    f"{_STARTUP_TIMEOUT}s (address: {startup_address}, "
+                                    f"{startup_timeout}s (address: {startup_address}, "
                                     f"{process_state})"
                                 ),
                                 log_path=startup.log_path,
@@ -1350,7 +1373,7 @@ class DaemonDiscovery:
             self.format_startup_failure(
                 prefix=(
                     f"ChunkHound daemon did not become reachable within "
-                    f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+                    f"{startup_timeout}s (address: {initial_address})"
                 )
             )
         )

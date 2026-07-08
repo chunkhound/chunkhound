@@ -165,7 +165,7 @@ async def test_private_watchman_sidecar_start_ignores_poisoned_python_path(
 
 
 @pytest.mark.asyncio
-async def test_private_watchman_sidecar_stop_cleans_state_keeps_runtime_cache_and_allows_restart(
+async def test_sidecar_stop_cleans_state_keeps_cache_allows_restart(
     tmp_path: Path,
 ) -> None:
     repo_root = tmp_path / "repo"

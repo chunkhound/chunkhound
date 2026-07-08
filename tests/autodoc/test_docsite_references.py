@@ -111,6 +111,7 @@ def _topic_body_with_sources() -> str:
         ]
     )
 
+
 def _topic_body_with_sources_and_citations() -> str:
     return "\n".join(
         [
@@ -216,7 +217,9 @@ async def test_cleanup_topics_injects_flattened_references() -> None:
 
     pages = await cleanup_topics(
         topics=[topic],
-        llm_manager=_FakeLLMManager(_FixedCleanupProvider("## Overview\nOverview text.")),  # type: ignore[arg-type]
+        llm_manager=_FakeLLMManager(
+            _FixedCleanupProvider("## Overview\nOverview text.")
+        ),  # type: ignore[arg-type]
         config=CleanupConfig(
             mode="llm",
             batch_size=1,
@@ -228,8 +231,12 @@ async def test_cleanup_topics_injects_flattened_references() -> None:
     output = pages[0].body_markdown
     assert "## Sources" not in output
     assert "## References" in output
-    assert '- <a id="ref-1"></a>[1] `repo/src/main.py` (2 chunks: L1-10, L20-30)' in output
-    assert '- <a id="ref-2"></a>[2] `repo/tests/test_main.py` (1 chunks: L5-8)' in output
+    assert (
+        '- <a id="ref-1"></a>[1] `repo/src/main.py` (2 chunks: L1-10, L20-30)' in output
+    )
+    assert (
+        '- <a id="ref-2"></a>[2] `repo/tests/test_main.py` (1 chunks: L5-8)' in output
+    )
 
 
 @pytest.mark.asyncio
@@ -246,7 +253,9 @@ async def test_cleanup_topics_filters_uncited_refs_with_citations() -> None:
     pages = await cleanup_topics(
         topics=[topic],
         llm_manager=_FakeLLMManager(
-            _FixedCleanupProvider("## Overview\nOverview text [1].\n\n## Details\nMore info.")
+            _FixedCleanupProvider(
+                "## Overview\nOverview text [1].\n\n## Details\nMore info."
+            )
         ),  # type: ignore[arg-type]
         config=CleanupConfig(
             mode="llm",
@@ -260,7 +269,9 @@ async def test_cleanup_topics_filters_uncited_refs_with_citations() -> None:
     output = page.body_markdown
     assert "## Sources" not in output
     assert "Overview text [[1]](#ref-1)." in output
-    assert '- <a id="ref-1"></a>[1] `repo/src/main.py` (2 chunks: L1-10, L20-30)' in output
+    assert (
+        '- <a id="ref-1"></a>[1] `repo/src/main.py` (2 chunks: L1-10, L20-30)' in output
+    )
     assert "- [2] `repo/tests/test_main.py` (1 chunks: L5-8)" not in output
     assert page.references_count == 1
 
@@ -306,8 +317,12 @@ async def test_cleanup_topics_does_not_filter_on_code_block_brackets() -> None:
     output = pages[0].body_markdown
     assert "arr[1]" in output
     assert "`arr[2]`" in output
-    assert '- <a id="ref-1"></a>[1] `repo/src/main.py` (2 chunks: L1-10, L20-30)' in output
-    assert '- <a id="ref-2"></a>[2] `repo/tests/test_main.py` (1 chunks: L5-8)' in output
+    assert (
+        '- <a id="ref-1"></a>[1] `repo/src/main.py` (2 chunks: L1-10, L20-30)' in output
+    )
+    assert (
+        '- <a id="ref-2"></a>[2] `repo/tests/test_main.py` (1 chunks: L5-8)' in output
+    )
 
 
 def test_reference_normalization_errors_when_sources_block_unparseable() -> None:

@@ -9,19 +9,14 @@ from chunkhound.parsers.parser_factory import ParserFactory
     reason="YAML parser not available",
 )
 def test_yaml_tree_sitter_emits_key_value_and_array(monkeypatch):
-    # Force tree-sitter YAML (RapidYAML wrapper will delegate to fallback when disabled).
+    # Force tree-sitter YAML (RapidYAML wrapper
+    # will delegate to fallback when disabled).
     monkeypatch.setenv("CHUNKHOUND_YAML_ENGINE", "tree")
 
     factory = ParserFactory()
     parser = factory.create_parser(Language.YAML)
 
-    content = (
-        "root:\n"
-        "  name: example\n"
-        "  items:\n"
-        "    - a\n"
-        "    - b\n"
-    )
+    content = "root:\n  name: example\n  items:\n    - a\n    - b\n"
     chunks = parser.parse_content(content, "test.yaml", FileId(1))
     assert chunks
 

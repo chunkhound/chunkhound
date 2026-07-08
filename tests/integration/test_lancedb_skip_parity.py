@@ -5,11 +5,10 @@ Covers:
 - indexed → skipped: existing file id is preserved (chunks not orphaned)
 - skipped → indexed: skip_reason is cleared on re-index
 """
+
 import asyncio
-from pathlib import Path
 
 import pytest
-
 
 # Use explicit extensions rather than **/* — LanceDB stores its database under
 # tmp_path/lancedb.lancedb/ which would otherwise be scanned as unknown-type files.
@@ -35,7 +34,10 @@ def coordinator(lancedb_provider, tmp_path):
 
 
 def test_lancedb_skipped_file_recorded(coordinator, tmp_path):
-    """Skipped file gets a DB record with skip_reason in LanceDB (parity with DuckDB)."""
+    """
+    Skipped file gets a DB record with skip_reason
+    in LanceDB (parity with DuckDB).
+    """
     (tmp_path / "data.xyzunk").write_text("binary\n")
 
     asyncio.run(coordinator.process_directory(tmp_path, patterns=_ALL_PATTERNS))
@@ -52,11 +54,15 @@ def test_lancedb_skipped_file_not_reparsed_on_second_run(coordinator, tmp_path):
     (tmp_path / "main.py").write_text("def hello(): pass\n")
     (tmp_path / "data.xyzunk").write_text("binary\n")
 
-    result1 = asyncio.run(coordinator.process_directory(tmp_path, patterns=_ALL_PATTERNS))
+    result1 = asyncio.run(
+        coordinator.process_directory(tmp_path, patterns=_ALL_PATTERNS)
+    )
     assert result1["status"] == "success"
     assert result1.get("skipped_filtered", 0) >= 1
 
-    result2 = asyncio.run(coordinator.process_directory(tmp_path, patterns=_ALL_PATTERNS))
+    result2 = asyncio.run(
+        coordinator.process_directory(tmp_path, patterns=_ALL_PATTERNS)
+    )
     assert result2["status"] == "success"
     assert result2.get("skipped_filtered", 0) == 0, (
         "Skipped file must not be re-parsed on run 2 in LanceDB"
@@ -97,9 +103,14 @@ def test_indexed_to_skipped_preserves_file_id(lancedb_provider, tmp_path):
 
     # Simulate the file becoming unrecognised/binary — record it as skipped
     lancedb_provider.record_skipped_file(
-        rel, pyfile.name, pyfile.suffix,
-        pyfile.stat().st_size, pyfile.stat().st_mtime,
-        None, None, "test skip reason",
+        rel,
+        pyfile.name,
+        pyfile.suffix,
+        pyfile.stat().st_size,
+        pyfile.stat().st_mtime,
+        None,
+        None,
+        "test skip reason",
     )
 
     file_record_after = lancedb_provider.get_file_by_path(rel, as_model=False)
@@ -137,9 +148,14 @@ def test_skipped_to_indexed_clears_skip_reason(lancedb_provider, tmp_path):
     rel = "code.py"
     # Record skip with stale mtime=0 so change detection will re-queue the file
     lancedb_provider.record_skipped_file(
-        rel, pyfile.name, pyfile.suffix,
-        pyfile.stat().st_size, 0.0,  # mtime=0 forces mtime mismatch
-        None, None, "old skip reason",
+        rel,
+        pyfile.name,
+        pyfile.suffix,
+        pyfile.stat().st_size,
+        0.0,  # mtime=0 forces mtime mismatch
+        None,
+        None,
+        "old skip reason",
     )
 
     pre = lancedb_provider.get_file_by_path(rel, as_model=False)

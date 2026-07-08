@@ -22,7 +22,8 @@ def is_tree_sitter_node(obj: Any) -> bool:
 
 
 class CodeParser:
-    """Tree-sitter based code parser using the registry system for all language support."""
+    """Tree-sitter based code parser using the registry
+    system for all language support."""
 
     def __init__(self, use_cache: bool = True, cache: TreeCache | None = None):
         """Initialize the code parser.
@@ -95,7 +96,8 @@ class CodeParser:
             raise
 
     def parse_incremental(self, file_path: Path, source_code: str | None = None) -> Any:
-        """Parse incrementally using TreeCache if available, fallback to direct parsing."""
+        """Parse incrementally using TreeCache if available,
+        fallback to direct parsing."""
         if source_code is None:
             # Read file content if not provided
             try:

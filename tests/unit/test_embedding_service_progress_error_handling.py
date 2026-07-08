@@ -208,10 +208,12 @@ class TestProgressFailuresDoNotMaskEmbeddingErrors:
     async def test_successful_embedding_with_broken_progress(self):
         """Successful embeddings should complete even if progress tracking fails."""
         # Configure embedding provider to succeed (async method needs AsyncMock)
-        self.mock_embedding_provider.embed = AsyncMock(return_value=[
-            [0.1] * 768,
-            [0.2] * 768,
-        ])
+        self.mock_embedding_provider.embed = AsyncMock(
+            return_value=[
+                [0.1] * 768,
+                [0.2] * 768,
+            ]
+        )
 
         # Configure progress to fail
         self.mock_progress.tasks = {}  # Will raise KeyError
@@ -240,12 +242,15 @@ class TestExceptionTupleCompleteness:
 
     EXCEPTION_TUPLE = (AttributeError, IndexError, TypeError, KeyError)
 
-    @pytest.mark.parametrize("exception_class,scenario", [
-        (KeyError, "task ID not in progress.tasks dict"),
-        (AttributeError, "task object missing attribute"),
-        (IndexError, "task ID out of range in list-like container"),
-        (TypeError, "elapsed has incompatible type for comparison/division"),
-    ])
+    @pytest.mark.parametrize(
+        "exception_class,scenario",
+        [
+            (KeyError, "task ID not in progress.tasks dict"),
+            (AttributeError, "task object missing attribute"),
+            (IndexError, "task ID out of range in list-like container"),
+            (TypeError, "elapsed has incompatible type for comparison/division"),
+        ],
+    )
     def test_all_expected_exceptions_are_in_tuple(self, exception_class, scenario):
         """Verify each expected exception type is in the catch tuple."""
         assert exception_class in self.EXCEPTION_TUPLE, (

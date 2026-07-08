@@ -1,4 +1,7 @@
-"""DatabaseProvider protocol for ChunkHound - abstract interface for database implementations."""
+"""DatabaseProvider protocol for ChunkHound.
+
+Abstract interface for database implementations.
+"""
 
 from pathlib import Path
 from typing import Any, Protocol
@@ -128,7 +131,7 @@ class DatabaseProvider(Protocol):
         ...
 
     async def delete_files_batch_async(self, file_paths: list[str]) -> int:
-        """Delete multiple files and their chunks/embeddings completely (asynchronous)."""
+        """Delete multiple files and chunks (asynchronous)."""
         ...
 
     async def insert_file_async(self, file: File) -> int:
@@ -156,7 +159,7 @@ class DatabaseProvider(Protocol):
         content_hash: str | None,
         skip_reason: str,
     ) -> None:
-        """Upsert a file record with skip_reason to prevent re-scanning (asynchronous)."""
+        """Upsert file with skip_reason to prevent re-scanning."""
         ...
 
     # Chunk Operations
@@ -225,7 +228,8 @@ class DatabaseProvider(Protocol):
 
         Args:
             embeddings_data: List of embedding data dictionaries
-            batch_size: Optional batch size for database operations (uses provider default if None)
+            batch_size: Optional batch size for DB operations
+                (uses provider default if None)
             connection: Optional database connection to use (for transaction contexts)
         """
         ...
@@ -239,7 +243,7 @@ class DatabaseProvider(Protocol):
     def get_existing_embeddings(
         self, chunk_ids: list[int], provider: str, model: str
     ) -> set[int]:
-        """Get set of chunk IDs that already have embeddings for given provider/model."""
+        """Get chunk IDs with existing embeddings for provider/model."""
         ...
 
     def delete_embeddings_by_chunk_id(self, chunk_id: int) -> None:
@@ -247,7 +251,7 @@ class DatabaseProvider(Protocol):
         ...
 
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
-        """Get all chunks with their metadata including file paths (provider-agnostic)."""
+        """Get all chunks with metadata including file paths."""
         ...
 
     # Search Operations
@@ -270,7 +274,8 @@ class DatabaseProvider(Protocol):
             page_size: Number of results per page
             offset: Starting position for pagination
             threshold: Optional similarity threshold
-            path_filter: Optional relative path to limit search scope (e.g., 'src/', 'tests/')
+            path_filter: Optional relative path to limit
+                search scope (e.g., 'src/', 'tests/')
 
         Returns:
             Tuple of (results, pagination_metadata)
@@ -338,7 +343,8 @@ class DatabaseProvider(Protocol):
             pattern: Regular expression pattern to search for
             page_size: Number of results per page
             offset: Starting position for pagination
-            path_filter: Optional relative path to limit search scope (e.g., 'src/', 'tests/')
+            path_filter: Optional relative path to limit
+                search scope (e.g., 'src/', 'tests/')
 
         Returns:
             Tuple of (results, pagination_metadata)
@@ -508,7 +514,8 @@ class DatabaseProvider(Protocol):
         """Check if optimization is warranted.
 
         Args:
-            operation: Optional operation context (e.g., "post-chunking", "post-indexing")
+            operation: Optional operation context
+                (e.g., "post-chunking", "post-indexing")
 
         Returns:
             True if optimization should run, False to skip.

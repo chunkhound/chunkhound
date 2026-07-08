@@ -61,6 +61,7 @@ class MockOpenAIEmbeddingServer(http.server.BaseHTTPRequestHandler):
     Mock OpenAI-compatible server that responds to embedding requests.
     This simulates servers like Ollama, LocalAI, or corporate OpenAI proxies.
     """
+
     def do_POST(self):
         """Handle POST requests to /v1/embeddings endpoint."""
         if self.path == "/v1/embeddings":
@@ -77,11 +78,13 @@ class MockOpenAIEmbeddingServer(http.server.BaseHTTPRequestHandler):
                 # Mock embedding response (same format as OpenAI)
                 embeddings_data = []
                 for i, _text in enumerate(input_texts):
-                    embeddings_data.append({
-                        "object": "embedding",
-                        "index": i,
-                        "embedding": [0.1] * 1536,
-                    })
+                    embeddings_data.append(
+                        {
+                            "object": "embedding",
+                            "index": i,
+                            "embedding": [0.1] * 1536,
+                        }
+                    )
 
                 response = {
                     "object": "list",
@@ -89,8 +92,8 @@ class MockOpenAIEmbeddingServer(http.server.BaseHTTPRequestHandler):
                     "model": request_data.get("model", "text-embedding-3-small"),
                     "usage": {
                         "prompt_tokens": sum(len(text.split()) for text in input_texts),
-                        "total_tokens": sum(len(text.split()) for text in input_texts)
-                    }
+                        "total_tokens": sum(len(text.split()) for text in input_texts),
+                    },
                 }
 
                 self.send_response(200)

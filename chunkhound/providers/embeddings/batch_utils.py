@@ -160,7 +160,8 @@ def with_token_limit_handling(
     Args:
         error_check_func: Function to check if exception indicates token limit exceeded
         safety_margin: Safety margin to subtract from token limit
-        single_text_fallback: Whether to use first chunk as fallback for oversized single text
+        single_text_fallback: Whether to use first chunk
+        as fallback for oversized single text
 
     Returns:
         Decorator function
@@ -235,10 +236,13 @@ def generic_token_limit_check(error: Exception) -> bool:
 
 
 # Convenience decorators for specific providers
-with_openai_token_handling = lambda: with_token_limit_handling(openai_token_limit_check)
-with_anthropic_token_handling = lambda: with_token_limit_handling(
-    anthropic_token_limit_check
-)
-with_generic_token_handling = lambda: with_token_limit_handling(
-    generic_token_limit_check
-)
+def with_openai_token_handling():
+    return with_token_limit_handling(openai_token_limit_check)
+
+
+def with_anthropic_token_handling():
+    return with_token_limit_handling(anthropic_token_limit_check)
+
+
+def with_generic_token_handling():
+    return with_token_limit_handling(generic_token_limit_check)

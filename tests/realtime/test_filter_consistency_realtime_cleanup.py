@@ -21,9 +21,9 @@ from chunkhound.providers.database.duckdb_provider import (
     _normalize_indexed_root,
 )
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
-from chunkhound.services.realtime.service import RealtimeIndexingService
-from chunkhound.services.realtime.events import SimpleEventHandler
 from chunkhound.services.realtime.adapters import WatchmanRealtimeAdapter
+from chunkhound.services.realtime.events import SimpleEventHandler
+from chunkhound.services.realtime.service import RealtimeIndexingService
 from chunkhound.services.realtime_path_filter import (
     RealtimePathFilter,
     RealtimePathFilterSettings,
@@ -159,9 +159,8 @@ async def test_watchdog_delete_admits_previously_indexed_excluded_file(
             config=config,
             loop=asyncio.get_running_loop(),
             root_path=root,
-            filtered_event_callback=lambda event_type, file_path: filtered_events.append(
-                (event_type, file_path)
-            ),
+            filtered_event_callback=lambda event_type,
+            file_path: filtered_events.append((event_type, file_path)),
             admission_callback=service._should_admit_realtime_event,
         )
 
@@ -462,7 +461,10 @@ async def test_cleanup_deleted_directory_enumerates_chunkless_files(
 
         await service._cleanup_deleted_directory(str(root / "sub"))
 
-        absolute_paths = {str(root / "sub" / "empty.bin"), str(root / "sub" / "code.py")}
+        absolute_paths = {
+            str(root / "sub" / "empty.bin"),
+            str(root / "sub" / "code.py"),
+        }
         assert set(queued) == absolute_paths
         assert str(root / "other" / "keep.py") not in queued
     finally:
@@ -541,9 +543,7 @@ async def test_cleanup_preserves_rows_when_realtime_filter_is_degraded(
 
         # Discovery sees the file on disk; reconciliation pass is told it is
         # not in the current discovered set so the cleanup path is exercised.
-        cleaned = coordinator._cleanup_orphaned_files(
-            root, [], ["**/*.py"], []
-        )
+        cleaned = coordinator._cleanup_orphaned_files(root, [], ["**/*.py"], [])
 
         # Only the missing-on-disk row was deleted; the still-present row was
         # preserved because the filter could not prove exclusion.

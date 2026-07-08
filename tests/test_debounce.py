@@ -98,7 +98,8 @@ class TestDebounce:
         await _wait_for_tasks(service)
 
         assert path not in service.pending_files, (
-            "pending_files should be cleaned up when debounce entry is removed externally"
+            "pending_files should be cleaned up when "
+            "debounce entry is removed externally"
         )
         assert service._pending_mutations == {}
         assert service._pending_path_counts == {}
@@ -109,7 +110,9 @@ class TestDebounce:
         await service.add_file(path, priority="scan")
 
         assert not service.file_queue.empty(), "scan event should bypass debounce"
-        assert len(service._pending_debounce) == 0, "scan should not create debounce entry"
+        assert len(service._pending_debounce) == 0, (
+            "scan should not create debounce entry"
+        )
 
     async def test_distinct_files_independent_debounce(self, service):
         """Each file gets its own debounce task; two files produce two queue entries."""

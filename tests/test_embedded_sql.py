@@ -40,14 +40,18 @@ def insert_user(name, email):
         assert len(embedded_chunks) >= 2, "Should detect at least 2 SQL queries"
 
         # Check first embedded SQL chunk
-        select_chunk = next((c for c in embedded_chunks if "SELECT" in c.code.upper()), None)
+        select_chunk = next(
+            (c for c in embedded_chunks if "SELECT" in c.code.upper()), None
+        )
         assert select_chunk is not None
         assert "users" in select_chunk.code.lower()
         assert select_chunk.metadata.get("host_language") == "python"
         assert select_chunk.metadata.get("sql_confidence", 0) >= 0.6
 
         # Check second embedded SQL chunk
-        insert_chunk = next((c for c in embedded_chunks if "INSERT" in c.code.upper()), None)
+        insert_chunk = next(
+            (c for c in embedded_chunks if "INSERT" in c.code.upper()), None
+        )
         assert insert_chunk is not None
         assert insert_chunk.metadata.get("host_context", "").startswith("function:")
 
@@ -57,7 +61,7 @@ def insert_user(name, email):
 
     def test_javascript_embedded_sql(self):
         """Test SQL detection in JavaScript template strings."""
-        js_code = '''
+        js_code = """
 async function getUsers() {
     const query = `
         SELECT u.id, u.name, u.email, p.phone
@@ -78,28 +82,34 @@ function createTable() {
         )
     `);
 }
-'''
+"""
 
-        parser = ParserFactory().create_parser(Language.JAVASCRIPT, detect_embedded_sql=True)
+        parser = ParserFactory().create_parser(
+            Language.JAVASCRIPT, detect_embedded_sql=True
+        )
         chunks = parser.parse_content(js_code)
 
         embedded_chunks = [c for c in chunks if c.metadata.get("embedded")]
         assert len(embedded_chunks) >= 2
 
         # Verify SELECT query
-        select_chunk = next((c for c in embedded_chunks if "SELECT" in c.code.upper()), None)
+        select_chunk = next(
+            (c for c in embedded_chunks if "SELECT" in c.code.upper()), None
+        )
         assert select_chunk is not None
         assert "JOIN" in select_chunk.code.upper()
         assert select_chunk.metadata.get("host_language") == "javascript"
 
         # Verify CREATE TABLE
-        create_chunk = next((c for c in embedded_chunks if "CREATE TABLE" in c.code.upper()), None)
+        create_chunk = next(
+            (c for c in embedded_chunks if "CREATE TABLE" in c.code.upper()), None
+        )
         assert create_chunk is not None
         assert "products" in create_chunk.code.lower()
 
     def test_java_embedded_sql(self):
         """Test SQL detection in Java strings."""
-        java_code = '''
+        java_code = """
 public class UserDao {
     public User findById(int id) {
         String sql = "SELECT * FROM users WHERE id = ?";
@@ -115,7 +125,7 @@ public class UserDao {
         jdbcTemplate.update("DELETE FROM users WHERE id = ?", id);
     }
 }
-'''
+"""
 
         parser = ParserFactory().create_parser(Language.JAVA, detect_embedded_sql=True)
         chunks = parser.parse_content(java_code)
@@ -153,24 +163,30 @@ def format_text():
     return text
 '''
 
-        parser = ParserFactory().create_parser(Language.PYTHON, detect_embedded_sql=True)
+        parser = ParserFactory().create_parser(
+            Language.PYTHON, detect_embedded_sql=True
+        )
         chunks = parser.parse_content(python_code)
 
         embedded_chunks = [c for c in chunks if c.metadata.get("embedded")]
 
         # SELECT alone scores 0.30, below the 0.60 threshold — no false positives
-        assert len(embedded_chunks) == 0, "SELECT without SQL structure should not be detected"
+        assert len(embedded_chunks) == 0, (
+            "SELECT without SQL structure should not be detected"
+        )
 
     def test_disabled_when_explicitly_off(self):
         """Test that embedded SQL detection can be disabled explicitly."""
-        python_code = '''
+        python_code = """
 def query_db():
     sql = "SELECT * FROM users"
     return execute(sql)
-'''
+"""
 
         # Create parser with embedded SQL detection explicitly disabled
-        parser = ParserFactory().create_parser(Language.PYTHON, detect_embedded_sql=False)
+        parser = ParserFactory().create_parser(
+            Language.PYTHON, detect_embedded_sql=False
+        )
         chunks = parser.parse_content(python_code)
 
         # Should NOT have embedded SQL chunks
@@ -179,7 +195,7 @@ def query_db():
 
     def test_sql_confidence_scoring(self):
         """Test that confidence scoring works correctly."""
-        python_code = '''
+        python_code = """
 def test():
     # High confidence - clear SQL with multiple keywords
     high = "SELECT id, name FROM users WHERE active = 1 ORDER BY name"
@@ -189,9 +205,11 @@ def test():
 
     # Low confidence - just one keyword
     low = "This text has SELECT in it but is not SQL"
-'''
+"""
 
-        parser = ParserFactory().create_parser(Language.PYTHON, detect_embedded_sql=True)
+        parser = ParserFactory().create_parser(
+            Language.PYTHON, detect_embedded_sql=True
+        )
         chunks = parser.parse_content(python_code)
 
         embedded_chunks = [c for c in chunks if c.metadata.get("embedded")]
@@ -226,7 +244,9 @@ def complex_query():
     return db.execute(query)
 '''
 
-        parser = ParserFactory().create_parser(Language.PYTHON, detect_embedded_sql=True)
+        parser = ParserFactory().create_parser(
+            Language.PYTHON, detect_embedded_sql=True
+        )
         chunks = parser.parse_content(python_code)
 
         embedded_chunks = [c for c in chunks if c.metadata.get("embedded")]
@@ -241,8 +261,8 @@ def complex_query():
 
     def test_ddl_confidence_scores(self):
         """DDL statements without PRIMARY KEY should score >= 0.6."""
-        from chunkhound.parsers.embedded_sql_detector import EmbeddedSqlDetector
         from chunkhound.core.types.common import Language
+        from chunkhound.parsers.embedded_sql_detector import EmbeddedSqlDetector
 
         detector = EmbeddedSqlDetector(Language.PYTHON)
         ddl_statements = [
@@ -256,13 +276,15 @@ def complex_query():
 
     def test_ddl_detection_without_primary_key(self):
         """Integration test: DDL strings without PRIMARY KEY are detected."""
-        python_code = '''
+        python_code = """
 def setup_db():
     conn.execute("CREATE TABLE users (id INT, name TEXT)")
     conn.execute("ALTER TABLE orders ADD COLUMN total DECIMAL(10,2)")
     conn.execute("DROP TABLE temp_data")
-'''
-        parser = ParserFactory().create_parser(Language.PYTHON, detect_embedded_sql=True)
+"""
+        parser = ParserFactory().create_parser(
+            Language.PYTHON, detect_embedded_sql=True
+        )
         chunks = parser.parse_content(python_code)
 
         embedded_chunks = [c for c in chunks if c.metadata.get("embedded")]
@@ -284,11 +306,11 @@ def setup_db():
             (f'f"{sql}"', sql),
             (f'rb"{sql}"', sql),
             (f'R"{sql}"', sql),
-            (f'@"{sql}"', sql),    # C# verbatim prefix
-            (f'$"{sql}"', sql),    # C# interpolated prefix
-            (f'@$"{sql}"', sql),   # C# verbatim+interpolated
-            (f'$@"{sql}"', sql),   # C# interpolated+verbatim
-            (f'"{sql}"', sql),     # plain — should still work
+            (f'@"{sql}"', sql),  # C# verbatim prefix
+            (f'$"{sql}"', sql),  # C# interpolated prefix
+            (f'@$"{sql}"', sql),  # C# verbatim+interpolated
+            (f'$@"{sql}"', sql),  # C# interpolated+verbatim
+            (f'"{sql}"', sql),  # plain — should still work
         ]
         for raw, expected in cases:
             result = detector._clean_string_content(raw)
@@ -297,13 +319,16 @@ def setup_db():
             )
 
     def test_python_raw_string_sql_detected(self):
-        """Integration: r-prefixed Python SQL strings must produce clean embedded chunks."""
-        python_code = '''
+        """Integration: r-prefixed Python SQL strings
+        must produce clean embedded chunks."""
+        python_code = """
 def fetch_users():
     query = r"SELECT * FROM users WHERE active = 1"
     return db.execute(query)
-'''
-        parser = ParserFactory().create_parser(Language.PYTHON, detect_embedded_sql=True)
+"""
+        parser = ParserFactory().create_parser(
+            Language.PYTHON, detect_embedded_sql=True
+        )
         chunks = parser.parse_content(python_code)
 
         embedded_chunks = [c for c in chunks if c.metadata.get("embedded")]
@@ -329,31 +354,36 @@ def fetch_users():
         ]
         for sql in cases:
             score = detector._calculate_sql_confidence(sql)
-            assert score >= 0.6, (
-                f"Expected confidence >= 0.6 for {sql!r}, got {score}"
-            )
+            assert score >= 0.6, f"Expected confidence >= 0.6 for {sql!r}, got {score}"
 
     def test_english_prose_with_sql_keywords_not_detected(self):
         """English sentences with SQL keywords must not be detected as SQL."""
-        python_code = '''
+        python_code = """
 def describe():
     msg = "SELECT from the list WHERE possible"
     return msg
-'''
-        parser = ParserFactory().create_parser(Language.PYTHON, detect_embedded_sql=True)
+"""
+        parser = ParserFactory().create_parser(
+            Language.PYTHON, detect_embedded_sql=True
+        )
         chunks = parser.parse_content(python_code)
 
         embedded_chunks = [c for c in chunks if c.metadata.get("embedded")]
         assert len(embedded_chunks) == 0, (
-            f"English prose should not be detected as SQL, got: {[c.code for c in embedded_chunks]}"
+            f"English prose should not be detected "
+            f"as SQL, got: "
+            f"{[c.code for c in embedded_chunks]}"
         )
 
     def test_select_from_gap_threshold(self):
-        """_select_from_combo_fires must reject 3+ pure-alpha words between SELECT and FROM."""
+        """_select_from_combo_fires must reject
+        3+ pure-alpha words between SELECT and FROM."""
         from chunkhound.parsers.embedded_sql_detector import _select_from_combo_fires
 
         # 3 pure-alpha words — English prose, must be rejected
-        fires, structural = _select_from_combo_fires("SELECT NAME AGE STATUS FROM USERS")
+        fires, structural = _select_from_combo_fires(
+            "SELECT NAME AGE STATUS FROM USERS"
+        )
         assert not fires
         # 2 pure-alpha words — plausible column list, must pass but is NOT structural
         fires, structural = _select_from_combo_fires("SELECT ID NAME FROM USERS")
@@ -369,12 +399,15 @@ def describe():
         assert structural
 
     def test_english_prose_select_from_scores_below_threshold(self):
-        """Regression: English phrases like SELECT name FROM the_list must score < 0.6."""
-        from chunkhound.parsers.embedded_sql_detector import EmbeddedSqlDetector
+        """Regression: English phrases like
+        SELECT name FROM the_list must score < 0.6."""
         from chunkhound.core.types.common import Language
+        from chunkhound.parsers.embedded_sql_detector import EmbeddedSqlDetector
 
         detector = EmbeddedSqlDetector(Language.PYTHON)
-        score = detector._calculate_sql_confidence("SELECT name FROM the_list WHERE possible")
+        score = detector._calculate_sql_confidence(
+            "SELECT name FROM the_list WHERE possible"
+        )
         assert score < 0.6, f"English prose scored {score:.2f}, expected < 0.6"
 
     def test_sql_language_no_self_referential_detection(self):
@@ -388,26 +421,33 @@ SELECT * FROM users WHERE id = 1;
 
         embedded_chunks = [c for c in chunks if c.metadata.get("embedded")]
         assert len(embedded_chunks) == 0, (
-            f"SQL files should not self-detect embedded SQL, got: {[c.code for c in embedded_chunks]}"
+            f"SQL files should not self-detect "
+            f"embedded SQL, got: "
+            f"{[c.code for c in embedded_chunks]}"
         )
 
-    @pytest.mark.parametrize("language", [
-        Language.PYTHON,
-        Language.JAVASCRIPT,
-        Language.TYPESCRIPT,
-        Language.JAVA,
-        Language.CSHARP,
-        Language.GO,
-        Language.RUST,
-        Language.PHP,
-    ])
+    @pytest.mark.parametrize(
+        "language",
+        [
+            Language.PYTHON,
+            Language.JAVASCRIPT,
+            Language.TYPESCRIPT,
+            Language.JAVA,
+            Language.CSHARP,
+            Language.GO,
+            Language.RUST,
+            Language.PHP,
+        ],
+    )
     def test_cross_language_detection(self, language):
         """Test that detection works across different languages."""
         # Simple SQL that should work in any language
         code_templates = {
             Language.PYTHON: 'query = "SELECT * FROM users WHERE id = 1"',
             Language.JAVASCRIPT: 'const query = "SELECT * FROM users WHERE id = 1";',
-            Language.TYPESCRIPT: 'const query: string = "SELECT * FROM users WHERE id = 1";',
+            Language.TYPESCRIPT: (
+                'const query: string = "SELECT * FROM users WHERE id = 1";'
+            ),
             Language.JAVA: 'String query = "SELECT * FROM users WHERE id = 1";',
             Language.CSHARP: 'string query = "SELECT * FROM users WHERE id = 1";',
             Language.GO: 'query := "SELECT * FROM users WHERE id = 1"',

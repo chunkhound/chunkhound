@@ -22,19 +22,31 @@ logic for mapping Vue template AST nodes to semantic chunks.
 
 Directive-related metadata is populated under the following keys (when applicable):
 
-- `directive_type`: One of `"event_handler"`, `"property_binding"`, `"v-model"`, `"slot"`, `"v-if"`, `"v-else-if"`, `"v-else"`, `"v-for"`, `"interpolation"`, or `"component_usage"`.
-- `event_name`, `property_name`, `slot_name`: The base name (modifiers are stripped for events and bindings).
+- `directive_type`: One of `"event_handler"`, `"property_binding"`,
+  `"v-model"`, `"slot"`, `"v-if"`, `"v-else-if"`, `"v-else"`,
+  `"v-for"`, `"interpolation"`, or `"component_usage"`.
+- `event_name`, `property_name`, `slot_name`: The base name
+  (modifiers are stripped for events and bindings).
 - For `v-model` specifically:
   - `model_binding`: The expression being bound (e.g. `"user.name"`).
-  - `modifiers`: List of modifiers (e.g. `["trim", "number"]`). Empty list when none present.
+  - `modifiers`: List of modifiers (e.g. `["trim", "number"]`).
+    Empty list when none present.
   - `model_argument`: Present for `v-model:foo` style bindings (the argument part).
 
-**Note on v-model metadata shape**: Previous versions of ChunkHound used a single `model_modifier` string field (populated from the tree-sitter `directive_argument` node). This was semantically incorrect for several forms (e.g. `v-model:foo`, `v-model:foo.trim`, and cases with multiple modifiers). The current shape (`modifiers` as a list + separate `model_argument`) is more accurate and was introduced as part of the Python 3.14 / tree-sitter grammar compatibility work.
+**Note on v-model metadata shape**: Previous versions of
+ChunkHound used a single `model_modifier` string field
+(populated from the tree-sitter `directive_argument` node).
+This was semantically incorrect for several forms
+(e.g. `v-model:foo`, `v-model:foo.trim`, and cases with
+multiple modifiers). The current shape (`modifiers` as a
+list + separate `model_argument`) is more accurate and was
+introduced as part of the Python 3.14 / tree-sitter grammar
+compatibility work.
 """
 
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node as TSNode
 
@@ -46,8 +58,8 @@ from chunkhound.parsers.universal_engine import UniversalConcept
 @dataclass(frozen=True)
 class ParsedVueDirective:
     base: str
-    argument: Optional[str]
-    modifiers: List[str]
+    argument: str | None
+    modifiers: list[str]
     raw: str
 
 
@@ -57,25 +69,25 @@ def parse_vue_directive(directive: str) -> ParsedVueDirective:
         return ParsedVueDirective("", None, [], directive)
 
     # Shorthands: @click, :prop, #slot
-    if directive.startswith(('@', ':', '#')):
+    if directive.startswith(("@", ":", "#")):
         prefix = directive[0]
         rest = directive[1:]
-        if '.' in rest:
-            arg, *mods = rest.split('.')
+        if "." in rest:
+            arg, *mods = rest.split(".")
             return ParsedVueDirective(prefix, arg, mods, directive)
         return ParsedVueDirective(prefix, rest, [], directive)
 
     # Long form or v-model with modifiers (v-on:click, v-model.trim, v-bind:prop)
-    if '.' in directive:
-        first, *rest = directive.split('.')
-        if ':' in first:
-            base, arg = first.split(':', 1)
+    if "." in directive:
+        first, *rest = directive.split(".")
+        if ":" in first:
+            base, arg = first.split(":", 1)
             return ParsedVueDirective(base, arg, rest, directive)
         return ParsedVueDirective(first, None, rest, directive)
 
     # Plain directives with argument (v-on:click, v-bind:prop) or no argument
-    if ':' in directive:
-        base, arg = directive.split(':', 1)
+    if ":" in directive:
+        base, arg = directive.split(":", 1)
         return ParsedVueDirective(base, arg, [], directive)
 
     return ParsedVueDirective(directive, None, [], directive)
@@ -236,21 +248,26 @@ class VueTemplateMapping(BaseMapping):
         """
         return ""
 
-    def _parse_directive_attribute(self, directive_attr_text: str) -> dict[str, str] | None:
+    def _parse_directive_attribute(
+        self, directive_attr_text: str
+    ) -> dict[str, str] | None:
         """Parse a Vue directive attribute into its components.
 
         Args:
-            directive_attr_text: The raw directive attribute text (e.g., 'v-if="condition"')
+            directive_attr_text: The raw directive attribute text
+                (e.g., 'v-if="condition"')
 
         Returns:
-            Dict with keys: 'directive', 'argument', 'value' or None if not a valid directive
+            Dict with keys: 'directive', 'argument', 'value'
+            or None if not a valid directive
         """
         directive_attr_text = directive_attr_text.strip()
 
         # Handle bare directives (no = sign)
         if "=" not in directive_attr_text:
             bare = directive_attr_text
-            # Normalize bare v-slot/# and v-else the same way valued forms are normalized
+            # Normalize bare v-slot/# and v-else the same way
+            # valued forms are normalized
             if bare.startswith("v-slot:"):
                 directive = "v-slot"
                 argument = bare[7:]
@@ -281,18 +298,26 @@ class VueTemplateMapping(BaseMapping):
         # Handle v-on: and @ syntax
         if directive_part.startswith("@") or directive_part.startswith("v-on:"):
             if directive_part.startswith("@"):
-                argument = directive_part[1:].split(".")[0]  # Remove @ and any .modifiers
+                argument = directive_part[1:].split(".")[
+                    0
+                ]  # Remove @ and any .modifiers
                 directive = "@"
             else:
-                argument = directive_part[5:].split(".")[0]  # Remove v-on: and any .modifiers
+                argument = directive_part[5:].split(".")[
+                    0
+                ]  # Remove v-on: and any .modifiers
                 directive = "v-on"
         # Handle v-bind: and : syntax
         elif directive_part.startswith(":") or directive_part.startswith("v-bind:"):
             if directive_part.startswith(":"):
-                argument = directive_part[1:].split(".")[0]  # Remove : and any .modifiers
+                argument = directive_part[1:].split(".")[
+                    0
+                ]  # Remove : and any .modifiers
                 directive = ":"
             else:
-                argument = directive_part[7:].split(".")[0]  # Remove v-bind: and any .modifiers
+                argument = directive_part[7:].split(".")[
+                    0
+                ]  # Remove v-bind: and any .modifiers
                 directive = "v-bind"
         # Handle v-slot: and # syntax
         # Note: Unlike @ / : / v-on / v-bind, we do not strip .modifiers here.
@@ -334,7 +359,9 @@ class VueTemplateMapping(BaseMapping):
             # Handle directive_attribute nodes
             if "definition" in captures:
                 directive_attr_node = captures["definition"]
-                directive_attr_text = self.get_node_text(directive_attr_node, source).strip()
+                directive_attr_text = self.get_node_text(
+                    directive_attr_node, source
+                ).strip()
 
                 parsed = self._parse_directive_attribute(directive_attr_text)
                 if parsed:
@@ -453,7 +480,9 @@ class VueTemplateMapping(BaseMapping):
             # Handle directive_attribute nodes
             if "definition" in captures:
                 directive_attr_node = captures["definition"]
-                directive_attr_text = self.get_node_text(directive_attr_node, source).strip()
+                directive_attr_text = self.get_node_text(
+                    directive_attr_node, source
+                ).strip()
 
                 parsed = self._parse_directive_attribute(directive_attr_text)
                 if parsed:

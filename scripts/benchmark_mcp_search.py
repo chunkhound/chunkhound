@@ -32,7 +32,7 @@ from tests.utils.windows_subprocess import (
 # ── config ──────────────────────────────────────────────────────────────────
 WARMUP_RUNS = 3
 MEASURED_RUNS = 10
-INIT_TIMEOUT = 30.0   # first call may wait for services to start
+INIT_TIMEOUT = 30.0  # first call may wait for services to start
 SEARCH_TIMEOUT = 15.0
 SETTLE_DELAY = 2.0
 
@@ -159,8 +159,7 @@ async def _run_queries(
         for _ in range(WARMUP_RUNS):
             await _timed_call(client, search_type, query)
         results[query] = [
-            await _timed_call(client, search_type, query)
-            for _ in range(MEASURED_RUNS)
+            await _timed_call(client, search_type, query) for _ in range(MEASURED_RUNS)
         ]
     return results
 
@@ -176,9 +175,9 @@ def _print_block(label: str, times: list[float]) -> None:
     print(
         f"  {label:<18}  "
         f"mean={statistics.mean(times):6.1f}ms  "
-        f"p50={_pct(times,50):6.1f}ms  "
-        f"p95={_pct(times,95):6.1f}ms  "
-        f"p99={_pct(times,99):6.1f}ms  "
+        f"p50={_pct(times, 50):6.1f}ms  "
+        f"p95={_pct(times, 95):6.1f}ms  "
+        f"p99={_pct(times, 99):6.1f}ms  "
         f"n={len(times)}"
     )
 
@@ -198,9 +197,7 @@ async def main() -> None:
         print("Connecting to MCP server…")
         available = await _handshake(client)
         print(f"Search types available: {available}\n")
-        print(
-            f"Settling for {SETTLE_DELAY:.1f}s before steady-state measurements...\n"
-        )
+        print(f"Settling for {SETTLE_DELAY:.1f}s before steady-state measurements...\n")
         await _settle_before_measurement()
 
         regex_flat: list[float] = []

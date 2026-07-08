@@ -31,7 +31,8 @@ CONSTANTS_INSTRUCTION_SHORT = (
 # =============================================================================
 
 # System prompt for fact extraction LLM calls
-FACT_EXTRACTION_SYSTEM = """You extract atomic facts from source material for research synthesis.
+FACT_EXTRACTION_SYSTEM = """You extract atomic facts from
+source material for research synthesis.
 
 An ATOMIC FACT is ONE verifiable claim about the source material:
 - Specific enough to cite with source:location
@@ -127,7 +128,8 @@ If you find contradictory evidence, note the discrepancy.
 FACTS_REDUCE_INSTRUCTION = """## Verified Facts Ledger
 These facts were extracted from source material. Ground synthesis in verified evidence.
 
-Confidence: DEFINITE (cite directly) > LIKELY (confident) > INFERRED (qualify) > UNCERTAIN (verify)
+Confidence: DEFINITE (cite directly) > LIKELY (confident)
+> INFERRED (qualify) > UNCERTAIN (verify)
 
 {facts_context}
 

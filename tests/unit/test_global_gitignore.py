@@ -460,7 +460,10 @@ class TestExtendWithGlobalGitignore:
         assert excludes == ["original"]
 
     def test_filters_negations_and_broad_wildcards(self, tmp_path: Path) -> None:
-        """Negation patterns and catch-all wildcards must not reach the flat exclude list."""
+        """
+        Negation patterns and catch-all wildcards
+        must not reach the flat exclude list.
+        """
         from chunkhound.providers.database.duckdb_provider import DuckDBProvider
         from chunkhound.services.indexing_coordinator import IndexingCoordinator
 

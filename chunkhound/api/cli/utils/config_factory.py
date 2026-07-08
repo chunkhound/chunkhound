@@ -7,8 +7,8 @@ instances, eliminating duplication across CLI commands and MCP servers.
 import argparse
 from pathlib import Path
 
-from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.config import Config
+from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.config.mcp_config import MCPConfig
 from chunkhound.core.config.research_config import ResearchConfig

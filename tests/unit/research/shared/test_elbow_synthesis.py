@@ -12,8 +12,6 @@ Proportional Budgets:
     ensuring larger clusters (more code) receive more output budget.
 """
 
-import pytest
-
 from chunkhound.services.research.shared.elbow_detection import (
     compute_elbow_threshold,
     find_elbow_kneedle,
@@ -38,7 +36,9 @@ class TestElbowDetection:
 
         # Elbow should be at or around index 2 (0.85) - the last high score
         assert elbow_idx is not None, "Should detect elbow for clear drop"
-        assert elbow_idx in [2, 3], f"Elbow should be at transition point, got {elbow_idx}"
+        assert elbow_idx in [2, 3], (
+            f"Elbow should be at transition point, got {elbow_idx}"
+        )
         # Verify keeping scores[:elbow_idx+1] includes the high-quality chunks
         kept_scores = scores[: elbow_idx + 1]
         assert all(s >= 0.40 for s in kept_scores), "Kept scores should be high quality"
@@ -73,7 +73,9 @@ class TestElbowDetection:
         # Gradual decline may or may not detect an elbow
         if elbow_idx is not None:
             # Elbow should be a valid index
-            assert 0 <= elbow_idx < len(scores), f"Elbow should be valid index, got {elbow_idx}"
+            assert 0 <= elbow_idx < len(scores), (
+                f"Elbow should be valid index, got {elbow_idx}"
+            )
             # Using scores[:elbow_idx+1] should keep at least 1 score
             kept = scores[: elbow_idx + 1]
             assert len(kept) >= 1, "Should keep at least one score"
@@ -173,7 +175,7 @@ class TestComputeElbowThreshold:
         # Should return one of the actual scores
         assert threshold in scores, f"Threshold {threshold} should be one of the scores"
         # Should be a high-quality threshold (not from the low tail)
-        assert threshold >= 0.35, f"Threshold should be at elbow, not in tail"
+        assert threshold >= 0.35, "Threshold should be at elbow, not in tail"
 
     def test_empty_list_returns_default(self):
         """Empty input returns default threshold 0.5."""
@@ -206,7 +208,9 @@ class TestComputeElbowThreshold:
         threshold = compute_elbow_threshold(chunks)
 
         # Should work with dict input
-        assert threshold in [0.95, 0.90, 0.40], "Should extract and process chunk scores"
+        assert threshold in [0.95, 0.90, 0.40], (
+            "Should extract and process chunk scores"
+        )
 
     def test_missing_rerank_score_uses_default(self):
         """Chunks missing rerank_score default to 0.0."""
@@ -249,9 +253,15 @@ class TestProportionalClusterBudgets:
             output_budgets.append(budget)
 
         # Verify proportions
-        assert output_budgets[0] == 60_000, f"60% cluster should get 60k, got {output_budgets[0]}"
-        assert output_budgets[1] == 30_000, f"30% cluster should get 30k, got {output_budgets[1]}"
-        assert output_budgets[2] == 10_000, f"10% cluster should get 10k, got {output_budgets[2]}"
+        assert output_budgets[0] == 60_000, (
+            f"60% cluster should get 60k, got {output_budgets[0]}"
+        )
+        assert output_budgets[1] == 30_000, (
+            f"30% cluster should get 30k, got {output_budgets[1]}"
+        )
+        assert output_budgets[2] == 10_000, (
+            f"10% cluster should get 10k, got {output_budgets[2]}"
+        )
 
         # Verify ratios maintained
         assert output_budgets[0] == 2 * output_budgets[1], "60k should be 2x 30k"
@@ -275,9 +285,13 @@ class TestProportionalClusterBudgets:
             output_budgets.append(budget)
 
         # 1% of 100k = 1k, but minimum is 5k
-        assert output_budgets[0] == 5000, f"Tiny cluster should get minimum 5k, got {output_budgets[0]}"
+        assert output_budgets[0] == 5000, (
+            f"Tiny cluster should get minimum 5k, got {output_budgets[0]}"
+        )
         # Large cluster gets proportional amount
-        assert output_budgets[1] == 99_000, f"Large cluster should get 99k, got {output_budgets[1]}"
+        assert output_budgets[1] == 99_000, (
+            f"Large cluster should get 99k, got {output_budgets[1]}"
+        )
 
     def test_single_cluster_gets_all_budget(self):
         """Single cluster should get the full output budget.
@@ -295,7 +309,9 @@ class TestProportionalClusterBudgets:
             output_budgets.append(budget)
 
         # Single cluster gets 100% = 80k
-        assert output_budgets[0] == 80_000, f"Single cluster should get full budget, got {output_budgets[0]}"
+        assert output_budgets[0] == 80_000, (
+            f"Single cluster should get full budget, got {output_budgets[0]}"
+        )
 
     def test_zero_total_input_uses_equal_split(self):
         """Zero total input should use proportion 1.0 per cluster.
@@ -315,7 +331,9 @@ class TestProportionalClusterBudgets:
             output_budgets.append(budget)
 
         # Each cluster gets full budget (proportion 1.0)
-        assert all(b == 30_000 for b in output_budgets), f"Zero input should give full budget each: {output_budgets}"
+        assert all(b == 30_000 for b in output_budgets), (
+            f"Zero input should give full budget each: {output_budgets}"
+        )
 
     def test_proportions_match_input_ratios(self):
         """Output proportions should match input token ratios.
@@ -339,9 +357,15 @@ class TestProportionalClusterBudgets:
         # 30k/100k = 30% of 50k = 15k
         # 40k/100k = 40% of 50k = 20k
         assert output_budgets[0] == 5000, f"10% should be 5k, got {output_budgets[0]}"
-        assert output_budgets[1] == 10_000, f"20% should be 10k, got {output_budgets[1]}"
-        assert output_budgets[2] == 15_000, f"30% should be 15k, got {output_budgets[2]}"
-        assert output_budgets[3] == 20_000, f"40% should be 20k, got {output_budgets[3]}"
+        assert output_budgets[1] == 10_000, (
+            f"20% should be 10k, got {output_budgets[1]}"
+        )
+        assert output_budgets[2] == 15_000, (
+            f"30% should be 15k, got {output_budgets[2]}"
+        )
+        assert output_budgets[3] == 20_000, (
+            f"40% should be 20k, got {output_budgets[3]}"
+        )
 
     def test_very_large_clusters_scale_correctly(self):
         """Large clusters should scale linearly without overflow.

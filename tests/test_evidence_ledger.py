@@ -26,7 +26,6 @@ from chunkhound.services.research.shared.evidence_ledger import (
     FactExtractor,
 )
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -1319,7 +1318,7 @@ class TestFactExtractor:
         # confidence=null (None) formerly raised AttributeError in _parse_confidence
         # category=null (None) formerly raised AttributeError on .strip()
         # source=null (None) with file_path=null must gracefully skip
-        mock_response.content = ("""\
+        mock_response.content = """\
 [
   {
     "statement": "Null confidence defaults to UNCERTAIN",
@@ -1350,7 +1349,7 @@ class TestFactExtractor:
     "entities": []
   }
 ]
-""")
+"""
         mock_llm_provider.complete.return_value = mock_response
 
         extractor = FactExtractor(mock_llm_provider)
@@ -1522,7 +1521,8 @@ class TestFactExtractor:
 
     @pytest.mark.asyncio
     async def test_extract_parses_location_bare_single_line(self, mock_llm_provider):
-        """Facts with bare single line location like \"45\" set end_line = start_line."""
+        """Facts with bare single line location
+        like "45" set end_line = start_line."""
         mock_response = MagicMock()
         mock_response.content = """[
   {
@@ -1837,11 +1837,11 @@ class TestClusteredExtraction:
         self, mock_llm_provider, mock_embedding_provider
     ):
         """Test clustered extraction returns ClusteredExtractionResult."""
+        from chunkhound.services.clustering_service import ClusterGroup
         from chunkhound.services.research.shared.evidence_ledger import (
             ClusteredExtractionResult,
             extract_facts_with_clustering,
         )
-        from chunkhound.services.clustering_service import ClusterGroup
 
         # Mock the clustering service behavior by patching it
         mock_cluster = ClusterGroup(
@@ -1870,12 +1870,12 @@ class TestClusteredExtraction:
         # Patch ClusteringService
         with patch(
             "chunkhound.services.research.shared.evidence_ledger.clustered_extractor.ClusteringService"
-        ) as MockClusteringService:
+        ) as mock_clustering_service:
             mock_service_instance = MagicMock()
             mock_service_instance.cluster_files_hdbscan_bounded = AsyncMock(
                 return_value=([mock_cluster], {"num_clusters": 1})
             )
-            MockClusteringService.return_value = mock_service_instance
+            mock_clustering_service.return_value = mock_service_instance
 
             result = await extract_facts_with_clustering(
                 files={"file.py": "code"},
@@ -1896,10 +1896,10 @@ class TestClusteredExtraction:
         self, mock_llm_provider, mock_embedding_provider
     ):
         """Test that returned clusters can be reused for synthesis."""
+        from chunkhound.services.clustering_service import ClusterGroup
         from chunkhound.services.research.shared.evidence_ledger import (
             extract_facts_with_clustering,
         )
-        from chunkhound.services.clustering_service import ClusterGroup
 
         # Create test cluster
         mock_cluster = ClusterGroup(
@@ -1917,7 +1917,7 @@ class TestClusteredExtraction:
 
         with patch(
             "chunkhound.services.research.shared.evidence_ledger.clustered_extractor.ClusteringService"
-        ) as MockClusteringService:
+        ) as mock_clustering_service:
             mock_service_instance = MagicMock()
             mock_service_instance.cluster_files_hdbscan_bounded = AsyncMock(
                 return_value=(
@@ -1925,7 +1925,7 @@ class TestClusteredExtraction:
                     {"num_clusters": 1, "avg_tokens_per_cluster": 10},
                 )
             )
-            MockClusteringService.return_value = mock_service_instance
+            mock_clustering_service.return_value = mock_service_instance
 
             result = await extract_facts_with_clustering(
                 files={"file1.py": "code1", "file2.py": "code2"},
@@ -2157,7 +2157,8 @@ class TestExtractorNewStyleJson:
 
     @pytest.mark.asyncio
     async def test_new_style_source_and_location(self, mock_llm_provider):
-        """Test extraction with 'source' and 'location' keys (not file_path/start_line)."""
+        """Test extraction with 'source' and 'location'
+        keys (not file_path/start_line)."""
         mock_response = MagicMock()
         mock_response.content = """[
   {
@@ -2398,7 +2399,8 @@ class TestExtractorUrlBasedFacts:
     async def test_source_url_without_explicit_url_is_normalized(
         self, mock_llm_provider
     ):
-        """Test source URLs become URL provenance without losing cluster source identity."""
+        """Test source URLs become URL provenance
+        without losing cluster source identity."""
         mock_response = MagicMock()
         mock_response.content = """[
   {
@@ -2453,9 +2455,7 @@ class TestExtractorUrlBasedFacts:
         assert fact.file_path == "docs/api.md"
 
     @pytest.mark.asyncio
-    async def test_new_style_fact_missing_location_is_skipped(
-        self, mock_llm_provider
-    ):
+    async def test_new_style_fact_missing_location_is_skipped(self, mock_llm_provider):
         """Test new-style facts without location are skipped, not fabricated as 1-1."""
         captured: list[str] = []
         sink_id = _loguru_logger.add(
@@ -2532,8 +2532,8 @@ class TestExtractorUrlBasedFacts:
                 == ""
             )
             assert any(
-                "Skipping URL-backed fact with ambiguous multi-source cluster provenance"
-                in msg
+                "Skipping URL-backed fact with ambiguous"
+                " multi-source cluster provenance" in msg
                 for msg in captured
             ), f"Expected warning not found in: {captured}"
         finally:
@@ -2543,7 +2543,8 @@ class TestExtractorUrlBasedFacts:
     async def test_url_only_fact_in_multi_source_cluster_is_skipped(
         self, mock_llm_provider
     ):
-        """Test URL-only facts (no source, has url) are skipped in multi-source clusters."""
+        """Test URL-only facts (no source, has url)
+        are skipped in multi-source clusters."""
         captured: list[str] = []
         sink_id = _loguru_logger.add(
             lambda msg: captured.append(msg), level="WARNING", format="{message}"
@@ -3174,7 +3175,9 @@ class TestExtractorMixedFormatResponse:
             root_query="How does search work?",
         )
 
-        assert ledger.facts_count == 2, "Both new-style and old-style facts should be parsed"
+        assert ledger.facts_count == 2, (
+            "Both new-style and old-style facts should be parsed"
+        )
 
         facts = list(ledger.facts.values())
 
@@ -3191,4 +3194,3 @@ class TestExtractorMixedFormatResponse:
         assert fact2.file_path == "api/handler.py"
         assert fact2.start_line == 42
         assert fact2.end_line == 45
-

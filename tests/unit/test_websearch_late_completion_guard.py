@@ -39,19 +39,23 @@ async def test_cancelled_transaction_does_not_raise_on_late_response(
     # Simulate listener_loop's call shape from connection.py:780.
     # Without the guard, set_result on the cancelled Future raises
     # InvalidStateError; the guard short-circuits before that.
-    tx(result={
-        "frameId": "F" * 32,
-        "loaderId": "L" * 32,
-    })  # must not raise
+    tx(
+        result={
+            "frameId": "F" * 32,
+            "loaderId": "L" * 32,
+        }
+    )  # must not raise
 
     # Happy path: the guard must still delegate to the original __call__
     # for non-done Transactions, otherwise every CDP send would hang.
     tx2 = Transaction(cdp.page.navigate(url="about:blank"))
     assert not tx2.done()
-    tx2(result={
-        "frameId": "F" * 32,
-        "loaderId": "L" * 32,
-    })
+    tx2(
+        result={
+            "frameId": "F" * 32,
+            "loaderId": "L" * 32,
+        }
+    )
     assert tx2.done()
     assert not tx2.cancelled()
     assert tx2.exception() is None

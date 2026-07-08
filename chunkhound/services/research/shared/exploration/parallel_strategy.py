@@ -159,7 +159,8 @@ class ParallelExplorationStrategy:
             wide_result, BaseException
         ):
             raise RuntimeError(
-                f"Both exploration strategies failed. BFS: {bfs_result}, Wide: {wide_result}"
+                f"Both exploration strategies failed. "
+                f"BFS: {bfs_result}, Wide: {wide_result}"
             )
 
         logger.info(

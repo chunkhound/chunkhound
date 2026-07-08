@@ -117,7 +117,8 @@ class TestScanLockSerialization:
 
     @pytest.mark.asyncio
     async def test_concurrent_scans_are_serialized(
-        self, server: _TestableMCPServer,
+        self,
+        server: _TestableMCPServer,
     ) -> None:
         """A second call to _run_directory_scan must wait for the first to finish.
 
@@ -131,7 +132,9 @@ class TestScanLockSerialization:
         process_calls: list[str] = []  # tracks which triggers were executed
 
         async def monitored_process(
-            target_path: Path, *, no_embeddings: bool = False  # noqa: ARG001
+            target_path: Path,
+            *,
+            no_embeddings: bool = False,  # noqa: ARG001
         ) -> MagicMock:
             trigger = _current_trigger  # captured from outer scope
             process_calls.append(trigger)
@@ -154,7 +157,8 @@ class TestScanLockSerialization:
             # Start first scan — it will block inside process_directory.
             task1 = asyncio.create_task(
                 server._run_directory_scan(
-                    server._scan_target_path, trigger="first",
+                    server._scan_target_path,
+                    trigger="first",
                 ),
             )
             # Wait until task1 has acquired the lock and entered process_directory.
@@ -168,7 +172,8 @@ class TestScanLockSerialization:
             _current_trigger = "second"
             task2 = asyncio.create_task(
                 server._run_directory_scan(
-                    server._scan_target_path, trigger="second",
+                    server._scan_target_path,
+                    trigger="second",
                 ),
             )
             await asyncio.sleep(0)
@@ -190,11 +195,15 @@ class TestScanLockSerialization:
 
     @pytest.mark.asyncio
     async def test_failure_resets_scan_state(
-        self, server: _TestableMCPServer,
+        self,
+        server: _TestableMCPServer,
     ) -> None:
         """A scan that raises must clear ``is_scanning`` and record the error."""
+
         async def failing_process(
-            target_path: Path, *, no_embeddings: bool = False  # noqa: ARG001
+            target_path: Path,
+            *,
+            no_embeddings: bool = False,  # noqa: ARG001
         ) -> MagicMock:
             raise RuntimeError("Simulated scan failure")
 
@@ -206,7 +215,8 @@ class TestScanLockSerialization:
         ):
             with pytest.raises(RuntimeError, match="Simulated scan failure"):
                 await server._run_directory_scan(
-                    server._scan_target_path, trigger="initial",
+                    server._scan_target_path,
+                    trigger="initial",
                 )
 
         assert server._scan_progress["is_scanning"] is False
@@ -215,7 +225,8 @@ class TestScanLockSerialization:
 
     @pytest.mark.asyncio
     async def test_trigger_label_appears_in_logs(
-        self, server: _TestableMCPServer,
+        self,
+        server: _TestableMCPServer,
     ) -> None:
         """The *trigger* string should propagate to debug log output."""
         with patch(
@@ -227,7 +238,8 @@ class TestScanLockSerialization:
         ):
             with patch.object(server, "debug_log") as mock_log:
                 await server._run_directory_scan(
-                    server._scan_target_path, trigger="realtime_resync",
+                    server._scan_target_path,
+                    trigger="realtime_resync",
                 )
 
         logged_text = " ".join(str(c) for c in mock_log.call_args_list)
@@ -237,7 +249,8 @@ class TestScanLockSerialization:
 
     @pytest.mark.asyncio
     async def test_second_scan_preserves_query_ready_timestamp(
-        self, server: _TestableMCPServer,
+        self,
+        server: _TestableMCPServer,
     ) -> None:
         """Running a second scan should preserve query-ready semantics.
 
@@ -252,20 +265,24 @@ class TestScanLockSerialization:
             ),
         ):
             await server._run_directory_scan(
-                server._scan_target_path, trigger="initial",
+                server._scan_target_path,
+                trigger="initial",
             )
             first_query_ready_at = server._scan_progress["query_ready_at"]
             assert first_query_ready_at is not None
 
             await server._run_directory_scan(
-                server._scan_target_path, trigger="realtime_resync",
+                server._scan_target_path,
+                trigger="realtime_resync",
             )
             second_query_ready_at = server._scan_progress["query_ready_at"]
             assert second_query_ready_at is not None
 
     @pytest.mark.asyncio
     async def test_run_directory_scan_requires_services(
-        self, config: MagicMock, tmp_path: Path,
+        self,
+        config: MagicMock,
+        tmp_path: Path,
     ) -> None:
         """Calling _run_directory_scan with services=None must raise immediately."""
         with (

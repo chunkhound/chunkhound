@@ -1,4 +1,7 @@
-"""OpenAI embedding provider implementation for ChunkHound - concrete embedding provider using OpenAI API."""
+"""OpenAI embedding provider for ChunkHound.
+
+Concrete embedding provider using OpenAI API.
+"""
 
 import asyncio
 import heapq
@@ -9,9 +12,6 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, TypedDict, cast
 
 import httpx
-from loguru import logger
-from typing_extensions import NotRequired
-
 from chunkhound.core.config.embedding_config import (
     RERANK_BASE_URL_REQUIRED,
     validate_rerank_configuration,
@@ -37,6 +37,8 @@ from chunkhound.providers.embeddings.shared_utils import (
     validate_positive_output_dims,
     validate_runtime_output_dims_config,
 )
+from loguru import logger
+from typing_extensions import NotRequired
 
 from .batch_utils import handle_token_limit_error
 
@@ -187,6 +189,7 @@ def _validate_qwen_model_config() -> None:
 # Validate configuration at module load
 _validate_qwen_model_config()
 
+
 class OpenAIModelConfig(TypedDict):
     """Static config for a known OpenAI embedding model.
 
@@ -286,13 +289,15 @@ class OpenAIEmbeddingProvider:
             model: Model name to use for embeddings
             rerank_model: Model name to use for reranking (optional for TEI format)
             rerank_url: Rerank endpoint URL (defaults to /rerank)
-            rerank_format: Reranking API format - 'cohere', 'tei', or 'auto' (default: 'auto')
+            rerank_format: Reranking API format -
+                'cohere', 'tei', or 'auto' (default: 'auto')
             batch_size: Maximum batch size for API requests
             timeout: Request timeout in seconds
             retry_attempts: Number of retry attempts for failed requests
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
-            rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+            rerank_batch_size: Max documents per rerank batch
+                (overrides model defaults, bounded by model caps)
             output_dims: Output embedding dimension. Official OpenAI endpoints
                 use documented model semantics for fail-fast validation. Custom
                 OpenAI-compatible endpoints are trusted instead, even under
@@ -359,8 +364,11 @@ class OpenAIEmbeddingProvider:
             # Warn about auto-detection risks in production
             if rerank_format == "auto":
                 logger.warning(
-                    "Using rerank_format='auto' may cause first request to fail if format guess is wrong. "
-                    "For production use, explicitly set rerank_format to 'cohere' or 'tei'."
+                    "Using rerank_format='auto' may cause"
+                    " first request to fail if format"
+                    " guess is wrong. For production"
+                    " use, explicitly set rerank_format"
+                    " to 'cohere' or 'tei'."
                 )
 
         # Configure Qwen-specific batch sizes (extracted for clarity)
@@ -440,7 +448,10 @@ class OpenAIEmbeddingProvider:
         self._qwen_rerank_config = qwen_rerank_config
 
     async def _ensure_client(self) -> None:
-        """Ensure the OpenAI client is initialized (must be called from async context)."""
+        """Ensure OpenAI client is initialized.
+
+        Must be called from async context.
+        """
         if self._client is not None and self._client_initialized:
             return
 
@@ -462,7 +473,8 @@ class OpenAIEmbeddingProvider:
         # Configure client options for custom endpoints
         api_key_value = self._api_key
         if not is_openai_official and not api_key_value:
-            # OpenAI client requires a string value, provide placeholder for custom endpoints
+            # OpenAI client requires a string value,
+            # provide placeholder for custom endpoints
             api_key_value = "not-required"
 
         client_kwargs: dict[str, Any] = {
@@ -478,11 +490,15 @@ class OpenAIEmbeddingProvider:
                     verify=False,
                 )
                 logger.debug(
-                    f"SSL verification disabled for embedding endpoint: {self._base_url}"
+                    f"SSL verification disabled for"
+                    f" embedding endpoint:"
+                    f" {self._base_url}"
                 )
 
-        # IMPORTANT: Create the client in async context to avoid TaskGroup errors on Ubuntu
-        # This ensures the event loop is running when the client initializes its httpx instance
+        # IMPORTANT: Create the client in async context
+        # to avoid TaskGroup errors on Ubuntu. This
+        # ensures the event loop is running when the
+        # client initializes its httpx instance.
         self._client = openai.AsyncOpenAI(**client_kwargs)
         self._client_initialized = True
 
@@ -498,7 +514,8 @@ class OpenAIEmbeddingProvider:
         if not self._api_version:
             raise ValueError("Azure OpenAI API version is required")
 
-        # azure_endpoint is validated by is_azure_openai_endpoint before this method is called
+        # azure_endpoint is validated by
+        # is_azure_openai_endpoint before this method
         if not self._azure_endpoint:
             raise ValueError("Azure endpoint is required for Azure OpenAI")
 
@@ -595,7 +612,7 @@ class OpenAIEmbeddingProvider:
             )
 
     def _validate_output_dims_config(self) -> None:
-        """Validate output_dims config and reject missing dims for client-side truncation."""
+        """Validate output_dims; reject missing dims for client-side truncation."""
         self._validate_output_dims_config_for(
             model=self._model,
             base_url=self._base_url,
@@ -631,9 +648,7 @@ class OpenAIEmbeddingProvider:
             dim_param is not None
             and not self._trust_runtime_output_dims()
             and self._model in self._model_config
-            and not self._model_config[self._model].get(
-                "matryoshka", False
-            )
+            and not self._model_config[self._model].get("matryoshka", False)
         ):
             dim_param = None
         if dim_param is not None:
@@ -685,7 +700,9 @@ class OpenAIEmbeddingProvider:
 
     def _uses_static_model_dims(self) -> bool:
         """Return True only when official OpenAI metadata is authoritative."""
-        return not self._trust_runtime_output_dims() and self._model in self._model_config
+        return (
+            not self._trust_runtime_output_dims() and self._model in self._model_config
+        )
 
     def _cache_runtime_native_dims(
         self, actual_dims: int, *, server_side_truncation: bool
@@ -703,7 +720,8 @@ class OpenAIEmbeddingProvider:
         output_dims = self._validate_runtime_output_dims_config()
         if output_dims is None:
             raise EmbeddingConfigurationError(
-                f"Model '{self._model}' has client_side_truncation=True but output_dims is not set."
+                f"Model '{self._model}' has client_side_truncation=True"
+                f" but output_dims is not set."
             )
         return output_dims
 
@@ -881,9 +899,9 @@ class OpenAIEmbeddingProvider:
         Azure and official OpenAI endpoints require authentication;
         custom OpenAI-compatible endpoints (Ollama, vLLM, etc.) do not.
         """
-        return is_azure_openai_endpoint(self._azure_endpoint) or is_official_openai_endpoint(
-            self._base_url
-        )
+        return is_azure_openai_endpoint(
+            self._azure_endpoint
+        ) or is_official_openai_endpoint(self._base_url)
 
     def is_available(self) -> bool:
         """Check if the provider is available and properly configured."""
@@ -930,7 +948,8 @@ class OpenAIEmbeddingProvider:
                 status["connectivity"] = "ok"
             else:
                 status["errors"].append(
-                    f"Unexpected embedding dimensions: {len(test_embedding)} != {self.dims}"
+                    f"Unexpected embedding dimensions:"
+                    f" {len(test_embedding)} != {self.dims}"
                 )
         except Exception as e:
             status["errors"].append(f"API connectivity test failed: {str(e)}")
@@ -976,7 +995,11 @@ class OpenAIEmbeddingProvider:
                 )  # Limit to first 3
 
             logger.error(
-                f"[OpenAI-Provider] Failed to generate embeddings (texts: {len(validated_texts)}, total_chars: {total_chars}, max_chars: {max_chars}): {e}"
+                f"[OpenAI-Provider] Failed to generate"
+                f" embeddings (texts:"
+                f" {len(validated_texts)},"
+                f" total_chars: {total_chars},"
+                f" max_chars: {max_chars}): {e}"
             )
 
             raise
@@ -1050,7 +1073,9 @@ class OpenAIEmbeddingProvider:
         for attempt in range(self._retry_attempts):
             try:
                 logger.debug(
-                    f"Generating embeddings for {len(texts)} texts (attempt {attempt + 1})"
+                    f"Generating embeddings for"
+                    f" {len(texts)} texts"
+                    f" (attempt {attempt + 1})"
                 )
 
                 response = await self._client.embeddings.create(
@@ -1072,7 +1097,9 @@ class OpenAIEmbeddingProvider:
                 if None in embeddings:
                     missing = [i for i, e in enumerate(embeddings) if e is None]
                     raise RuntimeError(
-                        f"OpenAI API returned incomplete embeddings, missing indices: {missing}"
+                        f"OpenAI API returned incomplete"
+                        f" embeddings, missing indices:"
+                        f" {missing}"
                     )
 
                 # Client-side truncation is the escape hatch for custom endpoints
@@ -1084,7 +1111,8 @@ class OpenAIEmbeddingProvider:
                         self._required_output_dims_for_client_truncation(),
                     )
                     logger.debug(
-                        f"Applying client-side truncation: {cast(int, raw_dim)}→{output_dims}"
+                        f"Applying client-side truncation:"
+                        f" {cast(int, raw_dim)}→{output_dims}"
                     )
                     truncated_embeddings = apply_client_side_truncation(
                         cast(list[list[float]], embeddings), output_dims
@@ -1111,9 +1139,13 @@ class OpenAIEmbeddingProvider:
                     cast(int, raw_dim),
                     server_side_truncation=server_side_truncation,
                 )
-                if self._discovered_native_dims == raw_dim and not server_side_truncation:
+                if (
+                    self._discovered_native_dims == raw_dim
+                    and not server_side_truncation
+                ):
                     logger.debug(
-                        f"Discovered native embedding dimension: {self._discovered_native_dims}"
+                        f"Discovered native embedding dimension:"
+                        f" {self._discovered_native_dims}"
                     )
                 validate_embedding_dims(actual_dims, self.dims, model=self._model)
 
@@ -1220,7 +1252,9 @@ class OpenAIEmbeddingProvider:
                         )
 
                     logger.warning(
-                        f"API connection error, retrying in {self._retry_delay} seconds: {error_details}"
+                        f"API connection error, retrying"
+                        f" in {self._retry_delay} seconds:"
+                        f" {error_details}"
                     )
                     if attempt < self._retry_attempts - 1:
                         await asyncio.sleep(self._retry_delay)
@@ -1414,10 +1448,14 @@ class OpenAIEmbeddingProvider:
             )
             return self._validation_probe_matches_runtime_contract(response)
         except EmbeddingDimensionError as e:
-            logger.error(f"OpenAI embedding validation failed (dimension mismatch): {e}")
+            logger.error(
+                f"OpenAI embedding validation failed (dimension mismatch): {e}"
+            )
             return False
         except EmbeddingConfigurationError as e:
-            logger.error(f"OpenAI embedding validation failed (configuration error): {e}")
+            logger.error(
+                f"OpenAI embedding validation failed (configuration error): {e}"
+            )
             return False
         except Exception as e:
             logger.error(f"OpenAI embedding validation failed: {e}")
@@ -1536,7 +1574,9 @@ class OpenAIEmbeddingProvider:
             if top_k is not None:
                 payload["top_n"] = top_k
             logger.debug(
-                f"Using Cohere format for reranking {len(documents)} documents with model {self._rerank_model}"
+                f"Using Cohere format for reranking"
+                f" {len(documents)} documents with"
+                f" model {self._rerank_model}"
             )
             return payload
 
@@ -1551,7 +1591,9 @@ class OpenAIEmbeddingProvider:
                 if top_k is not None:
                     auto_payload["top_n"] = top_k
                 logger.debug(
-                    f"Auto-detecting format, trying Cohere first (model: {self._rerank_model})"
+                    f"Auto-detecting format, trying"
+                    f" Cohere first"
+                    f" (model: {self._rerank_model})"
                 )
                 return auto_payload
             else:
@@ -1585,7 +1627,7 @@ class OpenAIEmbeddingProvider:
     async def rerank(
         self, query: str, documents: list[str], top_k: int | None = None
     ) -> list[RerankResult]:
-        """Rerank documents using configured rerank model with automatic batch splitting.
+        """Rerank documents with automatic batch splitting.
 
         Implements batch splitting to prevent OOM errors on large document sets.
         For Qwen3 rerankers: uses model-specific batch limits (64-128).
@@ -1614,9 +1656,10 @@ class OpenAIEmbeddingProvider:
             results = await self._rerank_single_batch(query, documents, top_k)
 
             # Apply client-side top_k for formats without server-side support (TEI)
-            # Cohere includes top_n in request, but we apply this uniformly for consistency
+            # Cohere includes top_n in request, but we
+            # apply this uniformly for consistency
             if top_k is not None and len(results) > top_k:
-                # Results from _rerank_single_batch are already sorted descending by score
+                # Results already sorted descending by score
                 results = results[:top_k]
                 logger.debug(
                     f"Applied client-side top_k filter: {len(results)} results"
@@ -1679,7 +1722,9 @@ class OpenAIEmbeddingProvider:
                     else:
                         # Last attempt or non-retryable error
                         logger.error(
-                            f"Batch {batch_idx + 1} failed after {attempt + 1} attempts: {e}"
+                            f"Batch {batch_idx + 1} failed"
+                            f" after {attempt + 1}"
+                            f" attempts: {e}"
                         )
                         # Continue to next batch instead of failing entire operation
                         batch_results = []
@@ -1724,8 +1769,10 @@ class OpenAIEmbeddingProvider:
                 all_results = all_results[:top_k]
 
         logger.debug(
-            f"Reranked {len(documents)} documents across {num_batches} batches "
-            f"({num_batches - failed_batches} succeeded), returning {len(all_results)} results"
+            f"Reranked {len(documents)} documents"
+            f" across {num_batches} batches"
+            f" ({num_batches - failed_batches} succeeded),"
+            f" returning {len(all_results)} results"
         )
 
         return all_results
@@ -1787,7 +1834,8 @@ class OpenAIEmbeddingProvider:
             async with httpx.AsyncClient(**client_kwargs) as client:
                 headers = {"Content-Type": "application/json"}
 
-                # Add Authorization header if API key is set (required for TEI with --api-key)
+                # Add Authorization header if API key
+                # is set (required for TEI with --api-key)
                 if self._api_key:
                     headers["Authorization"] = f"Bearer {self._api_key}"
                     logger.debug("Added Authorization header for rerank request")
@@ -1798,7 +1846,8 @@ class OpenAIEmbeddingProvider:
                 response.raise_for_status()
                 response_data = response.json()
 
-            # Normalize response format: TEI servers may return bare array or wrapped dict
+            # Normalize response format: TEI servers
+            # may return bare array or wrapped dict
             # Real TEI servers: [{"index": 0, "score": 0.95}, ...]
             # Cohere/proxies: {"results": [{"index": 0, "relevance_score": 0.95}, ...]}
             if isinstance(response_data, list):
@@ -1824,7 +1873,9 @@ class OpenAIEmbeddingProvider:
             ) + len(documents)
 
             logger.debug(
-                f"Successfully reranked {len(documents)} documents, got {len(rerank_results)} results"
+                f"Successfully reranked"
+                f" {len(documents)} documents,"
+                f" got {len(rerank_results)} results"
             )
             return rerank_results
 
@@ -1844,7 +1895,9 @@ class OpenAIEmbeddingProvider:
             # HTTP error response from service
             self._usage_stats["errors"] += 1
             logger.error(
-                f"Rerank service returned error {e.response.status_code}: {e.response.text}"
+                f"Rerank service returned error"
+                f" {e.response.status_code}:"
+                f" {e.response.text}"
             )
             raise
         except ValueError as e:
@@ -1872,7 +1925,8 @@ class OpenAIEmbeddingProvider:
         Thread-safe format detection using async lock to prevent race conditions.
         Validates that returned indices are within bounds of the original document list.
 
-        Supports both wrapped dict format (Cohere/proxies) and bare array format (real TEI servers).
+        Supports wrapped dict format (Cohere/proxies)
+        and bare array format (real TEI servers).
         Bare arrays are normalized to wrapped format before processing.
 
         Args:
@@ -1889,14 +1943,17 @@ class OpenAIEmbeddingProvider:
         # Early validation: check num_documents is reasonable
         if num_documents <= 0:
             logger.warning(
-                f"num_documents is {num_documents} (zero or negative), returning empty results"
+                f"num_documents is {num_documents}"
+                f" (zero or negative),"
+                f" returning empty results"
             )
             return []
 
         normalized_response = cast(dict[str, Any], response_data)
 
         # Validate response has results
-        # Note: Bare array responses are normalized to {"results": [...]} before this point
+        # Note: Bare array responses are normalized to
+        # {"results": [...]} before this point
         if "results" not in normalized_response:
             raise ValueError(
                 "Invalid rerank response: missing 'results' field. "
@@ -1938,13 +1995,16 @@ class OpenAIEmbeddingProvider:
             detected_format = "tei"
         else:
             raise ValueError(
-                "Invalid rerank response: results must have 'relevance_score' or 'score' field"
+                "Invalid rerank response: results must"
+                " have 'relevance_score' or 'score'"
+                " field"
             )
 
         # Cache detected format if in auto mode (thread-safe with async lock)
         if format_hint == "auto" and detected_format:
             async with self._format_detection_lock:
-                # Double-check pattern: check if another task already detected the format
+                # Double-check pattern: check if another
+                # task already detected the format
                 if self._detected_rerank_format is None:
                     self._detected_rerank_format = detected_format
                     logger.debug(f"Auto-detected rerank format: {detected_format}")
@@ -1958,7 +2018,9 @@ class OpenAIEmbeddingProvider:
 
             if "index" not in result or score_field not in result:
                 logger.warning(
-                    f"Skipping result {i}: missing required fields (index, {score_field})"
+                    f"Skipping result {i}: missing"
+                    f" required fields"
+                    f" (index, {score_field})"
                 )
                 continue
 
@@ -1973,7 +2035,9 @@ class OpenAIEmbeddingProvider:
 
                 if index >= num_documents:
                     logger.warning(
-                        f"Skipping result {i}: index {index} out of bounds (num_documents={num_documents})"
+                        f"Skipping result {i}:"
+                        f" index {index} out of bounds"
+                        f" (num_documents={num_documents})"
                     )
                     continue
 

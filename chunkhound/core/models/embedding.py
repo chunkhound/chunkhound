@@ -2,7 +2,8 @@
 
 This module contains the Embedding domain model which represents a vector embedding
 that has been generated for a code chunk. The Embedding model encapsulates embedding
-metadata, vector data, and provides methods for working with embeddings in a type-safe manner.
+metadata, vector data, and provides methods for working
+with embeddings in a type-safe manner.
 """
 
 from dataclasses import dataclass
@@ -70,7 +71,8 @@ class Embedding:
             raise ValidationError(
                 "vector_length",
                 len(self.vector),
-                f"Vector length ({len(self.vector)}) must match dimensions ({self.dims})",
+                f"Vector length ({len(self.vector)}) "
+                f"must match dimensions ({self.dims})",
             )
 
         # Check for invalid values in vector
@@ -287,7 +289,11 @@ class Embedding:
 
     def __str__(self) -> str:
         """Return string representation of the embedding."""
-        return f"Embedding(chunk_id={self.chunk_id}, {self.provider_model_key}, dims={self.dims})"
+        return (
+            f"Embedding(chunk_id={self.chunk_id}, "
+            f"{self.provider_model_key}, "
+            f"dims={self.dims})"
+        )
 
     def __repr__(self) -> str:
         """Return detailed string representation of the embedding."""
@@ -353,7 +359,9 @@ class EmbeddingResult:
                 raise ValidationError(
                     f"embeddings[{i}]",
                     len(embedding),
-                    f"Embedding vector length ({len(embedding)}) must match dimensions ({self.dims})",
+                    f"Embedding vector length "
+                    f"({len(embedding)}) must match "
+                    f"dimensions ({self.dims})",
                 )
 
         # Token count validation
@@ -388,7 +396,9 @@ class EmbeddingResult:
             raise ValidationError(
                 "chunk_ids",
                 len(chunk_ids),
-                f"Chunk IDs count ({len(chunk_ids)}) must match embeddings count ({len(self.embeddings)})",
+                f"Chunk IDs count ({len(chunk_ids)}) "
+                f"must match embeddings count "
+                f"({len(self.embeddings)})",
             )
 
         timestamp = datetime.utcnow()
@@ -425,7 +435,11 @@ class EmbeddingResult:
 
     def __str__(self) -> str:
         """Return string representation of the embedding result."""
-        return f"EmbeddingResult({self.count} embeddings, {self.provider_model_key}, dims={self.dims})"
+        return (
+            f"EmbeddingResult({self.count} embeddings, "
+            f"{self.provider_model_key}, "
+            f"dims={self.dims})"
+        )
 
     def __repr__(self) -> str:
         """Return detailed string representation of the embedding result."""

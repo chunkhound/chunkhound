@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manual test script for Anthropic provider with extended thinking and Opus 4.5 features.
+"""Manual test script for Anthropic provider
 
 This script tests the Anthropic provider with real API calls to verify:
 1. Basic completion without thinking
@@ -28,7 +28,7 @@ from chunkhound.providers.llm.anthropic_llm_provider import (
 # Skip all tests in this file if no API key is available
 pytestmark = pytest.mark.skipif(
     not os.getenv("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set - manual integration tests require real API key"
+    reason="ANTHROPIC_API_KEY not set - manual integration tests require real API key",
 )
 
 
@@ -71,7 +71,8 @@ async def test_thinking_completion():
 
     prompt = """Solve this step-by-step:
 
-If a train travels at 60 mph for 2.5 hours, then increases speed to 80 mph for 1.5 hours,
+If a train travels at 60 mph for 2.5 hours,
+then increases speed to 80 mph for 1.5 hours,
 how far did it travel in total?"""
 
     print(f"\nPrompt: {prompt}")
@@ -84,7 +85,10 @@ how far did it travel in total?"""
 
     # Note: With thinking enabled, the actual thinking process is in separate blocks
     # that we don't include in the final text output by default
-    print("\nNote: Extended thinking blocks are processed but not included in output by default.")
+    print(
+        "\nNote: Extended thinking blocks are processed"
+        " but not included in output by default."
+    )
 
     return response.tokens_used > 0
 
@@ -241,7 +245,9 @@ async def test_opus_45_full_features():
     headers = provider._get_beta_headers()
     print(f"  Beta headers: {headers}")
 
-    prompt = "Explain the difference between async/await and callbacks in 2-3 sentences."
+    prompt = (
+        "Explain the difference between async/await and callbacks in 2-3 sentences."
+    )
     print(f"\nPrompt: {prompt}")
 
     response = await provider.complete(prompt, max_completion_tokens=3000)

@@ -95,9 +95,7 @@ class TestDaemonStartupOrder:
         async def mock_initialize() -> None:
             daemon._start_startup_phase("initialize")
             daemon._initialized = True
-            daemon._scan_target_path = daemon._normalize_requested_target_path(
-                tmp_path
-            )
+            daemon._scan_target_path = daemon._normalize_requested_target_path(tmp_path)
             daemon._startup_publish_complete.clear()
             daemon._deferred_start_task = asyncio.create_task(asyncio.sleep(0))
             daemon._startup_failure_message = None
@@ -184,9 +182,7 @@ class TestDaemonStartupOrder:
         async def mock_initialize() -> None:
             daemon._start_startup_phase("initialize")
             daemon._initialized = True
-            daemon._scan_target_path = daemon._normalize_requested_target_path(
-                tmp_path
-            )
+            daemon._scan_target_path = daemon._normalize_requested_target_path(tmp_path)
             daemon._startup_publish_complete.clear()
             daemon._deferred_start_task = asyncio.create_task(asyncio.sleep(0))
             daemon._startup_failure_message = None
@@ -215,10 +211,15 @@ class TestDaemonStartupOrder:
             await daemon.run()
 
         # The event must be set before the barrier phase starts.
-        relevant = [c for c in call_order if c in {
-            "initialization_complete.set",
-            "startup_barrier.start",
-        }]
+        relevant = [
+            c
+            for c in call_order
+            if c
+            in {
+                "initialization_complete.set",
+                "startup_barrier.start",
+            }
+        ]
         assert relevant == [
             "initialization_complete.set",
             "startup_barrier.start",
@@ -276,8 +277,7 @@ class TestDaemonStartupOrder:
             await daemon._graceful_shutdown()
 
         assert len(call_order) >= 3, (
-            "Expected cleanup.start + remove_lock + unlink_socket, "
-            f"got: {call_order}"
+            f"Expected cleanup.start + remove_lock + unlink_socket, got: {call_order}"
         )
         cleanup_idx = call_order.index("cleanup.start")
         for artifact_step in ["remove_lock", "unlink_socket"]:
@@ -308,9 +308,7 @@ class TestDaemonStartupOrder:
 
         async def mock_initialize() -> None:
             daemon._initialized = True
-            daemon._scan_target_path = daemon._normalize_requested_target_path(
-                tmp_path
-            )
+            daemon._scan_target_path = daemon._normalize_requested_target_path(tmp_path)
             daemon._startup_publish_complete.clear()
             daemon._deferred_start_task = asyncio.create_task(asyncio.sleep(0))
             daemon._startup_failure_message = None
@@ -337,12 +335,15 @@ class TestDaemonStartupOrder:
         daemon._discovery.write_registry_entry = MagicMock()  # type: ignore[assignment]
         daemon._discovery.remove_lock = record_remove_lock  # type: ignore[assignment]
 
-        with patch(
-            "chunkhound.daemon.server.ipc.create_server",
-            new_callable=AsyncMock,
-        ) as mock_create, patch(
-            "chunkhound.daemon.server.os.unlink",
-            new=record_unlink,
+        with (
+            patch(
+                "chunkhound.daemon.server.ipc.create_server",
+                new_callable=AsyncMock,
+            ) as mock_create,
+            patch(
+                "chunkhound.daemon.server.os.unlink",
+                new=record_unlink,
+            ),
         ):
             mock_create.return_value = (mock_server, socket_path)
             with pytest.raises(RuntimeError, match="startup barrier failed"):
@@ -454,9 +455,7 @@ class TestDaemonStartupOrder:
 
         async def mock_initialize() -> None:
             daemon._initialized = True
-            daemon._scan_target_path = daemon._normalize_requested_target_path(
-                tmp_path
-            )
+            daemon._scan_target_path = daemon._normalize_requested_target_path(tmp_path)
             daemon._startup_publish_complete.clear()
             daemon._deferred_start_task = asyncio.create_task(asyncio.sleep(0))
             daemon._startup_failure_message = None
@@ -477,12 +476,15 @@ class TestDaemonStartupOrder:
 
         daemon._shutdown_event.set()
 
-        with patch(
-            "chunkhound.daemon.server.ipc.create_server",
-            new_callable=AsyncMock,
-        ) as mock_create, patch(
-            "chunkhound.daemon.server.os.unlink",
-            new=record_unlink,
+        with (
+            patch(
+                "chunkhound.daemon.server.ipc.create_server",
+                new_callable=AsyncMock,
+            ) as mock_create,
+            patch(
+                "chunkhound.daemon.server.os.unlink",
+                new=record_unlink,
+            ),
         ):
             mock_create.return_value = (mock_server, socket_path)
             await daemon.run()
@@ -496,12 +498,14 @@ class TestDaemonStartupOrder:
 # Assertion helper
 # ---------------------------------------------------------------------------
 
-_KEY_MARKERS = frozenset({
-    "daemon_publish.start",
-    "initialization_complete.set",
-    "startup_barrier.start",
-    "startup.complete",
-})
+_KEY_MARKERS = frozenset(
+    {
+        "daemon_publish.start",
+        "initialization_complete.set",
+        "startup_barrier.start",
+        "startup.complete",
+    }
+)
 
 
 def _assert_key_markers(call_order: list[str]) -> None:
@@ -525,5 +529,3 @@ def _assert_key_markers(call_order: list[str]) -> None:
         "Expected daemon_publish.start → initialization_complete.set → "
         f"startup_barrier.start → startup.complete, got: {relevant}"
     )
-
-

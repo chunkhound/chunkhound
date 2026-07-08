@@ -9,6 +9,7 @@ Exit 0: all failures are annotated as flaky (acknowledged debt)
 Exit 1: unannotated failure — PR is blocked until annotation is added
 Exit 2: usage error or missing input file
 """
+
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -18,7 +19,10 @@ from pathlib import Path
 def find_failed_tests(junit_xml: Path) -> list[tuple[str, str, int]]:
     """Return list of (file_path, test_name, line_no) for failed/errored tests."""
     if not junit_xml.exists():
-        print(f"ERROR: {junit_xml} not found — pytest may not have produced output.", file=sys.stderr)
+        print(
+            f"ERROR: {junit_xml} not found — pytest may not have produced output.",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     tree = ET.parse(junit_xml)
@@ -109,8 +113,11 @@ def main() -> None:
     print("FLAKY ANNOTATION REQUIRED", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
     print(
-        "The following test(s) failed on both CI attempts but lack a '# flaky: reason' annotation.\n"
-        "Add the annotation to unblock the PR and register the test as known flaky debt.\n",
+        "The following test(s) failed on both CI "
+        "attempts but lack a '# flaky: reason' "
+        "annotation.\n"
+        "Add the annotation to unblock the PR and "
+        "register the test as known flaky debt.\n",
         file=sys.stderr,
     )
     for file_path, test_name, line_no in unannotated:
@@ -118,7 +125,10 @@ def main() -> None:
         print(f"  MISSING annotation: {loc}::{test_name}", file=sys.stderr)
 
     print("\nExample fix:", file=sys.stderr)
-    print("  def test_something():  # flaky: timing-sensitive, tracked in issue #123", file=sys.stderr)
+    print(
+        "  def test_something():  # flaky: timing-sensitive, tracked in issue #123",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 

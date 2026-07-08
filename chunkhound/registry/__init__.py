@@ -146,15 +146,22 @@ class ProviderRegistry:
     def get_provider(self, name: str) -> Any:
         """Get a provider instance by name."""
         logger.debug(
-            f"[REGISTRY] Attempting to get provider '{name}', available providers: {list(self._providers.keys())}"
+            f"[REGISTRY] Attempting to get"
+            f" provider '{name}',"
+            f" available providers:"
+            f" {list(self._providers.keys())}"
         )
         if name not in self._providers:
             logger.warning(
-                f"[REGISTRY] No provider registered for {name}, available: {list(self._providers.keys())}"
+                f"[REGISTRY] No provider registered"
+                f" for {name}, available:"
+                f" {list(self._providers.keys())}"
             )
             raise ValueError(f"No provider registered for {name}")
         logger.debug(
-            f"[REGISTRY] Successfully retrieved provider '{name}': {type(self._providers[name])}"
+            f"[REGISTRY] Successfully retrieved"
+            f" provider '{name}':"
+            f" {type(self._providers[name])}"
         )
         return self._providers[name]
 
@@ -182,15 +189,21 @@ class ProviderRegistry:
         else:
             try:
                 logger.debug(
-                    "[REGISTRY] Attempting to get embedding provider for IndexingCoordinator"
+                    "[REGISTRY] Attempting to get"
+                    " embedding provider for"
+                    " IndexingCoordinator"
                 )
                 embedding_provider = self.get_provider("embedding")
                 logger.debug(
-                    f"[REGISTRY] Successfully got embedding provider: {type(embedding_provider)}"
+                    f"[REGISTRY] Successfully got"
+                    f" embedding provider:"
+                    f" {type(embedding_provider)}"
                 )
             except ValueError as e:
                 logger.warning(
-                    f"[REGISTRY] No embedding provider configured for IndexingCoordinator: {e}"
+                    f"[REGISTRY] No embedding provider"
+                    f" configured for"
+                    f" IndexingCoordinator: {e}"
                 )
                 pass  # No embedding provider configured
 
@@ -198,7 +211,9 @@ class ProviderRegistry:
         base_directory = self._config.target_dir if self._config else Path.cwd()
 
         logger.debug(
-            f"[REGISTRY] Creating IndexingCoordinator with embedding_provider={embedding_provider}"
+            f"[REGISTRY] Creating IndexingCoordinator"
+            f" with embedding_provider="
+            f"{embedding_provider}"
         )
         return IndexingCoordinator(
             database_provider=database_provider,
@@ -216,7 +231,9 @@ class ProviderRegistry:
         if self._config and getattr(self._config, "embeddings_disabled", False):
             embedding_provider = None
             logger.debug(
-                "[REGISTRY] Embeddings disabled; search service will run without embeddings"
+                "[REGISTRY] Embeddings disabled;"
+                " search service will run"
+                " without embeddings"
             )
         else:
             try:
@@ -284,7 +301,8 @@ class ProviderRegistry:
             return
 
         provider_type = self._config.database.provider
-        # Use get_db_path() to get the actual database location (includes provider-specific transformations)
+        # Use get_db_path() to get the actual database
+        # location (includes provider-specific transformations)
         db_path = str(self._config.database.get_db_path())
 
         # Get base directory from config (guaranteed to be set)
@@ -338,19 +356,24 @@ class ProviderRegistry:
             and self._config.embeddings_disabled
         ):
             logger.debug(
-                "[REGISTRY] Embeddings explicitly disabled, skipping embedding provider setup"
+                "[REGISTRY] Embeddings explicitly"
+                " disabled, skipping embedding"
+                " provider setup"
             )
             return
 
         # Skip if no embedding config found
         if not self._config.embedding:
             logger.debug(
-                "[REGISTRY] No embedding config found, skipping embedding provider setup"
+                "[REGISTRY] No embedding config found,"
+                " skipping embedding provider setup"
             )
             return
 
         logger.debug(
-            f"[REGISTRY] Found embedding config: provider={self._config.embedding.provider}"
+            f"[REGISTRY] Found embedding config:"
+            f" provider="
+            f"{self._config.embedding.provider}"
         )
         try:
             # Create EmbeddingManager and store as instance variable

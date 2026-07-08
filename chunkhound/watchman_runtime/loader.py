@@ -908,10 +908,13 @@ def _download_source_archive_once(
     temp_path: Path,
     timeout_seconds: float,
 ) -> None:
-    with urllib.request.urlopen(
-        source.source_url,
-        timeout=timeout_seconds,
-    ) as response, temp_path.open("wb") as handle:
+    with (
+        urllib.request.urlopen(
+            source.source_url,
+            timeout=timeout_seconds,
+        ) as response,
+        temp_path.open("wb") as handle,
+    ):
         response_geturl = getattr(response, "geturl", None)
         if callable(response_geturl):
             final_url = response_geturl()
@@ -1055,9 +1058,7 @@ def _read_deb_member_bytes(
         members_by_path = {
             normalized_path: member
             for member in handle.getmembers()
-            if (
-                normalized_path := _normalize_safe_archive_path(member.name)
-            )
+            if (normalized_path := _normalize_safe_archive_path(member.name))
             is not None
         }
         current_path = expected_path
@@ -1410,9 +1411,7 @@ def _read_runtime_payload_bytes(
     runtime: PackagedWatchmanRuntime, relative_path: PurePosixPath
 ) -> bytes:
     if runtime.hydrated_payload_root is not None:
-        return (
-            runtime.hydrated_payload_root / Path(*relative_path.parts)
-        ).read_bytes()
+        return (runtime.hydrated_payload_root / Path(*relative_path.parts)).read_bytes()
     return _read_packaged_bytes(runtime.relative_root / relative_path)
 
 
@@ -1564,10 +1563,7 @@ def build_watchman_runtime_force_include_entries(
         system_name=system_name,
         machine_name=machine_name,
     )
-    package_root = (
-        PurePosixPath("chunkhound")
-        / "watchman_runtime"
-    )
+    package_root = PurePosixPath("chunkhound") / "watchman_runtime"
     manifest_relative_path = runtime.relative_root / "manifest.json"
     entries: dict[str, str] = {
         str(_PACKAGE_ROOT / Path(*manifest_relative_path.parts)): (

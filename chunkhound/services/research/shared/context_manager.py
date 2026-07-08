@@ -34,8 +34,10 @@ class ContextManager:
     def collect_ancestor_data(self, node: BFSNode) -> dict[str, Any]:
         """Traverse parent chain and collect all ancestor chunks/files.
 
-        NOTE: This method is now deprecated in favor of global_explored_data tracking.
-        Kept for backward compatibility but not actively used in BFS duplicate detection.
+        NOTE: This method is now deprecated in favor
+        of global_explored_data tracking.
+        Kept for backward compatibility but not
+        actively used in BFS duplicate detection.
 
         Args:
             node: Current BFS node
@@ -86,8 +88,9 @@ class ContextManager:
     ) -> None:
         """Update global explored data with discoveries from a single node.
 
-        This allows sibling nodes and future nodes to detect duplicates across the entire BFS graph,
-        not just their ancestor chain. Critical for preventing redundant exploration.
+        This allows sibling nodes and future nodes to detect
+        duplicates across the entire BFS graph, not just their
+        ancestor chain. Critical for preventing redundant exploration.
 
         Args:
             global_explored_data: Global state dict with files_fully_read, chunk_ranges,
@@ -134,7 +137,8 @@ class ContextManager:
             global_explored_data: Global state with chunks list
 
         Returns:
-            Markdown tree structure of explored files and chunks, or None if no exploration yet
+            Markdown tree of explored files and chunks,
+            or None if no exploration yet
         """
         chunks = global_explored_data["chunks"]
         if not chunks:
@@ -162,7 +166,8 @@ class ContextManager:
         chunk_expanded_range: tuple[int, int],
         explored_data: dict[str, Any],
     ) -> bool:
-        """Check if chunk is 100% duplicate of any previously explored data in BFS graph.
+        """Check if chunk is 100% duplicate of any
+        previously explored data in BFS graph.
 
         Returns True only if:
         1. Chunk's file was fully read by any previously explored node, OR
@@ -173,7 +178,8 @@ class ContextManager:
         Args:
             chunk: Chunk dictionary
             chunk_expanded_range: Expanded range for this chunk
-            explored_data: Global explored data from entire BFS graph (not just ancestors)
+            explored_data: Global explored data from
+                entire BFS graph (not just ancestors)
 
         Returns:
             True if chunk is 100% duplicate, False otherwise
@@ -202,12 +208,15 @@ class ContextManager:
         chunks: list[dict[str, Any]],
         global_explored_data: dict[str, Any],
     ) -> tuple[bool, dict[str, Any]]:
-        """Detect if node has new information vs all previously explored nodes in BFS graph.
+        """Detect if node has new information vs all
+        previously explored nodes in BFS graph.
 
         Args:
             node: Current BFS node
             chunks: Chunks found for this node
-            global_explored_data: Global state with files_fully_read and chunk_ranges from ALL processed nodes
+            global_explored_data: Global state with
+                files_fully_read and chunk_ranges from
+                ALL processed nodes
 
         Returns:
             Tuple of (has_new_info, stats):
@@ -229,7 +238,8 @@ class ContextManager:
             # No chunks at all
             return (False, {"new_chunks": 0, "duplicate_chunks": 0, "total_chunks": 0})
 
-        # Check each chunk against global explored data (entire BFS graph, not just ancestors)
+        # Check each chunk against global explored data
+        # (entire BFS graph, not just ancestors)
         new_count = 0
         duplicate_count = 0
 

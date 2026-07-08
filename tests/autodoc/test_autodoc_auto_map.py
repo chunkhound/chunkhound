@@ -251,7 +251,10 @@ async def test_autodoc_auto_map_prereq_failure_exits_before_prompting_map_params
             [
                 "- Database not found at: /missing/db",
                 "- Embedding provider is not configured.",
-                "- Embedding provider does not support reranking with current config (configure reranking; typically `embedding.rerank_model`).",
+                "- Embedding provider does not support "
+                "reranking with current config "
+                "(configure reranking; typically "
+                "`embedding.rerank_model`).",
                 "- LLM provider is not configured.",
             ],
         ),

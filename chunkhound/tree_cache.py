@@ -76,7 +76,9 @@ class TreeCache:
         self._invalidations = 0
 
         logger.debug(
-            f"TreeCache initialized: max_entries={max_entries}, max_memory_mb={max_memory_mb}"
+            f"TreeCache initialized: "
+            f"max_entries={max_entries}, "
+            f"max_memory_mb={max_memory_mb}"
         )
 
     def get(self, file_path: Path) -> Any | None:

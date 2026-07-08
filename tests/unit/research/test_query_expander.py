@@ -18,9 +18,17 @@ def fake_llm_provider():
     return FakeLLMProvider(
         responses={
             # Match any query expansion request (searches for words in the prompt)
-            "query": '{"queries": ["authentication system implementation", "user auth flow design"]}',
-            "search": '{"queries": ["code search variation 1", "code search variation 2"]}',
-            "authentication": '{"queries": ["auth system architecture", "authentication workflow"]}',
+            "query": (
+                '{"queries": ["authentication '
+                'system implementation", "user auth'
+                ' flow design"]}'
+            ),
+            "search": (
+                '{"queries": ["code search variation 1", "code search variation 2"]}'
+            ),
+            "authentication": (
+                '{"queries": ["auth system architecture", "authentication workflow"]}'
+            ),
             "fallback": "default response",
         }
     )
@@ -33,6 +41,7 @@ def llm_manager(fake_llm_provider, monkeypatch):
     Monkeypatch the provider creation to return our fake provider
     instead of initializing real providers.
     """
+
     # Mock the _create_provider method to return our fake provider
     def mock_create_provider(self, config):
         return fake_llm_provider
@@ -104,9 +113,7 @@ class TestBuildSearchQuery:
     def test_query_first_position_for_embedding_bias(self, query_expander):
         """Query must come before context for embedding model position bias."""
         query = "database query"
-        context = ResearchContext(
-            root_query="root", ancestors=["parent1", "parent2"]
-        )
+        context = ResearchContext(root_query="root", ancestors=["parent1", "parent2"])
 
         result = query_expander.build_search_query(query, context)
 

@@ -97,7 +97,9 @@ def test_metal_parse_result_tagged_metal(tmp_path):
     """ParseResult.language is METAL, matching file detection end-to-end."""
     f = tmp_path / "kernel.metal"
     f.write_text(METAL_SNIPPET)
-    result = get_parser_factory().create_parser(Language.METAL).parse_with_result(
-        f, FileId(1)
+    result = (
+        get_parser_factory()
+        .create_parser(Language.METAL)
+        .parse_with_result(f, FileId(1))
     )
     assert result.language == Language.METAL

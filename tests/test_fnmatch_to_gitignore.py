@@ -2,7 +2,9 @@
 
 These run without the Rust extension; they exercise pure-Python logic.
 """
+
 import pytest
+
 from chunkhound.utils.file_patterns import _fnmatch_to_gitignore
 
 
@@ -41,7 +43,10 @@ def test_fnmatch_to_gitignore(pattern: str, expected: str) -> None:
 
 @pytest.mark.unit
 def test_multi_segment_patterns_not_root_anchored() -> None:
-    """Multi-segment patterns must keep '**/' so gitignore doesn't anchor them to root."""
+    """
+    Multi-segment patterns must keep '**/' so
+    gitignore doesn't anchor them to root.
+    """
     result = _fnmatch_to_gitignore("**/.yarn/cache/**")
     assert result.startswith("**/"), (
         f"Expected '**/' prefix to prevent root-anchoring, got: {result!r}"

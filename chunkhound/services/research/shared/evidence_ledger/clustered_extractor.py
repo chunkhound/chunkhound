@@ -41,7 +41,8 @@ class ClusteredExtractionResult:
     Attributes:
         evidence_ledger: Merged EvidenceLedger with facts from all clusters
         cluster_groups: HDBSCAN cluster groups (reusable for synthesis)
-        cluster_metadata: Clustering statistics (num_clusters, avg_tokens_per_cluster, etc.)
+        cluster_metadata: Clustering statistics
+        (num_clusters, avg_tokens_per_cluster, etc.)
     """
 
     evidence_ledger: EvidenceLedger
@@ -104,10 +105,13 @@ async def extract_facts_with_clustering(
 
     logger.info(
         f"Clustered {len(files)} files into {metadata['num_clusters']} HDBSCAN groups "
-        f"(bounds: [{min_tokens_per_cluster:,}, {max_tokens_per_cluster:,}]) for fact extraction"
+        f"(bounds: [{min_tokens_per_cluster:,}, "
+        f"{max_tokens_per_cluster:,}]) "
+        f"for fact extraction"
     )
 
-    # Convert ClusterGroup objects to extraction format with proportional fact allocation
+    # Convert ClusterGroup objects to extraction format
+    # with proportional fact allocation
     clusters_for_extraction = [
         (
             cluster.cluster_id,

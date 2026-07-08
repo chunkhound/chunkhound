@@ -59,8 +59,9 @@ class TestRetryAfterHeader:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             result = await provider._embed_batch_internal(["hello"])
 
@@ -94,8 +95,9 @@ class TestRetryAfterHeader:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["hi"])
 
@@ -126,8 +128,9 @@ class TestRetryAfterHeader:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["hi"])
 
@@ -164,8 +167,9 @@ class TestRetryAfterBodyParse:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["hello"])
 
@@ -194,8 +198,9 @@ class TestRetryAfterBodyParse:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["x"])
 
@@ -223,8 +228,9 @@ class TestRetryAfterBodyParse:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["x"])
 
@@ -258,8 +264,9 @@ class TestExponentialBackoffFallback:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["hello"])
 
@@ -293,8 +300,9 @@ class TestExponentialBackoffFallback:
         async def fake_sleep(secs):
             sleep_calls.append(secs)
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             await provider._embed_batch_internal(["x"])
 
@@ -314,8 +322,9 @@ class TestExponentialBackoffFallback:
         async def fake_sleep(_):
             pass
 
-        with patch.object(mod, "openai", fake_openai), patch.object(
-            asyncio, "sleep", fake_sleep
+        with (
+            patch.object(mod, "openai", fake_openai),
+            patch.object(asyncio, "sleep", fake_sleep),
         ):
             with pytest.raises(_FakeRateLimitError):
                 await provider._embed_batch_internal(["x"])

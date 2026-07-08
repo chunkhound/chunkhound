@@ -11,8 +11,7 @@ def _run_simulate(path: Path) -> list[str]:
     env["CHUNKHOUND_NO_RICH"] = "1"
     p = subprocess.run(
         ["uv", "run", "chunkhound", "index", "--simulate", str(path), "--sort", "path"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=env,
         timeout=60,
@@ -29,7 +28,8 @@ def test_dynamic_db_path_is_excluded_when_inside_target(tmp_path: Path) -> None:
     (ws / "src").mkdir(parents=True, exist_ok=True)
     (ws / "src" / "a.py").write_text("print('ok')\n", encoding="utf-8")
 
-    # Put database path inside workspace under a custom directory (not default .chunkhound)
+    # Put database path inside workspace under a
+    # custom directory (not default .chunkhound)
     db_dir = ws / "mydbdir"
     db_dir.mkdir(parents=True, exist_ok=True)
     db_file = db_dir / "test.duckdb"  # let DuckDB create this

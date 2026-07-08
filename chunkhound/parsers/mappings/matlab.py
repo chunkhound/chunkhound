@@ -12,6 +12,7 @@ from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
+from chunkhound.parsers.universal_engine import UniversalConcept
 
 
 class MatlabMapping(BaseMapping):
@@ -420,15 +421,11 @@ class MatlabMapping(BaseMapping):
         Returns:
             Tree-sitter query string or None if concept not supported
         """
-        try:
-            from chunkhound.parsers.universal_engine import UniversalConcept
-        except ImportError:
-            return None
-
         if concept == UniversalConcept.DEFINITION:
             # Combine function, class, properties, and top-level assignment queries
             # Note: Only capture top-level assignments (children of source_file),
-            # not assignments inside function bodies (those are extracted via function_definition)
+            # not assignments inside function bodies
+            # (those are extracted via function_definition)
             return """
                 (function_definition
                     (function_output)? @function_output
@@ -467,11 +464,6 @@ class MatlabMapping(BaseMapping):
         Returns:
             Extracted name string
         """
-        try:
-            from chunkhound.parsers.universal_engine import UniversalConcept
-        except ImportError:
-            return "unnamed"
-
         if concept != UniversalConcept.DEFINITION:
             return "unnamed"
 
@@ -611,11 +603,6 @@ class MatlabMapping(BaseMapping):
         Returns:
             List of constant dictionaries with 'name' and 'value' keys, or None
         """
-        try:
-            from chunkhound.parsers.universal_engine import UniversalConcept
-        except ImportError:
-            return None
-
         if concept != UniversalConcept.DEFINITION:
             return None
 

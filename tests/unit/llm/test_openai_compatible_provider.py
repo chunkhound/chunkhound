@@ -67,12 +67,12 @@ SPECS = [
             "expected_class": OpenAILLMProvider,
             "expected_missing_model_error": (
                 "Custom OpenAI-compatible LLM endpoints require an explicit model. "
-                "Set `llm.model` (or the per-role model override) when using `llm.base_url`."
+                "Set `llm.model` (or the per-role model "
+                "override) when using `llm.base_url`."
             ),
         },
         id="openai",
     ),
-
 ]
 
 
@@ -104,6 +104,7 @@ def mock_openai():
 # Factory contract  —  does LLMManager._create_provider produce a correctly
 # configured OpenAICompatibleProvider for each spec?
 # =============================================================================
+
 
 class TestFactoryPipeline:
     """Config dict → registry lookup → provider instance with correct fields."""
@@ -212,6 +213,7 @@ class TestFactoryPipeline:
 # Behavioral contract  —  core provider behavior exercised once (not per spec),
 # since all OpenAI-compatible providers share the same class.
 # =============================================================================
+
 
 class TestCompletionContract:
     """Core completion behavior shared by every OpenAI-compatible provider."""
@@ -357,6 +359,7 @@ class TestCompletionContract:
 # supports_structured_outputs=True vs False (parametrized over both paths).
 # =============================================================================
 
+
 class TestStructuredOutputContract:
     """Two code paths depending on the supports_structured_outputs flag."""
 
@@ -406,7 +409,9 @@ class TestStructuredOutputContract:
 
         provider = _provider(supports_structured_outputs=False)
         await provider.complete_structured(
-            "?", json_schema=self.SCHEMA, system="You are helpful.",
+            "?",
+            json_schema=self.SCHEMA,
+            system="You are helpful.",
         )
 
         call = mock_openai.call_args[1]
@@ -415,9 +420,7 @@ class TestStructuredOutputContract:
         assert '"answer"' in content
 
     @pytest.mark.asyncio
-    async def test_native_json_schema_with_reasoning_effort(
-        self, mock_openai
-    ):
+    async def test_native_json_schema_with_reasoning_effort(self, mock_openai):
         """sso=True includes both response_format and reasoning_effort."""
         mock_openai.return_value = self._make_resp()
 
@@ -435,6 +438,7 @@ class TestStructuredOutputContract:
 # =============================================================================
 # Helpers
 # =============================================================================
+
 
 def _bare_manager() -> LLMManager:
     """Return an LLMManager instance without running __init__ side effects."""

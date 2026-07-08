@@ -15,22 +15,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-# Matches Jinja/template expressions: {{ }}, {% %}, {# #}
-# Used to sanitize element attribute values before using them as chunk symbols.
-_JINJA_EXPR_RE = re.compile(r"\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\}", re.DOTALL)
-
-from tree_sitter import Node, Parser as _TSParser
-
-
-@lru_cache(maxsize=1)
-def _html_ts_parser() -> "_TSParser | None":
-    """Return a cached tree-sitter HTML parser for attribute re-extraction."""
-    try:
-        from tree_sitter_language_pack import get_language
-        lang = get_language("html")
-        return _TSParser(lang) if lang else None
-    except Exception:
-        return None
+from tree_sitter import Node
+from tree_sitter import Parser as _TSParser
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings._shared.css_family_helpers import (
@@ -41,6 +27,23 @@ from chunkhound.parsers.mappings._shared.css_family_helpers import (
 )
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
+
+# Matches Jinja/template expressions: {{ }}, {% %}, {# #}
+# Used to sanitize element attribute values before using them as chunk symbols.
+_JINJA_EXPR_RE = re.compile(r"\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\}", re.DOTALL)
+
+
+@lru_cache(maxsize=1)
+def _html_ts_parser() -> "_TSParser | None":
+    """Return a cached tree-sitter HTML parser for attribute re-extraction."""
+    try:
+        from tree_sitter_language_pack import get_language
+
+        lang = get_language("html")
+        return _TSParser(lang) if lang else None
+    except Exception:
+        return None
+
 
 # HTML semantic landmark tags to extract as BLOCK chunks
 SEMANTIC_TAGS = frozenset(
@@ -121,9 +124,7 @@ class HtmlMapping(BaseMapping):
                 return node_text(child, content).lower()
         return ""
 
-    def _get_attribute(
-        self, start_tag: Node, attr_name: str, content: bytes
-    ) -> str:
+    def _get_attribute(self, start_tag: Node, attr_name: str, content: bytes) -> str:
         """Extract a specific attribute value from a start_tag node."""
         for child in start_tag.children:
             if child.type != "attribute":
@@ -162,15 +163,21 @@ class HtmlMapping(BaseMapping):
         start_tag = self._get_start_tag(node)
         if start_tag is not None:
             # Prefer id > class > aria-label; strip template expressions first
-            id_val = _JINJA_EXPR_RE.sub("", self._get_attribute(start_tag, "id", content)).strip()
+            id_val = _JINJA_EXPR_RE.sub(
+                "", self._get_attribute(start_tag, "id", content)
+            ).strip()
             if id_val:
                 return f"{tag}#{id_val}"
-            class_val = _JINJA_EXPR_RE.sub("", self._get_attribute(start_tag, "class", content)).strip()
+            class_val = _JINJA_EXPR_RE.sub(
+                "", self._get_attribute(start_tag, "class", content)
+            ).strip()
             if class_val:
                 first_class = class_val.split()[0]
                 if first_class:
                     return f"{tag}.{first_class}"
-            aria_val = _JINJA_EXPR_RE.sub("", self._get_attribute(start_tag, "aria-label", content)).strip()
+            aria_val = _JINJA_EXPR_RE.sub(
+                "", self._get_attribute(start_tag, "aria-label", content)
+            ).strip()
             if aria_val:
                 return f"{tag}[{aria_val[:30]}]"
         if tag:
@@ -190,7 +197,8 @@ class HtmlMapping(BaseMapping):
                 (element
                   (start_tag
                     (tag_name) @tag_name
-                    (#match? @tag_name "^(section|article|main|header|footer|nav|aside|form|table|details|dialog|figure|fieldset)$")
+                    (#match? @tag_name
+                    "^(section|article|main|header|footer|nav|aside|form|table|details|dialog|figure|fieldset)$")
                   )
                 ) @definition
                 (element
@@ -286,7 +294,9 @@ class HtmlMapping(BaseMapping):
         if concept == UniversalConcept.BLOCK:
             if node.type == "script_element":
                 start_tag = self._get_start_tag(node)
-                if start_tag is not None and self._get_attribute(start_tag, "src", content):
+                if start_tag is not None and self._get_attribute(
+                    start_tag, "src", content
+                ):
                     return ""  # external script → captured as IMPORT
             elif node.type != "style_element":
                 if not self._is_semantic_element(node, content):
@@ -298,7 +308,11 @@ class HtmlMapping(BaseMapping):
                 start_tag = self._get_start_tag(node)
                 if start_tag is None:
                     return ""
-                return node_text(node, content) if self._get_attribute(start_tag, "src", content) else ""
+                return (
+                    node_text(node, content)
+                    if self._get_attribute(start_tag, "src", content)
+                    else ""
+                )
             if node.type != "element":
                 return ""
             tag = self._get_tag_name(node, content)

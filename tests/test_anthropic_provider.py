@@ -18,19 +18,18 @@ from chunkhound.core.config.claude_model_resolution import (
     resolve_claude_haiku_model,
     resolve_claude_model,
 )
-from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.anthropic_llm_provider import (
     ANTHROPIC_AVAILABLE,
     BETA_CONTEXT_MANAGEMENT,
     BETA_INTERLEAVED_THINKING,
     BETA_STRUCTURED_OUTPUTS,
     BETA_TASK_BUDGETS,
+    AnthropicLLMProvider,
     requires_adaptive_thinking,
     supports_adaptive_thinking,
     supports_effort,
     supports_effort_level,
     supports_task_budget,
-    AnthropicLLMProvider,
 )
 
 
@@ -201,6 +200,7 @@ class TestProviderCapabilities:
 
         # Anthropic has higher rate limits than OpenAI
         assert provider.get_synthesis_concurrency() == 5
+
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
 class TestConfiguration:
@@ -723,7 +723,12 @@ class TestStrictToolUse:
         """Test detecting strict tools."""
         tools = [
             {"name": "tool1", "description": "desc", "input_schema": {}},
-            {"name": "tool2", "description": "desc", "strict": True, "input_schema": {}},
+            {
+                "name": "tool2",
+                "description": "desc",
+                "strict": True,
+                "input_schema": {},
+            },
         ]
 
         has_strict = any(tool.get("strict") for tool in tools)
@@ -1188,13 +1193,11 @@ class TestToolChoiceContextManagement:
             thinking_enabled=True,
             interleaved_thinking=True,
         )
-        assert (
-            BETA_INTERLEAVED_THINKING
-            in provider._get_beta_headers(thinking_active=True)
+        assert BETA_INTERLEAVED_THINKING in provider._get_beta_headers(
+            thinking_active=True
         )
-        assert (
-            BETA_INTERLEAVED_THINKING
-            not in provider._get_beta_headers(thinking_active=False)
+        assert BETA_INTERLEAVED_THINKING not in provider._get_beta_headers(
+            thinking_active=False
         )
 
 
@@ -1394,10 +1397,13 @@ class TestClaudeHaikuModelResolution:
             lambda api_key=None: pytest.fail("discovery should not run"),
         )
 
-        assert resolve_claude_haiku_model(
-            CLAUDE_HAIKU_DEFAULT_SENTINEL,
-            discover=False,
-        ) == CLAUDE_HAIKU_FALLBACK_MODEL
+        assert (
+            resolve_claude_haiku_model(
+                CLAUDE_HAIKU_DEFAULT_SENTINEL,
+                discover=False,
+            )
+            == CLAUDE_HAIKU_FALLBACK_MODEL
+        )
 
     def test_model_discovery_picks_newest_haiku(self, monkeypatch):
         class FakeModels:
@@ -1424,10 +1430,13 @@ class TestClaudeHaikuModelResolution:
         import anthropic
 
         monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
-        assert resolve_claude_haiku_model(
-            CLAUDE_HAIKU_DEFAULT_SENTINEL,
-            "sk-ant-test",
-        ) == "claude-haiku-4-6-20260101"
+        assert (
+            resolve_claude_haiku_model(
+                CLAUDE_HAIKU_DEFAULT_SENTINEL,
+                "sk-ant-test",
+            )
+            == "claude-haiku-4-6-20260101"
+        )
 
     def test_model_discovery_failure_uses_fallback(self, monkeypatch):
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
@@ -1439,10 +1448,13 @@ class TestClaudeHaikuModelResolution:
         import anthropic
 
         monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
-        assert resolve_claude_haiku_model(
-            CLAUDE_HAIKU_DEFAULT_SENTINEL,
-            "sk-ant-test",
-        ) == CLAUDE_HAIKU_FALLBACK_MODEL
+        assert (
+            resolve_claude_haiku_model(
+                CLAUDE_HAIKU_DEFAULT_SENTINEL,
+                "sk-ant-test",
+            )
+            == CLAUDE_HAIKU_FALLBACK_MODEL
+        )
 
     @staticmethod
     def _all_fake_models():
@@ -1632,9 +1644,7 @@ class TestClaudeHaikuModelResolution:
             CLAUDE_OPUS_FALLBACK
         )
 
-    def test_sonnet_sentinel_discovery_cached_independently(
-        self, monkeypatch
-    ):
+    def test_sonnet_sentinel_discovery_cached_independently(self, monkeypatch):
         """Sonnet cache entry is independent of Haiku."""
         counter = self._make_api_key_sensitive_anthropic(monkeypatch)
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL", raising=False)
@@ -1651,9 +1661,7 @@ class TestClaudeHaikuModelResolution:
         assert result2 == "claude-sonnet-4-6-20260217-B"
         assert counter.call_count == 2
 
-    def test_opus_sentinel_discovery_cached_independently(
-        self, monkeypatch
-    ):
+    def test_opus_sentinel_discovery_cached_independently(self, monkeypatch):
         """Opus cache entry is independent of Haiku and Sonnet."""
         counter = self._make_api_key_sensitive_anthropic(monkeypatch)
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL", raising=False)
@@ -1670,9 +1678,7 @@ class TestClaudeHaikuModelResolution:
         assert result2 == "claude-opus-4-7-20260416-B"
         assert counter.call_count == 2
 
-    def test_sentinels_have_independent_cache_entries(
-        self, monkeypatch
-    ):
+    def test_sentinels_have_independent_cache_entries(self, monkeypatch):
         """Each sentinel has its own cache entry; discovering one does not
         populate another."""
         counter = self._make_counting_anthropic(monkeypatch)

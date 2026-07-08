@@ -39,19 +39,19 @@ class TomlMapping(BaseMapping):
 
     # BaseMapping required methods
     def get_function_query(self) -> str:
-        """Get tree-sitter query pattern for function definitions (not applicable to TOML)."""
+        """Get tree-sitter query pattern for function definitions."""
         return ""
 
     def get_class_query(self) -> str:
-        """Get tree-sitter query pattern for class definitions (not applicable to TOML)."""
+        """Get tree-sitter query pattern for class definitions."""
         return ""
 
     def get_comment_query(self) -> str:
-        """Get tree-sitter query pattern for comments (TOML supports comments but no tree-sitter)."""
+        """Get tree-sitter query pattern for comments."""
         return ""
 
     def extract_function_name(self, node: Node | None, source: str) -> str:
-        """Extract function name from a function definition node (not applicable to TOML)."""
+        """Extract function name from a function definition node."""
         return ""
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
@@ -68,7 +68,7 @@ class TomlMapping(BaseMapping):
             # Match TOML tables and key-value pairs as definitions
             return """
                 (table) @definition
-                
+
                 (pair) @definition
             """
 

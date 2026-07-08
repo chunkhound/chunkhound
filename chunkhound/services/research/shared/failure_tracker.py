@@ -45,7 +45,8 @@ class FailureMetrics:
         """Record a failure with automatic error categorization.
 
         Args:
-            item_description: Description of the failed item (e.g., file path, query text)
+            item_description: Description of the failed item
+            (e.g., file path, query text)
             exception: The exception that occurred
         """
         error_type = categorize_error(exception)

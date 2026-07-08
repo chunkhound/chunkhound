@@ -116,7 +116,10 @@ class BaseFileConfigSettingsSource(PydanticBaseSettingsSource, ABC):
         return self._data
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(config_files={[str(f) for f in self.config_files]})"
+        return (
+            f"{self.__class__.__name__}("
+            f"config_files={[str(f) for f in self.config_files]})"
+        )
 
 
 class YamlConfigSettingsSource(BaseFileConfigSettingsSource):
@@ -149,7 +152,8 @@ class TomlConfigSettingsSource(BaseFileConfigSettingsSource):
                 import tomli as tomllib
             except ImportError:
                 raise ImportError(
-                    "tomllib (Python 3.11+) or tomli is required for TOML configuration files. "
+                    "tomllib (Python 3.11+) or tomli is "
+                    "required for TOML configuration files. "
                     "Install with: pip install tomli"
                 )
 

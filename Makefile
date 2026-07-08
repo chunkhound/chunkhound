@@ -5,7 +5,7 @@
 # Optional: override config file via CONFIG, e.g.:
 #   make bench-lang CONFIG=.chunkhound.json
 
-.PHONY: bench-lang bench-cluster dev dev-release lint typecheck test rust-check rust-test
+.PHONY: bench-lang bench-cluster dev dev-release install-hooks lint typecheck test rust-check rust-test
 
 bench-lang:
 	uv run python -m chunkhound.tools.eval_search \
@@ -29,8 +29,11 @@ dev:
 dev-release:
 	rm -rf target/wheels/ && uv run maturin build --release --out target/wheels/ && uv run python scripts/install_native.py && uv run pytest tests/test_smoke.py -v -n auto
 
+install-hooks:
+	uv run python scripts/pre_commit.py install
+
 lint:
-	uv run ruff check chunkhound
+	uv run ruff check chunkhound scripts tests
 
 typecheck:
 	uv run mypy chunkhound

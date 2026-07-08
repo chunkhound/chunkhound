@@ -1,11 +1,12 @@
 """Tests for Lua language parser."""
 
-import pytest
 from pathlib import Path
 
+import pytest
+
 from chunkhound.core.types.common import FileId, Language
-from chunkhound.parsers.parser_factory import get_parser_factory
 from chunkhound.parsers.mappings.lua import LuaMapping
+from chunkhound.parsers.parser_factory import get_parser_factory
 
 
 class TestLuaMapping:
@@ -155,7 +156,9 @@ end
         # Check for some expected function names
         expected_names = ["greet", "calculateSum", "processData"]
         found = sum(1 for name in expected_names if any(name in n for n in names))
-        assert found >= 2, f"Expected to find at least 2 of {expected_names}, got names: {names}"
+        assert found >= 2, (
+            f"Expected to find at least 2 of {expected_names}, got names: {names}"
+        )
 
     def test_parse_complex_fixture(self, parser):
         """Test parsing complex Lua code with game modding patterns."""
@@ -172,18 +175,24 @@ end
         names = [getattr(c, "symbol", "") for c in chunks]
         expected_names = ["calcDamage", "calcAilmentDamage", "buildOutput"]
         found = sum(1 for name in expected_names if any(name in n for n in names))
-        assert found >= 2, f"Expected to find at least 2 of {expected_names}, got names: {names}"
+        assert found >= 2, (
+            f"Expected to find at least 2 of {expected_names}, got names: {names}"
+        )
 
         # Verify we can find the complex data tables
         table_names = ["dmgTypeList", "dmgTypeFlags", "ailmentData"]
         table_found = sum(1 for name in table_names if any(name in n for n in names))
-        assert table_found >= 1, f"Expected to find at least 1 of {table_names}, got names: {names}"
+        assert table_found >= 1, (
+            f"Expected to find at least 1 of {table_names}, got names: {names}"
+        )
 
     def test_parse_method_style_functions_captured(self, parser, tmp_path):
         """Test that method-style functions (colon and dot syntax) are captured.
 
-        Note: cAST may merge adjacent functions of the same kind for information density.
-        The key is that the full method names are extracted correctly at the query level,
+        Note: cAST may merge adjacent functions of the
+        same kind for information density.
+        The key is that the full method names are
+        extracted correctly at the query level,
         which can be verified by checking both symbol names and content.
         """
         code = """
@@ -206,14 +215,20 @@ end
 
         # Check that dot-style method is captured (in name or content)
         dot_style_found = (
-            any("MyModule.staticMethod" in name or "staticMethod" in name for name in names)
+            any(
+                "MyModule.staticMethod" in name or "staticMethod" in name
+                for name in names
+            )
             or "MyModule.staticMethod" in all_content
         )
         assert dot_style_found, f"Expected dot-style method in {names} or content"
 
         # Check that colon-style method is captured (in name or content)
         colon_style_found = (
-            any("MyModule:instanceMethod" in name or "instanceMethod" in name for name in names)
+            any(
+                "MyModule:instanceMethod" in name or "instanceMethod" in name
+                for name in names
+            )
             or "MyModule:instanceMethod" in all_content
         )
         assert colon_style_found, f"Expected colon-style method in {names} or content"

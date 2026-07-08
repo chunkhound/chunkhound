@@ -1250,11 +1250,13 @@ class TestComprehensiveFixture:
     def test_fixture_all_chunks_have_language_node_type(
         self, twincat_parser, comprehensive_fixture
     ):
-        """Test all chunks have language_node_type set (indicates TwinCAT/Lark origin)."""
+        """Test all chunks have language_node_type set
+        (indicates TwinCAT/Lark origin)."""
         chunks = extract_chunks_from_file(twincat_parser, comprehensive_fixture)
         assert_no_parse_errors(twincat_parser)
         for chunk in chunks:
-            # UniversalChunk is language-agnostic but tracks origin via language_node_type
+            # UniversalChunk is language-agnostic but
+            # tracks origin via language_node_type
             assert chunk.language_node_type is not None
             assert chunk.language_node_type.startswith("lark_")
 
@@ -1384,7 +1386,8 @@ class TestTwinCATLineNumbers:
     def test_variable_chunks_have_absolute_line_numbers(
         self, twincat_parser, program_fixture
     ):
-        """Test that variable line numbers are > 3 (not CDATA-relative starting at 1)."""
+        """Test that variable line numbers are > 3
+        (not CDATA-relative starting at 1)."""
         chunks = extract_chunks_from_file(twincat_parser, program_fixture)
         assert_no_parse_errors(twincat_parser)
         var_chunks = find_by_type(chunks, ChunkType.FIELD)
@@ -1420,7 +1423,8 @@ class TestTwinCATLineNumbers:
         assert ncycle_chunks[0].start_line == 12
 
     def test_line_numbers_are_not_cdata_relative(self, twincat_parser, program_fixture):
-        """Verify line numbers are > 3 (XML-absolute, not CDATA-relative starting at 1)."""
+        """Verify line numbers are > 3 (XML-absolute,
+        not CDATA-relative starting at 1)."""
         chunks = extract_chunks_from_file(twincat_parser, program_fixture)
         assert_no_parse_errors(twincat_parser)
 
@@ -1691,7 +1695,8 @@ FC_Test := i;
         assert len(while_loops) == 1
 
     def test_function_repeat_loop(self, twincat_parser):
-        """Test that FUNCTION with REPEAT creates BLOCK chunk with kind='repeat_loop'."""
+        """Test that FUNCTION with REPEAT creates BLOCK
+        chunk with kind='repeat_loop'."""
         xml = """<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FC_Test" Id="{1234}" SpecialFunc="None">
@@ -3238,7 +3243,8 @@ FC_WhileComplex := i;
 
 
 class TestImplementationBlockLineNumbers:
-    """Verify BLOCK chunks from Implementation have correct XML-absolute line numbers."""
+    """Verify BLOCK chunks from Implementation have correct
+    XML-absolute line numbers."""
 
     @pytest.fixture
     def function_if_fixture(self):
@@ -3464,7 +3470,8 @@ END_FOR;
             # - Line 4+: Declaration CDATA
             # - Line N+: Implementation CDATA (where blocks are)
             assert block.start_line > 3, (
-                f"Block {block.metadata.get('kind')} has start_line={block.start_line}, "
+                f"Block {block.metadata.get('kind')} "
+                f"has start_line={block.start_line}, "
                 "which suggests CDATA-relative numbering"
             )
 
@@ -3663,7 +3670,9 @@ class TestPropertyExtraction:
         chunks = extract_chunks_from_file(twincat_parser, property_fixture)
         assert_no_parse_errors(twincat_parser)
         property_chunks = find_by_type(chunks, ChunkType.PROPERTY)
-        # Value: decl + get + set = 3, ReadOnlyStatus: decl + get = 2, Name: decl + get + set = 3 = 8 total
+        # Value: decl + get + set = 3
+        # ReadOnlyStatus: decl + get = 2
+        # Name: decl + get + set = 3 = 8 total
         assert len(property_chunks) >= 7
         # Check for section suffixes
         sections = {c.metadata.get("section") for c in property_chunks}
@@ -3671,7 +3680,8 @@ class TestPropertyExtraction:
         assert "get" in sections
 
     def test_property_metadata(self, twincat_parser, property_fixture):
-        """Test PROPERTY metadata includes kind='property', pou_name, property_id, section."""
+        """Test PROPERTY metadata includes kind='property',
+        pou_name, property_id, section."""
         chunks = extract_chunks_from_file(twincat_parser, property_fixture)
         assert_no_parse_errors(twincat_parser)
         property_chunks = find_by_type(chunks, ChunkType.PROPERTY)
@@ -3898,7 +3908,8 @@ class TestChunkNameInSourceCode:
             line1 = lines[line_index]
             line2 = lines[line_index + 1] if line_index + 1 < len(lines) else ""
 
-            # For variables (kind='field'), check first two lines to cover pragma attributes
+            # For variables (kind='field'), check first two
+            # lines to cover pragma attributes
             if kind == "field":
                 assert name in line1 or name in line2, (
                     f"Variable name '{name}' (from name '{chunk.name}') "
@@ -4003,7 +4014,8 @@ class TestCommentExtraction:
         assert len(multiline) > 0, "Expected at least one multi-line block comment"
 
     def test_comment_language_node_type(self, twincat_parser, comment_fixture):
-        """Test that all comment chunks have language_node_type indicating Lark origin."""
+        """Test that all comment chunks have
+        language_node_type indicating Lark origin."""
         chunks = extract_chunks_from_file(twincat_parser, comment_fixture)
         assert_no_parse_errors(twincat_parser)
         comment_chunks = find_by_type(chunks, ChunkType.COMMENT)
@@ -4040,7 +4052,8 @@ def find_imports_by_type(
 
 
 class TestImportExtraction:
-    """Test IMPORT concept extraction (VAR_EXTERNAL, EXTENDS, IMPLEMENTS, type references)."""
+    """Test IMPORT concept extraction (VAR_EXTERNAL,
+    EXTENDS, IMPLEMENTS, type references)."""
 
     # --- VAR_EXTERNAL Tests ---
 
@@ -4180,7 +4193,8 @@ END_VAR
         xml = """<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_Motor" Id="{1234}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_Motor IMPLEMENTS I_Motor, I_Device, I_Runnable
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_Motor
+        IMPLEMENTS I_Motor, I_Device, I_Runnable
 VAR
     n : INT;
 END_VAR
@@ -4200,7 +4214,8 @@ END_VAR
         xml = """<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_Child" Id="{1234}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_Child EXTENDS FB_Parent IMPLEMENTS I_Child, I_Other
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_Child
+        EXTENDS FB_Parent IMPLEMENTS I_Child, I_Other
 VAR
     n : INT;
 END_VAR
@@ -4243,7 +4258,8 @@ END_VAR
         assert import_chunks[0].metadata["var_name"] == "fbMotor"
 
     def test_primitive_types_not_imported(self, twincat_parser):
-        """Test primitive types (BOOL, INT, REAL, etc.) don't create type_reference imports."""
+        """Test primitive types (BOOL, INT, REAL, etc.)
+        don't create type_reference imports."""
         xml = """<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_Test" Id="{1234}" SpecialFunc="None">

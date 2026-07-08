@@ -23,7 +23,8 @@ class TestExtensionConsistency:
     """Test suite for extension list synchronization."""
 
     def test_language_extensions_match_parser_factory(self):
-        """Language.get_all_extensions() must match parser_factory.EXTENSION_TO_LANGUAGE.
+        """Language.get_all_extensions() must match
+        parser_factory.EXTENSION_TO_LANGUAGE.
 
         This is the primary consistency check - ensures the Language enum's
         get_all_extensions() method returns exactly the same extensions as
@@ -284,14 +285,27 @@ class TestExtensionCoverage:
     @pytest.mark.parametrize(
         "ext",
         [
-            ".py", ".pyi", ".pyw",  # Python variants
-            ".js", ".mjs", ".cjs",  # JavaScript variants
-            ".ts", ".mts", ".cts",  # TypeScript variants
-            ".tsx", ".jsx",  # React variants
-            ".php", ".phtml", ".php3", ".php4", ".php5", ".phps",  # PHP variants
+            ".py",
+            ".pyi",
+            ".pyw",  # Python variants
+            ".js",
+            ".mjs",
+            ".cjs",  # JavaScript variants
+            ".ts",
+            ".mts",
+            ".cts",  # TypeScript variants
+            ".tsx",
+            ".jsx",  # React variants
+            ".php",
+            ".phtml",
+            ".php3",
+            ".php4",
+            ".php5",
+            ".phps",  # PHP variants
             ".zig",  # Zig
             ".vue",  # Vue
-            ".ps1", ".psm1",  # PowerShell
+            ".ps1",
+            ".psm1",  # PowerShell
         ],
     )
     def test_language_variant_extensions_supported(self, ext):
@@ -308,7 +322,8 @@ class TestExtensionCoverage:
         )
 
     def test_all_parser_factory_extensions_have_language(self):
-        """Every extension in EXTENSION_TO_LANGUAGE must map to a valid Language enum."""
+        """Every extension in EXTENSION_TO_LANGUAGE
+        must map to a valid Language enum."""
         for ext, language in EXTENSION_TO_LANGUAGE.items():
             if ext.startswith("."):
                 assert isinstance(language, Language), (
@@ -319,7 +334,8 @@ class TestExtensionCoverage:
                 )
 
     def test_from_file_extension_covers_all_parser_extensions(self):
-        """Every extension in EXTENSION_TO_LANGUAGE must resolve via from_file_extension().
+        """Every extension in EXTENSION_TO_LANGUAGE
+        must resolve via from_file_extension().
 
         Prevents silent file skipping: files discovered by the walker must not
         return Language.UNKNOWN from the language detector.
@@ -387,7 +403,9 @@ class TestIssue277UnknownExtensions:
         )
         result = Language.from_file_extension(Path(filename))
         assert result != Language.UNKNOWN, (
-            f"Language.from_file_extension() returns UNKNOWN for {filename} ({description})"
+            f"Language.from_file_extension()"
+            f" returns UNKNOWN for {filename}"
+            f" ({description})"
         )
 
     @pytest.mark.parametrize(
@@ -406,7 +424,9 @@ class TestIssue277UnknownExtensions:
             ("Jenkinsfile", "Jenkinsfile"),
         ],
     )
-    def test_realtime_service_indexes_newly_supported_files(self, filename, description):
+    def test_realtime_service_indexes_newly_supported_files(
+        self, filename, description
+    ):
         """Realtime service must index all newly supported file types."""
         handler = SimpleEventHandler(None, None, None)
         assert handler._should_index(Path(filename)), (

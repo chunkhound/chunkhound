@@ -33,4 +33,3 @@ def build_tree_manifest(
         manifest[rel] = digest
 
     return manifest
-

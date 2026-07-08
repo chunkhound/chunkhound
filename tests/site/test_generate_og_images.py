@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 from tests.site.png_helpers import png_dimensions
-from tests.site.tsx_runner import ROOT, NPM, sanitized_subprocess_env
+from tests.site.tsx_runner import NPM, ROOT, sanitized_subprocess_env
 
 GENERATE_SCRIPT = ROOT / "site" / "scripts" / "generate-og-images.mjs"
 
@@ -48,7 +48,9 @@ def test_generates_both_pngs_from_svgs() -> None:
         for name in ("og-image-dark.png", "og-image-light.png"):
             png_path = public_dir / name
             assert png_path.exists(), f"{name} was not generated"
-            assert png_path.stat().st_size > 50, f"{name} is too small to be a valid PNG"
+            assert png_path.stat().st_size > 50, (
+                f"{name} is too small to be a valid PNG"
+            )
 
             w, h = png_dimensions(png_path)
             assert w == 1200, f"{name} width is {w}, expected 1200"
@@ -81,7 +83,9 @@ def test_invalid_svg_errors() -> None:
 
 def test_package_scripts_keep_prepare_site_only_for_dev_and_build() -> None:
     """Dev/build keep the shared prepare step while preview remains opt-in."""
-    package_json = json.loads((ROOT / "site" / "package.json").read_text(encoding="utf-8"))
+    package_json = json.loads(
+        (ROOT / "site" / "package.json").read_text(encoding="utf-8")
+    )
     scripts = package_json["scripts"]
 
     assert scripts["generate:og-images"] == "node scripts/generate-og-images.mjs"

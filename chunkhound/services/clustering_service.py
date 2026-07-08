@@ -239,7 +239,7 @@ class ClusteringService:
 
         # Count native clusters and outliers before reassignment
         unique_labels = set(labels)
-        num_native_clusters = len([l for l in unique_labels if l >= 0])
+        num_native_clusters = len([label for label in unique_labels if label >= 0])
         num_outliers = int(np.sum(labels == -1))
 
         # Reassign outliers to nearest cluster

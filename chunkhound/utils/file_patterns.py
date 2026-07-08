@@ -1,7 +1,8 @@
 """File pattern matching utilities for directory traversal.
 
 # FILE_CONTEXT: Shared pattern matching logic for file discovery
-# ROLE: Provides picklable helper functions for both sequential and parallel file discovery
+# ROLE: Provides picklable helper functions for both
+# sequential and parallel file discovery
 # RATIONALE: Eliminates code duplication between worker processes and main thread
 #
 # PERFORMANCE OPTIMIZATIONS:
@@ -22,11 +23,14 @@ from chunkhound.core.utils.path_utils import get_relative_path_safe
 
 try:
     from chunkhound_native import scan_files as _rust_scan_files
+
     _RUST_AVAILABLE = True
 except ImportError:
     _RUST_AVAILABLE = False
 
-_USE_RUST = os.environ.get("CHUNKHOUND_USE_RUST", "1" if _RUST_AVAILABLE else "0") == "1"
+_USE_RUST = (
+    os.environ.get("CHUNKHOUND_USE_RUST", "1" if _RUST_AVAILABLE else "0") == "1"
+)
 _log = logging.getLogger(__name__)
 
 HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
@@ -167,7 +171,8 @@ def _extract_include_prefixes(patterns: list[str]) -> set[str]:
 
 
 def _can_prune_dir_by_prefix(include_prefixes: set[str], current_rel: str) -> bool:
-    """Return True if directory `current_rel` (root-relative) is outside all include anchors."""
+    """Return True if directory `current_rel` (root-relative)
+    is outside all include anchors."""
     if not include_prefixes:
         return False
     if current_rel in ("", "."):
@@ -421,7 +426,8 @@ def scan_directory_files(
                 ):
                     continue
 
-                # Fast include prefilter: avoid regex matching when file can't possibly match
+                # Fast include prefilter: avoid regex matching
+                # when file can't possibly match
                 allow_exts, allow_names, has_complex = _summarize_include_patterns(
                     patterns
                 )
@@ -475,7 +481,7 @@ def walk_directory_tree(
         if (
             not _has_complex
             and (_exts or _names)
-            and max_files is None       # Rust path doesn't support max_files cap
+            and max_files is None  # Rust path doesn't support max_files cap
         ):
             _gitignore_excludes = (
                 [_fnmatch_to_gitignore(p) for p in exclude_patterns]
@@ -491,7 +497,10 @@ def walk_directory_tree(
             )
             _log.debug(
                 "[RUST_SCANNER] scan_files root=%s exts=%s names=%s files=%d",
-                start_path, sorted(_exts), sorted(_names), len(_raw),
+                start_path,
+                sorted(_exts),
+                sorted(_names),
+                len(_raw),
             )
             # Rust's native gitignore can exclude nested git repos that appear in the
             # parent .gitignore. Detect such repos via the ignore engine's repo_roots
@@ -515,8 +524,11 @@ def walk_directory_tree(
                             exact_names=list(_names) if _names else None,
                         )
                         _log.debug(
-                            "[RUST_SCANNER] nested-repo boundary re-scan: root=%s files=%d",
-                            _nr_str, len(_extra),
+                            "[RUST_SCANNER] nested-repo"
+                            " boundary re-scan:"
+                            " root=%s files=%d",
+                            _nr_str,
+                            len(_extra),
                         )
                         for _p in _extra:
                             if _p not in _raw_set:
@@ -525,11 +537,15 @@ def walk_directory_tree(
             results = [Path(p) for p in _raw]
             # ignore_engine is applied as a file-level post-filter only — it does not
             # prune directory subtrees the way the Python path does. The ignore crate's
-            # native .gitignore handling and skip_dirs cover the common heavy directories;
+            # native .gitignore handling and skip_dirs
+            # cover the common heavy directories;
             # any additional engine rules that would prune directories are still correct
-            # (files inside are filtered here) but incur the cost of descending into them.
+            # (files inside are filtered here) but
+            # incur the cost of descending into them.
             if ignore_engine is not None and hasattr(ignore_engine, "matches"):
-                results = [p for p in results if not ignore_engine.matches(p, is_dir=False)]
+                results = [
+                    p for p in results if not ignore_engine.matches(p, is_dir=False)
+                ]
             return results, parent_gitignores.copy()
 
     files = []
@@ -647,7 +663,8 @@ def walk_directory_tree(
                 ):
                     continue
 
-            # Fast include prefilter: skip files that cannot match simple include patterns
+            # Fast include prefilter: skip files that
+            # cannot match simple include patterns
             if not inc_has_complex:
                 if (filename not in inc_allow_names) and (
                     file_path.suffix not in inc_allow_exts
@@ -692,9 +709,11 @@ def walk_subtree_worker(
     use_inode_ordering: bool = False,
     ignore_engine_args: object | None = None,
 ) -> tuple[list[Path], list[str]]:
-    """Worker function for parallel directory traversal (must be module-level for pickling).
+    """Worker function for parallel directory traversal
+    (must be module-level for pickling).
 
-    MULTIPROCESSING: This function must remain at module level to be picklable by ProcessPoolExecutor.
+    MULTIPROCESSING: This function must remain at
+    module level to be picklable by ProcessPoolExecutor.
     Each worker process creates its own pattern cache to avoid sharing state.
 
     RACE CONDITION SAFETY: Gracefully handles directories deleted during traversal.
@@ -705,7 +724,8 @@ def walk_subtree_worker(
         patterns: File patterns to include
         exclude_patterns: Patterns to exclude
         parent_gitignores: Pre-loaded gitignore patterns from parent directories
-        use_inode_ordering: Sort directories by inode for disk locality (HDD optimization)
+        use_inode_ordering: Sort directories by inode
+            for disk locality (HDD optimization)
 
     Returns:
         Tuple of (list of file paths found, list of error messages)

@@ -1,0 +1,48 @@
+name: Cross-OS Sidecar-Free DB Portability
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'ch-portability-deploy' || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  create-portable-db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --locked
+      - name: Create sidecar-free portable test database
+        run: uv run python tests/scripts/create_portable_test_db.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-test-db
+          path: .chunkhound/
+          include-hidden-files: true
+
+  verify-portable-db:
+    needs: create-portable-db
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable-test-db
+          path: .chunkhound/
+      - name: Verify sidecar-free DB works on this OS
+        run: uv run python tests/scripts/verify_portable_db.py

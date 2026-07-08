@@ -1,7 +1,6 @@
 from chunkhound.code_mapper import pipeline as code_mapper_pipeline
 from chunkhound.code_mapper import render as code_mapper_render
-from chunkhound.code_mapper.models import CodeMapperPOI
-from chunkhound.code_mapper.models import AgentDocMetadata
+from chunkhound.code_mapper.models import AgentDocMetadata, CodeMapperPOI
 
 
 def _meta() -> AgentDocMetadata:
@@ -37,7 +36,10 @@ def test_render_combined_document_includes_sections_and_coverage() -> None:
         scope_total_chunks=4,
     )
     poi_sections = [
-        (CodeMapperPOI(mode="architectural", text="Core Flow: details"), {"answer": "Section body"})
+        (
+            CodeMapperPOI(mode="architectural", text="Core Flow: details"),
+            {"answer": "Section body"},
+        )
     ]
 
     doc = code_mapper_render.render_combined_document(

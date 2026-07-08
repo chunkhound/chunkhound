@@ -1,9 +1,7 @@
 """Unit tests for chunkhound.core.git_diff.parser."""
-import pytest
 
 from chunkhound.core.git_diff.parser import parse_diff_to_chunks
 from chunkhound.core.types.common import ChunkType, Language
-
 
 SINGLE_HUNK_DIFF = """\
 diff --git a/foo/bar.py b/foo/bar.py
@@ -148,8 +146,7 @@ def test_oversized_hunk_splits_into_parts() -> None:
         "index abc..def 100644\n"
         "--- a/big.json\n"
         "+++ b/big.json\n"
-        f"@@ -0,0 +1,1000 @@ root\n"
-        + big_body
+        "@@ -0,0 +1,1000 @@ root\n" + big_body
     )
     chunks = parse_diff_to_chunks(diff)
     assert len(chunks) > 1, "oversized hunk must produce multiple chunks"
@@ -165,13 +162,14 @@ def test_oversized_hunk_fragments_have_unique_start_lines() -> None:
         "index abc..def 100644\n"
         "--- a/big.json\n"
         "+++ b/big.json\n"
-        "@@ -0,0 +1,1000 @@ root\n"
-        + "".join(big_lines)
+        "@@ -0,0 +1,1000 @@ root\n" + "".join(big_lines)
     )
     chunks = parse_diff_to_chunks(diff)
     assert len(chunks) > 1
     start_lines = [c.start_line for c in chunks]
-    assert len(start_lines) == len(set(start_lines)), "split fragments must have unique start_lines"
+    assert len(start_lines) == len(set(start_lines)), (
+        "split fragments must have unique start_lines"
+    )
 
 
 def test_split_fragment_start_lines_reflect_actual_diff_lines() -> None:
@@ -189,8 +187,7 @@ def test_split_fragment_start_lines_reflect_actual_diff_lines() -> None:
         "diff --git a/a.py b/a.py\n"
         "--- a/a.py\n"
         "+++ b/a.py\n"
-        f"@@ -98,60 +{hunk_start},60 @@ fn\n"
-        + "".join(lines)
+        f"@@ -98,60 +{hunk_start},60 @@ fn\n" + "".join(lines)
     )
     # max_chunk_chars=40: the @@ header (~24 chars) + first addition fills 1 part;
     # use a small value to make splits predictable.
@@ -202,27 +199,27 @@ def test_split_fragment_start_lines_reflect_actual_diff_lines() -> None:
     # At minimum, part 2 must start at line >= hunk_start + 1 (not hunk_start + 1
     # from ordinal, but the actual count of additions in part 1).
     for i in range(1, len(chunks)):
-        prev_end = chunks[i - 1].end_line
+        chunks[i - 1].end_line
         curr_start = chunks[i].start_line
         # Each fragment must start strictly after the previous one ends.
         assert curr_start > chunks[i - 1].start_line, (
-            f"part {i+1} start_line ({curr_start}) must be > part {i} start_line "
-            f"({chunks[i-1].start_line}); got ordinal instead of real line number"
+            f"part {i + 1} start_line ({curr_start}) must be > part {i} start_line "
+            f"({chunks[i - 1].start_line}); got ordinal instead of real line number"
         )
         # start_line must be within the hunk range
         assert hunk_start <= curr_start <= hunk_start + 59, (
-            f"part {i+1} start_line {curr_start} outside hunk range [{hunk_start}, {hunk_start+59}]"
+            f"part {i + 1} start_line {curr_start}"
+            f" outside hunk range [{hunk_start}, {hunk_start + 59}]"
         )
 
 
 def test_oversized_hunk_custom_max() -> None:
-    lines = [f"+x\n"] * 50  # 50 × 3 chars = 150 chars
+    lines = ["+x\n"] * 50  # 50 × 3 chars = 150 chars
     diff = (
         "diff --git a/a.py b/a.py\n"
         "--- a/a.py\n"
         "+++ b/a.py\n"
-        "@@ -1,0 +1,50 @@ fn\n"
-        + "".join(lines)
+        "@@ -1,0 +1,50 @@ fn\n" + "".join(lines)
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=40)
     assert len(chunks) > 1
@@ -243,8 +240,7 @@ def test_single_overlong_line_split() -> None:
         "diff --git a/icon.svg b/icon.svg\n"
         "--- a/icon.svg\n"
         "+++ b/icon.svg\n"
-        "@@ -0,0 +1,1 @@\n"
-        + long_line
+        "@@ -0,0 +1,1 @@\n" + long_line
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=10_000)
     assert len(chunks) > 1
@@ -259,8 +255,7 @@ def test_single_overlong_line_fragments_report_hunk_start_as_start_line() -> Non
         "diff --git a/icon.svg b/icon.svg\n"
         "--- a/icon.svg\n"
         "+++ b/icon.svg\n"
-        "@@ -0,0 +42,1 @@\n"
-        + long_line
+        "@@ -0,0 +42,1 @@\n" + long_line
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=10_000)
     assert len(chunks) > 1
@@ -277,15 +272,17 @@ def test_single_overlong_line_fragments_end_line_equals_start_line() -> None:
         "diff --git a/icon.svg b/icon.svg\n"
         "--- a/icon.svg\n"
         "+++ b/icon.svg\n"
-        "@@ -0,0 +42,1 @@\n"
-        + long_line
+        "@@ -0,0 +42,1 @@\n" + long_line
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=10_000)
     assert len(chunks) > 1
     for c in chunks:
         assert c.end_line == c.start_line, (
-            f"fragment {c.symbol!r}: end_line={c.end_line} != start_line={c.start_line}; "
-            "single-line hunk fragments must report their actual line, not the full hunk tail"
+            f"fragment {c.symbol!r}:"
+            f" end_line={c.end_line}"
+            f" != start_line={c.start_line};"
+            " single-line hunk fragments must report"
+            " their actual line, not the full hunk tail"
         )
 
 
@@ -306,8 +303,7 @@ def test_multi_line_split_intermediate_fragments_have_per_part_end_lines() -> No
         "diff --git a/a.py b/a.py\n"
         "--- a/a.py\n"
         "+++ b/a.py\n"
-        "@@ -98,10 +100,10 @@ fn\n"
-        + "".join(lines)
+        "@@ -98,10 +100,10 @@ fn\n" + "".join(lines)
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=30)
     assert len(chunks) >= 2, "expected at least 2 split fragments"
@@ -321,18 +317,19 @@ def test_multi_line_split_intermediate_fragments_have_per_part_end_lines() -> No
     # Every intermediate fragment must end strictly before hunk_end.
     for i, c in enumerate(chunks[:-1]):
         assert c.end_line < hunk_end, (
-            f"part {i+1} end_line={c.end_line} equals hunk_end={hunk_end}; "
+            f"part {i + 1} end_line={c.end_line} equals hunk_end={hunk_end}; "
             "intermediate fragments must not claim the full hunk's tail"
         )
     # Last fragment must end exactly at hunk_end.
     assert chunks[-1].end_line == hunk_end, (
         f"last fragment end_line={chunks[-1].end_line} should equal hunk_end={hunk_end}"
     )
-    # Adjacent fragments must be strictly contiguous: prev.end_line + 1 == next.start_line
+    # Adjacent fragments must be strictly contiguous:
+    # prev.end_line + 1 == next.start_line
     for i in range(len(chunks) - 1):
         assert chunks[i].end_line + 1 == chunks[i + 1].start_line, (
-            f"gap/overlap between part {i+1} (end={chunks[i].end_line}) "
-            f"and part {i+2} (start={chunks[i+1].start_line})"
+            f"gap/overlap between part {i + 1} (end={chunks[i].end_line}) "
+            f"and part {i + 2} (start={chunks[i + 1].start_line})"
         )
 
 
@@ -350,8 +347,7 @@ def test_split_fragments_cover_full_hunk_range_contiguously() -> None:
         "diff --git a/a.py b/a.py\n"
         "--- a/a.py\n"
         "+++ b/a.py\n"
-        "@@ -98,10 +100,10 @@ fn\n"
-        + "".join(lines)
+        "@@ -98,10 +100,10 @@ fn\n" + "".join(lines)
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=90)
     assert len(chunks) >= 2
@@ -365,9 +361,10 @@ def test_split_fragments_cover_full_hunk_range_contiguously() -> None:
     assert chunks[-1].end_line == hunk_end, (
         f"last fragment end_line={chunks[-1].end_line}, expected {hunk_end}"
     )
-    # Adjacent fragments must be strictly contiguous: prev.end_line + 1 == next.start_line
+    # Adjacent fragments must be strictly contiguous:
+    # prev.end_line + 1 == next.start_line
     for i in range(len(chunks) - 1):
         assert chunks[i].end_line + 1 == chunks[i + 1].start_line, (
-            f"gap/overlap between part {i+1} (end={chunks[i].end_line}) "
-            f"and part {i+2} (start={chunks[i+1].start_line})"
+            f"gap/overlap between part {i + 1} (end={chunks[i].end_line}) "
+            f"and part {i + 2} (start={chunks[i + 1].start_line})"
         )

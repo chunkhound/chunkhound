@@ -47,8 +47,10 @@ class DuckDBChunkRepository:
                 # Fallback for tests
                 result = self._connection_manager.connection.execute(
                     """
-                    INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
-                                      start_byte, end_byte, language, metadata)
+                    INSERT INTO chunks
+                    (file_id, chunk_type, symbol, code,
+                     start_line, end_line, start_byte,
+                     end_byte, language, metadata)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     RETURNING id
                 """,
@@ -105,8 +107,10 @@ class DuckDBChunkRepository:
             # Use single bulk INSERT with RETURNING for optimal performance
             values_sql = ", ".join(values_clauses)
             query = f"""
-                INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
-                                  start_byte, end_byte, language, metadata)
+                INSERT INTO chunks
+                (file_id, chunk_type, symbol, code,
+                 start_line, end_line, start_byte,
+                 end_byte, language, metadata)
                 VALUES {values_sql}
                 RETURNING id
             """
@@ -144,8 +148,11 @@ class DuckDBChunkRepository:
             else:
                 result = self._connection_manager.connection.execute(
                     """
-                    SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
-                           start_byte, end_byte, language, created_at, updated_at, metadata
+                    SELECT id, file_id, chunk_type,
+                           symbol, code, start_line,
+                           end_line, start_byte, end_byte,
+                           language, created_at,
+                           updated_at, metadata
                     FROM chunks WHERE id = ?
                 """,
                     [chunk_id],
@@ -205,8 +212,11 @@ class DuckDBChunkRepository:
             else:
                 results = self._connection_manager.connection.execute(
                     """
-                    SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
-                           start_byte, end_byte, language, created_at, updated_at, metadata
+                    SELECT id, file_id, chunk_type,
+                           symbol, code, start_line,
+                           end_line, start_byte, end_byte,
+                           language, created_at,
+                           updated_at, metadata
                     FROM chunks WHERE file_id = ?
                     ORDER BY start_line
                 """,
@@ -421,7 +431,7 @@ class DuckDBChunkRepository:
             return []
 
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
-        """Get all chunks with their metadata including file paths (provider-agnostic)."""
+        """Get all chunks with metadata including file paths."""
         if self.connection is None:
             raise RuntimeError("No database connection")
 

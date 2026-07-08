@@ -4,8 +4,6 @@ This module tests the filter_chunks_by_elbow function which provides
 unified elbow-based filtering for both BFS and WideCoverage strategies.
 """
 
-import pytest
-
 from chunkhound.services.research.shared.exploration.elbow_filter import (
     filter_chunks_by_elbow,
 )
@@ -135,7 +133,9 @@ class TestFilterChunksByElbow:
 
         # Verify output is sorted descending
         scores = [c["score"] for c in filtered]
-        assert scores == sorted(scores, reverse=True), "Output should be sorted descending"
+        assert scores == sorted(scores, reverse=True), (
+            "Output should be sorted descending"
+        )
         assert filtered[0]["chunk_id"] == "c1", "Highest score should be first"
 
     def test_three_chunks_minimum_for_elbow_detection(self):
@@ -277,10 +277,30 @@ class TestFilterChunksByElbowIntegration:
         BFS chunks have 'score' from semantic search.
         """
         chunks = [
-            {"chunk_id": "c1", "score": 0.92, "file_path": "src/main.py", "content": "def main()"},
-            {"chunk_id": "c2", "score": 0.88, "file_path": "src/utils.py", "content": "def helper()"},
-            {"chunk_id": "c3", "score": 0.45, "file_path": "tests/test.py", "content": "def test()"},
-            {"chunk_id": "c4", "score": 0.42, "file_path": "docs/readme.md", "content": "# Docs"},
+            {
+                "chunk_id": "c1",
+                "score": 0.92,
+                "file_path": "src/main.py",
+                "content": "def main()",
+            },
+            {
+                "chunk_id": "c2",
+                "score": 0.88,
+                "file_path": "src/utils.py",
+                "content": "def helper()",
+            },
+            {
+                "chunk_id": "c3",
+                "score": 0.45,
+                "file_path": "tests/test.py",
+                "content": "def test()",
+            },
+            {
+                "chunk_id": "c4",
+                "score": 0.42,
+                "file_path": "docs/readme.md",
+                "content": "# Docs",
+            },
         ]
 
         filtered, stats = filter_chunks_by_elbow(chunks, score_key="score")

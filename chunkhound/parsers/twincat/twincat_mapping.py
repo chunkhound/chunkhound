@@ -25,15 +25,25 @@ from chunkhound.parsers.universal_engine import UniversalChunk
 _PRIMITIVE_TYPES = TwinCATParser.PRIMITIVE_TYPES
 
 # IEC 61131-3 Standard Library function blocks to skip
-_STDLIB_TYPES = frozenset({
-    "TON", "TOF", "TP", "RTC",           # Timers
-    "CTU", "CTD", "CTUD",                # Counters
-    "R_TRIG", "F_TRIG",                  # Triggers
-    "SR", "RS",                          # Flip-flops
-})
+_STDLIB_TYPES = frozenset(
+    {
+        "TON",
+        "TOF",
+        "TP",
+        "RTC",  # Timers
+        "CTU",
+        "CTD",
+        "CTUD",  # Counters
+        "R_TRIG",
+        "F_TRIG",  # Triggers
+        "SR",
+        "RS",  # Flip-flops
+    }
+)
 
 # File extension for TcPOU files (Function Blocks, Interfaces, Programs, Functions)
 _TWINCAT_EXTENSION = ".TcPOU"
+
 
 @functools.lru_cache(maxsize=1)
 def _get_parser() -> TwinCATParser:

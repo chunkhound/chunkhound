@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
 GLOBAL_CSS = ROOT / "site" / "src" / "styles" / "global.css"
@@ -94,7 +93,9 @@ def test_astro_code_tokens_are_intentionally_pinned_to_dark_shiki_values() -> No
 
 def test_rendered_comment_token_meets_aa_contrast_on_shared_code_surfaces() -> None:
     css = GLOBAL_CSS.read_text(encoding="utf-8")
-    getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(encoding="utf-8")
+    getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(
+        encoding="utf-8"
+    )
     dark_tokens = _extract_tokens(_extract_block(css, ":root"))
     light_tokens = _extract_tokens(_extract_block(css, '[data-theme="light"]'))
     comment_token = _extract_shiki_dark_token(

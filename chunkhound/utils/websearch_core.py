@@ -128,8 +128,7 @@ def _check_chrome_version(chrome_path: str) -> None:
         ).strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         raise RuntimeError(
-            f"--version probe at {chrome_path!r} failed: "
-            f"{type(e).__name__}: {e}"
+            f"--version probe at {chrome_path!r} failed: {type(e).__name__}: {e}"
         ) from e
     major = next(
         (int(tok.split(".")[0]) for tok in out.split() if tok.split(".")[0].isdigit()),
@@ -169,6 +168,7 @@ def _resolve_chrome_path(
                 deferred[p] = e
     try:
         from zendriver.core.config import find_executable
+
         resolved = find_executable("auto")
     except Exception:
         # Broad catch: zendriver's launch-failure surface is documented as
@@ -337,8 +337,14 @@ def _html_to_markdown(html_text: str) -> str:
     return _Converter(
         strip=[
             "head",
-            "nav", "footer", "header", "aside",
-            "form", "button", "iframe", "noscript",
+            "nav",
+            "footer",
+            "header",
+            "aside",
+            "form",
+            "button",
+            "iframe",
+            "noscript",
         ],
         heading_style="ATX",
     ).convert(html_text)
@@ -502,8 +508,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
 
         response = await asyncio.wait_for(main_response, timeout=30)
         ct = _normalize_ct(
-            response.headers.get("content-type")
-            or response.headers.get("Content-Type")
+            response.headers.get("content-type") or response.headers.get("Content-Type")
         )
 
         if ct == "application/pdf":
@@ -527,9 +532,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
                     tab.send(cdp.network.get_cookies(urls=[pdf_url])),
                     timeout=10,
                 )
-                cookie_header = "; ".join(
-                    f"{c.name}={c.value}" for c in cookies
-                )
+                cookie_header = "; ".join(f"{c.name}={c.value}" for c in cookies)
             except asyncio.TimeoutError:
                 cookie_header = ""
             # Close the tab *before* urllib so Chrome stops holding the
@@ -550,7 +553,10 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             # the literal avoids a silent decode-behavior change there.
             extra = {"Cookie": cookie_header} if cookie_header else None
             _, body, _ = await asyncio.to_thread(
-                _fetch_url, pdf_url, extra, False  # follow_redirects=False
+                _fetch_url,
+                pdf_url,
+                extra,
+                False,  # follow_redirects=False
             )
             return "application/pdf", body, "utf-8"
 
@@ -587,8 +593,9 @@ async def _fetch_one(
             if ct == "application/pdf":
                 ext, content = _decode_pdf_or_fallback_html(body, charset)
             elif ct == "text/html":
-                ext, content = ".md", _html_to_markdown(
-                    body.decode(charset, errors="replace")
+                ext, content = (
+                    ".md",
+                    _html_to_markdown(body.decode(charset, errors="replace")),
                 )
             else:
                 raise ValueError(f"Unsupported content-type: {ct!r}")
@@ -622,8 +629,13 @@ async def fetch_and_save(
     async def _run(browser: zd.Browser | None) -> None:
         tasks = [
             _fetch_one(
-                url, tmpdir, browser, progress_callback, warning_callback,
-                semaphore, mapping,
+                url,
+                tmpdir,
+                browser,
+                progress_callback,
+                warning_callback,
+                semaphore,
+                mapping,
             )
             for url in urls
         ]
@@ -771,9 +783,7 @@ async def search_multi(
             else None
         )
         try:
-            batch = await asyncio.to_thread(
-                search, q, limit, per_query_progress
-            )
+            batch = await asyncio.to_thread(search, q, limit, per_query_progress)
         except urllib.error.URLError as e:
             if failure_callback is not None:
                 failure_callback(q, e)
@@ -817,11 +827,13 @@ def build_quickresearch_argv_core(
     """
     cmd: list[str] = [
         sys.executable,
-        "-m", "chunkhound.api.cli.main",
+        "-m",
+        "chunkhound.api.cli.main",
         "_quickresearch",
         query,
         str(tmpdir),
-        "--parent-pid", str(parent_pid),
+        "--parent-pid",
+        str(parent_pid),
     ]
     source = config.config_file or config.local_config_file
     if source is not None:

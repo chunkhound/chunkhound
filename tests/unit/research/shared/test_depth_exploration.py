@@ -14,9 +14,10 @@ Tests focus on synchronous helper methods:
 import pytest
 
 from chunkhound.core.config.research_config import ResearchConfig
-from chunkhound.services.research.shared.depth_exploration import DepthExplorationService
+from chunkhound.services.research.shared.depth_exploration import (
+    DepthExplorationService,
+)
 from tests.fixtures.fake_providers import FakeLLMProvider
-
 
 # -----------------------------------------------------------------------------
 # Fixtures
@@ -85,7 +86,9 @@ def research_config():
 
 
 @pytest.fixture
-def depth_service(mock_llm_manager, mock_embedding_manager, mock_db_services, research_config):
+def depth_service(
+    mock_llm_manager, mock_embedding_manager, mock_db_services, research_config
+):
     """Create depth exploration service with mocked dependencies."""
     return DepthExplorationService(
         llm_manager=mock_llm_manager,
@@ -468,9 +471,7 @@ class TestGenerateExplorationQueries:
         self, depth_service, fake_llm_provider
     ):
         """Should pass configured completion budget to query-generation LLM call."""
-        depth_service._config.depth_exploration_max_completion_tokens = (
-            12_345
-        )
+        depth_service._config.depth_exploration_max_completion_tokens = 12_345
         fragments = [
             {"chunk_id": "c1", "content": "def main(): pass", "file_path": "test.py"}
         ]
@@ -517,7 +518,9 @@ class TestGenerateExplorationQueries:
             fake_llm_provider.complete_structured = original_complete
 
     @pytest.mark.asyncio
-    async def test_handles_empty_queries_response(self, depth_service, fake_llm_provider):
+    async def test_handles_empty_queries_response(
+        self, depth_service, fake_llm_provider
+    ):
         """Should handle LLM returning empty queries array."""
         original_complete = fake_llm_provider.complete_structured
 
@@ -624,9 +627,7 @@ class TestEdgeCases:
             {"chunk_id": f"c{i}", "rerank_score": 0.5 + i * 0.01} for i in range(50)
         ]
         # Overlap with half of coverage
-        exploration = [
-            {"chunk_id": f"c{i}", "rerank_score": 0.9} for i in range(25)
-        ]
+        exploration = [{"chunk_id": f"c{i}", "rerank_score": 0.9} for i in range(25)]
 
         merged = depth_service._merge_coverage(covered, exploration)
 

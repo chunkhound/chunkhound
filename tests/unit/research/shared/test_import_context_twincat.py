@@ -18,7 +18,6 @@ import pytest
 from chunkhound.parsers.parser_factory import ParserFactory
 from chunkhound.services.research.shared.import_context import ImportContextService
 
-
 # TcPOU XML fixtures
 VAR_EXTERNAL_FIXTURE = """<?xml version="1.0"?>
 <TcPlcObject Version="1.1.0.1">
@@ -78,7 +77,9 @@ END_VAR
 
 TYPE_REFERENCE_FIXTURE = """<?xml version="1.0"?>
 <TcPlcObject Version="1.1.0.1">
-  <POU Name="FB_Controller" Id="{12345678-1234-1234-1234-123456789abc}" SpecialFunc="None">
+  <POU Name="FB_Controller"
+       Id="{12345678-1234-1234-1234-123456789abc}"
+       SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_Controller
 VAR
     fbDevice : FB_Device;
@@ -94,8 +95,13 @@ END_VAR
 
 COMBINED_FIXTURE = """<?xml version="1.0"?>
 <TcPlcObject Version="1.1.0.1">
-  <POU Name="FB_Combined" Id="{12345678-1234-1234-1234-123456789abc}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_Combined EXTENDS FB_Base IMPLEMENTS I_Motor, I_Device
+  <POU Name="FB_Combined"
+       Id="{12345678-1234-1234-1234-123456789abc}"
+       SpecialFunc="None">
+    <Declaration><![CDATA[
+      FUNCTION_BLOCK FB_Combined
+      EXTENDS FB_Base
+      IMPLEMENTS I_Motor, I_Device
 VAR_EXTERNAL
     nGlobal : DINT;
 END_VAR
@@ -122,7 +128,9 @@ END_FUNCTION_BLOCK
 
 PRIMITIVES_ONLY_FIXTURE = """<?xml version="1.0"?>
 <TcPlcObject Version="1.1.0.1">
-  <POU Name="FB_Primitives" Id="{12345678-1234-1234-1234-123456789abc}" SpecialFunc="None">
+  <POU Name="FB_Primitives"
+       Id="{12345678-1234-1234-1234-123456789abc}"
+       SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_Primitives
 VAR
     bFlag : BOOL;
@@ -202,18 +210,14 @@ class TestExtendsExtraction:
 
     def test_extracts_extends_import(self, import_context_service):
         """Should extract EXTENDS clause as import."""
-        imports = import_context_service.get_file_imports(
-            "test.TcPOU", EXTENDS_FIXTURE
-        )
+        imports = import_context_service.get_file_imports("test.TcPOU", EXTENDS_FIXTURE)
 
         import_text = "\n".join(imports)
         assert "FB_Base" in import_text
 
     def test_extends_marked_as_inheritance_type(self, import_context_service):
         """EXTENDS import should be identifiable in output."""
-        imports = import_context_service.get_file_imports(
-            "test.TcPOU", EXTENDS_FIXTURE
-        )
+        imports = import_context_service.get_file_imports("test.TcPOU", EXTENDS_FIXTURE)
 
         # Should have at least one import containing FB_Base
         assert any("FB_Base" in imp for imp in imports)
@@ -277,7 +281,9 @@ class TestTypeReferenceExtraction:
         imports = import_context_service.get_file_imports(
             "test.TcPOU", PRIMITIVES_ONLY_FIXTURE
         )
-        assert imports == [], f"Expected no imports for primitives-only fixture, got: {imports}"
+        assert imports == [], (
+            f"Expected no imports for primitives-only fixture, got: {imports}"
+        )
 
 
 class TestCombinedExtraction:
@@ -316,9 +322,7 @@ class TestCaching:
         )
 
         # Second call with same path (content ignored, uses cache)
-        imports2 = import_context_service.get_file_imports(
-            file_path, "invalid content"
-        )
+        imports2 = import_context_service.get_file_imports(file_path, "invalid content")
 
         # Should return same cached result
         assert imports1 == imports2
@@ -371,9 +375,7 @@ class TestEdgeCases:
         invalid_xml = "not valid xml content"
 
         # Should not raise
-        imports = import_context_service.get_file_imports(
-            "test.TcPOU", invalid_xml
-        )
+        imports = import_context_service.get_file_imports("test.TcPOU", invalid_xml)
 
         assert imports == []
 
@@ -381,7 +383,9 @@ class TestEdgeCases:
         """Should handle malformed Structured Text gracefully."""
         malformed_tcpou = """<?xml version="1.0"?>
 <TcPlcObject Version="1.1.0.1">
-  <POU Name="FB_Malformed" Id="{12345678-1234-1234-1234-123456789abc}" SpecialFunc="None">
+  <POU Name="FB_Malformed"
+       Id="{12345678-1234-1234-1234-123456789abc}"
+       SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_Malformed
 VAR
     this is not valid structured text syntax
@@ -392,9 +396,7 @@ END_VAR
 </TcPlcObject>
 """
         # Should not raise
-        imports = import_context_service.get_file_imports(
-            "test.TcPOU", malformed_tcpou
-        )
+        imports = import_context_service.get_file_imports("test.TcPOU", malformed_tcpou)
 
         # Should return empty list on parse error
         assert isinstance(imports, list)

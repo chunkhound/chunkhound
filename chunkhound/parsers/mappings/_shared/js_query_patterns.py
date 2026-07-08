@@ -6,7 +6,9 @@ LEXICAL_DECLARATION_CONFIG = """
 (lexical_declaration
     (variable_declarator
         name: (identifier) @name
-        value: [(object) (array) (number) (string) (true) (false) (null) (undefined)] @init
+        value: [(object) (array) (number)
+            (string) (true) (false)
+            (null) (undefined)] @init
     )
 ) @definition
 """
@@ -17,7 +19,9 @@ VAR_DECLARATION_CONFIG = """
 (variable_declaration
     (variable_declarator
         name: (identifier) @name
-        value: [(object) (array) (number) (string) (true) (false) (null) (undefined)] @init
+        value: [(object) (array) (number)
+            (string) (true) (false)
+            (null) (undefined)] @init
     )
 ) @definition
 """

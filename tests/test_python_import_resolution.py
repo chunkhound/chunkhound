@@ -1,7 +1,5 @@
 """Tests for Python import path resolution via resolve_import_paths()."""
 
-import pytest
-
 from chunkhound.parsers.mappings.python import PythonMapping
 
 
@@ -211,7 +209,10 @@ class TestPythonImportResolution:
     # =========================================================================
 
     def test_from_import_symbols_from_file(self, tmp_path):
-        """Test `from pkg import Cls, func` resolves to pkg.py when symbols are in file."""
+        """
+        Test `from pkg import Cls, func` resolves
+        to pkg.py when symbols are in file.
+        """
         mapping = PythonMapping()
 
         pkg_file = tmp_path / "pkg.py"

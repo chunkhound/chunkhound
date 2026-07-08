@@ -47,7 +47,8 @@ LLM_INPUT_TOKENS_MAX = 60_000  # Leaf nodes
 #   - Frequent "Missing: [detail]" statements
 #   - Theoretical placeholders ("provide exact values")
 #   - Incomplete analysis of complex components
-# Consider increasing these values. Quality validation warnings will indicate budget pressure.
+# Consider increasing these values. Quality
+# validation warnings will indicate budget pressure.
 LEAF_ANSWER_TOKENS_BASE = (
     18_000  # Base budget for leaf nodes (was 30k, reduced for cost)
 )
@@ -56,17 +57,24 @@ LEAF_ANSWER_TOKENS_BONUS = (
 )
 
 # Internal synthesis output budget (what LLM generates at internal nodes)
-# NOTE: Reduced from 17.5k/32k to balance cost vs quality. If root synthesis appears rushed or
+# NOTE: Reduced from 17.5k/32k to balance cost
+# vs quality. If root synthesis appears rushed or
 # omits critical architectural details, consider increasing INTERNAL_ROOT_TARGET.
 INTERNAL_ROOT_TARGET = 11_000  # Root synthesis target (was 17.5k, reduced for cost)
 INTERNAL_MAX_TOKENS = (
     19_000  # Maximum for deep internal nodes (was 32k, reduced for cost)
 )
 
-# Follow-up question generation output budget (what LLM generates for follow-up questions)
-# NOTE: High budgets needed for reasoning models (o1/o3/GPT-5) which use internal "thinking" tokens
-# WHY: Reasoning models consume 5-15k tokens for internal reasoning before producing 100-500 tokens of output
-# The actual generated questions are concise, but the model needs reasoning budget to evaluate relevance
+# Follow-up question generation output budget
+# (what LLM generates for follow-up questions)
+# NOTE: High budgets needed for reasoning models
+# (o1/o3/GPT-5) which use internal "thinking" tokens
+# WHY: Reasoning models consume 5-15k tokens for
+# internal reasoning before producing 100-500
+# tokens of output
+# The actual generated questions are concise, but
+# the model needs reasoning budget to evaluate
+# relevance
 FOLLOWUP_OUTPUT_TOKENS_MIN = (
     8_000  # Root/shallow nodes: simpler questions, less reasoning needed
 )
@@ -76,7 +84,8 @@ FOLLOWUP_OUTPUT_TOKENS_MAX = (
 
 # Utility operation output budgets (for reasoning models like o1/o3/GPT-5)
 # These operations use utility provider and don't vary by depth
-# WHY: Each utility operation produces small output but requires reasoning budget for quality
+# WHY: Each utility operation produces small output
+# but requires reasoning budget for quality
 QUERY_EXPANSION_TOKENS = (
     10_000  # Generate 2 queries (~200 output + ~8k reasoning to ensure diversity)
 )
@@ -99,14 +108,17 @@ MAX_SYNTHESIS_TOKENS = 600
 SINGLE_PASS_MAX_TOKENS = (
     150_000  # Total budget for single-pass synthesis (input + output)
 )
-OUTPUT_TOKENS_WITH_REASONING = 30_000  # Fixed output budget for reasoning models (18k output + 12k reasoning buffer)
+OUTPUT_TOKENS_WITH_REASONING = 30_000  # Fixed output budget for reasoning models
+# (18k output + 12k reasoning buffer)
 SINGLE_PASS_OVERHEAD_TOKENS = 5_000  # Prompt template and overhead
 SINGLE_PASS_TIMEOUT_SECONDS = 600  # 10 minutes timeout for large synthesis calls
 # Available for code/chunks: Scales dynamically with repo size (30k-150k input tokens)
 
 # Target output length (controlled via prompt instructions, not API token limits)
-# WHY: OUTPUT_TOKENS_WITH_REASONING is FIXED at 30k for all queries (reasoning models need this)
-# This allows reasoning models to use thinking tokens while producing appropriately sized output
+# WHY: OUTPUT_TOKENS_WITH_REASONING is FIXED at 30k
+# for all queries (reasoning models need this)
+# This allows reasoning models to use thinking
+# tokens while producing appropriately sized output
 # NOTE: Only INPUT budget scales dynamically based on repository size, output is fixed
 TARGET_OUTPUT_TOKENS = 15_000  # Default target for standard research outputs
 
@@ -150,7 +162,8 @@ ENABLE_SMART_BOUNDARIES = True  # Expand to natural code boundaries (functions/c
 MAX_BOUNDARY_EXPANSION_LINES = 300  # Maximum lines to expand for complete functions
 
 # File-level reranking for synthesis budget allocation
-# Prevents file diversity collapse where deep BFS exploration causes score accumulation in few files
+# Prevents file diversity collapse where deep BFS
+# exploration causes score accumulation in few files
 MAX_CHUNKS_PER_FILE_REPR = (
     5  # Top chunks to include in file representative document for reranking
 )

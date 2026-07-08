@@ -1222,7 +1222,8 @@ class MCPServerBase(ABC):
                 except DatabaseCompactionInProgressError:
                     log_if_not_mcp(
                         "info",
-                        "Database compaction in progress \u2014 DB-backed MCP tools will be "
+                        "Database compaction in progress "
+                        "\u2014 DB-backed MCP tools will be "
                         "unavailable until compaction finishes. "
                         "Non-DB tools (daemon_status, websearch) are unaffected.",
                     )
@@ -1297,9 +1298,8 @@ class MCPServerBase(ABC):
         filtered_count = len(TOOL_REGISTRY) - len(tools)
         if filtered_count > 0:
             has_llm = self.llm_manager is not None
-            has_emb = (
-                self.embedding_manager is not None
-                and bool(self.embedding_manager.list_providers())
+            has_emb = self.embedding_manager is not None and bool(
+                self.embedding_manager.list_providers()
             )
             has_reranker = has_reranker_support(self.embedding_manager)
             if debug_log := getattr(self, "debug_log", None):

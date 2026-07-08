@@ -2,7 +2,6 @@
 
 import os
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 
@@ -175,7 +174,10 @@ class TestProjectRootDetection:
 
             # Clean any leftover markers from temp directory tree
             def clean_markers(root_path: Path, current_path: Path):
-                """Remove any chunkhound markers from the directory tree, scoped to root_path."""
+                """
+                Remove any chunkhound markers from
+                the directory tree, scoped to root_path.
+                """
                 if not current_path.is_relative_to(root_path):
                     return  # Don't climb above root_path
 

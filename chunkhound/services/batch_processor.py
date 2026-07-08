@@ -158,7 +158,8 @@ _timeout_semaphore: object | None = None
 
 
 def _init_timeout_semaphore(max_concurrent: int) -> None:
-    """Initialize a shared semaphore limiting concurrent timeout children in a worker."""
+    """Initialize a shared semaphore limiting
+    concurrent timeout children in a worker."""
     global _timeout_semaphore
     if max_concurrent and _timeout_semaphore is None:
         try:
@@ -217,8 +218,12 @@ def process_file_batch(
             # Detect language (content-aware for ambiguous extensions)
             language = detect_language(file_path)
             _dbg_log(
-                f"START file={file_path} size_kb={file_stat.st_size / 1024:.1f} lang={language.value} "
-                f"tmo_s={timeout_s} min_kb={timeout_min_kb} threshold_kb={config_dict.get('config_file_size_threshold_kb')}"
+                f"START file={file_path}"
+                f" size_kb={file_stat.st_size / 1024:.1f}"
+                f" lang={language.value} "
+                f"tmo_s={timeout_s}"
+                f" min_kb={timeout_min_kb}"
+                f" threshold_kb={config_dict.get('config_file_size_threshold_kb')}"
             )
             t0 = perf_counter()
             if language == Language.UNKNOWN:
@@ -235,7 +240,10 @@ def process_file_batch(
                         )
                     )
                     _dbg_log(
-                        f"END   file={file_path} status=skipped reason=unknown_type dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                        f"END   file={file_path}"
+                        f" status=skipped"
+                        f" reason=unknown_type"
+                        f" dur_ms={(perf_counter() - t0) * 1000:.1f}"
                     )
                     logger.debug("Skipping file with unknown type: {}", file_path)
                     continue
@@ -256,7 +264,10 @@ def process_file_batch(
                             )
                         )
                         _dbg_log(
-                            f"END   file={file_path} status=skipped reason=binary_file dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                            f"END   file={file_path}"
+                            f" status=skipped"
+                            f" reason=binary_file"
+                            f" dur_ms={(perf_counter() - t0) * 1000:.1f}"
                         )
                         logger.debug("Skipping binary file: {}", file_path)
                         continue
@@ -296,7 +307,10 @@ def process_file_batch(
                         )
                     )
                     _dbg_log(
-                        f"END   file={file_path} status=skipped reason=large_config_file dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                        f"END   file={file_path}"
+                        f" status=skipped"
+                        f" reason=large_config_file"
+                        f" dur_ms={(perf_counter() - t0) * 1000:.1f}"
                     )
                     continue
 
@@ -327,7 +341,10 @@ def process_file_batch(
                         )
                     )
                     _dbg_log(
-                        f"END   file={file_path} status=skipped reason=timeout dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                        f"END   file={file_path}"
+                        f" status=skipped"
+                        f" reason=timeout"
+                        f" dur_ms={(perf_counter() - t0) * 1000:.1f}"
                     )
                     continue
                 elif status == "error":
@@ -344,7 +361,10 @@ def process_file_batch(
                         )
                     )
                     _dbg_log(
-                        f"END   file={file_path} status=error reason={payload} dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                        f"END   file={file_path}"
+                        f" status=error"
+                        f" reason={payload}"
+                        f" dur_ms={(perf_counter() - t0) * 1000:.1f}"
                     )
                     continue
                 else:
@@ -387,7 +407,10 @@ def process_file_batch(
                 )
             )
             _dbg_log(
-                f"END   file={file_path} status=success dur_ms={(perf_counter() - t0) * 1000:.1f} chunks={len(chunks_data)}"
+                f"END   file={file_path}"
+                f" status=success"
+                f" dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                f" chunks={len(chunks_data)}"
             )
 
         except Exception as e:

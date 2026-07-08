@@ -67,8 +67,15 @@ def test_strips_structural_chrome_wrapper_tags() -> None:
     """
     md = _html_to_markdown(html)
     for tag in (
-        "<head", "<nav", "<footer", "<header", "<aside",
-        "<form", "<button", "<iframe", "<noscript",
+        "<head",
+        "<nav",
+        "<footer",
+        "<header",
+        "<aside",
+        "<form",
+        "<button",
+        "<iframe",
+        "<noscript",
     ):
         assert tag not in md, f"wrapper {tag!r} should have been stripped"
     assert "MAINCONTENT" in md

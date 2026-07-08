@@ -151,8 +151,8 @@ class TestServerStartup:
     @pytest.mark.asyncio
     async def test_mcp_stdio_server_starts(self):
         """Test that MCP stdio server can start without immediate crashes."""
-        import tempfile
         import json
+        import tempfile
 
         # Create a temporary directory to avoid indexing the current directory
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -190,7 +190,7 @@ async def test():
     # Set minimal config
     os.environ["CHUNKHOUND_EMBEDDING__PROVIDER"] = "openai"
     os.environ["CHUNKHOUND_EMBEDDING__API_KEY"] = "test"
-    
+
     # Test we can import without immediate crash
     try:
         # Just test that critical imports work - this catches most startup issues
@@ -220,7 +220,8 @@ sys.exit(asyncio.run(test()))
 
                 if proc.returncode != 0:
                     pytest.fail(
-                        f"MCP stdio server initialization failed with code {proc.returncode}\n"
+                        f"MCP stdio server initialization failed"
+                        f" with code {proc.returncode}\n"
                         f"stdout: {stdout.decode()}\n"
                         f"stderr: {stderr.decode()}"
                     )
@@ -237,7 +238,8 @@ sys.exit(asyncio.run(test()))
 
     @pytest.mark.asyncio
     async def test_mcp_stdio_protocol_handshake(self):
-        """Test MCP stdio server completes full protocol handshake with tool discovery."""
+        """Test MCP stdio server completes full protocol
+        handshake with tool discovery."""
         import json
 
         with windows_safe_tempdir() as temp_path:
@@ -256,7 +258,8 @@ sys.exit(asyncio.run(test()))
             }
 
             # Add embedding config if API key available
-            # Note: code_research requires reranker+LLM to EXECUTE, but only embeddings to REGISTER
+            # Note: code_research requires reranker+LLM
+            # to EXECUTE, but only embeddings to REGISTER
             api_key = os.environ.get("OPENAI_API_KEY")
             if api_key:
                 config["embedding"] = {
@@ -383,7 +386,6 @@ sys.exit(asyncio.run(test()))
                     await stderr_task
                 except asyncio.CancelledError:
                     pass
-
 
     @pytest.mark.asyncio
     async def test_mcp_websearch_stdio_mocked(self):
@@ -545,7 +547,11 @@ class TestParserLoading:
 
         # SetupErrors should cause immediate test failure (critical issues)
         if setup_errors:
-            error_msg = "CRITICAL: Parser setup failures (version incompatibility or missing dependencies):\n"
+            error_msg = (
+                "CRITICAL: Parser setup failures"
+                " (version incompatibility or"
+                " missing dependencies):\n"
+            )
             for language, error in setup_errors:
                 error_msg += f"  - {language}: {error}\n"
             pytest.fail(error_msg)
@@ -572,7 +578,7 @@ class TestTypeAnnotations:
         for py_file in glob.glob("chunkhound/**/*.py", recursive=True):
             if "/tests/" in py_file.replace("\\", "/"):
                 continue
-            with open(py_file, "r", encoding="utf-8") as f:
+            with open(py_file, encoding="utf-8") as f:
                 content = f.read()
 
             # Check for the problematic pattern: "ClassName" | None
@@ -584,7 +590,7 @@ class TestTypeAnnotations:
             if re.search(pattern, content):
                 # Found potential issue, let's verify it's not in a string
                 try:
-                    tree = ast.parse(content)
+                    ast.parse(content)
                     # This is where we'd do more sophisticated checking
                     # For now, just flag the file
                     problematic_files.append(py_file)
@@ -594,7 +600,7 @@ class TestTypeAnnotations:
 
         if problematic_files:
             pytest.fail(
-                f"Found problematic forward reference union patterns in:\n"
+                "Found problematic forward reference union patterns in:\n"
                 + "\n".join(f"  - {f}" for f in problematic_files)
             )
 

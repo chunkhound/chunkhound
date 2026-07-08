@@ -84,7 +84,9 @@ class SearchService(BaseService):
                 (e.g., 'src/', 'tests/')
             force_strategy: Optional strategy override ('single_hop', 'multi_hop')
             time_limit: Optional time limit for multi-hop expansion (default: 5.0s)
-            result_limit: Optional result limit for multi-hop expansion (default: 500, None = unlimited)
+            result_limit: Optional result limit for
+            multi-hop expansion
+            (default: 500, None = unlimited)
 
         Returns:
             Tuple of (results, pagination_metadata)
@@ -102,7 +104,10 @@ class SearchService(BaseService):
             search_provider = provider or embedding_provider.name
             search_model = model or embedding_provider.model
 
-            # logger.debug(f"Search using provider='{search_provider}', model='{search_model}'")
+            # logger.debug(
+            #     f"Search using provider='{search_provider}', "
+            #     f"model='{search_model}'"
+            # )
 
             # Choose search strategy based on force_strategy or provider capabilities
             use_multi_hop = False
@@ -125,7 +130,9 @@ class SearchService(BaseService):
                     and embedding_provider.supports_reranking()
                 ):
                     logger.warning(
-                        "Multi-hop strategy requested but provider doesn't support reranking, falling back to single-hop"
+                        "Multi-hop strategy requested but provider "
+                        "doesn't support reranking, falling back "
+                        "to single-hop"
                     )
                     use_multi_hop = False
 

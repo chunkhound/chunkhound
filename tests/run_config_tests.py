@@ -8,7 +8,6 @@ which ones are passing (good baseline).
 """
 
 import subprocess
-import sys
 from pathlib import Path
 
 

@@ -98,9 +98,7 @@ def test_validator_rejects_read_only_for_index(tmp_path):
         "database.read_only=True is only valid for the 'mcp' subcommand" in e
         for e in errors
     ), errors
-    assert not any(
-        "read_only" in e for e in config.validate_for_command("mcp")
-    )
+    assert not any("read_only" in e for e in config.validate_for_command("mcp"))
 
 
 @pytest.fixture
@@ -154,9 +152,7 @@ def stale_wal_db_path(tmp_path):
 
 def test_read_only_stale_wal_surfaces_recovery_hint(stale_wal_db_path, tmp_path):
     cfg = DatabaseConfig(read_only=True)
-    reader = DuckDBProvider(
-        stale_wal_db_path, base_directory=tmp_path, config=cfg
-    )
+    reader = DuckDBProvider(stale_wal_db_path, base_directory=tmp_path, config=cfg)
     with pytest.raises(RuntimeError, match="Reopen without --read-only to recover"):
         reader.connect()
 
@@ -213,7 +209,10 @@ async def test_read_only_forces_stdio_when_daemon_requested(tmp_path, monkeypatc
     monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
 
     args = argparse.Namespace(
-        path=str(tmp_path), no_daemon=False, stdio=False, show_setup=False,
+        path=str(tmp_path),
+        no_daemon=False,
+        stdio=False,
+        show_setup=False,
     )
     config = Config(
         target_dir=tmp_path,

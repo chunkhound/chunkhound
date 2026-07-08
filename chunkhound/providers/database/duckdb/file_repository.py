@@ -1,4 +1,4 @@
-"""DuckDB file repository implementation for ChunkHound - handles file CRUD operations."""
+"""DuckDB file repository - handles file CRUD operations."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -74,7 +74,9 @@ class DuckDBFileRepository:
                 # Fallback for tests
                 result = self.connection_manager.connection.execute(
                     """
-                    INSERT INTO files (path, name, extension, size, modified_time, language)
+                    INSERT INTO files
+                    (path, name, extension, size,
+                     modified_time, language)
                     VALUES (?, ?, ?, ?, to_timestamp(?), ?)
                     RETURNING id
                 """,
@@ -124,7 +126,9 @@ class DuckDBFileRepository:
                 lookup_path = normalize_path_for_lookup(path, base_dir)
                 result = self.connection_manager.connection.execute(
                     """
-                    SELECT id, path, name, extension, size, modified_time, language, created_at, updated_at
+                    SELECT id, path, name, extension,
+                           size, modified_time, language,
+                           created_at, updated_at
                     FROM files WHERE path = ?
                 """,
                     [lookup_path],
@@ -175,7 +179,9 @@ class DuckDBFileRepository:
                 # Fallback for tests
                 result = self.connection_manager.connection.execute(
                     """
-                    SELECT id, path, name, extension, size, modified_time, language, created_at, updated_at
+                    SELECT id, path, name, extension,
+                           size, modified_time, language,
+                           created_at, updated_at
                     FROM files WHERE id = ?
                 """,
                     [file_id],

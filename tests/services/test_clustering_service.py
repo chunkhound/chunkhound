@@ -6,8 +6,8 @@ HDBSCAN clustering for natural semantic grouping.
 
 import pytest
 
-from chunkhound.services.clustering_service import ClusteringService, ClusterGroup
-from tests.fixtures.fake_providers import FakeLLMProvider, FakeEmbeddingProvider
+from chunkhound.services.clustering_service import ClusterGroup, ClusteringService
+from tests.fixtures.fake_providers import FakeEmbeddingProvider, FakeLLMProvider
 
 
 class TestKMeansClustering:
@@ -25,7 +25,9 @@ class TestKMeansClustering:
 
     @pytest.fixture
     def clustering_service(
-        self, fake_llm_provider: FakeLLMProvider, fake_embedding_provider: FakeEmbeddingProvider
+        self,
+        fake_llm_provider: FakeLLMProvider,
+        fake_embedding_provider: FakeEmbeddingProvider,
     ) -> ClusteringService:
         """Create clustering service with fake providers."""
         return ClusteringService(
@@ -52,7 +54,8 @@ class TestKMeansClustering:
     async def test_small_files_single_cluster(
         self, clustering_service: ClusteringService
     ) -> None:
-        """Test that files under token budget create single cluster when n_clusters=1."""
+        """Test that files under token budget create
+        single cluster when n_clusters=1."""
         # Files with total ~200 tokens (well under 30k limit)
         files = {f"file{i}.py": "def test(): pass\n" * 10 for i in range(5)}
 
@@ -174,7 +177,9 @@ class TestKMeansClustering:
 
         # Average should be reasonable
         expected_avg = metadata["total_tokens"] / len(clusters)
-        assert abs(metadata["avg_tokens_per_cluster"] - expected_avg) <= 1  # Allow rounding error
+        assert (
+            abs(metadata["avg_tokens_per_cluster"] - expected_avg) <= 1
+        )  # Allow rounding error
 
     @pytest.mark.asyncio
     async def test_budget_tracking_with_multiple_clusters(
@@ -253,7 +258,9 @@ class TestHDBSCANClustering:
 
     @pytest.fixture
     def clustering_service(
-        self, fake_llm_provider: FakeLLMProvider, fake_embedding_provider: FakeEmbeddingProvider
+        self,
+        fake_llm_provider: FakeLLMProvider,
+        fake_embedding_provider: FakeEmbeddingProvider,
     ) -> ClusteringService:
         """Create clustering service with fake providers."""
         return ClusteringService(
@@ -323,7 +330,8 @@ class TestHDBSCANClustering:
     async def test_hdbscan_all_files_accounted_for(
         self, clustering_service: ClusteringService
     ) -> None:
-        """Test that all input files appear in exactly one cluster after outlier reassignment."""
+        """Test that all input files appear in exactly one
+        cluster after outlier reassignment."""
         files = {f"file{i}.py": f"unique content {i}" * 50 for i in range(15)}
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan(files)
@@ -415,7 +423,9 @@ class TestClusterFilesHDBSCANBounded:
 
     @pytest.fixture
     def clustering_service(
-        self, fake_llm_provider: FakeLLMProvider, fake_embedding_provider: FakeEmbeddingProvider
+        self,
+        fake_llm_provider: FakeLLMProvider,
+        fake_embedding_provider: FakeEmbeddingProvider,
     ) -> ClusteringService:
         """Create clustering service with fake providers."""
         return ClusteringService(
@@ -449,13 +459,19 @@ class TestClusterFilesHDBSCANBounded:
         self, clustering_service: ClusteringService
     ) -> None:
         """Test that clusters exceeding max_tokens get split into subclusters."""
-        # Create files with distinct embeddings but similar enough for HDBSCAN clustering
+        # Create files with distinct embeddings but
+        # similar enough for HDBSCAN clustering
         # Use 6 files of ~20k tokens each = 120k total
-        # With 50k max, we need at least 3 clusters, so split should produce 4+ subclusters
+        # With 50k max, we need at least 3 clusters,
+        # so split should produce 4+ subclusters
         files = {}
         for i in range(6):
             # Each file has distinctly different content for k-means to separate
-            unique_content = f"unique_module_{i}_" + ("a" * i * 1000) + self._make_content_with_tokens(19_900)
+            unique_content = (
+                f"unique_module_{i}_"
+                + ("a" * i * 1000)
+                + self._make_content_with_tokens(19_900)
+            )
             files[f"large{i}.py"] = unique_content
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan_bounded(
@@ -502,7 +518,9 @@ class TestClusterFilesHDBSCANBounded:
         files = {}
         for i in range(6):
             # Each file has unique content to create distinct embeddings
-            unique_content = f"unique_module_{i}_" + self._make_content_with_tokens(4_990)
+            unique_content = f"unique_module_{i}_" + self._make_content_with_tokens(
+                4_990
+            )
             files[f"small_{i}.py"] = unique_content
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan_bounded(
@@ -538,9 +556,7 @@ class TestClusterFilesHDBSCANBounded:
         """Test that clusters already within bounds are not modified."""
         # Create files with ~25k tokens each (within 15k-50k bounds)
         medium_content = self._make_content_with_tokens(25_000)
-        files = {
-            f"medium{i}.py": medium_content for i in range(2)
-        }
+        files = {f"medium{i}.py": medium_content for i in range(2)}
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan_bounded(
             files,
@@ -618,7 +634,7 @@ class TestClusterFilesHDBSCANBounded:
         """Test that returned metadata accurately reflects operations performed."""
         # Create mix of file sizes to trigger both splits and merges
         large_content = self._make_content_with_tokens(60_000)  # Will need split
-        small_content = self._make_content_with_tokens(5_000)   # Will need merge
+        small_content = self._make_content_with_tokens(5_000)  # Will need merge
 
         files = {
             "large.py": large_content,
@@ -679,9 +695,9 @@ class TestClusterFilesHDBSCANBounded:
         """Test that all input files appear in output after splits and merges."""
         # Mix of sizes to trigger various operations
         files = {
-            "huge.py": self._make_content_with_tokens(80_000),   # Split needed
-            "medium.py": self._make_content_with_tokens(30_000), # OK
-            "small.py": self._make_content_with_tokens(5_000),   # Merge needed
+            "huge.py": self._make_content_with_tokens(80_000),  # Split needed
+            "medium.py": self._make_content_with_tokens(30_000),  # OK
+            "small.py": self._make_content_with_tokens(5_000),  # Merge needed
         }
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan_bounded(
@@ -782,7 +798,8 @@ class TestClusterFilesHDBSCANBounded:
     async def test_alternative_merge_target_found(
         self, clustering_service: ClusteringService
     ) -> None:
-        """Test that alternative merge target is used when nearest would exceed bounds."""
+        """Test that alternative merge target is used
+        when nearest would exceed bounds."""
         # Create files such that smallest must find alternative target
         # 3 small files (3k each), 1 medium (30k), 1 near-max (47k)
         # Small files can merge with medium but not near-max
@@ -821,8 +838,12 @@ class TestClusterFilesHDBSCANBounded:
         # Use unique content so k-means can distinguish them
         files = {
             "tiny.py": self._make_unique_content_with_tokens(2_000, seed="tiny"),
-            "nearmax1.py": self._make_unique_content_with_tokens(49_000, seed="nearmax1"),
-            "nearmax2.py": self._make_unique_content_with_tokens(49_000, seed="nearmax2"),
+            "nearmax1.py": self._make_unique_content_with_tokens(
+                49_000, seed="nearmax1"
+            ),
+            "nearmax2.py": self._make_unique_content_with_tokens(
+                49_000, seed="nearmax2"
+            ),
         }
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan_bounded(

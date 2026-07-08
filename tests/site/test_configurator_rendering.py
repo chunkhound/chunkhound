@@ -26,8 +26,9 @@ console.log(JSON.stringify(buildFullConfiguratorOutput(embedding, llm, '{editor_
     return run_tsx_json(script)
 
 
-def test_full_mode_heredoc_opener_keeps_initial_tokenization_across_selections(
-) -> None:
+def test_full_mode_heredoc_opener_keeps_initial_tokenization_across_selections() -> (
+    None
+):
     default_output = _render_full_output("voyageai", "anthropic", "cursor")
     alternate_output = _render_full_output("vllm-embed", "grok", "cursor")
 
@@ -44,8 +45,7 @@ def test_full_mode_heredoc_opener_keeps_initial_tokenization_across_selections(
     assert "CHUNKHOUND_EOF" in alternate_output["html"]
 
 
-def test_full_mode_renderer_outputs_stable_html_and_copy_for_non_default_selection(
-) -> None:
+def test_full_mode_renderer_stable_html_for_non_default() -> None:
     rendered = _render_full_output("ollama-embed", "codex-cli", "vscode")
 
     assert "echo .chunkhound.json >> .gitignore" in rendered["copy"]
@@ -58,8 +58,9 @@ def test_full_mode_renderer_outputs_stable_html_and_copy_for_non_default_selecti
     assert '<span class="json-comment">' in rendered["html"]
 
 
-def test_compact_mode_prepends_parent_directory_creation_for_nested_editor_files(
-) -> None:
+def test_compact_mode_prepends_parent_directory_creation_for_nested_editor_files() -> (
+    None
+):
     script = """
 import {
   buildCompactConfiguratorOutput,
@@ -124,16 +125,14 @@ console.log(JSON.stringify(
     assert "Add-Content -Path .gitignore -Value '.chunkhound.json'" in rendered["copy"]
     assert "@'\n{" in rendered["copy"]
     assert (
-        "'@ | Set-Content -Path '.chunkhound.json' -Encoding utf8"
-        in rendered["copy"]
+        "'@ | Set-Content -Path '.chunkhound.json' -Encoding utf8" in rendered["copy"]
     )
     assert (
         "New-Item -ItemType Directory -Force -Path '.vscode' | Out-Null"
         in rendered["copy"]
     )
     assert (
-        "'@ | Set-Content -Path '.vscode/mcp.json' -Encoding utf8"
-        in rendered["copy"]
+        "'@ | Set-Content -Path '.vscode/mcp.json' -Encoding utf8" in rendered["copy"]
     )
     assert ".chunkhound.json" in rendered["html"]
     assert ".vscode/mcp.json" in rendered["html"]
@@ -165,10 +164,10 @@ console.log(JSON.stringify(
     assert "~/.codeium/windsurf/mcp_config.json" not in rendered["copy"]
     assert (
         'New-Item -ItemType Directory -Force -Path "$HOME/.codeium/windsurf" '
-        '| Out-Null' in rendered["copy"]
+        "| Out-Null" in rendered["copy"]
     )
     assert (
         '\'@ | Set-Content -Path "$HOME/.codeium/windsurf/mcp_config.json" '
-        '-Encoding utf8' in rendered["copy"]
+        "-Encoding utf8" in rendered["copy"]
     )
     assert "$HOME/.codeium/windsurf/mcp_config.json" in rendered["html"]

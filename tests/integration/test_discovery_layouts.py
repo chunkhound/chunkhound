@@ -5,17 +5,28 @@ from pathlib import Path
 
 import pytest
 
-
-pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git required for discovery backend integration tests")
+pytestmark = pytest.mark.skipif(
+    shutil.which("git") is None,
+    reason="git required for discovery backend integration tests",
+)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(repo), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+    )
 
 
 def _git_init_and_commit(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=str(repo), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(
+        ["git", "init"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
     # Configure minimal identity for CI environments
     _git(repo, "config", "user.email", "ci@example.com")
     _git(repo, "config", "user.name", "CI")
@@ -35,9 +46,17 @@ def _simulate(dir_path: Path, discovery_backend: str | None = None) -> list[str]
     # Keep output lean and deterministic
     env["CHUNKHOUND_NO_RICH"] = "1"
     res = subprocess.run(
-        ["uv", "run", "chunkhound", "index", "--simulate", str(dir_path), "--sort", "path"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        [
+            "uv",
+            "run",
+            "chunkhound",
+            "index",
+            "--simulate",
+            str(dir_path),
+            "--sort",
+            "path",
+        ],
+        capture_output=True,
         text=True,
         env=env,
         timeout=90,
@@ -47,15 +66,26 @@ def _simulate(dir_path: Path, discovery_backend: str | None = None) -> list[str]
     return lines
 
 
-def _simulate_with_profile(dir_path: Path, discovery_backend: str | None = None) -> tuple[list[str], dict]:
+def _simulate_with_profile(
+    dir_path: Path, discovery_backend: str | None = None
+) -> tuple[list[str], dict]:
     env = os.environ.copy()
     if discovery_backend:
         env["CHUNKHOUND_INDEXING__DISCOVERY_BACKEND"] = discovery_backend
     env["CHUNKHOUND_NO_RICH"] = "1"
     res = subprocess.run(
-        ["uv", "run", "chunkhound", "index", "--simulate", str(dir_path), "--sort", "path", "--profile-startup"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        [
+            "uv",
+            "run",
+            "chunkhound",
+            "index",
+            "--simulate",
+            str(dir_path),
+            "--sort",
+            "path",
+            "--profile-startup",
+        ],
+        capture_output=True,
         text=True,
         env=env,
         timeout=90,
@@ -68,7 +98,9 @@ def _simulate_with_profile(dir_path: Path, discovery_backend: str | None = None)
         try:
             obj = __import__("json").loads(ln)
             if isinstance(obj, dict):
-                if "startup_profile" in obj and isinstance(obj["startup_profile"], dict):
+                if "startup_profile" in obj and isinstance(
+                    obj["startup_profile"], dict
+                ):
                     prof = obj["startup_profile"]
                     break
                 if "discovery_ms" in obj:  # simulate format
@@ -79,7 +111,7 @@ def _simulate_with_profile(dir_path: Path, discovery_backend: str | None = None)
     return lines, prof
 
 
-def test_layout_A_single_repo_tracked_under_ignored(tmp_path: Path) -> None:
+def test_layout_a_single_repo_tracked_under_ignored(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     # Files
     _write(repo / "src" / "a.py")
@@ -105,7 +137,7 @@ def test_layout_A_single_repo_tracked_under_ignored(tmp_path: Path) -> None:
     assert "runs/job00/kept.md" in git_list
 
 
-def test_layout_C_workspace_multi_repos_and_nonrepo(tmp_path: Path) -> None:
+def test_layout_c_workspace_multi_repos_and_nonrepo(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     repo1 = ws / "repo1"
     repo2 = ws / "repo2"
@@ -133,7 +165,7 @@ def test_layout_C_workspace_multi_repos_and_nonrepo(tmp_path: Path) -> None:
     assert "misc/tool.py" not in git_only_set
 
 
-def test_layout_D_nested_subrepo_boundary_respected(tmp_path: Path) -> None:
+def test_layout_d_nested_subrepo_boundary_respected(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     sub = root / "subrepo"
 
@@ -145,14 +177,18 @@ def test_layout_D_nested_subrepo_boundary_respected(tmp_path: Path) -> None:
     _write(sub / "pkg" / "mod.py")
     _git_init_and_commit(sub)
 
-    # Both backends should see subrepo file (repo-aware boundary in python; Git sees subrepo too)
+    # Both backends should see subrepo file
+    # (repo-aware boundary in python;
+    # Git sees subrepo too)
     py_set = set(_simulate(root, discovery_backend="python"))
     git_set = set(_simulate(root, discovery_backend="git"))
     assert "subrepo/pkg/mod.py" in py_set
     assert "subrepo/pkg/mod.py" in git_set
 
 
-def test_layout_E_mixed_workspace_python_git_cover_nonrepo_git_only_skips(tmp_path: Path) -> None:
+def test_layout_e_mixed_workspace_python_git_cover_nonrepo_git_only_skips(
+    tmp_path: Path,
+) -> None:
     ws = tmp_path / "ws2"
     repo = ws / "repo"
     _write(repo / "src" / "x.py")
@@ -177,22 +213,26 @@ def test_auto_selects_python_git_gitonly(tmp_path: Path) -> None:
 
     # I layout: all repos → git_only
     ws2 = tmp_path / "auto_ws2"
-    r1 = ws2 / "r1"; r2 = ws2 / "r2"
-    _write(r1 / "a.py"); _git_init_and_commit(r1)
-    _write(r2 / "b.ts"); _git_init_and_commit(r2)
+    r1 = ws2 / "r1"
+    r2 = ws2 / "r2"
+    _write(r1 / "a.py")
+    _git_init_and_commit(r1)
+    _write(r2 / "b.ts")
+    _git_init_and_commit(r2)
     _, prof2 = _simulate_with_profile(ws2, discovery_backend="auto")
     assert prof2.get("resolved_backend") in {"git_only", "git"}
 
     # E layout: mixed workspace → git
     ws3 = tmp_path / "auto_ws3"
     r3 = ws3 / "r3"
-    _write(r3 / "a.py"); _git_init_and_commit(r3)
+    _write(r3 / "a.py")
+    _git_init_and_commit(r3)
     _write(ws3 / "misc" / "note.md")
     _, prof3 = _simulate_with_profile(ws3, discovery_backend="auto")
     assert prof3.get("resolved_backend") == "git"
 
 
-def test_layout_F_non_repo_only_favors_python(tmp_path: Path) -> None:
+def test_layout_f_non_repo_only_favors_python(tmp_path: Path) -> None:
     ws = tmp_path / "scratch"
     _write(ws / "src" / "a.py")
     # No git here
@@ -207,7 +247,7 @@ def test_layout_F_non_repo_only_favors_python(tmp_path: Path) -> None:
     assert "src/a.py" not in git_only_set
 
 
-def test_layout_H_monorepo_heavy_ignored_with_tracked_artifacts(tmp_path: Path) -> None:
+def test_layout_h_monorepo_heavy_ignored_with_tracked_artifacts(tmp_path: Path) -> None:
     # Monorepo with a large ignored tree (runs/) but several tracked artifacts inside it
     repo = tmp_path / "heavy"
     _write(repo / "src" / "main.py", "print('ok')\n")
@@ -238,7 +278,7 @@ def test_layout_H_monorepo_heavy_ignored_with_tracked_artifacts(tmp_path: Path) 
     assert all(k not in py_set for k in kept_rel)
 
 
-def test_layout_I_workspace_all_repos_git_only_equals(tmp_path: Path) -> None:
+def test_layout_i_workspace_all_repos_git_only_equals(tmp_path: Path) -> None:
     # Entire workspace is repos; git_only should match python and git results
     ws = tmp_path / "ws_all_repos"
     repos = [ws / f"r{i}" for i in range(3)]
@@ -258,4 +298,3 @@ def test_layout_I_workspace_all_repos_git_only_equals(tmp_path: Path) -> None:
 
     # With no non-repo content and no tracked-under-ignored tricks, all should match
     assert py_set == git_set == git_only_set
-

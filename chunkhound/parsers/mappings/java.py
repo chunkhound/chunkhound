@@ -706,7 +706,8 @@ class JavaMapping(BaseMapping):
             if "name" in captures:
                 return self.get_node_text(captures["name"], source).strip()
 
-            # For field_declaration and local_variable_declaration, extract variable name
+            # For field_declaration and
+            # local_variable_declaration, extract variable name
             def_node = captures.get("definition")
             if def_node and def_node.type in [
                 "field_declaration",

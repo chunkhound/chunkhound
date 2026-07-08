@@ -1368,9 +1368,7 @@ async def test_stdio_tool_call_uses_error_content_when_success_precedes_error() 
         TextContent(type="text", text=json.dumps({"status": "ok"})),
         TextContent(
             type="text",
-            text=json.dumps(
-                {"error": {"type": "RuntimeError", "message": "second"}}
-            ),
+            text=json.dumps({"error": {"type": "RuntimeError", "message": "second"}}),
         ),
     ]
 
@@ -1483,9 +1481,7 @@ async def test_daemon_tool_call_propagates_mixed_content_error_flag() -> None:
         TextContent(type="text", text=json.dumps({"status": "ok"})),
         TextContent(
             type="text",
-            text=json.dumps(
-                {"error": {"type": "RuntimeError", "message": "second"}}
-            ),
+            text=json.dumps({"error": {"type": "RuntimeError", "message": "second"}}),
         ),
     ]
 
@@ -1513,9 +1509,7 @@ async def test_daemon_tool_call_propagates_mixed_content_error_flag() -> None:
         for name, tool in TOOL_REGISTRY.items()
     ],
 )
-def test_tool_requires_db_matches_signature(
-    tool_name: str, expected: bool
-) -> None:
+def test_tool_requires_db_matches_signature(tool_name: str, expected: bool) -> None:
     """Every tool's DB-service requirement must match its implementation signature."""
     assert tool_requires_db(tool_name) is expected
 

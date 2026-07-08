@@ -21,8 +21,8 @@ from chunkhound.database_factory import create_services
 from chunkhound.providers.database.duckdb_provider import (
     DuckDBTransactionConflictError,
 )
-from chunkhound.services.realtime.service import RealtimeIndexingService
 from chunkhound.services.realtime.events import SimpleEventHandler
+from chunkhound.services.realtime.service import RealtimeIndexingService
 from chunkhound.watchman import discover_nested_linux_mount_roots
 from chunkhound.watchman_runtime.loader import (
     listener_path_is_filesystem,
@@ -913,10 +913,9 @@ class TestRealtimeFunctional:
             pending_stats = await service.get_health()
             assert pending_stats["queue_size"] == 0
             assert pending_stats["pending_files"] == 0
-            assert (
-                service._reserved_follow_up_change_generations[str(target_file)]
-                == service._current_source_generation(target_file)
-            )
+            assert service._reserved_follow_up_change_generations[
+                str(target_file)
+            ] == service._current_source_generation(target_file)
 
             release_first_processing.set()
             await asyncio.wait_for(second_processing_completed.wait(), timeout=2.0)
@@ -940,8 +939,7 @@ class TestRealtimeFunctional:
 
             assert attempted_contents == ["value = 1\n", "value = 7\n"]
             assert (
-                str(target_file)
-                not in service._reserved_follow_up_change_generations
+                str(target_file) not in service._reserved_follow_up_change_generations
             )
             assert services.provider.get_file_by_path(str(target_file)) is not None
             assert final_stats["pipeline"]["processing_error_count"] == 1
@@ -1591,7 +1589,8 @@ class TestRealtimeFunctional:
             batch_attempts += 1
             if batch_attempts == 1:
                 raise DuckDBTransactionConflictError(
-                    "delete_files_batch(count=2) cannot run while another DuckDB transaction is active"
+                    "delete_files_batch(count=2) cannot run "
+                    "while another DuckDB transaction is active"
                 )
             batch_completed.set()
             return len(file_paths)

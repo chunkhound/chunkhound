@@ -26,7 +26,8 @@ class ChunkHoundError(Exception):
 
         Args:
             message: Human-readable error description
-            context: Optional dictionary with error context (e.g., file paths, chunk IDs)
+            context: Optional dictionary with error context
+                (e.g., file paths, chunk IDs)
             cause: Optional underlying exception that caused this error
         """
         super().__init__(message)
@@ -202,7 +203,8 @@ class DatabaseError(ChunkHoundError):
         """Initialize database error.
 
         Args:
-            operation: Database operation that failed (e.g., "insert", "query", "update")
+            operation: Database operation that failed
+                (e.g., "insert", "query", "update")
             table: Database table involved in the operation
             reason: Description of what went wrong
             context: Optional additional context
@@ -319,7 +321,10 @@ class DiskUsageLimitExceededError(ChunkHoundError):
             limit_mb: Configured limit in MB
             context: Optional additional context
         """
-        message = f"Database disk usage limit exceeded: {current_size_mb:.1f} MB >= {limit_mb:.1f} MB"
+        message = (
+            f"Database disk usage limit exceeded: "
+            f"{current_size_mb:.1f} MB >= {limit_mb:.1f} MB"
+        )
         super().__init__(message, context)
         self.current_size_mb = current_size_mb
         self.limit_mb = limit_mb

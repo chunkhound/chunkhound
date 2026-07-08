@@ -161,9 +161,7 @@ def test_lancedb_list_file_paths_returns_chunkless_rows(tmp_path: Path) -> None:
         )
 
         results = provider.list_file_paths_under_directory("sub")
-        assert sorted(results) == sorted(
-            ["sub/a.txt", "sub/b.bin", "sub/nested/c.py"]
-        )
+        assert sorted(results) == sorted(["sub/a.txt", "sub/b.bin", "sub/nested/c.py"])
         assert "other/d.txt" not in results
     finally:
         provider.disconnect()

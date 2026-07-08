@@ -219,7 +219,6 @@ class TwinCATParser:
         # (more negative -end_line) sort first, placing containers before children.
         return sorted(chunks, key=lambda c: (c.start_line, -c.end_line))
 
-
     def _map_chunk_type_to_concept(self, chunk_type: ChunkType) -> UniversalConcept:
         """Map TwinCAT ChunkType to UniversalConcept.
 
@@ -623,9 +622,7 @@ class TwinCATParser:
         # Extract comments
         if action.declaration and action.declaration.strip():
             decl_base = (
-                action.declaration_location.line
-                if action.declaration_location
-                else 1
+                action.declaration_location.line if action.declaration_location else 1
             )
             comment_chunks = self._extract_comment_universal_chunks(
                 action.declaration,
@@ -736,9 +733,7 @@ class TwinCATParser:
         # Extract comments
         if method.declaration and method.declaration.strip():
             decl_base = (
-                method.declaration_location.line
-                if method.declaration_location
-                else 1
+                method.declaration_location.line if method.declaration_location else 1
             )
             comment_chunks = self._extract_comment_universal_chunks(
                 method.declaration,
@@ -1124,9 +1119,7 @@ class TwinCATParser:
 
         return "".join(parts)
 
-    def _adjust_line_number(
-        self, line: int, location: SourceLocation | None
-    ) -> int:
+    def _adjust_line_number(self, line: int, location: SourceLocation | None) -> int:
         """Adjust line number from CDATA-relative to XML-absolute."""
         if location is None:
             return line
@@ -1311,14 +1304,44 @@ class TwinCATParser:
     # =========================================================================
 
     # IEC 61131-3 primitive types to skip when extracting type references
-    PRIMITIVE_TYPES = frozenset({
-        "BOOL", "BYTE", "WORD", "DWORD", "LWORD",
-        "SINT", "USINT", "INT", "UINT", "DINT", "UDINT", "LINT", "ULINT",
-        "REAL", "LREAL", "TIME", "LTIME", "DATE", "LDATE",
-        "TIME_OF_DAY", "TOD", "LTOD", "DATE_AND_TIME", "DT", "LDT",
-        "STRING", "WSTRING",
-        "ANY", "ANY_INT", "ANY_REAL", "ANY_NUM", "ANY_BIT", "ANY_STRING", "ANY_DATE",
-    })
+    PRIMITIVE_TYPES = frozenset(
+        {
+            "BOOL",
+            "BYTE",
+            "WORD",
+            "DWORD",
+            "LWORD",
+            "SINT",
+            "USINT",
+            "INT",
+            "UINT",
+            "DINT",
+            "UDINT",
+            "LINT",
+            "ULINT",
+            "REAL",
+            "LREAL",
+            "TIME",
+            "LTIME",
+            "DATE",
+            "LDATE",
+            "TIME_OF_DAY",
+            "TOD",
+            "LTOD",
+            "DATE_AND_TIME",
+            "DT",
+            "LDT",
+            "STRING",
+            "WSTRING",
+            "ANY",
+            "ANY_INT",
+            "ANY_REAL",
+            "ANY_NUM",
+            "ANY_BIT",
+            "ANY_STRING",
+            "ANY_DATE",
+        }
+    )
 
     def extract_import_chunks(
         self,

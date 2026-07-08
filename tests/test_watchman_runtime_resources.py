@@ -1217,6 +1217,5 @@ def test_materialize_watchman_binary_rewrites_corrupt_payload(tmp_path: Path) ->
 
     assert repaired_path == binary_path
     assert (
-        hashlib.sha256(repaired_path.read_bytes()).hexdigest()
-        == runtime.source_digest
+        hashlib.sha256(repaired_path.read_bytes()).hexdigest() == runtime.source_digest
     )

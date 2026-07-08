@@ -128,10 +128,16 @@ distclean: clean
                 has_target = any(
                     ":" in line and not line.strip().startswith("#") for line in lines
                 )
-                # rule_target is set on ALL rule parts (including Part 1) so that emergency-split
-                # sub-chunks of Part 1 inherit it via metadata.copy(). is_continuation can therefore
-                # be True for Part 1. The critical case this catches: a continuation part losing
-                # rule_target causes has_target=False AND is_continuation=False → assertion fails.
+                # rule_target is set on ALL rule parts
+                # (including Part 1) so that emergency-split
+                # sub-chunks of Part 1 inherit it via
+                # metadata.copy(). is_continuation can
+                # therefore be True for Part 1. The critical
+                # case this catches: a continuation part
+                # losing rule_target causes
+                # has_target=False AND
+                # is_continuation=False
+                # → assertion fails.
                 is_continuation = bool((chunk.metadata or {}).get("rule_target"))
                 assert has_target or is_continuation, (
                     f"Recipe without target in chunk: {chunk.symbol}"
@@ -147,7 +153,6 @@ distclean: clean
     # Search for install commands
     install_results, _ = search.search_regex("mkdir.*DESTDIR")
     assert len(install_results) > 0, "Install commands not searchable"
-
 
 
 async def test_makefile_end_to_end_indexing(makefile_workflow, tmp_path):
@@ -266,7 +271,6 @@ test: $(PROJECT)
     assert len(phony_results) > 0, "Phony targets not searchable"
 
 
-
 async def test_makefile_semantic_boundaries(makefile_workflow, tmp_path):
     """Test that cAST preserves Makefile semantic boundaries."""
 
@@ -313,11 +317,14 @@ async def test_makefile_semantic_boundaries(makefile_workflow, tmp_path):
             assert long_var_name in chunk.code
             assert "very long value" in chunk.code
 
-    # VERIFY: Part 1 of a split rule (the only chunk containing the target name) has the target line
+    # VERIFY: Part 1 of a split rule (the only chunk
+    # containing the target name) has the target line
     target_chunks = [c for c in chunks if "long-target-name" in c.code]
     if target_chunks:
         for chunk in target_chunks:
-            # This filter only matches Part 1 chunks; continuation chunks are recipe-only and excluded
+            # This filter only matches Part 1 chunks;
+            # continuation chunks are recipe-only
+            # and excluded
             assert ":" in chunk.code  # Target declaration
             assert "\t@echo" in chunk.code or "\t$(CC)" in chunk.code  # Recipe commands
 

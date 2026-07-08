@@ -694,7 +694,8 @@ class KotlinMapping(BaseMapping):
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
         """Get tree-sitter query for universal concept in Kotlin."""
         if concept == UniversalConcept.DEFINITION:
-            # Note: interfaces are represented as class_declaration in Kotlin's tree-sitter
+            # Note: interfaces are represented as
+            # class_declaration in Kotlin's tree-sitter
             return """
             (function_declaration
                 name: (identifier) @name

@@ -14,7 +14,6 @@ import pytest
 from chunkhound.core.config.llm_config import LLMProviderLiteral
 from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
 
-
 # ── Registry integrity ──────────────────────────────────────────────────────
 
 
@@ -81,7 +80,8 @@ def test_spec_has_valid_max_tokens_param_name(name, spec):
 )
 def test_spec_synthesis_concurrency_positive(name, spec):
     assert spec.synthesis_concurrency > 0, (
-        f"{name}: synthesis_concurrency must be positive, got {spec.synthesis_concurrency}"
+        f"{name}: synthesis_concurrency must be "
+        "positive, got {spec.synthesis_concurrency}"
     )
 
 
@@ -231,7 +231,9 @@ def test_spec_default_supports_structured_outputs(name, spec):
         {"model": "test-model", "api_key": "sk-test"},
     )
     assert provider._supports_structured_outputs is spec.supports_structured_outputs, (
-        f"{name}: expected spec.supports_structured_outputs={spec.supports_structured_outputs}, "
+        f"{name}: expected "
+        "spec.supports_structured_outputs="
+        f"{spec.supports_structured_outputs}, "
         f"got {provider._supports_structured_outputs}"
     )
 
@@ -289,6 +291,4 @@ def test_unknown_provider_error_lists_available():
     msg = str(excinfo.value)
     assert "Available providers:" in msg
     for known in ("openai", "anthropic", "gemini"):
-        assert known in msg, (
-            f"Known provider {known!r} should appear in available list"
-        )
+        assert known in msg, f"Known provider {known!r} should appear in available list"

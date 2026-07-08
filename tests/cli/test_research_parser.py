@@ -25,7 +25,8 @@ def test_research_parser_defaults_and_flags() -> None:
     assert args.path == Path(".")
     assert args.path_filter == "src/"
 
-    args = parser.parse_args(["research", "why is x slow", "repo", "--path-filter", "src/"])
+    args = parser.parse_args(
+        ["research", "why is x slow", "repo", "--path-filter", "src/"]
+    )
     assert args.path == Path("repo")
     assert args.path_filter == "src/"
-

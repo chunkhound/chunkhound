@@ -4,8 +4,6 @@ This test module ensures that DatabaseConfig.get_db_path() returns the correct
 final database location for each provider, preventing path duplication bugs.
 """
 
-from pathlib import Path
-
 import pytest
 
 from chunkhound.core.config.database_config import DatabaseConfig
@@ -109,7 +107,10 @@ def test_lancedb_path_transformation_matches_provider(tmp_path):
 
 
 def test_get_db_path_explicit_db_file_path_not_nested(tmp_path):
-    """--db /path/chunks.db must NOT create a nested chunks.db/chunks.db dir (issue #215)."""
+    """
+    --db /path/chunks.db must NOT create a nested
+    chunks.db/chunks.db dir (issue #215).
+    """
     explicit_path = tmp_path / "mydb" / "chunks.db"
     config = DatabaseConfig(path=explicit_path, provider="duckdb")
     result = config.get_db_path()

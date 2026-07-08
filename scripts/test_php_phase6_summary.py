@@ -2,12 +2,13 @@
 """Phase 6 Summary: Comprehensive test of PHP helper methods."""
 
 from pathlib import Path
-from chunkhound.parsers.parser_factory import ParserFactory
-from chunkhound.core.types.common import Language
 
-print("="*70)
+from chunkhound.core.types.common import Language
+from chunkhound.parsers.parser_factory import ParserFactory
+
+print("=" * 70)
 print("PHASE 6: PHP Helper Methods - Comprehensive Verification")
-print("="*70)
+print("=" * 70)
 
 factory = ParserFactory()
 parser = factory.create_parser(Language.PHP)
@@ -25,7 +26,7 @@ function getUserById(int $id, ?string $name = null): ?User {
             "kind": "function",
             "has_parameters": True,
             "has_return_type": True,
-        }
+        },
     },
     {
         "name": "Function with multiple parameter types",
@@ -39,7 +40,7 @@ function processData(array $items, string $mode, ?int $limit = 10): bool {
             "has_parameters": True,
             "param_count": 3,
             "has_return_type": True,
-        }
+        },
     },
     {
         "name": "Abstract class",
@@ -51,7 +52,7 @@ abstract class AbstractService {
         "expected": {
             "kind": "class",
             "is_abstract": True,
-        }
+        },
     },
     {
         "name": "Final class",
@@ -63,7 +64,7 @@ final class ImmutableValue {
         "expected": {
             "kind": "class",
             "is_final": True,
-        }
+        },
     },
     {
         "name": "Interface",
@@ -74,7 +75,7 @@ interface Processable {
 """,
         "expected": {
             "kind": "interface",
-        }
+        },
     },
     {
         "name": "Trait",
@@ -85,13 +86,13 @@ trait Timestampable {
 """,
         "expected": {
             "kind": "trait",
-        }
+        },
     },
 ]
 
-print("\n" + "="*70)
+print("\n" + "=" * 70)
 print("RUNNING TESTS")
-print("="*70 + "\n")
+print("=" * 70 + "\n")
 
 results = []
 for i, test_case in enumerate(test_cases, 1):
@@ -104,7 +105,7 @@ for i, test_case in enumerate(test_cases, 1):
     chunks = parser.parse_content(code, Path("test.php"), file_id=1)
 
     if not chunks:
-        print(f"   ❌ FAIL: No chunks found")
+        print("   ❌ FAIL: No chunks found")
         results.append(False)
         print()
         continue
@@ -127,7 +128,9 @@ for i, test_case in enumerate(test_cases, 1):
     if "is_abstract" in expected:
         actual_abstract = metadata.get("is_abstract", False)
         abstract_match = actual_abstract == expected["is_abstract"]
-        checks.append(("is_abstract", expected["is_abstract"], actual_abstract, abstract_match))
+        checks.append(
+            ("is_abstract", expected["is_abstract"], actual_abstract, abstract_match)
+        )
         if not abstract_match:
             passed = False
 
@@ -144,7 +147,9 @@ for i, test_case in enumerate(test_cases, 1):
         actual_params = metadata.get("parameters", [])
         has_params = len(actual_params) > 0
         params_match = has_params == expected["has_parameters"]
-        checks.append(("has_parameters", expected["has_parameters"], has_params, params_match))
+        checks.append(
+            ("has_parameters", expected["has_parameters"], has_params, params_match)
+        )
         if not params_match:
             passed = False
 
@@ -152,8 +157,8 @@ for i, test_case in enumerate(test_cases, 1):
         if has_params:
             print(f"   Parameters ({len(actual_params)}):")
             for p in actual_params:
-                type_str = p.get('type', 'mixed')
-                name_str = p.get('name', '?')
+                type_str = p.get("type", "mixed")
+                name_str = p.get("name", "?")
                 print(f"     - {type_str} {name_str}")
 
     # Check parameter count
@@ -161,7 +166,9 @@ for i, test_case in enumerate(test_cases, 1):
         actual_params = metadata.get("parameters", [])
         actual_count = len(actual_params)
         count_match = actual_count == expected["param_count"]
-        checks.append(("param_count", expected["param_count"], actual_count, count_match))
+        checks.append(
+            ("param_count", expected["param_count"], actual_count, count_match)
+        )
         if not count_match:
             passed = False
 
@@ -170,7 +177,9 @@ for i, test_case in enumerate(test_cases, 1):
         actual_return = metadata.get("return_type")
         has_return = actual_return is not None
         return_match = has_return == expected["has_return_type"]
-        checks.append(("has_return_type", expected["has_return_type"], has_return, return_match))
+        checks.append(
+            ("has_return_type", expected["has_return_type"], has_return, return_match)
+        )
         if not return_match:
             passed = False
 
@@ -183,17 +192,17 @@ for i, test_case in enumerate(test_cases, 1):
         print(f"   {status} {check_name}: {actual_val}")
 
     if passed:
-        print(f"   ✅ PASS")
+        print("   ✅ PASS")
     else:
-        print(f"   ❌ FAIL")
+        print("   ❌ FAIL")
 
     results.append(passed)
     print()
 
 # Summary
-print("="*70)
+print("=" * 70)
 print("SUMMARY")
-print("="*70)
+print("=" * 70)
 
 passed_count = sum(results)
 total_count = len(results)
@@ -206,9 +215,9 @@ if passed_count == total_count:
 else:
     print(f"\n⚠️  {total_count - passed_count} test(s) failed")
 
-print("\n" + "="*70)
+print("\n" + "=" * 70)
 print("PHASE 6: Helper Methods Implemented")
-print("="*70)
+print("=" * 70)
 print("""
 ✅ _extract_parameters(func_node, source) -> list[dict]
    - Extracts parameter names and type hints
@@ -236,4 +245,4 @@ print("""
    - Provides rich PHP-specific information in chunks
 """)
 
-print("="*70)
+print("=" * 70)

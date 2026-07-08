@@ -93,8 +93,13 @@ async def research_command(args: argparse.Namespace, config: Config) -> None:
         sys.exit(1)
 
     await run_research(
-        services, embedding_manager, llm_manager,
-        args.query, args.path_filter, config, formatter,
+        services,
+        embedding_manager,
+        llm_manager,
+        args.query,
+        args.path_filter,
+        config,
+        formatter,
         commit_range=getattr(args, "commit_range", None),
         commit_hash=getattr(args, "commit_hash", None),
         last_n_commits=getattr(args, "last_n_commits", None),

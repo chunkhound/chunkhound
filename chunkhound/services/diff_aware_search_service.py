@@ -96,9 +96,9 @@ class DiffAwareSearchService:
         if diff_embeddings:
             # Guard: embedding provider may return more/fewer embeddings than inputs
             # (batching boundary bug observed in Qwen3 provider). Clamp both to min.
-            M = min(len(diff_embeddings), len(diff_chunks))
-            self._diff_chunks = diff_chunks[:M]
-            mat = np.array(diff_embeddings[:M], dtype=np.float32)
+            m = min(len(diff_embeddings), len(diff_chunks))
+            self._diff_chunks = diff_chunks[:m]
+            mat = np.array(diff_embeddings[:m], dtype=np.float32)
             norms = np.linalg.norm(mat, axis=1, keepdims=True)
             norms = np.clip(norms, np.float32(1e-9), None)  # avoid upcast via float32
             self._norm_matrix: np.ndarray | None = mat / norms
@@ -188,8 +188,7 @@ class DiffAwareSearchService:
         paged = sorted_indices[offset : offset + page_size]
 
         results = [
-            self._chunk_to_dict(self._diff_chunks[i], float(scores[i]))
-            for i in paged
+            self._chunk_to_dict(self._diff_chunks[i], float(scores[i])) for i in paged
         ]
 
         has_more = (offset + page_size) < total_after_filter
@@ -222,7 +221,9 @@ class DiffAwareSearchService:
         """Semantic search with configurable vector_source."""
 
         if self._vector_source == "db":
-            db_only: tuple[list[dict[str, Any]], dict[str, Any]] = await self._original.search_semantic(
+            db_only: tuple[
+                list[dict[str, Any]], dict[str, Any]
+            ] = await self._original.search_semantic(
                 query=query,
                 page_size=page_size,
                 offset=offset,
@@ -247,7 +248,9 @@ class DiffAwareSearchService:
 
         # vector_source == "both"
         # Diff chunks are in-memory — fetch all of them (no cost).
-        diff_fetch = len(self._diff_chunks) if self._diff_chunks else (offset + page_size)
+        diff_fetch = (
+            len(self._diff_chunks) if self._diff_chunks else (offset + page_size)
+        )
         # Fetch all DB results so merged total/has_more are exact, not heuristic.
         # 10_000 exceeds any realistic HNSW top-K result set; for corpora larger
         # than this, pagination metadata beyond offset 10_000 is a lower bound.
@@ -300,7 +303,9 @@ class DiffAwareSearchService:
         seen_diff_ids: set[str] = set()
         diff_locations: set[tuple[Any, Any]] = set()
         deduped: list[dict[str, Any]] = []
-        for r in sorted(diff_results, key=lambda x: float(x.get("score", 0.0)), reverse=True):
+        for r in sorted(
+            diff_results, key=lambda x: float(x.get("score", 0.0)), reverse=True
+        ):
             cid = str(r.get("chunk_id", ""))
             if cid not in seen_diff_ids:
                 seen_diff_ids.add(cid)
@@ -310,7 +315,9 @@ class DiffAwareSearchService:
         # Pass 2 — DB results: skip if a diff result already covers this location,
         # or if a duplicate DB result for the same location was already kept.
         seen_db_locs: set[tuple[Any, Any]] = set()
-        for r in sorted(normalised_db, key=lambda x: float(x.get("score", 0.0)), reverse=True):
+        for r in sorted(
+            normalised_db, key=lambda x: float(x.get("score", 0.0)), reverse=True
+        ):
             loc = (r.get("file_path"), r.get("start_line"))
             if loc not in diff_locations and loc not in seen_db_locs:
                 seen_db_locs.add(loc)
@@ -320,9 +327,7 @@ class DiffAwareSearchService:
 
         # Apply threshold
         if threshold is not None:
-            deduped = [
-                r for r in deduped if float(r.get("score", 0.0)) >= threshold
-            ]
+            deduped = [r for r in deduped if float(r.get("score", 0.0)) >= threshold]
 
         total = len(deduped)
         paged = deduped[offset : offset + page_size]
@@ -358,7 +363,9 @@ class DiffAwareSearchService:
         offset: int = 0,
         path_filter: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        regex_result: tuple[list[dict[str, Any]], dict[str, Any]] = await self._original.search_regex_async(
+        regex_result: tuple[
+            list[dict[str, Any]], dict[str, Any]
+        ] = await self._original.search_regex_async(
             pattern, page_size=page_size, offset=offset, path_filter=path_filter
         )
         return regex_result
@@ -376,13 +383,30 @@ class DiffAwareSearchService:
 
         _enhancer = ResultEnhancer()
         tasks: list[tuple[str, Any]] = []
-        tasks.append(("semantic", asyncio.create_task(
-            self.search_semantic(query, page_size=page_size * 2, offset=offset, threshold=threshold)
-        )))
+        tasks.append(
+            (
+                "semantic",
+                asyncio.create_task(
+                    self.search_semantic(
+                        query,
+                        page_size=page_size * 2,
+                        offset=offset,
+                        threshold=threshold,
+                    )
+                ),
+            )
+        )
         if regex_pattern:
-            tasks.append(("regex", asyncio.create_task(
-                self.search_regex_async(regex_pattern, page_size=page_size * 2, offset=offset)
-            )))
+            tasks.append(
+                (
+                    "regex",
+                    asyncio.create_task(
+                        self.search_regex_async(
+                            regex_pattern, page_size=page_size * 2, offset=offset
+                        )
+                    ),
+                )
+            )
 
         results_by_type: dict[str, list[dict[str, Any]]] = {}
         for search_type, task in tasks:

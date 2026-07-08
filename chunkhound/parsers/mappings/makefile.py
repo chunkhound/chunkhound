@@ -33,7 +33,8 @@ class MakefileMapping(BaseMapping):
         """
 
     def get_class_query(self) -> str:
-        """Get tree-sitter query pattern for class definitions (not applicable to Makefiles)."""
+        """Get tree-sitter query pattern for class definitions
+        (not applicable to Makefiles)."""
         return ""
 
     def get_comment_query(self) -> str:
@@ -55,7 +56,8 @@ class MakefileMapping(BaseMapping):
         return self.get_fallback_name(node, "variable")
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
-        """Extract class name from a class definition node (not applicable to Makefiles)."""
+        """Extract class name from a class definition node
+        (not applicable to Makefiles)."""
         return ""
 
     # LanguageMapping protocol methods
@@ -67,11 +69,11 @@ class MakefileMapping(BaseMapping):
             (rule
                 (targets) @targets
             ) @definition
-            
+
             (variable_assignment
                 name: (_) @name
             ) @definition
-            
+
             (define_directive
                 name: (_) @name
             ) @definition
@@ -82,12 +84,12 @@ class MakefileMapping(BaseMapping):
             (rule
                 (recipe) @recipe
             ) @definition
-            
+
             (conditional
                 condition: (_) @condition
                 (_) @block
             ) @definition
-            
+
             (define_directive
                 name: (_) @name
                 (_) @block
@@ -104,11 +106,11 @@ class MakefileMapping(BaseMapping):
             (include_directive
                 filenames: (_) @include_path
             ) @definition
-            
+
             (include_directive
                 filenames: (_) @include_path
             ) @definition
-            
+
             (include_directive
                 filenames: (_) @include_path
             ) @definition

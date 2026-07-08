@@ -3,13 +3,13 @@
 Before-fix tests: regression guards that pass today and must stay passing.
 After-fix tests: written first, fail until implementation is done.
 """
+
 import argparse
 from pathlib import Path
 
 import pytest
 
 from chunkhound.core.config.indexing_config import IndexingConfig
-from chunkhound.core.types.common import Language
 from chunkhound.services.batch_processor import process_file_batch
 
 
@@ -39,6 +39,7 @@ def _write_binary_unknown(tmp_path: Path) -> Path:
 # These pass right now. They must continue to pass after implementation.
 # ════════════════════════════════════════════════════════════════════════════
 
+
 class TestDefaultBehaviourPreserved:
     """Existing behaviour: unknown files skipped, no wildcard injected by default."""
 
@@ -58,13 +59,16 @@ class TestDefaultBehaviourPreserved:
         pyfile.write_text("x = 1\n")
         results = process_file_batch([pyfile], _cfg())
         assert len(results) == 1
-        assert not (results[0].status == "skipped" and results[0].error == "Unknown file type")
+        assert not (
+            results[0].status == "skipped" and results[0].error == "Unknown file type"
+        )
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # AFTER FIX — new behaviour
 # Written first. Fail until implementation lands.
 # ════════════════════════════════════════════════════════════════════════════
+
 
 class TestIndexUnknownFilesFlag:
     """Flag-on: text unknown files indexed; binary files still skipped."""

@@ -4,12 +4,12 @@
 import sys
 from pathlib import Path
 
-from chunkhound.parsers.parser_factory import ParserFactory
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.parser_factory import ParserFactory
 
-print("="*70)
+print("=" * 70)
 print("PHP PARSER IMPLEMENTATION - FINAL SUMMARY")
-print("="*70)
+print("=" * 70)
 
 # Check availability
 factory = ParserFactory()
@@ -65,9 +65,10 @@ try:
 
     # Count by type
     from collections import Counter
+
     chunk_types = Counter(str(c.chunk_type.value) for c in chunks)
 
-    print(f"   - Chunk types:")
+    print("   - Chunk types:")
     for chunk_type, count in sorted(chunk_types.items()):
         print(f"      • {chunk_type}: {count}")
 
@@ -86,6 +87,7 @@ try:
 except Exception as e:
     print(f"   ❌ Error: {e}")
     import traceback
+
     traceback.print_exc()
     sys.exit(1)
 
@@ -110,12 +112,12 @@ for feature in features:
     print(f"   ✓ {feature}")
 
 print("\n✅ Implementation Summary:")
-print(f"   - Total Phases Completed: 7/7")
-print(f"   - BaseMapping Methods: 5/5")
-print(f"   - LanguageMapping Methods: 4/4")
-print(f"   - Helper Methods: 6/6")
-print(f"   - Test Coverage: Comprehensive")
+print("   - Total Phases Completed: 7/7")
+print("   - BaseMapping Methods: 5/5")
+print("   - LanguageMapping Methods: 4/4")
+print("   - Helper Methods: 6/6")
+print("   - Test Coverage: Comprehensive")
 
-print("\n" + "="*70)
+print("\n" + "=" * 70)
 print("PHP PARSER IMPLEMENTATION COMPLETE!")
-print("="*70)
+print("=" * 70)

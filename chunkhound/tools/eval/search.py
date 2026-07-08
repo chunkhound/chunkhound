@@ -361,8 +361,8 @@ async def _run_mode_per_language(
                     errors = config.validate_for_command("search")
                     if errors:
                         raise RuntimeError(
-                            "Semantic search requires a configured embedding provider.\n"
-                            + "\n".join(errors)
+                            "Semantic search requires a configured "
+                            "embedding provider.\n" + "\n".join(errors)
                         )
 
                 await _index_corpus(
@@ -404,7 +404,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--mode",
         choices=["mixed", "per-language"],
         default="mixed",
-        help="Evaluation mode: mixed corpus or one corpus per language (default: mixed)",
+        help=(
+            "Evaluation mode: mixed corpus or one corpus per language (default: mixed)"
+        ),
     )
     parser.add_argument(
         "--search-mode",

@@ -80,9 +80,7 @@ VALID_SCHEMAS: set[str] = {"main"}
 def _assert_allowed_identifier(value: str, allowed: set[str], kind: str) -> None:
     """Raise ValueError when *value* is not in the *allowed* set."""
     if value not in allowed:
-        raise ValueError(
-            f"Invalid {kind} {value!r}; expected one of {sorted(allowed)}"
-        )
+        raise ValueError(f"Invalid {kind} {value!r}; expected one of {sorted(allowed)}")
 
 
 def _embedding_tables_where_clause(
@@ -96,9 +94,7 @@ def _embedding_tables_where_clause(
     if catalog is not None:
         _assert_allowed_identifier(catalog, VALID_CATALOGS, "catalog")
         filters.append(f"table_catalog = '{catalog}'")
-    filters.append(
-        f"table_name SIMILAR TO '{EMBEDDING_TABLE_SIMILAR_PATTERN}'"
-    )
+    filters.append(f"table_name SIMILAR TO '{EMBEDDING_TABLE_SIMILAR_PATTERN}'")
     return " AND ".join(filters)
 
 
@@ -171,7 +167,8 @@ def _embedding_provider_model_index_name(dims: int) -> str:
 
 
 def _embedding_unique_index_name(dims: int) -> str:
-    """Return the canonical unique upsert-contract index name for one embedding table."""
+    """Return the canonical unique upsert-contract
+    index name for one embedding table."""
     return f"idx_{dims}_chunk_provider_model_unique"
 
 
@@ -215,7 +212,8 @@ def _embedding_dims_from_table_name(table_name: str) -> int | None:
 def _extract_column_names(cols_sql: str) -> list[str]:
     """Parse column names from a DDL column-definition fragment.
 
-    Input like ``"id INTEGER PRIMARY KEY ..., path TEXT ..."`` → ``["id", "path", ...]``.
+    Input like ``"id INTEGER PRIMARY KEY ..., "
+    ``"path TEXT ..."`` → ``["id", "path", ...]``.
     Only extracts the first token of each comma-separated entry.
     """
     names: list[str] = []

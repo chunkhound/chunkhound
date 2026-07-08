@@ -43,6 +43,7 @@ def test_autodoc_parser_accepts_audience_numeric_and_named_values() -> None:
     assert parser.parse_args([*base, "end-user"]).audience == "end-user"
     assert parser.parse_args([*base, "end_user"]).audience == "end-user"
 
+
 def test_autodoc_parser_accepts_map_audience() -> None:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
@@ -89,9 +90,11 @@ def test_write_astro_assets_only_preserves_topic_pages(tmp_path: Path) -> None:
     assert "navData" in layout_path.read_text(encoding="utf-8")
     assert (output_dir / "astro.config.mjs").read_text(encoding="utf-8").strip()
     assert (output_dir / "tsconfig.json").read_text(encoding="utf-8").strip()
-    assert (output_dir / "src" / "styles" / "global.css").read_text(
-        encoding="utf-8"
-    ).strip()
+    assert (
+        (output_dir / "src" / "styles" / "global.css")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
     assert (output_dir / "public" / "favicon.ico").read_bytes()
 
 

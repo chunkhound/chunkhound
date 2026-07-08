@@ -102,4 +102,3 @@ def test_block_concept_maps_to_block_chunk_type(universal_parser):
         {},
     )
     assert chunk_type == ChunkType.BLOCK
-

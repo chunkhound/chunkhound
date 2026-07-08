@@ -36,8 +36,6 @@ if TYPE_CHECKING:
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
-from chunkhound.services.indexing_coordinator import run_batch_compaction_boundary
-
 # Provider imports
 # Registry import for service layer
 from chunkhound.registry import (
@@ -46,6 +44,7 @@ from chunkhound.registry import (
     create_search_service,
     get_registry,
 )
+from chunkhound.services.indexing_coordinator import run_batch_compaction_boundary
 
 # Legacy imports for backward compatibility
 from .embeddings import EmbeddingManager

@@ -70,7 +70,7 @@ def test_autorun_llm_prereqs_accept_local_openai_compatible_llm_without_api_key(
             "provider": "openai",
             "model": "llama3.2",
             "base_url": "http://localhost:11434/v1",
-        }
+        },
     )
 
     missing, details = autorun._code_mapper_autorun_llm_prereqs(cfg)
@@ -88,7 +88,7 @@ def test_autorun_llm_prereqs_require_explicit_model_for_custom_endpoint(
         llm={
             "provider": "openai",
             "base_url": "http://localhost:11434/v1",
-        }
+        },
     )
 
     missing, details = autorun._code_mapper_autorun_llm_prereqs(cfg)

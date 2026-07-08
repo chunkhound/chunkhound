@@ -174,7 +174,9 @@ class DepthExplorationService(ProgressEmitterMixin):
         logger.info(
             f"Step 1.5.2: Generated {total_queries} exploration queries "
             f"across {len(exploration_queries)} files "
-            f"({generation_metrics.success_count}/{generation_metrics.total_operations} files succeeded)"
+            f"({generation_metrics.success_count}/"
+            f"{generation_metrics.total_operations}"
+            f" files succeeded)"
         )
         await self._emit_event(
             "gap_step",
@@ -258,8 +260,10 @@ class DepthExplorationService(ProgressEmitterMixin):
                 expanded_chunks = self._merge_coverage(expanded_chunks, import_chunks)
                 import_chunks_added = len(import_chunks)
                 logger.info(
-                    f"Step 1.5.6: Import resolution: added {import_chunks_added} chunks "
-                    f"from {len({c.get('file_path') for c in import_chunks})} import files"
+                    f"Step 1.5.6: Import resolution: "
+                    f"added {import_chunks_added} chunks "
+                    f"from {len({c.get('file_path') for c in import_chunks})} "
+                    f"import files"
                 )
             # Always emit — shows time even when import resolution returns nothing
             await self._emit_event(
@@ -442,7 +446,8 @@ class DepthExplorationService(ProgressEmitterMixin):
         }
 
         # Build constants section if available
-        # Note: Depth exploration uses inline instruction in prompt, not separate section
+        # Note: Depth exploration uses inline instruction
+        # in prompt, not separate section
         constants_section = ""
         if constants_context:
             constants_section = f"\n{constants_context}\n"

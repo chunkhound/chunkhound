@@ -11,9 +11,8 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import xxhash
-
-from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
@@ -219,7 +218,7 @@ class FakeEmbeddingProvider:
             model: Model name for identification
             dims: Embedding dimensions (native/full dimension)
             output_dims: Output dimension override for matryoshka testing
-            client_side_truncation: Truncate embeddings client-side (requires output_dims)
+            client_side_truncation: Truncate client-side (requires output_dims)
             batch_size: Maximum batch size
         """
         self._model = model
@@ -290,6 +289,11 @@ class FakeEmbeddingProvider:
         return self._max_tokens
 
     @property
+    def base_url(self) -> str:
+        """Base URL (not used by fake provider)."""
+        return ""
+
+    @property
     def config(self) -> EmbeddingConfig:
         """Provider configuration."""
         return EmbeddingConfig(
@@ -303,7 +307,7 @@ class FakeEmbeddingProvider:
             client_side_truncation=self.client_side_truncation,
         )
 
-    def _generate_deterministic_vector(self, text: str) -> list[float]:
+    def generate_deterministic_vector(self, text: str) -> list[float]:
         """Generate deterministic embedding via character n-gram feature hashing.
 
         Hashes character n-grams (3, 4, 5-grams) to dimension indices,
@@ -347,7 +351,7 @@ class FakeEmbeddingProvider:
         self._embeddings_generated += len(texts)
         self._tokens_used += sum(self.estimate_tokens(text) for text in texts)
 
-        embeddings = [self._generate_deterministic_vector(text) for text in texts]
+        embeddings = [self.generate_deterministic_vector(text) for text in texts]
 
         # Apply truncation to simulate matryoshka behavior
         if self._output_dims is not None:
@@ -356,9 +360,7 @@ class FakeEmbeddingProvider:
                     apply_client_side_truncation,
                 )
 
-                embeddings = apply_client_side_truncation(
-                    embeddings, self._output_dims
-                )
+                embeddings = apply_client_side_truncation(embeddings, self._output_dims)
             else:
                 # Server-side truncation: API returns output_dims-sized vectors
                 embeddings = [v[: self._output_dims] for v in embeddings]
@@ -521,7 +523,7 @@ class FakeEmbeddingProvider:
         self._requests_made += 1
 
         query_terms = self._tokenize(query)
-        query_vector = self._generate_deterministic_vector(query)
+        query_vector = self.generate_deterministic_vector(query)
         results = []
 
         for idx, doc in enumerate(documents):
@@ -542,7 +544,7 @@ class FakeEmbeddingProvider:
                 substr_score = 0.0
 
             # Hash cosine: deterministic tie-breaker mapped from [-1,1] to [0,1]
-            doc_vector = self._generate_deterministic_vector(doc)
+            doc_vector = self.generate_deterministic_vector(doc)
             cosine = sum(a * b for a, b in zip(query_vector, doc_vector))
             hash_score = (cosine + 1.0) / 2.0  # [0, 1]
 
@@ -566,7 +568,7 @@ class ConstantEmbeddingProvider(FakeEmbeddingProvider):
     any query will match any stored embedding with perfect similarity.
     """
 
-    def _generate_deterministic_vector(self, text: str) -> list[float]:
+    def generate_deterministic_vector(self, text: str) -> list[float]:
         """Return constant unit vector (all components equal)."""
         value = 1.0 / (self._dims**0.5)
         return [value] * self._dims

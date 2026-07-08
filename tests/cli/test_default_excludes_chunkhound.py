@@ -4,14 +4,22 @@ import subprocess
 from pathlib import Path
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 25) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["uv", "run", *cmd], cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+def _run(
+    cmd: list[str], cwd: Path | None = None, timeout: int = 25
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["uv", "run", *cmd],
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
 
 
 def test_default_excludes_exclude_chunkhound_files(tmp_path: Path) -> None:
     root = tmp_path
     # Create CH config and working dir
-    (root / ".chunkhound.json").write_text("{\n  \"indexing\": { \"exclude\": [ ] }\n}\n")
+    (root / ".chunkhound.json").write_text('{\n  "indexing": { "exclude": [ ] }\n}\n')
     (root / ".chunkhound").mkdir(parents=True, exist_ok=True)
     # Avoid colliding with CH's DB path (which expects a file at .chunkhound/db).
     # Create a harmless directory under .chunkhound that should be excluded.

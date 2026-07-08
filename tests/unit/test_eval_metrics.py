@@ -119,4 +119,3 @@ def test_build_json_payload_structure() -> None:
     assert "per_language" in payload
     assert "per_query" in payload
     assert payload["per_query"][0]["id"] == "q1"
-
