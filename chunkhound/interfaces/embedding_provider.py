@@ -5,13 +5,6 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-# Import and re-export exceptions for convenience
-from chunkhound.core.exceptions.embedding import (
-    EmbeddingConfigurationError,
-    EmbeddingDimensionError,
-    EmbeddingProviderError,
-)
-
 
 @dataclass
 class RerankResult:
