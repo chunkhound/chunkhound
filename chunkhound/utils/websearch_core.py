@@ -38,6 +38,15 @@ MAX_FETCH_CONCURRENCY = 5
 
 WEBSEARCH_LIMIT_MAX = 100
 
+__all__ = [
+    "WEBSEARCH_LIMIT_MAX",
+    "clamp_limit",
+    "websearch_timeout",
+    "fetch_and_save",
+    "search_multi",
+    "build_quickresearch_argv_core",
+]
+
 # Probe these paths before zendriver's auto-discovery. zendriver picks the
 # shortest-named binary from [google-chrome, chromium, chromium-browser,
 # chrome, google-chrome-stable], so `chromium` wins over `google-chrome`
