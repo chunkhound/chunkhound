@@ -447,11 +447,26 @@ def run_python_path(files: list[dict], db_path: str, batch_size: int) -> dict:
     try:
         conn.execute(_CREATE_SCHEMA)
         total_chunks = total_embs = 0
+        n_batches = max(1, (len(files) + batch_size - 1) // batch_size)
         for i in range(0, len(files), batch_size):
             batch = files[i : i + batch_size]
+            batch_num = i // batch_size + 1
+            t_batch = time.perf_counter()
+            ru0 = resource.getrusage(resource.RUSAGE_SELF)
             c, e = _python_write_files(conn, batch)
+            elapsed = time.perf_counter() - t_batch
+            ru1 = resource.getrusage(resource.RUSAGE_SELF)
+            cpu_s = (ru1.ru_utime + ru1.ru_stime) - (ru0.ru_utime + ru0.ru_stime)
+            cpu_pct = cpu_s / elapsed * 100 if elapsed > 0 else 0
             total_chunks += c
             total_embs += e
+            rss_kb = ru1.ru_maxrss
+            print(
+                f"  [python] batch {batch_num}/{n_batches}"
+                f"  files={len(batch):,}  chunks={c:,}  embs={e:,}"
+                f"  {elapsed:.1f}s  CPU={cpu_pct:.0f}%  RSS={rss_kb//1024:,}MB",
+                flush=True,
+            )
         conn.execute("CHECKPOINT")
     finally:
         conn.close()
@@ -490,11 +505,28 @@ def run_rust_path(files: list[dict], db_path: str, batch_size: int) -> dict:
     writer.open()
     try:
         total_chunks = total_embs = 0
+        n_batches = max(1, (len(files) + batch_size - 1) // batch_size)
         for i in range(0, len(files), batch_size):
             batch = files[i : i + batch_size]
+            batch_num = i // batch_size + 1
+            t_batch = time.perf_counter()
+            ru0 = resource.getrusage(resource.RUSAGE_SELF)
             result = writer.write_batch({"files": batch, "delete_paths": []})
-            total_chunks += result.get("chunks_written", 0)
-            total_embs += result.get("embeddings_written", 0)
+            elapsed = time.perf_counter() - t_batch
+            ru1 = resource.getrusage(resource.RUSAGE_SELF)
+            cpu_s = (ru1.ru_utime + ru1.ru_stime) - (ru0.ru_utime + ru0.ru_stime)
+            cpu_pct = cpu_s / elapsed * 100 if elapsed > 0 else 0
+            c = result.get("chunks_written", 0)
+            e = result.get("embeddings_written", 0)
+            total_chunks += c
+            total_embs += e
+            rss_kb = ru1.ru_maxrss
+            print(
+                f"  [rust]   batch {batch_num}/{n_batches}"
+                f"  files={len(batch):,}  chunks={c:,}  embs={e:,}"
+                f"  {elapsed:.1f}s  CPU={cpu_pct:.0f}%  RSS={rss_kb//1024:,}MB",
+                flush=True,
+            )
     finally:
         writer.close()
 
