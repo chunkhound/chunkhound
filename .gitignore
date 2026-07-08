@@ -334,3 +334,4 @@ site/public/og-image-light.png
 # AI review artifacts (from PR reviews, agent task plans)
 plan.txt
 AGENT_REVIEW.md
+HUMAN_REVIEW.md

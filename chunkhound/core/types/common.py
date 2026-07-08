@@ -324,6 +324,10 @@ class Language(Enum):
             # Use text fallback parser instead of silently producing
             # misaligned / empty chunks.
             ".sass": cls.TEXT,
+            # .haml has no bundled tree-sitter grammar (absent from
+            # tree-sitter-language-pack); index as text so files are searchable
+            # rather than silently skipped, mirroring the .sass fallback.
+            ".haml": cls.TEXT,
             ".jinja": cls.JINJA,
             ".j2": cls.JINJA,
             ".njk": cls.JINJA,

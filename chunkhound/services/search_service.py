@@ -219,6 +219,7 @@ class SearchService(BaseService):
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
+        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform regex search on code content (asynchronous).
 
@@ -231,6 +232,10 @@ class SearchService(BaseService):
             offset: Starting position for pagination
             path_filter: Optional relative path to limit search scope
                 (e.g., 'src/', 'tests/')
+            query: Optional natural-language query used to score results via
+                cosine similarity against stored chunk embeddings.  When set and
+                an embedding provider is available, each returned chunk receives
+                a ``similarity`` field before result enhancement.
 
         Returns:
             Tuple of (results, pagination_metadata)
@@ -246,6 +251,30 @@ class SearchService(BaseService):
                 path_filter=path_filter,
             )
 
+            # Score by cosine similarity before enhancement so similarity_percentage
+            # is populated by the result enhancer.
+            if query and self._embedding_provider and results:
+                try:
+                    query_vec = (await self._embedding_provider.embed([query]))[0]
+                    chunk_ids = [
+                        c["chunk_id"]
+                        for c in results
+                        if isinstance(c.get("chunk_id"), int)
+                    ]
+                    if chunk_ids:
+                        scores = await self.get_chunk_similarities_async(
+                            chunk_ids,
+                            query_vec,
+                            self._embedding_provider.name,
+                            self._embedding_provider.model,
+                        )
+                        for c in results:
+                            cid = c.get("chunk_id")
+                            if isinstance(cid, int):
+                                c["similarity"] = scores.get(cid, 0.0)
+                except Exception as e:
+                    logger.warning(f"Cosine scoring for regex results failed: {e}")
+
             # Enhance results with additional metadata
             enhanced_results = []
             for result in results:
@@ -260,6 +289,18 @@ class SearchService(BaseService):
         except Exception as e:
             logger.error(f"Async regex search failed: {e}")
             raise
+
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        """Batch cosine similarity between a query embedding and stored chunk embeddings."""
+        return await self._db.get_chunk_similarities_async(
+            chunk_ids, query_embedding, provider, model
+        )
 
     async def search_hybrid(
         self,

@@ -38,8 +38,11 @@ async def test_quickresearch_ignores_user_include_exclude_filters(
 
     captured: dict[str, IndexingConfig] = {}
 
-    def fake_setup(formatter: Any, cfg: Any) -> tuple[Any, Any]:
-        return (object(), object())
+    def fake_setup_embedding(formatter: Any, cfg: Any) -> Any:
+        return object()
+
+    def fake_setup_llm(formatter: Any, cfg: Any) -> Any:
+        return object()
 
     def fake_create_services(db: Any, cfg: Any, embedding_manager: Any) -> Any:
         return argparse.Namespace(indexing_coordinator=object())
@@ -62,7 +65,8 @@ async def test_quickresearch_ignores_user_include_exclude_filters(
     async def fake_run_research(*args: Any, **kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(qr_mod, "setup_embedding_llm", fake_setup)
+    monkeypatch.setattr(qr_mod, "setup_embedding_manager", fake_setup_embedding)
+    monkeypatch.setattr(qr_mod, "setup_llm_manager", fake_setup_llm)
     monkeypatch.setattr(qr_mod, "create_services", fake_create_services)
     monkeypatch.setattr(qr_mod, "DirectoryIndexingService", FakeIndexingService)
     monkeypatch.setattr(qr_mod, "run_research", fake_run_research)

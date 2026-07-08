@@ -15,11 +15,13 @@ from chunkhound.core.config.config import Config
 from chunkhound.utils.websearch_core import (
     build_quickresearch_argv_core,
     fetch_and_save,
-    search,
+    search_multi,
     websearch_timeout,
 )
+from chunkhound.utils.websearch_expansion import expand_web_queries
 from chunkhound.utils.websearch_postprocess import replace_paths_with_urls
 
+from ..utils.provider_setup import setup_llm_manager
 from ..utils.rich_output import RichOutputFormatter
 
 
@@ -47,9 +49,21 @@ def _build_quickresearch_argv(args: argparse.Namespace, tmpdir: Path, config: Co
 async def websearch_command(args: argparse.Namespace, config: Config) -> None:
     """Fetch DuckDuckGo results for the given query."""
     formatter = RichOutputFormatter(verbose=getattr(args, "verbose", False))
+    llm_manager = setup_llm_manager(formatter, config)
+
+    def _on_query_failure(q: str, e: urllib.error.URLError) -> None:
+        formatter.warning(
+            f"DDG query failed ({q!r}): {e.reason}; "
+            "continuing with remaining queries"
+        )
+
     try:
-        results = await asyncio.to_thread(
-            search, args.query, args.limit, formatter.progress_indicator
+        queries = await expand_web_queries(args.query, llm_manager)
+        results = await search_multi(
+            queries,
+            args.limit,
+            formatter.progress_indicator,
+            failure_callback=_on_query_failure,
         )
     except urllib.error.URLError as e:
         formatter.error(f"Web search failed: {e.reason}")

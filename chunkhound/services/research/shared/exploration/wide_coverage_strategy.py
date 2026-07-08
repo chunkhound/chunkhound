@@ -161,9 +161,11 @@ class WideCoverageStrategy:
             f"now have {len(all_chunks)} chunks"
         )
 
-        # Apply elbow-based filtering to final chunk set
+        # Apply elbow-based filtering to final chunk set.
+        # Use score_key=None (unified scoring) so Phase 1.5 chunks scored via
+        # cosine similarity are not treated as 0.0 alongside Phase 1/2 rerank scores.
         filtered_chunks, elbow_stats = filter_chunks_by_elbow(
-            all_chunks, score_key="rerank_score"
+            all_chunks, score_key=None
         )
         stats["elbow_filter"] = elbow_stats
         logger.info(
