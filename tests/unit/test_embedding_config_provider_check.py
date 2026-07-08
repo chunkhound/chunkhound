@@ -4,9 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+
 from chunkhound.providers.embeddings import openai_provider as openai_provider_module
 from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
 from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
@@ -203,7 +203,7 @@ def test_openai_provider_is_available_auth_matrix(
 
 
 @pytest.mark.asyncio
-async def test_openai_provider_health_check_reports_keyless_custom_endpoint_as_configured(
+async def test_openai_custom_endpoint_health_check_reports_configured_without_key(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Health check should report auth as satisfied without inventing an API key."""

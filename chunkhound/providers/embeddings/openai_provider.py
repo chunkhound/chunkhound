@@ -12,9 +12,6 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, TypedDict, cast
 
 import httpx
-from loguru import logger
-from typing_extensions import NotRequired
-
 from chunkhound.core.config.embedding_config import (
     RERANK_BASE_URL_REQUIRED,
     validate_rerank_configuration,
@@ -40,6 +37,8 @@ from chunkhound.providers.embeddings.shared_utils import (
     validate_positive_output_dims,
     validate_runtime_output_dims_config,
 )
+from loguru import logger
+from typing_extensions import NotRequired
 
 from .batch_utils import handle_token_limit_error
 
@@ -297,7 +296,8 @@ class OpenAIEmbeddingProvider:
             retry_attempts: Number of retry attempts for failed requests
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
-            rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+            rerank_batch_size: Max documents per rerank batch
+                (overrides model defaults, bounded by model caps)
             output_dims: Output embedding dimension. Official OpenAI endpoints
                 use documented model semantics for fail-fast validation. Custom
                 OpenAI-compatible endpoints are trusted instead, even under
@@ -612,7 +612,7 @@ class OpenAIEmbeddingProvider:
             )
 
     def _validate_output_dims_config(self) -> None:
-        """Validate output_dims config and reject missing dims for client-side truncation."""
+        """Validate output_dims; reject missing dims for client-side truncation."""
         self._validate_output_dims_config_for(
             model=self._model,
             base_url=self._base_url,
@@ -720,7 +720,8 @@ class OpenAIEmbeddingProvider:
         output_dims = self._validate_runtime_output_dims_config()
         if output_dims is None:
             raise EmbeddingConfigurationError(
-                f"Model '{self._model}' has client_side_truncation=True but output_dims is not set."
+                f"Model '{self._model}' has client_side_truncation=True"
+                f" but output_dims is not set."
             )
         return output_dims
 
@@ -1110,7 +1111,8 @@ class OpenAIEmbeddingProvider:
                         self._required_output_dims_for_client_truncation(),
                     )
                     logger.debug(
-                        f"Applying client-side truncation: {cast(int, raw_dim)}→{output_dims}"
+                        f"Applying client-side truncation:"
+                        f" {cast(int, raw_dim)}→{output_dims}"
                     )
                     truncated_embeddings = apply_client_side_truncation(
                         cast(list[list[float]], embeddings), output_dims
@@ -1142,7 +1144,8 @@ class OpenAIEmbeddingProvider:
                     and not server_side_truncation
                 ):
                     logger.debug(
-                        f"Discovered native embedding dimension: {self._discovered_native_dims}"
+                        f"Discovered native embedding dimension:"
+                        f" {self._discovered_native_dims}"
                     )
                 validate_embedding_dims(actual_dims, self.dims, model=self._model)
 
@@ -1949,7 +1952,8 @@ class OpenAIEmbeddingProvider:
         normalized_response = cast(dict[str, Any], response_data)
 
         # Validate response has results
-        # Note: Bare array responses are normalized to {"results": [...]} before this point
+        # Note: Bare array responses are normalized to
+        # {"results": [...]} before this point
         if "results" not in normalized_response:
             raise ValueError(
                 "Invalid rerank response: missing 'results' field. "

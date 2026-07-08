@@ -14,7 +14,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.llm_config import LLMConfig
@@ -256,9 +255,7 @@ def test_embedding_config_rerank_ssl_verify_rejects_invalid_env_bool(
     """Invalid rerank SSL env bools must fail explicitly."""
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY", raw_value)
 
-    with pytest.raises(
-        ValueError, match="CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY"
-    ):
+    with pytest.raises(ValueError, match="CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY"):
         EmbeddingConfig.load_from_env()
 
 

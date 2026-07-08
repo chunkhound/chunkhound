@@ -107,9 +107,7 @@ async def test_websearch_command_urlerror_exits_1(monkeypatch, patched) -> None:
 
 
 @pytest.mark.asyncio
-async def test_websearch_command_empty_results_exits_10(
-    monkeypatch, patched
-) -> None:
+async def test_websearch_command_empty_results_exits_10(monkeypatch, patched) -> None:
     monkeypatch.setattr(ws_core_mod, "search", _stub_search([]))
 
     errors: list[str] = []

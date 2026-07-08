@@ -9,8 +9,6 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, TypedDict, cast
 
 import httpx
-from loguru import logger
-
 from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
 from chunkhound.core.exceptions.embedding import (
@@ -23,6 +21,7 @@ from chunkhound.core.utils.voyageai_utils import (
     is_official_voyageai_endpoint,
 )
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
+from loguru import logger
 
 from .shared_utils import (
     apply_client_side_truncation,
@@ -242,7 +241,7 @@ class VoyageAIEmbeddingProvider:
             retry_attempts: Number of retry attempts for failed requests
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
-            rerank_batch_size: Max documents per rerank batch (overrides default of 1000)
+            rerank_batch_size: Max documents per rerank batch (overrides default 1000)
             output_dims: Optional server-side output dimension override. Known
                 official Voyage models keep their whitelist. Unknown/custom
                 Voyage-compatible endpoints are trusted instead and prove
@@ -343,9 +342,7 @@ class VoyageAIEmbeddingProvider:
         # endpoints; the official VoyageAI API keeps the higher recommended
         # concurrency even when callers pass its base_url explicitly.
         if max_concurrent_batches is None:
-            max_concurrent_batches = (
-                1 if is_custom else self.RECOMMENDED_CONCURRENCY
-            )
+            max_concurrent_batches = 1 if is_custom else self.RECOMMENDED_CONCURRENCY
         self._embed_semaphore = asyncio.Semaphore(max_concurrent_batches)
 
     @property
@@ -529,7 +526,7 @@ class VoyageAIEmbeddingProvider:
             )
 
     def _validate_output_dims_config(self) -> None:
-        """Validate output_dims and client_side_truncation, enforcing VoyageAI whitelist."""
+        """Validate output_dims and client-side truncation (VoyageAI whitelist)."""
         self._validate_output_dims_config_for(
             model=self._model,
             model_config=self._model_config,
@@ -615,9 +612,7 @@ class VoyageAIEmbeddingProvider:
                 # Validate raw API response dims before any client-side truncation
                 expected_raw = self._expected_raw_dims()
                 if raw_dims is not None and expected_raw is not None:
-                    validate_embedding_dims(
-                        raw_dims, expected_raw, model=self._model
-                    )
+                    validate_embedding_dims(raw_dims, expected_raw, model=self._model)
 
                 # Apply client-side truncation when server doesn't support dim param
                 if self._client_side_truncation:
@@ -938,7 +933,8 @@ class VoyageAIEmbeddingProvider:
         for attempt in range(self._retry_attempts):
             try:
                 logger.debug(
-                    f"VoyageAI reranking {len(documents)} documents with model {rerank_model}"
+                    f"VoyageAI reranking {len(documents)} documents"
+                    f" with model {rerank_model}"
                 )
 
                 result = await asyncio.to_thread(

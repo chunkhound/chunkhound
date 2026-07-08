@@ -274,7 +274,9 @@ def test_search_multi_passes_full_limit_to_each_query(monkeypatch) -> None:
     # ``limit / n``) so cross-variant URL overlap cannot silently drop the
     # returned count below ``limit``.
     responses: dict[str, list[tuple[str, str, str]]] = {
-        "q1": [], "q2": [], "q3": [],
+        "q1": [],
+        "q2": [],
+        "q3": [],
     }
     calls = _install_search_stub(monkeypatch, responses)
 
@@ -427,9 +429,7 @@ def test_search_multi_does_not_log_when_callback_provided(monkeypatch) -> None:
         seen.append((q, e))
 
     try:
-        asyncio.run(
-            ws_mod.search_multi(["q1", "q2"], limit=10, failure_callback=_cb)
-        )
+        asyncio.run(ws_mod.search_multi(["q1", "q2"], limit=10, failure_callback=_cb))
     finally:
         logger.remove(sink_id)
 

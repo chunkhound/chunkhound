@@ -783,9 +783,7 @@ async def search_multi(
             else None
         )
         try:
-            batch = await asyncio.to_thread(
-                search, q, limit, per_query_progress
-            )
+            batch = await asyncio.to_thread(search, q, limit, per_query_progress)
         except urllib.error.URLError as e:
             if failure_callback is not None:
                 failure_callback(q, e)

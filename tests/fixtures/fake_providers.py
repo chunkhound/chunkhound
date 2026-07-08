@@ -11,7 +11,6 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import xxhash
-
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
@@ -219,7 +218,7 @@ class FakeEmbeddingProvider:
             model: Model name for identification
             dims: Embedding dimensions (native/full dimension)
             output_dims: Output dimension override for matryoshka testing
-            client_side_truncation: Truncate embeddings client-side (requires output_dims)
+            client_side_truncation: Truncate client-side (requires output_dims)
             batch_size: Maximum batch size
         """
         self._model = model
@@ -361,9 +360,7 @@ class FakeEmbeddingProvider:
                     apply_client_side_truncation,
                 )
 
-                embeddings = apply_client_side_truncation(
-                    embeddings, self._output_dims
-                )
+                embeddings = apply_client_side_truncation(embeddings, self._output_dims)
             else:
                 # Server-side truncation: API returns output_dims-sized vectors
                 embeddings = [v[: self._output_dims] for v in embeddings]

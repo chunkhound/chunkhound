@@ -11,13 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import voyageai
-
 from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.core.exceptions.embedding import (
     EmbeddingConfigurationError,
     EmbeddingDimensionError,
 )
+
 from chunkhound.providers.embeddings.voyageai_provider import (
     _CATEGORY_BACKOFFS,
     VoyageAIEmbeddingProvider,
@@ -664,7 +664,10 @@ class TestVoyageOutputDimsRuntimeBehavior:
 
         await p.embed(["hello"])
 
-        with pytest.raises(EmbeddingDimensionError, match="dimension mismatch: got 2, expected 3"):
+        with pytest.raises(
+            EmbeddingDimensionError,
+            match="dimension mismatch: got 2, expected 3",
+        ):
             await p.embed(["hello again"])
 
     @pytest.mark.asyncio
@@ -750,13 +753,9 @@ class TestVoyageOutputDimsRuntimeBehavior:
     @pytest.mark.asyncio
     async def test_embedding_dimension_error_propagates_without_retry(self):
         """EmbeddingDimensionError must propagate immediately, not retry."""
-        p = _make_provider(
-            api_key="test-key", model="voyage-3", retry_attempts=3
-        )
+        p = _make_provider(api_key="test-key", model="voyage-3", retry_attempts=3)
         p._client.embed = MagicMock(
-            side_effect=EmbeddingDimensionError(
-                "dimension mismatch: got 2, expected 3"
-            )
+            side_effect=EmbeddingDimensionError("dimension mismatch: got 2, expected 3")
         )
 
         with pytest.raises(EmbeddingDimensionError, match="dimension mismatch"):
@@ -768,9 +767,7 @@ class TestVoyageOutputDimsRuntimeBehavior:
     @pytest.mark.asyncio
     async def test_embedding_configuration_error_propagates_without_retry(self):
         """EmbeddingConfigurationError must propagate immediately, not retry."""
-        p = _make_provider(
-            api_key="test-key", model="voyage-3", retry_attempts=3
-        )
+        p = _make_provider(api_key="test-key", model="voyage-3", retry_attempts=3)
         p._client.embed = MagicMock(
             side_effect=EmbeddingConfigurationError(
                 "output_dims 999 not in supported dimensions"
