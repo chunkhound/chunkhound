@@ -1278,7 +1278,7 @@ async def test_daemon_handle_tools_call_skips_connect_for_non_db_tools() -> None
         "params": {"name": "daemon_status", "arguments": {}},
     }
     with patch(
-        "chunkhound.daemon.server.handle_tool_call",
+        "chunkhound.mcp_server.common.handle_tool_call",
         new_callable=AsyncMock,
         return_value=[],
     ):
@@ -1490,7 +1490,7 @@ async def test_daemon_tool_call_propagates_mixed_content_error_flag() -> None:
     ]
 
     with patch(
-        "chunkhound.daemon.server.handle_tool_call",
+        "chunkhound.mcp_server.common.handle_tool_call",
         new=AsyncMock(return_value=mixed_contents),
     ):
         response = await daemon._handle_tools_call(
