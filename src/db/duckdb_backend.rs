@@ -204,31 +204,39 @@ impl DuckDbHnswBackend {
             .unwrap_or("")
             .to_string();
 
-        // DuckDB ON CONFLICT … RETURNING requires the conflict to be on a UNIQUE column.
-        // `path` has UNIQUE NOT NULL, so this is safe.
-        let id: i64 = conn.query_row(
-            "INSERT INTO files (path, name, extension, size, modified_time, content_hash, language)
-             VALUES (?, ?, ?, ?, CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, ?, ?)
-             ON CONFLICT (path) DO UPDATE SET
-                 size = EXCLUDED.size,
-                 modified_time = EXCLUDED.modified_time,
-                 content_hash = EXCLUDED.content_hash,
-                 language = EXCLUDED.language,
-                 updated_at = now()
-             RETURNING id",
-            duckdb::params![
-                file.path,
-                name,
-                ext,
-                file.size_bytes,
-                file.mtime,
-                file.mtime,
-                file.content_hash,
-                file.language,
-            ],
-            |row| row.get(0),
-        )?;
-        Ok(id)
+        // DuckDB rejects ON CONFLICT DO UPDATE inside an explicit transaction when
+        // a FK child table (chunks) has rows referencing the conflicting parent row,
+        // even if those children were deleted earlier in the same transaction.
+        // Work around by doing an explicit SELECT then UPDATE-or-INSERT.
+        let existing_id: Option<i64> = conn
+            .query_row("SELECT id FROM files WHERE path = ?", [&file.path], |r| r.get(0))
+            .ok();
+
+        if let Some(id) = existing_id {
+            conn.execute(
+                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, updated_at = now() WHERE id = ?",
+                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, id],
+            )?;
+            Ok(id)
+        } else {
+            let id: i64 = conn.query_row(
+                "INSERT INTO files (path, name, extension, size, modified_time, content_hash, language)
+                 VALUES (?, ?, ?, ?, CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, ?, ?)
+                 RETURNING id",
+                duckdb::params![
+                    file.path,
+                    name,
+                    ext,
+                    file.size_bytes,
+                    file.mtime,
+                    file.mtime,
+                    file.content_hash,
+                    file.language,
+                ],
+                |row| row.get(0),
+            )?;
+            Ok(id)
+        }
     }
 
     fn insert_chunks_for_file(
@@ -368,25 +376,38 @@ impl DuckDbHnswBackend {
         Ok(total)
     }
 
-    fn write_batch_txn(
-        conn: &Connection,
-        batch: &DbWriterBatch,
-    ) -> Result<(Vec<i64>, u64, Vec<(i64, usize, usize)>), DbError> {
-        // Handle delete_paths
-        for path in &batch.delete_paths {
+    // DuckDB rejects DELETE from a FK parent table inside an explicit transaction
+    // after the child rows were deleted in the same transaction. Delete paths are
+    // handled outside the transaction (before BEGIN) to work around this limitation.
+    fn delete_paths(conn: &Connection, paths: &[String]) -> Result<(), DbError> {
+        for path in paths {
             conn.execute(
                 "DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path = ?)",
                 duckdb::params![path],
             )?;
             conn.execute("DELETE FROM files WHERE path = ?", duckdb::params![path])?;
         }
+        Ok(())
+    }
 
-        // Delete chunks for files known to be modified (avoids duplication)
+    fn write_batch_txn(
+        conn: &Connection,
+        batch: &DbWriterBatch,
+    ) -> Result<(Vec<i64>, u64, Vec<(i64, usize, usize)>), DbError> {
+        // Delete old chunks for every file we're about to (re-)write.
+        // Use the caller-supplied existing_file_id when available for an indexed
+        // delete; fall back to a path lookup so idempotent re-writes without an
+        // explicit id don't accumulate duplicate chunks.
         for file in &batch.files {
             if let Some(existing_id) = file.existing_file_id {
                 conn.execute(
                     "DELETE FROM chunks WHERE file_id = ?",
                     duckdb::params![existing_id],
+                )?;
+            } else {
+                conn.execute(
+                    "DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path = ?)",
+                    duckdb::params![file.path],
                 )?;
             }
         }
@@ -470,7 +491,17 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
-        // Step 0: Ensure embedding tables outside txn (Invariant 13)
+        // Step 0a: Handle delete_paths OUTSIDE transaction (Invariant: DuckDB rejects
+        // FK parent-row deletes inside an explicit transaction after child deletes)
+        if !batch.delete_paths.is_empty() {
+            let conn = self
+                .conn
+                .as_ref()
+                .ok_or_else(|| DbError::Other("not open".into()))?;
+            Self::delete_paths(conn, &batch.delete_paths)?;
+        }
+
+        // Step 0b: Ensure embedding tables outside txn (Invariant 13)
         let unique_dims = Self::collect_unique_dims(batch);
         {
             let conn = self
