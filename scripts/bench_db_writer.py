@@ -160,6 +160,31 @@ def _create_embedding_table(conn: Any, dims: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# DB verification
+# ---------------------------------------------------------------------------
+
+def query_db_counts(db_path: str) -> dict:
+    """Count actual rows in DB after writes — authoritative check independent of writer reports."""
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        n_files  = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        n_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        emb_tables = [
+            r[0] for r in conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name SIMILAR TO 'embeddings_[0-9]+'"
+            ).fetchall()
+        ]
+        n_embs = sum(
+            conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            for t in emb_tables
+        )
+        return {"db_files": n_files, "db_chunks": n_chunks, "db_embs": n_embs}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Data loading / generation
 # ---------------------------------------------------------------------------
 
@@ -564,6 +589,36 @@ def _fmt_rss(kb: int) -> str:
     return f"+{mb:.1f} MB" if mb >= 0 else f"{mb:.1f} MB"
 
 
+def print_verification(py_result: dict | None, rust_result: dict | None) -> None:
+    checks = [
+        ("Files in DB",      "db_files"),
+        ("Chunks in DB",     "db_chunks"),
+        ("Embeddings in DB", "db_embs"),
+    ]
+    if py_result is None or rust_result is None:
+        r = py_result or rust_result
+        label = "Python" if py_result else "Rust"
+        print("Counts (single path):")
+        for name, key in checks:
+            print(f"  {name:<20} {label}={r.get(key, 'N/A')}")
+        return
+
+    all_pass = True
+    print("Correctness check (actual DB row counts):")
+    for name, key in checks:
+        pv = py_result.get(key)
+        rv = rust_result.get(key)
+        if isinstance(pv, int) and isinstance(rv, int):
+            ok = pv == rv
+            status = "PASS" if ok else "FAIL ✗"
+            if not ok:
+                all_pass = False
+        else:
+            status = "N/A"
+        print(f"  {name:<20} Python={str(pv):>10}  Rust={str(rv):>10}  {status}")
+    print("  All counts match ✓" if all_pass else "  MISMATCH — investigate ✗")
+
+
 def print_table(py_result: dict | None, rust_result: dict | None) -> None:
     py_err = py_result.get("error") if py_result else None
     rust_err = rust_result.get("error") if rust_result else None
@@ -757,6 +812,7 @@ def main() -> None:
                 py_r = run_python_path(files, py_db, batch_size)
                 if "error" not in py_r:
                     print(f"{py_r['wall']:.3f}s")
+                    py_r.update(query_db_counts(py_db))
                 else:
                     print(f"ERROR: {py_r['error']}")
                 if best_py is None or py_r.get("wall", 1e9) < best_py.get("wall", 1e9):
@@ -778,6 +834,7 @@ def main() -> None:
                 rust_r = run_rust_path(files, rust_db, batch_size)
                 if "error" not in rust_r:
                     print(f"{rust_r['wall']:.3f}s")
+                    rust_r.update(query_db_counts(rust_db))
                 else:
                     print(f"ERROR: {rust_r['error']}")
                 if best_rust is None or rust_r.get("wall", 1e9) < best_rust.get("wall", 1e9):
@@ -791,6 +848,7 @@ def main() -> None:
             best_rust = None
 
     print_table(best_py, best_rust)
+    print_verification(best_py, best_rust)
 
 
 if __name__ == "__main__":
