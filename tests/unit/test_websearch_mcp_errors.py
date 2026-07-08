@@ -82,7 +82,7 @@ async def _stub_fetch_and_save_noop(
     return None
 
 
-def _stub_build_argv(query, tmpdir, config):
+def _stub_build_argv(query, tmpdir, config, parent_pid):
     # Argv content is irrelevant — subprocess is patched out.
     return ["/bin/true"]
 

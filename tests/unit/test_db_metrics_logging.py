@@ -1,32 +1,24 @@
 import io
-import os
 from pathlib import Path
 
+import pytest
 from loguru import logger
 
+from chunkhound.core.models import Chunk, File
+from chunkhound.core.types.common import ChunkType, FilePath, Language, LineNumber
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-from chunkhound.core.models import File, Chunk
-from chunkhound.core.types.common import FilePath, Language, ChunkType, LineNumber
 
 
-def test_duckdb_chunk_metrics_emitted(tmp_path: Path, monkeypatch):
-    # Ensure CHUNKHOUND_MCP_MODE is not set (prevents optimize_tables from returning early)
-    monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
-
-    db_dir = tmp_path / "db"
-
-    # Capture loguru output
-    buf = io.StringIO()
-    logger.remove()
-    logger.add(buf, level="INFO")
-
-    provider = DuckDBProvider(db_path=db_dir, base_directory=tmp_path)
-    provider.connect()
-
+def _insert_yaml_chunks(provider: DuckDBProvider) -> None:
     file_id = provider.insert_file(
-        File(path=FilePath("a.yaml"), mtime=0.0, size_bytes=10, language=Language.YAML)
+        File(
+            path=FilePath("a.yaml"),
+            mtime=0.0,
+            size_bytes=10,
+            language=Language.YAML,
+        )
     )
-    chunks = [
+    provider.insert_chunks_batch([
         Chunk(
             file_id=file_id,
             chunk_type=ChunkType.KEY_VALUE,
@@ -45,13 +37,53 @@ def test_duckdb_chunk_metrics_emitted(tmp_path: Path, monkeypatch):
             end_line=LineNumber(3),
             language=Language.YAML,
         ),
-    ]
+    ])
 
-    provider.insert_chunks_batch(chunks)
-    provider.optimize_tables()
+
+def test_duckdb_chunk_metrics_emitted(tmp_path: Path, monkeypatch):
+    """Chunk bulk metrics remain visible in normal CLI mode."""
+    monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
+
+    buf = io.StringIO()
+    sink_id = logger.add(buf, level="INFO")
+
+    provider = DuckDBProvider(
+        db_path=tmp_path / "metrics.duckdb",
+        base_directory=tmp_path,
+    )
+    try:
+        provider.connect()
+        _insert_yaml_chunks(provider)
+        provider.optimize_tables()
+    finally:
+        provider.disconnect()
+        logger.remove(sink_id)
 
     out = buf.getvalue()
     assert "DuckDB chunks bulk metrics:" in out
     assert "files=1" in out
     assert "rows=2" in out
 
+
+def test_compaction_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Compaction logs contain size and reduction info (external observable)."""
+    monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
+    buf = io.StringIO()
+    sink_id = logger.add(buf, level="INFO")
+
+    provider = DuckDBProvider(
+        db_path=tmp_path / "compact.duckdb",
+        base_directory=tmp_path,
+    )
+    try:
+        provider.connect()
+        _insert_yaml_chunks(provider)
+        provider.compact_database()
+    finally:
+        provider.disconnect()
+        logger.remove(sink_id)
+
+    out = buf.getvalue()
+    assert "Compaction complete:" in out
+    assert "bytes" in out
+    assert "% reduction" in out

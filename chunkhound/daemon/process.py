@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import time
 
+# Seconds budget for the SIGKILL polling phase, separate from the
+# user-requested graceful timeout, preventing starvation when Phase 1
+# consumes the entire user timeout before the OS updates process state.
+_FORCE_KILL_DEADLINE: float = 2.0
+
 
 def pid_alive(pid: int) -> bool:
     """Return True if the process with *pid* is still running (not a zombie)."""
@@ -30,7 +35,11 @@ def process_create_time(pid: int) -> float | None:
 
 
 def stop_pid(pid: int, timeout: float = 10.0) -> bool:
-    """Stop pid and wait up to timeout seconds for it to die.
+    """Stop pid and wait for graceful termination plus force-kill fallback.
+
+    ``timeout`` is the graceful-stop budget before escalation. If SIGTERM does
+    not stop the process in time, a fixed additional SIGKILL polling window is
+    used so OS process-state updates are not starved by the graceful phase.
 
     Uses psutil for cross-platform terminate→kill escalation:
       graceful: Process.terminate() (SIGTERM on POSIX, TerminateProcess on Windows)
@@ -58,7 +67,9 @@ def stop_pid(pid: int, timeout: float = 10.0) -> bool:
             break
         time.sleep(min(0.1, remaining))
 
-    # Phase 2: force kill
+    # Phase 2: force kill — separate deadline so the OS process-state
+    # update (running → zombie) is not starved by Phase 1 having
+    # consumed the entire user-requested timeout.
     try:
         psutil.Process(pid).kill()
     except psutil.NoSuchProcess:
@@ -66,10 +77,11 @@ def stop_pid(pid: int, timeout: float = 10.0) -> bool:
     except psutil.AccessDenied:
         return not pid_alive(pid)
 
+    force_deadline = time.monotonic() + _FORCE_KILL_DEADLINE
     while True:
         if not pid_alive(pid):
             return True
-        remaining = deadline - time.monotonic()
+        remaining = force_deadline - time.monotonic()
         if remaining <= 0:
             return False
         time.sleep(min(0.1, remaining))

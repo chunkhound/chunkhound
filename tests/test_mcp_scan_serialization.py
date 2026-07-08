@@ -113,7 +113,7 @@ class TestScanLockSerialization:
         assert progress["chunks_created"] == 7
         assert progress["is_scanning"] is False
         assert progress["scan_error"] is None
-        assert progress["scan_completed_at"] is not None
+        assert progress["query_ready_at"] is not None
 
     @pytest.mark.asyncio
     async def test_concurrent_scans_are_serialized(
@@ -211,7 +211,7 @@ class TestScanLockSerialization:
 
         assert server._scan_progress["is_scanning"] is False
         assert "Simulated scan failure" in server._scan_progress["scan_error"]
-        assert server._scan_progress["scan_completed_at"] is None
+        assert server._scan_progress["query_ready_at"] is None
 
     @pytest.mark.asyncio
     async def test_trigger_label_appears_in_logs(
@@ -241,7 +241,7 @@ class TestScanLockSerialization:
     ) -> None:
         """Running a second scan should preserve query-ready semantics.
 
-        ``scan_completed_at`` means at least one successful index exists, so a
+        ``query_ready_at`` means at least one successful index exists, so a
         follow-up scan should refresh that timestamp rather than clear it.
         """
         with patch(
@@ -254,14 +254,14 @@ class TestScanLockSerialization:
             await server._run_directory_scan(
                 server._scan_target_path, trigger="initial",
             )
-            first_completed_at = server._scan_progress["scan_completed_at"]
-            assert first_completed_at is not None
+            first_query_ready_at = server._scan_progress["query_ready_at"]
+            assert first_query_ready_at is not None
 
             await server._run_directory_scan(
                 server._scan_target_path, trigger="realtime_resync",
             )
-            second_completed_at = server._scan_progress["scan_completed_at"]
-            assert second_completed_at is not None
+            second_query_ready_at = server._scan_progress["query_ready_at"]
+            assert second_query_ready_at is not None
 
     @pytest.mark.asyncio
     async def test_run_directory_scan_requires_services(

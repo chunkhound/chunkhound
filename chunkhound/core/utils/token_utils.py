@@ -183,7 +183,10 @@ def _estimate_tokens_openai(
     if enc is None and cl100k_fallback_ok:
         enc = _cl100k_base_safe()
     if enc is not None:
-        return len(enc.encode(text))
+        # disallowed_special=() so a source file containing a special-token
+        # literal (e.g. "<|endoftext|>") is counted as ordinary text instead of
+        # raising and failing the whole embedding batch. #315
+        return len(enc.encode(text, disallowed_special=()))
     # EMBEDDING_CHARS_PER_TOKEN (not LLM_CHARS_PER_TOKEN) because this function
     # is only called from estimate_tokens() for embedding providers; LLM callers
     # use estimate_tokens_llm() directly.

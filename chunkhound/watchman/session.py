@@ -13,7 +13,6 @@ from typing import Any
 
 from ..watchman_runtime.loader import (
     build_watchman_client_command,
-    build_watchman_runtime_command_prefix,
     build_watchman_runtime_environment,
     resolve_packaged_watchman_runtime,
 )
@@ -591,8 +590,34 @@ class WatchmanCliSession:
         }
 
     def _build_command(self, *, persistent: bool = True) -> list[str]:
+        if self._command_prefix is not None:
+            listener_flag = (
+                "--named-pipe-path"
+                if self._socket_path.lower().startswith("\\\\.\\pipe\\")
+                else "--unix-listener-path"
+            )
+            command = [
+                *self._command_prefix,
+                listener_flag,
+                self._socket_path,
+                "--no-spawn",
+                "--no-pretty",
+            ]
+            if persistent:
+                command.append("--persistent")
+            command.extend(
+                [
+                    "--server-encoding",
+                    "json",
+                    "--output-encoding",
+                    "json",
+                    "--json-command",
+                ]
+            )
+            return command
+
         runtime = resolve_packaged_watchman_runtime()
-        command = build_watchman_client_command(
+        return build_watchman_client_command(
             runtime=runtime,
             binary_path=self._binary_path,
             socket_path=self._socket_path,
@@ -601,17 +626,12 @@ class WatchmanCliSession:
             pidfile_path=self._pidfile_path,
             persistent=persistent,
         )
-        if self._command_prefix is None:
-            return command
-        default_prefix = build_watchman_runtime_command_prefix(
-            runtime=runtime,
-            binary_path=self._binary_path,
-        )
-        return [*self._command_prefix, *command[len(default_prefix) :]]
 
     def _build_command_env(self) -> dict[str, str]:
         if self._command_env is not None:
             return dict(self._command_env)
+        if self._command_prefix is not None:
+            return dict(os.environ)
         runtime = resolve_packaged_watchman_runtime()
         return build_watchman_runtime_environment(
             runtime=runtime,

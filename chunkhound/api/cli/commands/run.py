@@ -100,7 +100,10 @@ async def _handle_daemon_lock_conflict(
 
     formatter.info(f"Stopping daemon (pid={pid})…")
     if not await asyncio.to_thread(discovery.stop_daemon, timeout=10.0):
-        formatter.error(f"Daemon (pid={pid}) did not stop within 10 s. Aborting.")
+        formatter.error(
+            f"Daemon (pid={pid}) did not stop after a 10 s graceful timeout "
+            "plus force-kill fallback. Aborting."
+        )
         return False
     formatter.success("Daemon stopped.")
     return True
@@ -135,6 +138,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     local_config_path = project_dir / ".chunkhound.json"
     if local_config_path.exists():
         formatter.info(f"Found local config: {local_config_path}")
+    if getattr(config, "global_config_file", None):
+        formatter.info(f"Found global config: {config.global_config_file}")
 
     # Use database path from config
     db_path = Path(config.database.path)

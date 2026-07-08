@@ -1,110 +1,184 @@
-"""
-Test the mock reranking server functionality.
+"""Deterministic contract tests for the mock rerank server."""
 
-This test verifies that the mock reranking server works correctly
-and integrates properly with the test infrastructure.
-"""
-
-import pytest
 import httpx
+import pytest
+
+from tests.fixtures.rerank_server_manager import RerankServerManager
+from tests.rerank_server import MockRerankResult, MockRerankScenario
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
-async def test_mock_rerank_server_health():
-    """Test that the mock rerank server health endpoint works."""
-    # The server should be auto-started by fixtures if needed
-    try:
+async def test_mock_rerank_server_health_reports_identity() -> None:
+    """Health should prove the deterministic mock is the process under test."""
+    scenario = MockRerankScenario(
+        name="health-count",
+        query="unused",
+        documents=["unused"],
+        results=[MockRerankResult(index=0, score=1.0)],
+    )
+
+    async with RerankServerManager(scenarios=[scenario]) as manager:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get("http://localhost:8001/health")
-            
-            # If we get a response, server is running (mock or external)
-            assert response.status_code == 200
-            data = response.json()
-            
-            # Check response structure
-            assert isinstance(data, dict)
-            # Could be our mock server or external server
-            # Our mock returns {"healthy": True, "service": "mock-rerank-server"}
-            # External might return different structure
-            
-    except (httpx.RequestError, httpx.TimeoutException):
-        # Server not running - this is okay, test will be skipped
-        pytest.skip("No reranking server available")
+            response = await client.get(f"{manager.base_url}/health")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "healthy": True,
+            "service": "mock-rerank-server",
+            "scenario_count": 1,
+        }
 
 
-@pytest.mark.asyncio 
-async def test_mock_rerank_server_reranking():
-    """Test that the mock rerank server can rerank documents."""
-    try:
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_mock_rerank_server_matches_exact_cohere_request_and_records_it() -> None:
+    """Cohere requests should match exact fixtures and keep request capture."""
+    query = "python function"
+    documents = [
+        "def add(a, b): return a + b",
+        "The weather is nice today",
+        "class Calculator: pass",
+    ]
+    scenario = MockRerankScenario(
+        name="cohere-match",
+        query=query,
+        documents=documents,
+        results=[
+            MockRerankResult(index=0, score=0.99),
+            MockRerankResult(index=2, score=0.41),
+            MockRerankResult(index=1, score=0.05),
+        ],
+        response_format="cohere",
+    )
+
+    async with RerankServerManager(scenarios=[scenario]) as manager:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            # First check if server is running
-            health_response = await client.get("http://localhost:8001/health")
-            if health_response.status_code != 200:
-                pytest.skip("Rerank server not healthy")
-            
-            # Test reranking
-            rerank_request = {
-                "model": "test-model",
-                "query": "python function",
-                "documents": [
-                    "def add(a, b): return a + b",  # Should rank high
-                    "The weather is nice today",     # Should rank low
-                    "class Calculator: pass",        # Should rank medium
-                ],
-                "top_n": 2
-            }
-            
             response = await client.post(
-                "http://localhost:8001/rerank",
-                json=rerank_request
+                f"{manager.base_url}/rerank",
+                json={
+                    "model": "test-model",
+                    "query": query,
+                    "documents": documents,
+                    "top_n": 2,
+                },
             )
-            
-            assert response.status_code == 200
-            data = response.json()
-            
-            # Check response structure
-            assert "results" in data
-            assert isinstance(data["results"], list)
-            
-            # Check we got at most top_n results
-            assert len(data["results"]) <= 2
-            
-            # Check result structure
-            for result in data["results"]:
-                assert "index" in result
-                assert "relevance_score" in result
-                assert isinstance(result["index"], int)
-                assert isinstance(result["relevance_score"], (int, float))
-                assert 0 <= result["index"] < len(rerank_request["documents"])
-                assert 0 <= result["relevance_score"] <= 1
-            
-            # Results should be sorted by score descending
-            scores = [r["relevance_score"] for r in data["results"]]
-            assert scores == sorted(scores, reverse=True)
-            
-    except (httpx.RequestError, httpx.TimeoutException):
-        pytest.skip("No reranking server available")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "results": [
+                {"index": 0, "relevance_score": 0.99},
+                {"index": 2, "relevance_score": 0.41},
+            ]
+        }
+        assert manager.requests == [
+            {
+                "model": "test-model",
+                "query": query,
+                "documents": documents,
+                "top_n": 2,
+            }
+        ]
 
 
+@pytest.mark.fast
 @pytest.mark.asyncio
-async def test_rerank_server_manager_lifecycle():
-    """Test the rerank server manager can start and stop servers."""
-    from tests.fixtures.rerank_server_manager import RerankServerManager
-    
-    manager = RerankServerManager(port=8002)  # Use different port to avoid conflicts
-    
-    # Server should not be running initially on this port
-    assert not await manager.is_running()
-    
-    # Start server
-    async with manager:
-        # Server should be running
-        assert await manager.is_running()
-        
-        # Test health endpoint
+async def test_mock_rerank_server_supports_tei_and_bare_array_formats() -> None:
+    """The mock should cover both wrapped and bare-array TEI contracts."""
+    scenarios = [
+        MockRerankScenario(
+            name="tei",
+            query="wrapped",
+            documents=["a", "b"],
+            results=[MockRerankResult(index=1, score=0.88)],
+            response_format="tei",
+        ),
+        MockRerankScenario(
+            name="tei-bare",
+            query="bare",
+            documents=["x", "y"],
+            results=[MockRerankResult(index=0, score=0.77)],
+            response_format="tei-bare",
+        ),
+    ]
+
+    async with RerankServerManager(scenarios=scenarios) as manager:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get("http://127.0.0.1:8002/health")
-            assert response.status_code == 200
-    
-    # Server should be stopped after context exit
+            wrapped = await client.post(
+                f"{manager.base_url}/rerank",
+                json={"query": "wrapped", "texts": ["a", "b"]},
+            )
+            bare = await client.post(
+                f"{manager.base_url}/rerank",
+                json={"query": "bare", "texts": ["x", "y"]},
+            )
+
+        assert wrapped.json() == {"results": [{"index": 1, "score": 0.88}]}
+        assert bare.json() == [{"index": 0, "score": 0.77}]
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_rerank_server_manager_stops_cleanly() -> None:
+    """Manager should expose a live server only inside its async context."""
+    manager = RerankServerManager()
+
     assert not await manager.is_running()
+    async with manager:
+        assert await manager.is_running()
+    assert not await manager.is_running()
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_mock_rerank_server_rejects_unmatched_requests() -> None:
+    """Exact matching keeps tests deterministic by failing unexpected requests."""
+    scenario = MockRerankScenario(
+        name="known-request",
+        query="expected",
+        documents=["doc"],
+        results=[MockRerankResult(index=0, score=1.0)],
+    )
+
+    async with RerankServerManager(scenarios=[scenario]) as manager:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.post(
+                f"{manager.base_url}/rerank",
+                json={
+                    "model": "test-model",
+                    "query": "unexpected",
+                    "documents": ["doc"],
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "No mock rerank scenario matched request"
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_mock_rerank_server_rejects_mixed_payload_shapes() -> None:
+    """Requests must use either TEI texts or Cohere documents, never both."""
+    scenario = MockRerankScenario(
+        name="mixed-shape",
+        query="expected",
+        documents=["doc"],
+        results=[MockRerankResult(index=0, score=1.0)],
+    )
+
+    async with RerankServerManager(scenarios=[scenario]) as manager:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.post(
+                f"{manager.base_url}/rerank",
+                json={
+                    "query": "expected",
+                    "texts": ["doc"],
+                    "documents": ["doc"],
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "error": "Mixed rerank payload shape is invalid",
+            "error_type": "MockValidationError",
+        }

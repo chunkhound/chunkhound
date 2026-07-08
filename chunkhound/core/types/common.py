@@ -172,6 +172,7 @@ class Language(Enum):
     MAKEFILE = "makefile"
     C = "c"
     CPP = "cpp"
+    METAL = "metal"  # Metal Shading Language — C++ grammar
     MATLAB = "matlab"
     HCL = "hcl"
     OBJC = "objc"
@@ -183,6 +184,7 @@ class Language(Enum):
     DART = "dart"
     ELIXIR = "elixir"
     LUA = "lua"
+    POWERSHELL = "powershell"
     TWINCAT = "twincat"
 
     # Web languages
@@ -291,6 +293,7 @@ class Language(Enum):
             ".hxx": cls.CPP,
             ".hh": cls.CPP,
             ".h++": cls.CPP,
+            ".metal": cls.METAL,
             ".rs": cls.RUST,
             ".zig": cls.ZIG,
             ".m": cls.MATLAB,  # Note: .m is ambiguous, will use content detection
@@ -309,6 +312,8 @@ class Language(Enum):
             ".ex": cls.ELIXIR,
             ".exs": cls.ELIXIR,
             ".lua": cls.LUA,
+            ".ps1": cls.POWERSHELL,
+            ".psm1": cls.POWERSHELL,
             ".scss": cls.SCSS if SCSS_AVAILABLE else cls.TEXT,
             ".html": cls.HTML,
             ".htm": cls.HTML,
@@ -319,6 +324,10 @@ class Language(Enum):
             # Use text fallback parser instead of silently producing
             # misaligned / empty chunks.
             ".sass": cls.TEXT,
+            # .haml has no bundled tree-sitter grammar (absent from
+            # tree-sitter-language-pack); index as text so files are searchable
+            # rather than silently skipped, mirroring the .sass fallback.
+            ".haml": cls.TEXT,
             ".jinja": cls.JINJA,
             ".j2": cls.JINJA,
             ".njk": cls.JINJA,
@@ -368,6 +377,7 @@ class Language(Enum):
             Language.MAKEFILE,
             Language.C,
             Language.CPP,
+            Language.METAL,
             Language.MATLAB,
             Language.OBJC,
             Language.PHP,
@@ -378,6 +388,7 @@ class Language(Enum):
             Language.DART,
             Language.ELIXIR,
             Language.LUA,
+            Language.POWERSHELL,
             Language.TWINCAT,
         }
 
@@ -394,6 +405,7 @@ class Language(Enum):
             Language.KOTLIN,
             Language.GO,
             Language.CPP,
+            Language.METAL,
             Language.MATLAB,
             Language.OBJC,
             Language.PHP,
@@ -401,6 +413,7 @@ class Language(Enum):
             Language.SVELTE,
             Language.SWIFT,
             Language.DART,
+            Language.POWERSHELL,
         }
 
     @property

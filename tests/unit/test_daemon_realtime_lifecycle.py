@@ -23,7 +23,7 @@ def test_status_is_ready_after_successful_scan_without_realtime_errors() -> None
     result = derive_daemon_status(
         {
             "is_scanning": False,
-            "scan_completed_at": "2026-01-01T00:00:00",
+            "query_ready_at": "2026-01-01T00:00:00",
             "realtime": {"service_state": "active"},
         }
     )
@@ -36,7 +36,7 @@ def test_status_stays_degraded_when_scan_error_arrives_after_successful_scan() -
     result = derive_daemon_status(
         {
             "is_scanning": False,
-            "scan_completed_at": "2026-01-01T00:00:00",
+            "query_ready_at": "2026-01-01T00:00:00",
             "scan_error": "disk I/O error",
             "realtime": {"service_state": "active"},
         }
@@ -50,7 +50,7 @@ def test_status_is_degraded_when_realtime_needs_resync() -> None:
     result = derive_daemon_status(
         {
             "is_scanning": False,
-            "scan_completed_at": "2026-01-01T00:00:00",
+            "query_ready_at": "2026-01-01T00:00:00",
             "realtime": {
                 "service_state": "active",
                 "resync": {"needs_resync": True},

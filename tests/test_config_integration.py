@@ -19,7 +19,12 @@ from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 from chunkhound.registry import configure_registry, get_registry
-from tests.utils.windows_compat import database_cleanup_context, cleanup_database_resources, windows_safe_tempdir
+from tests.utils.windows_compat import (
+    cleanup_database_resources,
+    database_cleanup_context,
+    paths_equal,
+    windows_safe_tempdir,
+)
 
 
 def _cleanup_registry_and_connections():
@@ -192,7 +197,7 @@ def test_embedding_config_rerank_env_vars(monkeypatch, clean_environment):
     Test that reranking environment variables are loaded correctly by load_from_env().
 
     This is a regression test for the bug where CHUNKHOUND_EMBEDDING__RERANK_*
-    env vars were not loaded despite being documented in tests/RERANKING_TEST_SETUP.md.
+    env vars were not loaded despite being part of the supported test/runtime config surface.
     """
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_MODEL", "test-rerank-model")
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_URL", "http://localhost:8080/rerank")
@@ -216,6 +221,30 @@ def test_embedding_config_ssl_env_vars(monkeypatch, clean_environment):
 
     assert config["ssl_verify"] is False
     assert config["rerank_ssl_verify"] is True
+
+
+@pytest.mark.parametrize("raw_value", ["", "maybe", "2", "truthy"])
+def test_embedding_config_ssl_verify_rejects_invalid_env_bool(
+    monkeypatch, clean_environment, raw_value
+):
+    """Invalid embedding SSL env bools must fail explicitly."""
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__SSL_VERIFY", raw_value)
+
+    with pytest.raises(ValueError, match="CHUNKHOUND_EMBEDDING__SSL_VERIFY"):
+        EmbeddingConfig.load_from_env()
+
+
+@pytest.mark.parametrize("raw_value", ["", "maybe", "2", "truthy"])
+def test_embedding_config_rerank_ssl_verify_rejects_invalid_env_bool(
+    monkeypatch, clean_environment, raw_value
+):
+    """Invalid rerank SSL env bools must fail explicitly."""
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY", raw_value)
+
+    with pytest.raises(
+        ValueError, match="CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY"
+    ):
+        EmbeddingConfig.load_from_env()
 
 
 def test_llm_config_ssl_env_var(monkeypatch, clean_environment):
@@ -358,7 +387,7 @@ def test_azure_api_version_accepts_valid_formats() -> None:
 def test_local_config_overrides_env_vars(monkeypatch, clean_environment):
     """Local .chunkhound.json must override environment variables.
 
-    Config precedence (high to low): CLI > local config > env vars > config file > defaults.
+    Config precedence (high to low): CLI > explicit --config > local > global > env > defaults.
     This is a regression test for the reorder in config.py where local config
     was moved after env vars so it wins.
     """
@@ -390,7 +419,7 @@ def test_local_config_overrides_env_vars(monkeypatch, clean_environment):
 def test_cli_overrides_local_config(clean_environment):
     """CLI arguments must override local .chunkhound.json.
 
-    Config precedence (high to low): CLI > local config > env vars > config file > defaults.
+    Config precedence (high to low): CLI > explicit --config > local > global > env > defaults.
     Complementary to test_local_config_overrides_env_vars.
     """
     from types import SimpleNamespace
@@ -525,3 +554,132 @@ def test_map_command_uses_config_parent_for_workspace_root(clean_environment):
         assert config.llm is not None
         assert config.llm.provider == "grok"
         assert config.database.path == workspace_root.resolve() / ".chunkhound" / "db"
+
+
+def test_global_config_provides_defaults_and_is_overridden_by_local(monkeypatch, clean_environment):
+    """Global config (via CHUNKHOUND_GLOBAL_CONFIG_FILE) supplies cross-project defaults.
+
+    Local .chunkhound.json and explicit config override globals (deep merge).
+    """
+    with windows_safe_tempdir() as td:
+        td = Path(td)
+        global_cfg = td / "global.json"
+        global_cfg.write_text(
+            json.dumps(
+                {
+                    "embedding": {"provider": "openai", "api_key": "gkey", "model": "gmodel"},
+                    "indexing": {"batch_size": 42},
+                }
+            )
+        )
+        local_cfg = td / ".chunkhound.json"
+        local_cfg.write_text(json.dumps({"embedding": {"api_key": "lkey"}}))
+
+        monkeypatch.setenv("CHUNKHOUND_GLOBAL_CONFIG_FILE", str(global_cfg))
+
+        c = Config(target_dir=td)
+        assert paths_equal(c.global_config_file, global_cfg)
+        assert paths_equal(c.local_config_file, local_cfg)
+        assert c.embedding is not None
+        assert c.embedding.api_key.get_secret_value() == "lkey"  # local overrides
+        assert c.embedding.model == "gmodel"  # from global
+        assert c.indexing.batch_size == 42  # global not overridden by local
+
+
+def test_global_local_deep_merge_partial_overrides_and_list_replacement(
+    monkeypatch, clean_environment
+):
+    """Global + local demonstrate deep merge for objects and list replacement.
+
+    Covers the user-facing contract for global config merging:
+    - Partial overrides inside embedding/llm/research (specific keys only;
+      siblings from global survive).
+    - Full provider/model switch possible by supplying a sub-dict.
+    - Project exclude list replaces global's (raw level).
+    - Built-in defaults still appear in effective excludes.
+    - Untouched global values survive.
+    """
+
+    with windows_safe_tempdir() as td:
+        td = Path(td)
+        global_cfg = td / "global.json"
+        global_cfg.write_text(
+            json.dumps(
+                {
+                    "embedding": {
+                        "provider": "voyageai",
+                        "model": "voyage-3.5",
+                        "api_key": "g-voyage-key",
+                    },
+                    "llm": {
+                        "provider": "anthropic",
+                        "model": "claude-3-5-sonnet-20241022",
+                        "api_key": "g-anthropic-key",
+                    },
+                    "research": {
+                        "algorithm": "v2",
+                        "query_expansion_enabled": True,
+                        "num_expanded_queries": 3,
+                    },
+                    "indexing": {
+                        "batch_size": 77,
+                        "exclude": ["**/global-exclude-pattern/**"],
+                    },
+                }
+            )
+        )
+        local_cfg = td / ".chunkhound.json"
+        local_cfg.write_text(
+            json.dumps(
+                {
+                    # Partial: only the secret (provider + model from global survive)
+                    "embedding": {"api_key": "project-voyage-key"},
+                    # Different model for this project (provider from global survives)
+                    "llm": {"model": "claude-3-opus-20240229"},
+                    # Research tuning override (other research fields from global survive)
+                    "research": {"algorithm": "v3"},
+                    # Project-specific excludes fully replace global's list
+                    "indexing": {
+                        "exclude": ["**/my-project-vendor/**", "**/generated/**"]
+                    },
+                }
+            )
+        )
+
+        monkeypatch.setenv("CHUNKHOUND_GLOBAL_CONFIG_FILE", str(global_cfg))
+
+        c = Config(target_dir=td)
+
+        # embedding: partial override works, global siblings preserved
+        assert c.embedding is not None
+        assert c.embedding.provider == "voyageai"  # from global
+        assert c.embedding.model == "voyage-3.5"  # from global
+        assert c.embedding.api_key.get_secret_value() == "project-voyage-key"  # local
+
+        # llm: partial model override
+        assert c.llm is not None
+        assert c.llm.provider == "anthropic"  # from global
+        assert c.llm.model == "claude-3-opus-20240229"  # local override
+
+        # research: partial algorithm override, other fields from global
+        assert c.research.algorithm == "v3"  # local
+        assert c.research.query_expansion_enabled is True  # global
+        assert c.research.num_expanded_queries == 3  # global
+
+        # indexing scalar from global survives when local only touches exclude
+        assert c.indexing.batch_size == 77  # global
+
+        # exclude list: local fully replaces global's
+        assert c.indexing.exclude == ["**/my-project-vendor/**", "**/generated/**"]
+        # but effective excludes still include built-in defaults
+        effective = c.indexing.get_effective_config_excludes()
+        assert any("my-project-vendor" in p for p in effective)
+        assert any("node_modules" in p for p in effective)  # built-in default present
+        # global's list is gone from the raw exclude (replaced)
+        assert not any(
+            "global-exclude-pattern" in p for p in c.indexing.exclude
+        )
+
+        # global_config_file / local_config_file still recorded
+        assert paths_equal(c.global_config_file, global_cfg)
+        assert paths_equal(c.local_config_file, local_cfg)

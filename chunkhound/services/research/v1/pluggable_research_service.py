@@ -22,11 +22,11 @@ from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services import prompts
 from chunkhound.services.clustering_service import ClusterGroup
+from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
 from chunkhound.services.research.shared.chunk_range import (
     expand_to_natural_boundaries,
     get_chunk_expanded_range,
 )
-from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
 from chunkhound.services.research.shared.citation_manager import CitationManager
 from chunkhound.services.research.shared.evidence_ledger import (
     EvidenceLedger,
@@ -42,6 +42,7 @@ from chunkhound.services.research.shared.models import (
     TOKEN_BUDGET_PER_FILE,
     ResearchContext,
 )
+from chunkhound.services.research.shared.progress_mixin import ProgressEmitterMixin
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
 from chunkhound.services.research.v1.quality_validator import QualityValidator
 from chunkhound.services.research.v1.synthesis_engine import SynthesisEngine
@@ -51,7 +52,7 @@ if TYPE_CHECKING:
     from chunkhound.core.config.research_config import ResearchConfig
 
 
-class PluggableResearchService:
+class PluggableResearchService(ProgressEmitterMixin):
     """Service for performing deep research with pluggable exploration strategies.
 
     This service orchestrates the research pipeline while delegating exploration
@@ -89,7 +90,7 @@ class PluggableResearchService:
         self._llm_manager = llm_manager
         self._tool_name = tool_name
         self._node_counter = 0
-        self.progress = progress  # Store progress instance for event emission
+        self._progress = progress
         self._progress_lock: asyncio.Lock = asyncio.Lock()
         self._synthesis_engine = SynthesisEngine(llm_manager, database_services, self)
         self._citation_manager = CitationManager()
@@ -118,34 +119,6 @@ class PluggableResearchService:
         if self._config is not None:
             return self._config.num_expanded_queries
         return NUM_LLM_EXPANDED_QUERIES
-
-    async def _emit_event(
-        self,
-        event_type: str,
-        message: str,
-        node_id: int | None = None,
-        depth: int | None = None,
-        **metadata: Any,
-    ) -> None:
-        """Emit a progress event with lock protection.
-
-        Args:
-            event_type: Event type identifier
-            message: Human-readable event description
-            node_id: Optional BFS node ID
-            depth: Optional BFS depth level
-            **metadata: Additional event data (chunks, files, tokens, etc.)
-        """
-        if not self.progress:
-            return
-        async with self._progress_lock:
-            await self.progress.emit_event(
-                event_type=event_type,
-                message=message,
-                node_id=node_id,
-                depth=depth,
-                metadata=metadata,
-            )
 
     async def deep_research(self, query: str) -> dict[str, Any]:
         """Perform deep research on a query.

@@ -4,7 +4,7 @@ Combines depth exploration (Phase 1.5) and gap detection (Phase 2)
 for comprehensive codebase coverage.
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -17,6 +17,9 @@ from chunkhound.services.research.shared.exploration.elbow_filter import (
 )
 from chunkhound.services.research.shared.file_reader import FileReader
 from chunkhound.services.research.shared.import_context import ImportContextService
+
+if TYPE_CHECKING:
+    from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
 
 
 class WideCoverageStrategy:
@@ -40,6 +43,7 @@ class WideCoverageStrategy:
         config: ResearchConfig,
         import_resolver: Any | None = None,
         import_context_service: ImportContextService | None = None,
+        progress: "TreeProgressDisplay | None" = None,
     ):
         """Initialize wide coverage strategy.
 
@@ -50,6 +54,7 @@ class WideCoverageStrategy:
             config: Research configuration (controls depth_exploration_enabled)
             import_resolver: Optional ImportResolverService for import resolution
             import_context_service: Optional ImportContextService for header injection
+            progress: Optional TreeProgressDisplay for terminal UI (None for MCP)
         """
         # Lazy imports to avoid circular dependency
         from chunkhound.services.research.shared.depth_exploration import (
@@ -70,6 +75,7 @@ class WideCoverageStrategy:
             config=config,
             import_resolver=import_resolver,
             import_context_service=import_context_service,
+            progress=progress,
         )
         self._gap_detection = GapDetectionService(
             llm_manager=llm_manager,
@@ -78,6 +84,7 @@ class WideCoverageStrategy:
             config=config,
             import_resolver=import_resolver,
             import_context_service=import_context_service,
+            progress=progress,
         )
 
     @property

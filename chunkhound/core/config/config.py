@@ -4,8 +4,14 @@ This module provides a unified configuration system with clear precedence:
 1. CLI arguments (highest priority)
 2. Explicit config file (via --config path or CHUNKHOUND_CONFIG_FILE)
 3. Local .chunkhound.json in target directory
-4. Environment variables
-5. Default values (lowest priority)
+4. Global defaults (CHUNKHOUND_GLOBAL_CONFIG_FILE or auto-discovered under
+   ~/.config/chunkhound/ or ~/.chunkhound/)
+5. Environment variables
+6. Default values (lowest priority)
+
+Global config support means you can maintain common settings (API keys,
+indexing rules, etc.) in one place instead of copying .chunkhound.json
+to every project directory. Project-local files override the global layer.
 """
 
 import json
@@ -24,7 +30,17 @@ from .research_config import ResearchConfig
 
 
 class Config(BaseModel):
-    """Centralized configuration for ChunkHound."""
+    """Centralized configuration for ChunkHound.
+
+    Precedence (highest first):
+    1. CLI arguments
+    2. Explicit config file (--config or CHUNKHOUND_CONFIG_FILE)
+    3. Local .chunkhound.json in target directory
+    4. Global defaults (CHUNKHOUND_GLOBAL_CONFIG_FILE or
+       ~/.config/chunkhound/*.json etc.)
+    5. Environment variables (CHUNKHOUND_*)
+    6. Defaults
+    """
 
     model_config = ConfigDict(validate_assignment=True)
 
@@ -42,8 +58,29 @@ class Config(BaseModel):
     embeddings_disabled: bool = Field(default=False, exclude=True)
     # Private field to store the auto-discovered local .chunkhound.json path
     local_config_file: Path | None = Field(default=None, exclude=True)
+    # Private field to store the global defaults config path
+    # (from home or CHUNKHOUND_GLOBAL_CONFIG_FILE)
+    global_config_file: Path | None = Field(default=None, exclude=True)
     # Private field to store the explicit --config path (absolute) when provided
     config_file: Path | None = Field(default=None, exclude=True)
+
+    @staticmethod
+    def _get_global_config_candidates() -> list[Path]:
+        """Return preferred locations for global/user defaults config files.
+
+        These provide defaults that apply across projects without needing
+        a .chunkhound.json in every directory. Project-local .chunkhound.json
+        (and explicit --config) override values from global configs.
+        """
+        home = Path.home()
+        return [
+            home / ".config" / "chunkhound" / "chunkhound.json",
+            home / ".config" / "chunkhound" / ".chunkhound.json",
+            home / ".chunkhound" / "chunkhound.json",
+            home / ".chunkhound" / ".chunkhound.json",
+            home / "chunkhound.json",
+            home / ".chunkhound.json",
+        ]
 
     def __init__(self, args: Any | None = None, **kwargs: Any) -> None:
         """Universal configuration initialization that handles all contexts.
@@ -52,8 +89,14 @@ class Config(BaseModel):
         1. CLI arguments (highest priority)
         2. Explicit config file (via --config path or CHUNKHOUND_CONFIG_FILE)
         3. Local .chunkhound.json in target directory
-        4. Environment variables
-        5. Default values (lowest priority)
+        4. Global defaults config (CHUNKHOUND_GLOBAL_CONFIG_FILE or discovered in
+           ~/.config/chunkhound/ or ~/.chunkhound/)
+        5. Environment variables
+        6. Default values (lowest priority)
+
+        Global config enables one set of defaults (e.g. embedding provider + key,
+        common excludes) without copying .chunkhound.json into every project.
+        Local project config and explicit/CLI always override globals.
 
         Args:
             args: Optional argparse.Namespace from command line parsing
@@ -112,11 +155,44 @@ class Config(BaseModel):
         env_vars = self._load_env_vars()
         self._deep_merge(config_data, env_vars)
 
-        # 3. Check for local .chunkhound.json in target directory (overrides env vars)
+        # 2.5 Load global defaults config (env var or auto-discovered).
+        # Merged before local so project-local .chunkhound.json overrides globals.
+        # Lets users keep common settings (keys, excludes) in one place instead
+        # of copying .chunkhound.json into every project.
+        global_config_file = None
+        env_global = os.getenv("CHUNKHOUND_GLOBAL_CONFIG_FILE")
+        if env_global:
+            global_config_file = Path(env_global)
+            if not global_config_file.exists():
+                raise ValueError(
+                    f"Global config file not found: {global_config_file}. "
+                    "Check the path or remove CHUNKHOUND_GLOBAL_CONFIG_FILE."
+                )
+            config_data["global_config_file"] = global_config_file.resolve()
+        else:
+            for candidate in self._get_global_config_candidates():
+                if candidate.exists() and candidate.is_file():
+                    global_config_file = candidate
+                    config_data["global_config_file"] = global_config_file.resolve()
+                    break
+
+        if global_config_file:
+            try:
+                with open(global_config_file) as f:
+                    global_config = json.load(f)
+                    self._deep_merge(config_data, global_config)
+                    self._mark_exclude_user_supplied(config_data)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Invalid JSON in global config file {global_config_file}: {e}. "
+                    "Please check the file format and try again."
+                )
+
+        # 3. Check for local .chunkhound.json (overrides env vars and globals)
         if target_dir and target_dir.exists():
             local_config_path = target_dir / ".chunkhound.json"
             if local_config_path.exists() and local_config_path != config_file:
-                config_data["local_config_file"] = local_config_path
+                config_data["local_config_file"] = local_config_path.resolve()
                 try:
                     with open(local_config_path) as f:
                         local_config = json.load(f)
@@ -282,6 +358,19 @@ class Config(BaseModel):
             # Use object.__setattr__ to avoid Pydantic validation recursion
             object.__setattr__(self, "target_dir", self.target_dir.resolve())
 
+        # Ensure the tracked config file paths are also resolved to canonical form.
+        # This handles Windows short names (8.3 like RUNNER~1), symlinks, and
+        # any differences in how temp dirs / constructed Paths are represented
+        # before vs after .resolve().
+        for field_name in ("local_config_file", "global_config_file", "config_file"):
+            val = getattr(self, field_name, None)
+            if val is not None:
+                try:
+                    object.__setattr__(self, field_name, val.resolve())
+                except Exception:
+                    # Best effort; leave as-is if resolve is not possible.
+                    pass
+
         # Ensure database path is set
         if not self.database.path:
             # Try to detect project root from target_dir or auto-detect
@@ -379,6 +468,22 @@ class Config(BaseModel):
         elif command == "search":
             if self.embedding and not self.embedding.is_provider_configured():
                 errors.append("Embedding provider not properly configured")
+
+        if self.database.read_only:
+            # _quickresearch always uses a :memory: DB (see quickresearch.py),
+            # so a project-level read_only setting inherited via --config is
+            # structurally inapplicable — accept it here and let the connection
+            # manager drop read_only for :memory: paths.
+            if command not in ("mcp", "_quickresearch"):
+                errors.append(
+                    "database.read_only=True is only valid for the 'mcp' subcommand"
+                )
+            elif command == "mcp" and self.database.provider != "duckdb":
+                errors.append(
+                    "database.read_only=True is only supported with the DuckDB "
+                    f"provider (got '{self.database.provider}'). "
+                    "Use the DuckDB provider, or omit --read-only."
+                )
 
         return errors
 

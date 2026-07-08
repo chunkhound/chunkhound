@@ -4,20 +4,52 @@ import asyncio
 import copy
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Protocol
 
 from loguru import logger
-from watchdog.observers import Observer
-from watchdog.observers.api import BaseObserver
 
-from chunkhound.watchman import WatchmanScopePlan
-from chunkhound.watchman_runtime.loader import default_realtime_backend_for_current_install
 from chunkhound.utils.windows_constants import IS_WINDOWS
+from chunkhound.watchman import WatchmanScopePlan
+from chunkhound.watchman_runtime.loader import (
+    default_realtime_backend_for_current_install,
+)
 
-from .adapters import PollingRealtimeAdapter, WatchdogRealtimeAdapter, WatchmanRealtimeAdapter
+from .adapters import (
+    PollingRealtimeAdapter,
+    WatchdogRealtimeAdapter,
+    WatchmanRealtimeAdapter,
+)
 from .events import SimpleEventHandler
+
+
+class RealtimeObserver(Protocol):
+    """Minimal watchdog observer contract used by the watchdog backend only."""
+
+    def schedule(
+        self,
+        event_handler: SimpleEventHandler,
+        path: str,
+        recursive: bool = ...,
+    ) -> Any: ...
+
+    def start(self) -> None: ...
+
+    def is_alive(self) -> bool: ...
+
+    def stop(self) -> None: ...
+
+    def join(self, timeout: float | None = ...) -> None: ...
+
+
+def _create_watchdog_observer() -> RealtimeObserver:
+    """Import watchdog only inside the watchdog startup path."""
+    from watchdog.observers import Observer
+
+    return Observer()
+
 
 class RealtimeStartupStatusTracker:
     """Track bounded daemon-side startup timing for public status surfaces."""
@@ -232,26 +264,32 @@ class RealtimeStartupStatusTracker:
             )
         return snapshot
 
+
 class RealtimeStartupMixin:
     def _start_startup_phase(self, phase_name: str) -> None:
         self._startup_tracker.start_phase(phase_name)
         self._emit_status_update()
+
     def _complete_startup_phase(self, phase_name: str) -> None:
         self._startup_tracker.complete_phase(phase_name)
         self._emit_status_update()
+
     def _fail_startup_phase(self, phase_name: str, error: str) -> None:
         self._startup_tracker.fail_phase(phase_name, error)
         self._emit_status_update()
+
     def _set_warning(self, message: str) -> None:
         self._last_warning = message
         self._last_warning_at = self._utc_now()
         self._emit_status_update()
+
     def _set_error(self, message: str) -> None:
         self._last_error = message
         self._last_error_at = self._utc_now()
         if self._service_state not in {"stopping", "stopped"}:
             self._service_state = "degraded"
         self._emit_status_update()
+
     def _clear_resync_error_state(self) -> None:
         """Clear degraded state only when it originated from resync plumbing."""
         self._last_resync_error = None
@@ -262,6 +300,7 @@ class RealtimeStartupMixin:
             self._last_error_at = None
         self._refresh_runtime_service_state()
         self._emit_status_update()
+
     def _clear_error_state(
         self,
         *,
@@ -278,6 +317,7 @@ class RealtimeStartupMixin:
             self._last_error_at = None
         self._refresh_runtime_service_state()
         self._emit_status_update()
+
     @staticmethod
     def _resync_callback_error(result: Any) -> str | None:
         """Normalize backend-neutral callback error results into service failures."""
@@ -287,6 +327,7 @@ class RealtimeStartupMixin:
         if isinstance(error, str) and error:
             return f"Resync callback reported error status: {error}"
         return "Resync callback reported error status"
+
     def _refresh_runtime_service_state(self) -> None:
         if self._service_state in {"starting", "stopping", "stopped"}:
             return
@@ -308,6 +349,10 @@ class RealtimeStartupMixin:
             self._service_state = "degraded"
             return
         self._service_state = "running"
+
+    def _default_realtime_backend_for_current_install(self) -> str:
+        return default_realtime_backend_for_current_install()
+
     def _resolve_configured_backend(self) -> str:
         backend = getattr(self.config.indexing, "realtime_backend", None)
         self._configured_backend_raw = backend
@@ -315,7 +360,7 @@ class RealtimeStartupMixin:
             self._configured_backend_resolution = "explicit"
             return str(backend)
         self._configured_backend_resolution = "install_default"
-        resolved_backend = default_realtime_backend_for_current_install()
+        resolved_backend = self._default_realtime_backend_for_current_install()
         if backend is None:
             reason = "no explicit realtime backend is configured"
         else:
@@ -325,13 +370,16 @@ class RealtimeStartupMixin:
             f"{resolved_backend!r} because {reason}."
         )
         return resolved_backend
+
     def _set_effective_backend(self, backend: str) -> None:
         self._effective_backend = backend
+
     def _clear_watchman_monitoring_state(self) -> None:
         self.watchman_scope_plan = None
         self.watchman_subscription_queue = None
         self.monitoring_ready.clear()
         self._monitoring_ready_at = None
+
     def _activate_watchman_monitoring(
         self,
         *,
@@ -344,25 +392,30 @@ class RealtimeStartupMixin:
         self._set_effective_backend(backend_name)
         self._monitoring_ready_at = self._utc_now()
         self.monitoring_ready.set()
+
     def _current_startup_phase(self) -> str | None:
         current_phase = self._startup_tracker.snapshot().get("current_phase")
         return current_phase if isinstance(current_phase, str) else None
+
     def _start_still_owned(self, start_generation: int) -> bool:
         """Return whether a start() invocation still owns service startup state."""
         return (
             start_generation == self._start_generation
             and self._service_state not in {"stopping", "stopped"}
         )
+
     def _build_monitor_adapter(self) -> Any:
         if self._configured_backend == "watchman":
             return WatchmanRealtimeAdapter(self._realtime_context)
         if self._configured_backend == "polling":
             return PollingRealtimeAdapter(self._realtime_context)
         return WatchdogRealtimeAdapter(self._realtime_context)
+
     @staticmethod
     def _normalize_requested_watch_path(path: Path) -> Path:
         """Return an absolute watch path without resolving junctions/symlinks."""
         return path.expanduser().absolute()
+
     async def _cancel_processing_tasks(self) -> None:
         if self.event_consumer_task:
             self.event_consumer_task.cancel()
@@ -379,6 +432,7 @@ class RealtimeStartupMixin:
             except asyncio.CancelledError:
                 pass
             self.process_task = None
+
     async def _stop_observer(self) -> None:
         if self.observer:
             self.observer.stop()
@@ -388,6 +442,7 @@ class RealtimeStartupMixin:
                 logger.warning("Observer thread did not exit within timeout")
             self.observer = None
             self.event_handler = None
+
     async def _cancel_polling_task(self) -> None:
         if self._polling_task:
             self._polling_task.cancel()
@@ -397,6 +452,7 @@ class RealtimeStartupMixin:
                 pass
             self._polling_task = None
         self._using_polling = False
+
     async def _cancel_watchdog_setup_task(self) -> None:
         if self._watchdog_setup_task:
             self._watchdog_setup_task.cancel()
@@ -405,6 +461,7 @@ class RealtimeStartupMixin:
             except asyncio.CancelledError:
                 pass
             self._watchdog_setup_task = None
+
     async def _cancel_watchdog_bootstrap_future(self) -> None:
         self._watchdog_bootstrap_abort.set()
         future = self._watchdog_bootstrap_future
@@ -422,6 +479,7 @@ class RealtimeStartupMixin:
                 )
         if self._watchdog_bootstrap_future is future:
             self._watchdog_bootstrap_future = None
+
     async def start(self, watch_path: Path) -> None:
         """Start real-time indexing service."""
         # Fail-closed indexed-root identity guard BEFORE any state mutation,
@@ -436,9 +494,14 @@ class RealtimeStartupMixin:
         if callable(ensure_root):
             get_base = getattr(provider, "get_base_directory", None)
             requested_root = get_base() if callable(get_base) else watch_path
-            ensure_root(
-                requested_root=requested_root,
-                allow_claim_if_missing=True,
+            loop = asyncio.get_running_loop()
+            # run_in_executor only forwards positional args; lambda bridges kwargs
+            await loop.run_in_executor(
+                None,
+                lambda: ensure_root(
+                    requested_root=requested_root,
+                    allow_claim_if_missing=True,
+                ),
             )
 
         start_task = asyncio.current_task()
@@ -516,6 +579,7 @@ class RealtimeStartupMixin:
         finally:
             if self._active_start_task is start_task:
                 self._active_start_task = None
+
     async def stop(self) -> None:
         """Stop the service gracefully."""
         logger.debug("Stopping real-time indexing service")
@@ -578,6 +642,7 @@ class RealtimeStartupMixin:
         self._service_state = "stopped"
         self._monitor_adapter = None
         self._emit_status_update()
+
     async def _setup_watchdog_with_timeout(
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
@@ -633,8 +698,9 @@ class RealtimeStartupMixin:
                 and self._watchdog_bootstrap_future.done()
             ):
                 self._watchdog_bootstrap_future = None
+
     def _handle_watchdog_bootstrap_done(
-        self, future: asyncio.Future[tuple[BaseObserver, SimpleEventHandler] | None]
+        self, future: asyncio.Future[tuple[RealtimeObserver, SimpleEventHandler] | None]
     ) -> None:
         """Drain watchdog bootstrap exceptions and reflect unexpected failures."""
         if self._watchdog_bootstrap_future is future:
@@ -663,6 +729,7 @@ class RealtimeStartupMixin:
             or self._service_state in {"stopping", "stopped"}
         ):
             self._stop_bootstrap_observer(observer)
+
     async def _start_polling_backend(
         self, watch_path: Path, reason: str, emit_warning: bool = True
     ) -> None:
@@ -681,9 +748,10 @@ class RealtimeStartupMixin:
             self._set_warning(reason)
         else:
             self._emit_status_update()
+
     def _adopt_watchdog_monitor(
         self,
-        observer: BaseObserver,
+        observer: RealtimeObserver,
         event_handler: SimpleEventHandler,
         watch_path: Path,
     ) -> None:
@@ -707,8 +775,9 @@ class RealtimeStartupMixin:
         self.monitoring_ready.set()
         self._complete_startup_phase("watchdog_setup")
         self._emit_status_update()
+
     @staticmethod
-    def _stop_bootstrap_observer(observer: BaseObserver) -> None:
+    def _stop_bootstrap_observer(observer: RealtimeObserver) -> None:
         """Stop a watchdog observer created during a bootstrap race."""
         try:
             observer.stop()
@@ -718,12 +787,13 @@ class RealtimeStartupMixin:
             observer.join(timeout=1.0)
         except Exception:
             pass
+
     def _bootstrap_fs_monitor(
         self,
         watch_path: Path,
         loop: asyncio.AbstractEventLoop,
         abort_event: threading.Event,
-    ) -> tuple[BaseObserver, SimpleEventHandler] | None:
+    ) -> tuple[RealtimeObserver, SimpleEventHandler] | None:
         """Create and start a watchdog observer without mutating shared state."""
         event_handler = SimpleEventHandler(
             self.event_queue,
@@ -735,7 +805,7 @@ class RealtimeStartupMixin:
             filtered_event_callback=self._record_filtered_event,
             admission_callback=self._should_admit_realtime_event,
         )
-        observer = Observer()
+        observer = _create_watchdog_observer()
 
         # Use recursive=True to ensure all directory events are captured
         # This is necessary for proper real-time monitoring of new directories
@@ -767,6 +837,7 @@ class RealtimeStartupMixin:
 
         self._stop_bootstrap_observer(observer)
         raise RuntimeError("Observer failed to start within timeout")
+
     async def _add_subdirectories_progressively(self, root_path: Path) -> None:
         """No longer needed - using recursive monitoring."""
         logger.debug(

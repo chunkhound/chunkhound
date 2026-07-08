@@ -1,20 +1,12 @@
-"""Unit tests for VoyageAIEmbeddingProvider — new voyage ranking features.
+"""Unit tests for VoyageAIEmbeddingProvider.
 
-Covers gaps introduced by the voyage_endpoint branch:
-  - _build_rerank_payload (all format branches)
-  - _parse_rerank_response (sync, Cohere + TEI fields, edge cases)
-  - _rerank_via_http multi-batch aggregation and index re-mapping
-  - _rerank_http_batch response normalisation and error handling
-  - supports_reranking with/without base_url and rerank_url
-  - embed() sub-batching when input exceeds batch_size
-  - embed_batch() token-budget flush
-  - Semaphore initialisation (base_url → 1, official API → 40)
-  - HTTP 408 / upstream-timeout retry logic
-  - estimate_tokens edge cases
+Covers rerank HTTP/SDK behavior, embed batching, retry logic, and output_dims
+contracts for known Voyage models plus unknown/custom Voyage-compatible models.
 """
 
 from __future__ import annotations
 
+import math
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,6 +14,10 @@ import voyageai
 
 from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.core.exceptions.embedding import (
+    EmbeddingConfigurationError,
+    EmbeddingDimensionError,
+)
 from chunkhound.providers.embeddings.voyageai_provider import (
     _CATEGORY_BACKOFFS,
     VoyageAIEmbeddingProvider,
@@ -33,9 +29,22 @@ from chunkhound.providers.embeddings.voyageai_provider import (
 # ---------------------------------------------------------------------------
 
 
+class _FakeEmbedResult:
+    def __init__(self, embeddings: list[list[float]], total_tokens: int = 1):
+        self.embeddings = embeddings
+        self.total_tokens = total_tokens
+
+
+def _make_mock_client(*, params: dict[str, object] | None = None) -> MagicMock:
+    """Return a fake VoyageAI SDK client with controllable internal params."""
+    mock_client = MagicMock()
+    mock_client._params = {} if params is None else dict(params)
+    return mock_client
+
+
 def _make_provider(**kwargs) -> VoyageAIEmbeddingProvider:
     """Return a VoyageAIEmbeddingProvider with the SDK client mocked out."""
-    mock_client = MagicMock()
+    mock_client = _make_mock_client()
     with patch.object(voyageai, "Client", return_value=mock_client):
         return VoyageAIEmbeddingProvider(**kwargs)
 
@@ -121,14 +130,27 @@ class TestValidateRerankConfiguration:
 
 
 class TestSupportsReranking:
-    def test_official_api_always_true(self, provider_official):
+    def test_official_api_with_rerank_model_is_true(self, provider_official):
         assert provider_official.supports_reranking() is True
+
+    def test_official_api_without_rerank_model_is_false(self):
+        p = _make_provider(api_key="test-key", rerank_model=None)
+        assert p.supports_reranking() is False
 
     def test_custom_endpoint_without_rerank_url_is_false(self, provider_custom):
         assert provider_custom.supports_reranking() is False
 
     def test_custom_endpoint_with_rerank_url_is_true(self, provider_with_rerank_url):
         assert provider_with_rerank_url.supports_reranking() is True
+
+    def test_http_cohere_without_rerank_model_is_false(self):
+        p = _make_provider(
+            api_key="test-key",
+            rerank_url="http://localhost:8001/rerank",
+            rerank_format="cohere",
+            rerank_model=None,
+        )
+        assert p.supports_reranking() is False
 
 
 # ===========================================================================
@@ -146,6 +168,27 @@ class TestSemaphoreInit:
             == VoyageAIEmbeddingProvider.RECOMMENDED_CONCURRENCY
         )
 
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://api.voyageai.com",
+            "https://api.voyageai.com/v1",
+            "https://api.voyageai.com/v1/",
+        ],
+    )
+    def test_explicit_official_base_url_keeps_recommended_concurrency(
+        self, base_url: str
+    ):
+        """Regression: explicit official base_url must not drop concurrency to 1."""
+        p = _make_provider(
+            api_key="test-key",
+            base_url=base_url,
+        )
+        assert (
+            p._embed_semaphore._value
+            == VoyageAIEmbeddingProvider.RECOMMENDED_CONCURRENCY
+        )
+
     def test_explicit_max_concurrent_batches_honoured(self):
         p = _make_provider(api_key="test-key", max_concurrent_batches=5)
         assert p._embed_semaphore._value == 5
@@ -157,6 +200,31 @@ class TestSemaphoreInit:
             max_concurrent_batches=3,
         )
         assert p._embed_semaphore._value == 3
+
+
+class TestClientBaseUrlParams:
+    def test_explicit_official_base_url_uses_modern_sdk_param(self):
+        """Regression: official base_url must stay out of request JSON on new SDKs."""
+        mock_client = _make_mock_client(params={"base_url": None})
+        with patch.object(voyageai, "Client", return_value=mock_client):
+            VoyageAIEmbeddingProvider(
+                api_key="test-key",
+                base_url="https://api.voyageai.com/v1",
+            )
+
+        assert mock_client._params["base_url"] == "https://api.voyageai.com/v1"
+        assert "api_base" not in mock_client._params
+
+    def test_explicit_official_base_url_falls_back_to_legacy_sdk_param(self):
+        mock_client = _make_mock_client(params={})
+        with patch.object(voyageai, "Client", return_value=mock_client):
+            VoyageAIEmbeddingProvider(
+                api_key="test-key",
+                base_url="https://api.voyageai.com/v1",
+            )
+
+        assert mock_client._params["api_base"] == "https://api.voyageai.com/v1"
+        assert "base_url" not in mock_client._params
 
 
 # ===========================================================================
@@ -544,6 +612,179 @@ class TestRerankViaHttpBatching:
 # ===========================================================================
 
 
+class TestVoyageOutputDimsRuntimeBehavior:
+    def test_client_side_truncation_without_output_dims_fails_at_init(self):
+        with pytest.raises(
+            EmbeddingConfigurationError,
+            match="output_dims is not set",
+        ):
+            _make_provider(
+                api_key="test-key",
+                model="acme-voyage-compatible",
+                client_side_truncation=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_without_output_dims_discovers_runtime_native_dims(
+        self,
+    ):
+        p = _make_provider(
+            api_key="test-key",
+            model="acme-voyage-compatible",
+        )
+        p._client.embed = MagicMock(
+            return_value=_FakeEmbedResult([[0.1, 0.2, 0.3]], total_tokens=3)
+        )
+
+        assert p.dims == 1024
+        assert p.native_dims == 1024
+
+        result = await p.embed(["hello"])
+
+        assert len(result[0]) == 3
+        assert p.dims == 3
+        assert p.native_dims == 3
+        _, kwargs = p._client.embed.call_args
+        assert "output_dimension" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_without_output_dims_rejects_mismatch_after_discovery(
+        self,
+    ):
+        p = _make_provider(
+            api_key="test-key",
+            model="acme-voyage-compatible",
+        )
+        p._client.embed = MagicMock(
+            side_effect=[
+                _FakeEmbedResult([[0.1, 0.2, 0.3]], total_tokens=3),
+                _FakeEmbedResult([[0.1, 0.2]], total_tokens=3),
+            ]
+        )
+
+        await p.embed(["hello"])
+
+        with pytest.raises(EmbeddingDimensionError, match="dimension mismatch: got 2, expected 3"):
+            await p.embed(["hello again"])
+
+    @pytest.mark.asyncio
+    async def test_known_matryoshka_model_sends_output_dimension_param(self):
+        p = _make_provider(
+            api_key="test-key",
+            model="voyage-3.5",
+            output_dims=512,
+        )
+        p._client.embed = MagicMock(
+            return_value=_FakeEmbedResult([[0.1] * 512], total_tokens=3)
+        )
+
+        result = await p.embed(["hello"])
+
+        assert len(result[0]) == 512
+        _, kwargs = p._client.embed.call_args
+        assert kwargs["output_dimension"] == 512
+
+    @pytest.mark.asyncio
+    async def test_client_side_truncation_omits_output_dimension_and_normalizes(self):
+        p = _make_provider(
+            api_key="test-key",
+            model="voyage-3.5",
+            output_dims=256,
+            client_side_truncation=True,
+        )
+        full_vector = [3.0, 4.0] + [0.0] * 2046
+        p._client.embed = MagicMock(
+            return_value=_FakeEmbedResult([full_vector], total_tokens=3)
+        )
+
+        result = await p.embed(["hello"])
+
+        _, kwargs = p._client.embed.call_args
+        assert "output_dimension" not in kwargs
+        assert len(result[0]) == 256
+        assert result[0][0] == pytest.approx(0.6)
+        assert result[0][1] == pytest.approx(0.8)
+        assert math.sqrt(sum(x * x for x in result[0])) == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_server_side_truncation_sends_output_dimension(self):
+        p = _make_provider(
+            api_key="test-key",
+            model="acme-voyage-compatible",
+            output_dims=2,
+        )
+        p._client.embed = MagicMock(
+            return_value=_FakeEmbedResult([[0.1, 0.2]], total_tokens=3)
+        )
+
+        result = await p.embed(["hello"])
+
+        assert len(result[0]) == 2
+        _, kwargs = p._client.embed.call_args
+        assert kwargs["output_dimension"] == 2
+        assert p.dims == 2
+        assert p._discovered_native_dims is None
+        assert p.native_dims == 1024  # fallback, not truncated dims
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_client_side_truncation_uses_runtime_dims(self):
+        p = _make_provider(
+            api_key="test-key",
+            model="acme-voyage-compatible",
+            output_dims=2,
+            client_side_truncation=True,
+        )
+        p._client.embed = MagicMock(
+            return_value=_FakeEmbedResult([[3.0, 4.0, 5.0]], total_tokens=3)
+        )
+
+        assert p.supported_dimensions == []
+        result = await p.embed(["hello"])
+
+        assert len(result[0]) == 2
+        assert p.native_dims == 3
+        assert p.dims == 2
+        assert list(p.supported_dimensions) == [1, 2, 3]
+        assert math.sqrt(sum(x * x for x in result[0])) == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_embedding_dimension_error_propagates_without_retry(self):
+        """EmbeddingDimensionError must propagate immediately, not retry."""
+        p = _make_provider(
+            api_key="test-key", model="voyage-3", retry_attempts=3
+        )
+        p._client.embed = MagicMock(
+            side_effect=EmbeddingDimensionError(
+                "dimension mismatch: got 2, expected 3"
+            )
+        )
+
+        with pytest.raises(EmbeddingDimensionError, match="dimension mismatch"):
+            await p.embed(["hello"])
+
+        # Must fail on first attempt, not retry 3 times
+        assert p._client.embed.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_embedding_configuration_error_propagates_without_retry(self):
+        """EmbeddingConfigurationError must propagate immediately, not retry."""
+        p = _make_provider(
+            api_key="test-key", model="voyage-3", retry_attempts=3
+        )
+        p._client.embed = MagicMock(
+            side_effect=EmbeddingConfigurationError(
+                "output_dims 999 not in supported dimensions"
+            )
+        )
+
+        with pytest.raises(
+            EmbeddingConfigurationError, match="not in supported dimensions"
+        ):
+            await p.embed(["hello"])
+
+        assert p._client.embed.call_count == 1
+
+
 class TestEmbedSubBatching:
     @pytest.mark.asyncio
     async def test_single_call_when_within_batch_size(self, provider_official):
@@ -839,6 +1080,20 @@ class TestRerankSdkRetry:
     caught by a failing test, not a production stack trace."""
 
     @pytest.mark.asyncio
+    async def test_missing_rerank_model_fails_fast(self):
+        p = _make_provider(api_key="test-key", rerank_model=None)
+
+        with pytest.raises(RuntimeError, match="requires rerank_model"):
+            await p._rerank_via_sdk("q", ["d1"], top_k=None)
+
+    @pytest.mark.asyncio
+    async def test_missing_rerank_model_fails_fast_through_public_api(self):
+        p = _make_provider(api_key="test-key", rerank_model=None)
+
+        with pytest.raises(RuntimeError, match="requires rerank_model"):
+            await p.rerank("q", ["d1"], top_k=None)
+
+    @pytest.mark.asyncio
     async def test_rate_limit_error_retried_with_30s_base_delay(self):
         p = _make_provider(api_key="test-key", retry_attempts=2, retry_delay=0.0)
         call_count = 0
@@ -941,6 +1196,75 @@ class TestRerankSdkRetry:
 # ===========================================================================
 
 
+class TestHttpRerankGuards:
+    @pytest.mark.asyncio
+    async def test_missing_rerank_url_fails_fast(self):
+        p = _make_provider(api_key="test-key")
+
+        with pytest.raises(RuntimeError, match="requires rerank_url"):
+            await p._rerank_http_batch("q", ["d1"], top_k=None)
+
+
+class TestUnknownVoyageModelConfig:
+    def test_unknown_model_allows_positive_output_dims(self):
+        p = _make_provider(
+            api_key="test-key",
+            model="acme-voyage-compatible",
+            output_dims=777,
+        )
+        assert p.output_dims == 777
+        assert p.dims == 777
+
+    def test_unknown_model_metadata_does_not_report_config_only_dims(self):
+        p = _make_provider(
+            api_key="test-key",
+            model="acme-voyage-compatible",
+            output_dims=777,
+        )
+        assert p.supported_dimensions == []
+
+    def test_unknown_model_metadata_starts_empty_without_runtime_discovery(self):
+        p = _make_provider(
+            api_key="test-key",
+            model="acme-voyage-compatible",
+        )
+        assert p.supported_dimensions == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_metadata_updates_after_runtime_discovery(self):
+        p = _make_provider(
+            api_key="test-key",
+            model="acme-voyage-compatible",
+        )
+        p._client.embed = MagicMock(
+            return_value=_FakeEmbedResult([[0.1, 0.2, 0.3]], total_tokens=3)
+        )
+
+        await p.embed(["hello"])
+
+        assert p.supported_dimensions == [3]
+
+    def test_unknown_model_rejects_non_positive_output_dims(self):
+        with pytest.raises(
+            EmbeddingConfigurationError, match="must be a positive integer"
+        ):
+            _make_provider(
+                api_key="test-key",
+                model="acme-voyage-compatible",
+                output_dims=0,
+            )
+
+    def test_known_model_rejects_unsupported_output_dims(self):
+        with pytest.raises(
+            EmbeddingConfigurationError, match="not in supported dimensions"
+        ):
+            _make_provider(
+                api_key="test-key",
+                model="voyage-3.5",
+                output_dims=123,  # Not in [256, 512, 1024, 2048]
+            )
+
+
 class TestFactoryRerankUrlResolution:
     """Test that the factory resolves relative rerank_url against base_url."""
 
@@ -1001,6 +1325,10 @@ class TestGetModelInfo:
     def test_official_api_supports_reranking_true(self, provider_official):
         info = provider_official.get_model_info()
         assert info["supports_reranking"] is True
+
+    def test_official_api_without_rerank_model_reports_false(self):
+        info = _make_provider(api_key="test-key", rerank_model=None).get_model_info()
+        assert info["supports_reranking"] is False
 
     def test_custom_endpoint_without_rerank_url_is_false(self, provider_custom):
         info = provider_custom.get_model_info()

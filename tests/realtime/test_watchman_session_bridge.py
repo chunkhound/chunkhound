@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
-import os
 import stat
 import sys
 import textwrap
@@ -13,10 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import chunkhound.watchman.session as watchman_session_module
-from chunkhound.services.realtime_indexing_service import (
-    RealtimeIndexingService,
-    WatchmanRealtimeAdapter,
-)
+from chunkhound.services.realtime.adapters import WatchmanRealtimeAdapter
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
     WatchmanCliSession,
@@ -26,10 +22,13 @@ from chunkhound.watchman import (
 )
 from tests.helpers.watchman_realtime import (
     build_watchman_service as _build_watchman_service,
+)
+from tests.helpers.watchman_realtime import (
     prepend_poisoned_python_shims as _prepend_poisoned_python_shims,
 )
 
-pytestmark = pytest.mark.requires_native_watchman
+# Keep fake-CLI/session contract tests runnable without packaged Watchman; mark
+# only tests that launch a real PrivateWatchmanSidecar as requiring native Watchman.
 
 _FAKE_WATCHMAN_CLI = """\
 from __future__ import annotations
@@ -220,7 +219,7 @@ def test_scope_plan_subscription_names_resolve_colliding_secondary_suffixes(
     )
 
 
-def test_scope_plan_subscription_names_preserve_logical_root_when_target_resolves_elsewhere(
+def test_scope_plan_subscription_names_preserve_logical_root_when_resolved_elsewhere(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target_path = tmp_path / "logical_workspace"
@@ -333,7 +332,9 @@ async def test_watchman_bridge_queue_overflow_reports_exact_drop_magnitude(
     }
     session.subscription_queue.put_nowait(overflow_payload)
 
-    bridge_task = asyncio.create_task(adapter._bridge_session_subscription_pdus(session))
+    bridge_task = asyncio.create_task(
+        adapter._bridge_session_subscription_pdus(session)
+    )
     try:
         await asyncio.wait_for(session.subscription_queue.join(), timeout=1.0)
         health = await service.get_health()
@@ -454,6 +455,7 @@ def test_watchman_cli_session_bounds_long_secondary_subscription_names(
     assert bounded_a.startswith("chunkhound-live-indexing--very-long-scope-name")
 
 
+@pytest.mark.requires_native_watchman
 @pytest.mark.asyncio
 async def test_watchman_cli_session_start_ignores_poisoned_python_path(
     tmp_path: Path,
@@ -533,6 +535,54 @@ def test_watchman_cli_session_prepared_startup_support_is_transport_aware(
         lambda: SimpleNamespace(listener_transport="named_pipe"),
     )
     assert session.supports_prepared_session_startup() is False
+
+
+@pytest.mark.asyncio
+async def test_watchman_cli_session_command_prefix_does_not_resolve_packaged_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script_path = _write_fake_watchman_cli(tmp_path)
+    target_path = tmp_path / "repo"
+    target_path.mkdir()
+    socket_path = tmp_path / "watchman.sock"
+    socket_path.write_text("socket ready\n", encoding="utf-8")
+    statefile_path = tmp_path / "watchman.state"
+    statefile_path.write_text("state ready\n", encoding="utf-8")
+    logfile_path = tmp_path / "watchman.log"
+    logfile_path.write_text("log ready\n", encoding="utf-8")
+    pidfile_path = tmp_path / "watchman.pid"
+    pidfile_path.write_text("123\n", encoding="utf-8")
+
+    def fail_runtime_resolution() -> None:
+        raise AssertionError("explicit command_prefix must not resolve runtime")
+
+    monkeypatch.setattr(
+        watchman_session_module,
+        "resolve_packaged_watchman_runtime",
+        fail_runtime_resolution,
+    )
+
+    session = WatchmanCliSession(
+        binary_path=script_path,
+        socket_path=socket_path,
+        statefile_path=statefile_path,
+        logfile_path=logfile_path,
+        pidfile_path=pidfile_path,
+        project_root=tmp_path,
+        command_prefix=[sys.executable, str(script_path)],
+    )
+
+    try:
+        setup = await session.start(target_path=target_path)
+
+        assert setup.capabilities == {
+            "cmd-watch-project": True,
+            "relative_root": True,
+        }
+        assert setup.scope_plan.primary_scope.watch_root == target_path.resolve()
+        assert session.get_health()["watchman_session_alive"] is True
+    finally:
+        await session.stop()
 
 
 @pytest.mark.asyncio
