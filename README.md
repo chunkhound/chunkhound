@@ -2,9 +2,9 @@
     <a href="https://chunkhound.ai">
     <picture>
         <source media="(prefers-color-scheme: dark)"
-srcset="site/public/logo-light.svg">
+        srcset="site/public/logo-light.svg">
         <img src="site/public/logo.svg"
-alt="ChunkHound" width="140">
+        alt="ChunkHound" width="140">
     </picture>
     </a>
 </p>
@@ -13,9 +13,9 @@ alt="ChunkHound" width="140">
     <a href="https://chunkhound.ai">
     <picture>
         <source media="(prefers-color-scheme: dark)"
-srcset="site/public/wordmark-text-dark.svg">
+        srcset="site/public/wordmark-text-dark.svg">
         <img src="site/public/wordmark-text.svg"
-alt="ChunkHound" width="300">
+        alt="ChunkHound" width="300">
     </picture>
     </a>
 </p>
