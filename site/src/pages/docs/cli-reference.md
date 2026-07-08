@@ -117,7 +117,6 @@ chunkhound search "database migration" --commit-range main..HEAD
 ```
 
 > **Note:** `--regex` ignores git diff flags (`--last-n`, `--commit-range`, `--commit-hash`). For diff-scoped search, use semantic search (default).
-```
 
 ## `chunkhound websearch`
 
