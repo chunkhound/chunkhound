@@ -245,6 +245,42 @@ class TestProjectRootDetection:
             finally:
                 os.chdir(original_cwd)
 
+    def test_walk_continues_past_inaccessible_parent(self, monkeypatch):
+        """Should not crash when Path.exists() raises during upward walk.
+
+        Regression: on Windows, walking up through an ACL-denied ancestor
+        (e.g. probing markers inside C:\\Users\\<name>\\) propagates
+        PermissionError out of Path.exists() and used to abort the walk
+        before reaching a valid project root higher up.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir).resolve() / "home"
+            project = fake_home / "project"
+            locked = project / "locked"
+            deep = locked / "deep"
+            deep.mkdir(parents=True)
+            (project / ".chunkhound.json").touch()
+
+            monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+            real_exists = Path.exists
+
+            def guarded_exists(self):
+                # Deny probes at or beneath `locked`; allow probes above it.
+                if self == locked or locked in self.parents:
+                    raise PermissionError("simulated ACL on locked/")
+                return real_exists(self)
+
+            monkeypatch.setattr(Path, "exists", guarded_exists)
+
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(deep)
+                result = find_project_root()
+                assert result == project
+            finally:
+                os.chdir(original_cwd)
+
     def test_multiple_nested_levels(self):
         """Should work from deeply nested directories."""
         with tempfile.TemporaryDirectory() as tmpdir:
