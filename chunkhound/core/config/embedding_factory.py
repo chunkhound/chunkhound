@@ -101,14 +101,20 @@ class EmbeddingProviderFactory:
                 f"azure_deployment={azure_deployment}, "
                 f"api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-                f"rerank_batch_size={rerank_batch_size}"
+                f"rerank_batch_size={rerank_batch_size}, "
+                f"timeout={config.get('timeout', 30)}, "
+                f"batch_size={config.get('batch_size', 100)}, "
+                f"max_retries={config.get('max_retries', 3)}"
             )
         else:
             logger.debug(
                 f"Creating OpenAI provider: model={model}, "
                 f"base_url={base_url}, api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-                f"rerank_batch_size={rerank_batch_size}"
+                f"rerank_batch_size={rerank_batch_size}, "
+                f"timeout={config.get('timeout', 30)}, "
+                f"batch_size={config.get('batch_size', 100)}, "
+                f"max_retries={config.get('max_retries', 3)}"
             )
 
         try:
