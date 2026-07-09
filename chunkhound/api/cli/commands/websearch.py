@@ -12,15 +12,14 @@ import urllib.error
 from pathlib import Path
 
 from chunkhound.core.config.config import Config
-from chunkhound.utils.websearch_expansion import expand_web_queries
-from chunkhound.utils.websearch_postprocess import replace_paths_with_urls
-
 from chunkhound.utils.websearch_core import (
     build_quickresearch_argv_core,
     fetch_and_save,
     search_multi,
     websearch_timeout,
 )
+from chunkhound.utils.websearch_expansion import expand_web_queries
+from chunkhound.utils.websearch_postprocess import replace_paths_with_urls
 
 from ..utils.provider_setup import setup_llm_manager
 from ..utils.rich_output import RichOutputFormatter
