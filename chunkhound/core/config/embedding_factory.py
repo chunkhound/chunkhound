@@ -103,7 +103,10 @@ class EmbeddingProviderFactory:
                 f"azure_deployment={azure_deployment}, "
                 f"api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-                f"rerank_batch_size={rerank_batch_size}"
+                f"rerank_batch_size={rerank_batch_size}, "
+                f"timeout={config.get('timeout', 30)}, "
+                f"batch_size={config.get('batch_size', 100)}, "
+                f"max_retries={config.get('max_retries', 3)}"
             )
         else:
             logger.debug(
@@ -112,7 +115,10 @@ class EmbeddingProviderFactory:
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
                 f"rerank_batch_size={rerank_batch_size}, "
                 f"output_dims={output_dims}, "
-                f"client_side_truncation={client_side_truncation}"
+                f"client_side_truncation={client_side_truncation}, "
+                f"timeout={config.get('timeout', 30)}, "
+                f"batch_size={config.get('batch_size', 100)}, "
+                f"max_retries={config.get('max_retries', 3)}"
             )
 
         try:
@@ -131,6 +137,9 @@ class EmbeddingProviderFactory:
                 api_version=api_version,
                 azure_endpoint=azure_endpoint,
                 azure_deployment=azure_deployment,
+                batch_size=config.get("batch_size", 100),
+                timeout=config.get("timeout", 30),
+                retry_attempts=config.get("max_retries", 3),
             )
         except Exception as e:
             raise ValueError(f"Failed to create OpenAI provider: {e}") from e
