@@ -4,9 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
-
 from chunkhound.providers.embeddings import openai_provider as openai_provider_module
 from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
 from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider

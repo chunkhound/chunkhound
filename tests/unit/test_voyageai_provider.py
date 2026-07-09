@@ -11,13 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import voyageai
+
 from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.core.exceptions.embedding import (
     EmbeddingConfigurationError,
     EmbeddingDimensionError,
 )
-
 from chunkhound.providers.embeddings.voyageai_provider import (
     _CATEGORY_BACKOFFS,
     VoyageAIEmbeddingProvider,

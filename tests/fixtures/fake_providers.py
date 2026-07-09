@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import xxhash
+
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
