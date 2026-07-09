@@ -265,27 +265,55 @@ impl DuckDbHnswBackend {
             DELETE FROM rust_temp_chunks;",
         )?;
 
-        {
-            let mut stmt = conn.prepare(
-                "INSERT INTO rust_temp_chunks
-                 (file_id, chunk_type, symbol, code, start_line, end_line,
-                  start_byte, end_byte, language, metadata)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )?;
-            for chunk in chunks {
-                stmt.execute(duckdb::params![
-                    file_id,
-                    chunk.chunk_type,
-                    chunk.symbol,
-                    chunk.code,
-                    chunk.start_line,
-                    chunk.end_line,
-                    chunk.start_byte,
-                    chunk.end_byte,
-                    chunk.language,
-                    chunk.metadata,
-                ])?;
+        // Batch 100 rows per INSERT to cut SQL round-trips ~100× vs one-row-at-a-time.
+        // Mirrors the same pattern used in insert_embeddings_txn.
+        const CHUNK_INSERT_BATCH: usize = 100;
+        for chunk_slice in chunks.chunks(CHUNK_INSERT_BATCH) {
+            let row_ph = std::iter::repeat("(?,?,?,?,?,?,?,?,?,?)")
+                .take(chunk_slice.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "INSERT INTO rust_temp_chunks \
+                 (file_id, chunk_type, symbol, code, start_line, end_line, \
+                  start_byte, end_byte, language, metadata) VALUES {row_ph}"
+            );
+            let mut params: Vec<duckdb::types::Value> =
+                Vec::with_capacity(chunk_slice.len() * 10);
+            for chunk in chunk_slice {
+                params.push(duckdb::types::Value::BigInt(file_id));
+                params.push(duckdb::types::Value::Text(chunk.chunk_type.clone()));
+                params.push(chunk.symbol.as_deref().map_or(
+                    duckdb::types::Value::Null,
+                    |s| duckdb::types::Value::Text(s.to_string()),
+                ));
+                params.push(duckdb::types::Value::Text(chunk.code.clone()));
+                params.push(chunk.start_line.map_or(
+                    duckdb::types::Value::Null,
+                    duckdb::types::Value::BigInt,
+                ));
+                params.push(chunk.end_line.map_or(
+                    duckdb::types::Value::Null,
+                    duckdb::types::Value::BigInt,
+                ));
+                params.push(chunk.start_byte.map_or(
+                    duckdb::types::Value::Null,
+                    duckdb::types::Value::BigInt,
+                ));
+                params.push(chunk.end_byte.map_or(
+                    duckdb::types::Value::Null,
+                    duckdb::types::Value::BigInt,
+                ));
+                params.push(chunk.language.as_deref().map_or(
+                    duckdb::types::Value::Null,
+                    |s| duckdb::types::Value::Text(s.to_string()),
+                ));
+                params.push(chunk.metadata.as_deref().map_or(
+                    duckdb::types::Value::Null,
+                    |s| duckdb::types::Value::Text(s.to_string()),
+                ));
             }
+            conn.execute(&sql, duckdb::params_from_iter(params))?;
         }
 
         let mut stmt = conn.prepare(
