@@ -394,6 +394,8 @@ impl DuckDbHnswBackend {
         if paths.is_empty() {
             return Ok(());
         }
+        // Discover embedding tables once for this call.
+        let emb_tables = Self::discover_embedding_tables(conn)?;
         const DELETE_BATCH: usize = 500;
         for batch in paths.chunks(DELETE_BATCH) {
             let ph = std::iter::repeat("?")
@@ -404,6 +406,19 @@ impl DuckDbHnswBackend {
                 .iter()
                 .map(|p| duckdb::types::Value::Text(p.clone()))
                 .collect();
+            // embeddings_N tables have no FK to chunks — delete embeddings first
+            // to avoid ghost rows accumulating on re-index (CF-1).
+            let chunk_subquery = format!(
+                "SELECT id FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path IN ({ph}))"
+            );
+            for (table_name, _dims) in &emb_tables {
+                conn.execute(
+                    &format!(
+                        "DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"
+                    ),
+                    duckdb::params_from_iter(params.clone()),
+                )?;
+            }
             conn.execute(
                 &format!("DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path IN ({ph}))"),
                 duckdb::params_from_iter(params.clone()),
@@ -439,17 +454,37 @@ impl DuckDbHnswBackend {
         conn: &Connection,
         batch: &DbWriterBatch,
     ) -> Result<(Vec<i64>, u64, Vec<(i64, usize, usize)>), DbError> {
-        // Delete old chunks for every file we're about to (re-)write.
-        // Use the caller-supplied existing_file_id when available for an indexed
-        // delete; fall back to a path lookup so idempotent re-writes without an
-        // explicit id don't accumulate duplicate chunks.
+        // Delete old embeddings and chunks for every file we're about to (re-)write.
+        // embeddings_N tables have no FK cascade from chunks, so we must delete
+        // embeddings before chunks or ghost rows accumulate on re-index (CF-2).
+        // Discover embedding tables once per transaction to avoid repeated catalog queries.
+        let emb_tables = Self::discover_embedding_tables(conn)?;
         for file in &batch.files {
             if let Some(existing_id) = file.existing_file_id {
+                for (table_name, _dims) in &emb_tables {
+                    conn.execute(
+                        &format!(
+                            "DELETE FROM \"{table_name}\" WHERE chunk_id IN \
+                             (SELECT id FROM chunks WHERE file_id = ?)"
+                        ),
+                        duckdb::params![existing_id],
+                    )?;
+                }
                 conn.execute(
                     "DELETE FROM chunks WHERE file_id = ?",
                     duckdb::params![existing_id],
                 )?;
             } else {
+                for (table_name, _dims) in &emb_tables {
+                    conn.execute(
+                        &format!(
+                            "DELETE FROM \"{table_name}\" WHERE chunk_id IN \
+                             (SELECT id FROM chunks WHERE file_id IN \
+                              (SELECT id FROM files WHERE path = ?))"
+                        ),
+                        duckdb::params![file.path],
+                    )?;
+                }
                 conn.execute(
                     "DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path = ?)",
                     duckdb::params![file.path],
