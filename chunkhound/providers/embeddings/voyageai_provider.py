@@ -9,6 +9,8 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, TypedDict, cast
 
 import httpx
+from loguru import logger
+
 from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
 from chunkhound.core.exceptions.embedding import (
@@ -21,7 +23,6 @@ from chunkhound.core.utils.voyageai_utils import (
     is_official_voyageai_endpoint,
 )
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
-from loguru import logger
 
 from .shared_utils import (
     apply_client_side_truncation,

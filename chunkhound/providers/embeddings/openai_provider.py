@@ -12,6 +12,9 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, TypedDict, cast
 
 import httpx
+from loguru import logger
+from typing_extensions import NotRequired
+
 from chunkhound.core.config.embedding_config import (
     RERANK_BASE_URL_REQUIRED,
     validate_rerank_configuration,
@@ -37,8 +40,6 @@ from chunkhound.providers.embeddings.shared_utils import (
     validate_positive_output_dims,
     validate_runtime_output_dims_config,
 )
-from loguru import logger
-from typing_extensions import NotRequired
 
 from .batch_utils import handle_token_limit_error
 
