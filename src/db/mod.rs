@@ -10,6 +10,8 @@ pub trait DbBackend: Send {
     fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError>;
     fn needs_compaction(&mut self) -> Result<bool, DbError>;
     fn run_compaction(&mut self) -> Result<(), DbError>;
+    fn drop_all_hnsw_indexes(&mut self) -> Result<(), DbError> { Ok(()) }
+    fn ensure_all_hnsw_indexes(&mut self) -> Result<(), DbError> { Ok(()) }
 }
 
 #[derive(Debug, Clone)]

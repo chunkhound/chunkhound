@@ -80,4 +80,17 @@ impl RustDbWriter {
         })
         .map_err(PyErr::from)
     }
+
+    fn drop_all_hnsw_indexes(&self) -> PyResult<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.backend.drop_all_hnsw_indexes().map_err(PyErr::from)
+    }
+
+    fn ensure_all_hnsw_indexes(&self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| {
+            let mut inner = self.inner.lock().unwrap();
+            inner.backend.ensure_all_hnsw_indexes()
+        })
+        .map_err(PyErr::from)
+    }
 }

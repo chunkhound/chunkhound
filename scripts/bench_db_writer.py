@@ -463,6 +463,26 @@ def _python_write_files(conn: Any, files: list[dict]) -> tuple[int, int]:
     return total_chunks, total_embs
 
 
+def _python_ensure_hnsw_indexes(conn: Any) -> None:
+    """Mirror of ensure_all_hnsw_indexes: load VSS and build HNSW on every embeddings_* table."""
+    try:
+        conn.execute("INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true;")
+    except Exception:
+        return
+    tables = [
+        r[0] for r in conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_name SIMILAR TO 'embeddings_[0-9]+'"
+        ).fetchall()
+    ]
+    for table_name in tables:
+        dims = table_name.split("_", 1)[1]
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS "hnsw_embedding_{dims}" '
+            f'ON "{table_name}" USING HNSW (embedding) WITH (metric = \'cosine\')'
+        )
+
+
 def run_python_path(files: list[dict], db_path: str, batch_size: int) -> dict:
     """Run the Python direct write path in production-sized batches."""
     rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -492,6 +512,10 @@ def run_python_path(files: list[dict], db_path: str, batch_size: int) -> dict:
                 f"  {elapsed:.1f}s  CPU={cpu_pct:.0f}%  RSS={rss_kb//1024:,}MB",
                 flush=True,
             )
+        t_ensure = time.perf_counter()
+        _python_ensure_hnsw_indexes(conn)
+        hnsw_ensure_s = time.perf_counter() - t_ensure
+        print(f"  [python] HNSW rebuild: {hnsw_ensure_s:.2f}s", flush=True)
         conn.execute("CHECKPOINT")
     finally:
         conn.close()
@@ -507,6 +531,8 @@ def run_python_path(files: list[dict], db_path: str, batch_size: int) -> dict:
         "embs": total_embs,
         "rss_delta_kb": rss_after - rss_before,
         "db_bytes": db_size,
+        "hnsw_drop_s": 0.0,
+        "hnsw_ensure_s": hnsw_ensure_s,
     }
 
 
@@ -529,6 +555,10 @@ def run_rust_path(files: list[dict], db_path: str, batch_size: int) -> dict:
     writer = RustDbWriter(db_config)
     writer.open()
     try:
+        t_drop = time.perf_counter()
+        writer.drop_all_hnsw_indexes()
+        hnsw_drop_s = time.perf_counter() - t_drop
+        print(f"  [rust]   HNSW drop: {hnsw_drop_s:.2f}s", flush=True)
         total_chunks = total_embs = 0
         n_batches = max(1, (len(files) + batch_size - 1) // batch_size)
         for i in range(0, len(files), batch_size):
@@ -552,6 +582,10 @@ def run_rust_path(files: list[dict], db_path: str, batch_size: int) -> dict:
                 f"  {elapsed:.1f}s  CPU={cpu_pct:.0f}%  RSS={rss_kb//1024:,}MB",
                 flush=True,
             )
+        t_ensure = time.perf_counter()
+        writer.ensure_all_hnsw_indexes()
+        hnsw_ensure_s = time.perf_counter() - t_ensure
+        print(f"  [rust]   HNSW rebuild: {hnsw_ensure_s:.2f}s", flush=True)
     finally:
         writer.close()
 
@@ -566,6 +600,8 @@ def run_rust_path(files: list[dict], db_path: str, batch_size: int) -> dict:
         "embs": total_embs,
         "rss_delta_kb": rss_after - rss_before,
         "db_bytes": db_size,
+        "hnsw_drop_s": hnsw_drop_s,
+        "hnsw_ensure_s": hnsw_ensure_s,
     }
 
 
@@ -677,10 +713,33 @@ def print_table(py_result: dict | None, rust_result: dict | None) -> None:
     def row(label: str, py_val: str, rust_val: str) -> None:
         print(f"{label:<22}{py_val.rjust(W)}{rust_val.rjust(W)}")
 
+    py_drop_s    = py_result.get("hnsw_drop_s")    if py_result and not py_err else None
+    py_ensure_s  = py_result.get("hnsw_ensure_s")  if py_result and not py_err else None
+    rust_drop_s  = rust_result.get("hnsw_drop_s")  if rust_result and not rust_err else None
+    rust_ensure_s= rust_result.get("hnsw_ensure_s")if rust_result and not rust_err else None
+
+    py_batch_s   = (py_wall - (py_drop_s or 0) - (py_ensure_s or 0))   if py_wall is not None else None
+    rust_batch_s = (rust_wall - (rust_drop_s or 0) - (rust_ensure_s or 0)) if rust_wall is not None else None
+
     row(
         "Wall time",
         f"{py_wall:.3f} s" if py_wall is not None else (py_err or "skipped"),
         f"{rust_wall:.3f} s" if rust_wall is not None else (rust_err or "skipped"),
+    )
+    row(
+        "  ↳ batch writes",
+        f"{py_batch_s:.3f} s" if py_batch_s is not None else "N/A",
+        f"{rust_batch_s:.3f} s" if rust_batch_s is not None else "N/A",
+    )
+    row(
+        "  ↳ HNSW drop",
+        f"{py_drop_s:.3f} s" if py_drop_s is not None else "N/A",
+        f"{rust_drop_s:.3f} s" if rust_drop_s is not None else "N/A",
+    )
+    row(
+        "  ↳ HNSW rebuild",
+        f"{py_ensure_s:.3f} s" if py_ensure_s is not None else "N/A",
+        f"{rust_ensure_s:.3f} s" if rust_ensure_s is not None else "N/A",
     )
     row(
         "Throughput (c/s)",

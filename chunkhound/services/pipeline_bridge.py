@@ -50,6 +50,14 @@ class RustWriterBridge:
         assert self._writer is not None
         self._writer.run_compaction()
 
+    def drop_all_hnsw_indexes(self) -> None:
+        if self._writer is not None and hasattr(self._writer, "drop_all_hnsw_indexes"):
+            self._writer.drop_all_hnsw_indexes()
+
+    def ensure_all_hnsw_indexes(self) -> None:
+        if self._writer is not None and hasattr(self._writer, "ensure_all_hnsw_indexes"):
+            self._writer.ensure_all_hnsw_indexes()
+
     def finalize(self) -> None:
         if self._writer is not None:
             try:

@@ -13,6 +13,7 @@ pub struct DuckDbHnswBackend {
     write_count: u32,
     has_vss: bool,
     hnsw_cache: Option<Vec<HnswIndexInfo>>,
+    hnsw_bulk_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,7 @@ impl DuckDbHnswBackend {
             write_count: 0,
             has_vss: false,
             hnsw_cache: None,
+            hnsw_bulk_mode: false,
         }
     }
 
@@ -414,6 +416,25 @@ impl DuckDbHnswBackend {
         Ok(())
     }
 
+    fn discover_embedding_tables(conn: &Connection) -> Result<Vec<(String, u32)>, DbError> {
+        let mut stmt = conn.prepare(
+            "SELECT table_name FROM information_schema.tables
+             WHERE table_name SIMILAR TO 'embeddings_[0-9]+'",
+        )?;
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let result = names
+            .into_iter()
+            .filter_map(|name| {
+                let dims: u32 = name.strip_prefix("embeddings_")?.parse().ok()?;
+                Some((name, dims))
+            })
+            .collect();
+        Ok(result)
+    }
+
     fn write_batch_txn(
         conn: &Connection,
         batch: &DbWriterBatch,
@@ -507,6 +528,9 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn close(&mut self) -> Result<(), DbError> {
+        if self.hnsw_bulk_mode {
+            let _ = self.ensure_all_hnsw_indexes();
+        }
         if let Some(conn) = self.conn.as_ref() {
             let _ = conn.execute_batch("CHECKPOINT");
         }
@@ -548,7 +572,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                 .conn
                 .as_ref()
                 .ok_or_else(|| DbError::Other("not open".into()))?;
-            if self.has_vss && total_emb >= 50 {
+            if !self.hnsw_bulk_mode && self.has_vss && total_emb >= 50 {
                 let indexes = match &self.hnsw_cache {
                     Some(cached) => cached.clone(),
                     None => {
@@ -643,6 +667,45 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             .ok_or_else(|| DbError::Other("not open".into()))?;
         conn.execute_batch("CHECKPOINT")?;
         self.write_count = 0;
+        Ok(())
+    }
+
+    fn drop_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| DbError::Other("not open".into()))?;
+        let indexes = Self::discover_hnsw_indexes(conn)?;
+        for idx in &indexes {
+            let safe_name = idx.index_name.replace('"', "\"\"");
+            conn.execute(&format!("DROP INDEX IF EXISTS \"{safe_name}\""), [])?;
+        }
+        self.hnsw_bulk_mode = true;
+        self.hnsw_cache = None;
+        Ok(())
+    }
+
+    fn ensure_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
+        if !self.has_vss {
+            self.hnsw_bulk_mode = false;
+            return Ok(());
+        }
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| DbError::Other("not open".into()))?;
+        let tables = Self::discover_embedding_tables(conn)?;
+        for (table_name, dims) in &tables {
+            let hnsw_name = format!("hnsw_embedding_{dims}");
+            let safe_tbl = table_name.replace('"', "\"\"");
+            conn.execute_batch(&format!(
+                "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"{safe_tbl}\" USING HNSW (embedding) WITH (metric = 'cosine')"
+            ))?;
+        }
+        if !tables.is_empty() {
+            conn.execute_batch("CHECKPOINT")?;
+        }
+        self.hnsw_bulk_mode = false;
         Ok(())
     }
 }
