@@ -160,9 +160,6 @@ impl DuckDbHnswBackend {
                 ))?;
             }
         }
-        if !indexes.is_empty() {
-            conn.execute_batch("CHECKPOINT")?;
-        }
         Ok(())
     }
 
@@ -390,12 +387,27 @@ impl DuckDbHnswBackend {
     // after the child rows were deleted in the same transaction. Delete paths are
     // handled outside the transaction (before BEGIN) to work around this limitation.
     fn delete_paths(conn: &Connection, paths: &[String]) -> Result<(), DbError> {
-        for path in paths {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        const DELETE_BATCH: usize = 500;
+        for batch in paths.chunks(DELETE_BATCH) {
+            let ph = std::iter::repeat("?")
+                .take(batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let params: Vec<duckdb::types::Value> = batch
+                .iter()
+                .map(|p| duckdb::types::Value::Text(p.clone()))
+                .collect();
             conn.execute(
-                "DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path = ?)",
-                duckdb::params![path],
+                &format!("DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path IN ({ph}))"),
+                duckdb::params_from_iter(params.clone()),
             )?;
-            conn.execute("DELETE FROM files WHERE path = ?", duckdb::params![path])?;
+            conn.execute(
+                &format!("DELETE FROM files WHERE path IN ({ph})"),
+                duckdb::params_from_iter(params),
+            )?;
         }
         Ok(())
     }
