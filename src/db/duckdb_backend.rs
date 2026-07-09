@@ -12,6 +12,7 @@ pub struct DuckDbHnswBackend {
     conn: Option<Connection>,
     write_count: u32,
     has_vss: bool,
+    hnsw_cache: Option<Vec<HnswIndexInfo>>,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +29,7 @@ impl DuckDbHnswBackend {
             conn: None,
             write_count: 0,
             has_vss: false,
+            hnsw_cache: None,
         }
     }
 
@@ -538,14 +540,25 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // Step 1: Count embeddings to decide HNSW lifecycle
         let total_emb = Self::count_total_embeddings(batch);
 
-        // Step 2: Discover + DROP HNSW indexes BEFORE BEGIN (Invariant 14)
+        // Step 2: Discover + DROP HNSW indexes BEFORE BEGIN (Invariant 14).
+        // Cache the index DDL after first successful discovery to skip the
+        // catalog query on every subsequent batch.
         let hnsw_indexes = {
             let conn = self
                 .conn
                 .as_ref()
                 .ok_or_else(|| DbError::Other("not open".into()))?;
             if self.has_vss && total_emb >= 50 {
-                let indexes = Self::discover_hnsw_indexes(conn)?;
+                let indexes = match &self.hnsw_cache {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        let discovered = Self::discover_hnsw_indexes(conn)?;
+                        if !discovered.is_empty() {
+                            self.hnsw_cache = Some(discovered.clone());
+                        }
+                        discovered
+                    }
+                };
                 if !indexes.is_empty() {
                     Self::drop_hnsw_indexes(conn, &indexes)?;
                 }
