@@ -343,22 +343,32 @@ impl DuckDbHnswBackend {
                 DELETE FROM {temp};"
             ))?;
 
-            {
-                let mut stmt = conn.prepare(&format!(
-                    "INSERT INTO {temp} (chunk_id, provider, model, embedding, dims)
-                     VALUES (?, ?, ?, ?, ?)"
-                ))?;
-                for (chunk_id, chunk) in items {
+            // Batch 100 rows per INSERT to cut SQL round-trips ~100×.
+            const EMBED_INSERT_BATCH: usize = 100;
+            for chunk_slice in items.chunks(EMBED_INSERT_BATCH) {
+                let row_ph = std::iter::repeat("(?,?,?,?,?)")
+                    .take(chunk_slice.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "INSERT INTO {temp} (chunk_id, provider, model, embedding, dims) VALUES {row_ph}"
+                );
+                let mut params: Vec<duckdb::types::Value> =
+                    Vec::with_capacity(chunk_slice.len() * 5);
+                for (chunk_id, chunk) in chunk_slice.iter() {
                     let emb = chunk.embedding.as_ref().unwrap();
                     let emb_json = serde_json::to_string(emb).map_err(DbError::Json)?;
-                    stmt.execute(duckdb::params![
-                        chunk_id,
-                        chunk.provider.as_deref().unwrap_or("unknown"),
-                        chunk.model.as_deref().unwrap_or("unknown"),
-                        emb_json,
-                        *dims as i64,
-                    ])?;
+                    params.push(duckdb::types::Value::BigInt(*chunk_id));
+                    params.push(duckdb::types::Value::Text(
+                        chunk.provider.as_deref().unwrap_or("unknown").to_string(),
+                    ));
+                    params.push(duckdb::types::Value::Text(
+                        chunk.model.as_deref().unwrap_or("unknown").to_string(),
+                    ));
+                    params.push(duckdb::types::Value::Text(emb_json));
+                    params.push(duckdb::types::Value::BigInt(*dims as i64));
                 }
+                conn.execute(&sql, duckdb::params_from_iter(params))?;
             }
 
             let rows = conn.execute(

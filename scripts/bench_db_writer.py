@@ -455,7 +455,7 @@ def _python_write_files(conn: Any, files: list[dict]) -> tuple[int, int]:
                    ON CONFLICT (chunk_id, provider, model) DO UPDATE
                    SET embedding = EXCLUDED.embedding, dims = EXCLUDED.dims"""
             ).rowcount
-            if n is not None:
+            if n is not None and n >= 0:
                 total_embs += n
             else:
                 total_embs += len(items)
