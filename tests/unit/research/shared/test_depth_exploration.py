@@ -12,12 +12,12 @@ Tests focus on synchronous helper methods:
 """
 
 import pytest
-
 from chunkhound.core.config.research_config import ResearchConfig
+from tests.fixtures.fake_providers import FakeLLMProvider
+
 from chunkhound.services.research.shared.depth_exploration import (
     DepthExplorationService,
 )
-from tests.fixtures.fake_providers import FakeLLMProvider
 
 # -----------------------------------------------------------------------------
 # Fixtures
@@ -300,16 +300,16 @@ class TestGlobalDedup:
         assert set(chunk_ids) == {"c1", "c2", "c3"}
 
     def test_keeps_higher_score_on_conflict(self, depth_service):
-        """Should keep chunk with higher rerank_score on conflict."""
+        """Should keep chunk with higher similarity on conflict."""
         results = [
-            [{"chunk_id": "c1", "content": "code1", "rerank_score": 0.5}],
-            [{"chunk_id": "c1", "content": "code1", "rerank_score": 0.9}],
+            [{"chunk_id": "c1", "content": "code1", "similarity": 0.5}],
+            [{"chunk_id": "c1", "content": "code1", "similarity": 0.9}],
         ]
 
         deduped = depth_service._global_dedup(results)
 
         assert len(deduped) == 1
-        assert deduped[0]["rerank_score"] == 0.9
+        assert deduped[0]["similarity"] == 0.9
 
     def test_handles_id_field_fallback(self, depth_service):
         """Should fall back to 'id' if 'chunk_id' not present."""
@@ -627,7 +627,7 @@ class TestEdgeCases:
             {"chunk_id": f"c{i}", "rerank_score": 0.5 + i * 0.01} for i in range(50)
         ]
         # Overlap with half of coverage
-        exploration = [{"chunk_id": f"c{i}", "rerank_score": 0.9} for i in range(25)]
+        exploration = [{"chunk_id": f"c{i}", "similarity": 0.9} for i in range(25)]
 
         merged = depth_service._merge_coverage(covered, exploration)
 
@@ -637,7 +637,7 @@ class TestEdgeCases:
         # First 25 should have exploration's higher score (0.9)
         for chunk in merged:
             if int(chunk["chunk_id"][1:]) < 25:
-                assert chunk["rerank_score"] == 0.9
+                assert chunk["similarity"] == 0.9
 
     def test_group_chunks_with_path_variations(self, depth_service):
         """Should handle different path formats."""

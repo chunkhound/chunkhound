@@ -66,7 +66,8 @@ _WINDOWS_PORT_SPAN = 16_384
 _STARTUP_POLL_INTERVAL = 0.1
 
 
-def _read_startup_timeout() -> float:
+def _resolve_startup_timeout() -> float:
+    """Parse and validate CHUNKHOUND_DAEMON_STARTUP_TIMEOUT env var."""
     raw = os.environ.get("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "30.0")
     try:
         timeout = float(raw)
@@ -80,6 +81,9 @@ def _read_startup_timeout() -> float:
             f"number, got {raw!r}"
         )
     return timeout
+
+
+_STARTUP_TIMEOUT = _resolve_startup_timeout()
 
 
 _WINDOWS_REPLACE_RETRIES = 20
@@ -1187,16 +1191,15 @@ class DaemonDiscovery:
             RuntimeError: If the daemon does not become reachable within
                           the configured startup timeout.
         """
-        startup_timeout = _read_startup_timeout()
         initial_address = self.get_ipc_address()
         existing_address = await self._reuse_live_daemon(
             initial_address,
-            startup_timeout,
+            _STARTUP_TIMEOUT,
         )
         if existing_address is not None:
             return existing_address
 
-        deadline = time.monotonic() + startup_timeout
+        deadline = time.monotonic() + _STARTUP_TIMEOUT
         while time.monotonic() < deadline:
             # User-scoped per-root startup barrier: closes the concurrent
             # cross-runtime startup race where two proxies under different
@@ -1356,7 +1359,7 @@ class DaemonDiscovery:
                             self.format_startup_failure(
                                 prefix=(
                                     f"ChunkHound daemon did not start within "
-                                    f"{startup_timeout}s (address: {startup_address}, "
+                                    f"{_STARTUP_TIMEOUT}s (address: {startup_address}, "
                                     f"{process_state})"
                                 ),
                                 log_path=startup.log_path,
@@ -1373,7 +1376,7 @@ class DaemonDiscovery:
             self.format_startup_failure(
                 prefix=(
                     f"ChunkHound daemon did not become reachable within "
-                    f"{startup_timeout}s (address: {initial_address})"
+                    f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
                 )
             )
         )

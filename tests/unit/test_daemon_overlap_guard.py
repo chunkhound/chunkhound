@@ -881,7 +881,7 @@ def test_discovery_startup_timeout_honors_env_override(
 ) -> None:
     """The daemon discovery timeout contract must follow the env override."""
     monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "12.5")
-    assert discovery_module._read_startup_timeout() == 12.5
+    assert discovery_module._resolve_startup_timeout() == 12.5
 
 
 def test_discovery_startup_timeout_default_when_no_env(
@@ -889,7 +889,7 @@ def test_discovery_startup_timeout_default_when_no_env(
 ) -> None:
     """The daemon discovery timeout defaults to 30s when no env override."""
     monkeypatch.delenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", raising=False)
-    assert discovery_module._read_startup_timeout() == 30.0
+    assert discovery_module._resolve_startup_timeout() == 30.0
 
 
 def test_discovery_startup_timeout_rejects_invalid_env(
@@ -898,7 +898,7 @@ def test_discovery_startup_timeout_rejects_invalid_env(
     """The daemon discovery timeout env must fail loudly when malformed."""
     monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "not-a-number")
     with pytest.raises(ValueError, match="must be a number"):
-        discovery_module._read_startup_timeout()
+        discovery_module._resolve_startup_timeout()
 
 
 def test_discovery_startup_timeout_rejects_non_positive_or_non_finite_env(
@@ -908,7 +908,7 @@ def test_discovery_startup_timeout_rejects_non_positive_or_non_finite_env(
     for raw in ("0", "-1", "nan", "inf"):
         monkeypatch.setenv("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", raw)
         with pytest.raises(ValueError, match="finite positive number"):
-            discovery_module._read_startup_timeout()
+            discovery_module._resolve_startup_timeout()
 
 
 @pytest.mark.asyncio

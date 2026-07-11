@@ -24,8 +24,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import duckdb
-from loguru import logger
-
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
@@ -41,9 +39,6 @@ from chunkhound.providers.database.duckdb.embedding_repository import (
 )
 from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
 from chunkhound.providers.database.like_utils import escape_like_pattern
-from chunkhound.providers.database.serial_database_provider import (
-    SerialDatabaseProvider,
-)
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
     _executor_local,
@@ -53,6 +48,11 @@ from chunkhound.utils.windows_constants import (
     IS_WINDOWS,
     WINDOWS_FILE_HANDLE_DELAY,
     _unlink_compacted,
+)
+from loguru import logger
+
+from chunkhound.providers.database.serial_database_provider import (
+    SerialDatabaseProvider,
 )
 
 
@@ -4246,6 +4246,34 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "has_more": False,
                 "total": 0,
             }
+
+    def _executor_get_chunk_similarities(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        """Batch cosine similarity between query embedding and stored embeddings."""
+        if not chunk_ids:
+            return {}
+        dims = len(query_embedding)
+        table_name = f"embeddings_{dims}"
+        if not self._executor_table_exists(conn, state, table_name):
+            return {}
+        placeholders = ", ".join(["?"] * len(chunk_ids))
+        query = f"""
+            SELECT e.chunk_id,
+                   array_cosine_similarity(e.embedding, ?::FLOAT[{dims}]) as similarity
+            FROM {table_name} e
+            WHERE e.chunk_id IN ({placeholders})
+              AND e.provider = ? AND e.model = ?
+        """
+        params = [query_embedding, *chunk_ids, provider, model]
+        rows = conn.execute(query, params).fetchall()
+        return {int(row[0]): float(row[1]) for row in rows}
 
     def find_similar_chunks(
         self,

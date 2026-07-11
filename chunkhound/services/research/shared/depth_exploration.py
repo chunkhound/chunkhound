@@ -32,10 +32,6 @@ from chunkhound.services.research.shared.chunk_context_builder import (
     ChunkContextBuilder,
     get_chunk_text,
 )
-from chunkhound.services.research.shared.chunk_dedup import (
-    deduplicate_chunks,
-    merge_chunk_lists,
-)
 from chunkhound.services.research.shared.elbow_detection import (
     compute_elbow_threshold,
 )
@@ -52,6 +48,15 @@ from chunkhound.services.research.shared.models import (
     ResearchContext,
 )
 from chunkhound.services.research.shared.progress_mixin import ProgressEmitterMixin
+
+from chunkhound.services.research.shared.chunk_dedup import (
+    deduplicate_chunks,
+    get_chunk_id,
+    merge_chunk_lists,
+)
+from chunkhound.services.research.shared.exploration.elbow_filter import (
+    get_unified_score,
+)
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
 
 
@@ -330,10 +335,13 @@ class DepthExplorationService(ProgressEmitterMixin):
         Returns:
             List of top file paths
         """
-        # Calculate average score per file
+        # Calculate average score per file using unified priority:
+        # rerank_score > similarity > score. This keeps file ranking
+        # consistent whether chunks came from Phase 1 (rerank_score),
+        # Phase 1.5 (similarity), or BFS (score).
         file_scores: dict[str, float] = {}
         for file_path, chunks in file_to_chunks.items():
-            scores = [c.get("rerank_score", 0.0) for c in chunks]
+            scores = [get_unified_score(c) for c in chunks]
             file_scores[file_path] = sum(scores) / len(scores) if scores else 0.0
 
         # Sort by score descending and take top-K
@@ -513,16 +521,27 @@ Output JSON with queries array."""
             List of result lists (one per query)
         """
 
-        async def execute_single_query(query: str, source_file: str) -> list[dict]:
+        # Accumulate ALL chunk IDs found by previous iterations (both above and below
+        # threshold) so that later iterations skip them during regex pagination,
+        # triggering the consecutive-dry-pages early exit sooner.
+        # Semantic search is unaffected — the same chunk can still be surfaced by
+        # HNSW in a different query context.
+        global_seen: set[int | str] = set()
+
+        async def execute_single_query(
+            query: str, source_file: str, exclude_ids: set[int | str]
+        ) -> list[dict]:
             """Execute a single exploration query."""
             context = ResearchContext(root_query=root_query)
 
-            # Run unified search with compound reranking (root + exploration query)
+            # Run unified search with cosine similarity scoring (no reranker)
             chunks = await self._unified_search.unified_search(
                 query=query,
                 context=context,
-                rerank_queries=[root_query, query],
+                skip_rerank=True,
                 path_filter=path_filter,
+                emit_event_callback=self._emit_event,
+                exclude_ids=exclude_ids,
             )
 
             # Apply window expansion if enabled
@@ -531,9 +550,17 @@ Output JSON with queries array."""
                     chunks, window_lines=self._config.window_expansion_lines
                 )
 
+            # Register all found chunk IDs (before threshold filtering) so that
+            # later iterations skip them in regex pagination even if they fell
+            # below threshold here.
+            for chunk in chunks:
+                cid = get_chunk_id(chunk)
+                if cid:
+                    global_seen.add(cid)
+
             # Compute adaptive threshold
             if chunks:
-                scores = [c.get("rerank_score", 0.0) for c in chunks]
+                scores = [c.get("similarity", 0.0) for c in chunks]
                 exploration_threshold = compute_elbow_threshold(scores)
             else:
                 exploration_threshold = phase1_threshold
@@ -543,7 +570,7 @@ Output JSON with queries array."""
 
             # Filter chunks by threshold
             filtered = [
-                c for c in chunks if c.get("rerank_score", 0.0) >= effective_threshold
+                c for c in chunks if c.get("similarity", 0.0) >= effective_threshold
             ]
 
             logger.debug(
@@ -552,22 +579,18 @@ Output JSON with queries array."""
             )
             return filtered
 
-        # Flatten queries and execute in parallel
-        tasks = []
+        # Run serially: concurrent unified_search calls all queue on the single DB
+        # executor thread, causing each call's Step 5 timer to balloon to N × per-search
+        # DB time instead of 1×.
+        query_results: list[list[dict]] = []
         for file_path, queries in exploration_queries.items():
             for query in queries:
-                tasks.append(execute_single_query(query, file_path))
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Process results
-        query_results: list[list[dict]] = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning(f"Exploration query execution failed: {result}")
-                query_results.append([])
-            elif isinstance(result, list):
-                query_results.append(result)
+                try:
+                    result = await execute_single_query(query, file_path, global_seen)
+                    query_results.append(result)
+                except Exception as exc:
+                    logger.warning(f"Exploration query execution failed: {exc}")
+                    query_results.append([])
 
         return query_results
 
@@ -575,7 +598,7 @@ Output JSON with queries array."""
         """Global deduplication across all exploration results.
 
         SYNC POINT: This happens ONLY after all queries complete.
-        Conflict resolution: keep chunk with highest rerank_score.
+        Conflict resolution: keep chunk with highest similarity.
 
         Args:
             query_results: List of result lists from exploration queries
@@ -583,7 +606,9 @@ Output JSON with queries array."""
         Returns:
             Deduplicated chunks
         """
-        return deduplicate_chunks(query_results, log_prefix="Exploration dedup")
+        return deduplicate_chunks(
+            query_results, score_field="similarity", log_prefix="Exploration dedup"
+        )
 
     def _merge_coverage(
         self, covered_chunks: list[dict], exploration_chunks: list[dict]
@@ -598,5 +623,8 @@ Output JSON with queries array."""
             Merged and deduplicated chunks
         """
         return merge_chunk_lists(
-            covered_chunks, exploration_chunks, log_prefix="Exploration merge"
+            covered_chunks,
+            exploration_chunks,
+            score_fn=get_unified_score,
+            log_prefix="Exploration merge",
         )

@@ -5,19 +5,19 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from loguru import logger
-
 from chunkhound.core.models import Chunk, File
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.file_discovery_cache import FileDiscoveryCache
 from chunkhound.providers.database.serial_executor import SerialDatabaseExecutor
 from chunkhound.utils.logging_guard import log_if_not_mcp
+from loguru import logger
 
 # Type hinting only
 if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
+
     from chunkhound.services.search_service import SearchService
 
 
@@ -276,13 +276,39 @@ class SerialDatabaseProvider(ABC):
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
+        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Async variant of search_regex."""
+        """Async variant of search_regex.
+
+        Args:
+            pattern: Regular expression pattern to search for
+            page_size: Number of results per page
+            offset: Starting position for pagination
+            path_filter: Optional relative path to limit search scope
+            query: Optional natural-language query for scoring results
+        """
         if not hasattr(self, "_executor_search_regex"):
             return [], {"error": "Regex search not supported by this provider"}
 
         return await self._execute_in_db_thread(
             "search_regex", pattern, page_size, offset, path_filter
+        )
+
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        """Async: cosine similarity between query embedding and stored embeddings."""
+        if not hasattr(self, "_executor_get_chunk_similarities"):
+            return {}
+        return cast(
+            dict[int, float],
+            await self._execute_in_db_thread(
+                "get_chunk_similarities", chunk_ids, query_embedding, provider, model
+            ),
         )
 
     async def get_stats_async(self) -> dict[str, int]:

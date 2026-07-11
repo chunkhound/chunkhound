@@ -3,11 +3,10 @@
 import asyncio
 from typing import Any
 
-from loguru import logger
-
 from chunkhound.core.types.common import ChunkId
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
+from loguru import logger
 
 from .base_service import BaseService
 from .search.context_retriever import ContextRetriever
@@ -226,6 +225,7 @@ class SearchService(BaseService):
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
+        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform regex search on code content (asynchronous).
 
@@ -238,6 +238,10 @@ class SearchService(BaseService):
             offset: Starting position for pagination
             path_filter: Optional relative path to limit search scope
                 (e.g., 'src/', 'tests/')
+            query: Optional natural-language query used to score results via
+                cosine similarity against stored chunk embeddings. When set and
+                an embedding provider is available, each returned chunk receives
+                a ``similarity`` field before result enhancement.
 
         Returns:
             Tuple of (results, pagination_metadata)
@@ -251,6 +255,7 @@ class SearchService(BaseService):
                 page_size=page_size,
                 offset=offset,
                 path_filter=path_filter,
+                query=query,
             )
 
             # Enhance results with additional metadata
@@ -267,6 +272,18 @@ class SearchService(BaseService):
         except Exception as e:
             logger.error(f"Async regex search failed: {e}")
             raise
+
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        """Cosine similarity between query embedding and stored chunk embeddings."""
+        return await self._db.get_chunk_similarities_async(
+            chunk_ids, query_embedding, provider, model
+        )
 
     async def search_hybrid(
         self,

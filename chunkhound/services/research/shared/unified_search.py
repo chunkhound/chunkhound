@@ -15,13 +15,10 @@ import asyncio
 import re
 from typing import Any
 
-from loguru import logger
-
 from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.services.research.shared.chunk_context_builder import get_chunk_text
-from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
 from chunkhound.services.research.shared.models import (
     MAX_SYMBOLS_TO_SEARCH,
     QUERY_EXPANSION_ENABLED,
@@ -30,6 +27,9 @@ from chunkhound.services.research.shared.models import (
     ResearchContext,
 )
 from chunkhound.utils.metadata import extract_parameter_names, extract_parameter_types
+from loguru import logger
+
+from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
 
 
 class UnifiedSearch:
@@ -76,10 +76,12 @@ class UnifiedSearch:
         context: ResearchContext,
         expanded_queries: list[str] | None = None,
         rerank_queries: list[str] | None = None,
+        skip_rerank: bool = False,
         emit_event_callback: Any = None,
         node_id: int | None = None,
         depth: int | None = None,
         path_filter: str | None = None,
+        exclude_ids: set[int | str] | None = None,
     ) -> list[dict[str, Any]]:
         """Perform unified semantic + symbol-based regex search (Steps 2-7).
 
@@ -91,6 +93,8 @@ class UnifiedSearch:
         4. Regex search for top symbols (Step 5)
         5. Unify results at chunk level (Step 6)
         6. Unified rerank semantic + regex against ROOT query (Step 7)
+           When skip_rerank=True, Step 7 is skipped and similarity scores from
+           semantic search are used instead.
 
         Step 7 ensures optimal ranking by reranking the combined semantic + regex
         results together against the ROOT query (not BFS queries), preventing
@@ -104,10 +108,15 @@ class UnifiedSearch:
                 already done)
             rerank_queries: Optional list of queries for compound reranking
                 (default: use root query only)
+            skip_rerank: When True, skip Step 7 reranking and use cosine similarity
+                scores from semantic search instead. Useful for depth exploration
+                queries where reranker cost is not justified.
             emit_event_callback: Optional callback for emitting events
             node_id: Optional BFS node ID for event emission
             depth: Optional BFS depth for event emission
             path_filter: Optional path filter to limit search scope
+            exclude_ids: Optional set of chunk IDs to exclude from regex search.
+                Merged with semantic chunk IDs before symbol search.
 
         Returns:
             List of unified chunks
@@ -304,17 +313,19 @@ class UnifiedSearch:
                     )
 
                     # Collect semantic chunk IDs for exclusion (before regex search)
-                    semantic_chunk_ids = set()
+                    exclude_set: set[int | str] = (
+                        set(exclude_ids) if exclude_ids else set()
+                    )
                     for chunk in semantic_results:
                         chunk_id = get_chunk_id(chunk)
                         if chunk_id:
-                            semantic_chunk_ids.add(chunk_id)
+                            exclude_set.add(chunk_id)
 
                     regex_results = await self.search_by_symbols(
                         top_symbols,
                         target_per_symbol=target_per_symbol,
                         path_filter=path_filter,
-                        exclude_ids=semantic_chunk_ids,
+                        exclude_ids=exclude_set,
                     )
 
                     # Emit regex search results
@@ -352,81 +363,88 @@ class UnifiedSearch:
         # Reranks semantic + regex results TOGETHER for optimal ranking
         # Uses ROOT query (not BFS queries) to prevent diversity collapse
         # Optionally uses compound reranking with multiple queries
-        embedding_provider = self._embedding_manager.get_provider()
-        if (
-            hasattr(embedding_provider, "supports_reranking")
-            and embedding_provider.supports_reranking()
-            and len(combined_pool) > 1
-        ):
-            try:
-                documents = [get_chunk_text(c) for c in combined_pool]
+        # Skipped entirely when skip_rerank=True (cosine similarity used instead)
+        if not skip_rerank:
+            embedding_provider = self._embedding_manager.get_provider()
+            if (
+                hasattr(embedding_provider, "supports_reranking")
+                and embedding_provider.supports_reranking()
+                and len(combined_pool) > 1
+            ):
+                try:
+                    documents = [get_chunk_text(c) for c in combined_pool]
 
-                # Compound reranking: rerank against each query and average scores
-                if rerank_queries and len(rerank_queries) > 1:
-                    logger.debug(
-                        f"Step 7: Compound reranking against {len(rerank_queries)} "
-                        "queries"
-                    )
+                    # Compound reranking: rerank against each query and average scores
+                    if rerank_queries and len(rerank_queries) > 1:
+                        logger.debug(
+                            f"Step 7: Compound reranking against {len(rerank_queries)} "
+                            "queries"
+                        )
 
-                    # Rerank against each query
-                    all_scores: list[dict[int, float]] = []
-                    for rerank_query in rerank_queries:
+                        # Rerank against each query
+                        all_scores: list[dict[int, float]] = []
+                        for rerank_query in rerank_queries:
+                            rerank_results = await embedding_provider.rerank(
+                                query=rerank_query,
+                                documents=documents,
+                            )
+
+                            # Collect scores for this query
+                            query_scores = {}
+                            for rerank_result in rerank_results:
+                                if 0 <= rerank_result.index < len(combined_pool):
+                                    query_scores[rerank_result.index] = (
+                                        rerank_result.score
+                                    )
+                            all_scores.append(query_scores)
+
+                        # Compute compound score as average across all queries
+                        for idx in range(len(combined_pool)):
+                            scores = [
+                                query_scores.get(idx, 0.0)
+                                for query_scores in all_scores
+                            ]
+                            compound_score = (
+                                sum(scores) / len(scores) if scores else 0.0
+                            )
+                            combined_pool[idx]["rerank_score"] = compound_score
+
+                        logger.debug(
+                            "Step 7: Compound rerank complete - averaged scores from "
+                            f"{len(rerank_queries)} queries"
+                        )
+                    else:
+                        # Single query reranking (default behavior)
+                        rerank_query = (
+                            rerank_queries[0] if rerank_queries else context.root_query
+                        )
                         rerank_results = await embedding_provider.rerank(
                             query=rerank_query,
                             documents=documents,
                         )
 
-                        # Collect scores for this query
-                        query_scores = {}
+                        # Apply reranking scores (same pattern as multi_hop_strategy.py)
                         for rerank_result in rerank_results:
                             if 0 <= rerank_result.index < len(combined_pool):
-                                query_scores[rerank_result.index] = rerank_result.score
-                        all_scores.append(query_scores)
+                                combined_pool[rerank_result.index]["rerank_score"] = (
+                                    rerank_result.score
+                                )
 
-                    # Compute compound score as average across all queries
-                    for idx in range(len(combined_pool)):
-                        scores = [
-                            query_scores.get(idx, 0.0) for query_scores in all_scores
-                        ]
-                        compound_score = sum(scores) / len(scores) if scores else 0.0
-                        combined_pool[idx]["rerank_score"] = compound_score
+                        logger.debug(
+                            f"Step 7: Unified rerank complete - {len(combined_pool)} "
+                            "chunks reranked against root query"
+                        )
 
-                    logger.debug(
-                        "Step 7: Compound rerank complete - averaged scores from "
-                        f"{len(rerank_queries)} queries"
-                    )
-                else:
-                    # Single query reranking (default behavior)
-                    rerank_query = (
-                        rerank_queries[0] if rerank_queries else context.root_query
-                    )
-                    rerank_results = await embedding_provider.rerank(
-                        query=rerank_query,
-                        documents=documents,
+                    # Sort by rerank score descending
+                    combined_pool.sort(
+                        key=lambda c: c.get("rerank_score", 0.0),
+                        reverse=True,
                     )
 
-                    # Apply reranking scores (same pattern as multi_hop_strategy.py)
-                    for rerank_result in rerank_results:
-                        if 0 <= rerank_result.index < len(combined_pool):
-                            combined_pool[rerank_result.index]["rerank_score"] = (
-                                rerank_result.score
-                            )
-
-                    logger.debug(
-                        f"Step 7: Unified rerank complete - {len(combined_pool)} "
-                        "chunks reranked against root query"
+                except Exception as e:
+                    logger.warning(
+                        f"Unified rerank failed, keeping semantic-priority order: {e}"
                     )
-
-                # Sort by rerank score descending
-                combined_pool.sort(
-                    key=lambda c: c.get("rerank_score", 0.0),
-                    reverse=True,
-                )
-
-            except Exception as e:
-                logger.warning(
-                    f"Unified rerank failed, keeping semantic-priority order: {e}"
-                )
 
         return combined_pool
 
