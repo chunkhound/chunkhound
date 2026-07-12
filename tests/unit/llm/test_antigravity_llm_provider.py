@@ -114,9 +114,16 @@ def mock_subprocess():
     test. Tests that assert on cleanup nest their own patches, which win inside
     their ``with`` block.
     """
+    def _fake_which(name, *_args, **_kwargs):
+        # Resolve ``taskkill`` to itself so the Windows process-tree cleanup
+        # builds ``["taskkill", ...]``; stub the CLI binary lookup otherwise.
+        if name == "taskkill":
+            return "taskkill"
+        return "/usr/local/bin/agy"
+
     with (
         patch("asyncio.create_subprocess_exec") as mock,
-        patch("shutil.which", return_value="/usr/local/bin/agy"),
+        patch("shutil.which", side_effect=_fake_which),
         patch("os.killpg", create=True),
         patch("subprocess.run"),
     ):
