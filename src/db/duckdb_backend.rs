@@ -482,42 +482,77 @@ impl DuckDbHnswBackend {
         conn: &Connection,
         batch: &DbWriterBatch,
     ) -> Result<(Vec<i64>, u64, Vec<(i64, usize, usize)>), DbError> {
-        // Delete old embeddings and chunks for every file we're about to (re-)write.
-        // embeddings_N tables have no FK cascade from chunks, so we must delete
-        // embeddings before chunks or ghost rows accumulate on re-index (CF-2).
-        // Discover embedding tables once per transaction to avoid repeated catalog queries.
+        // PF-3: Batch pre-deletes — one IN-list per group instead of one statement per file.
+        // embeddings_N tables have no FK cascade from chunks, so embeddings must be deleted
+        // before chunks to avoid ghost rows on re-index (CF-2).
+        // Split files into those with a known file_id (by_id) and path-only (by_path);
+        // each group is cleared with 2 statements rather than 2 × N.
         let emb_tables = Self::discover_embedding_tables(conn)?;
-        for file in &batch.files {
-            if let Some(existing_id) = file.existing_file_id {
-                for (table_name, _dims) in &emb_tables {
-                    conn.execute(
-                        &format!(
-                            "DELETE FROM \"{table_name}\" WHERE chunk_id IN \
-                             (SELECT id FROM chunks WHERE file_id = ?)"
-                        ),
-                        duckdb::params![existing_id],
-                    )?;
-                }
+
+        let by_id: Vec<i64> = batch
+            .files
+            .iter()
+            .filter_map(|f| f.existing_file_id)
+            .collect();
+        let by_path: Vec<&str> = batch
+            .files
+            .iter()
+            .filter(|f| f.existing_file_id.is_none())
+            .map(|f| f.path.as_str())
+            .collect();
+
+        if !by_id.is_empty() {
+            let ph = std::iter::repeat("?")
+                .take(by_id.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let params: Vec<duckdb::types::Value> = by_id
+                .iter()
+                .map(|&id| duckdb::types::Value::BigInt(id))
+                .collect();
+            for (table_name, _dims) in &emb_tables {
                 conn.execute(
-                    "DELETE FROM chunks WHERE file_id = ?",
-                    duckdb::params![existing_id],
-                )?;
-            } else {
-                for (table_name, _dims) in &emb_tables {
-                    conn.execute(
-                        &format!(
-                            "DELETE FROM \"{table_name}\" WHERE chunk_id IN \
-                             (SELECT id FROM chunks WHERE file_id IN \
-                              (SELECT id FROM files WHERE path = ?))"
-                        ),
-                        duckdb::params![file.path],
-                    )?;
-                }
-                conn.execute(
-                    "DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path = ?)",
-                    duckdb::params![file.path],
+                    &format!(
+                        "DELETE FROM \"{table_name}\" WHERE chunk_id IN \
+                         (SELECT id FROM chunks WHERE file_id IN ({ph}))"
+                    ),
+                    duckdb::params_from_iter(params.clone()),
                 )?;
             }
+            conn.execute(
+                &format!("DELETE FROM chunks WHERE file_id IN ({ph})"),
+                duckdb::params_from_iter(params),
+            )?;
+        }
+
+        if !by_path.is_empty() {
+            let ph = std::iter::repeat("?")
+                .take(by_path.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let params: Vec<duckdb::types::Value> = by_path
+                .iter()
+                .map(|p| duckdb::types::Value::Text(p.to_string()))
+                .collect();
+            let chunk_subquery = format!(
+                "SELECT id FROM chunks WHERE file_id IN \
+                 (SELECT id FROM files WHERE path IN ({ph}))"
+            );
+            for (table_name, _dims) in &emb_tables {
+                conn.execute(
+                    &format!(
+                        "DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"
+                    ),
+                    duckdb::params_from_iter(params.clone()),
+                )?;
+            }
+            conn.execute(
+                &format!(
+                    "DELETE FROM chunks WHERE file_id IN \
+                     (SELECT id FROM files WHERE path IN ({ph}))"
+                ),
+                duckdb::params_from_iter(params),
+            )?;
         }
 
         // Upsert files → collect file_ids
