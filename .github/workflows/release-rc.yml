@@ -137,7 +137,14 @@ jobs:
           new_text = re.sub(r'(?m)^version = ".*"', f'version = "{cargo_version}"', text, count=1)
           path.write_text(new_text)
           PYEOF
+          # maturin treats a sibling pyproject.toml as authoritative package metadata
+          # ("mixed" Rust/Python project support), which misnames this wheel as
+          # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
+          # Python package's pyproject.toml for the build; nothing else in this job
+          # needs it (the uv commands above already use --no-project).
+          mv pyproject.toml pyproject.toml.hidden
           uvx --python 3.12 maturin build --release --out dist/
+          mv pyproject.toml.hidden pyproject.toml
 
       - name: Upload native wheel artifact
         uses: actions/upload-artifact@v4
