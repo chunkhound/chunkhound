@@ -96,10 +96,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install uv  # provides Python 3.12 build interpreter — abi3 wheel runs on Python 3.10+
+      - name: Install uv
         uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
+
+      - name: Install Python 3.12  # abi3 wheel runs on Python 3.10+
+        run: uv python install 3.12
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -117,9 +118,8 @@ jobs:
       - name: Build native wheel
         shell: bash
         run: |
-          uv pip install maturin
           VERSION="${GITHUB_REF_NAME#v}"
-          uv run maturin build --release --out dist/ --set-version "$VERSION"
+          uvx --python 3.12 maturin build --release --out dist/ --set-version "$VERSION"
 
       - name: Upload native wheel artifact
         uses: actions/upload-artifact@v4
