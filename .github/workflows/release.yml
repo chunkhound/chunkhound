@@ -128,7 +128,15 @@ jobs:
       - name: Smoke test native wheel
         shell: bash
         run: |
-          uv run --no-project --python 3.12 --with dist/chunkhound_native-*.whl \
+          # Run outside the repo root: the repo's own chunkhound_native/__init__.py
+          # source-tree stub (kept so `maturin develop` re-exports survive editable
+          # reinstalls locally) would otherwise shadow the installed wheel package,
+          # since it expects a compiled extension sitting next to it that only
+          # exists after a local editable build, not in this CI job.
+          WHEEL_DIR="$(pwd)/dist"
+          TMP_DIR="$(mktemp -d)"
+          cd "$TMP_DIR"
+          uv run --no-project --python 3.12 --with "$WHEEL_DIR"/chunkhound_native-*.whl \
             python -c "from chunkhound_native import scan_files; r = scan_files('.', ['py']); assert isinstance(r, list)"
 
       - name: Upload native wheel artifact
