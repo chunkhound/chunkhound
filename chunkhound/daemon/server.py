@@ -21,7 +21,6 @@ from typing import Any
 
 from chunkhound.core.config.config import Config
 from chunkhound.mcp_server.base import MCPServerBase
-from chunkhound.mcp_server.common import handle_tool_call, tool_call_failed
 from chunkhound.version import __version__
 
 from . import ipc
@@ -379,6 +378,8 @@ class ChunkHoundDaemon(MCPServerBase):
         params = msg.get("params", {})
         tool_name: str = params.get("name", "")
         arguments: dict[str, Any] = params.get("arguments", {})
+
+        from chunkhound.mcp_server.common import handle_tool_call, tool_call_failed
 
         text_contents = await handle_tool_call(
             tool_name=tool_name,

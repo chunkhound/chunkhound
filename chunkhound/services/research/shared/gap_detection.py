@@ -248,7 +248,7 @@ class GapDetectionService(ProgressEmitterMixin):
 
         # Step 2.7: Fill gaps in parallel (INDEPENDENT - no shared mutable state)
         t = perf_counter()
-        gap_results = await self._fill_gaps_parallel(
+        gap_results = await self._fill_gaps_serial(
             root_query, selected_gaps, phase1_threshold, path_filter
         )
         gaps_filled = len([r for r in gap_results if r])
@@ -632,6 +632,7 @@ Output JSON with gaps array."""
         """Step 2.5: Unify similar gaps using LLM.
 
         CRITICAL: Includes ROOT query in every unification prompt.
+        LLM calls are parallelized with asyncio.gather — pure LLM I/O, no DB access.
 
         Args:
             root_query: Original research query
@@ -658,33 +659,27 @@ Output JSON with gaps array."""
             "required": ["unified_query"],
         }
 
-        unified_gaps: list[UnifiedGap] = []
+        async def unify_cluster(
+            cluster_id: int, cluster_gaps: list[GapCandidate]
+        ) -> UnifiedGap:
+            vote_count = len(cluster_gaps)
+            avg_confidence = sum(g.confidence for g in cluster_gaps) / vote_count
+            min_shard_idx = min(g.source_shard for g in cluster_gaps)
+            shard_bonus = 1 / (1 + min_shard_idx)
+            score = vote_count * avg_confidence * (1 + 0.3 * shard_bonus)
 
-        for cluster_id, cluster_gaps in cluster_map.items():
             if len(cluster_gaps) == 1:
-                # Single gap, no need to unify
-                gap = cluster_gaps[0]
-                # Apply same scoring formula: vote_count * avg_confidence * (1 + 0.3 * shard_bonus)
-                vote_count = 1
-                avg_confidence = gap.confidence
-                shard_bonus = 1 / (1 + gap.source_shard)
-                score = vote_count * avg_confidence * (1 + 0.3 * shard_bonus)
-                unified_gaps.append(
-                    UnifiedGap(
-                        query=gap.query,
-                        sources=cluster_gaps,
-                        vote_count=vote_count,
-                        avg_confidence=avg_confidence,
-                        score=score,
-                    )
+                return UnifiedGap(
+                    query=cluster_gaps[0].query,
+                    sources=cluster_gaps,
+                    vote_count=vote_count,
+                    avg_confidence=avg_confidence,
+                    score=score,
                 )
-                continue
 
-            # Multiple gaps - unify with LLM
             gap_list = "\n".join(
                 f"- {g.query} (confidence: {g.confidence:.2f})" for g in cluster_gaps
             )
-
             prompt = f"""RESEARCH QUERY: {root_query}
 
 Merge these similar gap queries into ONE refined query
@@ -700,50 +695,39 @@ Output a single unified query that captures the essential information need."""
                     json_schema=schema,
                     max_completion_tokens=512,
                 )
-
                 unified_query = result.get("unified_query", cluster_gaps[0].query)
-                vote_count = len(cluster_gaps)
-                avg_confidence = sum(g.confidence for g in cluster_gaps) / vote_count
-
-                # Score calculation with shard bonus
-                min_shard_idx = min(g.source_shard for g in cluster_gaps)
-                shard_bonus = 1 / (1 + min_shard_idx)
-                score = vote_count * avg_confidence * (1 + 0.3 * shard_bonus)
-
-                unified_gaps.append(
-                    UnifiedGap(
-                        query=unified_query,
-                        sources=cluster_gaps,
-                        vote_count=vote_count,
-                        avg_confidence=avg_confidence,
-                        score=score,
-                    )
-                )
-
                 logger.debug(
                     f"Unified {vote_count} gaps (score: {score:.2f}): "
                     f"{unified_query[:60]}..."
                 )
-
+                return UnifiedGap(
+                    query=unified_query,
+                    sources=cluster_gaps,
+                    vote_count=vote_count,
+                    avg_confidence=avg_confidence,
+                    score=score,
+                )
             except Exception as e:
                 logger.warning(f"Gap unification failed for cluster {cluster_id}: {e}")
-                # Fallback: use first gap with proper scoring formula
-                gap = cluster_gaps[0]
-                vote_count = len(cluster_gaps)
-                avg_confidence = sum(g.confidence for g in cluster_gaps) / vote_count
-                min_shard_idx = min(g.source_shard for g in cluster_gaps)
-                shard_bonus = 1 / (1 + min_shard_idx)
-                score = vote_count * avg_confidence * (1 + 0.3 * shard_bonus)
-                unified_gaps.append(
-                    UnifiedGap(
-                        query=gap.query,
-                        sources=cluster_gaps,
-                        vote_count=vote_count,
-                        avg_confidence=avg_confidence,
-                        score=score,
-                    )
+                return UnifiedGap(
+                    query=cluster_gaps[0].query,
+                    sources=cluster_gaps,
+                    vote_count=vote_count,
+                    avg_confidence=avg_confidence,
+                    score=score,
                 )
 
+        tasks = [
+            unify_cluster(cluster_id, cluster_gaps)
+            for cluster_id, cluster_gaps in cluster_map.items()
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        unified_gaps: list[UnifiedGap] = []
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.warning(f"Gap unification task failed unexpectedly: {r}")
+            else:
+                unified_gaps.append(r)
         return unified_gaps
 
     def _select_gaps_by_elbow(self, unified_gaps: list[UnifiedGap]) -> list[UnifiedGap]:
@@ -868,17 +852,18 @@ Output a single unified query that captures the essential information need."""
         # We want to include the elbow point itself
         return elbow_idx + 1
 
-    async def _fill_gaps_parallel(
+    async def _fill_gaps_serial(
         self,
         root_query: str,
         selected_gaps: list[UnifiedGap],
         phase1_threshold: float,
         path_filter: str | None,
     ) -> list[list[dict]]:
-        """Step 2.7: Fill gaps in parallel using unified search.
+        """Step 2.7: Fill gaps serially using unified search.
 
-        CRITICAL: Gap fills are INDEPENDENT - no shared mutable state.
-        Each gap fill is a complete unified search with its own deduplication.
+        Serial execution avoids DuckDB thread contention: concurrent gap fills
+        all queue on the single DB executor thread, causing each search's Step 5
+        timer to balloon to N × per-search DB time instead of 1×.
 
         Args:
             root_query: Original research query
@@ -889,31 +874,21 @@ Output a single unified query that captures the essential information need."""
         Returns:
             List of gap result lists (one per gap)
         """
-
-        async def fill_single_gap(gap: UnifiedGap) -> list[dict]:
-            """Fill a single gap independently."""
-            return await self._fill_single_gap(
-                root_query, gap, phase1_threshold, path_filter
-            )
-
-        # Run all gap fills in parallel
-        tasks = [fill_single_gap(gap) for gap in selected_gaps]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Process results
         gap_results: list[list[dict]] = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.warning(
-                    f"Gap fill failed for '{selected_gaps[i].query[:60]}...': {result}"
+        for gap in selected_gaps:
+            try:
+                result = await self._fill_single_gap(
+                    root_query, gap, phase1_threshold, path_filter
                 )
-                gap_results.append([])
-            elif isinstance(result, list):
                 gap_results.append(result)
                 logger.debug(
-                    f"Gap fill complete: '{selected_gaps[i].query[:60]}...' → "
-                    f"{len(result)} chunks"
+                    f"Gap fill complete: '{gap.query[:60]}...' → {len(result)} chunks"
                 )
+            except Exception as exc:
+                logger.warning(
+                    f"Gap fill failed for '{gap.query[:60]}...': {exc}"
+                )
+                gap_results.append([])
 
         return gap_results
 
@@ -947,6 +922,7 @@ Output a single unified query that captures the essential information need."""
             context=context,
             rerank_queries=[root_query, gap.query],
             path_filter=path_filter,
+            emit_event_callback=self._emit_event,
         )
 
         # Apply window expansion if enabled

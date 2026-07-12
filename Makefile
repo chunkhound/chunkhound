@@ -5,7 +5,7 @@
 # Optional: override config file via CONFIG, e.g.:
 #   make bench-lang CONFIG=.chunkhound.json
 
-.PHONY: bench-lang bench-cluster dev dev-release lint typecheck test
+.PHONY: bench-lang bench-cluster dev dev-release lint typecheck test rust-check rust-test
 
 bench-lang:
 	uv run python -m chunkhound.tools.eval_search \
@@ -37,3 +37,10 @@ typecheck:
 
 test:
 	uv run pytest tests/ -v
+
+rust-check:
+	cargo fmt --check
+	cargo clippy --all-targets -- -D warnings
+
+rust-test:
+	cargo test

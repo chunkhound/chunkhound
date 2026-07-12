@@ -17,7 +17,7 @@ NODE_SIMILARITY_THRESHOLD = (
     0.2  # Reserved for future similarity-based deduplication (currently uses LLM)
 )
 MAX_FOLLOWUP_QUESTIONS = 3
-MAX_SYMBOLS_TO_SEARCH = 5  # Top N symbols to search via regex (from spec)
+MAX_SYMBOLS_TO_SEARCH = 3  # Top N symbols to search via regex (from spec)
 QUERY_EXPANSION_ENABLED = True  # Enable LLM-powered query expansion for better recall
 NUM_LLM_EXPANDED_QUERIES = 2  # LLM generates 2 queries, we prepend original = 3 total
 

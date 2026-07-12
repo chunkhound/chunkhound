@@ -34,7 +34,7 @@ from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as EmbeddingProviderProtocol,
 )
 from chunkhound.llm_manager import LLMManager
-from chunkhound.mcp_server.tools import tool_requires_db
+
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
 )
@@ -1191,6 +1191,8 @@ class MCPServerBase(ABC):
         """
         if not self.services:
             raise RuntimeError("Services not initialized. Call initialize() first.")
+        from chunkhound.mcp_server.tools import tool_requires_db
+
         if tool_requires_db(tool_name):
             await self._connect_provider()
         return self.services
