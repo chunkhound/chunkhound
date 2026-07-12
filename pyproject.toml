@@ -116,8 +116,7 @@ dependencies = [
 
 [project.optional-dependencies]
 native = [
-    # disabled until chunkhound-native>=0.2.0 is published with exact_names support
-    # restore: "chunkhound-native>=0.2.0"
+    "chunkhound-native>=5.2.0",
 ]
 dev = [
     "pytest>=7.4.0",
