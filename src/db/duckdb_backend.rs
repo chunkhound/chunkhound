@@ -741,7 +741,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // Step 5: RECREATE HNSW AFTER COMMIT (Invariant 14)
         if !hnsw_indexes.is_empty() {
             let conn = self.conn.as_ref().unwrap();
-            let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
+            Self::recreate_hnsw_indexes(conn, &hnsw_indexes)?;
         }
 
         self.write_count += 1;
@@ -784,8 +784,10 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn ensure_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
+        // Reset first so that any error path (including early returns) leaves bulk
+        // mode off — otherwise close() would retry in a partially-indexed state.
+        self.hnsw_bulk_mode = false;
         if !self.has_vss {
-            self.hnsw_bulk_mode = false;
             return Ok(());
         }
         let conn = self
@@ -803,7 +805,6 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         if !tables.is_empty() {
             conn.execute_batch("CHECKPOINT")?;
         }
-        self.hnsw_bulk_mode = false;
         Ok(())
     }
 }

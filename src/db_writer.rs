@@ -12,9 +12,6 @@ struct WriterInner {
     backend: Box<dyn DbBackend>,
 }
 
-// Safety: WriterInner is accessed only under the Mutex, and DuckDbHnswBackend is Send.
-unsafe impl Send for WriterInner {}
-
 #[pyclass]
 pub struct RustDbWriter {
     inner: Mutex<WriterInner>,
@@ -113,14 +110,18 @@ impl RustDbWriter {
         })
     }
 
-    fn open(&self) -> PyResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.backend.open().map_err(PyErr::from)
+    fn open(&self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| {
+            let mut inner = self.inner.lock().unwrap();
+            inner.backend.open().map_err(PyErr::from)
+        })
     }
 
-    fn close(&self) -> PyResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.backend.close().map_err(PyErr::from)
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| {
+            let mut inner = self.inner.lock().unwrap();
+            inner.backend.close().map_err(PyErr::from)
+        })
     }
 
     fn write_batch(&self, py: Python<'_>, batch: &Bound<'_, PyAny>) -> PyResult<PyObject> {
@@ -157,9 +158,11 @@ impl RustDbWriter {
         .map_err(PyErr::from)
     }
 
-    fn drop_all_hnsw_indexes(&self) -> PyResult<()> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.backend.drop_all_hnsw_indexes().map_err(PyErr::from)
+    fn drop_all_hnsw_indexes(&self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| {
+            let mut inner = self.inner.lock().unwrap();
+            inner.backend.drop_all_hnsw_indexes().map_err(PyErr::from)
+        })
     }
 
     fn ensure_all_hnsw_indexes(&self, py: Python<'_>) -> PyResult<()> {

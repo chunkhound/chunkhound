@@ -1,2 +1,6 @@
 from .chunkhound_native import scan_files
-from .chunkhound_native import RustDbWriter
+
+try:
+    from .chunkhound_native import RustDbWriter
+except ImportError:
+    RustDbWriter = None

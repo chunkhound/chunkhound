@@ -38,16 +38,27 @@ class RustWriterBridge:
     def available(self) -> bool:
         return self._writer is not None
 
+    def __del__(self) -> None:
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+            self._writer = None
+
     def write_batch(self, batch: dict) -> dict:
-        assert self._writer is not None
+        if self._writer is None:
+            raise RuntimeError("RustWriterBridge is not available")
         return self._writer.write_batch(batch)
 
     def needs_compaction(self) -> bool:
-        assert self._writer is not None
+        if self._writer is None:
+            raise RuntimeError("RustWriterBridge is not available")
         return self._writer.needs_compaction()
 
     def run_compaction(self) -> None:
-        assert self._writer is not None
+        if self._writer is None:
+            raise RuntimeError("RustWriterBridge is not available")
         self._writer.run_compaction()
 
     def drop_all_hnsw_indexes(self) -> None:
