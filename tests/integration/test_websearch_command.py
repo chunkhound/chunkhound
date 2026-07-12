@@ -332,20 +332,23 @@ def test_build_quickresearch_argv_omits_previous_query_when_none(tmp_path) -> No
     assert "--previous-query" not in cmd
 
 
-def test_build_quickresearch_argv_normalized_query_replaces_positional(tmp_path) -> None:
-    """The positional ``query`` arg on _quickresearch is the normalized form."""
+def test_build_quickresearch_argv_query_param_becomes_positional(tmp_path) -> None:
+    """Whatever is passed as ``query`` becomes the ``_quickresearch`` positional.
+
+    In practice both CLI and MCP pass the RAW user input here — not the
+    LLM-normalized ``search_query`` — to avoid silently degrading deep
+    research with a lossy normalization.
+    """
     from chunkhound.core.config.config import Config
 
     args = _make_args(query="raw user input")
     cmd = ws_mod._build_quickresearch_argv(
         args, tmp_path, Config(),
-        query="normalized form",
+        query="whatever the caller passes",
         previous_query=None,
     )
-    # The query positional is the third element after [python, -m, module,
-    # "_quickresearch"] — validate the normalized form landed there.
     idx = cmd.index("_quickresearch")
-    assert cmd[idx + 1] == "normalized form"
+    assert cmd[idx + 1] == "whatever the caller passes"
 
 
 @pytest.mark.asyncio

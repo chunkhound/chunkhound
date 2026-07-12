@@ -55,10 +55,52 @@ def _preserves_quotes(variant: str, user_quotes: list[str]) -> bool:
     return all(any(uq in vq for vq in variant_quotes) for uq in user_quotes)
 
 
+# JSON schema example values in the "Return JSON of the form:" line, not
+# structural delimiters — excluded from the strip list.
+_PLACEHOLDER_TAGS = frozenset({"<query1>", "<query2>", "<query3>"})
+
+# Every `<name>` literal in the templates, stripped from user input so a
+# crafted query can't terminate a delimiter and impersonate a new section.
+# Regex requires the full `<name>` shape so `std::vector<int>` survives.
+_PROMPT_TAG_LITERALS: tuple[str, ...] = tuple(
+    sorted(
+        set(
+            re.findall(
+                r"</?[A-Za-z_][A-Za-z0-9_]*>",
+                prompts.WEBSEARCH_EXPANSION_USER
+                + prompts.WEBSEARCH_EXPANSION_INSTRUCTIONS_BASELINE
+                + prompts.WEBSEARCH_EXPANSION_INSTRUCTIONS_FOLLOWUP
+                + prompts.WEBSEARCH_EXPANSION_FOLLOWUP_EXAMPLES,
+            )
+        )
+        - _PLACEHOLDER_TAGS,
+        key=len,
+        reverse=True,
+    )
+)
+
+
+def _strip_prompt_tags(s: str) -> str:
+    # Fixpoint loop: `str.replace` is single-pass and does not rescan its
+    # output, so a composed input like `<qu<query>ery>` would otherwise
+    # collapse into a fresh `<query>` that survives the sanitizer.
+    while True:
+        new = s
+        for literal in _PROMPT_TAG_LITERALS:
+            new = new.replace(literal, "")
+        if new == s:
+            return s
+        s = new
+
+
 def _build_context_lines(query: str, previous_query: str | None) -> str:
     # Tag delimiters (not quotes) so inputs containing double quotes don't
     # produce malformed `""..."" ` sequences the LLM has to disambiguate.
+    # Strip tag-name literals from the body so user text can't terminate
+    # the delimiter and inject fake structure.
+    query = _strip_prompt_tags(query)
     if previous_query:
+        previous_query = _strip_prompt_tags(previous_query)
         return (
             f"<query>{query}</query>\n"
             f"<previous_query>{previous_query}</previous_query>"
@@ -104,6 +146,13 @@ async def expand_web_queries(
       coerced to ``None`` — no chaining, baseline prompt path.
     - Fallback to ``WebExpansionResult(queries=[query], search_query=query)``
       when ``llm_manager`` is ``None`` or the LLM call raises.
+    - Structural hardening only, not full injection defense: a fixed list of
+      the prompt template's own tag literals (e.g. ``</query>``,
+      ``</CURRENT_CONTEXT>``) is silently stripped from ``query`` and
+      ``previous_query`` before rendering, so a crafted input can't terminate
+      a delimiter and pose as a new section. Any other adversarial content in
+      the body still reaches the LLM as-is — callers must not treat the
+      returned queries as trusted.
     """
     # Defensive re-coercion: surface entry points also coerce, but direct
     # in-process callers (tests, notebooks) bypass the boundary.

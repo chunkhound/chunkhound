@@ -114,10 +114,8 @@ async def quickresearch_command(args: argparse.Namespace, config: Config) -> Non
             f"Researching {args.path}"
             + (f" (filter: {args.path_filter})" if args.path_filter else "")
         )
-        # Defensive re-coercion at the subprocess boundary: `argparse` treats
-        # an absent flag as None (fine), but a hand-crafted `--previous-query
-        # ''` argv would yield an empty string that should still mean "no
-        # chain".
+        # argparse gives None for an absent flag but "" for `--previous-query ''`
+        # from a hand-crafted subprocess argv — coerce both to None ("no chain").
         previous_query = args.previous_query or None
         await run_research(
             services,
