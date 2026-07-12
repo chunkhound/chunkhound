@@ -97,10 +97,25 @@ jobs:
       - name: Build native wheel
         shell: bash
         run: |
-          # maturin build has no --set-version flag; it reads the wheel version
-          # from Cargo.toml's [package] version, so patch that field from the tag.
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+          # maturin build has no --set-version flag; it reads the wheel version from
+          # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
+          # before any pre-release suffix) while the git tag uses PEP 440 (no
+          # hyphen, e.g. 5.2.0a3) -- convert before patching. maturin parses the
+          # Cargo version via pep440_rs, which normalizes the hyphenated form to
+          # the same PEP 440 version, so the wheel still ends up as 5.2.0a3.
+          export TAG_VERSION="${GITHUB_REF_NAME#v}"
+          uv run --no-project --python 3.12 python - <<'PYEOF'
+          import os, re, pathlib
+
+          tag_version = os.environ["TAG_VERSION"]
+          m = re.match(r"^(\d+\.\d+\.\d+)([a-zA-Z].*)?$", tag_version)
+          cargo_version = f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
+
+          path = pathlib.Path("Cargo.toml")
+          text = path.read_text()
+          new_text = re.sub(r'(?m)^version = ".*"', f'version = "{cargo_version}"', text, count=1)
+          path.write_text(new_text)
+          PYEOF
           uvx --python 3.12 maturin build --release --out dist/
 
       - name: Smoke test native wheel
