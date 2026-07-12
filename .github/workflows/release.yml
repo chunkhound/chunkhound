@@ -97,8 +97,11 @@ jobs:
       - name: Build native wheel
         shell: bash
         run: |
+          # maturin build has no --set-version flag; it reads the wheel version
+          # from Cargo.toml's [package] version, so patch that field from the tag.
           VERSION="${GITHUB_REF_NAME#v}"
-          uvx --python 3.12 maturin build --release --out dist/ --set-version "$VERSION"
+          sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+          uvx --python 3.12 maturin build --release --out dist/
 
       - name: Smoke test native wheel
         shell: bash
