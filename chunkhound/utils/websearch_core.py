@@ -34,9 +34,18 @@ if TYPE_CHECKING:
 
 from chunkhound.core.config.config import Config
 
-_MAX_FETCH_CONCURRENCY = 5
+MAX_FETCH_CONCURRENCY = 5
 
 WEBSEARCH_LIMIT_MAX = 100
+
+__all__ = [
+    "WEBSEARCH_LIMIT_MAX",
+    "clamp_limit",
+    "websearch_timeout",
+    "fetch_and_save",
+    "search_multi",
+    "build_quickresearch_argv_core",
+]
 
 # Probe these paths before zendriver's auto-discovery. zendriver picks the
 # shortest-named binary from [google-chrome, chromium, chromium-browser,
@@ -617,7 +626,7 @@ async def fetch_and_save(
     mapping: dict[str, str] | None = None,
 ) -> None:
     """Fetch each URL concurrently (bounded) and save content to tmpdir."""
-    semaphore = asyncio.Semaphore(_MAX_FETCH_CONCURRENCY)
+    semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
 
     async def _run(browser: zd.Browser | None) -> None:
         tasks = [

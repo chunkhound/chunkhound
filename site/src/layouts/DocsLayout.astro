@@ -5,13 +5,32 @@ import Nav from '../components/Nav.astro';
 import DocsSidebar from '../components/DocsSidebar.astro';
 import '../styles/docs.css';
 
-type MarkdownProps = MarkdownLayoutProps<{ title?: string; description?: string }>;
-type DirectProps = { title?: string; description?: string };
+type TocItem = {
+  depth: 2 | 3;
+  slug: string;
+  text: string;
+};
+
+type MarkdownProps = MarkdownLayoutProps<{ title?: string; description?: string }> & {
+  headings?: Array<{ depth: number; slug: string; text: string }>;
+};
+type DirectProps = { title?: string; description?: string; toc?: TocItem[] };
 type Props = MarkdownProps | DirectProps;
 
-const title = 'frontmatter' in Astro.props ? Astro.props.frontmatter.title : Astro.props.title;
-const description = 'frontmatter' in Astro.props ? Astro.props.frontmatter.description : Astro.props.description;
+const normalizeToc = (
+  items: Array<{ depth: number; slug: string; text: string }> | undefined,
+): TocItem[] =>
+  (items ?? []).flatMap((item) =>
+    (item.depth === 2 || item.depth === 3) && item.slug && item.text
+      ? [{ depth: item.depth, slug: item.slug, text: item.text }]
+      : [],
+  );
+
+const props = Astro.props as Props;
+const title = 'frontmatter' in props ? props.frontmatter.title : props.title;
+const description = 'frontmatter' in props ? props.frontmatter.description : props.description;
 const pageTitle = title ? `${title} — ChunkHound Docs` : 'ChunkHound Docs';
+const toc = 'toc' in props && props.toc?.length ? props.toc : normalizeToc('headings' in props ? props.headings : undefined);
 ---
 
 <Base title={pageTitle} description={description}>
@@ -34,7 +53,11 @@ const pageTitle = title ? `${title} — ChunkHound Docs` : 'ChunkHound Docs';
     </main>
     <aside class="docs-toc" aria-label="On this page" data-docs-mobile-inert>
       <div class="toc-title"><ph-list-bullets size="16" weight="duotone" aria-hidden="true"></ph-list-bullets> On this page</div>
-      <nav class="toc-list" data-toc></nav>
+      <nav class="toc-list" data-toc>
+        {toc.map((item) => (
+          <a class="toc-link" href={`#${item.slug}`} data-depth={item.depth}>{item.text}</a>
+        ))}
+      </nav>
     </aside>
   </div>
 

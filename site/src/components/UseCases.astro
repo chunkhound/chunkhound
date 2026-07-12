@@ -1,0 +1,162 @@
+---
+const useCases = [
+  {
+    title: "Research before editing",
+    description:
+      "Give agents cited architecture context, relevant files, recent changes, and external constraints before they generate code.",
+    prompt: 'Ask: "How does auth work?" then "What changed in the last 20 commits?"',
+    icon: "ph-robot",
+  },
+  {
+    title: "Understand large PRs and releases",
+    description:
+      "Turn branch diffs, commit ranges, tags, and specific commits into cited reviewer briefs, release summaries, and changelog drafts.",
+    prompt: 'Ask: "What changed on main..HEAD for reviewers?"',
+    icon: "ph-clock-counter-clockwise",
+  },
+  {
+    title: "Trace symptoms to code paths",
+    description:
+      "Turn stack traces, webhook failures, and customer reports into cited explanations grounded in code, history, and external constraints.",
+    prompt: 'Ask: "Why would webhook retries fail?"',
+    icon: "ph-lifebuoy",
+  },
+  {
+    title: "Reconcile code with external docs",
+    description:
+      "Pinpoint cited docs, APIs, issues, and articles, then connect external evidence to local implementation context.",
+    prompt: 'Ask: "Do our OAuth refresh tokens match current guidance?"',
+    icon: "ph-globe-hemisphere-west",
+  },
+];
+---
+
+<section id="use-cases" class="use-cases">
+  <div class="container">
+    <p class="eyebrow">USE CASES</p>
+    <h2 class="heading">Deep understanding, applied to real work</h2>
+    <p class="body">
+      The same cited context supports the jobs where missing context hurts most: editing code, understanding changes, debugging incidents, and reconciling implementation with external docs.
+    </p>
+
+    <div class="grid">
+      {useCases.map((item) => {
+        const Icon = item.icon;
+        return (
+          <article class="card">
+            <Icon class="card-icon" size="28" weight="duotone" aria-hidden="true" />
+            <h3 class="card-title">{item.title}</h3>
+            <p class="card-desc">{item.description}</p>
+            <p class="prompt">Try: {item.prompt}</p>
+          </article>
+        );
+      })}
+    </div>
+  </div>
+</section>
+
+<script>
+  import "@phosphor-icons/webcomponents/PhRobot";
+  import "@phosphor-icons/webcomponents/PhClockCounterClockwise";
+  import "@phosphor-icons/webcomponents/PhLifebuoy";
+  import "@phosphor-icons/webcomponents/PhGlobeHemisphereWest";
+</script>
+
+<style>
+  .use-cases {
+    padding: var(--space-10) 0;
+  }
+
+  .container {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 0 var(--space-6);
+    text-align: center;
+  }
+
+  .eyebrow {
+    text-transform: uppercase;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    color: var(--text-tertiary);
+    margin-bottom: var(--space-3);
+  }
+
+  .heading {
+    font-size: var(--text-2xl);
+    line-height: var(--lh-2xl);
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--space-4);
+  }
+
+  .body {
+    font-size: var(--text-lg);
+    line-height: var(--lh-lg);
+    font-weight: 500;
+    color: var(--text-secondary);
+    max-width: 720px;
+    margin: 0 auto var(--space-7);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-5);
+  }
+
+  .card {
+    background: var(--bg-surface);
+    border: var(--border-w-default) solid var(--border-color);
+    border-radius: var(--radius-xl);
+    padding: var(--space-5);
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .card-icon {
+    display: block;
+    color: var(--primary);
+    margin-bottom: var(--space-3);
+  }
+
+  .card-title {
+    font-size: var(--text-xl);
+    line-height: var(--lh-xl);
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--space-3);
+  }
+
+  .card-desc {
+    font-size: var(--text-base);
+    line-height: var(--lh-base);
+    color: var(--text-secondary);
+    margin-bottom: var(--space-4);
+  }
+
+  .prompt {
+    font-family: "JetBrains Mono", monospace;
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+    color: var(--on-primary-bg);
+    background: var(--primary-bg);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+    height: 104px;
+    overflow: hidden;
+  }
+
+  @media (max-width: 900px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+
+    .prompt {
+      height: auto;
+    }
+  }
+</style>

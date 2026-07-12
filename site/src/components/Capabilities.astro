@@ -5,44 +5,56 @@ const capabilities = [
   {
     icon: "ph-graph",
     title: "Multi-Hop Semantic Search",
-    description: "Discovers code through semantic bridges. Three hops find architectural relationships that keyword search misses entirely.",
+    description: "Follows semantic bridges across files and subsystems. Three hops surface architectural relationships that plain text matching misses.",
     tag: "3-hop traversal",
   },
   {
     icon: "ph-detective",
     title: "Gap Detection & Filling",
-    description: "Clusters results, identifies missing concepts via LLM analysis, uses elbow detection to filter noise. Finds what you didn't know to ask for.",
+    description: "Finds missing parts of the answer by clustering evidence, spotting uncovered concepts, and filtering noise before synthesis.",
     tag: "Elbow detection",
   },
   {
     icon: "ph-tree-structure",
     title: "cAST Chunking",
-    description: "AST-aware code splitting from Carnegie Mellon research. +4.3 recall on RepoEval, +2.67 pass@1 on SWE-bench vs. naive chunking.",
+    description: "Code-aware chunking from Carnegie Mellon research that improves retrieval quality before search and research even begin.",
     tag: "arXiv:2506.15655",
     tagUrl: "https://arxiv.org/abs/2506.15655",
   },
   {
     icon: "ph-compass",
     title: "Depth Exploration",
-    description: "Explores different angles of files already in results. A file with auth logic and session management gets explored for both.",
+    description: "Explores promising files from multiple angles, so one subsystem can be understood by behavior, responsibilities, and patterns.",
     tag: "Aspect-based queries",
   },
   {
     icon: "ph-file-magnifying-glass",
     title: "Code Research",
-    description: "One call produces a cited markdown architecture report. Query expansion, gap detection, evidence ledger, map-reduce synthesis.",
+    description: "One call produces a cited markdown explanation of how the system works, grounded in the files and components behind the answer.",
     tag: "Cited reports",
   },
   {
     icon: "ph-intersect-three",
     title: "Unified Semantic + Regex",
-    description: "Extracts symbols from semantic results, runs parallel regex searches, reranks everything against the root query. Two paradigms, unified.",
+    description: "Combines conceptual discovery with exact symbol and regex tracing, then reranks everything against the original question.",
     tag: "Hybrid search",
+  },
+  {
+    icon: "ph-clock-counter-clockwise",
+    title: "Git History Research",
+    description: "Asks by last N commits, commit hash, tag, branch, or range to explain large PRs, release ranges, and why behavior changed.",
+    tag: "--last-n · --commit-range · --commit-hash",
+  },
+  {
+    icon: "ph-globe-hemisphere-west",
+    title: "Pinpoint Web Research",
+    description: "Finds the cited external docs, APIs, issues, and articles your implementation depends on, then brings them into agent context.",
+    tag: "Cited URL research",
   },
   {
     icon: "ph-book-open-text",
     title: "Auto-Documentation",
-    description: "Generates a searchable documentation site from your codebase. Five comprehensiveness levels from minimal to exhaustive.",
+    description: "Turns research-backed understanding into a searchable documentation site generated directly from the codebase.",
     tag: "5 levels",
   },
 ];
@@ -51,7 +63,7 @@ const capabilities = [
 <section id="capabilities" class="capabilities">
   <div class="container">
     <p class="eyebrow">CAPABILITIES</p>
-    <h2 class="heading">Seven capabilities, one semantic index</h2>
+    <h2 class="heading">Capabilities behind deep codebase understanding</h2>
 
     <div class="grid">
       {capabilities.map((cap) => {
@@ -76,9 +88,11 @@ const capabilities = [
 
 <script>
   import "@phosphor-icons/webcomponents/PhBookOpenText";
+  import "@phosphor-icons/webcomponents/PhClockCounterClockwise";
   import "@phosphor-icons/webcomponents/PhCompass";
   import "@phosphor-icons/webcomponents/PhDetective";
   import "@phosphor-icons/webcomponents/PhFileMagnifyingGlass";
+  import "@phosphor-icons/webcomponents/PhGlobeHemisphereWest";
   import "@phosphor-icons/webcomponents/PhGraph";
   import "@phosphor-icons/webcomponents/PhIntersectThree";
   import "@phosphor-icons/webcomponents/PhTreeStructure";

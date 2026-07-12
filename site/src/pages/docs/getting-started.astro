@@ -16,6 +16,14 @@ const psCode = `# Skip if you already have uv\npowershell -ExecutionPolicy ByPas
 <DocsLayout
     title="Getting Started"
     description="Install ChunkHound, pick your stack, index your code, and verify search end to end."
+    toc={[
+        { depth: 2, slug: "install", text: "Install" },
+        { depth: 2, slug: "index-and-verify", text: "Index and verify" },
+        { depth: 2, slug: "use-it-from-your-agent", text: "Use it from your agent" },
+        { depth: 3, slug: "example-prompts", text: "Example prompts" },
+        { depth: 3, slug: "mcp", text: "MCP integration" },
+        { depth: 2, slug: "where-to-next", text: "Where to next" },
+    ]}
 >
     <h1>Get ChunkHound running<span class="title-dot" aria-hidden="true"
         ></span></h1>
@@ -24,7 +32,7 @@ const psCode = `# Skip if you already have uv\npowershell -ExecutionPolicy ByPas
         minutes.
     </p>
 
-    <h2>Install</h2>
+    <h2 id="install">Install</h2>
     <PlatformCodeBlock dataCopy={posixCode}>
         <div data-platform-code="posix" data-platform-copy={posixCode}>
             <Code lang="bash" themes={SHIKI_THEMES} defaultColor={false} code={posixCode} />
@@ -56,7 +64,7 @@ const psCode = `# Skip if you already have uv\npowershell -ExecutionPolicy ByPas
     </p>
     <Configurator heading="Pick your stack" compact={false} />
 
-    <h2>Index and verify</h2>
+    <h2 id="index-and-verify">Index and verify</h2>
     <p>
         Run these four commands in order. Each one verifies a different layer of
         the stack: database, regex search, embeddings, then LLM.
@@ -109,7 +117,7 @@ src/main.py:1: import os</code></pre>
         </p>
     </DocsCallout>
 
-    <h2>Use it from your agent</h2>
+    <h2 id="use-it-from-your-agent">Use it from your agent</h2>
     <p>
         Your agent already has ChunkHound &mdash; the editor command from
         <strong>Pick your stack</strong> registered it as an MCP tool. The
@@ -122,16 +130,29 @@ src/main.py:1: import os</code></pre>
         replaces 5&ndash;10 manual searches.
     </p>
 
-    <h3>Example prompts</h3>
+    <h3 id="example-prompts">Example prompts</h3>
     <p>The pattern is one line. Paste it into your editor chat with a topic of your own:</p>
     <DocCode lang="text" code="Use chunkhound research to ..." />
-    <p>A few directions to start with:</p>
+
+    <p class="prompt-group-title">Agent grounding</p>
     <ul class="prompt-ideas">
         <li>explain how authentication works end to end, with file:line citations</li>
         <li>map every caller of the email subsystem and the helpers they share</li>
-        <li>trace the login flow from form submit to Set-Cookie</li>
-        <li>find every file-upload handler and compare their size limits, MIME validation, and storage targets</li>
+        <li>trace the login flow from form submit to Set-Cookie before editing it</li>
+    </ul>
+
+    <p class="prompt-group-title">Support and RCA</p>
+    <ul class="prompt-ideas">
         <li>diagnose duplicate webhook deliveries by tracing the handler outward through retries, queues, and idempotency keys</li>
+        <li>find the most likely code path for this stack trace and list a safe workaround</li>
+        <li>compare every file-upload handler's size limits, MIME validation, and storage targets</li>
+    </ul>
+
+    <p class="prompt-group-title">Product behavior</p>
+    <ul class="prompt-ideas">
+        <li>explain what happens when a user changes billing plans, including edge cases</li>
+        <li>summarize the onboarding flow for a product brief with citations to the code</li>
+        <li>generate docs for the permission model from the current implementation</li>
     </ul>
     <p>
         Need just a file or symbol? Ask the agent to use <code>chunkhound search</code>
@@ -147,7 +168,7 @@ src/main.py:1: import os</code></pre>
         <strong>Pick your stack</strong>.
     </p>
 
-    <h2>Where to next</h2>
+    <h2 id="where-to-next">Where to next</h2>
     <div class="next-grid">
         <a href="/docs/configuration/" class="next-card">
             <h4>Configuration</h4>
@@ -206,6 +227,13 @@ src/main.py:1: import os</code></pre>
 
     :global(.docs-callout-success) :global(pre code) {
         font-size: var(--text-sm);
+        color: var(--text-primary);
+    }
+
+    .prompt-group-title {
+        margin-top: var(--space-5);
+        margin-bottom: var(--space-2);
+        font-weight: 700;
         color: var(--text-primary);
     }
 
