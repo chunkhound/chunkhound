@@ -37,7 +37,9 @@ except ImportError:
         # provider passes; a MagicMock would expose auto-generated child mocks
         # instead of the actual values.
         def __init__(self, *, enabled_tools=None, enable_subagents=False, **kwargs):
-            self.enabled_tools = list(enabled_tools) if enabled_tools is not None else []
+            self.enabled_tools = (
+                list(enabled_tools) if enabled_tools is not None else []
+            )
             self.enable_subagents = enable_subagents
             for key, value in kwargs.items():
                 setattr(self, key, value)
@@ -65,7 +67,10 @@ import pytest
 
 from chunkhound.interfaces.llm_provider import LLMResponse
 from chunkhound.providers.llm.antigravity_cli_provider import AntigravityCLIProvider
-from chunkhound.providers.llm.antigravity_llm_provider import SDK_AVAILABLE, AntigravityLLMProvider
+from chunkhound.providers.llm.antigravity_llm_provider import (
+    SDK_AVAILABLE,
+    AntigravityLLMProvider,
+)
 
 # Guard against pytest collection order: if an earlier-collected test imported
 # `chunkhound.llm_manager` (which imports this provider at module load) before this
@@ -84,7 +89,9 @@ if not SDK_AVAILABLE:
 @pytest.fixture
 def mock_antigravity_agent():
     """Mock the Agent class inside the provider module."""
-    with patch("chunkhound.providers.llm.antigravity_llm_provider.Agent", create=True) as mock:
+    with patch(
+        "chunkhound.providers.llm.antigravity_llm_provider.Agent", create=True
+    ) as mock:
         yield mock
 
 
@@ -107,9 +114,12 @@ def mock_subprocess():
     test. Tests that assert on cleanup nest their own patches, which win inside
     their ``with`` block.
     """
-    with patch("asyncio.create_subprocess_exec") as mock, patch(
-        "shutil.which", return_value="/usr/local/bin/agy"
-    ), patch("os.killpg", create=True), patch("subprocess.run"):
+    with (
+        patch("asyncio.create_subprocess_exec") as mock,
+        patch("shutil.which", return_value="/usr/local/bin/agy"),
+        patch("os.killpg", create=True),
+        patch("subprocess.run"),
+    ):
         yield mock
 
 
@@ -163,7 +173,9 @@ async def test_sdk_missing_api_key_raises(mock_antigravity_agent):
 @pytest.mark.asyncio
 async def test_sdk_complete_success(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -192,7 +204,9 @@ async def test_sdk_complete_success(mock_antigravity_agent):
 @pytest.mark.asyncio
 async def test_sdk_complete_error_propagation(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -206,7 +220,9 @@ async def test_sdk_complete_error_propagation(mock_antigravity_agent):
 @pytest.mark.asyncio
 async def test_sdk_structured_success(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -239,7 +255,9 @@ async def test_sdk_structured_success(mock_antigravity_agent):
 @pytest.mark.asyncio
 async def test_sdk_complete_token_estimation_includes_thoughts(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -272,7 +290,9 @@ async def test_sdk_complete_reports_component_tokens_when_total_missing(
     total_token_count, the provider must sum the components instead of
     discarding them for a character-length estimate."""
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -328,8 +348,10 @@ async def test_cli_complete_success(mock_subprocess):
     mock_subprocess.assert_called_once()
     cmd_args = mock_subprocess.call_args.args
     assert cmd_args[0].endswith("agy") or cmd_args[0].endswith("antigravity")
-    assert "--print" in cmd_args
     assert "--sandbox" in cmd_args
+    # --print must NOT be used: it would leak the prompt onto argv and make agy
+    # consume the following flag as the prompt (agy reads the prompt from stdin).
+    assert "--print" not in cmd_args
     assert "--model" in cmd_args
     assert cmd_args[cmd_args.index("--model") + 1] == "gemini-3.5-flash"
 
@@ -351,6 +373,102 @@ async def test_cli_complete_success(mock_subprocess):
 
 
 @pytest.mark.asyncio
+async def test_cli_prompt_sent_via_stdin_not_argv(mock_subprocess):
+    """The prompt (and merged system instructions) must be delivered over stdin,
+    never as a command-line argument — otherwise workspace source snippets, file
+    paths, and secrets leak into process listings (`ps`). agy reads the piped,
+    non-TTY stdin as the prompt when no prompt flag is passed."""
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+
+    mock_process = AsyncMock()
+    mock_process.pid = 12345
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"ok", b"")
+    mock_subprocess.return_value = mock_process
+
+    prompt = "SENSITIVE-PROMPT-XYZ"
+    system = "SYS-INSTR-ABC"
+    with patch("shutil.which", return_value="/usr/local/bin/agy"):
+        await provider.complete(prompt, system=system)
+
+    # The prompt must not appear anywhere in argv.
+    cmd_args = mock_subprocess.call_args.args
+    assert not any(prompt in str(arg) for arg in cmd_args)
+    assert not any(system in str(arg) for arg in cmd_args)
+
+    # The merged prompt must be piped via stdin instead.
+    stdin_input = mock_process.communicate.call_args.kwargs.get("input")
+    assert stdin_input is not None
+    decoded = stdin_input.decode("utf-8")
+    assert prompt in decoded
+    assert system in decoded
+
+
+@pytest.mark.asyncio
+async def test_cli_temp_dir_removed_on_cancellation(mock_subprocess):
+    """If the task is cancelled while the process tree is being torn down, the
+    per-call temp working directory must still be removed (no leak)."""
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+
+    mock_process = AsyncMock()
+    mock_process.pid = 12345
+    mock_process.returncode = None  # forces the kill branch in the finally block
+    # Simulate the task being cancelled while the subprocess call is pending.
+    mock_process.communicate.side_effect = asyncio.CancelledError()
+    mock_subprocess.return_value = mock_process
+
+    with (
+        patch("shutil.which", return_value="/usr/local/bin/agy"),
+        # Reproduce the reported bug shape: cancellation re-raised from the
+        # shielded process-tree teardown must not skip temp-dir removal.
+        patch.object(
+            provider,
+            "_kill_process_tree",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        ),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await provider._run_cli_command("prompt")
+
+    cwd_passed = mock_subprocess.call_args.kwargs.get("cwd")
+    assert cwd_passed is not None
+    assert "chunkhound-antigravity-" in os.path.basename(cwd_passed)
+    assert not os.path.exists(cwd_passed), "temp dir leaked after cancellation"
+
+
+@pytest.mark.asyncio
+async def test_cli_debug_log_redacts_prompt(mock_subprocess):
+    """The CLI debug log must never contain prompt text (which can carry source
+    snippets, paths, or secrets) — only the binary and flags, with the prompt
+    summarized by length."""
+    cli = AntigravityCLIProvider(model="gemini-3.5-flash")
+
+    mock_process = AsyncMock()
+    mock_process.pid = 12345
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"ok", b"")
+    mock_subprocess.return_value = mock_process
+
+    secret = "super-secret-token-42"
+    with (
+        patch(
+            "chunkhound.providers.llm.antigravity_cli_provider.logger.debug"
+        ) as mock_debug,
+        patch("shutil.which", return_value="/usr/local/bin/agy"),
+    ):
+        await cli.complete(secret)
+
+    logged = " ".join(
+        str(call.args[0]) for call in mock_debug.call_args_list if call.args
+    )
+    assert secret not in logged, "prompt content leaked into the CLI debug log"
+    assert "--sandbox" in logged
+    # Prompt travels via stdin, so it is neither on argv nor in the log; the log
+    # only notes its length.
+    assert "stdin" in logged
+
+
+@pytest.mark.asyncio
 async def test_cli_complete_failure(mock_subprocess):
     provider = AntigravityCLIProvider(model="gemini-3.5-flash")
 
@@ -363,7 +481,9 @@ async def test_cli_complete_failure(mock_subprocess):
     )
     mock_subprocess.return_value = mock_process
 
-    with pytest.raises(RuntimeError, match="Authentication failed: api_key=\\[REDACTED\\]"):
+    with pytest.raises(
+        RuntimeError, match="Authentication failed: api_key=\\[REDACTED\\]"
+    ):
         await provider.complete("CLI prompt")
 
 
@@ -400,6 +520,7 @@ async def test_cli_binary_fallback(mock_subprocess):
 async def test_cli_timeout_cleanup(mock_subprocess):
     import sys
     import signal
+
     provider = AntigravityCLIProvider(model="gemini-3.5-flash", timeout=2)
 
     mock_process = AsyncMock()
@@ -408,9 +529,11 @@ async def test_cli_timeout_cleanup(mock_subprocess):
     mock_process.wait = AsyncMock(return_value=0)
     mock_subprocess.return_value = mock_process
 
-    with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError()), \
-         patch("os.killpg", create=True) as mock_killpg, \
-         patch("subprocess.run") as mock_run:
+    with (
+        patch("asyncio.wait_for", side_effect=asyncio.TimeoutError()),
+        patch("os.killpg", create=True) as mock_killpg,
+        patch("subprocess.run") as mock_run,
+    ):
         with pytest.raises(RuntimeError, match="timed out after 2s"):
             await provider.complete("CLI prompt")
 
@@ -422,33 +545,180 @@ async def test_cli_timeout_cleanup(mock_subprocess):
     else:
         mock_killpg.assert_any_call(12345, signal.SIGTERM)
 
+    # The per-call temp working directory must be removed even on the timeout path.
+    cwd_passed = mock_subprocess.call_args.kwargs.get("cwd")
+    assert cwd_passed is not None
+    assert not os.path.exists(cwd_passed), "temp dir leaked after timeout"
+
 
 @pytest.mark.asyncio
 async def test_sdk_timeout(mock_antigravity_agent):
+    """A per-call timeout override must bound ``complete()`` and surface as a
+    RuntimeError even when the SDK chat call hangs — and it must honor the
+    override, not the larger default request timeout."""
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", timeout=10,
-        target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        timeout=30,
+        target_dir="/tmp/chunkhound-test",
     )
 
-    _make_agent_mock(mock_antigravity_agent)
+    class _HangingChatAgent:
+        def __init__(self, *_args, **_kwargs):
+            self.conversation = None
 
-    async def mock_wait_for_se(coro, timeout=None):
-        if hasattr(coro, "close"):
-            coro.close()
-        raise asyncio.TimeoutError()
+        async def __aenter__(self):
+            return self
 
-    with patch("asyncio.wait_for", side_effect=mock_wait_for_se) as mock_wait_for:
-        with pytest.raises(RuntimeError, match="Antigravity SDK call failed:"):
-            await provider.complete("Test prompt", timeout=5)
+        async def __aexit__(self, *_exc):
+            return False
 
-        mock_wait_for.assert_called_once()
-        assert mock_wait_for.call_args.kwargs["timeout"] == 5
+        async def chat(self, _prompt):
+            await asyncio.sleep(30)
+
+    mock_antigravity_agent.side_effect = _HangingChatAgent
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    with pytest.raises(RuntimeError, match="timed out after"):
+        await provider.complete("Test prompt", timeout=0.3)
+    elapsed = loop.time() - start
+
+    # Must use the 0.3s override, not the 30s default, and return control.
+    assert elapsed < 5, f"complete() did not honor the timeout override ({elapsed}s)"
+
+
+@pytest.mark.asyncio
+async def test_sdk_hung_teardown_returns_control(mock_antigravity_agent):
+    """A stuck ``Agent.__aexit__`` that ignores cancellation must not extend the
+    request indefinitely: ``complete()`` bounds teardown by CLEANUP_GRACE_TIMEOUT
+    and returns control as a timeout error rather than hanging on the unwind."""
+    provider = AntigravityLLMProvider(
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        timeout=30,
+        target_dir="/tmp/chunkhound-test",
+    )
+    # Shrink the teardown grace so the test is fast.
+    provider.CLEANUP_GRACE_TIMEOUT = 0.3
+
+    response, conversation = _make_sdk_response("done")
+
+    class _HungTeardownAgent:
+        def __init__(self, *_args, **_kwargs):
+            self.conversation = conversation
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            # Resist cancellation for well beyond the grace window, then let go
+            # so the abandoned task can eventually finish (no session hang).
+            deadline = asyncio.get_running_loop().time() + 3.0
+            while asyncio.get_running_loop().time() < deadline:
+                try:
+                    await asyncio.sleep(3.0)
+                except asyncio.CancelledError:
+                    continue
+            return False
+
+        async def chat(self, _prompt):
+            return response
+
+    mock_antigravity_agent.side_effect = _HungTeardownAgent
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    with pytest.raises(RuntimeError, match="timed out after"):
+        await provider.complete("hi", timeout=0.3)
+    elapsed = loop.time() - start
+
+    # request_timeout (0.3) + grace (0.3) with headroom; must NOT wait the full
+    # 3s teardown before returning control to the caller.
+    assert elapsed < 2, f"hung teardown was not abandoned within grace ({elapsed}s)"
+
+
+@pytest.mark.asyncio
+async def test_batch_complete_cancels_siblings_on_failure(mock_antigravity_agent):
+    """A failed batch prompt must cancel still-running siblings so their
+    ``Agent`` sessions tear down via ``__aexit__`` instead of lingering as
+    orphan tasks that keep touching the workspace after the caller has the error.
+    """
+    provider = AntigravityLLMProvider(
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
+    )
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def fake_complete(prompt, **_kwargs):
+        if prompt == "fail":
+            # Yield once so both prompts start before the failure propagates
+            # through ``asyncio.gather``.
+            await asyncio.sleep(0)
+            raise RuntimeError("boom")
+        started.set()
+        try:
+            # Simulate a sibling blocked inside ``res.text()``.
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return LLMResponse(
+            content="slow-done",
+            tokens_used=0,
+            model="gemini-3.5-flash",
+            finish_reason="stop",
+        )
+
+    provider.complete = fake_complete  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await provider.batch_complete(["fail", "slow"])
+
+    assert started.is_set(), "slow sibling should have entered its session"
+    assert cancelled.is_set(), (
+        "slow sibling should be cancelled (session torn down) on batch failure, "
+        "not left running as an orphan task"
+    )
+
+
+@pytest.mark.asyncio
+async def test_health_check_uses_short_timeout(mock_antigravity_agent):
+    """Health checks must use a short readiness timeout (HEALTH_CHECK_TIMEOUT),
+    not the full request timeout, so an unhealthy SDK session fails fast."""
+    provider = AntigravityLLMProvider(
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
+    )
+
+    assert provider.HEALTH_CHECK_TIMEOUT == 30
+
+    fake_response = LLMResponse(
+        content="pong",
+        tokens_used=0,
+        model="gemini-3.5-flash",
+        finish_reason="stop",
+    )
+    mock_complete = AsyncMock(return_value=fake_response)
+    provider.complete = mock_complete  # type: ignore[assignment]
+
+    result = await provider.health_check()
+
+    mock_complete.assert_awaited_once()
+    assert mock_complete.call_args.kwargs["timeout"] == provider.HEALTH_CHECK_TIMEOUT
+    assert result["status"] == "healthy"
 
 
 @pytest.mark.asyncio
 async def test_sdk_security_constraints(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -478,7 +748,9 @@ async def test_sdk_security_constraints(mock_antigravity_agent):
 @pytest.mark.asyncio
 async def test_sdk_structured_validation(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -517,7 +789,9 @@ async def test_cli_max_completion_tokens_warning(mock_subprocess):
     mock_process.communicate.return_value = (b"Response from CLI", b"")
     mock_subprocess.return_value = mock_process
 
-    with patch("chunkhound.providers.llm.antigravity_cli_provider.logger.warning") as mock_warn:
+    with patch(
+        "chunkhound.providers.llm.antigravity_cli_provider.logger.warning"
+    ) as mock_warn:
         await provider.complete("prompt", max_completion_tokens=512)
         mock_warn.assert_called_once_with(
             "Antigravity CLI does not support limiting output tokens "
@@ -529,7 +803,9 @@ async def test_cli_max_completion_tokens_warning(mock_subprocess):
 @pytest.mark.asyncio
 async def test_sdk_structured_fallback_validation_failure(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -565,7 +841,9 @@ def test_sdk_root_ref_schema_compiles_to_referenced_model():
     """A root-level $ref schema must compile to the referenced model, not an
     empty one, so the SDK receives the correct structured-output shape."""
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     schema = {
@@ -590,7 +868,9 @@ async def test_sdk_structured_required_null_preserved(mock_antigravity_agent):
     from pydantic import BaseModel
 
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     class _Model(BaseModel):
@@ -624,7 +904,9 @@ async def test_sdk_structured_optional_nullable_null_preserved(mock_antigravity_
     model returned, not silently drop it. Uses the raw-dict production path (the
     real SDK returns json.loads output)."""
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -647,13 +929,52 @@ async def test_sdk_structured_optional_nullable_null_preserved(mock_antigravity_
 
 
 @pytest.mark.asyncio
+async def test_sdk_structured_root_allof_nullable_null_preserved(
+    mock_antigravity_agent,
+):
+    """An optional nullable field declared only under a bare root ``allOf``
+    branch must keep an explicit null. Earlier the cleanup only ``$ref``-resolved
+    the root and dropped it (root-composition cleanup)."""
+    provider = AntigravityLLMProvider(
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
+    )
+
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    response = MagicMock()
+    response.structured_output = AsyncMock(return_value={"a": None})
+    response.text = AsyncMock(return_value="")
+    response.thoughts = ""
+    agent_mock.chat = AsyncMock(return_value=response)
+    agent_mock.conversation = MagicMock()
+
+    schema = {
+        "$defs": {
+            "Base": {
+                "type": "object",
+                "properties": {"a": {"type": ["string", "null"]}},
+                "required": [],
+            }
+        },
+        "allOf": [{"$ref": "#/$defs/Base"}],
+    }
+
+    result = await provider.complete_structured("Structured prompt", json_schema=schema)
+    # Optional + nullable under a bare root allOf: the explicit null must survive.
+    assert result == {"a": None}
+
+
+@pytest.mark.asyncio
 async def test_sdk_structured_nested_optional_none_dropped(mock_antigravity_agent):
     """A nested optional field returned as null must be dropped (treated as
     absent) rather than serialized as null and rejected by the validator."""
     from pydantic import BaseModel
 
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     class _Inner(BaseModel):
@@ -695,7 +1016,9 @@ async def test_sdk_structured_dict_nested_optional_none_dropped(mock_antigravity
     optional field returned as null must still be dropped rather than serialized
     as null and rejected by the validator."""
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -730,7 +1053,9 @@ async def test_sdk_structured_text_fallback_drops_optional_none(mock_antigravity
     (treated as absent) rather than fail strict schema validation — matching the
     dict/model paths."""
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -762,7 +1087,9 @@ async def test_sdk_structured_text_fallback_drops_optional_none(mock_antigravity
 @pytest.mark.asyncio
 async def test_sdk_usage_stats_tracking(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     # Check initial stats
@@ -797,7 +1124,9 @@ async def test_sdk_usage_stats_tracking(mock_antigravity_agent):
 @pytest.mark.asyncio
 async def test_sdk_health_check_healthy(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -817,7 +1146,9 @@ async def test_sdk_health_check_healthy(mock_antigravity_agent):
 @pytest.mark.asyncio
 async def test_sdk_health_check_unhealthy(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -832,7 +1163,9 @@ async def test_sdk_health_check_unhealthy(mock_antigravity_agent):
 @pytest.mark.asyncio
 async def test_sdk_max_completion_tokens_warning(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -850,7 +1183,9 @@ async def test_sdk_max_completion_tokens_warning(mock_antigravity_agent):
 
 def test_sdk_compile_schema_to_pydantic_constraints(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
     schema = {
         "type": "object",
@@ -943,7 +1278,9 @@ def test_sdk_compile_schema_to_pydantic_constraints(mock_antigravity_agent):
 def test_sdk_compile_schema_allof_merges_intersection(mock_antigravity_agent):
     """allOf is an intersection: subschemas merge into one model requiring all fields."""
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
     schema = {
         "$defs": {
@@ -980,7 +1317,7 @@ async def test_sdk_target_dir_propagation(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
         api_key="test-api-key",
         model="gemini-3.5-flash",
-        target_dir="/test/project/root"
+        target_dir="/test/project/root",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
@@ -998,11 +1335,15 @@ async def test_sdk_target_dir_propagation(mock_antigravity_agent):
 @pytest.mark.asyncio
 async def test_sdk_structured_pydantic_model(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
-        api_key="test-api-key", model="gemini-3.5-flash", target_dir="/tmp/chunkhound-test"
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
     )
 
     agent_mock = _make_agent_mock(mock_antigravity_agent)
-    resp_mock, conv_mock = _make_sdk_response("{}", thoughts="Structured output Pydantic...")
+    resp_mock, conv_mock = _make_sdk_response(
+        "{}", thoughts="Structured output Pydantic..."
+    )
 
     # Mock structured_output to return a mock object behaving like Pydantic model
     mock_pydantic_instance = MagicMock()

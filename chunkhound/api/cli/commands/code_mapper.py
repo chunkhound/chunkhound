@@ -68,7 +68,9 @@ def _create_code_mapper_llm_manager(
     try:
         if config.llm:
             utility_config, synthesis_config = config.llm.get_provider_configs()
-            return LLMManager(utility_config, synthesis_config, target_dir=config.target_dir)
+            return LLMManager(
+                utility_config, synthesis_config, target_dir=config.target_dir
+            )
         raise ValueError("No LLM provider configured for Code Mapper")
     except (ValueError, ConfigurationError) as e:
         formatter.error(f"LLM provider setup failed: {e}")

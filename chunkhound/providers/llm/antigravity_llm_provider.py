@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from typing import Any
 
 from loguru import logger
@@ -19,6 +20,12 @@ except ImportError:
 class AntigravityLLMProvider(LLMProvider):
     """LLM provider wrapping the official google-antigravity SDK."""
 
+    # Constants
+    HEALTH_CHECK_TIMEOUT = 30  # Seconds to wait for the readiness probe
+    # Upper bound on Agent session teardown after a timeout/cancellation, so a
+    # hung ``Agent.__aexit__`` cannot extend a request past its deadline.
+    CLEANUP_GRACE_TIMEOUT = 5
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -38,8 +45,8 @@ class AntigravityLLMProvider(LLMProvider):
         if not SDK_AVAILABLE:
             raise RuntimeError(
                 "google-antigravity SDK is not installed. "
-                "Install it with `uv tool install \"chunkhound[antigravity]\"` "
-                "or `pip install \"chunkhound[antigravity]\"`."
+                'Install it with `uv tool install "chunkhound[antigravity]"` '
+                'or `pip install "chunkhound[antigravity]"`.'
             )
         # Fail fast when no API key is available, so callers (e.g. MCP tool
         # listing) filter out LLM tools at startup rather than surfacing a
@@ -128,6 +135,29 @@ class AntigravityLLMProvider(LLMProvider):
 
         return LocalAgentConfig(**config_kwargs)
 
+    async def _bounded_cancel(self, task: asyncio.Task[Any]) -> None:
+        """Cancel a session task and wait at most CLEANUP_GRACE_TIMEOUT for teardown.
+
+        ``asyncio.wait_for`` on the session coroutine would otherwise block on
+        the ``Agent.__aexit__`` unwind, so a hung teardown could exceed the
+        request deadline. Here the task is shielded and cancelled with a bounded
+        grace period; if teardown does not finish in time it is abandoned so
+        control returns to the caller.
+        """
+        if task.done():
+            # Retrieve any result/exception so it is not reported as
+            # "exception was never retrieved".
+            with contextlib.suppress(BaseException):
+                task.result()
+            return
+        task.cancel()
+        with contextlib.suppress(
+            asyncio.TimeoutError, asyncio.CancelledError, Exception
+        ):
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=self.CLEANUP_GRACE_TIMEOUT
+            )
+
     async def complete(
         self,
         prompt: str,
@@ -169,11 +199,11 @@ class AntigravityLLMProvider(LLMProvider):
                 # by the request timeout. On timeout ``wait_for`` cancels this
                 # coroutine and ``async with`` runs ``__aexit__`` on unwind.
                 async with Agent(config=config) as agent:
-                    logger.debug(
-                        f"Executing chat prompt (timeout: {request_timeout}s)"
-                    )
+                    logger.debug(f"Executing chat prompt (timeout: {request_timeout}s)")
                     res = await agent.chat(prompt)
                     content = await res.text()
+                    if not content or not content.strip():
+                        raise RuntimeError("Antigravity SDK returned an empty response")
 
                     # Extract thoughts/reasoning tokens
                     thoughts = getattr(res, "thoughts", "")
@@ -192,16 +222,10 @@ class AntigravityLLMProvider(LLMProvider):
                             )
                             if total_usage is not None:
                                 total_tokens = (
-                                    getattr(
-                                        total_usage, "total_token_count", 0
-                                    )
-                                    or 0
+                                    getattr(total_usage, "total_token_count", 0) or 0
                                 )
                                 prompt_tokens = (
-                                    getattr(
-                                        total_usage, "prompt_token_count", 0
-                                    )
-                                    or 0
+                                    getattr(total_usage, "prompt_token_count", 0) or 0
                                 )
                                 candidates = (
                                     getattr(
@@ -256,12 +280,23 @@ class AntigravityLLMProvider(LLMProvider):
                         finish_reason="stop",
                     )
 
+            # Shield the session so a timeout returns control immediately;
+            # teardown is then bounded explicitly via ``_bounded_cancel``.
+            session_task = asyncio.create_task(_run_session())
             return await asyncio.wait_for(
-                _run_session(), timeout=request_timeout
+                asyncio.shield(session_task), timeout=request_timeout
             )
         except asyncio.TimeoutError as e:
-            logger.error(f"Antigravity SDK call failed: timed out after {request_timeout}s")
-            raise RuntimeError(f"Antigravity SDK call failed: timed out after {request_timeout}s") from e
+            await self._bounded_cancel(session_task)
+            msg = f"Antigravity SDK call failed: timed out after {request_timeout}s"
+            logger.error(msg)
+            raise RuntimeError(msg) from e
+        except asyncio.CancelledError:
+            # Caller cancelled (e.g. a failed batch cancelling siblings): the
+            # shield decoupled the session from this cancellation, so cancel it
+            # explicitly with a bounded teardown, then propagate unchanged.
+            await self._bounded_cancel(session_task)
+            raise
         except Exception as e:
             logger.error(f"Antigravity SDK call failed: {e}")
             raise RuntimeError(f"Antigravity SDK call failed: {e}") from e
@@ -317,8 +352,30 @@ class AntigravityLLMProvider(LLMProvider):
 
         return merged
 
+    def _cleanup_root_schema(self, schema: Any, defs: dict[str, Any]) -> Any:
+        """Return the root schema the optional-null cleanup reads.
+
+        ``$ref``-resolves the root and, when a root ``allOf`` is present, merges
+        it via ``_merge_all_of`` (union of ``properties`` and ``required``) —
+        the same shape ``_compile_schema_to_pydantic`` hands the SDK. Without
+        this, ``_drop_optional_none`` sees no top-level
+        ``properties``/``required`` for a bare root ``allOf`` and drops valid
+        nullable fields before the final validation runs.
+
+        Root ``anyOf``/``oneOf`` are intentionally not merged here: the compiler
+        turns them into a ``typing.Union``, which the SDK's ``response_schema``
+        rejects at config-build time, so they never reach this cleanup path.
+        """
+        resolved = self._resolve_ref(schema, defs)
+        if isinstance(resolved, dict) and "allOf" in resolved:
+            return self._merge_all_of(resolved, defs)
+        return resolved
+
     def _compile_schema_to_pydantic(
-        self, schema: Any, name: str = "DynamicResponseModel", defs: dict[str, Any] | None = None
+        self,
+        schema: Any,
+        name: str = "DynamicResponseModel",
+        defs: dict[str, Any] | None = None,
     ) -> Any:
         """Dynamically compile a JSON Schema into a Pydantic model class.
 
@@ -340,11 +397,7 @@ class AntigravityLLMProvider(LLMProvider):
         falls back to ``Any`` rather than ``str | None``, so the schema handed to
         the SDK is weaker than the caller's (the value is still enforced by the
         final JSON Schema validation against the original schema in
-        ``complete_structured``). See ``complete_structured`` for a related
-        limitation (d): its post-response optional-``null`` cleanup only
-        ``$ref``-resolves the root schema and does not merge a root composition
-        keyword, so a schema whose fields live entirely under a bare root
-        ``allOf`` is not seen by the cleanup.
+        ``complete_structured``).
         """
         from typing import Any, Literal
 
@@ -441,7 +494,11 @@ class AntigravityLLMProvider(LLMProvider):
                             items, name=f"{name}_{field_name}_item", defs=defs
                         )
                         python_type = list[item_type]  # type: ignore[valid-type]
-                    elif isinstance(items, dict) and "enum" in items and isinstance(items["enum"], list):
+                    elif (
+                        isinstance(items, dict)
+                        and "enum" in items
+                        and isinstance(items["enum"], list)
+                    ):
                         python_type = list[Literal[tuple(items["enum"])]]  # type: ignore[misc]
                     elif isinstance(items_type, str) and items_type in type_mapping:
                         python_type = list[type_mapping[items_type]]  # type: ignore[valid-type]
@@ -578,16 +635,10 @@ class AntigravityLLMProvider(LLMProvider):
                             )
                             if total_usage is not None:
                                 total_tokens = (
-                                    getattr(
-                                        total_usage, "total_token_count", 0
-                                    )
-                                    or 0
+                                    getattr(total_usage, "total_token_count", 0) or 0
                                 )
                                 prompt_tokens = (
-                                    getattr(
-                                        total_usage, "prompt_token_count", 0
-                                    )
-                                    or 0
+                                    getattr(total_usage, "prompt_token_count", 0) or 0
                                 )
                                 candidates = (
                                     getattr(
@@ -719,9 +770,7 @@ class AntigravityLLMProvider(LLMProvider):
                                     isinstance(resolved_sub, dict)
                                     and resolved_sub.get("type") == "array"
                                 ):
-                                    item_obj = _object_schema(
-                                        resolved_sub.get("items")
-                                    )
+                                    item_obj = _object_schema(resolved_sub.get("items"))
                                 if item_obj is not None:
                                     cleaned[k] = [
                                         _drop_optional_none(item, item_obj)
@@ -735,14 +784,11 @@ class AntigravityLLMProvider(LLMProvider):
                                 cleaned[k] = v
                         return cleaned
 
-                    # Limitation (d): the root schema is only ``$ref``-resolved
-                    # here, not ``allOf``-merged (unlike
-                    # ``_compile_schema_to_pydantic``). A schema whose fields
-                    # live entirely under a bare root ``allOf`` therefore has no
-                    # top-level ``properties``/``required`` for the cleanup to
-                    # read, so its optional nulls may be dropped. No current
-                    # caller emits root-composition schemas.
-                    root_schema = self._resolve_ref(json_schema, defs)
+                    # Merge a root ``allOf`` so _drop_optional_none can read
+                    # properties/required from the branch — matching what
+                    # _compile_schema_to_pydantic hands the SDK. See
+                    # ``_cleanup_root_schema`` for why anyOf/oneOf are excluded.
+                    root_schema = self._cleanup_root_schema(json_schema, defs)
 
                     def _validate_text(text: str) -> dict[str, Any]:
                         # Normalize optional-null the same way as the
@@ -753,9 +799,7 @@ class AntigravityLLMProvider(LLMProvider):
                         try:
                             parsed = json.loads(extract_json_from_response(text))
                         except (ValueError, TypeError):
-                            return parse_and_validate_structured_json(
-                                text, json_schema
-                            )
+                            return parse_and_validate_structured_json(text, json_schema)
                         if isinstance(parsed, dict):
                             cleaned = _drop_optional_none(parsed, root_schema)
                             return parse_and_validate_structured_json(
@@ -777,7 +821,9 @@ class AntigravityLLMProvider(LLMProvider):
                                 result.model_dump(), root_schema
                             )
                         elif hasattr(result, "dict"):
-                            result_dict = _drop_optional_none(result.dict(), root_schema)
+                            result_dict = _drop_optional_none(
+                                result.dict(), root_schema
+                            )
                         elif hasattr(result, "__dict__"):
                             result_dict = _drop_optional_none(
                                 dict(result.__dict__), root_schema
@@ -814,12 +860,23 @@ class AntigravityLLMProvider(LLMProvider):
                     # Fallback to parsing text output
                     return _validate_text(text_content)
 
+            # Shield the session so a timeout returns control immediately;
+            # teardown is then bounded explicitly via ``_bounded_cancel``.
+            session_task = asyncio.create_task(_run_session())
             return await asyncio.wait_for(
-                _run_session(), timeout=request_timeout
+                asyncio.shield(session_task), timeout=request_timeout
             )
         except asyncio.TimeoutError as e:
-            logger.error(f"Antigravity SDK structured call failed: timed out after {request_timeout}s")
-            raise RuntimeError(f"Antigravity SDK structured call failed: timed out after {request_timeout}s") from e
+            await self._bounded_cancel(session_task)
+            msg = (
+                "Antigravity SDK structured call failed: "
+                f"timed out after {request_timeout}s"
+            )
+            logger.error(msg)
+            raise RuntimeError(msg) from e
+        except asyncio.CancelledError:
+            await self._bounded_cancel(session_task)
+            raise
         except Exception as e:
             logger.error(f"Antigravity SDK structured call failed: {e}")
             raise RuntimeError(f"Antigravity SDK structured call failed: {e}") from e
@@ -831,15 +888,41 @@ class AntigravityLLMProvider(LLMProvider):
         max_completion_tokens: int = 4096,
     ) -> list[LLMResponse]:
         """Generate completions for multiple prompts concurrently."""
-        tasks = [
-            self.complete(
-                prompt=prompt,
-                system=system,
-                max_completion_tokens=max_completion_tokens,
-            )
-            for prompt in prompts
-        ]
-        return list(await asyncio.gather(*tasks))
+        concurrency = self.get_synthesis_concurrency()
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _bounded_complete(prompt: str) -> LLMResponse:
+            async with semaphore:
+                return await self.complete(
+                    prompt=prompt,
+                    system=system,
+                    max_completion_tokens=max_completion_tokens,
+                )
+
+        # Own the coroutines as Tasks so we can cancel siblings on failure.
+        # On the success path this is equivalent to the previous bare gather.
+        tasks = [asyncio.create_task(_bounded_complete(prompt)) for prompt in prompts]
+        try:
+            return list(await asyncio.gather(*tasks))
+        except BaseException:
+            # A failed batch must stop owning local SDK work: cancel any
+            # sibling prompts still awaiting SDK work so their ``Agent``
+            # sessions tear down via ``__aexit__`` rather than lingering as
+            # orphan tasks that keep touching the workspace after the caller
+            # has already received the batch error. Then re-raise the
+            # original exception unchanged (preserves RuntimeError type and
+            # caller-cancellation propagation).
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            # Bound the sibling teardown drain: a hung ``Agent.__aexit__`` in a
+            # cancelled sibling must not block re-raising the batch error.
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=self.CLEANUP_GRACE_TIMEOUT,
+                )
+            raise
 
     def estimate_tokens(self, text: str) -> int:
         """Estimate token count for text."""
@@ -848,7 +931,11 @@ class AntigravityLLMProvider(LLMProvider):
     async def health_check(self) -> dict[str, Any]:
         """Perform health check."""
         try:
-            response = await self.complete("ping", max_completion_tokens=4096)
+            response = await self.complete(
+                "ping",
+                max_completion_tokens=4096,
+                timeout=self.HEALTH_CHECK_TIMEOUT,
+            )
             return {
                 "status": "healthy",
                 "provider": self.name,

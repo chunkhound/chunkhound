@@ -45,7 +45,6 @@ async def test_autodoc_offers_auto_map_when_map_dir_missing_index(
     ):
         plan = autorun._build_auto_map_plan(  # type: ignore[attr-defined]
             output_dir=output_dir,
-            target_dir=tmp_path,
             map_out_dir=map_out_dir,
             comprehensiveness=comprehensiveness,
             audience=audience,
@@ -183,7 +182,6 @@ async def test_autodoc_generates_map_when_map_in_omitted(
     ):
         plan = autorun._build_auto_map_plan(  # type: ignore[attr-defined]
             output_dir=output_dir,
-            target_dir=tmp_path,
             map_out_dir=map_out_dir,
             comprehensiveness=comprehensiveness,
             audience=audience,
@@ -264,7 +262,7 @@ async def test_autodoc_auto_map_prereq_failure_exits_before_prompting_map_params
     async def fake_run_code_mapper_for_autodoc(**_kwargs):  # type: ignore[no-untyped-def]
         ran_map.append(Path("should-not-run"))
         return autorun._build_auto_map_plan(  # type: ignore[attr-defined]
-            output_dir=tmp_path / "autodoc", target_dir=tmp_path
+            output_dir=tmp_path / "autodoc"
         )
 
     monkeypatch.setattr(
