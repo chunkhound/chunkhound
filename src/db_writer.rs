@@ -1,11 +1,12 @@
 use std::sync::Mutex;
 
+use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 use crate::db::{create_backend, DbBackend, DbConfig};
 use crate::error::DbError;
-use crate::types::DbWriterBatch;
+use crate::types::{ChunkRecord, DbWriterBatch, FileRecord};
 
 struct WriterInner {
     backend: Box<dyn DbBackend>,
@@ -19,11 +20,86 @@ pub struct RustDbWriter {
     inner: Mutex<WriterInner>,
 }
 
+/// Extract an optional field from a PyDict — returns None if key is absent or value is Python None.
+fn extract_opt<'py, T: FromPyObject<'py>>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<Option<T>> {
+    match dict.get_item(key)? {
+        None => Ok(None),
+        Some(v) if v.is_none() => Ok(None),
+        Some(v) => Ok(Some(v.extract()?)),
+    }
+}
+
+/// Extract a required field from a PyDict — errors if key is absent.
+fn extract_req<'py, T: FromPyObject<'py>>(dict: &Bound<'py, PyDict>, key: &str) -> PyResult<T> {
+    dict.get_item(key)?
+        .ok_or_else(|| PyKeyError::new_err(key.to_string()))?
+        .extract()
+}
+
+/// Extract a DbWriterBatch directly from a Python dict — no json.dumps / serde_json round-trip.
+fn extract_batch(batch: &Bound<'_, PyAny>) -> PyResult<DbWriterBatch> {
+    let batch_dict = batch.downcast::<PyDict>()?;
+
+    let delete_paths: Vec<String> = batch_dict
+        .get_item("delete_paths")?
+        .ok_or_else(|| PyKeyError::new_err("delete_paths"))?
+        .extract()?;
+
+    let files_obj = batch_dict
+        .get_item("files")?
+        .ok_or_else(|| PyKeyError::new_err("files"))?;
+    let files_list = files_obj.downcast::<PyList>()?;
+
+    let mut files = Vec::with_capacity(files_list.len());
+    for file_obj in files_list.iter() {
+        let fd = file_obj.downcast::<PyDict>()?;
+
+        let chunks_obj = fd
+            .get_item("chunks")?
+            .ok_or_else(|| PyKeyError::new_err("chunks"))?;
+        let chunks_list = chunks_obj.downcast::<PyList>()?;
+
+        let mut chunks = Vec::with_capacity(chunks_list.len());
+        for chunk_obj in chunks_list.iter() {
+            let cd = chunk_obj.downcast::<PyDict>()?;
+            chunks.push(ChunkRecord {
+                chunk_type: extract_req(cd, "chunk_type")?,
+                symbol: extract_opt(cd, "symbol")?,
+                code: extract_req(cd, "code")?,
+                start_line: extract_opt(cd, "start_line")?,
+                end_line: extract_opt(cd, "end_line")?,
+                start_byte: extract_opt(cd, "start_byte")?,
+                end_byte: extract_opt(cd, "end_byte")?,
+                language: extract_opt(cd, "language")?,
+                metadata: extract_opt(cd, "metadata")?,
+                embedding: extract_opt(cd, "embedding")?,
+                provider: extract_opt(cd, "provider")?,
+                model: extract_opt(cd, "model")?,
+            });
+        }
+
+        files.push(FileRecord {
+            existing_file_id: extract_opt(fd, "existing_file_id")?,
+            path: extract_req(fd, "path")?,
+            mtime: extract_opt(fd, "mtime")?,
+            size_bytes: extract_opt(fd, "size_bytes")?,
+            content_hash: extract_opt(fd, "content_hash")?,
+            language: extract_opt(fd, "language")?,
+            chunks,
+        });
+    }
+
+    Ok(DbWriterBatch { files, delete_paths })
+}
+
 #[pymethods]
 impl RustDbWriter {
     #[new]
     fn new(db_config: &Bound<'_, PyDict>) -> PyResult<Self> {
-        // Convert PyDict → JSON → DbConfig
+        // Config dict is small and called once — JSON round-trip is acceptable here.
         let json_module = db_config.py().import_bound("json")?;
         let json_str: String = json_module
             .call_method1("dumps", (db_config,))?
@@ -48,13 +124,13 @@ impl RustDbWriter {
     }
 
     fn write_batch(&self, py: Python<'_>, batch: &Bound<'_, PyAny>) -> PyResult<PyObject> {
-        // Serialize batch to JSON inside the GIL
-        let json_module = py.import_bound("json")?;
-        let json_str: String = json_module.call_method1("dumps", (batch,))?.extract()?;
+        // Extract batch fields directly from Python objects while holding the GIL.
+        // This replaces json.dumps(batch) → String → serde_json::from_str, saving
+        // ~4MB of JSON serialization per batch at 20 files × 17 chunks × 1536-dim embeddings.
+        let batch = extract_batch(batch)?;
 
-        // Release GIL for the heavy DB work
+        // Release GIL for the heavy DB work.
         let result = py.allow_threads(|| {
-            let batch: DbWriterBatch = serde_json::from_str(&json_str).map_err(DbError::Json)?;
             let mut inner = self.inner.lock().unwrap();
             inner.backend.write_batch(&batch)
         });
