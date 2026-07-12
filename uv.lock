@@ -542,6 +542,9 @@ dev = [
     { name = "pytest-timeout" },
     { name = "ruff" },
 ]
+native = [
+    { name = "chunkhound-native" },
+]
 test = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -569,6 +572,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.12.15" },
     { name = "anthropic", specifier = ">=0.96.0,<1.0.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
+    { name = "chunkhound-native", marker = "extra == 'native'", specifier = ">=5.2.0" },
     { name = "duckdb", specifier = "==1.4.4" },
     { name = "google-genai", specifier = ">=1.51.0" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -656,6 +660,16 @@ dev = [
     { name = "ruff", specifier = ">=0.11.12" },
     { name = "types-jsonschema", specifier = ">=4.0.0" },
     { name = "types-psutil", specifier = ">=7.0.0.20250601" },
+]
+
+[[package]]
+name = "chunkhound-native"
+version = "5.2.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b8/24/c1653de2e3ef5cc2d7e3d167adaeea3314011c3e5b7c286ff3f81c7b15b4/chunkhound_native-5.2.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:e08ce480134bfb68916b577b699e0bcf965c3fd2fbb57ff8e99252378b3c46d4", size = 801423, upload-time = "2026-07-12T11:51:59.859Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/fd/9d88dc60e46c2ca2579762540bd7e2a1730226441d1ee08c9fdbad43b2b7/chunkhound_native-5.2.0-cp310-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:f9488f6bbbe9f29ff797acb034df86bdadd09ab9c9c85c4e5fad8f8f907faec9", size = 924319, upload-time = "2026-07-12T11:52:01.368Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/bb/b174668e6b1e91af2b80fb8cb7ca19fb793849ab149113dc2d7e3a69d3bc/chunkhound_native-5.2.0-cp310-abi3-win_amd64.whl", hash = "sha256:ce2d9db93f488e34d01d1e55c4dee17445e245941cda5aeec1d6163fa5b2bba9", size = 744935, upload-time = "2026-07-12T11:52:02.937Z" },
 ]
 
 [[package]]
