@@ -205,6 +205,21 @@ impl DuckDbHnswBackend {
             .unwrap_or("")
             .to_string();
 
+        // PF-4: if the caller already knows the file_id, skip the SELECT and go straight
+        // to UPDATE — saves one round-trip per file during incremental re-indexing.
+        // Falls through to the SELECT path only when the id is stale (rows_affected == 0),
+        // which can happen when writing to a fresh DB (e.g., benchmark replay).
+        if let Some(id) = file.existing_file_id {
+            let rows = conn.execute(
+                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, updated_at = now() WHERE id = ?",
+                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, id],
+            )?;
+            if rows > 0 {
+                return Ok(id);
+            }
+            // id is stale — fall through to SELECT path below
+        }
+
         // DuckDB rejects ON CONFLICT DO UPDATE inside an explicit transaction when
         // a FK child table (chunks) has rows referencing the conflicting parent row,
         // even if those children were deleted earlier in the same transaction.
