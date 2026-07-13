@@ -26,9 +26,13 @@ def _get_use_rust() -> bool:
 class RustWriterBridge:
     """Thin shim that routes writes to RustDbWriter when available.
 
-    Phase 0 (current): class exists, Rust extension is exercised by tests.
-    Phase 1 (TODO): wire this into IndexingCoordinator to replace Python DB
-    writes — see the db_writter branch for the implementation plan.
+    Phase 0 (current): intentionally NOT wired into any production code path.
+    The class and the native extension are exercised only by the tests in
+    tests/test_rust_db_writer.py.  No production writes go through this class yet.
+
+    Phase 1 (TODO): wire into SerialDatabaseExecutor
+    (chunkhound/providers/database/serial_executor.py) to replace the Python
+    DuckDB write path — see the db_writter branch for the implementation plan.
     """
 
     def __init__(self, db_config: dict) -> None:

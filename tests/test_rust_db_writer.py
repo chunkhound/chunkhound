@@ -491,3 +491,60 @@ class TestFeatureFlag:
 
         if b.available():
             b.finalize()
+
+
+# ---------------------------------------------------------------------------
+# Schema parity (guards against DDL drift between Rust and schema_constants.py)
+# ---------------------------------------------------------------------------
+
+class TestSchemaParity:
+    def test_files_and_chunks_columns_match_schema_constants(self, tmp_path):
+        """Rust-created tables must have the same columns (in order) as schema_constants.py.
+
+        This is the CI guard for the DDL duplication between duckdb_backend.rs::setup_schema
+        and chunkhound/providers/database/duckdb/schema_constants.py.  When a column is
+        added or renamed in schema_constants.py, this test will fail until duckdb_backend.rs
+        is updated to match.
+        """
+        # pylint: disable=protected-access  (accessing private module constants intentionally)
+        from chunkhound.providers.database.duckdb.schema_constants import (
+            _FILES_COLUMN_NAMES,
+            _CHUNKS_COLUMN_NAMES,
+        )
+
+        db = str(tmp_path / "parity.duckdb")
+        w = _make_writer(db)
+        w.open()
+        w.close()
+
+        conn = duckdb.connect(db)
+        try:
+            rust_files_cols = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'files' ORDER BY ordinal_position"
+                ).fetchall()
+            ]
+            rust_chunks_cols = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'chunks' ORDER BY ordinal_position"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+
+        assert rust_files_cols == _FILES_COLUMN_NAMES, (
+            f"files columns mismatch.\n"
+            f"  Rust  : {rust_files_cols}\n"
+            f"  Python: {_FILES_COLUMN_NAMES}\n"
+            f"Update duckdb_backend.rs::setup_schema to match schema_constants.py."
+        )
+        assert rust_chunks_cols == _CHUNKS_COLUMN_NAMES, (
+            f"chunks columns mismatch.\n"
+            f"  Rust  : {rust_chunks_cols}\n"
+            f"  Python: {_CHUNKS_COLUMN_NAMES}\n"
+            f"Update duckdb_backend.rs::setup_schema to match schema_constants.py."
+        )

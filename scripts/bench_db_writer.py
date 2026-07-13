@@ -103,37 +103,20 @@ def determine_batch_size(files: list[dict]) -> int:
 # Schema helpers
 # ---------------------------------------------------------------------------
 
-_CREATE_SCHEMA = """
+# Build the CREATE TABLE statements from the canonical Python source rather than
+# duplicating them here.  schema_constants.py is the single source of truth for
+# column definitions; any column added there is automatically picked up by this
+# benchmark's Python write path on the next run.
+from chunkhound.providers.database.duckdb.schema_constants import (
+    _CHUNKS_TABLE_COLUMNS as _SC_CHUNKS_COLS,
+    _FILES_TABLE_COLUMNS as _SC_FILES_COLS,
+)
+
+_CREATE_SCHEMA = f"""
 CREATE SEQUENCE IF NOT EXISTS files_id_seq START 1;
-CREATE TABLE IF NOT EXISTS files (
-    id INTEGER PRIMARY KEY DEFAULT nextval('files_id_seq'),
-    path TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL,
-    extension TEXT,
-    size INTEGER,
-    modified_time TIMESTAMP,
-    content_hash TEXT,
-    language TEXT,
-    skip_reason TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+CREATE TABLE IF NOT EXISTS files ({_SC_FILES_COLS});
 CREATE SEQUENCE IF NOT EXISTS chunks_id_seq START 1;
-CREATE TABLE IF NOT EXISTS chunks (
-    id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
-    file_id INTEGER REFERENCES files(id),
-    chunk_type TEXT NOT NULL,
-    symbol TEXT,
-    code TEXT NOT NULL,
-    start_line INTEGER,
-    end_line INTEGER,
-    start_byte INTEGER,
-    end_byte INTEGER,
-    language TEXT,
-    metadata TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+CREATE TABLE IF NOT EXISTS chunks ({_SC_CHUNKS_COLS});
 CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq START 1;
 CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
 CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);

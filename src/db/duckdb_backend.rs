@@ -40,6 +40,11 @@ impl DuckDbHnswBackend {
         }
     }
 
+    // SCHEMA PARITY: This DDL must stay in sync with the Python canonical source at
+    // chunkhound/providers/database/duckdb/schema_constants.py (_FILES_TABLE_COLUMNS,
+    // _CHUNKS_TABLE_COLUMNS, _SCHEMA_VERSION_TABLE_COLUMNS).  The cross-check test
+    // tests/test_rust_db_writer.py::TestSchemaParity catches column-level drift at CI time.
+    // When adding or renaming columns, update schema_constants.py FIRST, then mirror here.
     fn setup_schema(conn: &Connection) -> Result<(), DbError> {
         conn.execute_batch(
             "
@@ -85,7 +90,7 @@ impl DuckDbHnswBackend {
                 description TEXT
             );
             INSERT INTO schema_version (version, description)
-                SELECT 1, 'initial schema (rust writer)'
+                SELECT 1, 'Initial schema'
                 WHERE NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 1);
         ",
         )?;
