@@ -1,7 +1,8 @@
 """Feature-flagged bridge from Python indexing pipeline to Rust DB writer.
 
 Set CHUNKHOUND_USE_RUST=0 to force the Python path even when the native
-extension is available. On by default when chunkhound_native is importable.
+extension is available. Checked at instantiation time (not import time),
+so setting the env var before creating RustWriterBridge is sufficient.
 """
 
 import os
@@ -16,7 +17,10 @@ except ImportError:
     _RustDbWriter = None
     _RUST_AVAILABLE = False
 
-_USE_RUST = os.environ.get("CHUNKHOUND_USE_RUST", "1" if _RUST_AVAILABLE else "0") == "1"
+
+def _get_use_rust() -> bool:
+    """Read the CHUNKHOUND_USE_RUST env var at call time (avoids module-reload in tests)."""
+    return os.environ.get("CHUNKHOUND_USE_RUST", "1" if _RUST_AVAILABLE else "0") == "1"
 
 
 class RustWriterBridge:
@@ -24,7 +28,7 @@ class RustWriterBridge:
 
     def __init__(self, db_config: dict) -> None:
         self._writer = None
-        if not (_USE_RUST and _RUST_AVAILABLE):
+        if not (_get_use_rust() and _RUST_AVAILABLE):
             _log.debug("Rust DB writer disabled (CHUNKHOUND_USE_RUST=0 or native not built)")
             return
         try:
@@ -38,13 +42,11 @@ class RustWriterBridge:
     def available(self) -> bool:
         return self._writer is not None
 
-    def __del__(self) -> None:
-        if self._writer is not None:
-            try:
-                self._writer.close()
-            except Exception:
-                pass
-            self._writer = None
+    def __enter__(self) -> "RustWriterBridge":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.finalize()
 
     def write_batch(self, batch: dict) -> dict:
         if self._writer is None:

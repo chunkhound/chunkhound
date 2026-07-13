@@ -71,6 +71,14 @@ impl DuckDbHnswBackend {
             CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq START 1;
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                description TEXT
+            );
+            INSERT INTO schema_version (version, description)
+                SELECT 1, 'initial schema (rust writer)'
+                WHERE NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 1);
         ",
         )?;
         Ok(())
@@ -385,7 +393,7 @@ impl DuckDbHnswBackend {
                 let mut params: Vec<duckdb::types::Value> =
                     Vec::with_capacity(chunk_slice.len() * 5);
                 for (chunk_id, chunk) in chunk_slice.iter() {
-                    let emb = chunk.embedding.as_ref().unwrap();
+                    let emb = chunk.embedding.as_ref().expect("embedding is Some: only chunks with Some(emb) are in embedding_pairs");
                     let emb_json = serde_json::to_string(emb).map_err(DbError::Json)?;
                     params.push(duckdb::types::Value::BigInt(*chunk_id));
                     params.push(duckdb::types::Value::Text(
@@ -415,9 +423,11 @@ impl DuckDbHnswBackend {
         Ok(total)
     }
 
-    // DuckDB rejects DELETE from a FK parent table inside an explicit transaction
-    // after the child rows were deleted in the same transaction. Delete paths are
-    // handled outside the transaction (before BEGIN) to work around this limitation.
+    // delete_paths (explicit path removals from the caller) run outside the transaction
+    // to avoid the DuckDB limitation where ON CONFLICT DO UPDATE on a FK parent row
+    // is rejected inside an explicit transaction even after child rows are deleted.
+    // The pre-deletes inside write_batch_txn work because upsert_file uses an explicit
+    // SELECT + UPDATE/INSERT rather than ON CONFLICT DO UPDATE syntax.
     fn delete_paths(conn: &Connection, paths: &[String]) -> Result<(), DbError> {
         if paths.is_empty() {
             return Ok(());
@@ -462,7 +472,8 @@ impl DuckDbHnswBackend {
     fn discover_embedding_tables(conn: &Connection) -> Result<Vec<(String, u32)>, DbError> {
         let mut stmt = conn.prepare(
             "SELECT table_name FROM information_schema.tables
-             WHERE table_name SIMILAR TO 'embeddings_[0-9]+'",
+             WHERE table_schema = 'main'
+             AND table_name SIMILAR TO 'embeddings_[0-9]+'",
         )?;
         let names: Vec<String> = stmt
             .query_map([], |row| row.get::<_, String>(0))?
@@ -590,11 +601,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     fn open(&mut self) -> Result<(), DbError> {
         // Crash recovery: check for swap_intent file (Invariant 17)
         let db_path = PathBuf::from(&self.config.db_path);
-        let intent_path = {
-            let mut p = db_path.clone();
-            p.set_extension("duckdb.swap_intent");
-            p
-        };
+        let intent_path = PathBuf::from(format!("{}.swap_intent", self.config.db_path));
         if intent_path.exists() {
             if let Ok(intent) = std::fs::read_to_string(&intent_path) {
                 match intent.trim() {
@@ -602,14 +609,14 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                         let _ = std::fs::remove_file(&intent_path);
                     }
                     "phase1" => {
-                        let old_path = db_path.with_extension("duckdb.old");
+                        let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
                         if old_path.exists() {
                             let _ = std::fs::rename(&old_path, &db_path);
                         }
                         let _ = std::fs::remove_file(&intent_path);
                     }
                     "phase2" => {
-                        let old_path = db_path.with_extension("duckdb.old");
+                        let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
                         let _ = std::fs::remove_file(&old_path);
                         let _ = std::fs::remove_file(&intent_path);
                     }
@@ -713,7 +720,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         // Step 3e: Insert embeddings (still inside txn)
         let embeddings_written = {
-            let conn = self.conn.as_ref().unwrap();
+            let conn = self.conn.as_ref().expect("conn is Some: open() succeeded and BEGIN passed");
             match Self::insert_embeddings_txn(conn, batch, &embedding_pairs) {
                 Ok(n) => n,
                 Err(e) => {
@@ -728,7 +735,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         // Step 4: COMMIT
         {
-            let conn = self.conn.as_ref().unwrap();
+            let conn = self.conn.as_ref().expect("conn is Some: open() succeeded and BEGIN passed");
             if let Err(e) = conn.execute_batch("COMMIT") {
                 let _ = conn.execute_batch("ROLLBACK");
                 if !hnsw_indexes.is_empty() {
@@ -740,7 +747,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         // Step 5: RECREATE HNSW AFTER COMMIT (Invariant 14)
         if !hnsw_indexes.is_empty() {
-            let conn = self.conn.as_ref().unwrap();
+            let conn = self.conn.as_ref().expect("conn is Some: open() succeeded and COMMIT passed");
             Self::recreate_hnsw_indexes(conn, &hnsw_indexes)?;
         }
 
@@ -796,7 +803,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             .ok_or_else(|| DbError::Other("not open".into()))?;
         let tables = Self::discover_embedding_tables(conn)?;
         for (table_name, dims) in &tables {
-            let hnsw_name = format!("hnsw_embedding_{dims}");
+            let hnsw_name = format!("idx_hnsw_{dims}");
             let safe_tbl = table_name.replace('"', "\"\"");
             conn.execute_batch(&format!(
                 "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"{safe_tbl}\" USING HNSW (embedding) WITH (metric = 'cosine')"

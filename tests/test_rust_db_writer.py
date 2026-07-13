@@ -9,7 +9,6 @@ writer.close() — DuckDB enforces single-writer.
 
 from __future__ import annotations
 
-import importlib
 import os
 
 import duckdb
@@ -336,6 +335,27 @@ class TestCrashRecovery:
         assert not intent_path.exists()
         assert not old_path.exists()
 
+    def test_pre_swap_intent_cleared_on_open_db_extension(self, tmp_path):
+        """Crash-recovery intent path must be correct for a .db-extension path (not .duckdb).
+
+        Regression guard for the set_extension() bug: PathBuf::set_extension() on
+        'chunks.db' would produce 'chunks.duckdb.swap_intent' instead of
+        'chunks.db.swap_intent'. The correct implementation uses string concatenation.
+        """
+        db_path = tmp_path / "chunks.db"
+        # Intent path must be exactly "<db_path>.swap_intent"
+        intent_path = tmp_path / "chunks.db.swap_intent"
+        intent_path.write_text("pre-swap")
+
+        w = _make_writer(str(db_path))
+        w.open()
+        w.close()
+
+        assert not intent_path.exists(), (
+            "intent file must be removed; wrong path construction would leave it untouched"
+        )
+        assert _count(str(db_path), "files") == 0
+
 
 # ---------------------------------------------------------------------------
 # HNSW threshold boundary (Invariant 14)
@@ -375,28 +395,27 @@ class TestHnswBoundary:
 
 class TestFeatureFlag:
     def test_rust_disabled_via_env(self, monkeypatch, tmp_path):
-        """CHUNKHOUND_USE_RUST=0 must make RustWriterBridge.available() return False."""
+        """CHUNKHOUND_USE_RUST=0 must make RustWriterBridge.available() return False.
+
+        _get_use_rust() is evaluated at instantiation time, so monkeypatching the
+        env var before constructing the bridge is sufficient — no module reload needed.
+        """
         monkeypatch.setenv("CHUNKHOUND_USE_RUST", "0")
 
-        import chunkhound.services.pipeline_bridge as bridge
-        importlib.reload(bridge)
+        from chunkhound.services.pipeline_bridge import RustWriterBridge
 
-        b = bridge.RustWriterBridge(
+        b = RustWriterBridge(
             {"db_path": str(tmp_path / "t.duckdb"), "compaction_batch_threshold": 50}
         )
         assert b.available() is False
-
-        # restore module state so other tests are not affected
-        importlib.reload(bridge)
 
     def test_rust_enabled_by_default_when_native_present(self, monkeypatch, tmp_path):
         """With native extension installed and no override, bridge must be available."""
         monkeypatch.delenv("CHUNKHOUND_USE_RUST", raising=False)
 
-        import chunkhound.services.pipeline_bridge as bridge
-        importlib.reload(bridge)
+        from chunkhound.services.pipeline_bridge import RustWriterBridge
 
-        b = bridge.RustWriterBridge(
+        b = RustWriterBridge(
             {"db_path": str(tmp_path / "t.duckdb"), "compaction_batch_threshold": 50}
         )
         # available() iff native extension is importable AND CHUNKHOUND_USE_RUST != "0"
@@ -410,5 +429,3 @@ class TestFeatureFlag:
 
         if b.available():
             b.finalize()
-
-        importlib.reload(bridge)

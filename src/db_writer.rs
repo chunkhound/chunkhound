@@ -112,14 +112,14 @@ impl RustDbWriter {
 
     fn open(&self, py: Python<'_>) -> PyResult<()> {
         py.allow_threads(|| {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.backend.open().map_err(PyErr::from)
         })
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         py.allow_threads(|| {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.backend.close().map_err(PyErr::from)
         })
     }
@@ -132,7 +132,7 @@ impl RustDbWriter {
 
         // Release GIL for the heavy DB work.
         let result = py.allow_threads(|| {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.backend.write_batch(&batch)
         });
 
@@ -145,14 +145,16 @@ impl RustDbWriter {
         Ok(dict.into())
     }
 
-    fn needs_compaction(&self) -> PyResult<bool> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.backend.needs_compaction().map_err(PyErr::from)
+    fn needs_compaction(&self, py: Python<'_>) -> PyResult<bool> {
+        py.allow_threads(|| {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.backend.needs_compaction().map_err(PyErr::from)
+        })
     }
 
     fn run_compaction(&self, py: Python<'_>) -> PyResult<()> {
         py.allow_threads(|| {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.backend.run_compaction()
         })
         .map_err(PyErr::from)
@@ -160,14 +162,14 @@ impl RustDbWriter {
 
     fn drop_all_hnsw_indexes(&self, py: Python<'_>) -> PyResult<()> {
         py.allow_threads(|| {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.backend.drop_all_hnsw_indexes().map_err(PyErr::from)
         })
     }
 
     fn ensure_all_hnsw_indexes(&self, py: Python<'_>) -> PyResult<()> {
         py.allow_threads(|| {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.backend.ensure_all_hnsw_indexes()
         })
         .map_err(PyErr::from)
