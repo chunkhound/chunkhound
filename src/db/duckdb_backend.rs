@@ -504,7 +504,9 @@ impl DuckDbHnswBackend {
                 );
                 for (table_name, _dims) in &emb_tables {
                     conn.execute(
-                        &format!("DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"),
+                        &format!(
+                            "DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"
+                        ),
                         duckdb::params_from_iter(params.clone()),
                     )?;
                 }
@@ -666,10 +668,7 @@ impl DuckDbHnswBackend {
     // for the embedding insert step that follows in the same transaction.
     // Pre-deletes for upserted files are handled by pre_delete_for_upsert (called
     // before BEGIN to avoid DuckDB's intra-transaction FK check limitation).
-    fn write_batch_inner(
-        conn: &Connection,
-        batch: &DbWriterBatch,
-    ) -> Result<BatchInner, DbError> {
+    fn write_batch_inner(conn: &Connection, batch: &DbWriterBatch) -> Result<BatchInner, DbError> {
         // Upsert files → collect file_ids
         let mut file_ids = Vec::with_capacity(batch.files.len());
         for file in &batch.files {
@@ -818,7 +817,10 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // Cache the index DDL after first successful discovery to skip the
         // catalog query on every subsequent batch.
         let hnsw_indexes = {
-            let conn = self.conn.as_ref().ok_or_else(|| DbError::Other("not open".into()))?;
+            let conn = self
+                .conn
+                .as_ref()
+                .ok_or_else(|| DbError::Other("not open".into()))?;
             if !self.hnsw_bulk_mode && self.has_vss && total_emb >= 50 {
                 let indexes = match &self.hnsw_cache {
                     Some(cached) => cached.clone(),

@@ -24,7 +24,6 @@ pub struct DbConfig {
     pub compaction_batch_threshold: u32,
 }
 
-
 pub fn create_backend(cfg: DbConfig) -> Box<dyn DbBackend> {
     Box::new(DuckDbHnswBackend::new(cfg))
 }

@@ -99,10 +99,14 @@ impl RustDbWriter {
     #[new]
     fn new(db_config: &Bound<'_, PyDict>) -> PyResult<Self> {
         let db_path: String = extract_req(db_config, "db_path")?;
-        let compaction_batch_threshold: u32 = extract_opt::<u64>(db_config, "compaction_batch_threshold")?
-            .map(|v| v as u32)
-            .unwrap_or(50);
-        let config = DbConfig { db_path, compaction_batch_threshold };
+        let compaction_batch_threshold: u32 =
+            extract_opt::<u64>(db_config, "compaction_batch_threshold")?
+                .map(|v| v as u32)
+                .unwrap_or(50);
+        let config = DbConfig {
+            db_path,
+            compaction_batch_threshold,
+        };
         let backend = create_backend(config);
         Ok(RustDbWriter {
             inner: Mutex::new(WriterInner { backend }),
