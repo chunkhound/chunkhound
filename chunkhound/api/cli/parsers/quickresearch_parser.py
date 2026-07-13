@@ -49,8 +49,9 @@ def add_quickresearch_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
-    # Internal-only: populated by the websearch subprocess when chaining. Not
-    # advertised — no help text, kept out of user-facing surfaces.
+    # `_quickresearch` is hidden, so this flag has no help text — user-visible
+    # `--previous-query` lives on `chunkhound websearch` and `chunkhound research`.
+    # Populated here only by the websearch subprocess when chaining.
     p.add_argument(
         "--previous-query",
         default=None,
