@@ -477,6 +477,13 @@ async def test_cli_debug_log_redacts_prompt(mock_subprocess):
 
 @pytest.mark.asyncio
 async def test_cli_complete_failure(mock_subprocess):
+    """A nonzero exit surfaces a curated error, never the CLI's raw output.
+
+    The stderr can echo the piped prompt, source snippets, and paths (only
+    token-shaped secrets are redacted). It must not reach the user-visible
+    RuntimeError or the default-level log; the sanitized detail is available
+    only at debug level.
+    """
     provider = AntigravityCLIProvider(model="gemini-3.5-flash")
 
     mock_process = AsyncMock()
@@ -488,10 +495,27 @@ async def test_cli_complete_failure(mock_subprocess):
     )
     mock_subprocess.return_value = mock_process
 
-    with pytest.raises(
-        RuntimeError, match="Authentication failed: api_key=\\[REDACTED\\]"
+    with (
+        patch(
+            "chunkhound.providers.llm.antigravity_cli_provider.logger.debug"
+        ) as mock_debug,
+        pytest.raises(RuntimeError) as excinfo,
     ):
         await provider.complete("CLI prompt")
+
+    # User-visible error: exit code only, no CLI output / secrets.
+    message = str(excinfo.value)
+    assert message == "Antigravity CLI command failed (exit code 1)"
+    assert "secret_1234567890" not in message
+    assert "api_key" not in message
+
+    # The stderr detail is available only at debug, with token-shaped secrets
+    # redacted by the shared sanitizer.
+    logged = " ".join(
+        str(call.args[0]) for call in mock_debug.call_args_list if call.args
+    )
+    assert "api_key=[REDACTED]" in logged
+    assert "secret_1234567890" not in logged
 
 
 @pytest.mark.asyncio
@@ -643,6 +667,19 @@ async def test_sdk_hung_teardown_returns_control(mock_antigravity_agent):
     # request_timeout (0.3) + grace (0.3) with headroom; must NOT wait the full
     # 3s teardown before returning control to the caller.
     assert elapsed < 2, f"hung teardown was not abandoned within grace ({elapsed}s)"
+
+    # The still-running teardown must be RETAINED (owned by the provider), not
+    # silently orphaned: it stays tracked while it runs past the grace window.
+    assert len(provider._abandoned_teardowns) == 1
+
+    # Once the stuck __aexit__ finally releases (~3s), the done-callback drains
+    # the tracked task, so the provider does not leak the reference forever.
+    drain_deadline = loop.time() + 5.0
+    while provider._abandoned_teardowns and loop.time() < drain_deadline:
+        await asyncio.sleep(0.1)
+    assert not provider._abandoned_teardowns, (
+        "abandoned teardown task was never drained after teardown completed"
+    )
 
 
 @pytest.mark.asyncio

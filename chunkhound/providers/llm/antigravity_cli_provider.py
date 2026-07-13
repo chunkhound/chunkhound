@@ -162,15 +162,23 @@ class AntigravityCLIProvider(BaseCLIProvider):
             )
 
             if process.returncode != 0:
-                raw_err = (
-                    (stderr or stdout or b"").decode("utf-8", errors="ignore").strip()
-                )
-                sanitized_err = sanitize_error_text(raw_err)
+                # Keep raw CLI output OUT of user-facing errors and default-level
+                # logs. It can echo the piped prompt, source snippets, and file
+                # paths, and sanitize_error_text() only redacts token-shaped
+                # secrets. Decode stderr only (never stdout, which carries model
+                # output), surface it at debug for troubleshooting, and raise a
+                # curated exit-code-only message.
+                raw_err = (stderr or b"").decode("utf-8", errors="ignore").strip()
+                if raw_err:
+                    logger.debug(
+                        f"Antigravity CLI stderr: {sanitize_error_text(raw_err)}"
+                    )
                 logger.error(
-                    "Antigravity CLI command failed "
-                    f"(exit code {process.returncode}): {sanitized_err}"
+                    f"Antigravity CLI command failed (exit code {process.returncode})"
                 )
-                raise RuntimeError(sanitized_err or f"Exit code {process.returncode}")
+                raise RuntimeError(
+                    f"Antigravity CLI command failed (exit code {process.returncode})"
+                )
 
             return stdout.decode("utf-8", errors="ignore")
 
@@ -192,7 +200,13 @@ class AntigravityCLIProvider(BaseCLIProvider):
             raise
         finally:
             try:
-                if process and process.returncode is None:
+                # Run process-tree cleanup regardless of exit code. If ``agy``
+                # exited (0 or nonzero) but left a background descendant alive,
+                # the process group is still live and must be reaped; guarding on
+                # ``returncode is None`` would skip that orphan. On the normal
+                # success path the Unix group kill hits an empty group and the
+                # ``ProcessLookupError`` is swallowed, so this is a no-op.
+                if process is not None:
                     await asyncio.shield(
                         self._kill_process_tree(
                             process, pgid=captured_process_pid, env=env
@@ -214,6 +228,14 @@ class AntigravityCLIProvider(BaseCLIProvider):
     ) -> None:
         """Terminate an antigravity subprocess and its descendants."""
         if sys.platform == "win32":
+            # No process group / job object is captured on Windows, so cleanup
+            # targets ``process.pid`` directly. Once the process has exited its
+            # PID may be reused, so reaping by PID after exit could kill an
+            # unrelated tree. Only reap while the process is still running
+            # (cancellation/timeout); orphan-after-clean-exit reaping is a
+            # documented Unix-only capability here.
+            if process.returncode is not None:
+                return
             taskkill_success = False
             try:
                 taskkill_path = shutil.which("taskkill") or "taskkill"

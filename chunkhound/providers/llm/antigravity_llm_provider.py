@@ -76,6 +76,11 @@ class AntigravityLLMProvider(LLMProvider):
         self._prompt_tokens = 0
         self._completion_tokens = 0
 
+        # Session tasks whose teardown ignored cancellation past the grace
+        # window. Retained (rather than silently dropped) so the provider keeps
+        # ownership of still-running Agent work instead of leaking it to the GC.
+        self._abandoned_teardowns: set[asyncio.Task[Any]] = set()
+
     @property
     def name(self) -> str:
         """Provider name."""
@@ -157,6 +162,25 @@ class AntigravityLLMProvider(LLMProvider):
             await asyncio.wait_for(
                 asyncio.shield(task), timeout=self.CLEANUP_GRACE_TIMEOUT
             )
+        if task.done():
+            # Teardown honored cancellation within the grace window. Drain the
+            # result/exception so it is not reported as "never retrieved".
+            with contextlib.suppress(BaseException):
+                task.result()
+            return
+        # Teardown ignored cancellation past the grace window. Retain ownership
+        # so the still-running session task is not silently orphaned or garbage
+        # collected mid-flight ("Task was destroyed but it is pending!"), and
+        # warn that local Agent work continues in the background while control
+        # returns to the caller. An uncooperative coroutine cannot be
+        # force-killed, so tracking + warning is the honest bound here.
+        self._abandoned_teardowns.add(task)
+        task.add_done_callback(self._abandoned_teardowns.discard)
+        logger.warning(
+            "Antigravity SDK session teardown exceeded the "
+            f"{self.CLEANUP_GRACE_TIMEOUT}s grace window; it continues in the "
+            "background while control returns to the caller."
+        )
 
     async def complete(
         self,

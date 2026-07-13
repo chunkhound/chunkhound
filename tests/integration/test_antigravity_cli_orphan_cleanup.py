@@ -93,3 +93,71 @@ async def test_antigravity_orphan_child_terminated_after_cancellation(
                 psutil.Process(child_pid).kill()
             except psutil.NoSuchProcess:
                 pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix process-group proof")
+@pytest.mark.asyncio
+async def test_antigravity_orphan_child_terminated_after_clean_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Fake agy backgrounds a child, writes a valid response, and exits 0.
+
+    Cleanup must still reap the lingering process-group member even though the
+    wrapper terminated cleanly (``returncode == 0``) — the scenario the previous
+    ``returncode is None`` guard skipped.
+    """
+    child_pid_file = tmp_path / "child_clean.pid"
+    fake_agy = tmp_path / "agy"
+    fake_agy.write_text(
+        textwrap.dedent(
+            f"""
+            #!{sys.executable}
+            import subprocess
+            import sys
+
+            # Detach the child's stdio so it does not hold agy's stdout/stderr
+            # pipes open; otherwise communicate() would block for EOF until the
+            # child exits (60s). A real daemonized orphan closes its fds too.
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            pid_file = "{child_pid_file.as_posix()}"
+            with open(pid_file, "w", encoding="utf-8") as handle:
+                handle.write(str(child.pid))
+                handle.flush()
+            sys.stdout.write("Antigravity OK response")
+            sys.stdout.flush()
+            sys.exit(0)
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    fake_agy.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    provider = AntigravityCLIProvider(
+        model="gemini-3.5-flash",
+        timeout=30,
+    )
+
+    # Clean exit 0: the call succeeds and returns the CLI stdout.
+    response = await provider.complete("prompt")
+    assert response.content
+
+    child_pid = await _wait_for_pid_file(child_pid_file)
+    try:
+        await _wait_until_pid_gone(child_pid)
+    finally:
+        if psutil.pid_exists(child_pid):
+            try:
+                psutil.Process(child_pid).kill()
+            except psutil.NoSuchProcess:
+                pass
