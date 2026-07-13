@@ -388,6 +388,68 @@ class TestHnswBoundary:
         assert result["embeddings_written"] == 50
         assert _count(db, "embeddings_128") == 50
 
+    def test_new_dims_mid_session_gets_hnsw(self, tmp_path):
+        """A second embedding dimension introduced mid-session must get its HNSW index.
+
+        Regression for the hnsw_cache staleness bug: once the cache is primed for
+        dims=128, a batch with a new dims=64 must (a) invalidate the cache so Step 2
+        rediscovers all indexes next time, and (b) create an HNSW index for
+        embeddings_64 after the commit via Step 5+.  Without the fix, embeddings_64
+        would never receive an HNSW index and queries would fall back to a table scan.
+        """
+        db = str(tmp_path / "t.duckdb")
+        w = _make_writer(db)
+        w.open()
+
+        # Batch 1: 50 × 128-dim — above threshold, HNSW lifecycle fires, cache primed.
+        files1 = [_file(f"a{i}.py", chunks=[_chunk(dims=128)]) for i in range(50)]
+        r1 = w.write_batch(_batch(files=files1))
+
+        # Batch 2: 50 × 64-dim — new dimension; writer must invalidate cache and
+        # create an HNSW index for embeddings_64 after committing.
+        files2 = [_file(f"b{i}.py", chunks=[_chunk(dims=64)]) for i in range(50)]
+        r2 = w.write_batch(_batch(files=files2))
+
+        # Batch 3: another 50 × 64-dim — exercises the normal per-batch HNSW cycle
+        # for the newly-indexed dimension (drop existing idx_hnsw_64, write, recreate).
+        files3 = [_file(f"c{i}.py", chunks=[_chunk(dims=64)]) for i in range(50)]
+        r3 = w.write_batch(_batch(files=files3))
+
+        w.close()
+
+        assert r1["embeddings_written"] == 50
+        assert r2["embeddings_written"] == 50
+        assert r3["embeddings_written"] == 50
+        assert _count(db, "embeddings_128") == 50
+        assert _count(db, "embeddings_64") == 100
+
+        # When VSS is available verify both tables have an HNSW index.
+        conn = duckdb.connect(db)
+        try:
+            try:
+                conn.execute("LOAD vss")
+                has_vss = True
+            except Exception:
+                has_vss = False
+
+            if has_vss:
+                rows = conn.execute(
+                    "SELECT table_name, index_name FROM duckdb_indexes() "
+                    "WHERE table_name SIMILAR TO 'embeddings_[0-9]+' "
+                    "AND schema_name = 'main'"
+                ).fetchall()
+                tables_with_hnsw = {
+                    r[0] for r in rows if "hnsw" in r[1].lower()
+                }
+                assert "embeddings_128" in tables_with_hnsw, (
+                    f"HNSW missing for embeddings_128: {rows}"
+                )
+                assert "embeddings_64" in tables_with_hnsw, (
+                    f"HNSW missing for embeddings_64 (cache staleness regression): {rows}"
+                )
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Feature flag (pipeline_bridge)

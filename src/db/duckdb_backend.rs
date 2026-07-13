@@ -14,6 +14,10 @@ pub struct DuckDbHnswBackend {
     has_vss: bool,
     hnsw_cache: Option<Vec<HnswIndexInfo>>,
     hnsw_bulk_mode: bool,
+    // Dims for which embeddings_N tables are known to exist in this session.
+    // Used to detect new dimensions mid-session so the HNSW cache can be
+    // invalidated and a fresh HNSW index created after the first commit.
+    known_dims: HashSet<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +36,7 @@ impl DuckDbHnswBackend {
             has_vss: false,
             hnsw_cache: None,
             hnsw_bulk_mode: false,
+            known_dims: HashSet::new(),
         }
     }
 
@@ -180,12 +185,7 @@ impl DuckDbHnswBackend {
             .files
             .iter()
             .flat_map(|f| &f.chunks)
-            .filter(|c| {
-                c.embedding
-                    .as_ref()
-                    .map(|e| !e.is_empty())
-                    .unwrap_or(false)
-            })
+            .filter(|c| c.embedding.as_ref().map(|e| !e.is_empty()).unwrap_or(false))
             .count()
     }
 
@@ -218,7 +218,9 @@ impl DuckDbHnswBackend {
         // even if those children were deleted earlier in the same transaction.
         // Work around by doing an explicit SELECT then UPDATE-or-INSERT.
         let existing_id: Option<i64> = conn
-            .query_row("SELECT id FROM files WHERE path = ?", [&file.path], |r| r.get(0))
+            .query_row("SELECT id FROM files WHERE path = ?", [&file.path], |r| {
+                r.get(0)
+            })
             .ok();
 
         if let Some(id) = existing_id {
@@ -277,8 +279,7 @@ impl DuckDbHnswBackend {
         // Mirrors the same pattern used in insert_embeddings_txn.
         const CHUNK_INSERT_BATCH: usize = 100;
         for chunk_slice in chunks.chunks(CHUNK_INSERT_BATCH) {
-            let row_ph = std::iter::repeat("(?,?,?,?,?,?,?,?,?,?)")
-                .take(chunk_slice.len())
+            let row_ph = std::iter::repeat_n("(?,?,?,?,?,?,?,?,?,?)", chunk_slice.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
@@ -286,40 +287,55 @@ impl DuckDbHnswBackend {
                  (file_id, chunk_type, symbol, code, start_line, end_line, \
                   start_byte, end_byte, language, metadata) VALUES {row_ph}"
             );
-            let mut params: Vec<duckdb::types::Value> =
-                Vec::with_capacity(chunk_slice.len() * 10);
+            let mut params: Vec<duckdb::types::Value> = Vec::with_capacity(chunk_slice.len() * 10);
             for chunk in chunk_slice {
                 params.push(duckdb::types::Value::BigInt(file_id));
                 params.push(duckdb::types::Value::Text(chunk.chunk_type.clone()));
-                params.push(chunk.symbol.as_deref().map_or(
-                    duckdb::types::Value::Null,
-                    |s| duckdb::types::Value::Text(s.to_string()),
-                ));
+                params.push(
+                    chunk
+                        .symbol
+                        .as_deref()
+                        .map_or(duckdb::types::Value::Null, |s| {
+                            duckdb::types::Value::Text(s.to_string())
+                        }),
+                );
                 params.push(duckdb::types::Value::Text(chunk.code.clone()));
-                params.push(chunk.start_line.map_or(
-                    duckdb::types::Value::Null,
-                    duckdb::types::Value::BigInt,
-                ));
-                params.push(chunk.end_line.map_or(
-                    duckdb::types::Value::Null,
-                    duckdb::types::Value::BigInt,
-                ));
-                params.push(chunk.start_byte.map_or(
-                    duckdb::types::Value::Null,
-                    duckdb::types::Value::BigInt,
-                ));
-                params.push(chunk.end_byte.map_or(
-                    duckdb::types::Value::Null,
-                    duckdb::types::Value::BigInt,
-                ));
-                params.push(chunk.language.as_deref().map_or(
-                    duckdb::types::Value::Null,
-                    |s| duckdb::types::Value::Text(s.to_string()),
-                ));
-                params.push(chunk.metadata.as_deref().map_or(
-                    duckdb::types::Value::Null,
-                    |s| duckdb::types::Value::Text(s.to_string()),
-                ));
+                params.push(
+                    chunk
+                        .start_line
+                        .map_or(duckdb::types::Value::Null, duckdb::types::Value::BigInt),
+                );
+                params.push(
+                    chunk
+                        .end_line
+                        .map_or(duckdb::types::Value::Null, duckdb::types::Value::BigInt),
+                );
+                params.push(
+                    chunk
+                        .start_byte
+                        .map_or(duckdb::types::Value::Null, duckdb::types::Value::BigInt),
+                );
+                params.push(
+                    chunk
+                        .end_byte
+                        .map_or(duckdb::types::Value::Null, duckdb::types::Value::BigInt),
+                );
+                params.push(
+                    chunk
+                        .language
+                        .as_deref()
+                        .map_or(duckdb::types::Value::Null, |s| {
+                            duckdb::types::Value::Text(s.to_string())
+                        }),
+                );
+                params.push(
+                    chunk
+                        .metadata
+                        .as_deref()
+                        .map_or(duckdb::types::Value::Null, |s| {
+                            duckdb::types::Value::Text(s.to_string())
+                        }),
+                );
             }
             conn.execute(&sql, duckdb::params_from_iter(params))?;
         }
@@ -383,8 +399,7 @@ impl DuckDbHnswBackend {
             // Batch 100 rows per INSERT to cut SQL round-trips ~100×.
             const EMBED_INSERT_BATCH: usize = 100;
             for chunk_slice in items.chunks(EMBED_INSERT_BATCH) {
-                let row_ph = std::iter::repeat("(?,?,?,?,?)")
-                    .take(chunk_slice.len())
+                let row_ph = std::iter::repeat_n("(?,?,?,?,?)", chunk_slice.len())
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
@@ -393,7 +408,9 @@ impl DuckDbHnswBackend {
                 let mut params: Vec<duckdb::types::Value> =
                     Vec::with_capacity(chunk_slice.len() * 5);
                 for (chunk_id, chunk) in chunk_slice.iter() {
-                    let emb = chunk.embedding.as_ref().expect("embedding is Some: only chunks with Some(emb) are in embedding_pairs");
+                    let emb = chunk.embedding.as_ref().expect(
+                        "embedding is Some: only chunks with Some(emb) are in embedding_pairs",
+                    );
                     let emb_json = serde_json::to_string(emb).map_err(DbError::Json)?;
                     params.push(duckdb::types::Value::BigInt(*chunk_id));
                     params.push(duckdb::types::Value::Text(
@@ -436,8 +453,7 @@ impl DuckDbHnswBackend {
         let emb_tables = Self::discover_embedding_tables(conn)?;
         const DELETE_BATCH: usize = 500;
         for batch in paths.chunks(DELETE_BATCH) {
-            let ph = std::iter::repeat("?")
-                .take(batch.len())
+            let ph = std::iter::repeat_n("?", batch.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let params: Vec<duckdb::types::Value> = batch
@@ -451,9 +467,7 @@ impl DuckDbHnswBackend {
             );
             for (table_name, _dims) in &emb_tables {
                 conn.execute(
-                    &format!(
-                        "DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"
-                    ),
+                    &format!("DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"),
                     duckdb::params_from_iter(params.clone()),
                 )?;
             }
@@ -489,6 +503,8 @@ impl DuckDbHnswBackend {
         Ok(result)
     }
 
+    // (file_ids, chunks_written, embedding_pairs: (chunk_id, file_idx, chunk_idx))
+    #[allow(clippy::type_complexity)]
     fn write_batch_txn(
         conn: &Connection,
         batch: &DbWriterBatch,
@@ -513,8 +529,7 @@ impl DuckDbHnswBackend {
             .collect();
 
         if !by_id.is_empty() {
-            let ph = std::iter::repeat("?")
-                .take(by_id.len())
+            let ph = std::iter::repeat_n("?", by_id.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let params: Vec<duckdb::types::Value> = by_id
@@ -537,8 +552,7 @@ impl DuckDbHnswBackend {
         }
 
         if !by_path.is_empty() {
-            let ph = std::iter::repeat("?")
-                .take(by_path.len())
+            let ph = std::iter::repeat_n("?", by_path.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let params: Vec<duckdb::types::Value> = by_path
@@ -551,9 +565,7 @@ impl DuckDbHnswBackend {
             );
             for (table_name, _dims) in &emb_tables {
                 conn.execute(
-                    &format!(
-                        "DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"
-                    ),
+                    &format!("DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"),
                     duckdb::params_from_iter(params.clone()),
                 )?;
             }
@@ -625,9 +637,15 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             }
         }
 
+        self.known_dims.clear();
         let conn = Connection::open(&self.config.db_path)?;
         self.has_vss = Self::try_load_vss(&conn);
         Self::setup_schema(&conn)?;
+        // Prime known_dims from tables that already exist so the first batch
+        // with an existing dimension does not trigger a spurious cache invalidation.
+        let existing = Self::discover_embedding_tables(&conn)?;
+        self.known_dims
+            .extend(existing.into_iter().map(|(_, dims)| dims));
         self.conn = Some(conn);
         Ok(())
     }
@@ -654,8 +672,13 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             Self::delete_paths(conn, &batch.delete_paths)?;
         }
 
-        // Step 0b: Ensure embedding tables outside txn (Invariant 13)
+        // Step 0b: Ensure embedding tables outside txn (Invariant 13).
+        // Track which dims are genuinely new so we can (a) invalidate the stale
+        // HNSW cache and (b) create a fresh HNSW index for the new table after
+        // the commit (Step 5+).  The per-batch bookend only manages EXISTING
+        // indexes, so a brand-new embeddings_N table would never get one otherwise.
         let unique_dims = Self::collect_unique_dims(batch);
+        let new_dims: Vec<u32> = unique_dims.difference(&self.known_dims).copied().collect();
         {
             let conn = self
                 .conn
@@ -664,6 +687,11 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             for &dims in &unique_dims {
                 Self::ensure_embedding_table_dims(conn, dims)?;
             }
+        }
+        self.known_dims.extend(unique_dims.iter().copied());
+        if !new_dims.is_empty() {
+            // The cached HNSW snapshot predates the new table(s) — force rediscovery.
+            self.hnsw_cache = None;
         }
 
         // Step 1: Count embeddings to decide HNSW lifecycle
@@ -720,7 +748,10 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         // Step 3e: Insert embeddings (still inside txn)
         let embeddings_written = {
-            let conn = self.conn.as_ref().expect("conn is Some: open() succeeded and BEGIN passed");
+            let conn = self
+                .conn
+                .as_ref()
+                .expect("conn is Some: open() succeeded and BEGIN passed");
             match Self::insert_embeddings_txn(conn, batch, &embedding_pairs) {
                 Ok(n) => n,
                 Err(e) => {
@@ -735,7 +766,10 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         // Step 4: COMMIT
         {
-            let conn = self.conn.as_ref().expect("conn is Some: open() succeeded and BEGIN passed");
+            let conn = self
+                .conn
+                .as_ref()
+                .expect("conn is Some: open() succeeded and BEGIN passed");
             if let Err(e) = conn.execute_batch("COMMIT") {
                 let _ = conn.execute_batch("ROLLBACK");
                 if !hnsw_indexes.is_empty() {
@@ -747,8 +781,30 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         // Step 5: RECREATE HNSW AFTER COMMIT (Invariant 14)
         if !hnsw_indexes.is_empty() {
-            let conn = self.conn.as_ref().expect("conn is Some: open() succeeded and COMMIT passed");
+            let conn = self
+                .conn
+                .as_ref()
+                .expect("conn is Some: open() succeeded and COMMIT passed");
             Self::recreate_hnsw_indexes(conn, &hnsw_indexes)?;
+        }
+
+        // Step 5+: Create HNSW indexes for newly-introduced embedding dimensions.
+        // The bookend above only recreates indexes that existed before Step 2's drop;
+        // a brand-new embeddings_N table has no HNSW yet.  Create it now so that
+        // subsequent batches can manage it through the normal drop/recreate cycle.
+        // hnsw_cache was already invalidated in Step 0b, so the next batch rediscovers.
+        if !new_dims.is_empty() && self.has_vss {
+            let conn = self
+                .conn
+                .as_ref()
+                .expect("conn is Some: open() succeeded and COMMIT passed");
+            for &dims in &new_dims {
+                let hnsw_name = format!("idx_hnsw_{dims}");
+                let table = format!("embeddings_{dims}");
+                conn.execute_batch(&format!(
+                    "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"{table}\" USING HNSW (embedding) WITH (metric = 'cosine')"
+                ))?;
+            }
         }
 
         self.write_count += 1;

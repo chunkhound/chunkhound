@@ -89,7 +89,10 @@ fn extract_batch(batch: &Bound<'_, PyAny>) -> PyResult<DbWriterBatch> {
         });
     }
 
-    Ok(DbWriterBatch { files, delete_paths })
+    Ok(DbWriterBatch {
+        files,
+        delete_paths,
+    })
 }
 
 #[pymethods]
@@ -98,11 +101,8 @@ impl RustDbWriter {
     fn new(db_config: &Bound<'_, PyDict>) -> PyResult<Self> {
         // Config dict is small and called once — JSON round-trip is acceptable here.
         let json_module = db_config.py().import_bound("json")?;
-        let json_str: String = json_module
-            .call_method1("dumps", (db_config,))?
-            .extract()?;
-        let json_val: serde_json::Value =
-            serde_json::from_str(&json_str).map_err(|e| DbError::Json(e))?;
+        let json_str: String = json_module.call_method1("dumps", (db_config,))?.extract()?;
+        let json_val: serde_json::Value = serde_json::from_str(&json_str).map_err(DbError::Json)?;
         let config = DbConfig::from_json_value(&json_val).map_err(PyErr::from)?;
         let backend = create_backend(config);
         Ok(RustDbWriter {

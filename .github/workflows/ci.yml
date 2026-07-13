@@ -133,8 +133,22 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # Separate cache for the precompiled DuckDB zip so a Cargo.lock bump
+      # (for an unrelated crate) doesn't force a re-download.  Key on the
+      # DuckDB version embedded in Cargo.lock — changes only when duckdb-rs
+      # itself is upgraded.
+      - name: Cache DuckDB precompiled library
+        if: hashFiles('Cargo.toml') != ''
+        uses: actions/cache@v4
+        with:
+          path: target/duckdb-download/
+          key: ${{ runner.os }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-duckdb-
+
       - name: Build Rust extension (maturin develop)
         if: hashFiles('Cargo.toml') != ''
+        env:
+          DUCKDB_DOWNLOAD_LIB: "1"
         run: |
           uv pip install maturin
           uv run maturin develop
@@ -145,10 +159,14 @@ jobs:
 
       - name: Clippy (Rust lints)
         if: hashFiles('Cargo.toml') != ''
+        env:
+          DUCKDB_DOWNLOAD_LIB: "1"
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run Rust unit tests
         if: hashFiles('Cargo.toml') != ''
+        env:
+          DUCKDB_DOWNLOAD_LIB: "1"
         run: cargo test
 
       - name: Test collection check
