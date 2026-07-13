@@ -82,6 +82,7 @@ INSTRUCTIONS_BASELINE = """<INSTRUCTIONS>
    - If it's a natural language question, extract key search terms
    - If it's a keyword dump, organize into coherent phrase
    - Keep quoted phrases, technical terms and specific brands intact
+
 2. Generate comprehensive search variations
 3. Add temporal markers where appropriate
 
@@ -90,15 +91,13 @@ IMPORTANT: Always generate EXACTLY 3 queries - no more, no less.
 
 
 INSTRUCTIONS_FOLLOWUP = """<INSTRUCTIONS>
-For all queries:
 1. First, produce the normalized query for DuckDuckGo (return in `search_query`):
    - If it's a natural language question, extract key search terms
    - If it's a keyword dump, organize into coherent phrase
    - Keep quoted phrases, technical terms and specific brands intact
 
-When previous_query exists:
-2. Identify the domain/technology from previous query (e.g., "React hooks" → React domain)
-3. Extract the NEW aspect from current query (e.g., "performance optimization")
+2. Identify the domain/technology from the previous query (e.g., "React hooks" → React domain)
+3. Extract the NEW aspect from the current query (e.g., "performance optimization")
 4. Generate queries that combine: [domain context] + [new aspect]
 5. AVOID repeating the exact previous query terms
 6. Keep domain awareness but explore the new dimension
