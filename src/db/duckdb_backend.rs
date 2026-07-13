@@ -100,7 +100,7 @@ impl DuckDbHnswBackend {
         let table = format!("embeddings_{dims}");
         conn.execute_batch(&format!(
             "
-            CREATE TABLE IF NOT EXISTS {table} (
+            CREATE TABLE IF NOT EXISTS \"{table}\" (
                 id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
                 chunk_id INTEGER NOT NULL,
                 provider TEXT NOT NULL,
@@ -110,7 +110,7 @@ impl DuckDbHnswBackend {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
-            ON {table} (chunk_id, provider, model);
+            ON \"{table}\" (chunk_id, provider, model);
         "
         ))?;
         Ok(())
@@ -427,7 +427,7 @@ impl DuckDbHnswBackend {
 
             let rows = conn.execute(
                 &format!(
-                    "INSERT INTO {table} (chunk_id, provider, model, embedding, dims)
+                    "INSERT INTO \"{table}\" (chunk_id, provider, model, embedding, dims)
                      SELECT chunk_id, provider, model, embedding::FLOAT[{dims}], dims
                      FROM {temp}
                      ON CONFLICT (chunk_id, provider, model) DO UPDATE
@@ -514,6 +514,8 @@ impl DuckDbHnswBackend {
         // before chunks to avoid ghost rows on re-index (CF-2).
         // Split files into those with a known file_id (by_id) and path-only (by_path);
         // each group is cleared with 2 statements rather than 2 × N.
+        // TODO(Phase 1): pass known emb_tables in from the caller instead of re-querying
+        // the catalog on every batch inside the transaction.
         let emb_tables = Self::discover_embedding_tables(conn)?;
 
         let by_id: Vec<i64> = batch
@@ -820,8 +822,8 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn run_compaction(&mut self) -> Result<(), DbError> {
-        // Phase 0 compaction: simple CHECKPOINT + VACUUM equivalent via EXPORT/IMPORT
-        // Full 3-phase atomic swap deferred; for now just CHECKPOINT.
+        // Phase 0: CHECKPOINT only.
+        // TODO(Phase 1): replace with full 3-phase atomic EXPORT/IMPORT swap.
         let conn = self
             .conn
             .as_ref()

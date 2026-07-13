@@ -24,7 +24,12 @@ def _get_use_rust() -> bool:
 
 
 class RustWriterBridge:
-    """Thin shim that routes writes to RustDbWriter when available."""
+    """Thin shim that routes writes to RustDbWriter when available.
+
+    Phase 0 (current): class exists, Rust extension is exercised by tests.
+    Phase 1 (TODO): wire this into IndexingCoordinator to replace Python DB
+    writes — see the db_writter branch for the implementation plan.
+    """
 
     def __init__(self, db_config: dict) -> None:
         self._writer = None
@@ -64,11 +69,11 @@ class RustWriterBridge:
         self._writer.run_compaction()
 
     def drop_all_hnsw_indexes(self) -> None:
-        if self._writer is not None and hasattr(self._writer, "drop_all_hnsw_indexes"):
+        if self._writer is not None:
             self._writer.drop_all_hnsw_indexes()
 
     def ensure_all_hnsw_indexes(self) -> None:
-        if self._writer is not None and hasattr(self._writer, "ensure_all_hnsw_indexes"):
+        if self._writer is not None:
             self._writer.ensure_all_hnsw_indexes()
 
     def finalize(self) -> None:
