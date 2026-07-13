@@ -69,10 +69,12 @@ class RustWriterBridge:
         self._writer.run_compaction()
 
     def drop_all_hnsw_indexes(self) -> None:
+        """No-op when unavailable — callers use as an optional bulk-mode hint."""
         if self._writer is not None:
             self._writer.drop_all_hnsw_indexes()
 
     def ensure_all_hnsw_indexes(self) -> None:
+        """No-op when unavailable — callers use as an optional bulk-mode hint."""
         if self._writer is not None:
             self._writer.ensure_all_hnsw_indexes()
 

@@ -75,7 +75,10 @@ impl DuckDbHnswBackend {
             );
             CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq START 1;
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
+            CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
             CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
+            CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(chunk_type);
+            CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol);
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -98,6 +101,14 @@ impl DuckDbHnswBackend {
 
     fn ensure_embedding_table_dims(conn: &Connection, dims: u32) -> Result<(), DbError> {
         let table = format!("embeddings_{dims}");
+        // Legacy compat: the 1536-dimension chunk_id index was originally named
+        // idx_embeddings_1536_chunk_id; newer dimensions use idx_{dims}_chunk_id.
+        // Mirrors schema_constants._embedding_chunk_id_index_name in Python.
+        let chunk_id_idx = if dims == 1536 {
+            format!("idx_embeddings_{dims}_chunk_id")
+        } else {
+            format!("idx_{dims}_chunk_id")
+        };
         conn.execute_batch(&format!(
             "
             CREATE TABLE IF NOT EXISTS \"{table}\" (
@@ -111,6 +122,10 @@ impl DuckDbHnswBackend {
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
             ON \"{table}\" (chunk_id, provider, model);
+            CREATE INDEX IF NOT EXISTS {chunk_id_idx}
+            ON \"{table}\" (chunk_id);
+            CREATE INDEX IF NOT EXISTS idx_{dims}_provider_model
+            ON \"{table}\" (provider, model);
         "
         ))?;
         Ok(())
@@ -504,6 +519,8 @@ impl DuckDbHnswBackend {
     }
 
     // (file_ids, chunks_written, embedding_pairs: (chunk_id, file_idx, chunk_idx))
+    // The tuple return avoids an intermediate struct for an internal helper that is only
+    // ever called once; extracting a named struct would add indirection with no clarity gain.
     #[allow(clippy::type_complexity)]
     fn write_batch_txn(
         conn: &Connection,
@@ -654,10 +671,16 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
     fn close(&mut self) -> Result<(), DbError> {
         if self.hnsw_bulk_mode {
-            let _ = self.ensure_all_hnsw_indexes();
+            if let Err(e) = self.ensure_all_hnsw_indexes() {
+                eprintln!(
+                    "chunkhound_native: warning: ensure_all_hnsw_indexes on close failed: {e}"
+                );
+            }
         }
         if let Some(conn) = self.conn.as_ref() {
-            let _ = conn.execute_batch("CHECKPOINT");
+            if let Err(e) = conn.execute_batch("CHECKPOINT") {
+                eprintln!("chunkhound_native: warning: CHECKPOINT on close failed: {e}");
+            }
         }
         self.conn = None;
         Ok(())
@@ -712,9 +735,9 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                     Some(cached) => cached.clone(),
                     None => {
                         let discovered = Self::discover_hnsw_indexes(conn)?;
-                        if !discovered.is_empty() {
-                            self.hnsw_cache = Some(discovered.clone());
-                        }
+                        // Cache even an empty result so subsequent batches don't
+                        // re-query the catalog when no HNSW indexes exist yet.
+                        self.hnsw_cache = Some(discovered.clone());
                         discovered
                     }
                 };
