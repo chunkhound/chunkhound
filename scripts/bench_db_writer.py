@@ -127,6 +127,8 @@ def determine_batch_size(files: list[dict]) -> int:
 from chunkhound.providers.database.duckdb.schema_constants import (
     _CHUNKS_TABLE_COLUMNS as _SC_CHUNKS_COLS,
     _FILES_TABLE_COLUMNS as _SC_FILES_COLS,
+    _embedding_table_columns as _sc_embedding_cols,
+    _embedding_unique_index_name as _sc_embedding_unique_idx,
 )
 
 _CREATE_SCHEMA = f"""
@@ -142,21 +144,13 @@ CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
 
 def _create_embedding_table(conn: Any, dims: int) -> None:
     table = f"embeddings_{dims}"
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {table} (
-            id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
-            chunk_id INTEGER NOT NULL,
-            provider TEXT NOT NULL,
-            model TEXT NOT NULL,
-            embedding FLOAT[{dims}],
-            dims INTEGER NOT NULL DEFAULT {dims},
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute(f"""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
-        ON {table} (chunk_id, provider, model)
-    """)
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {table} ({_sc_embedding_cols(dims)})"
+    )
+    conn.execute(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {_sc_embedding_unique_idx(dims)}"
+        f" ON {table} (chunk_id, provider, model)"
+    )
 
 
 # ---------------------------------------------------------------------------

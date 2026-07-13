@@ -464,7 +464,7 @@ class TestFeatureFlag:
         """
         monkeypatch.setenv("CHUNKHOUND_USE_RUST", "0")
 
-        from chunkhound.services.pipeline_bridge import RustWriterBridge
+        from chunkhound.providers.database.pipeline_bridge import RustWriterBridge
 
         b = RustWriterBridge(
             {"db_path": str(tmp_path / "t.duckdb"), "compaction_batch_threshold": 50}
@@ -475,7 +475,7 @@ class TestFeatureFlag:
         """With native extension installed and no override, bridge must be available."""
         monkeypatch.delenv("CHUNKHOUND_USE_RUST", raising=False)
 
-        from chunkhound.services.pipeline_bridge import RustWriterBridge
+        from chunkhound.providers.database.pipeline_bridge import RustWriterBridge
 
         b = RustWriterBridge(
             {"db_path": str(tmp_path / "t.duckdb"), "compaction_batch_threshold": 50}

@@ -5,7 +5,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::db::{create_backend, DbBackend, DbConfig};
-use crate::error::DbError;
 use crate::types::{ChunkRecord, DbWriterBatch, FileRecord};
 
 struct WriterInner {
@@ -99,11 +98,11 @@ fn extract_batch(batch: &Bound<'_, PyAny>) -> PyResult<DbWriterBatch> {
 impl RustDbWriter {
     #[new]
     fn new(db_config: &Bound<'_, PyDict>) -> PyResult<Self> {
-        // Config dict is small and called once — JSON round-trip is acceptable here.
-        let json_module = db_config.py().import_bound("json")?;
-        let json_str: String = json_module.call_method1("dumps", (db_config,))?.extract()?;
-        let json_val: serde_json::Value = serde_json::from_str(&json_str).map_err(DbError::Json)?;
-        let config = DbConfig::from_json_value(&json_val).map_err(PyErr::from)?;
+        let db_path: String = extract_req(db_config, "db_path")?;
+        let compaction_batch_threshold: u32 = extract_opt::<u64>(db_config, "compaction_batch_threshold")?
+            .map(|v| v as u32)
+            .unwrap_or(50);
+        let config = DbConfig { db_path, compaction_batch_threshold };
         let backend = create_backend(config);
         Ok(RustDbWriter {
             inner: Mutex::new(WriterInner { backend }),
@@ -147,7 +146,7 @@ impl RustDbWriter {
 
     fn needs_compaction(&self, py: Python<'_>) -> PyResult<bool> {
         py.allow_threads(|| {
-            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.backend.needs_compaction().map_err(PyErr::from)
         })
     }

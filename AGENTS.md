@@ -133,6 +133,19 @@ PyPI trusted publisher required for `release-rc.yml`:
 ```bash
 rust-check: make rust-check   # cargo fmt --check + clippy -D warnings
 rust-test:  make rust-test    # cargo test
+
+# Build the native extension (required before running tests that import chunkhound_native)
+#
+# CI (has internet): DUCKDB_DOWNLOAD_LIB=1 downloads the precompiled shared library from GitHub.
+#   DUCKDB_DOWNLOAD_LIB=1 uv run maturin develop
+#
+# Local (no internet / air-gapped): reuse the static library compiled by a prior release build.
+#   The .a lives under target/release/build/libduckdb-sys-*/out/libduckdb.a — find it with:
+#     find target/release/build -name "libduckdb.a" | head -1
+#   Then build against it (symlink gives libduckdb-sys the name it expects):
+#     OUT=$(find target/release/build -name "libduckdb.a" -printf "%h\n" | head -1)
+#     ln -sf "$OUT/libduckdb.a" "$OUT/libduckdb_static.a"
+#     DUCKDB_LIB_DIR="$OUT" DUCKDB_STATIC=1 uv run maturin develop --release
 ```
 
 ## PROJECT_MAINTENANCE

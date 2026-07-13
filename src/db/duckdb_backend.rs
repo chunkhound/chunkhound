@@ -27,6 +27,12 @@ struct HnswIndexInfo {
     create_sql: Option<String>,
 }
 
+struct BatchInner {
+    file_ids: Vec<i64>,
+    chunks_written: u64,
+    embedding_pairs: Vec<(i64, usize, usize)>,
+}
+
 impl DuckDbHnswBackend {
     pub fn new(config: DbConfig) -> Self {
         DuckDbHnswBackend {
@@ -38,6 +44,12 @@ impl DuckDbHnswBackend {
             hnsw_bulk_mode: false,
             known_dims: HashSet::new(),
         }
+    }
+
+    fn conn_or_err(&self) -> Result<&Connection, DbError> {
+        self.conn
+            .as_ref()
+            .ok_or_else(|| DbError::Other("not open".into()))
     }
 
     // SCHEMA PARITY: This DDL must stay in sync with the Python canonical source at
@@ -462,7 +474,7 @@ impl DuckDbHnswBackend {
     // delete_paths (explicit path removals from the caller) run outside the transaction
     // to avoid the DuckDB limitation where ON CONFLICT DO UPDATE on a FK parent row
     // is rejected inside an explicit transaction even after child rows are deleted.
-    // The pre-deletes inside write_batch_txn work because upsert_file uses an explicit
+    // The pre-deletes inside write_batch_inner work because upsert_file uses an explicit
     // SELECT + UPDATE/INSERT rather than ON CONFLICT DO UPDATE syntax.
     fn delete_paths(conn: &Connection, paths: &[String]) -> Result<(), DbError> {
         if paths.is_empty() {
@@ -522,14 +534,13 @@ impl DuckDbHnswBackend {
         Ok(result)
     }
 
-    // (file_ids, chunks_written, embedding_pairs: (chunk_id, file_idx, chunk_idx))
-    // The tuple return avoids an intermediate struct for an internal helper that is only
-    // ever called once; extracting a named struct would add indirection with no clarity gain.
-    #[allow(clippy::type_complexity)]
-    fn write_batch_txn(
+    // Runs inside an already-open BEGIN/COMMIT envelope managed by the caller.
+    // Handles pre-deletes, file upserts, and chunk inserts; returns intermediate
+    // state needed for the embedding insert step that follows in the same transaction.
+    fn write_batch_inner(
         conn: &Connection,
         batch: &DbWriterBatch,
-    ) -> Result<(Vec<i64>, u64, Vec<(i64, usize, usize)>), DbError> {
+    ) -> Result<BatchInner, DbError> {
         // PF-3: Batch pre-deletes — one IN-list per group instead of one statement per file.
         // embeddings_N tables have no FK cascade from chunks, so embeddings must be deleted
         // before chunks to avoid ghost rows on re-index (CF-2).
@@ -628,7 +639,11 @@ impl DuckDbHnswBackend {
             }
         }
 
-        Ok((file_ids, total_chunks, embedding_pairs))
+        Ok(BatchInner {
+            file_ids,
+            chunks_written: total_chunks,
+            embedding_pairs,
+        })
     }
 }
 
@@ -674,30 +689,38 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn close(&mut self) -> Result<(), DbError> {
+        // Collect the first error encountered but always drop the connection so the
+        // DB file is released even when cleanup steps fail.
+        let mut result: Result<(), DbError> = Ok(());
+
         if self.hnsw_bulk_mode {
             if let Err(e) = self.ensure_all_hnsw_indexes() {
-                eprintln!(
-                    "chunkhound_native: warning: ensure_all_hnsw_indexes on close failed: {e}"
-                );
+                result = Err(e);
             }
         }
         if let Some(conn) = self.conn.as_ref() {
             if let Err(e) = conn.execute_batch("CHECKPOINT") {
-                eprintln!("chunkhound_native: warning: CHECKPOINT on close failed: {e}");
+                if result.is_ok() {
+                    result = Err(DbError::DuckDb(e));
+                }
             }
         }
         self.conn = None;
-        Ok(())
+        result
     }
 
     fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
         // Step 0a: Handle delete_paths OUTSIDE transaction (Invariant: DuckDB rejects
-        // FK parent-row deletes inside an explicit transaction after child deletes)
+        // FK parent-row deletes inside an explicit transaction after child deletes).
+        //
+        // Atomicity gap: if the process crashes after delete_paths commits but before
+        // the write transaction below commits, the affected files are absent from the
+        // DB without their replacement rows.  Recovery is self-healing: on the next
+        // index run the indexer will find those paths missing from the DB and re-index
+        // them from disk — no manual intervention required.  Source files on disk are
+        // never touched, so no data is permanently lost.
         if !batch.delete_paths.is_empty() {
-            let conn = self
-                .conn
-                .as_ref()
-                .ok_or_else(|| DbError::Other("not open".into()))?;
+            let conn = self.conn_or_err()?;
             Self::delete_paths(conn, &batch.delete_paths)?;
         }
 
@@ -709,10 +732,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         let unique_dims = Self::collect_unique_dims(batch);
         let new_dims: Vec<u32> = unique_dims.difference(&self.known_dims).copied().collect();
         {
-            let conn = self
-                .conn
-                .as_ref()
-                .ok_or_else(|| DbError::Other("not open".into()))?;
+            let conn = self.conn_or_err()?;
             for &dims in &unique_dims {
                 Self::ensure_embedding_table_dims(conn, dims)?;
             }
@@ -730,10 +750,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // Cache the index DDL after first successful discovery to skip the
         // catalog query on every subsequent batch.
         let hnsw_indexes = {
-            let conn = self
-                .conn
-                .as_ref()
-                .ok_or_else(|| DbError::Other("not open".into()))?;
+            let conn = self.conn.as_ref().ok_or_else(|| DbError::Other("not open".into()))?;
             if !self.hnsw_bulk_mode && self.has_vss && total_emb >= 50 {
                 let indexes = match &self.hnsw_cache {
                     Some(cached) => cached.clone(),
@@ -755,14 +772,11 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         };
 
         // Step 3: Transaction
-        let (file_ids, chunks_written, embedding_pairs) = {
-            let conn = self
-                .conn
-                .as_ref()
-                .ok_or_else(|| DbError::Other("not open".into()))?;
+        let batch_inner = {
+            let conn = self.conn_or_err()?;
             conn.execute_batch("BEGIN")?;
 
-            match Self::write_batch_txn(conn, batch) {
+            match Self::write_batch_inner(conn, batch) {
                 Ok(inner) => inner,
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK");
@@ -774,6 +788,11 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                 }
             }
         };
+        let (file_ids, chunks_written, embedding_pairs) = (
+            batch_inner.file_ids,
+            batch_inner.chunks_written,
+            batch_inner.embedding_pairs,
+        );
 
         // Step 3e: Insert embeddings (still inside txn)
         let embeddings_written = {
@@ -844,27 +863,21 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         })
     }
 
-    fn needs_compaction(&mut self) -> Result<bool, DbError> {
+    fn needs_compaction(&self) -> Result<bool, DbError> {
         Ok(self.write_count >= self.config.compaction_batch_threshold)
     }
 
     fn run_compaction(&mut self) -> Result<(), DbError> {
         // Phase 0: CHECKPOINT only.
         // TODO(Phase 1): replace with full 3-phase atomic EXPORT/IMPORT swap.
-        let conn = self
-            .conn
-            .as_ref()
-            .ok_or_else(|| DbError::Other("not open".into()))?;
+        let conn = self.conn_or_err()?;
         conn.execute_batch("CHECKPOINT")?;
         self.write_count = 0;
         Ok(())
     }
 
     fn drop_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
-        let conn = self
-            .conn
-            .as_ref()
-            .ok_or_else(|| DbError::Other("not open".into()))?;
+        let conn = self.conn_or_err()?;
         let indexes = Self::discover_hnsw_indexes(conn)?;
         for idx in &indexes {
             let safe_name = idx.index_name.replace('"', "\"\"");
@@ -882,10 +895,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         if !self.has_vss {
             return Ok(());
         }
-        let conn = self
-            .conn
-            .as_ref()
-            .ok_or_else(|| DbError::Other("not open".into()))?;
+        let conn = self.conn_or_err()?;
         let tables = Self::discover_embedding_tables(conn)?;
         for (table_name, dims) in &tables {
             let hnsw_name = format!("idx_hnsw_{dims}");
