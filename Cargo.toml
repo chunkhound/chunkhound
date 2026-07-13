@@ -2,6 +2,8 @@
 name = "chunkhound_native"
 version = "0.1.0"
 edition = "2021"
+# repeat_n (used in duckdb_backend.rs) was stabilized in 1.82
+rust-version = "1.82"
 
 [lib]
 name = "chunkhound_native"

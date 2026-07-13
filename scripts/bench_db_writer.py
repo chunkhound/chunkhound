@@ -18,14 +18,31 @@ from __future__ import annotations
 import argparse
 import os
 import random
-import resource
 import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
+try:
+    import resource as _resource
+except ImportError:  # Windows: resource module does not exist
+    _resource = None  # type: ignore[assignment]
+
 import duckdb
+
+
+class _ZeroRUsage:
+    """Dummy rusage for platforms without the resource module (e.g. Windows)."""
+    ru_utime = 0.0
+    ru_stime = 0.0
+    ru_maxrss = 0
+
+
+def _getrusage() -> "_ZeroRUsage | Any":
+    if _resource is None:
+        return _ZeroRUsage()
+    return _resource.getrusage(_resource.RUSAGE_SELF)
 
 # ---------------------------------------------------------------------------
 # Production batch-size logic (mirrors indexing_coordinator._determine_db_batch_size)
@@ -468,7 +485,7 @@ def _python_ensure_hnsw_indexes(conn: Any) -> None:
 
 def run_python_path(files: list[dict], db_path: str, batch_size: int) -> dict:
     """Run the Python direct write path in production-sized batches."""
-    rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_before = _getrusage().ru_maxrss
     t0 = time.perf_counter()
 
     conn = duckdb.connect(db_path)
@@ -480,10 +497,10 @@ def run_python_path(files: list[dict], db_path: str, batch_size: int) -> dict:
             batch = files[i : i + batch_size]
             batch_num = i // batch_size + 1
             t_batch = time.perf_counter()
-            ru0 = resource.getrusage(resource.RUSAGE_SELF)
+            ru0 = _getrusage()
             c, e = _python_write_files(conn, batch)
             elapsed = time.perf_counter() - t_batch
-            ru1 = resource.getrusage(resource.RUSAGE_SELF)
+            ru1 = _getrusage()
             cpu_s = (ru1.ru_utime + ru1.ru_stime) - (ru0.ru_utime + ru0.ru_stime)
             cpu_pct = cpu_s / elapsed * 100 if elapsed > 0 else 0
             total_chunks += c
@@ -504,7 +521,7 @@ def run_python_path(files: list[dict], db_path: str, batch_size: int) -> dict:
         conn.close()
 
     wall = time.perf_counter() - t0
-    rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_after = _getrusage().ru_maxrss
     db_size = Path(db_path).stat().st_size if Path(db_path).exists() else 0
 
     return {
@@ -532,7 +549,7 @@ def run_rust_path(files: list[dict], db_path: str, batch_size: int) -> dict:
 
     db_config = {"db_path": db_path, "compaction_batch_threshold": 9999}
 
-    rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_before = _getrusage().ru_maxrss
     t0 = time.perf_counter()
 
     writer = RustDbWriter(db_config)
@@ -548,10 +565,10 @@ def run_rust_path(files: list[dict], db_path: str, batch_size: int) -> dict:
             batch = files[i : i + batch_size]
             batch_num = i // batch_size + 1
             t_batch = time.perf_counter()
-            ru0 = resource.getrusage(resource.RUSAGE_SELF)
+            ru0 = _getrusage()
             result = writer.write_batch({"files": batch, "delete_paths": []})
             elapsed = time.perf_counter() - t_batch
-            ru1 = resource.getrusage(resource.RUSAGE_SELF)
+            ru1 = _getrusage()
             cpu_s = (ru1.ru_utime + ru1.ru_stime) - (ru0.ru_utime + ru0.ru_stime)
             cpu_pct = cpu_s / elapsed * 100 if elapsed > 0 else 0
             c = result.get("chunks_written", 0)
@@ -573,7 +590,7 @@ def run_rust_path(files: list[dict], db_path: str, batch_size: int) -> dict:
         writer.close()
 
     wall = time.perf_counter() - t0
-    rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_after = _getrusage().ru_maxrss
     db_size = Path(db_path).stat().st_size if Path(db_path).exists() else 0
 
     return {

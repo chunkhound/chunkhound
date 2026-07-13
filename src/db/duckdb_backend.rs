@@ -227,11 +227,10 @@ impl DuckDbHnswBackend {
             .and_then(|n| n.to_str())
             .unwrap_or(file.path.as_str())
             .to_string();
-        let ext = path
+        let ext: Option<String> = path
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_string();
+            .map(|s| s.to_string());
 
         // DuckDB rejects ON CONFLICT DO UPDATE inside an explicit transaction when
         // a FK child table (chunks) has rows referencing the conflicting parent row,

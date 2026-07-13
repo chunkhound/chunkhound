@@ -548,3 +548,65 @@ class TestSchemaParity:
             f"  Python: {_CHUNKS_COLUMN_NAMES}\n"
             f"Update duckdb_backend.rs::setup_schema to match schema_constants.py."
         )
+
+    def test_column_types_match_python_schema(self, tmp_path):
+        """Rust DDL column types must match what DuckDB reports for the Python canonical DDL.
+
+        Catches type/constraint drift that test_files_and_chunks_columns_match_schema_constants
+        cannot detect — e.g. changing INTEGER to BIGINT, or TEXT to VARCHAR explicitly.
+        Uses the Python DDL as the authoritative reference: both sides are created via
+        DuckDB and compared through information_schema, so no hardcoded type strings are
+        needed and the test stays valid across DuckDB versions.
+        """
+        from chunkhound.providers.database.duckdb.schema_constants import (
+            _FILES_TABLE_COLUMNS,
+            _CHUNKS_TABLE_COLUMNS,
+        )
+
+        def _col_types(conn: duckdb.DuckDBPyConnection, table: str) -> dict[str, str]:
+            return {
+                r[0]: r[1]
+                for r in conn.execute(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    f"WHERE table_name = '{table}' ORDER BY ordinal_position"
+                ).fetchall()
+            }
+
+        # Reference: create tables using the Python canonical DDL.
+        py_db = str(tmp_path / "python_ref.duckdb")
+        ref_conn = duckdb.connect(py_db)
+        try:
+            ref_conn.execute("CREATE SEQUENCE IF NOT EXISTS files_id_seq START 1")
+            ref_conn.execute("CREATE SEQUENCE IF NOT EXISTS chunks_id_seq START 1")
+            ref_conn.execute(f"CREATE TABLE files ({_FILES_TABLE_COLUMNS})")
+            ref_conn.execute(f"CREATE TABLE chunks ({_CHUNKS_TABLE_COLUMNS})")
+            py_files_types = _col_types(ref_conn, "files")
+            py_chunks_types = _col_types(ref_conn, "chunks")
+        finally:
+            ref_conn.close()
+
+        # Subject: create tables using the Rust DDL via RustDbWriter.open().
+        rust_db = str(tmp_path / "rust_parity.duckdb")
+        w = _make_writer(rust_db)
+        w.open()
+        w.close()
+
+        rust_conn = duckdb.connect(rust_db)
+        try:
+            rust_files_types = _col_types(rust_conn, "files")
+            rust_chunks_types = _col_types(rust_conn, "chunks")
+        finally:
+            rust_conn.close()
+
+        assert rust_files_types == py_files_types, (
+            f"files column types mismatch (Rust DDL vs Python DDL).\n"
+            f"  Rust  : {rust_files_types}\n"
+            f"  Python: {py_files_types}\n"
+            "Update duckdb_backend.rs::setup_schema to match schema_constants.py."
+        )
+        assert rust_chunks_types == py_chunks_types, (
+            f"chunks column types mismatch (Rust DDL vs Python DDL).\n"
+            f"  Rust  : {rust_chunks_types}\n"
+            f"  Python: {py_chunks_types}\n"
+            "Update duckdb_backend.rs::setup_schema to match schema_constants.py."
+        )
