@@ -77,7 +77,7 @@ def _count(db_path: str, table: str) -> int:
     """Count rows in a table — call only after writer.close()."""
     conn = duckdb.connect(db_path)
     try:
-        return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        return conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
     finally:
         conn.close()
 

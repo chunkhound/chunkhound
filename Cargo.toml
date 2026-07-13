@@ -12,6 +12,10 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3       = { version = "0.22", features = ["extension-module", "abi3-py310"] }
 ignore     = "0.4"
+# duckdb build mode is controlled by env vars, not Cargo features (duckdb default = []).
+# CI: DUCKDB_DOWNLOAD_LIB=1  — downloads precompiled shared lib from GitHub.
+# Local/air-gapped: DUCKDB_LIB_DIR + DUCKDB_STATIC=1 — reuses the static .a from a prior
+#   release build. See RUST_COMMANDS in AGENTS.md for the full command.
 duckdb     = { version = "1" }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"

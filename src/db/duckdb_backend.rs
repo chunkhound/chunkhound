@@ -483,6 +483,52 @@ impl DuckDbHnswBackend {
         // Discover embedding tables once for this call.
         let emb_tables = Self::discover_embedding_tables(conn)?;
         const DELETE_BATCH: usize = 500;
+
+        // Phase 1: atomically delete embeddings + chunks together.
+        // embeddings_N tables have no FK to chunks — delete embeddings first
+        // to avoid ghost rows accumulating on re-index (CF-1).
+        // Wrapping in a transaction ensures emb and chunk deletes are atomic
+        // with each other (no ghost emb rows if the process crashes mid-batch).
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<(), DbError> {
+            for batch in paths.chunks(DELETE_BATCH) {
+                let ph = std::iter::repeat_n("?", batch.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let params: Vec<duckdb::types::Value> = batch
+                    .iter()
+                    .map(|p| duckdb::types::Value::Text(p.clone()))
+                    .collect();
+                let chunk_subquery = format!(
+                    "SELECT id FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path IN ({ph}))"
+                );
+                for (table_name, _dims) in &emb_tables {
+                    conn.execute(
+                        &format!("DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"),
+                        duckdb::params_from_iter(params.clone()),
+                    )?;
+                }
+                conn.execute(
+                    &format!("DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path IN ({ph}))"),
+                    duckdb::params_from_iter(params),
+                )?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT").map_err(DbError::DuckDb)?,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
+
+        // Phase 2: delete parent rows (files) in auto-commit mode.
+        // Must be separate from Phase 1: DuckDB's FK check engine reads the committed
+        // DB state, not the current transaction's in-progress deletes.  If Phase 1's
+        // chunk deletes were in the same transaction as the files delete, the engine
+        // would still see the (not-yet-committed) chunks referencing the file and
+        // reject the DELETE with a FK constraint error.
         for batch in paths.chunks(DELETE_BATCH) {
             let ph = std::iter::repeat_n("?", batch.len())
                 .collect::<Vec<_>>()
@@ -491,21 +537,6 @@ impl DuckDbHnswBackend {
                 .iter()
                 .map(|p| duckdb::types::Value::Text(p.clone()))
                 .collect();
-            // embeddings_N tables have no FK to chunks — delete embeddings first
-            // to avoid ghost rows accumulating on re-index (CF-1).
-            let chunk_subquery = format!(
-                "SELECT id FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path IN ({ph}))"
-            );
-            for (table_name, _dims) in &emb_tables {
-                conn.execute(
-                    &format!("DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"),
-                    duckdb::params_from_iter(params.clone()),
-                )?;
-            }
-            conn.execute(
-                &format!("DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE path IN ({ph}))"),
-                duckdb::params_from_iter(params.clone()),
-            )?;
             conn.execute(
                 &format!("DELETE FROM files WHERE path IN ({ph})"),
                 duckdb::params_from_iter(params),
@@ -534,84 +565,111 @@ impl DuckDbHnswBackend {
         Ok(result)
     }
 
-    // Runs inside an already-open BEGIN/COMMIT envelope managed by the caller.
-    // Handles pre-deletes, file upserts, and chunk inserts; returns intermediate
-    // state needed for the embedding insert step that follows in the same transaction.
-    fn write_batch_inner(
-        conn: &Connection,
-        batch: &DbWriterBatch,
-    ) -> Result<BatchInner, DbError> {
-        // PF-3: Batch pre-deletes — one IN-list per group instead of one statement per file.
-        // embeddings_N tables have no FK cascade from chunks, so embeddings must be deleted
-        // before chunks to avoid ghost rows on re-index (CF-2).
-        // Split files into those with a known file_id (by_id) and path-only (by_path);
-        // each group is cleared with 2 statements rather than 2 × N.
-        // TODO(Phase 1): pass known emb_tables in from the caller instead of re-querying
-        // the catalog on every batch inside the transaction.
-        let emb_tables = Self::discover_embedding_tables(conn)?;
-
+    // Pre-deletes chunks (and orphaned embeddings) for files about to be upserted.
+    // Must run OUTSIDE the write transaction: DuckDB's FK check engine sees the committed
+    // state of the DB, not the current transaction's state. Any UPDATE on files inside a
+    // transaction where child chunks were deleted earlier in the same transaction is rejected
+    // with a FK constraint error — even though no FK is actually violated at commit time.
+    // The same limitation affects delete_paths; both are handled identically (pre-txn commit).
+    //
+    // Atomicity gap: if the process crashes after this commits but before the write transaction
+    // below commits, the old chunks are absent but new ones were not written.  Recovery is
+    // self-healing: on the next index run the files are found in the DB and re-indexed from
+    // disk — no data is permanently lost.
+    fn pre_delete_for_upsert(conn: &Connection, batch: &DbWriterBatch) -> Result<(), DbError> {
         let by_id: Vec<i64> = batch
             .files
             .iter()
             .filter_map(|f| f.existing_file_id)
             .collect();
-        let by_path: Vec<&str> = batch
+        let by_path: Vec<String> = batch
             .files
             .iter()
             .filter(|f| f.existing_file_id.is_none())
-            .map(|f| f.path.as_str())
+            .map(|f| f.path.clone())
             .collect();
 
-        if !by_id.is_empty() {
-            let ph = std::iter::repeat_n("?", by_id.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let params: Vec<duckdb::types::Value> = by_id
-                .iter()
-                .map(|&id| duckdb::types::Value::BigInt(id))
-                .collect();
-            for (table_name, _dims) in &emb_tables {
+        if by_id.is_empty() && by_path.is_empty() {
+            return Ok(());
+        }
+
+        // TODO(Phase 1): cache emb_tables on DuckDbHnswBackend (alongside hnsw_cache) instead
+        // of re-querying the catalog on every batch. Hoisting is non-trivial because the set can
+        // grow mid-session when a new embedding dimension appears for the first time — the cache
+        // must be invalidated whenever a new embeddings_N table is created.
+        let emb_tables = Self::discover_embedding_tables(conn)?;
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<(), DbError> {
+            if !by_id.is_empty() {
+                let ph = std::iter::repeat_n("?", by_id.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let params: Vec<duckdb::types::Value> = by_id
+                    .iter()
+                    .map(|&id| duckdb::types::Value::BigInt(id))
+                    .collect();
+                for (table_name, _dims) in &emb_tables {
+                    conn.execute(
+                        &format!(
+                            "DELETE FROM \"{table_name}\" WHERE chunk_id IN \
+                             (SELECT id FROM chunks WHERE file_id IN ({ph}))"
+                        ),
+                        duckdb::params_from_iter(params.clone()),
+                    )?;
+                }
+                conn.execute(
+                    &format!("DELETE FROM chunks WHERE file_id IN ({ph})"),
+                    duckdb::params_from_iter(params),
+                )?;
+            }
+            if !by_path.is_empty() {
+                let ph = std::iter::repeat_n("?", by_path.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let params: Vec<duckdb::types::Value> = by_path
+                    .iter()
+                    .map(|p| duckdb::types::Value::Text(p.clone()))
+                    .collect();
+                let chunk_subquery = format!(
+                    "SELECT id FROM chunks WHERE file_id IN \
+                     (SELECT id FROM files WHERE path IN ({ph}))"
+                );
+                for (table_name, _dims) in &emb_tables {
+                    conn.execute(
+                        &format!(
+                            "DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"
+                        ),
+                        duckdb::params_from_iter(params.clone()),
+                    )?;
+                }
                 conn.execute(
                     &format!(
-                        "DELETE FROM \"{table_name}\" WHERE chunk_id IN \
-                         (SELECT id FROM chunks WHERE file_id IN ({ph}))"
+                        "DELETE FROM chunks WHERE file_id IN \
+                         (SELECT id FROM files WHERE path IN ({ph}))"
                     ),
-                    duckdb::params_from_iter(params.clone()),
+                    duckdb::params_from_iter(params),
                 )?;
             }
-            conn.execute(
-                &format!("DELETE FROM chunks WHERE file_id IN ({ph})"),
-                duckdb::params_from_iter(params),
-            )?;
-        }
-
-        if !by_path.is_empty() {
-            let ph = std::iter::repeat_n("?", by_path.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let params: Vec<duckdb::types::Value> = by_path
-                .iter()
-                .map(|p| duckdb::types::Value::Text(p.to_string()))
-                .collect();
-            let chunk_subquery = format!(
-                "SELECT id FROM chunks WHERE file_id IN \
-                 (SELECT id FROM files WHERE path IN ({ph}))"
-            );
-            for (table_name, _dims) in &emb_tables {
-                conn.execute(
-                    &format!("DELETE FROM \"{table_name}\" WHERE chunk_id IN ({chunk_subquery})"),
-                    duckdb::params_from_iter(params.clone()),
-                )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT").map_err(DbError::DuckDb),
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
             }
-            conn.execute(
-                &format!(
-                    "DELETE FROM chunks WHERE file_id IN \
-                     (SELECT id FROM files WHERE path IN ({ph}))"
-                ),
-                duckdb::params_from_iter(params),
-            )?;
         }
+    }
 
+    // Runs inside an already-open BEGIN/COMMIT envelope managed by the caller.
+    // Handles file upserts and chunk inserts; returns intermediate state needed
+    // for the embedding insert step that follows in the same transaction.
+    // Pre-deletes for upserted files are handled by pre_delete_for_upsert (called
+    // before BEGIN to avoid DuckDB's intra-transaction FK check limitation).
+    fn write_batch_inner(
+        conn: &Connection,
+        batch: &DbWriterBatch,
+    ) -> Result<BatchInner, DbError> {
         // Upsert files → collect file_ids
         let mut file_ids = Vec::with_capacity(batch.files.len());
         for file in &batch.files {
@@ -724,7 +782,17 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             Self::delete_paths(conn, &batch.delete_paths)?;
         }
 
-        // Step 0b: Ensure embedding tables outside txn (Invariant 13).
+        // Step 0b: Pre-delete chunks/embeddings for files being upserted, OUTSIDE transaction.
+        // DuckDB's FK check engine sees the committed DB state, not the current transaction's
+        // in-flight deletes.  Any UPDATE on files inside a txn where child chunks were deleted
+        // earlier in that same txn is rejected — even though no FK is violated at commit time.
+        // Running these deletes before BEGIN avoids the spurious constraint error.
+        {
+            let conn = self.conn_or_err()?;
+            Self::pre_delete_for_upsert(conn, batch)?;
+        }
+
+        // Step 0c: Ensure embedding tables outside txn (Invariant 13).
         // Track which dims are genuinely new so we can (a) invalidate the stale
         // HNSW cache and (b) create a fresh HNSW index for the new table after
         // the commit (Step 5+).  The per-batch bookend only manages EXISTING
@@ -840,7 +908,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // The bookend above only recreates indexes that existed before Step 2's drop;
         // a brand-new embeddings_N table has no HNSW yet.  Create it now so that
         // subsequent batches can manage it through the normal drop/recreate cycle.
-        // hnsw_cache was already invalidated in Step 0b, so the next batch rediscovers.
+        // hnsw_cache was already invalidated in Step 0c, so the next batch rediscovers.
         if !new_dims.is_empty() && self.has_vss {
             let conn = self
                 .conn

@@ -33,6 +33,16 @@ class RustWriterBridge:
     Phase 1 (TODO): wire into SerialDatabaseExecutor
     (chunkhound/providers/database/serial_executor.py) to replace the Python
     DuckDB write path — see the db_writter branch for the implementation plan.
+
+    Error-behaviour contract
+    ------------------------
+    ``write_batch``, ``needs_compaction``, and ``run_compaction`` raise
+    ``RuntimeError`` when the writer is unavailable — callers must guard with
+    ``available()`` before calling them.
+
+    ``drop_all_hnsw_indexes`` and ``ensure_all_hnsw_indexes`` are intentional
+    no-ops when unavailable; they are optional bulk-mode performance hints and
+    safe to call unconditionally.
     """
 
     def __init__(self, db_config: dict) -> None:
