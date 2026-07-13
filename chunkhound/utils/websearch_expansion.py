@@ -84,11 +84,20 @@ def _strip_prompt_tags(s: str) -> str:
     # Fixpoint loop: `str.replace` is single-pass and does not rescan its
     # output, so a composed input like `<qu<query>ery>` would otherwise
     # collapse into a fresh `<query>` that survives the sanitizer.
+    stripped: set[str] = set()
     while True:
         new = s
         for literal in _PROMPT_TAG_LITERALS:
-            new = new.replace(literal, "")
+            after = new.replace(literal, "")
+            if after != new:
+                stripped.add(literal)
+                new = after
         if new == s:
+            if stripped:
+                logger.debug(
+                    "Websearch expansion stripped prompt tag literals from user "
+                    f"input: {sorted(stripped)}"
+                )
             return s
         s = new
 
@@ -148,11 +157,11 @@ async def expand_web_queries(
       when ``llm_manager`` is ``None`` or the LLM call raises.
     - Structural hardening only, not full injection defense: a fixed list of
       the prompt template's own tag literals (e.g. ``</query>``,
-      ``</CURRENT_CONTEXT>``) is silently stripped from ``query`` and
-      ``previous_query`` before rendering, so a crafted input can't terminate
-      a delimiter and pose as a new section. Any other adversarial content in
-      the body still reaches the LLM as-is — callers must not treat the
-      returned queries as trusted.
+      ``</CURRENT_CONTEXT>``) is stripped from ``query`` and ``previous_query``
+      before rendering (logged at DEBUG when any literal is removed), so a
+      crafted input can't terminate a delimiter and pose as a new section. Any
+      other adversarial content in the body still reaches the LLM as-is —
+      callers must not treat the returned queries as trusted.
     """
     # Defensive re-coercion: surface entry points also coerce, but direct
     # in-process callers (tests, notebooks) bypass the boundary.

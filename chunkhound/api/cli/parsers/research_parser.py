@@ -48,6 +48,13 @@ def add_research_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Optional path filter (e.g., 'src/', 'tests/')",
     )
 
+    research_parser.add_argument(
+        "--previous-query",
+        type=str,
+        default=None,
+        help="Prior query for follow-up framing — synthesizer phrases the answer in that topic's context. Does not steer which code is searched or retrieved.",
+    )
+
     # Git diff / commit-range arguments
     add_git_diff_arguments(research_parser)
 

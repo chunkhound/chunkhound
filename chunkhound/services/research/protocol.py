@@ -28,10 +28,10 @@ class ResearchServiceProtocol(Protocol):
 
         Args:
             query: Research query to investigate
-            previous_query: Single-hop chaining hook populated only by the
-                websearch chaining path. When set, the synthesis stage frames
-                the answer in the prior topic's context. Empty / None means
-                un-chained (baseline path).
+            previous_query: Follow-up chain hook. When set, the synthesis
+                stage frames the answer in the prior topic's context —
+                search, retrieval, and reranking are unaffected. Empty /
+                None means un-chained.
 
         Returns:
             Dict with answer, citations, stats, and optional fields

@@ -19,7 +19,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
-    Annotated,
     Any,
     Literal,
     TypedDict,
@@ -220,16 +219,6 @@ def _extract_param_descriptions_from_docstring(func: Callable) -> dict[str, str]
     return descriptions
 
 
-class InternalOnly:
-    """Marker for parameters that must be hidden from the MCP schema.
-
-    Use as ``Annotated[T, InternalOnly()]`` on an implementation parameter
-    that the function accepts but that MCP clients must never see in
-    ``tools/list``. ``_generate_json_schema_from_signature`` drops any
-    parameter carrying this marker before emitting the schema.
-    """
-
-
 def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
     """Generate JSON Schema from function signature.
 
@@ -258,14 +247,9 @@ def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
         ):
             continue
 
-        # Get type hint and detect Annotated[..., InternalOnly()] opt-out
         annotation: Any = (
             param.annotation if param.annotation != inspect.Parameter.empty else Any
         )
-        if hasattr(annotation, "__metadata__"):
-            if any(isinstance(m, InternalOnly) for m in annotation.__metadata__):
-                continue
-            annotation = annotation.__origin__
 
         # Convert to JSON Schema type
         schema = _python_type_to_json_schema_type(annotation)
@@ -524,6 +508,9 @@ GIT HISTORY RESEARCH:
 - last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
 - vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
+
+FOLLOW-UP CHAIN:
+- previous_query: Prior query for follow-up framing. When set, the synthesizer frames the answer in the prior topic's context. This changes only the answer's phrasing; it does not alter which code is searched or retrieved.
 
 One call replaces 5-10 manual searches. Call it liberally — understanding first, coding second."""
 
@@ -786,7 +773,7 @@ async def deep_research_impl(
     commit_hash: str | None = None,
     last_n_commits: int | None = None,
     vector_source: str = "diff",
-    previous_query: Annotated[str | None, InternalOnly()] = None,
+    previous_query: str | None = None,
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -802,14 +789,7 @@ async def deep_research_impl(
         commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
         last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
         vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
-
-    Note:
-        ``previous_query`` is the single-hop chaining hook for the websearch
-        chain, supplied only via the ``_quickresearch`` subprocess path. The
-        public entry point is the ``websearch`` MCP tool's ``previous_query``;
-        here it's marked ``Annotated[..., InternalOnly()]`` so the schema
-        generator omits it from ``code_research``'s MCP schema, and it's
-        intentionally absent from the ``Args:`` block above.
+        previous_query: Prior query for follow-up framing (optional). When set, the synthesis stage frames the answer in the prior topic's context. Does not affect which code is searched or retrieved.
 
     Returns:
         Dict with answer and metadata
@@ -850,6 +830,9 @@ async def deep_research_impl(
     # Create default config from environment if not provided
     if config is None:
         config = Config.from_environment()
+    # Empty-string → None coercion at the surface boundary, so every downstream
+    # consumer sees the two-valued "real string or None" contract.
+    previous_query = previous_query or None
 
     # Create code research service using factory (v1 or v2 based on config)
     # This ensures followup suggestions automatically update if tool is renamed

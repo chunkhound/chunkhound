@@ -34,9 +34,11 @@ async def run_research(
 ) -> None:
     """Run deep_research_impl with TreeProgressDisplay and print result.
 
-    ``previous_query`` is the websearch chain's single-hop framing hook;
-    the ``chunkhound research`` CLI never sets it. See
-    ``deep_research_impl`` for schema-visibility details.
+    ``previous_query`` marks this call as a follow-up to a prior query — the
+    synthesizer frames the answer in that topic's context. In this
+    code-research path the effect is framing-only; search and retrieval are
+    unaffected. (The ``websearch`` tool uses the same parameter additionally
+    to steer DDG query expansion.)
     """
     progress_output = (
         sys.stderr if os.environ.get("CHUNKHOUND_QUICKRESEARCH_QUIET") else sys.stdout
@@ -57,14 +59,13 @@ async def run_research(
                 vector_source=vector_source,
                 previous_query=previous_query,
             )
-            print("\n")
-            print(
-                result.get(
-                    "answer",
-                    f"Research incomplete: Unable to analyze '{query}'. "
-                    "Try a more specific query or check that relevant code exists.",
-                )
+            answer = result.get(
+                "answer",
+                f"Research incomplete: Unable to analyze '{query}'. "
+                "Try a more specific query or check that relevant code exists.",
             )
+            print("\n")
+            print(answer)
         except Exception as e:
             formatter.error(f"Research failed: {e}")
             logger.exception("Full error details:")
@@ -106,4 +107,5 @@ async def research_command(args: argparse.Namespace, config: Config) -> None:
         commit_hash=getattr(args, "commit_hash", None),
         last_n_commits=getattr(args, "last_n_commits", None),
         vector_source=getattr(args, "vector_source", "diff"),
+        previous_query=args.previous_query or None,
     )
