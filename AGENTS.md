@@ -143,9 +143,14 @@ rust-test:  make rust-test    # cargo test
 #   The .a lives under target/release/build/libduckdb-sys-*/out/libduckdb.a — find it with:
 #     find target/release/build -name "libduckdb.a" | head -1
 #   Then build against it (symlink gives libduckdb-sys the name it expects):
-#     OUT=$(find target/release/build -name "libduckdb.a" -printf "%h\n" | head -1)
+#     OUT=$(find "$(pwd)/target/release/build" -name "libduckdb.a" -printf "%h\n" | head -1)
 #     ln -sf "$OUT/libduckdb.a" "$OUT/libduckdb_static.a"
-#     DUCKDB_LIB_DIR="$OUT" DUCKDB_STATIC=1 uv run maturin develop --release
+#     DUCKDB_LIB_DIR="$OUT" DUCKDB_STATIC=1 RUSTFLAGS="-C link-arg=-lstdc++" uv run maturin develop --release
+#
+#   RUSTFLAGS note: -lstdc++ is required when statically linking DuckDB. The static
+#   .a includes C++ exception-handling code (__gxx_personality_v0) that lives in
+#   libstdc++.so. Without this flag the .so builds cleanly but fails at Python import
+#   with "undefined symbol: __gxx_personality_v0".
 ```
 
 ## PROJECT_MAINTENANCE
