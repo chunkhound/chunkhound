@@ -44,9 +44,14 @@ class AntigravityLLMProvider(LLMProvider):
         """
         if not SDK_AVAILABLE:
             raise RuntimeError(
-                "google-antigravity SDK is not installed. "
-                'Install it with `uv tool install "chunkhound[antigravity]"` '
-                'or `pip install "chunkhound[antigravity]"`.'
+                "google-antigravity SDK is not installed. Install the optional "
+                "extra into the SAME environment ChunkHound runs from:\n"
+                "  - source checkout (uv):  uv sync --extra antigravity\n"
+                '  - pip venv:              pip install "chunkhound[antigravity]"\n'
+                '  - global tool:           uv tool install "chunkhound[antigravity]"\n'
+                "If you run from a source checkout or via `uv run`, sync the extra "
+                "into that project env (`uv sync --extra antigravity`) rather than "
+                "a separate `uv tool` prefix, or the same import failure persists."
             )
         # Fail fast when no API key is available, so callers (e.g. MCP tool
         # listing) filter out LLM tools at startup rather than surfacing a
@@ -175,12 +180,26 @@ class AntigravityLLMProvider(LLMProvider):
         # returns to the caller. An uncooperative coroutine cannot be
         # force-killed, so tracking + warning is the honest bound here.
         self._abandoned_teardowns.add(task)
-        task.add_done_callback(self._abandoned_teardowns.discard)
+        task.add_done_callback(self._on_abandoned_teardown_done)
         logger.warning(
             "Antigravity SDK session teardown exceeded the "
             f"{self.CLEANUP_GRACE_TIMEOUT}s grace window; it continues in the "
             "background while control returns to the caller."
         )
+
+    def _on_abandoned_teardown_done(self, task: "asyncio.Task[Any]") -> None:
+        # Drain the late result so a teardown that finally raises past the grace
+        # window is not reported as "exception was never retrieved", and surface
+        # the real cleanup failure for operators. Runs on the loop when the task
+        # ends.
+        self._abandoned_teardowns.discard(task)
+        with contextlib.suppress(asyncio.CancelledError):
+            exc = task.exception()
+            if exc is not None:
+                logger.warning(
+                    "Antigravity SDK session teardown ultimately failed after "
+                    f"the {self.CLEANUP_GRACE_TIMEOUT}s grace window: {exc!r}"
+                )
 
     async def complete(
         self,
@@ -387,8 +406,8 @@ class AntigravityLLMProvider(LLMProvider):
         nullable fields before the final validation runs.
 
         Root ``anyOf``/``oneOf`` are intentionally not merged here: the compiler
-        turns them into a ``typing.Union``, which the SDK's ``response_schema``
-        rejects at config-build time, so they never reach this cleanup path.
+        rejects a root union schema with a ``ValueError`` before any SDK call,
+        so they never reach this cleanup path.
         """
         resolved = self._resolve_ref(schema, defs)
         if isinstance(resolved, dict) and "allOf" in resolved:
@@ -408,20 +427,21 @@ class AntigravityLLMProvider(LLMProvider):
         Supported subset (covers every schema ChunkHound passes to
         ``complete_structured`` today): nested ``object``/``array`` schemas,
         ``enum``, primitive types, ``$ref`` resolution at the root and inside
-        ``properties``/array ``items``, ``allOf`` (merged as a shallow
-        intersection), and ``anyOf``/``oneOf`` at the schema root (compiled to a
-        ``Union``).
+        ``properties``/array ``items``, and ``allOf`` (merged as a shallow
+        intersection).
 
-        Known limitations (not exercised by any current caller): (a) scalar
-        ``anyOf``/``oneOf`` declared at the property level is not compiled to a
-        ``Union`` (falls back to ``Any``); (b) ``allOf`` subschemas are
-        shallow-merged (conflicting per-property constraints are last-wins rather
-        than deeply intersected); and (c) a nullable primitive type-array
-        (``{"type": ["string", "null"]}``) is not narrowed — the compiled field
-        falls back to ``Any`` rather than ``str | None``, so the schema handed to
-        the SDK is weaker than the caller's (the value is still enforced by the
-        final JSON Schema validation against the original schema in
-        ``complete_structured``).
+        Unsupported / rejected (not exercised by any current caller): (a) a root
+        ``anyOf``/``oneOf`` (union) schema raises ``ValueError`` — the SDK's
+        ``response_schema`` requires a single model class, not a ``typing.Union``,
+        so this fails closed with a clear error rather than a cryptic SDK
+        config-build failure; (b) scalar ``anyOf``/``oneOf`` declared at the
+        property level is not compiled to a ``Union`` (falls back to ``Any``);
+        (c) ``allOf`` subschemas are shallow-merged (conflicting per-property
+        constraints are last-wins rather than deeply intersected); and (d) a
+        nullable primitive type-array (``{"type": ["string", "null"]}``) is not
+        narrowed — the compiled field falls back to ``Any`` rather than
+        ``str | None`` (the value is still enforced by the final JSON Schema
+        validation against the original schema in ``complete_structured``).
         """
         from typing import Any, Literal
 
@@ -453,27 +473,26 @@ class AntigravityLLMProvider(LLMProvider):
 
         # Handle composition logic.
         # allOf is an intersection (must satisfy ALL subschemas): merge them
-        # into a single object schema and compile that. anyOf/oneOf are unions
-        # (satisfy at least one / exactly one): compile each and join as Union.
-        from typing import Union
-
+        # into a single object schema and compile that.
         if "allOf" in schema:
             return self._compile_schema_to_pydantic(
                 self._merge_all_of(schema, defs), name=name, defs=defs
             )
 
+        # anyOf/oneOf at the schema root would have to compile to a
+        # ``typing.Union``, which the SDK's ``response_schema`` rejects at
+        # config-build time (it requires a single model class). Fail closed with
+        # a clear ChunkHound-side error instead of surfacing a cryptic SDK
+        # failure. This branch is only reachable at the root: property-level
+        # scalar unions are handled in the properties loop (fall back to ``Any``)
+        # and never recurse here. No current caller passes a root union schema.
         for comp_key in ("anyOf", "oneOf"):
             if comp_key in schema:
-                comp_schemas = schema[comp_key]
-                if isinstance(comp_schemas, list) and comp_schemas:
-                    types = []
-                    for i, s in enumerate(comp_schemas):
-                        t = self._compile_schema_to_pydantic(
-                            s, name=f"{name}_{comp_key}_{i}", defs=defs
-                        )
-                        types.append(t)
-                    if types:
-                        return Union[tuple(types)]
+                raise ValueError(
+                    "Antigravity SDK structured output does not support a root "
+                    f"'{comp_key}' (union) schema. Provide a single top-level "
+                    "object schema instead."
+                )
 
         properties = schema.get("properties", {})
         required = schema.get("required", [])
@@ -639,11 +658,20 @@ class AntigravityLLMProvider(LLMProvider):
                         logger.warning(
                             f"structured_output() failed: {e}. Falling back to text."
                         )
-                    text_content = ""
-                    try:
-                        text_content = await res.text()
-                    except Exception:
-                        pass
+                    # Fetch the model's text output lazily and at most once. The
+                    # structured-success path never consumes it, so awaiting it
+                    # eagerly could let a slow or hung ``res.text()`` time out an
+                    # already-valid structured result. Only the token-count
+                    # estimate fallback and the text fallbacks below read it.
+                    _text_cache: dict[str, str] = {}
+
+                    async def _get_text_content() -> str:
+                        if "value" not in _text_cache:
+                            try:
+                                _text_cache["value"] = await res.text()
+                            except Exception:
+                                _text_cache["value"] = ""
+                        return _text_cache["value"]
 
                     # Retrieve token usage from agent conversation
                     prompt_tokens = 0
@@ -699,7 +727,7 @@ class AntigravityLLMProvider(LLMProvider):
                             if system:
                                 prompt_tokens += len(system) // 4
                             thoughts = getattr(res, "thoughts", "")
-                            content = text_content
+                            content = await _get_text_content()
                             completion_tokens = len(content + thoughts) // 4
                             total_tokens = prompt_tokens + completion_tokens
 
@@ -874,15 +902,16 @@ class AntigravityLLMProvider(LLMProvider):
                                     f"Structured result failed schema validation: "
                                     f"{structured_err}; attempting text fallback."
                                 )
-                                if text_content:
+                                fallback_text = await _get_text_content()
+                                if fallback_text:
                                     try:
-                                        return _validate_text(text_content)
+                                        return _validate_text(fallback_text)
                                     except Exception:
                                         pass
                                 raise
 
                     # Fallback to parsing text output
-                    return _validate_text(text_content)
+                    return _validate_text(await _get_text_content())
 
             # Shield the session so a timeout returns control immediately;
             # teardown is then bounded explicitly via ``_bounded_cancel``.

@@ -45,6 +45,7 @@ async def test_autodoc_offers_auto_map_when_map_dir_missing_index(
     ):
         plan = autorun._build_auto_map_plan(  # type: ignore[attr-defined]
             output_dir=output_dir,
+            target_dir=output_dir,
             map_out_dir=map_out_dir,
             comprehensiveness=comprehensiveness,
             audience=audience,
@@ -182,6 +183,7 @@ async def test_autodoc_generates_map_when_map_in_omitted(
     ):
         plan = autorun._build_auto_map_plan(  # type: ignore[attr-defined]
             output_dir=output_dir,
+            target_dir=output_dir,
             map_out_dir=map_out_dir,
             comprehensiveness=comprehensiveness,
             audience=audience,
@@ -262,7 +264,7 @@ async def test_autodoc_auto_map_prereq_failure_exits_before_prompting_map_params
     async def fake_run_code_mapper_for_autodoc(**_kwargs):  # type: ignore[no-untyped-def]
         ran_map.append(Path("should-not-run"))
         return autorun._build_auto_map_plan(  # type: ignore[attr-defined]
-            output_dir=tmp_path / "autodoc"
+            output_dir=tmp_path / "autodoc", target_dir=tmp_path
         )
 
     monkeypatch.setattr(
@@ -306,3 +308,24 @@ async def test_autodoc_auto_map_prereq_failure_exits_before_prompting_map_params
 
     assert excinfo.value.code == 1
     assert ran_map == []
+
+
+def test_auto_map_plan_scopes_to_target_dir_not_cwd(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Map scope must follow the configured workspace (config.target_dir), not
+    the shell CWD, so ``autodoc --config /repo/.chunkhound.json`` run from
+    elsewhere still maps ``/repo``."""
+    workspace = (tmp_path / "repo").resolve()
+    workspace.mkdir()
+    elsewhere = (tmp_path / "elsewhere").resolve()
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    plan = autorun._build_auto_map_plan(  # type: ignore[attr-defined]
+        output_dir=workspace / "site",
+        target_dir=workspace,
+    )
+
+    assert plan.map_scope == workspace
+    assert plan.map_scope != elsewhere

@@ -41,12 +41,16 @@ def _dedup_preserve_order(items: list[str]) -> list[str]:
 def _build_auto_map_plan(
     *,
     output_dir: Path,
+    target_dir: Path | None,
     map_out_dir: Path | None = None,
     comprehensiveness: str | None = None,
     audience: str | None = None,
 ) -> AutoMapPlan:
     default_map_out_dir = output_dir.with_name(f"map_{output_dir.name}")
-    map_scope = Path.cwd().resolve()
+    # ``Config.target_dir`` is always resolved during Config init (never None);
+    # scope the map to the configured workspace, never the shell CWD.
+    assert target_dir is not None, "Config.target_dir must be set before mapping"
+    map_scope = target_dir.resolve()
     return AutoMapPlan(
         map_out_dir=map_out_dir or default_map_out_dir,
         map_scope=map_scope,
@@ -55,9 +59,11 @@ def _build_auto_map_plan(
     )
 
 
-def _resolve_map_out_dir(*, args: Namespace, output_dir: Path) -> Path:
+def _resolve_map_out_dir(
+    *, args: Namespace, output_dir: Path, target_dir: Path | None
+) -> Path:
     map_out_dir_arg = getattr(args, "map_out_dir", None)
-    default_plan = _build_auto_map_plan(output_dir=output_dir)
+    default_plan = _build_auto_map_plan(output_dir=output_dir, target_dir=target_dir)
     map_out_dir_hint = (
         Path(map_out_dir_arg).expanduser()
         if map_out_dir_arg is not None
@@ -119,9 +125,13 @@ def _resolve_map_context(*, args: Namespace) -> Path | None:
     return map_context
 
 
-def resolve_auto_map_options(*, args: Namespace, output_dir: Path) -> AutoMapOptions:
+def resolve_auto_map_options(
+    *, args: Namespace, output_dir: Path, target_dir: Path | None
+) -> AutoMapOptions:
     return AutoMapOptions(
-        map_out_dir=_resolve_map_out_dir(args=args, output_dir=output_dir),
+        map_out_dir=_resolve_map_out_dir(
+            args=args, output_dir=output_dir, target_dir=target_dir
+        ),
         comprehensiveness=_resolve_map_comprehensiveness(args=args),
         audience=_resolve_map_audience(args=args),
         map_context=_resolve_map_context(args=args),
@@ -325,6 +335,7 @@ async def run_code_mapper_for_autodoc(
 
     plan = _build_auto_map_plan(
         output_dir=output_dir,
+        target_dir=config.target_dir,
         map_out_dir=map_out_dir,
         comprehensiveness=comprehensiveness,
         audience=audience,
@@ -375,7 +386,9 @@ async def autorun_code_mapper_for_autodoc(
         decline_exit_code=decline_exit_code,
     )
 
-    map_options = resolve_auto_map_options(args=args, output_dir=output_dir)
+    map_options = resolve_auto_map_options(
+        args=args, output_dir=output_dir, target_dir=config.target_dir
+    )
     formatter.info(f"Generating maps via Code Mapper: {map_options.map_out_dir}")
     plan = await run_code_mapper_for_autodoc(
         config=config,

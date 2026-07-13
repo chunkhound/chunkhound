@@ -260,6 +260,46 @@ async def test_sdk_structured_success(mock_antigravity_agent):
 
 
 @pytest.mark.asyncio
+async def test_sdk_structured_result_not_blocked_by_slow_text(mock_antigravity_agent):
+    """A valid structured response with usage data must return promptly even when
+    ``res.text()`` hangs: text output is only a fallback and must never be on the
+    critical path of a successful structured completion."""
+    provider = AntigravityLLMProvider(
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
+    )
+
+    agent_mock = _make_agent_mock(mock_antigravity_agent)
+    # Valid structured output + populated usage metadata (so the token-estimate
+    # fallback that reads text() is skipped).
+    resp_mock, conv_mock = _make_sdk_response("{}")
+
+    async def _hang(*_args, **_kwargs):
+        await asyncio.sleep(30)
+        return "{}"
+
+    resp_mock.text = AsyncMock(side_effect=_hang)
+    agent_mock.chat = AsyncMock(return_value=resp_mock)
+    agent_mock.conversation = conv_mock
+
+    schema = {
+        "type": "object",
+        "properties": {"key": {"type": "string"}},
+        "required": ["key"],
+    }
+
+    # With text() hanging 30s, a small request timeout would trip only if the
+    # provider awaited it; the structured result must come back instead.
+    result = await provider.complete_structured(
+        "Structured prompt", json_schema=schema, timeout=1
+    )
+
+    assert result == {"key": "val"}
+    resp_mock.text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_sdk_complete_token_estimation_includes_thoughts(mock_antigravity_agent):
     provider = AntigravityLLMProvider(
         api_key="test-api-key",
@@ -519,6 +559,33 @@ async def test_cli_complete_failure(mock_subprocess):
 
 
 @pytest.mark.asyncio
+async def test_cli_scopes_temp_env_to_sandbox_dir(mock_subprocess):
+    """Child temp-file APIs are scoped to the per-call sandbox cwd.
+
+    TMPDIR/TMP/TEMP are pointed at the temp cwd so anything the CLI writes via
+    tempfile.* lands in the sandbox dir that cleanup removes, rather than the
+    inherited system temp location.
+    """
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+
+    mock_process = AsyncMock()
+    mock_process.pid = 12345
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"ok", b"")
+    mock_subprocess.return_value = mock_process
+
+    with patch("shutil.which", return_value="/usr/local/bin/agy"):
+        await provider.complete("prompt")
+
+    kwargs = mock_subprocess.call_args[1]
+    env, cwd = kwargs["env"], kwargs["cwd"]
+    assert "chunkhound-antigravity-" in cwd
+    assert env["TMPDIR"] == cwd
+    assert env["TMP"] == cwd
+    assert env["TEMP"] == cwd
+
+
+@pytest.mark.asyncio
 async def test_cli_binary_fallback(mock_subprocess):
     with patch("shutil.which") as mock_which:
 
@@ -580,6 +647,58 @@ async def test_cli_timeout_cleanup(mock_subprocess):
     cwd_passed = mock_subprocess.call_args.kwargs.get("cwd")
     assert cwd_passed is not None
     assert not os.path.exists(cwd_passed), "temp dir leaked after timeout"
+
+
+@pytest.mark.asyncio
+async def test_cli_windows_cleanup_never_masks_primary_error():
+    """On Windows, best-effort process reaping must never raise: it runs in the
+    caller's ``finally``, so an escaping psutil error (e.g. AccessDenied) would
+    replace the curated timeout/cancel error. ``_kill_process_tree`` must swallow
+    it. Runs on any OS by forcing the win32 branch."""
+    import types
+
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+
+    process = AsyncMock()
+    process.pid = 12345
+    process.returncode = None  # still running -> Windows branch does not early-return
+    process.wait = AsyncMock(return_value=0)
+
+    class _FakeError(Exception):
+        pass
+
+    class _FakeAccessDenied(_FakeError):
+        pass
+
+    class _FakeNoSuchProcess(_FakeError):
+        pass
+
+    fake_psutil = types.ModuleType("psutil")
+    fake_psutil.Error = _FakeError
+    fake_psutil.AccessDenied = _FakeAccessDenied
+    fake_psutil.NoSuchProcess = _FakeNoSuchProcess
+
+    def _raise_access_denied(_pid):
+        raise _FakeAccessDenied("denied")
+
+    fake_psutil.Process = _raise_access_denied
+
+    taskkill_result = MagicMock()
+    taskkill_result.returncode = 1  # taskkill fails -> psutil fallback runs
+    taskkill_result.stderr = b"access denied"
+
+    with (
+        patch(
+            "chunkhound.providers.llm.antigravity_cli_provider.sys.platform",
+            "win32",
+        ),
+        patch("shutil.which", return_value="taskkill"),
+        patch("subprocess.run", return_value=taskkill_result),
+        patch.dict(sys.modules, {"psutil": fake_psutil}),
+    ):
+        # Must return without raising despite the psutil AccessDenied during
+        # the best-effort fallback reap.
+        await provider._kill_process_tree(process)
 
 
 @pytest.mark.asyncio
@@ -683,6 +802,71 @@ async def test_sdk_hung_teardown_returns_control(mock_antigravity_agent):
 
 
 @pytest.mark.asyncio
+async def test_sdk_late_raising_teardown_is_drained(mock_antigravity_agent):
+    """A teardown that ignores cancellation past the grace window and then RAISES
+    must have its late exception drained (retrieved) — not left to surface as an
+    unhandled "exception was never retrieved" — and the real cleanup failure must
+    be logged so operators can see it."""
+    provider = AntigravityLLMProvider(
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        timeout=30,
+        target_dir="/tmp/chunkhound-test",
+    )
+    provider.CLEANUP_GRACE_TIMEOUT = 0.3
+
+    response, conversation = _make_sdk_response("done")
+
+    class _LateRaisingTeardownAgent:
+        def __init__(self, *_args, **_kwargs):
+            self.conversation = conversation
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            # Resist cancellation past the grace window, then fail the unwind.
+            deadline = asyncio.get_running_loop().time() + 0.8
+            while asyncio.get_running_loop().time() < deadline:
+                try:
+                    await asyncio.sleep(0.8)
+                except asyncio.CancelledError:
+                    continue
+            raise RuntimeError("teardown blew up")
+
+        async def chat(self, _prompt):
+            return response
+
+    mock_antigravity_agent.side_effect = _LateRaisingTeardownAgent
+
+    loop = asyncio.get_running_loop()
+    with patch(
+        "chunkhound.providers.llm.antigravity_llm_provider.logger.warning"
+    ) as mock_warning:
+        with pytest.raises(RuntimeError, match="timed out after"):
+            await provider.complete("hi", timeout=0.3)
+
+        # Task is retained while it runs past the grace window.
+        assert len(provider._abandoned_teardowns) == 1
+
+        # Once the stuck __aexit__ finally raises, the done-callback must drain
+        # the task (removing it) — proving the late exception was retrieved.
+        drain_deadline = loop.time() + 5.0
+        while provider._abandoned_teardowns and loop.time() < drain_deadline:
+            await asyncio.sleep(0.05)
+        assert not provider._abandoned_teardowns, (
+            "late-raising teardown task was never drained"
+        )
+
+    # The real cleanup failure is surfaced (retrieved, not dropped).
+    warnings = " ".join(
+        str(c.args[0]) for c in mock_warning.call_args_list if c.args
+    )
+    assert "ultimately failed" in warnings
+    assert "teardown blew up" in warnings
+
+
+@pytest.mark.asyncio
 async def test_batch_complete_cancels_siblings_on_failure(mock_antigravity_agent):
     """A failed batch prompt must cancel still-running siblings so their
     ``Agent`` sessions tear down via ``__aexit__`` instead of lingering as
@@ -771,7 +955,22 @@ async def test_sdk_security_constraints(mock_antigravity_agent):
     agent_mock.chat = AsyncMock(return_value=resp_mock)
     agent_mock.conversation = conv_mock
 
-    await provider.complete("Test prompt")
+    # Spy on the SDK config constructor to capture the RAW policy list we hand it,
+    # before the SDK normalizes it. `LocalAgentConfig.policies` after construction
+    # is SDK-version/platform-specific (the SDK expands our deny_all()+allow() list
+    # into synthetic per-tool rules and may rename/relocate the deny baseline), so
+    # asserting on it couples the test to SDK mechanics and breaks across platforms.
+    import google.antigravity as _ga
+
+    captured_policies = {}
+    real_config_cls = _ga.LocalAgentConfig
+
+    def _config_spy(**kwargs):
+        captured_policies["raw"] = kwargs.get("policies")
+        return real_config_cls(**kwargs)
+
+    with patch.object(_ga, "LocalAgentConfig", _config_spy):
+        await provider.complete("Test prompt")
 
     mock_antigravity_agent.assert_called_once()
     config_passed = mock_antigravity_agent.call_args[1].get("config")
@@ -782,11 +981,47 @@ async def test_sdk_security_constraints(mock_antigravity_agent):
     assert enabled_tools is not None
     from google.antigravity.types import BuiltinTools
 
-    assert BuiltinTools.LIST_DIR in enabled_tools
+    # Read-only capability contract: exactly the five inspection tools are
+    # enabled, and no write/exec-capable tool leaks in.
+    for readonly in (
+        BuiltinTools.LIST_DIR,
+        BuiltinTools.SEARCH_DIR,
+        BuiltinTools.FIND_FILE,
+        BuiltinTools.VIEW_FILE,
+        BuiltinTools.FINISH,
+    ):
+        assert readonly in enabled_tools
     assert BuiltinTools.CREATE_FILE not in enabled_tools
+    assert len(enabled_tools) == 5
 
     assert config_passed.workspaces == ["/tmp/chunkhound-test"]
-    assert len(config_passed.policies) > 0
+
+    # Policy safety contract, asserted on the RAW list we construct (captured
+    # above) rather than the SDK-normalized `config.policies`. Structurally the
+    # list is a deny-all baseline plus exactly the five read-only allows — a
+    # fixed six-entry list we fully own, stable across SDK versions/platforms.
+    raw_policies = captured_policies["raw"]
+    assert raw_policies is not None
+    assert len(raw_policies) == 6  # deny_all() + 5 read-only allow()s
+
+    # Decision/tool semantics are only meaningful with the real SDK installed
+    # (under the injected fake SDK the policy helpers return MagicMocks). Where
+    # the real SDK is present, verify the deny baseline and that ONLY read-only
+    # inspection tools are approved — never a write/exec-capable tool.
+    if not isinstance(_ga, MagicMock):
+        deny_tools = {p.tool for p in raw_policies if p.decision.name == "DENY"}
+        approved_tools = {
+            p.tool for p in raw_policies if p.decision.name == "APPROVE"
+        }
+        assert "*" in deny_tools  # deny-all baseline present
+        assert approved_tools == {
+            "list_directory",
+            "search_directory",
+            "find_file",
+            "view_file",
+            "finish",
+        }
+        assert "create_file" not in approved_tools
 
 
 @pytest.mark.asyncio
@@ -1354,6 +1589,27 @@ def test_sdk_compile_schema_allof_merges_intersection(mock_antigravity_agent):
     # Missing the field contributed by the parent subschema must fail.
     with pytest.raises(ValidationError):
         model_cls(id=1)
+
+
+@pytest.mark.parametrize("comp_key", ["anyOf", "oneOf"])
+def test_sdk_root_union_schema_fails_closed(mock_antigravity_agent, comp_key):
+    """A root anyOf/oneOf schema raises a clear ChunkHound error, not a cryptic
+    SDK config-build failure. The SDK's response_schema needs a single model
+    class, not a typing.Union, so this is rejected up front."""
+    provider = AntigravityLLMProvider(
+        api_key="test-api-key",
+        model="gemini-3.5-flash",
+        target_dir="/tmp/chunkhound-test",
+    )
+    schema = {
+        comp_key: [
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+            {"type": "object", "properties": {"b": {"type": "integer"}}},
+        ]
+    }
+
+    with pytest.raises(ValueError, match=f"root '{comp_key}'"):
+        provider._compile_schema_to_pydantic(schema)
 
 
 @pytest.mark.asyncio

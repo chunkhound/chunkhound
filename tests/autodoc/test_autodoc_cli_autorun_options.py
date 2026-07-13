@@ -21,7 +21,7 @@ def test_resolve_auto_map_options_defaults_noninteractive(
     )
 
     options = resolve_auto_map_options(
-        args=args, output_dir=output_dir
+        args=args, output_dir=output_dir, target_dir=tmp_path
     )
 
     assert options.map_out_dir == output_dir.with_name(f"map_{output_dir.name}")
@@ -45,7 +45,7 @@ def test_resolve_auto_map_options_honors_explicit_args(
     )
 
     options = resolve_auto_map_options(
-        args=args, output_dir=output_dir
+        args=args, output_dir=output_dir, target_dir=tmp_path
     )
 
     assert options.map_out_dir == (tmp_path / "maps").resolve()

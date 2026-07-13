@@ -229,13 +229,16 @@ export const llmProviders: ConfiguratorProviderOption[] = [
         svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81"/></svg>`,
         config: { provider: "antigravity-sdk" },
         apiKeyPlaceholder: "<YOUR_GEMINI_API_KEY>",
-        setupHint: "uv tool install 'chunkhound[antigravity]'",
+        setupHint:
+            "Install the optional SDK into the SAME environment ChunkHound runs from. Source checkout (uv): uv sync --extra antigravity (or uv pip install -e '.[antigravity]'). Pip venv: pip install 'chunkhound[antigravity]'. Global tool: uv tool install 'chunkhound[antigravity]'. The SDK ships as platform-specific wheels (no source distribution), so if no compatible wheel exists for your platform the install fails — use the antigravity-cli provider instead (external CLI only, no Python extra).",
     },
     {
         id: "antigravity-cli",
         name: "Antigravity CLI",
         svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81"/></svg>`,
         config: { provider: "antigravity-cli" },
+        setupHint:
+            "Requires the local 'agy' (or 'antigravity') CLI installed and authenticated on your PATH — no Python extra needed.",
     },
     {
         id: "deepseek",

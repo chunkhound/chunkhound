@@ -111,6 +111,16 @@ class AntigravityCLIProvider(BaseCLIProvider):
         captured_process_pid: int | None = None
         temp_dir = tempfile.mkdtemp(prefix="chunkhound-antigravity-")
 
+        # Scope the child's temp-file APIs to the per-call temp dir. TMPDIR/TMP/
+        # TEMP are omitted from the env allowlist above, so without this the CLI
+        # (or a descendant) writing via tempfile.* would land in the inherited
+        # system/user temp location and survive the final rmtree(temp_dir).
+        # Pointing them at temp_dir keeps those writes inside the sandbox dir
+        # that cleanup removes.
+        env["TMPDIR"] = temp_dir
+        env["TMP"] = temp_dir
+        env["TEMP"] = temp_dir
+
         # Note: We intentionally preserve HOME, USERPROFILE, APPDATA, and LOCALAPPDATA
         # rather than redirecting them to the temp directory. While this exposes user-level
         # configuration to the CLI (a documented sandboxing tradeoff), it is strictly
@@ -274,11 +284,17 @@ class AntigravityCLIProvider(BaseCLIProvider):
                         for child in parent.children(recursive=True):
                             try:
                                 child.kill()
-                            except psutil.NoSuchProcess:
+                            except (psutil.Error, OSError):
                                 pass
                         parent.kill()
-                    except psutil.NoSuchProcess:
-                        pass
+                    except (psutil.Error, OSError) as e:
+                        # Best-effort reaping must never raise: this runs in the
+                        # caller's ``finally``, where an escaping exception (e.g.
+                        # ``psutil.AccessDenied``) would replace the curated
+                        # timeout/cancel error the user should see.
+                        logger.debug(
+                            f"Windows psutil cleanup failed (best-effort): {e}"
+                        )
                 except ImportError:
                     try:
                         process.kill()

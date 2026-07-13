@@ -251,9 +251,12 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 
 > [!NOTE]
 > The `google-antigravity` SDK dependency is optional to keep base installations lightweight and compatible.
-> If you configure `provider: "antigravity-sdk"`, you must install the optional dependencies:
-> - Using pip: `pip install "chunkhound[antigravity]"`
-> - Using uv: `uv pip install "chunkhound[antigravity]"` (or `uv tool install "chunkhound[antigravity]"`)
+> If you configure `provider: "antigravity-sdk"`, install the optional extra into the **same environment ChunkHound runs from**:
+> - Source checkout (uv): `uv sync --extra antigravity` (or `uv pip install -e ".[antigravity]"`)
+> - Pip venv: `pip install "chunkhound[antigravity]"`
+> - Global tool: `uv tool install "chunkhound[antigravity]"`
+>
+> **Platform support:** `google-antigravity` is published as platform-specific wheels with no source distribution, so which OS/architectures it installs on depends on the wheels the SDK version you resolve happens to ship. If `pip install "chunkhound[antigravity]"` (or `uv sync --extra antigravity`) reports no compatible wheel for your platform, use the `antigravity-cli` provider instead — it needs only the external `agy`/`antigravity` CLI, no Python extra. See the [`google-antigravity` page on PyPI](https://pypi.org/project/google-antigravity/#files) for the current wheel list.
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
