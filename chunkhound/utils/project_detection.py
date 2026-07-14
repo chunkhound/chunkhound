@@ -4,6 +4,17 @@ import os
 from pathlib import Path
 
 
+def _exists_or_false(path: Path) -> bool:
+    # Path.exists() on Python <3.12 propagates PermissionError (EACCES /
+    # ERROR_ACCESS_DENIED) — e.g. probing a locked-down C:\Users on Windows
+    # aborts the entire walk. Treat any OSError as "not present" so discovery
+    # continues past inaccessible parents.
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def find_project_root(start_path: Path | None = None) -> Path:
     """
     Find project root directory using strict requirements.
@@ -27,9 +38,9 @@ def find_project_root(start_path: Path | None = None) -> Path:
     if start_path is not None:
         # CLI positional argument provided - use it directly
         project_root = Path(start_path).resolve()
-        if not project_root.exists():
+        if not _exists_or_false(project_root):
             print(
-                f"Error: Specified project directory does not exist: {project_root}",
+                f"Error: Specified project directory does not exist or is not accessible: {project_root}",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -45,20 +56,22 @@ def find_project_root(start_path: Path | None = None) -> Path:
     current = Path.cwd()
     home = Path.home()
 
-    # Walk up to filesystem root (but stop at home directory for safety)
-    while current != current.parent and current != home:
+    # Inspect home before breaking (Windows: CWD may equal Path.home()).
+    while True:
         # Priority 1: Explicit .chunkhound.json marker
-        if (current / ".chunkhound.json").exists():
+        if _exists_or_false(current / ".chunkhound.json"):
             return current
 
         # Priority 2: Existing database directory
-        if (current / ".chunkhound" / "db").exists():
+        if _exists_or_false(current / ".chunkhound" / "db"):
             return current
 
         # Priority 3: Git repository root
-        if (current / ".git").exists():
+        if _exists_or_false(current / ".git"):
             return current
 
+        if current == home or current == current.parent:
+            break
         current = current.parent
 
     # No markers found - provide helpful error
