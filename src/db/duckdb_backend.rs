@@ -34,6 +34,11 @@ struct BatchInner {
 }
 
 impl DuckDbHnswBackend {
+    /// Batch size for path-based DELETE operations (delete_paths, pre_delete_for_upsert).
+    /// 500 paths per batch balances SQL round-trip overhead vs memory usage for IN-list
+    /// parameter binding.
+    const DELETE_BATCH: usize = 500;
+
     pub fn new(config: DbConfig) -> Self {
         DuckDbHnswBackend {
             config,
@@ -488,9 +493,8 @@ impl DuckDbHnswBackend {
         // TODO(Phase 1): cache emb_tables on DuckDbHnswBackend (alongside hnsw_cache) so
         // this catalog scan is not repeated for every batch.  See pre_delete_for_upsert for the
         // matching TODO and the invalidation note (cache must grow when a new embeddings_N table
-        // appears).
+        // appears).  When caching is implemented, both TODOs should be resolved together.
         let emb_tables = Self::discover_embedding_tables(conn)?;
-        const DELETE_BATCH: usize = 500;
 
         // Phase 1: atomically delete embeddings + chunks together.
         // embeddings_N tables have no FK to chunks — delete embeddings first
@@ -499,7 +503,7 @@ impl DuckDbHnswBackend {
         // with each other (no ghost emb rows if the process crashes mid-batch).
         conn.execute_batch("BEGIN")?;
         let result = (|| -> Result<(), DbError> {
-            for batch in paths.chunks(DELETE_BATCH) {
+            for batch in paths.chunks(Self::DELETE_BATCH) {
                 let ph = std::iter::repeat_n("?", batch.len())
                     .collect::<Vec<_>>()
                     .join(",");
@@ -539,7 +543,7 @@ impl DuckDbHnswBackend {
         // chunk deletes were in the same transaction as the files delete, the engine
         // would still see the (not-yet-committed) chunks referencing the file and
         // reject the DELETE with a FK constraint error.
-        for batch in paths.chunks(DELETE_BATCH) {
+        for batch in paths.chunks(Self::DELETE_BATCH) {
             let ph = std::iter::repeat_n("?", batch.len())
                 .collect::<Vec<_>>()
                 .join(",");
@@ -582,10 +586,19 @@ impl DuckDbHnswBackend {
     // with a FK constraint error — even though no FK is actually violated at commit time.
     // The same limitation affects delete_paths; both are handled identically (pre-txn commit).
     //
-    // Atomicity gap: if the process crashes after this commits but before the write transaction
-    // below commits, the old chunks are absent but new ones were not written.  Recovery is
-    // self-healing: on the next index run the files are found in the DB and re-indexed from
-    // disk — no data is permanently lost.
+    // Atomicity gap — two cases:
+    //
+    // (a) Upsert files: only chunks/embeddings are deleted here; the file row survives.
+    //     If the process crashes after this COMMIT but before the write transaction below,
+    //     the file still exists in the files table with stale metadata.  Recovery is
+    //     self-healing: on the next index run the file is found in the DB and re-indexed
+    //     from disk — no data is permanently lost.
+    //
+    // (b) delete_paths (handled in Step 0a): files ARE removed from the DB.  If the process
+    //     crashes after delete_paths commits but before the write transaction below commits,
+    //     those files are absent from the DB and will not be re-populated unless the caller
+    //     explicitly re-requests them.  This is an inherent limitation of the two-phase
+    //     commit approach — the caller must be prepared to re-submit deletes after a crash.
     fn pre_delete_for_upsert(conn: &Connection, batch: &DbWriterBatch) -> Result<(), DbError> {
         let by_id: Vec<i64> = batch
             .files
@@ -784,11 +797,12 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // FK parent-row deletes inside an explicit transaction after child deletes).
         //
         // Atomicity gap: if the process crashes after delete_paths commits but before
-        // the write transaction below commits, the affected files are absent from the
-        // DB without their replacement rows.  Recovery is self-healing: on the next
-        // index run the indexer will find those paths missing from the DB and re-index
-        // them from disk — no manual intervention required.  Source files on disk are
-        // never touched, so no data is permanently lost.
+        // the write transaction below commits, the deleted files are permanently absent
+        // from the DB.  Unlike the upsert path (file rows survive → self-healing),
+        // delete_paths removes the file rows themselves.  The caller must be prepared
+        // to re-submit delete requests after a crash — the indexer has no way to know
+        // which files were intended for deletion.  Source files on disk are never
+        // touched by this code path.
         if !batch.delete_paths.is_empty() {
             let conn = self.conn_or_err()?;
             Self::delete_paths(conn, &batch.delete_paths)?;
