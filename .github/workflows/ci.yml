@@ -157,6 +157,7 @@ jobs:
 
       - name: Run tests
         id: tests
+        continue-on-error: true
         env:
           CHUNKHOUND_USE_EXISTING_SITE_DIST: "1"
         # Two retry layers serving different failure modes:
@@ -165,6 +166,9 @@ jobs:
         # - --reruns (pytest-rerunfailures): retries individual flaky tests within a
         #   process, used on Windows where the file-monitor can miss writes transiently.
         # timeout_minutes * max_attempts must stay below the job-level timeout.
+        # continue-on-error: a persistent failure doesn't fail the job by itself — the
+        # "Check flaky annotations" step below is the real gate, so the job stays green
+        # when every failure is annotated '# flaky: reason'.
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08  # v3
         with:
           timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}
@@ -180,7 +184,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Check flaky annotations
-        if: failure() && steps.tests.outcome == 'failure'
+        if: steps.tests.outcome == 'failure'
         run: uv run python scripts/check_flaky_annotations.py test-results.xml
 
   pages-artifact:
