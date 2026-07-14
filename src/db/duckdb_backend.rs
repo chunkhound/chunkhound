@@ -110,10 +110,15 @@ impl DuckDbHnswBackend {
     }
 
     fn try_load_vss(conn: &Connection) -> bool {
-        conn.execute_batch(
+        match conn.execute_batch(
             "INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true;",
-        )
-        .is_ok()
+        ) {
+            Ok(()) => true,
+            Err(e) => {
+                log::debug!("VSS extension unavailable (vector search disabled): {e}");
+                false
+            }
+        }
     }
 
     fn ensure_embedding_table_dims(conn: &Connection, dims: u32) -> Result<(), DbError> {
@@ -480,7 +485,10 @@ impl DuckDbHnswBackend {
         if paths.is_empty() {
             return Ok(());
         }
-        // Discover embedding tables once for this call.
+        // TODO(Phase 1): cache emb_tables on DuckDbHnswBackend (alongside hnsw_cache) so
+        // this catalog scan is not repeated for every batch.  See pre_delete_for_upsert for the
+        // matching TODO and the invalidation note (cache must grow when a new embeddings_N table
+        // appears).
         let emb_tables = Self::discover_embedding_tables(conn)?;
         const DELETE_BATCH: usize = 500;
 
@@ -742,6 +750,11 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         self.known_dims
             .extend(existing.into_iter().map(|(_, dims)| dims));
         self.conn = Some(conn);
+        // Crash recovery: if the process was killed between Step 2 (DROP HNSW) and
+        // Step 5 (RECREATE HNSW) in write_batch, HNSW indexes are absent but the
+        // embeddings_N tables still hold data.  Recreate any missing indexes now so
+        // the next session doesn't silently fall back to brute-force vector scan.
+        self.ensure_all_hnsw_indexes()?;
         Ok(())
     }
 

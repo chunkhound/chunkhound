@@ -32,7 +32,7 @@ class RustWriterBridge:
 
     Phase 1 (TODO): wire into SerialDatabaseExecutor
     (chunkhound/providers/database/serial_executor.py) to replace the Python
-    DuckDB write path — see the db_writter branch for the implementation plan.
+    DuckDB write path — see the db_writer branch for the implementation plan.
 
     Error-behaviour contract
     ------------------------

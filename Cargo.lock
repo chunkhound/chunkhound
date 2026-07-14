@@ -398,6 +398,7 @@ version = "0.1.0"
 dependencies = [
  "duckdb",
  "ignore",
+ "log",
  "pyo3",
  "serde",
  "serde_json",
