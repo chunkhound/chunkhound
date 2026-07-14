@@ -67,7 +67,7 @@ chunkhound index --check-ignores --vs git
 
 ## `chunkhound search`
 
-Search an indexed codebase using semantic or regex search.
+Search an indexed codebase or git history using semantic or regex search.
 
 ```bash
 chunkhound search <query> [path] [options]
@@ -89,6 +89,10 @@ chunkhound search <query> [path] [options]
 | `--page-size N` | Results per page (default: 10) |
 | `--offset N` | Pagination offset |
 | `--path-filter PATH` | Filter results by file path |
+| `--last-n N` | Search changes from the last N commits |
+| `--commit-range RANGE` | Search changes in a git revision range, such as `v2.4..HEAD` or `main..HEAD` |
+| `--commit-hash HASH` | Search changes introduced by one commit |
+| `--vector-source {diff,both,db}` | With git history options, choose changed code only (`diff`), diff plus indexed DB (`both`), or indexed DB only (`db`) |
 | `--config PATH` | Path to configuration file |
 | `--verbose` | Verbose output |
 | `--debug` | Debug output |
@@ -107,6 +111,41 @@ chunkhound search "database connection" --path-filter src/db/
 
 # Paginate results
 chunkhound search "error handling" --page-size 5 --offset 10
+
+# Search a branch or release range by meaning
+chunkhound search "database migration" --commit-range main..HEAD
+```
+
+> **Note:** `--regex` ignores git diff flags (`--last-n`, `--commit-range`, `--commit-hash`). For diff-scoped search, use semantic search (default).
+
+## `chunkhound websearch`
+
+Search the web via DuckDuckGo, fetch the top pages, and run deep research over the fetched content to produce a cited answer. Use it to pinpoint external technical facts before connecting them to local code research.
+
+```bash
+chunkhound websearch <query> [options]
+```
+
+| Argument | Description |
+|---|---|
+| `query` | Natural-language or keyword search query (required) |
+
+**Options:**
+
+| Flag | Description |
+|---|---|
+| `--limit N` | Max results to fetch (1–100, default: 30) |
+
+> **Requires** embedding + LLM + reranker providers. See [Configuration](/docs/configuration#web-search) for setup details.
+
+**Examples:**
+
+```bash
+# Pinpoint a technical fact from external docs
+chunkhound websearch "OAuth refresh token rotation best practices"
+
+# Limit results
+chunkhound websearch "Rust 2025 edition new features" --limit 50
 ```
 
 ## `chunkhound research`
@@ -127,6 +166,10 @@ chunkhound research <query> [path] [options]
 | Flag | Description |
 |---|---|
 | `--path-filter PATH` | Filter results by file path |
+| `--last-n N` | Research changes from the last N commits |
+| `--commit-range RANGE` | Research a git revision range, such as `v2.4..HEAD` or `main..HEAD` |
+| `--commit-hash HASH` | Research changes introduced by one commit |
+| `--vector-source {diff,both,db}` | With git history options, choose changed code only (`diff`), diff plus indexed DB (`both`), or indexed DB only (`db`) |
 | `--config PATH` | Path to configuration file |
 | `--verbose` | Verbose output |
 | `--debug` | Debug output |
@@ -139,6 +182,12 @@ chunkhound research "How does the auth system work?"
 
 # Scoped to a subdirectory
 chunkhound research "How are database migrations handled?" --path-filter src/db/
+
+# Summarize a large PR or release range for reviewers
+chunkhound research "Summarize behavior changes for reviewers" --commit-range main..HEAD
+
+# Draft changelog-ready bullets from implementation changes
+chunkhound research "What changed in billing since v2.4?" --commit-range v2.4..HEAD
 ```
 
 ## `chunkhound mcp`

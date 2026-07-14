@@ -94,17 +94,23 @@ git push origin vX.Y.Za1
 # 4. Revert remote back to original
 git remote set-url origin "$ORIGINAL_REMOTE"
 
-# 5. Update uv.lock (only needed when chunkhound[native] extra is re-enabled)
+# 5. Update uv.lock — pyproject.toml only pins a floor version, so this must be
+#    bumped every release to pick up the version that was just published
 uv lock --upgrade-package chunkhound-native
 git add uv.lock
 git commit -m "chore: bump chunkhound-native in lockfile to vX.Y.Za1"
 ```
 
-PyPI trusted publisher required for `release-rc.yml`:
+PyPI trusted publisher required for `release-rc.yml` (on the `chunkhound` project):
 - Owner: `chunkhound`
 - Repository: `chunkhound`
 - Workflow: `release-rc.yml`
 - Environment: `pypi`
+
+This same tag push also publishes `chunkhound-native` via the `publish-rc-native` job, which needs
+its own trusted publisher registered on the **`chunkhound-native`** PyPI project (Workflow:
+`release-rc.yml`, Environment: `pypi-native`) — see `RELEASING.md` prerequisites for the full
+setup and the environment-scoping gotcha that causes a confusing `403` if it's misconfigured.
 
 ## DB_PATH_GOTCHAS
 - **Preferred: pass project directory as positional arg** — `chunkhound search "query" /path/to/project` — this reads `.chunkhound.json` and resolves the DB correctly

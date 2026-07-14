@@ -4,33 +4,42 @@
 <section id="approach" class="core-insight">
   <div class="container">
     <p class="eyebrow">THE APPROACH</p>
-    <h2 class="heading">Three lenses into one semantic index</h2>
+    <h2 class="heading">Deep understanding needs more than search</h2>
     <p class="body">
       ChunkHound parses your code with cAST — AST-aware chunking backed by
-      Carnegie Mellon research (<a href="https://arxiv.org/abs/2506.15655" target="_blank" rel="noopener" class="paper-link"><code>arXiv:2506.15655</code></a>). It builds a semantic graph that search, research,
-      and documentation all draw from. Not three separate tools — three lenses into one index.
+      Carnegie Mellon research (<a href="https://arxiv.org/abs/2506.15655" target="_blank" rel="noopener" class="paper-link"><code>arXiv:2506.15655</code></a>). It then grounds answers in the places software understanding actually lives: current code, architecture, git history, external docs, and generated knowledge.
     </p>
 
     <div class="lens-row">
       <div class="lens-card">
         <ph-magnifying-glass class="lens-icon" size="26" weight="duotone" aria-hidden="true"></ph-magnifying-glass>
-        <span class="lens-name">Search</span>
-        <span class="lens-desc">Find code semantically</span>
+        <span class="lens-name">Current code</span>
+        <span class="lens-desc">Semantic and regex search</span>
       </div>
       <div class="lens-card">
         <ph-binoculars class="lens-icon" size="26" weight="duotone" aria-hidden="true"></ph-binoculars>
-        <span class="lens-name">Research</span>
-        <span class="lens-desc">Understand architecture</span>
+        <span class="lens-name">Architecture</span>
+        <span class="lens-desc">Cited cross-file research</span>
+      </div>
+      <div class="lens-card">
+        <ph-clock-counter-clockwise class="lens-icon" size="26" weight="duotone" aria-hidden="true"></ph-clock-counter-clockwise>
+        <span class="lens-name">Git history</span>
+        <span class="lens-desc">Semantic search over commits, ranges, and branches</span>
+      </div>
+      <div class="lens-card">
+        <ph-globe-hemisphere-west class="lens-icon" size="26" weight="duotone" aria-hidden="true"></ph-globe-hemisphere-west>
+        <span class="lens-name">External context</span>
+        <span class="lens-desc">Pinpoint web research</span>
       </div>
       <div class="lens-card">
         <ph-book-open-text class="lens-icon" size="26" weight="duotone" aria-hidden="true"></ph-book-open-text>
-        <span class="lens-name">Autodoc</span>
-        <span class="lens-desc">Generate documentation</span>
+        <span class="lens-name">Shared knowledge</span>
+        <span class="lens-desc">Autodoc from research</span>
       </div>
     </div>
     <div class="hub">
       <div class="hub-line"></div>
-      <div class="hub-node"><ph-database size="18" weight="duotone" aria-hidden="true"></ph-database> One semantic index</div>
+      <div class="hub-node"><ph-database size="18" weight="duotone" aria-hidden="true"></ph-database> One codebase context layer</div>
       <div class="hub-line"></div>
     </div>
   </div>
@@ -39,7 +48,9 @@
 <script>
   import "@phosphor-icons/webcomponents/PhBinoculars";
   import "@phosphor-icons/webcomponents/PhBookOpenText";
+  import "@phosphor-icons/webcomponents/PhClockCounterClockwise";
   import "@phosphor-icons/webcomponents/PhDatabase";
+  import "@phosphor-icons/webcomponents/PhGlobeHemisphereWest";
   import "@phosphor-icons/webcomponents/PhMagnifyingGlass";
 </script>
 
@@ -65,16 +76,16 @@
   }
 
   .heading {
-    font-size: var(--text-2xl);
-    line-height: var(--lh-2xl);
+    font-size: var(--text-xl);
+    line-height: var(--lh-xl);
     font-weight: 600;
     color: var(--text-primary);
     margin-bottom: var(--space-4);
   }
 
   .body {
-    font-size: var(--text-base);
-    line-height: var(--lh-base);
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
     color: var(--text-secondary);
     max-width: 720px;
     margin: 0 auto var(--space-7);
@@ -99,11 +110,10 @@
   }
 
   .lens-row {
-    display: flex;
-    justify-content: center;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: var(--space-4);
     margin-bottom: var(--space-4);
-    flex-wrap: wrap;
   }
 
   .lens-card {
@@ -165,13 +175,10 @@
 
   @media (max-width: 768px) {
     .lens-row {
-      flex-direction: column;
-      align-items: center;
-    }
-
-    .lens-card {
-      width: 100%;
+      grid-template-columns: 1fr;
       max-width: 280px;
+      margin-left: auto;
+      margin-right: auto;
     }
 
     .hub-line {

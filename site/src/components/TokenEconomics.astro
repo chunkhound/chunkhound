@@ -9,18 +9,17 @@
             A retry is just a token you didn't have to spend.
         </h2>
         <p class="body">
-            When an agent doesn't know your architecture, it guesses. When it
-            guesses wrong, it loops — regenerating on context already polluted
-            by the failed attempt. ChunkHound spends tokens once: a research
-            call that surfaces the auth chain, the utility that already exists,
-            the data model that changed last quarter. Users consistently report
-            the same pattern across codebases of every size.
+            When an agent doesn't understand your architecture, it guesses.
+            Wrong guesses turn into retries, polluted context, and wasted
+            tokens. ChunkHound shifts that work earlier: one research call can
+            surface the auth chain, the existing utility, and the data model
+            change before code gets written.
         </p>
 
         <div class="contrast-card">
             <div class="contrast-grid">
                 <div class="col col-blind">
-                    <p class="col-label"><ph-warning-circle size="16" weight="duotone" aria-hidden="true"></ph-warning-circle> Without context</p>
+                    <p class="col-label"><ph-warning-circle size="16" weight="duotone" aria-hidden="true"></ph-warning-circle> Blind agent loop</p>
                     <div class="flow-step dim">Attempt 1 — wrong direction</div>
                     <div class="flow-step dim">
                         Attempt 2 — missed existing utility
@@ -35,11 +34,11 @@
                 </div>
                 <div class="col-divider"></div>
                 <div class="col col-grounded">
-                    <p class="col-label"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle> With ChunkHound</p>
+                    <p class="col-label"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle> Research-first workflow</p>
                     <div class="flow-step">
                         Research call — architecture mapped,
                     </div>
-                    <div class="flow-step cursor-host">utilities found, patterns understood.</div>
+                    <div class="flow-step cursor-host">changes understood, patterns surfaced.</div>
                     <div class="flow-step">&nbsp;</div>
                     <div class="flow-step">&nbsp;</div>
                     <div class="flow-step done-good">Attempt 1 — done.</div>
