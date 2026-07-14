@@ -62,6 +62,11 @@ class RustWriterBridge:
         return self._writer is not None
 
     def __enter__(self) -> "RustWriterBridge":
+        if self._writer is None:
+            raise RuntimeError(
+                "RustWriterBridge is not available — check CHUNKHOUND_USE_RUST "
+                "or native build logs"
+            )
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -97,5 +102,8 @@ class RustWriterBridge:
             try:
                 self._writer.close()
             except Exception as exc:
-                _log.warning("Error closing Rust DB writer: %s", exc)
+                # close() propagates HNSW rebuild and CHECKPOINT errors.
+                # If ensure_all_hnsw_indexes failed, the DB is left in a degraded
+                # state (missing HNSW indexes) — escalate to ERROR so it's visible.
+                _log.error("Error closing Rust DB writer (DB may be degraded): %s", exc)
             self._writer = None
