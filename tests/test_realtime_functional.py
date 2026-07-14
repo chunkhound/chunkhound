@@ -21,10 +21,8 @@ from chunkhound.database_factory import create_services
 from chunkhound.providers.database.duckdb_provider import (
     DuckDBTransactionConflictError,
 )
-from chunkhound.services.realtime_indexing_service import (
-    RealtimeIndexingService,
-    SimpleEventHandler,
-)
+from chunkhound.services.realtime.service import RealtimeIndexingService
+from chunkhound.services.realtime.events import SimpleEventHandler
 from chunkhound.watchman import discover_nested_linux_mount_roots
 from chunkhound.watchman_runtime.loader import (
     listener_path_is_filesystem,
@@ -354,19 +352,19 @@ class TestRealtimeFunctional:
                 }
 
         monkeypatch.setattr(
-            "chunkhound.services.realtime_indexing_service.PrivateWatchmanSidecar",
+            "chunkhound.services.realtime.service.PrivateWatchmanSidecar",
             _FakeSidecar,
         )
         monkeypatch.setattr(
-            "chunkhound.services.realtime_indexing_service.WatchmanCliSession",
+            "chunkhound.services.realtime.service.WatchmanCliSession",
             _FakeSession,
         )
         monkeypatch.setattr(
-            "chunkhound.services.realtime_indexing_service.discover_nested_linux_mount_roots",
+            "chunkhound.services.realtime.service.discover_nested_linux_mount_roots",
             lambda target_path: (),
         )
         monkeypatch.setattr(
-            "chunkhound.services.realtime_indexing_service.discover_nested_windows_junction_scopes",
+            "chunkhound.services.realtime.service.discover_nested_windows_junction_scopes",
             lambda target_path: (),
         )
 
@@ -1116,7 +1114,7 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            "_RETRY_BASE_DELAY_SECONDS",
             0.01,
             raising=False,
         )
@@ -1201,7 +1199,7 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            "_RETRY_BASE_DELAY_SECONDS",
             0.05,
             raising=False,
         )
@@ -1303,7 +1301,7 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            "_RETRY_BASE_DELAY_SECONDS",
             0.05,
             raising=False,
         )
@@ -1394,13 +1392,13 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_MAX_RETRIES",
+            "_MAX_RETRY_BUDGET",
             1,
             raising=False,
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            "_RETRY_BASE_DELAY_SECONDS",
             0.01,
             raising=False,
         )
@@ -1615,7 +1613,7 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             service,
-            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            "_RETRY_BASE_DELAY_SECONDS",
             0.01,
             raising=False,
         )
@@ -2300,7 +2298,7 @@ class TestRealtimeFunctional:
         service._monitoring_ready_at = service._utc_now()
 
         monkeypatch.setattr(
-            "chunkhound.services.realtime_indexing_service.logger.warning",
+            "chunkhound.services.realtime.service.logger.warning",
             lambda message: warning_messages.append(message),
         )
 

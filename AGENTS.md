@@ -94,17 +94,23 @@ git push origin vX.Y.Za1
 # 4. Revert remote back to original
 git remote set-url origin "$ORIGINAL_REMOTE"
 
-# 5. Update uv.lock (only needed when chunkhound[native] extra is re-enabled)
+# 5. Update uv.lock — pyproject.toml only pins a floor version, so this must be
+#    bumped every release to pick up the version that was just published
 uv lock --upgrade-package chunkhound-native
 git add uv.lock
 git commit -m "chore: bump chunkhound-native in lockfile to vX.Y.Za1"
 ```
 
-PyPI trusted publisher required for `release-rc.yml`:
+PyPI trusted publisher required for `release-rc.yml` (on the `chunkhound` project):
 - Owner: `chunkhound`
 - Repository: `chunkhound`
 - Workflow: `release-rc.yml`
 - Environment: `pypi`
+
+This same tag push also publishes `chunkhound-native` via the `publish-rc-native` job, which needs
+its own trusted publisher registered on the **`chunkhound-native`** PyPI project (Workflow:
+`release-rc.yml`, Environment: `pypi-native`) — see `RELEASING.md` prerequisites for the full
+setup and the environment-scoping gotcha that causes a confusing `403` if it's misconfigured.
 
 ## DB_PATH_GOTCHAS
 - **Preferred: pass project directory as positional arg** — `chunkhound search "query" /path/to/project` — this reads `.chunkhound.json` and resolves the DB correctly
@@ -115,6 +121,25 @@ PyPI trusted publisher required for `release-rc.yml`:
 - Old-style flat `.chunkhound` files (pre-v4) block directory creation — move aside before re-indexing
 - Project-local `.chunkhound.json` with relative `"path": ".chunkhound"` resolves to CWD, not the project dir — use `--db` with absolute paths when indexing remote projects
 - `--config` does NOT override a project-local `.chunkhound.json` for DB path — always use explicit `--db` when the target project has its own config
+
+## RUST_RULES
+**NEVER:**
+- NEVER write `unsafe` code — `#![forbid(unsafe_code)]` is set at the crate root; the compiler will reject it
+- NEVER add `#[allow(clippy::...)]` without an inline comment explaining why
+- NEVER use `.unwrap()` at the PyO3 boundary — use `?` or `PyErr::new`; `.expect("reason")` is acceptable for truly-unreachable internal invariants
+- NEVER borrow `&str` across `py.allow_threads()` — convert to owned `String` before the GIL is released
+
+**ALWAYS:**
+- ALWAYS wrap CPU/IO-bound work in `py.allow_threads(|| { ... })` to release the GIL during Rust execution
+- ALWAYS run `cargo fmt` and `cargo clippy --all-targets -- -D warnings` before committing Rust changes (`make rust-check`)
+- ALWAYS run `cargo test` after Rust changes (`make rust-test`)
+- ALWAYS use owned types (`String`, `Vec<T>`) at the `allow_threads` boundary
+
+## RUST_COMMANDS
+```bash
+rust-check: make rust-check   # cargo fmt --check + clippy -D warnings
+rust-test:  make rust-test    # cargo test
+```
 
 ## PROJECT_MAINTENANCE
 - Smoke tests are mandatory guardrails

@@ -27,6 +27,7 @@ LANGUAGE_SAMPLES = {
     Language.MAKEFILE: "all:\n\techo hello",
     Language.C: "int main() { return 0; }",
     Language.CPP: "int main() { return 0; }",
+    Language.METAL: "int main() { return 0; }",  # MSL is C++14 -> cpp grammar
     Language.OBJC: "@interface MyClass : NSObject\n@end",
     Language.MATLAB: "function result = hello()\nresult = 1;\nend",
     Language.MARKDOWN: "# Hello\nWorld",
@@ -43,6 +44,7 @@ LANGUAGE_SAMPLES = {
     Language.SWIFT: "class MyClass {\n    func hello() -> String {\n        return \"world\"\n    }\n}",
     Language.DART: "void main() { }",
     Language.LUA: "function hello() print('world') end",
+    Language.POWERSHELL: "function Get-Hello {\n    Write-Output 'world'\n}",
     Language.SQL: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));\nCREATE VIEW active_users AS SELECT * FROM users;\nCREATE FUNCTION get_user_count() RETURNS INT BEGIN RETURN 0; END;\nCREATE TRIGGER audit_insert AFTER INSERT ON users FOR EACH ROW BEGIN INSERT INTO audit_log VALUES (NEW.id); END;\nCREATE INDEX idx_users_name ON users (name);",
     Language.HTML: "<section><h1>Hello</h1></section>",
     Language.CSS: "body { color: red; }",

@@ -21,7 +21,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
 from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.tools import execute_tool, search_impl
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime.service import RealtimeIndexingService
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     realtime_backend_for_tests,
@@ -367,6 +367,7 @@ def added_during_edit():
             Language.RUST: 'fn qa_test_function() -> &\'static str {\n    // Rust QA test\n    "rust_qa_unique"\n}',
             Language.C: '#include <stdio.h>\n\n// C QA test\nchar* qa_test_function() {\n    return "c_qa_unique";\n}',
             Language.CPP: '#include <string>\n\n// C++ QA test\nstd::string qaTestFunction() {\n    return "cpp_qa_unique";\n}',
+            Language.METAL: '// Metal QA test (MSL is C++14)\nconst char* qaTestFunction() {\n    return "metal_qa_unique";\n}',
             Language.BASH: '#!/bin/bash\n# Bash QA test\nqa_test_function() {\n    echo "bash_qa_unique"\n}',
             Language.MARKDOWN: "# QA Test\n\nThis is a **markdown QA test** with `markdown_qa_unique` content.",
             Language.JSON: '{\n    "qa_test": true,\n    "content": "json_qa_unique",\n    "type": "qa_validation"\n}',
@@ -416,6 +417,7 @@ function qaTestFunction() {
             Language.OBJC: '// Objective-C QA test\n@implementation QATest\n- (NSString *)qaTestMethod {\n    return @"objc_qa_unique";\n}\n@end',
             Language.PHP: '<?php\n// PHP QA test\nfunction qa_test_function() {\n    return "php_qa_unique";\n}',
             Language.SWIFT: '// Swift QA test\nfunc qaTestFunction() -> String {\n    return "swift_qa_unique"\n}',
+            Language.POWERSHELL: '# PowerShell QA test\nfunction Get-QaTest {\n    return "powershell_qa_unique"\n}',
             Language.ZIG: '// Zig QA test\nfn qa_test_function() []const u8 {\n    return "zig_qa_unique";\n}',
             Language.PDF: None,  # PDF is binary, skip content template
             Language.SQL: '-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT \'sql_qa_unique\'\n);',
@@ -440,6 +442,7 @@ function qaTestFunction() {
             Language.RUST: ".rs",
             Language.C: ".c",
             Language.CPP: ".cpp",
+            Language.METAL: ".metal",
             Language.BASH: ".sh",
             Language.MARKDOWN: ".md",
             Language.JSON: ".json",
@@ -461,6 +464,7 @@ function qaTestFunction() {
             Language.OBJC: ".m",
             Language.PHP: ".php",
             Language.SWIFT: ".swift",
+            Language.POWERSHELL: ".ps1",
             Language.ZIG: ".zig",
             Language.PDF: ".pdf",
             Language.SQL: ".sql",

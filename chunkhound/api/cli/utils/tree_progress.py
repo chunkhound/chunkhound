@@ -94,6 +94,7 @@ class TreeProgressDisplay:
             "search_semantic": "🔎",
             "search_regex": "📝",
             "search_regex_complete": "✓",
+            "search_rerank": "⚖️",
             "extract_symbols": "🏷️",
             "extract_symbols_complete": "📋",
             "read_files": "📖",
@@ -110,6 +111,8 @@ class TreeProgressDisplay:
             "main_complete": "🎉",
             "error": "❌",
             "evidence_ledger": "📊",
+            "gap_step": "▶",
+            "fact_extraction": "🧮",
         }
         return symbols.get(event_type, "•")
 

@@ -23,19 +23,19 @@ const STEPS: HeroStep[] = [
     },
     {
         type: "output",
-        text: "Indexed 12,847 files · 33 languages · 2.1M LOC",
+        text: "Indexed 12,847 files · dozens of languages/file types · 2.1M LOC",
     },
     { type: "blank" },
     {
         type: "prompt",
         segments: [
-            { cls: "cmd", text: "chunkhound search " },
-            { cls: "str", text: '"how does authentication work"' },
+            { cls: "cmd", text: "chunkhound research " },
+            { cls: "str", text: '"How does authentication work?"' },
         ],
     },
     {
         type: "output",
-        text: "Found 42 results via 3-hop semantic traversal",
+        text: "Cited report · 14 files · 6 components · 23 citations",
         dim: true,
     },
     { type: "blank" },
@@ -43,12 +43,26 @@ const STEPS: HeroStep[] = [
         type: "prompt",
         segments: [
             { cls: "cmd", text: "chunkhound research " },
-            { cls: "str", text: '"authentication architecture"' },
+            { cls: "str", text: '"Summarize auth changes for reviewers"' },
+            { cls: "cmd", text: " --commit-range main..HEAD" },
         ],
     },
     {
         type: "output",
-        text: "Generated report · 14 files · 6 components · 23 citations",
+        text: "Branch diff analyzed · reviewer brief generated",
+        dim: true,
+    },
+    { type: "blank" },
+    {
+        type: "prompt",
+        segments: [
+            { cls: "cmd", text: "chunkhound websearch " },
+            { cls: "str", text: '"OAuth refresh token rotation best practices"' },
+        ],
+    },
+    {
+        type: "output",
+        text: "External docs pinpointed · cited answer generated",
         dim: true,
         cursor: true,
     },

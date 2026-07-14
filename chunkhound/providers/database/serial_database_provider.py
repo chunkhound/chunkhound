@@ -1,5 +1,6 @@
 """Base class for database providers requiring single-threaded execution."""
 
+import asyncio
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -10,6 +11,7 @@ from chunkhound.core.models import Chunk, File
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.file_discovery_cache import FileDiscoveryCache
 from chunkhound.providers.database.serial_executor import SerialDatabaseExecutor
+from chunkhound.utils.logging_guard import log_if_not_mcp
 
 # Type hinting only
 if TYPE_CHECKING:
@@ -281,6 +283,23 @@ class SerialDatabaseProvider(ABC):
             "search_regex", pattern, page_size, offset, path_filter
         )
 
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        """Async: batch cosine similarity between query embedding and stored chunk embeddings."""
+        if not hasattr(self, "_executor_get_chunk_similarities"):
+            return {}
+        return cast(
+            dict[int, float],
+            await self._execute_in_db_thread(
+                "get_chunk_similarities", chunk_ids, query_embedding, provider, model
+            ),
+        )
+
     async def get_stats_async(self) -> dict[str, int]:
         """Async variant of get_stats."""
         return cast(dict[str, int], await self._execute_in_db_thread("get_stats"))
@@ -367,7 +386,14 @@ class SerialDatabaseProvider(ABC):
         """Async variant of record_skipped_file."""
         await self._execute_in_db_thread(
             "record_skipped_file",
-            path, name, extension, size, mtime, language, content_hash, skip_reason,
+            path,
+            name,
+            extension,
+            size,
+            mtime,
+            language,
+            content_hash,
+            skip_reason,
         )
 
     async def get_chunks_by_file_id_async(
@@ -649,3 +675,78 @@ class SerialDatabaseProvider(ABC):
         (e.g., LanceDB fragment compaction threshold).
         """
         return False
+
+    def drop_all_hnsw_indexes(self) -> None:
+        """Drop provider-managed HNSW indexes when the backend exposes them.
+
+        Compatibility no-op for providers whose vector layer is engine-managed
+        or does not expose standalone HNSW index DDL.
+        """
+        pass
+
+    def ensure_all_hnsw_indexes(self) -> None:
+        """Create provider-managed HNSW indexes when the backend exposes them.
+
+        Compatibility no-op for providers whose vector layer is engine-managed
+        or does not expose standalone HNSW index DDL.
+        """
+        pass
+
+    def compact_database(self) -> int:
+        """Compact the database file to eliminate fragmentation.
+
+        Default raises NotImplementedError. Override in providers that
+        support provider-specific file compaction.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support compaction"
+        )
+
+    async def compact_database_async(self) -> int:
+        """Async variant of compact_database."""
+        return await asyncio.get_running_loop().run_in_executor(
+            None, self.compact_database
+        )
+
+    def measure_fragmentation(self) -> float:
+        """Return fragmentation ratio. Stateless by default.
+
+        Override in providers to use provider-specific metrics.
+        """
+        return 0.0
+
+    def _executor_compact_if_needed(self, conn: Any, state: dict[str, Any]) -> bool:
+        """Default executor method: no-op.
+
+        Override in providers that support compaction (e.g. DuckDB).
+        Must NOT call _execute_in_db_thread / _execute_in_db_thread_sync
+        (would deadlock the single executor thread).
+        """
+        return False
+
+    def compact_if_needed(self) -> bool:
+        """Compact the database if fragmentation exceeds threshold.
+
+        Delegates to the executor's _executor_compact_if_needed when available.
+        Falls back to should_optimize + compact_database for providers without
+        an executor.
+        """
+        if self._executor is not None:
+            return cast(bool, self._execute_in_db_thread_sync("compact_if_needed"))
+        # Fallback for providers without executor
+        try:
+            if not self.should_optimize():
+                return False
+            self.compact_database()
+            return True
+        except NotImplementedError:
+            return False
+        except Exception as e:
+            log_if_not_mcp("warning", f"Compaction failed: {e}")
+            return False
+
+    async def compact_if_needed_async(self) -> bool:
+        """Async variant of compact_if_needed."""
+        if self._executor is not None:
+            return cast(bool, await self._execute_in_db_thread("compact_if_needed"))
+        return self.compact_if_needed()

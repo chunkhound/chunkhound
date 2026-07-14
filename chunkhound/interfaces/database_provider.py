@@ -80,6 +80,20 @@ class DatabaseProvider(Protocol):
         """Drop vector index for specific provider/model/dims combination."""
         ...
 
+    def drop_all_hnsw_indexes(self) -> None:
+        """Drop every HNSW index on all embedding tables.
+
+        No-op for providers without HNSW support (LanceDB).
+        """
+        ...
+
+    def ensure_all_hnsw_indexes(self) -> None:
+        """Ensure canonical HNSW indexes exist on all embedding tables.
+
+        No-op for providers without HNSW support (LanceDB).
+        """
+        ...
+
     # File Operations
     def insert_file(self, file: File) -> int:
         """Insert file record and return file ID."""
@@ -341,9 +355,21 @@ class DatabaseProvider(Protocol):
         """Perform regex search on code content (asynchronous)."""
         ...
 
-    def list_file_paths_under_directory(
-        self, directory_prefix: str
-    ) -> list[str]:
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        """Batch cosine similarity between a query embedding and stored chunk embeddings.
+
+        Returns:
+            Dict mapping chunk_id to cosine similarity score (0.0 for missing embeddings).
+        """
+        ...
+
+    def list_file_paths_under_directory(self, directory_prefix: str) -> list[str]:
         """Return every ``files.path`` under a relative directory prefix.
 
         Includes paths equal to ``directory_prefix`` and paths starting with
@@ -444,9 +470,52 @@ class DatabaseProvider(Protocol):
         """Process all supported files in a directory."""
         ...
 
+    # Compaction / Fragmentation
+    def compact_database(self) -> int:
+        """Compact the database file to eliminate fragmentation.
+
+        Provider-specific implementation. DuckDB rebuilds a fresh canonical
+        ChunkHound database file, then atomically swaps it into place. Unknown
+        / non-canonical tables may be dropped by provider design.
+
+        Returns:
+            Size of the compacted database in bytes. Returns 0 for in-memory.
+        """
+        ...
+
+    async def compact_database_async(self) -> int:
+        """Compact the database file (asynchronous).
+
+        Returns:
+            Size of the compacted database in bytes.
+        """
+        ...
+
+    def measure_fragmentation(self) -> float:
+        """Return fragmentation ratio. Fully stateless.
+
+        Uses PRAGMA database_size, pragma_storage_info (block allocation
+        metadata), and os.path.getsize to compare actual file size against
+        the estimated minimum live data size.
+        < 1.5 = healthy, > 3.0 = fragmented, > 5.0 = significantly fragmented.
+        """
+        ...
+
+    def compact_if_needed(self) -> bool:
+        """Compact the database if fragmentation exceeds threshold.
+
+        Fully stateless: measures fragmentation via PRAGMA database_size + file stat.
+        Returns True if compaction was performed.
+        """
+        ...
+
+    async def compact_if_needed_async(self) -> bool:
+        """Async variant of compact_if_needed."""
+        ...
+
     # Health and Diagnostics
     def optimize_tables(self) -> None:
-        """Optimize tables by compacting fragments and rebuilding indexes (provider-specific)."""
+        """Optimize tables with provider-specific maintenance work."""
         ...
 
     def should_optimize(self, operation: str = "") -> bool:

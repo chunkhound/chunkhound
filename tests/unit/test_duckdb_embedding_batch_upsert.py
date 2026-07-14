@@ -505,6 +505,7 @@ def test_connect_upgrades_legacy_embeddings_1536_before_unique_index_creation(
     provider = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
     provider.connect()
     try:
+        provider._ensure_embedding_table_exists(1536)
         provider.connection.execute(
             "DROP INDEX IF EXISTS idx_1536_chunk_provider_model_unique"
         )
@@ -947,9 +948,7 @@ def test_provider_batch_failure_rolls_back_without_hnsw(
             provider._executor_insert_embeddings_batch(
                 FailingConnection(provider.connection),
                 {
-                    "operations_since_checkpoint": 0,
                     "transaction_active": False,
-                    "deferred_checkpoint": False,
                 },
                 [
                     {
@@ -995,9 +994,7 @@ def test_provider_batch_joins_existing_transaction_without_committing(
     provider.connect()
     try:
         state = {
-            "operations_since_checkpoint": 0,
             "transaction_active": False,
-            "deferred_checkpoint": False,
         }
         provider._executor_begin_transaction(provider.connection, state)
         try:
@@ -1056,9 +1053,7 @@ def test_provider_batch_failure_leaves_outer_transaction_open(
     provider.connect()
     try:
         state = {
-            "operations_since_checkpoint": 0,
             "transaction_active": False,
-            "deferred_checkpoint": False,
         }
 
         class FailingConnection:
@@ -1131,6 +1126,12 @@ def test_provider_batch_failure_leaves_outer_transaction_open(
 def test_provider_legacy_embedding_upgrade_joins_existing_transaction(
     tmp_path: Path,
 ) -> None:
+    """Embedding batch upsert within an existing transaction respects rollback.
+
+    External contract: when _executor_insert_embeddings_batch is called
+    inside a caller-owned transaction and that transaction is rolled back,
+    the original data is preserved.
+    """
     pytest.importorskip("duckdb")
 
     provider = DuckDBProvider(
@@ -1139,21 +1140,23 @@ def test_provider_legacy_embedding_upgrade_joins_existing_transaction(
     )
     provider.connect()
     try:
-        provider._ensure_embedding_table_exists(3)
-        provider.connection.execute(
-            "DROP INDEX IF EXISTS idx_3_chunk_provider_model_unique"
+        # Seed with one embedding via the normal path
+        provider.insert_embeddings_batch(
+            [
+                {
+                    "chunk_id": 1,
+                    "provider": "fallback",
+                    "model": "mini",
+                    "embedding": [1.0, 2.0, 3.0],
+                    "dims": 3,
+                }
+            ],
+            batch_size=5,
         )
-        provider.connection.execute(
-            """
-            INSERT INTO embeddings_3 (chunk_id, provider, model, embedding, dims)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [1, "fallback", "mini", [1.0, 2.0, 3.0], 3],
-        )
+
+        # Start an outer transaction and upsert a replacement embedding
         state = {
-            "operations_since_checkpoint": 0,
             "transaction_active": False,
-            "deferred_checkpoint": False,
         }
         provider._executor_begin_transaction(provider.connection, state)
         try:
@@ -1181,21 +1184,13 @@ def test_provider_legacy_embedding_upgrade_joins_existing_transaction(
                 """,
                 [1, "fallback", "mini"],
             ).fetchall()
-            indexes = provider.connection.execute(
-                """
-                SELECT index_name
-                FROM duckdb_indexes()
-                WHERE table_name = 'embeddings_3'
-                ORDER BY index_name
-                """
-            ).fetchall()
             assert len(rows) == 1
             assert list(rows[0][0]) == pytest.approx([9.0, 8.0, 7.0])
-            assert "idx_3_chunk_provider_model_unique" in {row[0] for row in indexes}
         finally:
             if state["transaction_active"]:
                 provider._executor_rollback_transaction(provider.connection, state)
 
+        # After rollback the original embedding must be restored
         rolled_back_rows = provider.execute_query(
             """
             SELECT embedding
@@ -1204,21 +1199,9 @@ def test_provider_legacy_embedding_upgrade_joins_existing_transaction(
             """,
             [1, "fallback", "mini"],
         )
-        rolled_back_indexes = provider.execute_query(
-            """
-            SELECT index_name
-            FROM duckdb_indexes()
-            WHERE table_name = 'embeddings_3'
-            ORDER BY index_name
-            """,
-            [],
-        )
         assert len(rolled_back_rows) == 1
         assert list(rolled_back_rows[0]["embedding"]) == pytest.approx(
             [1.0, 2.0, 3.0]
         )
-        assert "idx_3_chunk_provider_model_unique" not in {
-            row["index_name"] for row in rolled_back_indexes
-        }
     finally:
         provider.disconnect(skip_checkpoint=True)

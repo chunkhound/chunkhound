@@ -198,8 +198,13 @@ Fast analytical queries and efficient storage.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `max_disk_usage_mb` | `number` | `null` | Max DB size in MB before indexing stops (CLI flag uses GB) |
+| `fragmentation_threshold_pct` | `number` | `30` | Background/auto-compaction trigger: file-size overhead above the provider's estimated live DB size (%). 30 = compact when the DB is ~30% larger than live data. 0 = always, null = never. This does not disable the fixed `chunkhound index` compaction boundaries. CLI: `--fragmentation-threshold-pct`. |
 | `lancedb_index_type` | `string` | `null` | LanceDB vector index type: `auto`, `ivf_hnsw_sq`, or `ivf_rq` |
 | `lancedb_optimize_fragment_threshold` | `number` | `100` | Fragment count to trigger LanceDB compaction |
+
+DuckDB also compacts during `chunkhound index` at two fixed batch boundaries: once after chunking and before embedding generation, then again at the end of the indexing pass. Those boundary calls are unconditional, including `--no-embeddings` and noop re-index runs. If a batch compaction fails with `status: "error"`, the index run is aborted. Providers that report compaction as unsupported/`skipped` keep indexing normally. Sampled/background auto-compaction (triggered by fragmentation threshold during normal operations) does NOT fail the original operation — failures are logged and skipped.
+
+DuckDB compaction rebuilds a fresh canonical ChunkHound database file and swaps it into place atomically. This is intentionally **not** a generic DuckDB passthrough: only ChunkHound-owned canonical tables (`schema_version`, `files`, `chunks`, `embeddings_*`) are preserved. Any unknown or non-canonical tables are dropped during compaction by design.
 
 ## Indexing Options
 
@@ -299,13 +304,42 @@ Controls the `code_research` MCP tool and `chunkhound research` command.
 | Option | Type | Default | Env Var | Description |
 |---|---|---|---|---|
 | `algorithm` | `"v1"\|"v2"\|"v3"` | `"v3"` | `CHUNKHOUND_RESEARCH_ALGORITHM` | Research algorithm version |
-| `exhaustive_mode` | `bool` | `false` | `CHUNKHOUND_RESEARCH_EXHAUSTIVE_MODE` | Retrieve everything (no time/count limit) |
-| `multi_hop_time_limit` | `number` | `5.0` | `CHUNKHOUND_RESEARCH_MULTI_HOP_TIME_LIMIT` | Max seconds for evidence expansion |
-| `multi_hop_result_limit` | `number` | `500` | `CHUNKHOUND_RESEARCH_MULTI_HOP_RESULT_LIMIT` | Max accumulated chunks |
-| `target_tokens` | `number` | `20000` | `CHUNKHOUND_RESEARCH_TARGET_TOKENS` | Output token budget for synthesis |
-| `query_expansion_enabled` | `bool` | `true` | `CHUNKHOUND_RESEARCH_QUERY_EXPANSION_ENABLED` | LLM-based query expansion |
-| `depth_exploration_max_completion_tokens` | `number` | `10000` | `CHUNKHOUND_RESEARCH_DEPTH_EXPLORATION_MAX_COMPLETION_TOKENS` | Completion/reasoning token budget for depth exploration query generation |
-| `relevance_threshold` | `number` | `0.5` | `CHUNKHOUND_RESEARCH_RELEVANCE_THRESHOLD` | Min rerank score for inclusion |
+| `query_expansion_enabled` | `bool` | `true` | `CHUNKHOUND_RESEARCH_QUERY_EXPANSION_ENABLED` | LLM-based query expansion for broader coverage |
+| `num_expanded_queries` | `int` | `2` | `CHUNKHOUND_RESEARCH_NUM_EXPANDED_QUERIES` | Number of additional queries to generate (1-5) |
+| `initial_page_size` | `int` | `30` | `CHUNKHOUND_RESEARCH_INITIAL_PAGE_SIZE` | Results per vector query in multi-hop search (10-100) |
+| `relevance_threshold` | `number` | `0.5` | `CHUNKHOUND_RESEARCH_RELEVANCE_THRESHOLD` | Min rerank score for chunk inclusion (0.3-0.8) |
+| `max_symbols` | `int` | `5` | `CHUNKHOUND_RESEARCH_MAX_SYMBOLS` | Max symbols to extract for regex search augmentation (1-20) |
+| `regex_augmentation_ratio` | `number` | `0.3` | `CHUNKHOUND_RESEARCH_REGEX_AUGMENTATION_RATIO` | Regex target as fraction of semantic count (0.1-1.0) |
+| `regex_min_results` | `int` | `20` | `CHUNKHOUND_RESEARCH_REGEX_MIN_RESULTS` | Min regex results regardless of augmentation ratio (10-100) |
+| `regex_scan_page_size` | `int` | `100` | `CHUNKHOUND_RESEARCH_REGEX_SCAN_PAGE_SIZE` | Internal pagination batch size for regex exclusion scanning (50-200) |
+| `multi_hop_time_limit` | `number` | `5.0` | `CHUNKHOUND_RESEARCH_MULTI_HOP_TIME_LIMIT` | Max seconds for evidence expansion (1.0-15.0) |
+| `multi_hop_result_limit` | `int` | `500` | `CHUNKHOUND_RESEARCH_MULTI_HOP_RESULT_LIMIT` | Max chunks accumulated during multi-hop expansion (100-2000) |
+| `multi_hop_min_candidates` | `int` | `5` | `CHUNKHOUND_RESEARCH_MULTI_HOP_MIN_CANDIDATES` | Min candidates above threshold to continue expansion (1-20) |
+| `multi_hop_score_degradation` | `number` | `0.15` | `CHUNKHOUND_RESEARCH_MULTI_HOP_SCORE_DEGRADATION` | Max score drop in top-5 before terminating expansion (0.05-0.5) |
+| `multi_hop_min_relevance` | `number` | `0.3` | `CHUNKHOUND_RESEARCH_MULTI_HOP_MIN_RELEVANCE` | Quality floor for expansion candidates (0.1-0.8) |
+| `depth_exploration_enabled` | `bool` | `true` | `CHUNKHOUND_RESEARCH_DEPTH_EXPLORATION_ENABLED` | Enable depth exploration to find more chunks in discovered files |
+| `max_exploration_files` | `int` | `5` | `CHUNKHOUND_RESEARCH_MAX_EXPLORATION_FILES` | Max files to explore for additional aspects, top-K by score (1-15) |
+| `exploration_queries_per_file` | `int` | `2` | `CHUNKHOUND_RESEARCH_EXPLORATION_QUERIES_PER_FILE` | Number of aspect-based queries to generate per file (1-3) |
+| `depth_exploration_max_completion_tokens` | `int` | `10000` | `CHUNKHOUND_RESEARCH_DEPTH_EXPLORATION_MAX_COMPLETION_TOKENS` | Token budget for depth exploration query generation (1-50000) |
+| `min_gaps` | `int` | `1` | `CHUNKHOUND_RESEARCH_MIN_GAPS` | Minimum gaps to process after selection (0-5) |
+| `max_gaps` | `int` | `10` | `CHUNKHOUND_RESEARCH_MAX_GAPS` | Maximum gaps to fill after selection (5-30) |
+| `gap_similarity_threshold` | `number` | `0.25` | `CHUNKHOUND_RESEARCH_GAP_SIMILARITY_THRESHOLD` | Cosine distance threshold for clustering similar gaps (0.1-0.5) |
+| `shard_budget` | `int` | `40000` | `CHUNKHOUND_RESEARCH_SHARD_BUDGET` | Token budget per gap detection shard for LLM processing (20000-60000) |
+| `min_cluster_size` | `int` | `5` | `CHUNKHOUND_RESEARCH_MIN_CLUSTER_SIZE` | Minimum cluster size for HDBSCAN clustering (1-20) |
+| `target_tokens` | `int` | `20000` | `CHUNKHOUND_RESEARCH_TARGET_TOKENS` | Output token budget for final synthesis (10000-100000) |
+| `max_compression_iterations` | `int` | `5` | `CHUNKHOUND_RESEARCH_MAX_COMPRESSION_ITERATIONS` | Max compression loop iterations before error (1-10) |
+| `max_boundary_expansion_lines` | `int` | `300` | `CHUNKHOUND_RESEARCH_MAX_BOUNDARY_EXPANSION_LINES` | Max lines to expand for complete functions/classes (50-500) |
+| `max_chunks_per_file_repr` | `int` | `5` | `CHUNKHOUND_RESEARCH_MAX_CHUNKS_PER_FILE_REPR` | Top chunks per file for representative document creation (1-10) |
+| `max_tokens_per_file_repr` | `int` | `2000` | `CHUNKHOUND_RESEARCH_MAX_TOKENS_PER_FILE_REPR` | Token limit per file representative document (500-5000) |
+| `context_window` | `int` | `150000` | `CHUNKHOUND_RESEARCH_CONTEXT_WINDOW` | Max tokens for LLM context window (50000-200000) |
+| `compression_max_depth` | `int` | `10` | `CHUNKHOUND_RESEARCH_COMPRESSION_MAX_DEPTH` | Max recursion depth for hierarchical compression (1-20) |
+| `final_synthesis_threshold` | `int` | `75000` | `CHUNKHOUND_RESEARCH_FINAL_SYNTHESIS_THRESHOLD` | Max tokens for final synthesis LLM call (30000-200000) |
+| `window_expansion_enabled` | `bool` | `true` | `CHUNKHOUND_RESEARCH_WINDOW_EXPANSION_ENABLED` | Enable neighboring chunk expansion for context |
+| `window_expansion_lines` | `int` | `50` | `CHUNKHOUND_RESEARCH_WINDOW_EXPANSION_LINES` | Lines to expand before/after retrieved chunks (10-200) |
+| `import_resolution_enabled` | `bool` | `true` | `CHUNKHOUND_RESEARCH_IMPORT_RESOLUTION_ENABLED` | Automatically fetch source files for imports in retrieved chunks |
+| `import_resolution_max_files` | `int` | `10` | `CHUNKHOUND_RESEARCH_IMPORT_RESOLUTION_MAX_FILES` | Max import source files to fetch per synthesis (1-50) |
+| `exhaustive_mode` | `bool` | `false` | `CHUNKHOUND_RESEARCH_EXHAUSTIVE_MODE` | Enable exhaustive retrieval (no result limit, 600s timeout) |
+| `exhaustive_time_limit` | `number` | `600.0` | `CHUNKHOUND_RESEARCH_EXHAUSTIVE_TIME_LIMIT` | Safety timeout for exhaustive mode in seconds (60-1800) |
 
 ```json
 {
@@ -319,8 +353,6 @@ Controls the `code_research` MCP tool and `chunkhound research` command.
   }
 }
 ```
-
-The full list of parameters is available in `research_config.py`.
 
 ### Algorithm Versions
 
@@ -354,9 +386,19 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_EMBEDDING__API_KEY` | API key for embedding provider |
 | `CHUNKHOUND_EMBEDDING__BASE_URL` | Base URL for OpenAI-compatible endpoints |
 | `CHUNKHOUND_EMBEDDING__SSL_VERIFY` | Verify TLS certificates for embedding requests sent to `base_url` |
+| `CHUNKHOUND_EMBEDDING__RERANK_MODEL` | Reranking model name |
+| `CHUNKHOUND_EMBEDDING__RERANK_URL` | Separate rerank endpoint URL |
 | `CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY` | Verify TLS certificates for rerank requests (overrides `ssl_verify`) |
+| `CHUNKHOUND_EMBEDDING__RERANK_FORMAT` | Reranking API format: `cohere`, `tei`, or `auto` |
+| `CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE` | Max documents per rerank request |
+| `CHUNKHOUND_EMBEDDING__TIMEOUT` | Request timeout in seconds (default: 30) |
+| `CHUNKHOUND_EMBEDDING__MAX_RETRIES` | Max retry attempts on failure (default: 3) |
+| `CHUNKHOUND_EMBEDDING__API_VERSION` | Azure OpenAI API version (`YYYY-MM-DD`) |
+| `CHUNKHOUND_EMBEDDING__AZURE_ENDPOINT` | Azure OpenAI endpoint |
+| `CHUNKHOUND_EMBEDDING__AZURE_DEPLOYMENT` | Azure OpenAI deployment name |
 | `CHUNKHOUND_DATABASE__PROVIDER` | Database backend (`duckdb` or `lancedb`) |
 | `CHUNKHOUND_DATABASE__PATH` | Database storage path |
+| `CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB` | Max database size in GB |
 | `CHUNKHOUND_LLM_PROVIDER` | LLM provider for research |
 | `CHUNKHOUND_LLM_MODEL` | LLM model shorthand that sets both utility and synthesis roles |
 | `CHUNKHOUND_LLM_UTILITY_MODEL` | LLM model for utility tasks (fast, lower cost) |
@@ -364,21 +406,60 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_LLM_API_KEY` | API key for LLM provider |
 | `CHUNKHOUND_LLM_BASE_URL` | Base URL for LLM provider (proxy / custom endpoint) |
 | `CHUNKHOUND_LLM_SSL_VERIFY` | Verify TLS certificates for requests sent to `llm.base_url` |
+| `CHUNKHOUND_LLM_UTILITY_PROVIDER` | Override provider for utility operations |
+| `CHUNKHOUND_LLM_SYNTHESIS_PROVIDER` | Override provider for synthesis operations |
+| `CHUNKHOUND_LLM_TIMEOUT` | LLM request timeout in seconds (default: 120) |
+| `CHUNKHOUND_LLM_MAX_RETRIES` | Max retry attempts (default: 3) |
+| `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` | Reasoning effort for Codex models (`minimal`, `low`, `medium`, `high`, `xhigh`) |
+| `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY` | Reasoning effort override for utility stage |
+| `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS` | Reasoning effort override for synthesis stage |
+| `CHUNKHOUND_LLM_ANTHROPIC_THINKING_ENABLED` | Enable extended thinking |
+| `CHUNKHOUND_LLM_ANTHROPIC_THINKING_MODE` | Thinking mode: `auto`, `off`, `manual`, or `adaptive` |
+| `CHUNKHOUND_LLM_ANTHROPIC_THINKING_BUDGET_TOKENS` | Manual-mode thinking budget (min 1024, default: 10000) |
+| `CHUNKHOUND_LLM_ANTHROPIC_THINKING_DISPLAY` | Adaptive-mode thinking text: `summarized` or `omitted` |
+| `CHUNKHOUND_LLM_ANTHROPIC_INTERLEAVED_THINKING` | Manual-mode interleaved thinking between tool calls |
+| `CHUNKHOUND_LLM_ANTHROPIC_EFFORT` | Token-usage effort: `low`, `medium`, `high`, `xhigh`, `max` |
+| `CHUNKHOUND_LLM_ANTHROPIC_TASK_BUDGET_TOKENS` | Advisory agentic-loop token budget (beta) |
+| `CHUNKHOUND_LLM_ANTHROPIC_PROMPT_CACHING` | Send `cache_control` for prompt caching |
+| `CHUNKHOUND_LLM_ANTHROPIC_CACHE_TTL` | Prompt-cache TTL (e.g. `1h`) |
+| `CHUNKHOUND_LLM_ANTHROPIC_CONTEXT_MANAGEMENT_ENABLED` | Automatic clearing of tool results and thinking blocks (beta) |
+| `CHUNKHOUND_LLM_ANTHROPIC_CLEAR_THINKING_KEEP_TURNS` | Thinking turns to keep when context management clears them |
+| `CHUNKHOUND_LLM_ANTHROPIC_CLEAR_TOOL_USES_TRIGGER_TOKENS` | Input-token threshold that triggers tool-result clearing |
+| `CHUNKHOUND_LLM_ANTHROPIC_CLEAR_TOOL_USES_KEEP` | Number of recent tool-use pairs to keep after clearing |
 | `CHUNKHOUND_LLM_GEMINI_THINKING_LEVEL` | Gemini thinking depth (`low`, `medium`, `high`) |
 | `CHUNKHOUND_LLM_GEMINI_THINKING_BUDGET` | Gemini fixed thinking token budget |
 | `CHUNKHOUND_INDEXING__EXCLUDE_MODE` | Exclusion mode (`combined`, `config_only`, `gitignore_only`) |
-| `CHUNKHOUND_INDEXING__PER_FILE_TIMEOUT_SECONDS` | Per-file parse timeout |
-| `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL` | Enable embedded SQL detection |
+| `CHUNKHOUND_INDEXING__EXCLUDE` | Glob patterns to exclude from indexing |
+| `CHUNKHOUND_INDEXING__INCLUDE` | Glob patterns limiting which files are indexed |
+| `CHUNKHOUND_INDEXING__CLEANUP` | Remove orphaned DB records after indexing (default: true) |
+| `CHUNKHOUND_INDEXING__FORCE_REINDEX` | Force re-indexing of all files (default: false) |
+| `CHUNKHOUND_INDEXING__MAX_FILE_SIZE_MB` | Skip files larger than this (MB, default: 10) |
+| `CHUNKHOUND_INDEXING__CONFIG_FILE_SIZE_THRESHOLD_KB` | Skip structured config files larger than this (KB, default: 20) |
+| `CHUNKHOUND_INDEXING__PER_FILE_TIMEOUT_SECONDS` | Per-file parse timeout (default: 3.0) |
+| `CHUNKHOUND_INDEXING__PER_FILE_TIMEOUT_MIN_SIZE_KB` | Only apply per-file timeout to files at least this large (KB, default: 128) |
+| `CHUNKHOUND_INDEXING__BATCH_SIZE` | Files per parsing batch (default: 50) |
+| `CHUNKHOUND_INDEXING__DB_BATCH_SIZE` | Chunks per database write batch (default: 100) |
+| `CHUNKHOUND_INDEXING__MAX_CONCURRENT` | Max concurrent parser workers (default: 5) |
+| `CHUNKHOUND_INDEXING__CHUNK_OVERLAP` | Internal chunk overlap (default: 50) |
+| `CHUNKHOUND_INDEXING__MIN_CHUNK_SIZE` | Internal min chunk size (default: 50) |
+| `CHUNKHOUND_INDEXING__INDEX_UNKNOWN_FILES` | Index files with unrecognized extensions as plain text (default: false) |
+| `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL` | Enable embedded SQL detection (default: true) |
+| `CHUNKHOUND_INDEXING__DISCOVERY_BACKEND` | File discovery backend: `auto`, `python`, `git`, `git_only` (default: `auto`) |
+| `CHUNKHOUND_INDEXING__GITIGNORE_BACKEND` | Backend for gitignore evaluation: `python` or `libgit2` (default: `python`) |
+| `CHUNKHOUND_INDEXING__CHIGNORE_FILE` | ChunkHound-specific ignore file name (default: `.chignore`) |
 | `CHUNKHOUND_INDEXING__GIT_PATHSPEC_CAP` | Max git pathspec entries (default: 128) |
+| `CHUNKHOUND_INDEXING__MTIME_EPSILON_SECONDS` | Tolerance for file mtime comparison (seconds, default: 0.01) |
+| `CHUNKHOUND_INDEXING__PARALLEL_DISCOVERY` | Enable parallel directory traversal for large codebases (default: true) |
+| `CHUNKHOUND_INDEXING__MIN_DIRS_FOR_PARALLEL` | Minimum top-level directories to activate parallel discovery (default: 4) |
+| `CHUNKHOUND_INDEXING__MAX_DISCOVERY_WORKERS` | Maximum worker processes for parallel discovery (default: 16) |
+| `CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_OVERLAY` | Apply CH root .gitignore as global overlay across repos (default: false) |
+| `CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_NONREPO` | Use CH root .gitignore only for non-repo paths (default: true) |
+| `CHUNKHOUND_INDEXING__REALTIME_BACKEND` | Filesystem monitoring backend: `watchman`, `watchdog`, or `polling` |
 | `CHUNKHOUND_DB_EXECUTE_TIMEOUT` | Database executor timeout |
 | `CHUNKHOUND_YAML_ENGINE` | YAML parser engine (`rapid` or `tree`) |
-| `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` | Reasoning effort for Codex models (`minimal`, `low`, `medium`, `high`, `xhigh`) |
 | `CHUNKHOUND_CONFIG_FILE` | Path to config file (alternative to `--config`) |
+| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Web search subprocess timeout in seconds (default: 600) |
 | `CHUNKHOUND_DEBUG` | Enable debug logging |
-| `CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB` | Max database size in GB |
-| `CHUNKHOUND_INDEXING__FORCE_REINDEX` | Force re-indexing |
-| `CHUNKHOUND_INDEXING__MAX_CONCURRENT` | Max concurrent workers |
-| `CHUNKHOUND_EMBEDDING__RERANK_MODEL` | Reranking model |
 | `VOYAGE_API_KEY` | Fallback API key for VoyageAI provider |
 
 ## Advanced routing
@@ -588,3 +669,45 @@ LLM config:
 ```
 
 > **Ollama vs vLLM:** Ollama is simpler — one process, one command per model. vLLM is better for throughput and gives you full control over each serving process. Both work equally well with ChunkHound as long as `llm.model` is set explicitly.
+
+## Web Search
+
+The `websearch` tool searches the web via DuckDuckGo, fetches the top pages, indexes the fetched content in memory, and runs the same deep research pipeline used for local code search. It is available as an MCP tool and as `chunkhound websearch`.
+
+### Requirements
+
+The web search tool requires all three provider capabilities to be configured:
+
+- **Embedding provider** — e.g. `embedding.provider: "voyageai"` or `"openai"`
+- **LLM provider** — for query expansion and answer synthesis
+- **Reranking** — `embedding.rerank_model` must be set for relevance-aware multi-hop search
+
+If any of these are missing, the MCP `websearch` tool is not registered (capability gating) and the CLI command will fail.
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `query` | string | required | Natural-language or keyword query sent to DuckDuckGo |
+| `--limit` / `limit` | int | 30 | Max results to fetch (1–100). CLI uses `--limit`, MCP uses `limit`. |
+
+### Environment Variables
+
+| Variable | Description |
+|---|---|
+| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Wall-clock timeout (seconds) for the research subprocess. Default: 600. Also returned for malformed values. |
+
+### Fixed Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `MAX_FETCH_CONCURRENCY` | `5` | Max concurrent page fetches (defined in `chunkhound.utils.websearch_core`) |
+| `WEBSEARCH_LIMIT_MAX` | `100` | Upper bound for the `--limit` / `limit` parameter |
+
+### Browser Dependency
+
+The fetch path uses **zendriver** (v0.15.3, core dependency — no extra install needed) to drive the system-installed Google Chrome for rich page rendering. Chrome >=124 is required. If Chrome is not found or too old, fetches fall back to `urllib` (less capable — may miss JS-rendered content and cannot fetch PDFs).
+
+### Research Config Linkage
+
+The web search tool delegates to the same deep research pipeline as `code_research`. All settings in the [Research Configuration](#research-configuration) section apply: `algorithm`, `multi_hop_time_limit`, `relevance_threshold`, `query_expansion_enabled`, `target_tokens`, etc.

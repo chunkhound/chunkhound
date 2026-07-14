@@ -12,22 +12,26 @@ from chunkhound.services.research.shared.elbow_detection import find_elbow_kneed
 
 
 def get_unified_score(chunk: dict[str, Any]) -> float:
-    """Get score for elbow detection, preferring rerank_score over score.
+    """Get score for elbow detection, preferring rerank_score over similarity over score.
 
     This provides a unified scoring approach for chunks from different
     exploration strategies:
     - BFS uses "score" from semantic search
-    - WideCoverage uses "rerank_score" from reranking
+    - WideCoverage Phase 1/2 uses "rerank_score" from reranking
+    - WideCoverage Phase 1.5 uses "similarity" from cosine scoring (skip_rerank=True)
 
     Args:
         chunk: Chunk dictionary with score fields
 
     Returns:
-        Float score value, preferring rerank_score if available
+        Float score value, preferring rerank_score, then similarity, then score
     """
     rerank = chunk.get("rerank_score")
     if rerank is not None:
         return float(rerank)
+    similarity = chunk.get("similarity")
+    if similarity is not None:
+        return float(similarity)
     score = chunk.get("score")
     if score is not None:
         return float(score)

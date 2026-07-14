@@ -1,15 +1,13 @@
 """Embedding providers for ChunkHound - pluggable vector embedding generation."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.interfaces.embedding_provider import (
-    EmbeddingProvider as InterfaceEmbeddingProvider,
-)
-from chunkhound.interfaces.embedding_provider import (
-    RerankResult,
+    EmbeddingProvider,
 )
 
 if TYPE_CHECKING:
@@ -19,65 +17,6 @@ if TYPE_CHECKING:
 
 # OpenAI and tiktoken imports have been moved to the specific provider implementations
 # that need them. This reduces unnecessary dependencies in the core module.
-
-
-class EmbeddingProvider(Protocol):
-    """Protocol for embedding providers."""
-
-    @property
-    def name(self) -> str:
-        """Provider name (e.g., 'openai')."""
-        ...
-
-    @property
-    def model(self) -> str:
-        """Model name (e.g., 'text-embedding-3-small')."""
-        ...
-
-    @property
-    def dims(self) -> int:
-        """Embedding dimensions."""
-        ...
-
-    @property
-    def distance(self) -> str:
-        """Distance metric ('cosine' | 'l2')."""
-        ...
-
-    @property
-    def batch_size(self) -> int:
-        """Maximum batch size for embedding requests."""
-        ...
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for a list of texts.
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            List of embedding vectors (one per input text)
-        """
-        ...
-
-    def supports_reranking(self) -> bool:
-        """Return True if this provider supports reranking."""
-        ...
-
-    async def rerank(
-        self, query: str, documents: list[str], top_k: int | None = None
-    ) -> list[RerankResult]:
-        """Rerank documents by relevance to query.
-
-        Args:
-            query: Query text to rank against
-            documents: List of document texts to rank
-            top_k: Optional limit on number of results
-
-        Returns:
-            List of RerankResult with original index and relevance score
-        """
-        ...
 
 
 @dataclass
@@ -100,11 +39,11 @@ class EmbeddingManager:
     """Manages embedding providers and generation."""
 
     def __init__(self) -> None:
-        self._providers: dict[str, InterfaceEmbeddingProvider] = {}
+        self._providers: dict[str, EmbeddingProvider] = {}
         self._default_provider: str | None = None
 
     def register_provider(
-        self, provider: InterfaceEmbeddingProvider, set_default: bool = False
+        self, provider: EmbeddingProvider, set_default: bool = False
     ) -> None:
         """Register an embedding provider.
 
@@ -121,7 +60,7 @@ class EmbeddingManager:
             self._default_provider = provider.name
             logger.info(f"Set default embedding provider: {provider.name}")
 
-    def get_provider(self, name: str | None = None) -> InterfaceEmbeddingProvider:
+    def get_provider(self, name: str | None = None) -> EmbeddingProvider:
         """Get an embedding provider by name.
 
         Args:
@@ -140,7 +79,7 @@ class EmbeddingManager:
 
         return self._providers[name]
 
-    def get_default_provider(self) -> InterfaceEmbeddingProvider | None:
+    def get_default_provider(self) -> EmbeddingProvider | None:
         """Get the default embedding provider if one is set.
 
         Returns:
@@ -183,16 +122,21 @@ class EmbeddingManager:
 def create_openai_provider(
     api_key: str | None = None,
     base_url: str | None = None,
-    model: str = "text-embedding-3-small",
+    model: str = OPENAI_DEFAULT_MODEL,
     rerank_model: str | None = None,
     rerank_url: str = "/rerank",
     rerank_format: str = "auto",
     rerank_batch_size: int | None = None,
+    output_dims: int | None = None,
+    client_side_truncation: bool = False,
     ssl_verify: bool = True,
     rerank_ssl_verify: bool | None = None,
     api_version: str | None = None,
     azure_endpoint: str | None = None,
     azure_deployment: str | None = None,
+    batch_size: int = 100,
+    timeout: int = 30,
+    retry_attempts: int = 3,
 ) -> "OpenAIEmbeddingProvider":
     """Create an OpenAI embedding provider with default settings.
 
@@ -209,12 +153,18 @@ def create_openai_provider(
             'cohere', 'tei', or 'auto' (default: 'auto')
         rerank_batch_size: Max documents per rerank batch
             (overrides model defaults, bounded by model caps)
+        output_dims: Output embedding dimension (for matryoshka models)
+        client_side_truncation: Truncate embeddings client-side
+            instead of using API dimensions parameter
         ssl_verify: Verify TLS certificates for requests sent via base_url
         rerank_ssl_verify: Verify TLS certificates for rerank requests.
             Defaults to ssl_verify when unset.
         api_version: Azure OpenAI API version (e.g., '2024-02-01')
         azure_endpoint: Azure OpenAI endpoint URL (e.g., 'https://myresource.openai.azure.com')
         azure_deployment: Azure OpenAI deployment name
+        batch_size: Max texts per embedding request (default: 100)
+        timeout: Request timeout in seconds (default: 30)
+        retry_attempts: Number of retry attempts on failure (default: 3)
 
     Returns:
         Configured OpenAI embedding provider
@@ -230,9 +180,14 @@ def create_openai_provider(
         rerank_url=rerank_url,
         rerank_format=rerank_format,
         rerank_batch_size=rerank_batch_size,
+        output_dims=output_dims,
+        client_side_truncation=client_side_truncation,
         ssl_verify=ssl_verify,
         rerank_ssl_verify=rerank_ssl_verify,
         api_version=api_version,
         azure_endpoint=azure_endpoint,
         azure_deployment=azure_deployment,
+        batch_size=batch_size,
+        timeout=timeout,
+        retry_attempts=retry_attempts,
     )

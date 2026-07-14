@@ -217,14 +217,13 @@ def _format_search_results(
         # Display result header
         formatter.info(f"\n[{offset + i}] {native_path}")
 
-        # Show similarity score for semantic search
-        if not is_regex:
-            similarity = result_item.get("similarity")
-            score = result_item.get("score")
-            if score is not None:
-                formatter.info(f"Score: {score:.3f}")
-            elif similarity is not None:
-                formatter.info(f"Similarity: {similarity:.3f}")
+        # Show similarity score when available (semantic always; regex when query scoring is active)
+        similarity = result_item.get("similarity")
+        score = result_item.get("score")
+        if score is not None:
+            formatter.info(f"Score: {score:.3f}")
+        elif similarity is not None:
+            formatter.info(f"Similarity: {similarity:.3f}")
 
         # Display content with line numbers if available
         start_line = result_item.get("start_line")

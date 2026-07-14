@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-07-12
+
 ### Breaking Changes
 - **DeepSeek, Grok, and Gemini require explicit model** — The baked-in default
   models (`deepseek-v4-flash`, `grok-4-1-fast-reasoning`, and Gemini's prior
@@ -14,11 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-role model override) explicitly for these providers.
 
 ### Added
+- **Rust-native file scanner** — Directory scanning can now use a Rust extension (`chunkhound_native`) built on the `ignore` crate's parallel `WalkBuilder`, replacing the Python `os.walk`-based scanner. Enabled by default when the native extension is installed (`CHUNKHOUND_USE_RUST=0` to opt out); falls back to the Python scanner automatically when the extension is absent or for patterns the fast path can't handle.
+- **Database compaction** — DuckDB databases now auto-compact via an atomic swap when fragmentation crosses `database.fragmentation_threshold_pct`, reclaiming disk space with no indexing downtime and no disruption to concurrent MCP/daemon access.
+- **PowerShell language support** — `.ps1`/`.psm1` files are now parsed with function/class/method/property/enum-aware chunks instead of the generic text fallback.
+- **Metal language support** — `.metal` shader files (MLX-style kernels) now parse via the C++ grammar for struct/function-aware chunks.
+- **HAML indexing** — `.haml` files, previously skipped entirely, are now indexed and searchable as text.
+- **Global configuration file** — Cross-project defaults (embedding provider/key, LLM configuration, research options, etc.) can now be set once via a global config file, loaded from `CHUNKHOUND_GLOBAL_CONFIG_FILE` or auto-discovered from standard user locations.
+- **Python 3.14 support** — ChunkHound now runs on Python 3.14; `tree-sitter-language-pack` upgraded 0.9.0 → 0.13.0 and DuckDB pinned to 1.4.4.
+- **Gemini configurable thinking** — The Gemini provider now supports configurable `thinking_level`/`thinking_budget` parameters.
+- **`start-proxy.sh`** — Helper script for running ChunkHound's stdio MCP server behind a streamable-HTTP proxy, for MCP clients that require HTTP transport.
 - **Git diff search** — Semantic search over git history: `--last-n <N>`, `--commit-range <A..B>`, `--commit-hash <hash>`. Available in CLI (`chunkhound search`, `chunkhound research`) and MCP tools (`search`, `code_research`). `--vector-source` controls scope: `diff` (default), `both` (merge with DB index), `db` (DB only). Staged-changes search (`git diff --cached`) is not included in this release.
 - **Claude Opus 4.8 support**: the Anthropic provider now gives Opus 4.8 full Opus 4.7 capability parity: adaptive-only extended thinking (an explicit `manual` request auto-resolves to adaptive), effort levels `low`/`medium`/`high`/`xhigh`/`max`, and the task-budgets beta. The pinned `claude-opus` offline fallback was bumped to `claude-opus-4-8`. Fixes a `400 "thinking.type.enabled is not supported for this model"` error when targeting `claude-opus-4-8` with thinking enabled.
 - **Websearch CLI command and MCP tool** — New `chunkhound websearch "<query>"` CLI subcommand and matching `websearch` MCP tool let coding agents pull external context into the loop without leaving it. Searches DuckDuckGo, fetches the top results, converts them to Markdown, runs `code_research` over a transient in-memory index of the fetched pages, and returns a single cited answer with local tmpdir paths rewritten back to source URLs. Per-request timeout configurable via `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` (default 600s). `markdownify` and `zendriver==0.15.3` are new core dependencies.
   - **System Chrome via zendriver over CDP** — Rich page fetches drive the system-installed Google Chrome directly through zendriver's raw CDP bindings. No Node runtime, no bundled Chromium download, no `playwright install` step, and no `chunkhound[browser]` extra to opt into — it works out of the box when Chrome ≥124 is present. Chrome resolution probes known install paths and version-checks the binary (zendriver's CDP binding requires `Response.charset`, which only Chrome ≥124 emits); any verification failure (missing binary, too old, unparseable `--version`) collapses to a warning and the urllib fallback rather than raising.
   - **Robust PDF handling** — PDF detection inspects real response headers before Chrome's PDF viewer engages, verifies the `%PDF-` magic bytes (so endpoints returning HTML under an `application/pdf` Content-Type fall through to HTML→markdown instead of corrupting the result set), and refetches PDFs via urllib with Chrome's cookies forwarded so cookie-gated PDFs (signed URLs, session-protected docs) still work — redirects on the cookie-bearing request are blocked to prevent cross-origin credential leakage. Fetches whose rendered markdown is whitespace-only fail explicitly instead of writing zero-byte files into the result set.
+  - **LLM query expansion** — Each websearch query is now expanded via the utility LLM into 3 DuckDuckGo-optimized variants, run and merged with URL-based deduplication, improving result coverage for a single search. Falls back to the original single query when no LLM is configured or the expansion call fails.
+- **`chunkhound mcp --read-only` (DuckDB)** — Point an MCP client at a pre-indexed database — shared, mounted read-only, or otherwise untouchable — without risking writes from the indexer or daemon. Regex search still works; writes through the provider raise. Also exposed as `database.read_only`; rejected for non-`mcp` subcommands.
 
 ### Changed
 - **DeepSeek/Grok refactored to data-driven registry** — Per-provider
@@ -30,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New: `modifiers` (list of strings) + `model_argument` (optional string for `v-model:foo` style bindings)
 
   The previous `model_modifier` field was already semantically incorrect on many real cases (it was derived from the tree-sitter `directive_argument` node and could not properly distinguish arguments from modifiers or represent multiple modifiers). The new fields are more correct and consistent with how `parse_vue_directive` works. This is a breaking change for any code or LLM prompts that directly inspected `chunk.metadata["model_modifier"]` on Vue chunks. Most other Vue directive metadata keys (`event_name`, `property_name`, `slot_name`, etc.) are unchanged in meaning.
+
+### Enhanced
+- **Depth exploration research performance** — Deep code research's Phase 1.5 depth-exploration step no longer fires one concurrent HTTP rerank call per exploration query (which could overload the reranking server); it now scores chunks via in-database cosine similarity, tracks found chunks globally across iterations to avoid re-scanning covered ground, and parallelizes gap-cluster unification — reducing wall-clock time on large research runs while improving output coverage. Per-step timings are now visible in the terminal progress tree, and the exploration query token budget is configurable.
+
+### Performance
+- **Skipped-file re-scan avoidance** — Files skipped during parsing (binary, unknown type, oversized config, timeout) are now recorded in the database with a skip reason, so unchanged skipped files are bypassed on subsequent indexing runs instead of being re-queued and re-skipped every time — saves up to ~10 minutes per run on large codebases.
 
 ### Fixed
 - **Multi-source URL provenance in fact extraction** — URL-backed facts in
@@ -43,6 +62,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP string return passthrough** — Tools returning raw strings (e.g.
   websearch results) now pass through as markdown instead of being wrapped
   in JSON objects.
+- **OpenAI-compatible embedding config forwarding** — `timeout`, `batch_size`, and `max_retries` config values are now correctly forwarded to the OpenAI embedding provider factory path; previously they were silently dropped and every OpenAI-compatible provider ran with hardcoded defaults regardless of configuration.
+- **Indexing batch_size forwarding** (issue #244) — `embedding_batch_size`, `db_batch_size`, and `max_concurrent_batches` config are now honored by `process_directory`, fixing silently-ignored `batch_size: 1` workarounds for limited providers.
+- **tiktoken special-token crash** (issue #315) — Source files containing tokenizer special-token literals (e.g. `<|endoftext|>`) no longer abort the entire embedding batch with a "disallowed special token" error.
+- **tiktoken stall on blocked networks** — Token estimation no longer stalls on the connect timeout when the tiktoken BPE-file download host is network-blocked; falls back to a character-count heuristic and negative-caches the failure so the warning fires at most once per model per process.
+- **Embedding rate-limit backoff** (issue #298) — 429 responses now honor the `retry-after`/`x-ratelimit-reset-requests` header (or a parsed "try again in X seconds" message) with exponential backoff capped at 120s and jitter, instead of a flat 1–2s linear retry that hammered the provider.
+- **Orphaned subprocess cleanup** — OpenCode CLI, the internal `_quickresearch` helper, and the MCP proxy no longer leave orphaned child processes behind when their parent exits, is cancelled, or dies unexpectedly.
+- **Claude Code CLI subprocess auto-updates** — The Claude Code CLI auto-updater is now disabled for ChunkHound's subprocess invocations, preventing unexpected version changes mid-run.
+- **Path-filter hidden file/directory misclassification** — Hidden directories (e.g. `.github`) and hidden files with extensions (e.g. `.eslintrc.js`) are no longer misclassified against each other in `path_filter` matching for regex/semantic search.
+- **Multi-hop search result cap** — Multi-hop search now correctly bounds its initial fetch by `result_limit` (previously bypassed it), and a crash when `result_limit` is `None` in exhaustive mode is fixed.
+- **LanceDB migration on PyArrow 23** — Metadata is now serialized correctly during schema migration, preventing an `ArrowTypeError` when restoring existing chunks after an embedding schema change.
+- **Gitignore respected at repository roots** — Directory scans now honor `.gitignore` rules, including nested-gitignore-driven pruning, when scanning from a repository root; previously some ignored trees were still walked.
+
+### Security
+- **Path-filter SQL substring leak** — Fixed a path-filter normalization bug in `DuckDBProvider` where substring matches could leak results across directory boundaries (e.g. a filter for `src` could match `src_utils/`).
 
 ## [5.1.0] - 2026-05-20
 
@@ -753,7 +786,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...HEAD
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.2.0...HEAD
+[5.2.0]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...v5.2.0
 [5.1.0]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v5.0.0
 [4.0.1]: https://github.com/chunkhound/chunkhound/compare/v4.0.0...v4.0.1

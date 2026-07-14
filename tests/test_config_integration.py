@@ -223,6 +223,30 @@ def test_embedding_config_ssl_env_vars(monkeypatch, clean_environment):
     assert config["rerank_ssl_verify"] is True
 
 
+@pytest.mark.parametrize("raw_value", ["", "maybe", "2", "truthy"])
+def test_embedding_config_ssl_verify_rejects_invalid_env_bool(
+    monkeypatch, clean_environment, raw_value
+):
+    """Invalid embedding SSL env bools must fail explicitly."""
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__SSL_VERIFY", raw_value)
+
+    with pytest.raises(ValueError, match="CHUNKHOUND_EMBEDDING__SSL_VERIFY"):
+        EmbeddingConfig.load_from_env()
+
+
+@pytest.mark.parametrize("raw_value", ["", "maybe", "2", "truthy"])
+def test_embedding_config_rerank_ssl_verify_rejects_invalid_env_bool(
+    monkeypatch, clean_environment, raw_value
+):
+    """Invalid rerank SSL env bools must fail explicitly."""
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY", raw_value)
+
+    with pytest.raises(
+        ValueError, match="CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY"
+    ):
+        EmbeddingConfig.load_from_env()
+
+
 def test_llm_config_ssl_env_var(monkeypatch, clean_environment):
     """LLM ssl_verify env var should parse into a boolean."""
     monkeypatch.setenv("CHUNKHOUND_LLM_SSL_VERIFY", "false")

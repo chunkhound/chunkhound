@@ -143,7 +143,7 @@ def _patch_websearch_for_tests() -> None:
                 if mapping is not None:
                     mapping[name] = url
 
-        def _stub_build_argv(query, tmpdir, config):
+        def _stub_build_argv(query, tmpdir, config, parent_pid):
             # -S skips site init so this sitecustomize isn't re-loaded in the
             # grandchild — avoids a recursive chunkhound cold-import that
             # blew past the 30s tools/call budget on Windows.

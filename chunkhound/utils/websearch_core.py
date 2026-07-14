@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import html
 import html.parser
+import itertools
 import os
 import re
 import subprocess
@@ -23,16 +24,28 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
+from loguru import logger
+
 if TYPE_CHECKING:
     from http.client import HTTPMessage
+    from typing import Any
 
     import zendriver as zd
 
 from chunkhound.core.config.config import Config
 
-_MAX_FETCH_CONCURRENCY = 5
+MAX_FETCH_CONCURRENCY = 5
 
 WEBSEARCH_LIMIT_MAX = 100
+
+__all__ = [
+    "WEBSEARCH_LIMIT_MAX",
+    "clamp_limit",
+    "websearch_timeout",
+    "fetch_and_save",
+    "search_multi",
+    "build_quickresearch_argv_core",
+]
 
 # Probe these paths before zendriver's auto-discovery. zendriver picks the
 # shortest-named binary from [google-chrome, chromium, chromium-browser,
@@ -48,6 +61,65 @@ _CHROME_PATHS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
 ]
+
+
+_late_completion_guard_installed = False
+
+
+def _install_late_completion_guard() -> None:
+    """Patch zendriver's Transaction.__call__ to drop late completions.
+
+    TODO: remove once zendriver fixes Connection.send to pop cancelled
+    transactions from connection.mapper (or guards Transaction.__call__
+    upstream). Revisit on every zendriver bump — the version-mismatch
+    warning below is the in-process signal that this may be stale.
+
+    zendriver 0.15.3's Connection.send (connection.py:561-572) does not pop the
+    Transaction from connection.mapper when its awaiter is cancelled — e.g. when
+    we wrap tab.send(cdp.page.navigate(...)) in asyncio.wait_for(..., timeout=30)
+    at _fetch_page. The Transaction Future transitions to CANCELLED but stays
+    registered. When Chrome later delivers the response, Listener.listener_loop
+    (connection.py:780) pops the orphan and calls tx(**message), which calls
+    set_result() on the cancelled Future and raises InvalidStateError. That
+    exception is uncaught in listener_loop and kills the listener task — the
+    asyncio "Task exception was never retrieved" log is the visible symptom; the
+    real damage is that the websocket recv stops draining and the browser
+    session becomes unusable.
+
+    Guarding __call__ with a Future.done() check makes the late completion a
+    no-op, mirroring the local ``on_response`` idempotency guard inside
+    ``_fetch_page``. Discarding the late result is correct: the only consumer
+    was the awaiter inside Connection.send, which already received
+    CancelledError.
+
+    Idempotent via module-level flag — safe to call from every fetch_and_save.
+    """
+    global _late_completion_guard_installed
+    if _late_completion_guard_installed:
+        return
+    import warnings
+
+    import zendriver
+    from zendriver.core.connection import Transaction
+
+    if zendriver.__version__ != "0.15.3":
+        warnings.warn(
+            f"zendriver {zendriver.__version__} != pinned 0.15.3; "
+            "late-completion guard may now be redundant or broken — revisit "
+            "whether upstream fixed Connection.send or Transaction.__call__",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    _orig_call = Transaction.__call__
+
+    def _safe_call(self: Transaction, **response: Any) -> None:
+        if self.done():
+            return
+        _orig_call(self, **response)
+
+    Transaction.__call__ = _safe_call  # type: ignore[method-assign]
+    _late_completion_guard_installed = True
 
 
 def _check_chrome_version(chrome_path: str) -> None:
@@ -554,7 +626,7 @@ async def fetch_and_save(
     mapping: dict[str, str] | None = None,
 ) -> None:
     """Fetch each URL concurrently (bounded) and save content to tmpdir."""
-    semaphore = asyncio.Semaphore(_MAX_FETCH_CONCURRENCY)
+    semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
 
     async def _run(browser: zd.Browser | None) -> None:
         tasks = [
@@ -569,6 +641,9 @@ async def fetch_and_save(
     # Lazy import: pulls in websockets + CDP binding modules. Wasted cost
     # for CLI commands that never touch websearch (e.g. `chunkhound index`).
     import zendriver as zd
+
+    # Must run before any tab.send() creates a Transaction.
+    _install_late_completion_guard()
 
     # _resolve_chrome_path returns None for every "no usable Chrome >=124"
     # case (not installed, too old, --version probe failed) and emits its
@@ -649,16 +724,105 @@ def search(
     return results[:limit]
 
 
+def _normalize_url(raw: str) -> str:
+    """Dedupe key: lowercase netloc, strip trailing '/' from path, drop fragment.
+
+    Used only as a `dict` key inside `search_multi` — original URLs remain
+    unchanged in the returned tuples.
+    """
+    p = urllib.parse.urlparse(raw)
+    path = p.path.rstrip("/") or "/"
+    return p._replace(netloc=p.netloc.lower(), path=path, fragment="").geturl()
+
+
+async def search_multi(
+    queries: list[str],
+    limit: int,
+    progress_callback: Callable[[str], None] | None = None,
+    failure_callback: Callable[[str, urllib.error.URLError], None] | None = None,
+) -> list[tuple[str, str, str]]:
+    """Run multiple DDG queries sequentially, interleave by rank, dedupe.
+
+    Sequential (not parallel) because DDG's HTML endpoint rate-limits
+    aggressively. Each variant is capped at the full ``limit`` (not
+    ``limit / n``) so that heavy cross-variant overlap — common when the
+    LLM produces near-synonym expansions — cannot leave the caller with
+    fewer than ``limit`` distinct URLs. All queries are executed — no
+    early exit — so diversity from later variants is not lost when an
+    earlier variant alone could saturate ``limit``.
+
+    Ordering is rank-major: every variant's rank-1 hit comes before any
+    variant's rank-2 hit, etc. — so no single query dominates the head of
+    the list, and when the same URL appears in multiple batches its
+    stored ``(title, snippet)`` comes from the query where it ranked
+    highest. Dedupe (first-occurrence-wins by ``_normalize_url``) and
+    truncation to ``limit`` happen once, after every query has run.
+    Cost: worst case ``N × ceil(limit / page_size)`` page fetches —
+    traded against heavy cross-variant overlap silently under-filling
+    the result set.
+
+    On per-query URLError, invoke ``failure_callback`` when provided or
+    fall back to a ``logger.warning`` when no callback is supplied, and
+    continue with the remaining queries; if ALL raise, re-raise the
+    first.
+    """
+    if not queries:
+        return []
+    queries = list(dict.fromkeys(queries))  # dedupe identical strings; preserves order
+    n = len(queries)
+    batches: list[list[tuple[str, str, str]]] = []
+    first_error: urllib.error.URLError | None = None
+    successes = 0
+    for i, q in enumerate(queries, start=1):
+        per_query_progress: Callable[[str], None] | None = (
+            (lambda msg, p=f"[{i}/{n}] ": progress_callback(f"{p}{msg}"))
+            if progress_callback is not None
+            else None
+        )
+        try:
+            batch = await asyncio.to_thread(
+                search, q, limit, per_query_progress
+            )
+        except urllib.error.URLError as e:
+            if failure_callback is not None:
+                failure_callback(q, e)
+            else:
+                logger.warning(
+                    f"DDG query failed ({q!r}): {e.reason}; "
+                    "continuing with remaining queries"
+                )
+            if first_error is None:
+                first_error = e
+            continue
+        successes += 1
+        batches.append(batch)
+    if successes == 0 and first_error is not None:
+        raise first_error
+    seen: dict[str, tuple[str, str, str]] = {}
+    for rank_row in itertools.zip_longest(*batches):
+        for row in rank_row:
+            if row is None:
+                continue
+            key = _normalize_url(row[1])
+            if key not in seen:
+                seen[key] = row
+    return list(seen.values())[:limit]
+
+
 def build_quickresearch_argv_core(
     query: str,
     tmpdir: Path,
     config: Config,
+    parent_pid: int,
 ) -> list[str]:
     """Build argv to invoke _quickresearch as a subprocess.
 
     Forwards the config source file as an absolute path so the child process
     does not need to re-run config discovery (which would otherwise fall back
     to env vars / defaults under the MCP server's working directory).
+
+    ``parent_pid`` is the caller's own PID (``os.getpid()``); the child uses
+    it as the reference for its orphan watchdog.
     """
     cmd: list[str] = [
         sys.executable,
@@ -666,6 +830,7 @@ def build_quickresearch_argv_core(
         "_quickresearch",
         query,
         str(tmpdir),
+        "--parent-pid", str(parent_pid),
     ]
     source = config.config_file or config.local_config_file
     if source is not None:

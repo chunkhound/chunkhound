@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
@@ -120,6 +120,30 @@ def format_error_response(
     return response
 
 
+def is_error_tool_content(text: str) -> bool:
+    """Return True when MCP text content carries a serialized tool error."""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("error"), dict)
+
+
+def first_error_tool_content(
+    text_contents: list[types.TextContent],
+) -> types.TextContent | None:
+    """Return the first MCP text item that encodes a serialized tool error."""
+    for content in text_contents:
+        if is_error_tool_content(content.text):
+            return content
+    return None
+
+
+def tool_call_failed(text_contents: list[types.TextContent]) -> bool:
+    """Return True when any returned MCP text item encodes a tool failure."""
+    return first_error_tool_content(text_contents) is not None
+
+
 def validate_search_parameters(
     page_size: int | None = None,
     offset: int | None = None,
@@ -146,13 +170,14 @@ def validate_search_parameters(
 async def handle_tool_call(
     tool_name: str,
     arguments: dict[str, Any],
-    services: DatabaseServices,
+    services: DatabaseServices | None,
     embedding_manager: EmbeddingManager | None,
     initialization_complete: asyncio.Event,
     debug_mode: bool = False,
     scan_progress: dict | None = None,
     llm_manager: LLMManager | None = None,
     config: Any = None,
+    ensure_services: Callable[[str], Awaitable[DatabaseServices]] | None = None,
 ) -> list[types.TextContent]:
     """Unified tool call handler for all MCP servers.
 
@@ -169,6 +194,7 @@ async def handle_tool_call(
         scan_progress: Optional scan progress from MCPServerBase
         llm_manager: Optional LLM manager for code_research
         config: Optional Config instance for research service factory
+        ensure_services: Optional lazy DB-service resolver for DB-backed tools
 
     Returns:
         List containing a single TextContent with JSON-formatted response
@@ -202,10 +228,19 @@ async def handle_tool_call(
         # Parse arguments (handles both string and typed values)
         parsed_args = parse_mcp_arguments(arguments)
 
+        resolved_services = services
+        if tool.requires_db:
+            if ensure_services is not None:
+                resolved_services = await ensure_services(tool_name)
+            elif resolved_services is None:
+                raise ServiceNotInitializedError(
+                    "Services not initialized. Call initialize() first."
+                )
+
         # Execute tool
         result = await execute_tool(
             tool_name=tool_name,
-            services=services,
+            services=resolved_services,
             embedding_manager=embedding_manager,
             arguments=parsed_args,
             scan_progress=scan_progress,

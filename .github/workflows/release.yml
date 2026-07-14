@@ -75,10 +75,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install uv  # provides Python 3.12 build interpreter — abi3 wheel runs on Python 3.10+
+      - name: Install uv
         uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
+
+      - name: Install Python 3.12  # abi3 wheel runs on Python 3.10+
+        run: uv python install 3.12
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -96,15 +97,47 @@ jobs:
       - name: Build native wheel
         shell: bash
         run: |
-          uv pip install maturin
-          VERSION="${GITHUB_REF_NAME#v}"
-          uv run maturin build --release --out dist/ --set-version "$VERSION"
+          # maturin build has no --set-version flag; it reads the wheel version from
+          # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
+          # before any pre-release suffix) while the git tag uses PEP 440 (no
+          # hyphen, e.g. 5.2.0a3) -- convert before patching. maturin parses the
+          # Cargo version via pep440_rs, which normalizes the hyphenated form to
+          # the same PEP 440 version, so the wheel still ends up as 5.2.0a3.
+          export TAG_VERSION="${GITHUB_REF_NAME#v}"
+          uv run --no-project --python 3.12 python - <<'PYEOF'
+          import os, re, pathlib
+
+          tag_version = os.environ["TAG_VERSION"]
+          m = re.match(r"^(\d+\.\d+\.\d+)([a-zA-Z].*)?$", tag_version)
+          cargo_version = f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
+
+          path = pathlib.Path("Cargo.toml")
+          text = path.read_text()
+          new_text = re.sub(r'(?m)^version = ".*"', f'version = "{cargo_version}"', text, count=1)
+          path.write_text(new_text)
+          PYEOF
+          # maturin treats a sibling pyproject.toml as authoritative package metadata
+          # ("mixed" Rust/Python project support), which misnames this wheel as
+          # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
+          # Python package's pyproject.toml for the build; nothing else in this job
+          # needs it (the uv commands above already use --no-project).
+          mv pyproject.toml pyproject.toml.hidden
+          uvx --python 3.12 maturin build --release --out dist/
+          mv pyproject.toml.hidden pyproject.toml
 
       - name: Smoke test native wheel
         shell: bash
         run: |
-          uv pip install dist/chunkhound_native-*.whl
-          python -c "from chunkhound_native import scan_files; r = scan_files('.', ['py']); assert isinstance(r, list)"
+          # Run outside the repo root: the repo's own chunkhound_native/__init__.py
+          # source-tree stub (kept so `maturin develop` re-exports survive editable
+          # reinstalls locally) would otherwise shadow the installed wheel package,
+          # since it expects a compiled extension sitting next to it that only
+          # exists after a local editable build, not in this CI job.
+          WHEEL_DIR="$(pwd)/dist"
+          TMP_DIR="$(mktemp -d)"
+          cd "$TMP_DIR"
+          uv run --no-project --python 3.12 --with "$WHEEL_DIR"/chunkhound_native-*.whl \
+            python -c "from chunkhound_native import scan_files; r = scan_files('.', ['py']); assert isinstance(r, list)"
 
       - name: Upload native wheel artifact
         uses: actions/upload-artifact@v4

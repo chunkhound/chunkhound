@@ -4,10 +4,26 @@ This test ensures the MCP stdio server exposes correct tool metadata from TOOL_R
 preventing issues where tools have incorrect or missing descriptions.
 """
 
+import inspect
+import json
+
 import pytest
 
-from chunkhound.mcp_server.tools import TOOL_REGISTRY
+from chunkhound.mcp_server.common import (
+    first_error_tool_content,
+    is_error_tool_content,
+    tool_call_failed,
+)
+from chunkhound.mcp_server.tools import TOOL_REGISTRY, tool_requires_db
+from chunkhound.providers.database.serial_executor import (
+    DatabaseCompactionInProgressError,
+)
 from chunkhound.version import __version__
+
+
+def _tool_error_payload(text: str) -> dict[str, str]:
+    """Decode the public MCP error payload carried in text content."""
+    return json.loads(text)["error"]
 
 
 def test_tool_registry_populated():
@@ -190,7 +206,7 @@ async def test_daemon_status_tool_returns_scan_progress_snapshot():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -221,7 +237,7 @@ async def test_daemon_status_tool_degrades_on_realtime_state():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "degraded",
             "last_error": None,
@@ -250,7 +266,7 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "configured_backend": "watchman",
             "effective_backend": "watchman",
@@ -377,7 +393,7 @@ async def test_daemon_status_tool_exposes_startup_timing_breakdown():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -489,7 +505,7 @@ async def test_daemon_status_tool_degrades_stalled_pipeline_summary():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -547,7 +563,7 @@ async def test_daemon_status_tool_keeps_query_ready_after_realtime_failure():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "scan_error": (
             "Storage reconciliation cleanup failed: "
             "database invalidated during orphan cleanup"
@@ -587,8 +603,7 @@ async def test_daemon_status_tool_keeps_query_ready_after_realtime_failure():
     assert result["status"] == "degraded"
     assert result["query_ready"] is True
     assert (
-        "Storage reconciliation cleanup failed"
-        in result["scan_progress"]["scan_error"]
+        "Storage reconciliation cleanup failed" in result["scan_progress"]["scan_error"]
     )
     assert (
         "Storage reconciliation cleanup failed"
@@ -606,7 +621,7 @@ async def test_daemon_status_tool_keeps_initial_scan_failure_unqueryable():
         "chunks_created": 0,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": None,
+        "query_ready_at": None,
         "scan_error": "Initial directory scan failed: database unavailable",
         "realtime": {
             "service_state": "running",
@@ -647,7 +662,7 @@ async def test_daemon_status_tool_keeps_query_ready_during_post_bootstrap_scan()
         "chunks_created": 9,
         "is_scanning": True,
         "scan_started_at": "2026-04-01T00:00:10",
-        "scan_completed_at": "2026-04-01T00:00:05",
+        "query_ready_at": "2026-04-01T00:00:05",
         "scan_error": None,
         "realtime": {
             "service_state": "running",
@@ -686,7 +701,7 @@ async def test_daemon_status_tool_keeps_initial_scan_in_progress_unqueryable():
         "chunks_created": 2,
         "is_scanning": True,
         "scan_started_at": "2026-04-01T00:00:00",
-        "scan_completed_at": None,
+        "query_ready_at": None,
         "scan_error": None,
         "realtime": {
             "service_state": "running",
@@ -724,7 +739,7 @@ async def test_daemon_status_tool_exposes_pending_mutation_backlog_details():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -820,7 +835,7 @@ async def test_daemon_status_tool_exposes_hot_path_event_pressure():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -886,7 +901,7 @@ async def test_daemon_status_tool_exposes_event_queue_overflow_reconciling_paylo
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "running",
             "last_error": None,
@@ -975,7 +990,7 @@ async def test_daemon_status_tool_exposes_event_queue_overflow_failed_payload():
         "chunks_created": 9,
         "is_scanning": False,
         "scan_started_at": "2026-03-08T00:00:00",
-        "scan_completed_at": "2026-03-08T00:00:05",
+        "query_ready_at": "2026-03-08T00:00:05",
         "realtime": {
             "service_state": "degraded",
             "last_error": "No resync callback configured",
@@ -1118,6 +1133,413 @@ def test_no_tool_definitions_list():
     )
 
 
+@pytest.mark.asyncio
+async def test_non_db_tools_do_not_trigger_provider_connect() -> None:
+    """daemon_status/websearch must not conflate MCP sessions with DB opens."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    server = StdioMCPServer(config=MagicMock())
+    server.services = SimpleNamespace(provider=SimpleNamespace(is_connected=False))
+    connect_provider = AsyncMock()
+    server._connect_provider = connect_provider
+
+    await server.ensure_tool_services("daemon_status")
+    await server.ensure_tool_services("websearch")
+
+    connect_provider.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_db_tools_still_trigger_provider_connect() -> None:
+    """DB-backed tools still require the authoritative provider instance."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    server = StdioMCPServer(config=MagicMock())
+    server.services = SimpleNamespace(provider=SimpleNamespace(is_connected=False))
+    connect_provider = AsyncMock()
+    server._connect_provider = connect_provider
+
+    await server.ensure_tool_services("search")
+
+    connect_provider.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_db_tools_surface_explicit_compaction_error() -> None:
+    """DB-backed MCP tools must surface compaction-busy errors explicitly."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    server = StdioMCPServer(config=MagicMock())
+    server.services = SimpleNamespace(provider=SimpleNamespace(is_connected=False))
+    server._connect_provider = AsyncMock(
+        side_effect=DatabaseCompactionInProgressError("busy")
+    )
+
+    with pytest.raises(DatabaseCompactionInProgressError, match="busy"):
+        await server.ensure_tool_services("search")
+
+
+@pytest.mark.asyncio
+async def test_unknown_stdio_tool_returns_unknown_without_connect_attempt() -> None:
+    """Unknown stdio MCP tools must fail before any DB reconnect attempt."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from mcp.types import CallToolRequest
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    server = StdioMCPServer(config=MagicMock())
+    server.services = SimpleNamespace(provider=SimpleNamespace(is_connected=False))
+    server._initialization_complete.set()
+    server.ensure_tool_services = AsyncMock(
+        side_effect=DatabaseCompactionInProgressError("busy")
+    )
+
+    handler = server.server.request_handlers[CallToolRequest]
+    response = await handler(
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "__missing_tool__", "arguments": {}},
+            id=1,
+        )
+    )
+
+    server.ensure_tool_services.assert_not_awaited()
+    assert response.root.isError is True
+    payload = _tool_error_payload(response.root.content[0].text)
+    assert payload["message"] == "Unknown tool: __missing_tool__"
+
+
+@pytest.mark.asyncio
+async def test_unknown_daemon_tool_returns_unknown_without_connect_attempt() -> None:
+    """Unknown daemon MCP tools must fail before any DB reconnect attempt."""
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from chunkhound.daemon.server import ChunkHoundDaemon
+
+    daemon = ChunkHoundDaemon(
+        config=MagicMock(),
+        args=MagicMock(),
+        socket_path="",
+        project_dir=Path("/tmp"),
+    )
+    daemon.services = SimpleNamespace(provider=SimpleNamespace(is_connected=False))
+    daemon._initialization_complete.set()
+    daemon.ensure_tool_services = AsyncMock(
+        side_effect=DatabaseCompactionInProgressError("busy")
+    )
+
+    response = await daemon._handle_tools_call(
+        {
+            "id": "1",
+            "params": {"name": "__missing_tool__", "arguments": {}},
+        }
+    )
+
+    daemon.ensure_tool_services.assert_not_awaited()
+    assert response["result"]["isError"] is True
+    payload = _tool_error_payload(response["result"]["content"][0]["text"])
+    assert payload["message"] == "Unknown tool: __missing_tool__"
+
+
+@pytest.mark.asyncio
+async def test_daemon_handle_tools_call_skips_connect_for_non_db_tools() -> None:
+    """Daemon _handle_tools_call must not trigger DB connect for daemon_status."""
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from chunkhound.daemon.server import ChunkHoundDaemon
+
+    daemon = ChunkHoundDaemon(
+        config=MagicMock(),
+        args=MagicMock(),
+        socket_path="",
+        project_dir=Path("/tmp"),
+    )
+    daemon.services = SimpleNamespace(provider=SimpleNamespace(is_connected=False))
+    connect_mock = AsyncMock()
+    daemon._connect_provider = connect_mock
+
+    msg = {
+        "id": "1",
+        "params": {"name": "daemon_status", "arguments": {}},
+    }
+    with patch(
+        "chunkhound.mcp_server.common.handle_tool_call",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        await daemon._handle_tools_call(msg)
+
+    connect_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stdio_tool_call_surfaces_compaction_busy_payload() -> None:
+    """Stdio MCP clients should receive the serialized compaction error payload."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from mcp.types import CallToolRequest
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    server = StdioMCPServer(config=MagicMock())
+    server.services = SimpleNamespace(provider=SimpleNamespace(is_connected=False))
+    server._initialization_complete.set()
+    server.ensure_tool_services = AsyncMock(
+        side_effect=DatabaseCompactionInProgressError("busy")
+    )
+
+    handler = server.server.request_handlers[CallToolRequest]
+    response = await handler(
+        CallToolRequest(
+            method="tools/call",
+            params={"name": "search", "arguments": {"type": "regex", "query": "x"}},
+            id=1,
+        )
+    )
+
+    assert response.root.isError is True
+    payload = _tool_error_payload(response.root.content[0].text)
+    assert payload == {
+        "type": "DatabaseCompactionInProgressError",
+        "message": "busy",
+    }
+
+
+@pytest.mark.asyncio
+async def test_stdio_tool_call_surfaces_generic_tool_failure_payload() -> None:
+    """Stdio MCP clients should receive serialized unexpected tool failures."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from mcp.types import CallToolRequest
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    server = StdioMCPServer(config=MagicMock())
+    server._initialization_complete.set()
+
+    handler = server.server.request_handlers[CallToolRequest]
+    with patch(
+        "chunkhound.mcp_server.common.execute_tool",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("boom"),
+    ):
+        response = await handler(
+            CallToolRequest(
+                method="tools/call",
+                params={"name": "daemon_status", "arguments": {}},
+                id=1,
+            )
+        )
+
+    assert response.root.isError is True
+    payload = _tool_error_payload(response.root.content[0].text)
+    assert payload == {"type": "RuntimeError", "message": "boom"}
+
+
+@pytest.mark.asyncio
+async def test_stdio_tool_call_uses_error_content_when_success_precedes_error() -> None:
+    """Stdio transport must raise the actual error-bearing content item."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from mcp.types import CallToolRequest, TextContent
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    server = StdioMCPServer(config=MagicMock())
+    server._initialization_complete.set()
+
+    mixed_contents = [
+        TextContent(type="text", text=json.dumps({"status": "ok"})),
+        TextContent(
+            type="text",
+            text=json.dumps(
+                {"error": {"type": "RuntimeError", "message": "second"}}
+            ),
+        ),
+    ]
+
+    handler = server.server.request_handlers[CallToolRequest]
+    with patch(
+        "chunkhound.mcp_server.stdio.handle_tool_call",
+        new=AsyncMock(return_value=mixed_contents),
+    ):
+        response = await handler(
+            CallToolRequest(
+                method="tools/call",
+                params={"name": "daemon_status", "arguments": {}},
+                id=1,
+            )
+        )
+
+    assert response.root.isError is True
+    payload = _tool_error_payload(response.root.content[0].text)
+    assert payload == {"type": "RuntimeError", "message": "second"}
+
+
+@pytest.mark.asyncio
+async def test_daemon_tool_call_marks_compaction_busy_as_error() -> None:
+    """Daemon MCP clients should see compaction-busy tool failures as errors."""
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from chunkhound.daemon.server import ChunkHoundDaemon
+
+    daemon = ChunkHoundDaemon(
+        config=MagicMock(),
+        args=MagicMock(),
+        socket_path="",
+        project_dir=Path("/tmp"),
+    )
+    daemon.services = SimpleNamespace(provider=SimpleNamespace(is_connected=False))
+    daemon._initialization_complete.set()
+    daemon.ensure_tool_services = AsyncMock(
+        side_effect=DatabaseCompactionInProgressError("busy")
+    )
+
+    response = await daemon._handle_tools_call(
+        {
+            "id": "1",
+            "params": {"name": "search", "arguments": {"type": "regex", "query": "x"}},
+        }
+    )
+
+    assert response["result"]["isError"] is True
+    payload = _tool_error_payload(response["result"]["content"][0]["text"])
+    assert payload == {
+        "type": "DatabaseCompactionInProgressError",
+        "message": "busy",
+    }
+
+
+@pytest.mark.asyncio
+async def test_daemon_tool_call_marks_generic_tool_failure_as_error() -> None:
+    """Daemon MCP clients should see unexpected tool exceptions as errors."""
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from chunkhound.daemon.server import ChunkHoundDaemon
+
+    daemon = ChunkHoundDaemon(
+        config=MagicMock(),
+        args=MagicMock(),
+        socket_path="",
+        project_dir=Path("/tmp"),
+    )
+    daemon._initialization_complete.set()
+
+    with patch(
+        "chunkhound.mcp_server.common.execute_tool",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("boom"),
+    ):
+        response = await daemon._handle_tools_call(
+            {
+                "id": "1",
+                "params": {"name": "daemon_status", "arguments": {}},
+            }
+        )
+
+    assert response["result"]["isError"] is True
+    payload = _tool_error_payload(response["result"]["content"][0]["text"])
+    assert payload == {"type": "RuntimeError", "message": "boom"}
+
+
+@pytest.mark.asyncio
+async def test_daemon_tool_call_propagates_mixed_content_error_flag() -> None:
+    """Daemon transport must preserve mixed content while flagging later errors."""
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from mcp.types import TextContent
+
+    from chunkhound.daemon.server import ChunkHoundDaemon
+
+    daemon = ChunkHoundDaemon(
+        config=MagicMock(),
+        args=MagicMock(),
+        socket_path="",
+        project_dir=Path("/tmp"),
+    )
+    daemon._initialization_complete.set()
+
+    mixed_contents = [
+        TextContent(type="text", text=json.dumps({"status": "ok"})),
+        TextContent(
+            type="text",
+            text=json.dumps(
+                {"error": {"type": "RuntimeError", "message": "second"}}
+            ),
+        ),
+    ]
+
+    with patch(
+        "chunkhound.mcp_server.common.handle_tool_call",
+        new=AsyncMock(return_value=mixed_contents),
+    ):
+        response = await daemon._handle_tools_call(
+            {
+                "id": "1",
+                "params": {"name": "daemon_status", "arguments": {}},
+            }
+        )
+
+    assert response["result"]["isError"] is True
+    assert len(response["result"]["content"]) == 2
+    payload = _tool_error_payload(response["result"]["content"][1]["text"])
+    assert payload == {"type": "RuntimeError", "message": "second"}
+
+
+@pytest.mark.parametrize(
+    "tool_name,expected",
+    [
+        (name, "services" in inspect.signature(tool.implementation).parameters)
+        for name, tool in TOOL_REGISTRY.items()
+    ],
+)
+def test_tool_requires_db_matches_signature(
+    tool_name: str, expected: bool
+) -> None:
+    """Every tool's DB-service requirement must match its implementation signature."""
+    assert tool_requires_db(tool_name) is expected
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    list(TOOL_REGISTRY.keys()),
+)
+def test_requires_db_field_matches_implementation(tool_name: str) -> None:
+    """The declarative requires_db field must match the implementation signature."""
+    tool = TOOL_REGISTRY[tool_name]
+    has_services = "services" in inspect.signature(tool.implementation).parameters
+    assert tool.requires_db is has_services, (
+        f"Tool '{tool_name}': requires_db={tool.requires_db} "
+        f"but implementation {'has' if has_services else 'lacks'} "
+        f"a 'services' parameter"
+    )
+
+
+def test_tool_requires_db_returns_true_for_unknown_tool() -> None:
+    """Unknown tool names must conservatively assume DB is needed."""
+    assert tool_requires_db("__nonexistent_tool__") is True
+
+
 def test_search_enum_restricted_without_embeddings():
     """Verify search type enum is restricted to regex when embeddings unavailable.
 
@@ -1225,15 +1647,102 @@ def test_filtered_tool_dicts_hides_llm_tools_without_manager():
 
     # Tools without requires_llm must be present
     assert "search" in names, "search should be present (no LLM required)"
-    assert "daemon_status" in names, (
-        "daemon_status should be present (no LLM required)"
-    )
+    assert "daemon_status" in names, "daemon_status should be present (no LLM required)"
 
     # search should have degraded description
     search_tool = next(d for d in tool_dicts if d["name"] == "search")
     assert "research" not in search_tool["description"].lower(), (
         "search description should be degraded without LLM"
     )
+
+
+# ── MCP error content helpers ────────────────────────────────────────────
+
+
+class TestIsErrorToolContent:
+    """is_error_tool_content identifies serialized error payloads."""
+
+    def test_valid_error_payload(self) -> None:
+        """A JSON object with an 'error' dict is detected as an error."""
+        text = json.dumps({"error": {"type": "RuntimeError", "message": "boom"}})
+        assert is_error_tool_content(text) is True
+
+    def test_non_error_json_object(self) -> None:
+        """A JSON object without an 'error' key is not an error."""
+        assert is_error_tool_content('{"status": "ok"}') is False
+
+    def test_error_as_string_is_not_detected(self) -> None:
+        """An 'error' key with a string value (not dict) is not an error."""
+        assert is_error_tool_content('{"error": "boom"}') is False
+
+    def test_malformed_json_is_not_detected(self) -> None:
+        """Non-JSON text is not an error."""
+        assert is_error_tool_content("not json") is False
+
+    def test_empty_string_is_not_detected(self) -> None:
+        """Empty string is not an error."""
+        assert is_error_tool_content("") is False
+
+
+class TestFirstErrorToolContent:
+    """first_error_tool_content returns the first error-bearing TextContent."""
+
+    def test_returns_first_error(self) -> None:
+        """When multiple contents exist, the first error is returned."""
+        from mcp.types import TextContent
+
+        contents = [
+            TextContent(type="text", text=json.dumps({"status": "ok"})),
+            TextContent(
+                type="text",
+                text=json.dumps({"error": {"type": "RuntimeError", "message": "boom"}}),
+            ),
+        ]
+        result = first_error_tool_content(contents)
+        assert result is not None
+        assert "boom" in result.text
+
+    def test_returns_none_when_no_error(self) -> None:
+        """When no content is an error, returns None."""
+        from mcp.types import TextContent
+
+        contents = [
+            TextContent(type="text", text=json.dumps({"status": "ok"})),
+        ]
+        assert first_error_tool_content(contents) is None
+
+    def test_returns_none_for_empty_list(self) -> None:
+        """Empty list returns None."""
+        assert first_error_tool_content([]) is None
+
+
+class TestToolCallFailed:
+    """tool_call_failed detects error-bearing content lists."""
+
+    def test_returns_true_when_error_present(self) -> None:
+        """A list with an error content returns True."""
+        from mcp.types import TextContent
+
+        contents = [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": {"type": "RuntimeError", "message": "boom"}}),
+            ),
+        ]
+        assert tool_call_failed(contents) is True
+
+    def test_returns_false_when_no_error(self) -> None:
+        """A list with only success content returns False."""
+        from mcp.types import TextContent
+
+        contents = [
+            TextContent(type="text", text=json.dumps({"status": "ok"})),
+        ]
+        assert tool_call_failed(contents) is False
+
+    def test_returns_false_for_empty_list(self) -> None:
+        """Empty list returns False."""
+        assert tool_call_failed([]) is False
 
 
 if __name__ == "__main__":

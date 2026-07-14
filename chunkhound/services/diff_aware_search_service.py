@@ -50,6 +50,7 @@ class SearchServiceProtocol(Protocol):
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
+        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]: ...
 
     async def search_hybrid(
@@ -61,6 +62,14 @@ class SearchServiceProtocol(Protocol):
         semantic_weight: float = 0.7,
         threshold: float | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]: ...
+
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]: ...
 
     def get_chunk_context(
         self, chunk_id: Any, context_lines: int = 5
@@ -357,11 +366,23 @@ class DiffAwareSearchService:
         page_size: int = 10,
         offset: int = 0,
         path_filter: str | None = None,
+        query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         regex_result: tuple[list[dict[str, Any]], dict[str, Any]] = await self._original.search_regex_async(
-            pattern, page_size=page_size, offset=offset, path_filter=path_filter
+            pattern, page_size=page_size, offset=offset, path_filter=path_filter, query=query
         )
         return regex_result
+
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        return await self._original.get_chunk_similarities_async(
+            chunk_ids, query_embedding, provider, model
+        )
 
     async def search_hybrid(
         self,

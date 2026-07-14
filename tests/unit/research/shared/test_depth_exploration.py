@@ -297,16 +297,16 @@ class TestGlobalDedup:
         assert set(chunk_ids) == {"c1", "c2", "c3"}
 
     def test_keeps_higher_score_on_conflict(self, depth_service):
-        """Should keep chunk with higher rerank_score on conflict."""
+        """Should keep chunk with higher similarity on conflict."""
         results = [
-            [{"chunk_id": "c1", "content": "code1", "rerank_score": 0.5}],
-            [{"chunk_id": "c1", "content": "code1", "rerank_score": 0.9}],
+            [{"chunk_id": "c1", "content": "code1", "similarity": 0.5}],
+            [{"chunk_id": "c1", "content": "code1", "similarity": 0.9}],
         ]
 
         deduped = depth_service._global_dedup(results)
 
         assert len(deduped) == 1
-        assert deduped[0]["rerank_score"] == 0.9
+        assert deduped[0]["similarity"] == 0.9
 
     def test_handles_id_field_fallback(self, depth_service):
         """Should fall back to 'id' if 'chunk_id' not present."""
@@ -376,32 +376,32 @@ class TestMergeCoverage:
         assert chunk_ids == {"c1", "c2", "c3"}
 
     def test_overwrites_with_higher_score(self, depth_service):
-        """Should overwrite coverage chunk if exploration has higher score."""
+        """Should overwrite coverage chunk if exploration has higher similarity score."""
         covered = [
-            {"chunk_id": "c1", "content": "code1", "rerank_score": 0.5},
+            {"chunk_id": "c1", "content": "code1", "similarity": 0.5},
         ]
         exploration = [
-            {"chunk_id": "c1", "content": "code1", "rerank_score": 0.9},
+            {"chunk_id": "c1", "content": "code1", "similarity": 0.9},
         ]
 
         merged = depth_service._merge_coverage(covered, exploration)
 
         assert len(merged) == 1
-        assert merged[0]["rerank_score"] == 0.9
+        assert merged[0]["similarity"] == 0.9
 
     def test_keeps_coverage_chunk_if_higher_score(self, depth_service):
         """Should keep coverage chunk if it has higher score."""
         covered = [
-            {"chunk_id": "c1", "content": "code1", "rerank_score": 0.9},
+            {"chunk_id": "c1", "content": "code1", "similarity": 0.9},
         ]
         exploration = [
-            {"chunk_id": "c1", "content": "code1", "rerank_score": 0.5},
+            {"chunk_id": "c1", "content": "code1", "similarity": 0.5},
         ]
 
         merged = depth_service._merge_coverage(covered, exploration)
 
         assert len(merged) == 1
-        assert merged[0]["rerank_score"] == 0.9
+        assert merged[0]["similarity"] == 0.9
 
     def test_empty_exploration_returns_coverage(self, depth_service):
         """Should return coverage when exploration is empty."""
@@ -621,11 +621,11 @@ class TestEdgeCases:
     def test_merge_with_many_overlapping_chunks(self, depth_service):
         """Merge should handle many overlapping chunks efficiently."""
         covered = [
-            {"chunk_id": f"c{i}", "rerank_score": 0.5 + i * 0.01} for i in range(50)
+            {"chunk_id": f"c{i}", "similarity": 0.5 + i * 0.01} for i in range(50)
         ]
         # Overlap with half of coverage
         exploration = [
-            {"chunk_id": f"c{i}", "rerank_score": 0.9} for i in range(25)
+            {"chunk_id": f"c{i}", "similarity": 0.9} for i in range(25)
         ]
 
         merged = depth_service._merge_coverage(covered, exploration)
@@ -636,7 +636,7 @@ class TestEdgeCases:
         # First 25 should have exploration's higher score (0.9)
         for chunk in merged:
             if int(chunk["chunk_id"][1:]) < 25:
-                assert chunk["rerank_score"] == 0.9
+                assert chunk["similarity"] == 0.9
 
     def test_group_chunks_with_path_variations(self, depth_service):
         """Should handle different path formats."""
