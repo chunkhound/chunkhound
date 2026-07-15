@@ -335,9 +335,9 @@ def test_build_quickresearch_argv_omits_previous_query_when_none(tmp_path) -> No
 def test_build_quickresearch_argv_query_param_becomes_positional(tmp_path) -> None:
     """Whatever is passed as ``query`` becomes the ``_quickresearch`` positional.
 
-    In practice both CLI and MCP pass the RAW user input here — not the
-    LLM-normalized ``search_query`` — to avoid silently degrading deep
-    research with a lossy normalization.
+    In practice both CLI and MCP pass the RAW user input here — feeding a
+    lossy narrowing (e.g. ``queries[0]`` from the expansion) would silently
+    degrade deep research with no signal.
     """
     from chunkhound.core.config.config import Config
 
@@ -359,8 +359,7 @@ async def test_websearch_cli_previous_query_reaches_expansion(monkeypatch, patch
     async def capturing_expand(query, llm_manager, previous_query=None):
         captured["query"] = query
         captured["previous_query"] = previous_query
-        from chunkhound.utils.websearch_expansion import WebExpansionResult
-        return WebExpansionResult(queries=[query], search_query=query)
+        return [query]
 
     monkeypatch.setattr(ws_mod, "expand_web_queries", capturing_expand)
     monkeypatch.setattr(ws_core_mod, "search", _stub_search(_default_results()))
@@ -386,8 +385,7 @@ async def test_websearch_cli_empty_previous_query_treated_as_none(
 
     async def capturing_expand(query, llm_manager, previous_query=None):
         captured["previous_query"] = previous_query
-        from chunkhound.utils.websearch_expansion import WebExpansionResult
-        return WebExpansionResult(queries=[query], search_query=query)
+        return [query]
 
     monkeypatch.setattr(ws_mod, "expand_web_queries", capturing_expand)
     monkeypatch.setattr(ws_core_mod, "search", _stub_search(_default_results()))
@@ -406,18 +404,13 @@ async def test_websearch_cli_empty_previous_query_treated_as_none(
 async def test_websearch_cli_subprocess_gets_raw_query(
     patched_capturing, monkeypatch
 ) -> None:
-    """`_quickresearch` positional is the RAW query, not the LLM-normalized form.
+    """`_quickresearch` positional is the RAW query, not ``queries[0]``.
 
-    A lossy normalization (e.g. dropping keywords) would silently narrow the
-    downstream deep-research prompt. The normalized ``search_query`` steers
-    only DDG variants and the follow-up footer.
+    A lossy narrowing (e.g. dropping keywords) would silently narrow the
+    downstream deep-research prompt with no signal.
     """
-    from chunkhound.utils.websearch_expansion import WebExpansionResult
-
     async def canned_expand(query, llm_manager, previous_query=None):
-        return WebExpansionResult(
-            queries=["v1", "v2", "v3"], search_query="normalized form"
-        )
+        return ["v1", "v2", "v3"]
 
     monkeypatch.setattr(ws_mod, "expand_web_queries", canned_expand)
 
@@ -429,96 +422,3 @@ async def test_websearch_cli_subprocess_gets_raw_query(
     cmd = patched_capturing["captured"]["cmd"]
     idx = cmd.index("_quickresearch")
     assert cmd[idx + 1] == "raw user input"
-
-
-@pytest.mark.asyncio
-async def test_websearch_cli_footer_uses_shell_form(patched_capturing, monkeypatch) -> None:
-    """CLI footer contains the shell command; NOT the MCP tool-call form."""
-    from chunkhound.utils.websearch_expansion import WebExpansionResult
-
-    async def canned_expand(query, llm_manager, previous_query=None):
-        return WebExpansionResult(
-            queries=["v1", "v2", "v3"], search_query="cur norm"
-        )
-
-    monkeypatch.setattr(ws_mod, "expand_web_queries", canned_expand)
-
-    def fake_run(cmd, **kwargs):
-        class _R:
-            returncode = 0
-            stdout = "answer body"
-        return _R()
-
-    monkeypatch.setattr(ws_mod.subprocess, "run", fake_run)
-
-    printed: list[str] = []
-    monkeypatch.setattr(
-        ws_mod.RichOutputFormatter,
-        "text_block",
-        lambda self, text: printed.append(text),
-    )
-
-    from chunkhound.core.config.config import Config
-    await ws_mod.websearch_command(_make_args(query="raw"), config=Config())
-
-    assert printed, "expected exactly one text_block call"
-    output = printed[-1]
-    # CLI shell-form incantation appears; MCP tool-call form does NOT.
-    # shlex.quote wraps "cur norm" in single quotes (contains a space).
-    assert (
-        "chunkhound websearch \"[follow-up]\" --previous-query 'cur norm'"
-        in output
-    )
-    assert "websearch(query:" not in output
-    # `Continue exploring:` marker survives — emitted unconditionally.
-    assert "Continue exploring:" in output
-
-
-@pytest.mark.asyncio
-async def test_websearch_cli_footer_shell_escapes_embedded_quotes(
-    patched_capturing, monkeypatch
-) -> None:
-    """CLI footer must survive a `search_query` that contains double quotes.
-
-    `_preserves_quotes` explicitly keeps quoted phrases through expansion;
-    naive f-string interpolation of `--previous-query "{current_query}"`
-    would break the shell command on copy-paste. shlex.quote fixes this.
-    """
-    from chunkhound.utils.websearch_expansion import WebExpansionResult
-
-    async def canned_expand(query, llm_manager, previous_query=None):
-        return WebExpansionResult(
-            queries=["v1", "v2", "v3"],
-            search_query='compare "React 19" vs Vue',
-        )
-
-    monkeypatch.setattr(ws_mod, "expand_web_queries", canned_expand)
-
-    def fake_run(cmd, **kwargs):
-        class _R:
-            returncode = 0
-            stdout = "answer body"
-        return _R()
-
-    monkeypatch.setattr(ws_mod.subprocess, "run", fake_run)
-
-    printed: list[str] = []
-    monkeypatch.setattr(
-        ws_mod.RichOutputFormatter,
-        "text_block",
-        lambda self, text: printed.append(text),
-    )
-
-    from chunkhound.core.config.config import Config
-    await ws_mod.websearch_command(_make_args(query="raw"), config=Config())
-
-    output = printed[-1]
-    # Extract the emitted --previous-query token and round-trip through the
-    # shell lexer — the parsed value must equal the original search_query.
-    import shlex
-    marker = "--previous-query "
-    tail = output[output.index(marker) + len(marker):]
-    # Emitted form terminates at the closing backtick of the footer.
-    emitted = tail.split("`", 1)[0].strip()
-    (parsed,) = shlex.split(emitted)
-    assert parsed == 'compare "React 19" vs Vue'

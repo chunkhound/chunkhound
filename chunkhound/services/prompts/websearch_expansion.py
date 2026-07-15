@@ -1,13 +1,14 @@
 # ruff: noqa: E501
 """Websearch query expansion prompt (DuckDuckGo).
 
-Emits exactly 3 web-optimized query variants plus a normalized ``search_query``
-form. Two-branch template: baseline (single-shot) or follow-up (previous-query
-aware). All prompt text lives here as plain-string constants; the builder in
-``chunkhound/utils/websearch_expansion.py`` selects between the baseline and
-follow-up variants and resolves ``{current_year}`` on the follow-up examples,
-so each slot value reaching the outer template is fully-substituted plain
-text — mirroring the ``build_follow_up_section`` pattern in
+Emits exactly 3 web-optimized query variants. Two-branch template: baseline
+(single-shot) or follow-up (previous-query aware). All prompt text lives here
+as plain-string constants; the builder in
+``chunkhound/utils/websearch_expansion.py`` selects between the variants and
+pre-resolves ``{current_year}`` inside the follow-up examples so that value
+arrives at the outer ``USER_TEMPLATE.format(...)`` fully substituted — the
+outer format is single-pass and won't re-scan slot values. Mirrors the
+``build_follow_up_section`` pattern in
 ``chunkhound/services/prompts/synthesis.py``.
 """
 
@@ -40,8 +41,7 @@ Output: {{
     "Docker container orchestration",
     "Docker container orchestration {current_year}",
     "container orchestration best practices"
-  ],
-  "search_query": "Docker container orchestration"
+  ]
 }}
 
 Example 2 - Natural language question:
@@ -51,8 +51,7 @@ Output: {{
     "React performance optimization techniques {current_year}",
     "React rendering optimization best practices",
     "React performance profiling tools guide"
-  ],
-  "search_query": "React performance optimization"
+  ]
 }}
 
 Example 3 - Keyword dump:
@@ -62,8 +61,7 @@ Output: {{
     "python async await concurrency patterns",
     "python parallelism vs concurrency guide {current_year}",
     "asyncio concurrent programming best practices"
-  ],
-  "search_query": "python async await concurrency parallelism"
+  ]
 }}
 </EXAMPLES>
 
@@ -74,33 +72,23 @@ Output: {{
 </TEMPORAL_RULES>
 
 Return JSON of the form:
-{{"queries": ["<query1>", "<query2>", "<query3>"], "search_query": "<normalized form of Query, or empty string to defer>"}}"""
+{{"queries": ["<query1>", "<query2>", "<query3>"]}}"""
 
 
 INSTRUCTIONS_BASELINE = """<INSTRUCTIONS>
-1. First, produce the normalized query for DuckDuckGo (return in `search_query`):
-   - If it's a natural language question, extract key search terms
-   - If it's a keyword dump, organize into coherent phrase
-   - Keep quoted phrases, technical terms and specific brands intact
-
-2. Generate comprehensive search variations
-3. Add temporal markers where appropriate
+1. Generate comprehensive search variations following <QUERY_NORMALIZATION>
+2. Add temporal markers where appropriate
 
 IMPORTANT: Always generate EXACTLY 3 queries - no more, no less.
 </INSTRUCTIONS>"""
 
 
 INSTRUCTIONS_FOLLOWUP = """<INSTRUCTIONS>
-1. First, produce the normalized query for DuckDuckGo (return in `search_query`):
-   - If it's a natural language question, extract key search terms
-   - If it's a keyword dump, organize into coherent phrase
-   - Keep quoted phrases, technical terms and specific brands intact
-
-2. Identify the domain/technology from the previous query (e.g., "React hooks" → React domain)
-3. Extract the NEW aspect from the current query (e.g., "performance optimization")
-4. Generate queries that combine: [domain context] + [new aspect]
-5. AVOID repeating the exact previous query terms
-6. Keep domain awareness but explore the new dimension
+1. Identify the domain/technology from the previous query (e.g., "React hooks" → React domain)
+2. Extract the NEW aspect from the current query (e.g., "performance optimization")
+3. Generate queries that combine: [domain context] + [new aspect], following <QUERY_NORMALIZATION>
+4. AVOID repeating the exact previous query terms
+5. Keep domain awareness but explore the new dimension
 
 IMPORTANT: Always generate EXACTLY 3 queries - no more, no less.
 </INSTRUCTIONS>"""
@@ -117,8 +105,7 @@ Output: {{
     "React hooks performance optimization",
     "useMemo useCallback performance patterns {current_year}",
     "React rendering optimization strategies {current_year}"
-  ],
-  "search_query": "React hooks performance optimization"
+  ]
 }}
 
 Example (with previous context) — Node:
@@ -130,8 +117,7 @@ Output: {{
     "chrome devtools heap snapshot nodejs",
     "chrome devtools heap profiling techniques {current_year}",
     "memory snapshot interpretation guide nodejs"
-  ],
-  "search_query": "chrome devtools heap snapshot nodejs"
+  ]
 }}
 
 """

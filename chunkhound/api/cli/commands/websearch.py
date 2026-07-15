@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -35,10 +34,10 @@ def _build_quickresearch_argv(
 ) -> list[str]:
     """Build argv to invoke _quickresearch as a subprocess, forwarding relevant args.
 
-    ``query`` is the raw user query — the LLM-normalized ``search_query`` is
-    reserved for the DDG variants and footer, since lossy normalization would
-    silently narrow the research prompt (only outright empty/whitespace/LLM
-    failures fall back to raw). ``previous_query`` is pre-coerced by the caller.
+    ``query`` is the raw user query — feeding a lossy narrowing (e.g.
+    ``queries[0]`` from the expansion) here would silently narrow the
+    deep-research prompt with no signal to the user. ``previous_query`` is
+    pre-coerced by the caller.
     """
     from ..parsers.common_arguments import build_forwarded_argv
     from ..parsers.quickresearch_parser import add_quickresearch_subparser
@@ -77,11 +76,11 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         )
 
     try:
-        expansion = await expand_web_queries(
+        queries = await expand_web_queries(
             args.query, llm_manager, previous_query=previous_query
         )
         results = await search_multi(
-            expansion.queries,
+            queries,
             args.limit,
             formatter.progress_indicator,
             failure_callback=_on_query_failure,
@@ -124,10 +123,9 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         # subprocess wrapper is still the cleanest way to capture stdout for
         # path-rewriting and enforce the wall-clock timeout — using the same
         # path on both surfaces avoids divergence.
-        # Positional query is the RAW user input; the LLM-normalized
-        # ``search_query`` steers only DDG variants + the follow-up footer.
-        # Feeding a lossy normalization to deep research would silently
-        # degrade the answer with no signal.
+        # Positional query is the RAW user input — feeding a lossy narrowing
+        # (e.g. queries[0]) to deep research would silently degrade the
+        # answer with no signal.
         cmd = _build_quickresearch_argv(
             args, tmpdir, config,
             query=args.query,
@@ -161,14 +159,4 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
             formatter.error(f"Research failed (exit {e.returncode})")
             sys.exit(e.returncode)
     answer = replace_paths_with_urls(result.stdout, mapping)
-    current_query = expansion.search_query
-    # Surface-scoped chain footer: emit only the CLI incantation so users
-    # never see a tool-call form that isn't runnable at the shell.
-    # shlex.quote protects embedded double-quotes so quoted phrases in the
-    # search_query survive copy-paste — the whole point of _preserves_quotes.
-    footer = (
-        "\n\n---\n"
-        f'**Continue exploring:** Run `chunkhound websearch "[follow-up]" '
-        f'--previous-query {shlex.quote(current_query)}`'
-    )
-    formatter.text_block(answer + footer)
+    formatter.text_block(answer)

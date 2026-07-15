@@ -518,18 +518,15 @@ async def test_websearch_mcp_empty_previous_query_treated_as_none(
 
 @pytest.mark.asyncio
 async def test_websearch_mcp_subprocess_gets_raw_query(monkeypatch, patched):
-    """MCP subprocess positional is the RAW query, not the LLM-normalized form.
+    """MCP subprocess positional is the RAW query, not ``queries[0]``.
 
-    Deep research would silently degrade if handed a lossy normalization; the
-    normalized ``search_query`` is reserved for DDG variants and the footer.
+    Deep research would silently degrade if handed a lossy narrowing, with
+    no signal to the user.
     """
     from chunkhound.utils import websearch_expansion as we_mod
-    from chunkhound.utils.websearch_expansion import WebExpansionResult
 
     async def canned_expand(query, llm_manager, previous_query=None):
-        return WebExpansionResult(
-            queries=["v1", "v2", "v3"], search_query="normalized form"
-        )
+        return ["v1", "v2", "v3"]
 
     # `websearch_impl` lazy-imports `expand_web_queries` inside the function,
     # so patch on the source module — patching `tools_mod` would not hit the
@@ -591,63 +588,6 @@ async def test_websearch_mcp_previous_query_reaches_subprocess(
     )
 
     assert captured["previous_query"] == "prior topic"
-
-
-@pytest.mark.asyncio
-async def test_websearch_mcp_footer_uses_tool_call_form(monkeypatch, patched):
-    """MCP footer contains the tool-call form; NOT the CLI shell form."""
-    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
-    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
-
-    fake_proc = _FakeProc(stdout=b"answer body", returncode=0)
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
-
-    result = await tools_mod.websearch_impl(
-        embedding_manager=None,
-        llm_manager=None,
-        config=None,
-        query="raw",
-    )
-
-    assert 'websearch(query: "[follow-up]", previous_query: "raw")' in result
-    assert "chunkhound websearch" not in result
-    assert "Continue exploring:" in result
-
-
-@pytest.mark.asyncio
-async def test_websearch_mcp_footer_json_escapes_embedded_quotes(monkeypatch, patched):
-    """MCP footer must survive a `search_query` containing double quotes.
-
-    `_preserves_quotes` explicitly keeps quoted phrases through expansion;
-    naive f-string interpolation of `previous_query: "{current_query}"`
-    would emit invalid tool-call syntax on copy-paste. json.dumps fixes this.
-    """
-    import json
-
-    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
-    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
-
-    fake_proc = _FakeProc(stdout=b"answer body", returncode=0)
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
-    )
-
-    # llm_manager=None → expand_web_queries falls back to search_query=query,
-    # so the embedded quotes propagate straight to the footer.
-    tricky = 'compare "React 19" vs Vue'
-    result = await tools_mod.websearch_impl(
-        embedding_manager=None,
-        llm_manager=None,
-        config=None,
-        query=tricky,
-    )
-
-    # json.dumps is deterministic, so verify the exact escaped literal appears
-    # in the footer's tool-call form.
-    expected = f'previous_query: {json.dumps(tricky)})`'
-    assert expected in result, f"expected {expected!r} in: {result!r}"
 
 
 @pytest.mark.asyncio

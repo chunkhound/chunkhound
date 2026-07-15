@@ -8,7 +8,6 @@ The registry pattern ensures consistent tool metadata and behavior.
 
 import asyncio
 import inspect
-import json
 import os
 import re
 import shutil
@@ -909,9 +908,9 @@ async def websearch_impl(
 
     limit = clamp_limit(limit)
 
-    expansion = await expand_web_queries(query, llm_manager, previous_query=previous_query)
+    queries = await expand_web_queries(query, llm_manager, previous_query=previous_query)
     try:
-        results = await search_multi(expansion.queries, limit, None)
+        results = await search_multi(queries, limit, None)
     except urllib.error.URLError as e:
         raise MCPError(f"Web search failed: {e.reason}") from e
     if not results:
@@ -930,10 +929,9 @@ async def websearch_impl(
             mapping=mapping,
         )
 
-        # Positional query is the RAW user input; the LLM-normalized
-        # ``search_query`` steers only DDG variants + the follow-up footer.
-        # Feeding a lossy normalization to deep research would silently
-        # degrade the answer with no signal.
+        # Positional query is the RAW user input — feeding a lossy narrowing
+        # (e.g. queries[0]) to deep research would silently degrade the
+        # answer with no signal.
         cmd = build_quickresearch_argv_core(
             query, tmpdir, config,
             parent_pid=os.getpid(),
@@ -981,17 +979,7 @@ async def websearch_impl(
             "> - " + w.replace("\n", "\n> ") for w in warnings
         )
     ) if warnings else ""
-    current_query = expansion.search_query
-    # Surface-scoped chain footer: emit only the MCP tool-call form so
-    # clients don't see a shell command they can't execute.
-    # json.dumps escapes embedded double-quotes so quoted phrases in the
-    # search_query survive copy-paste — the whole point of _preserves_quotes.
-    footer = (
-        "\n\n---\n"
-        f'**Continue exploring:** Use `websearch(query: "[follow-up]", '
-        f'previous_query: {json.dumps(current_query)})`'
-    )
-    return f"{answer}{warn_block}{footer}"
+    return f"{answer}{warn_block}"
 
 
 # =============================================================================

@@ -24,7 +24,10 @@ def add_research_subparser(subparsers: Any) -> argparse.ArgumentParser:
     research_parser = subparsers.add_parser(
         "research",
         help="Perform deep code research",
-        description="Answer complex questions about codebase architecture and patterns. Synthesis budgets scale automatically based on repository size.",
+        description=(
+            "Answer complex questions about codebase architecture and patterns. "
+            "Synthesis budgets scale automatically based on repository size."
+        ),
     )
 
     # Required query argument
@@ -52,7 +55,11 @@ def add_research_subparser(subparsers: Any) -> argparse.ArgumentParser:
         "--previous-query",
         type=str,
         default=None,
-        help="Prior query for follow-up framing — synthesizer phrases the answer in that topic's context. Does not steer which code is searched or retrieved.",
+        help=(
+            "Prior query for follow-up framing — synthesizer phrases the answer "
+            "in that topic's context. Does not steer which code is searched or "
+            "retrieved."
+        ),
     )
 
     # Git diff / commit-range arguments
@@ -61,7 +68,7 @@ def add_research_subparser(subparsers: Any) -> argparse.ArgumentParser:
     # Add common arguments
     add_common_arguments(research_parser)
 
-    # Add config-specific arguments - database, embedding (for reranking), llm, and research
+    # Add config-specific arguments: database, embedding (reranking), llm, research
     add_config_arguments(research_parser, ["database", "embedding", "llm", "research"])
 
     return cast(argparse.ArgumentParser, research_parser)
