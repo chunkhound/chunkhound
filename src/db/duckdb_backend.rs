@@ -120,7 +120,7 @@ impl DuckDbHnswBackend {
         ) {
             Ok(()) => true,
             Err(e) => {
-                log::debug!("VSS extension unavailable (vector search disabled): {e}");
+                log::warn!("VSS extension unavailable (vector search disabled): {e}");
                 false
             }
         }

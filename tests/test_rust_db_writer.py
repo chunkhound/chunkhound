@@ -356,6 +356,98 @@ class TestCrashRecovery:
         )
         assert _count(str(db_path), "files") == 0
 
+    def test_hnsw_crash_recovery_restores_missing_indexes(self, tmp_path):
+        """Crash between HNSW drop (Step 2) and recreate (Step 5) is recovered on open().
+
+        When a write_batch drops HNSW indexes before BEGIN and the process terminates
+        before Step 5 recreates them, the DB is left with embeddings_N tables but no
+        HNSW indexes — queries silently fall back to brute-force vector scan.
+
+        open() must detect this and call ensure_all_hnsw_indexes() to restore them.
+        """
+        db = str(tmp_path / "t.duckdb")
+
+        # Session 1: write >= 50 embeddings to trigger HNSW index creation
+        w1 = _make_writer(db)
+        w1.open()
+        files = [_file(f"{i}.py", chunks=[_chunk(dims=128)]) for i in range(50)]
+        w1.write_batch(_batch(files=files))
+        w1.close()
+
+        # Verify the HNSW index exists after session 1
+        conn = duckdb.connect(db)
+        try:
+            try:
+                conn.execute("LOAD vss")
+                has_vss = True
+            except Exception:
+                has_vss = True  # VSS already loaded from prior test runs
+            if has_vss:
+                rows = conn.execute(
+                    "SELECT index_name FROM duckdb_indexes() "
+                    "WHERE table_name = 'embeddings_128' "
+                    "AND schema_name = 'main'"
+                ).fetchall()
+                hnsw_names = [r[0] for r in rows if "hnsw" in r[0].lower()]
+                assert hnsw_names, (
+                    f"Expected HNSW index on embeddings_128 after session 1, "
+                    f"got: {rows}"
+                )
+        finally:
+            conn.close()
+
+        # Simulate crash: manually drop the HNSW index outside the writer's lifecycle.
+        # This mirrors the state after write_batch Step 2 (DROP HNSW) without Step 5.
+        conn = duckdb.connect(db)
+        try:
+            try:
+                conn.execute("LOAD vss")
+            except Exception:
+                pass
+            conn.execute("DROP INDEX IF EXISTS idx_hnsw_128")
+            conn.execute("CHECKPOINT")
+            # Confirm the index is gone
+            rows = conn.execute(
+                "SELECT index_name FROM duckdb_indexes() "
+                "WHERE table_name = 'embeddings_128' "
+                "AND schema_name = 'main'"
+            ).fetchall()
+            hnsw_names = [r[0] for r in rows if "hnsw" in r[0].lower()]
+            assert not hnsw_names, (
+                f"Expected HNSW index to be absent after manual drop, "
+                f"got: {rows}"
+            )
+        finally:
+            conn.close()
+
+        # Session 2: open() must detect the missing HNSW index and recreate it via
+        # ensure_all_hnsw_indexes(), which is called unconditionally during open().
+        w2 = _make_writer(db)
+        w2.open()
+        w2.close()
+
+        # Verify the HNSW index has been restored
+        conn = duckdb.connect(db)
+        try:
+            try:
+                conn.execute("LOAD vss")
+            except Exception:
+                pass
+            rows = conn.execute(
+                "SELECT index_name FROM duckdb_indexes() "
+                "WHERE table_name = 'embeddings_128' "
+                "AND schema_name = 'main'"
+            ).fetchall()
+            hnsw_names = [r[0] for r in rows if "hnsw" in r[0].lower()]
+            assert hnsw_names, (
+                f"HNSW index not restored after crash recovery: {rows}"
+            )
+            assert _count(db, "embeddings_128") == 50, (
+                "embeddings_128 data must survive the simulated crash"
+            )
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # HNSW threshold boundary (Invariant 14)
