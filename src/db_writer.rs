@@ -101,9 +101,15 @@ impl RustDbWriter {
         let db_path: String = extract_req(db_config, "db_path")?;
         let compaction_batch_threshold: u32 =
             extract_opt::<u32>(db_config, "compaction_batch_threshold")?.unwrap_or(50);
+        let compaction_threshold: f64 =
+            extract_opt::<f64>(db_config, "compaction_threshold")?.unwrap_or(0.30);
+        let compaction_min_size_mb: u64 =
+            extract_opt::<u64>(db_config, "compaction_min_size_mb")?.unwrap_or(50);
         let config = DbConfig {
             db_path,
             compaction_batch_threshold,
+            compaction_threshold,
+            compaction_min_size_bytes: compaction_min_size_mb * 1024 * 1024,
         };
         let backend = create_backend(config);
         Ok(RustDbWriter {

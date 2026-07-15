@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use duckdb::Connection;
 
-use crate::db::DbConfig;
+use crate::db::{DbBackend, DbConfig};
 use crate::error::DbError;
 use crate::types::{BatchResult, ChunkRecord, DbWriterBatch, FileRecord};
 
@@ -31,6 +31,17 @@ struct BatchInner {
     file_ids: Vec<i64>,
     chunks_written: u64,
     embedding_pairs: Vec<(i64, usize, usize)>,
+}
+
+/// Two-signal compaction metrics (Phase 0).
+#[derive(Debug, Clone)]
+struct CompactionStats {
+    /// Fraction of DB blocks that are free (0.0–1.0).
+    free_ratio: f64,
+    /// Fraction of stored rows that are dead (0.0–1.0).
+    row_waste_ratio: f64,
+    /// Estimated reclaimable bytes = db_size × max(free_ratio, row_waste_ratio).
+    reclaimable: u64,
 }
 
 impl DuckDbHnswBackend {
@@ -684,6 +695,175 @@ impl DuckDbHnswBackend {
         }
     }
 
+    /// Write a compaction-intent marker file and fsync it to disk.
+    /// Used by the 3-phase swap protocol to enable crash recovery (Invariant 17).
+    fn write_intent(path: &Path, phase: &str) -> Result<(), DbError> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(phase.as_bytes())?;
+        f.sync_all()?;
+        Ok(())
+    }
+
+    /// Check available disk space on the filesystem containing `dir`.
+    /// Returns None when the platform does not support the query.
+    fn available_disk_space(_dir: &Path) -> Option<u64> {
+        // Best-effort: platform-specific implementations can be added.
+        None
+    }
+
+    /// 3-phase EXPORT/IMPORT atomic swap (Section 22.5).
+    ///
+    /// Phase 1: EXPORT current DB to Parquet while connection is open,
+    ///          then CHECKPOINT + close.
+    /// Phase 2: Write intent files, rename old DB, IMPORT into a fresh DB,
+    ///          rebuild HNSW indexes.
+    /// Phase 3: Atomic rename of compacted DB to active path, cleanup.
+    fn run_export_import_compaction(&mut self) -> Result<(), DbError> {
+        let db_path = PathBuf::from(&self.config.db_path);
+        let export_dir = PathBuf::from(format!("{}.export_tmp", self.config.db_path));
+        let compact_path = PathBuf::from(format!("{}.compact", self.config.db_path));
+        let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
+        let intent_path = PathBuf::from(format!("{}.swap_intent", self.config.db_path));
+
+        // --- Phase 1: Export while connection is open ----------------------
+        let conn = self.conn_or_err()?;
+
+        // Snapshot HNSW DDL before closing (needed for rebuild in Phase 2).
+        let hnsw_indexes = Self::discover_hnsw_indexes(conn)?;
+
+        // Preflight disk space: need ~3× DB size for export + compact files.
+        let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+        if let Some(avail) = Self::available_disk_space(&db_path) {
+            if avail < db_size * 3 {
+                return Err(DbError::Other(format!(
+                    "insufficient disk space for compaction: \
+                     need {} bytes, have {} bytes",
+                    db_size * 3,
+                    avail
+                )));
+            }
+        }
+
+        // Clean up stale artifacts from a prior failed compaction.
+        let _ = std::fs::remove_dir_all(&export_dir);
+        let _ = std::fs::remove_file(&compact_path);
+
+        // EXPORT current database schema + data to Parquet files.
+        let export_sql = format!(
+            "EXPORT DATABASE '{}' (FORMAT PARQUET)",
+            export_dir.display()
+        );
+        log::info!("compaction: {}", export_sql);
+        conn.execute_batch(&export_sql)?;
+
+        // CHECKPOINT and close the live connection.
+        conn.execute_batch("CHECKPOINT")?;
+        self.conn = None;
+
+        // --- Phase 2: Rename old DB, create compacted DB ------------------
+        Self::write_intent(&intent_path, "pre-swap")?;
+        std::fs::rename(&db_path, &old_path)?;
+
+        Self::write_intent(&intent_path, "phase1")?;
+
+        // Create a fresh DB file and IMPORT the Parquet export.
+        let import_conn = Connection::open(&compact_path)?;
+        let import_sql = format!("IMPORT DATABASE '{}'", export_dir.display());
+        log::info!("compaction: {}", import_sql);
+        let import_result = import_conn.execute_batch(&import_sql);
+
+        // Rebuild HNSW indexes on the compacted DB.
+        if !hnsw_indexes.is_empty() {
+            if let Err(e) = Self::recreate_hnsw_indexes(&import_conn, &hnsw_indexes) {
+                log::warn!(
+                    "compaction: HNSW rebuild failed ({}), \
+                     continuing without indexes",
+                    e
+                );
+            }
+        }
+        import_conn.execute_batch("CHECKPOINT")?;
+        drop(import_conn); // Close before rename.
+
+        // Check import result AFTER closing the connection.
+        import_result?;
+
+        // Clean up export temp directory.
+        let _ = std::fs::remove_dir_all(&export_dir);
+
+        // --- Phase 3: Atomic rename to active path ------------------------
+        Self::write_intent(&intent_path, "phase2")?;
+        std::fs::rename(&compact_path, &db_path)?;
+
+        // Clean up intent file and old DB.
+        let _ = std::fs::remove_file(&intent_path);
+        let _ = std::fs::remove_file(&old_path);
+
+        // --- Reopen connection to compacted DB ----------------------------
+        self.reopen()?;
+        self.write_count = 0;
+        self.hnsw_cache = None;
+        log::info!("compaction: complete");
+        Ok(())
+    }
+
+    /// Reopen the connection after a successful compaction.
+    fn reopen(&mut self) -> Result<(), DbError> {
+        self.known_dims.clear();
+        let conn = Connection::open(&self.config.db_path)?;
+        self.has_vss = Self::try_load_vss(&conn);
+        Self::setup_schema(&conn)?;
+        let existing = Self::discover_embedding_tables(&conn)?;
+        self.known_dims
+            .extend(existing.into_iter().map(|(_, dims)| dims));
+        self.conn = Some(conn);
+        self.ensure_all_hnsw_indexes()?;
+        Ok(())
+    }
+
+    /// Recover after a failed compaction attempt: reopen connection and
+    /// restore state so the caller can continue or fall back to CHECKPOINT.
+    fn reopen_after_compaction_failure(&mut self) -> Result<(), DbError> {
+        // If the old DB was renamed away, try to restore it from intent.
+        let db_path = PathBuf::from(&self.config.db_path);
+        let intent_path = PathBuf::from(format!("{}.swap_intent", self.config.db_path));
+        let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
+        if intent_path.exists() {
+            if let Ok(intent) = std::fs::read_to_string(&intent_path) {
+                match intent.trim() {
+                    "pre-swap" => {
+                        // Original DB was renamed to .old; restore it.
+                        if old_path.exists() && !db_path.exists() {
+                            let _ = std::fs::rename(&old_path, &db_path);
+                        }
+                        let _ = std::fs::remove_file(&intent_path);
+                    }
+                    "phase1" | "phase2" => {
+                        // Old DB already renamed; compact may or may not
+                        // exist. Try to restore the original.
+                        if old_path.exists() {
+                            if db_path.exists() {
+                                let _ = std::fs::remove_file(&db_path);
+                            }
+                            let _ = std::fs::rename(&old_path, &db_path);
+                        }
+                        let _ = std::fs::remove_file(&intent_path);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Clean up any compaction artifacts.
+        let compact_path = PathBuf::from(format!("{}.compact", self.config.db_path));
+        let export_dir = PathBuf::from(format!("{}.export_tmp", self.config.db_path));
+        let _ = std::fs::remove_file(&compact_path);
+        let _ = std::fs::remove_dir_all(&export_dir);
+
+        // Reopen.
+        self.reopen()
+    }
+
     // Runs inside an already-open BEGIN/COMMIT envelope managed by the caller.
     // Handles file upserts and chunk inserts; returns intermediate state needed
     // for the embedding insert step that follows in the same transaction.
@@ -721,6 +901,106 @@ impl DuckDbHnswBackend {
             file_ids,
             chunks_written: total_chunks,
             embedding_pairs,
+        })
+    }
+
+    /// Two-signal fragmentation detection (Phase 0).
+    ///
+    /// `free_ratio`: fraction of DB blocks that are free (freed by CHECKPOINT,
+    /// not reused). Queried from DuckDB's `pragma_database_size`.
+    ///
+    /// `row_waste_ratio`: fraction of rows in storage that are dead (deleted but
+    /// still occupying space in row groups). Estimated by comparing total stored
+    /// row counts from `pragma_storage_info` against live `COUNT(*)` from our
+    /// tables.
+    ///
+    /// Both signals fall back to zero when the DB is empty or pragmas are
+    /// unavailable (safe default: no compaction needed).
+    fn compaction_stats(&self) -> Result<CompactionStats, DbError> {
+        let conn = self.conn_or_err()?;
+
+        // --- free_ratio: from pragma_database_size -----------------------------
+        let free_ratio: f64 = conn
+            .query_row(
+                "SELECT CASE WHEN total_blocks > 0 THEN free_blocks::DOUBLE \
+                           / total_blocks ELSE 0.0 END FROM pragma_database_size()",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0.0);
+
+        // --- row_waste_ratio: stored vs live rows across our tables ------------
+        let live_chunks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        let live_embeddings: i64 = {
+            let tables = Self::discover_embedding_tables(conn).unwrap_or_default();
+            let mut total = 0i64;
+            for (table_name, _) in &tables {
+                if let Ok(cnt) =
+                    conn.query_row(&format!("SELECT COUNT(*) FROM \"{table_name}\""), [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                {
+                    total += cnt;
+                }
+            }
+            total
+        };
+
+        // MAX(count) per row_group avoids counting the same row N times (once
+        // per column segment).
+        let stored_chunks: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(cnt), 0) FROM (\
+                   SELECT row_group_id, MAX(count) AS cnt \
+                   FROM pragma_storage_info('chunks') \
+                   GROUP BY row_group_id)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        let stored_embeddings: i64 = {
+            let tables = Self::discover_embedding_tables(conn).unwrap_or_default();
+            let mut total = 0i64;
+            for (table_name, _) in &tables {
+                let safe = table_name.replace('"', "\"\"");
+                if let Ok(cnt) = conn.query_row(
+                    &format!(
+                        "SELECT COALESCE(SUM(cnt), 0) FROM (\
+                           SELECT row_group_id, MAX(count) AS cnt \
+                           FROM pragma_storage_info('\"{safe}\"') \
+                           GROUP BY row_group_id)"
+                    ),
+                    [],
+                    |r| r.get::<_, i64>(0),
+                ) {
+                    total += cnt;
+                }
+            }
+            total
+        };
+
+        let total_stored = stored_chunks + stored_embeddings;
+        let total_live = live_chunks + live_embeddings;
+        let row_waste_ratio = if total_stored > total_live && total_stored > 0 {
+            (total_stored - total_live) as f64 / total_stored as f64
+        } else {
+            0.0
+        };
+
+        // --- reclaimable bytes -----------------------------------------------
+        let db_size = std::fs::metadata(&self.config.db_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let reclaimable = (db_size as f64 * free_ratio.max(row_waste_ratio)) as u64;
+
+        Ok(CompactionStats {
+            free_ratio,
+            row_waste_ratio,
+            reclaimable,
         })
     }
 }
@@ -961,15 +1241,33 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn needs_compaction(&self) -> Result<bool, DbError> {
+        // Two-signal metric-based detection (Phase 0).
+        // Falls back to simple write-count threshold when stats are unavailable.
+        if let Ok(stats) = self.compaction_stats() {
+            let effective = stats.free_ratio.max(stats.row_waste_ratio);
+            if effective >= self.config.compaction_threshold
+                && stats.reclaimable >= self.config.compaction_min_size_bytes
+            {
+                return Ok(true);
+            }
+        }
         Ok(self.write_count >= self.config.compaction_batch_threshold)
     }
 
     fn run_compaction(&mut self) -> Result<(), DbError> {
-        // Phase 0: CHECKPOINT only.
-        // TODO(Phase 1): replace with full 3-phase atomic EXPORT/IMPORT swap.
-        let conn = self.conn_or_err()?;
-        conn.execute_batch("CHECKPOINT")?;
-        self.write_count = 0;
+        // 3-phase atomic EXPORT/IMPORT compaction (Phase 0).
+        // Falls back to CHECKPOINT-only if EXPORT/IMPORT is unavailable
+        // (e.g. DuckDB build without Parquet support).
+        if let Err(e) = self.run_export_import_compaction() {
+            log::warn!(
+                "compaction: EXPORT/IMPORT failed ({}), falling back to CHECKPOINT",
+                e
+            );
+            self.reopen_after_compaction_failure()?;
+            let conn = self.conn_or_err()?;
+            conn.execute_batch("CHECKPOINT")?;
+            self.write_count = 0;
+        }
         Ok(())
     }
 
@@ -1007,3 +1305,4 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         Ok(())
     }
 }
+

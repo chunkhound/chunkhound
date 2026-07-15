@@ -21,7 +21,14 @@ pub trait DbBackend: Send {
 #[derive(Debug, Clone)]
 pub struct DbConfig {
     pub db_path: String,
+    /// Legacy simple-threshold for fallback; prefer two-signal detection.
     pub compaction_batch_threshold: u32,
+    /// Threshold for effective_waste = max(free_ratio, row_waste_ratio).
+    /// Default: 0.30 (30% of DB space is reclaimable).
+    pub compaction_threshold: f64,
+    /// Minimum reclaimable bytes required before compaction triggers.
+    /// Default: 52428800 (50 MB).
+    pub compaction_min_size_bytes: u64,
 }
 
 pub fn create_backend(cfg: DbConfig) -> Box<dyn DbBackend> {
