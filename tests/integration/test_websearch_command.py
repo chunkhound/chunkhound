@@ -352,7 +352,9 @@ def test_build_quickresearch_argv_query_param_becomes_positional(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_websearch_cli_previous_query_reaches_expansion(monkeypatch, patched) -> None:
+async def test_websearch_cli_previous_query_reaches_expansion(
+    monkeypatch, patched
+) -> None:
     """CLI --previous-query flows into ``expand_web_queries``."""
     captured: dict[str, object] = {}
 

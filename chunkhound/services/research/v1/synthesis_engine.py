@@ -138,7 +138,7 @@ class SynthesisEngine:
         Args:
             chunks: All chunks from BFS traversal (will be filtered to match budgeted files)
             files: Budgeted file contents (subset within token limits)
-            context: Research context (supplies ``root_query`` and optional ``previous_query``)
+            context: Research context (root_query, optional previous_query)
             synthesis_budgets: Dynamic budgets based on repository size
             constants_context: Constants ledger context for LLM prompts
             facts_context: Facts ledger context for LLM prompts
@@ -326,7 +326,7 @@ class SynthesisEngine:
         Args:
             cluster: Cluster group with files to synthesize
             chunks: All chunks (will be filtered to cluster files)
-            context: Research context (supplies ``root_query`` and optional ``previous_query``)
+            context: Research context (root_query, optional previous_query)
             synthesis_budgets: Dynamic budgets based on repository size
             total_input_tokens: Sum of all cluster tokens (for proportional budget allocation)
             constants_context: Constants ledger context for LLM prompts
@@ -507,7 +507,7 @@ Provide a comprehensive analysis focusing on the query."""
             cluster_results: Results from map step (cluster summaries)
             all_chunks: All chunks from clusters (will be filtered to match synthesized files)
             all_files: All files that were synthesized across clusters
-            context: Research context (supplies ``root_query`` and optional ``previous_query``)
+            context: Research context (root_query, optional previous_query)
             synthesis_budgets: Dynamic budgets based on repository size
             constants_context: Constants ledger context for LLM prompts
             facts_context: Facts ledger context for LLM prompts
