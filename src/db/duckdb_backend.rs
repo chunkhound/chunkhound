@@ -1305,4 +1305,3 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         Ok(())
     }
 }
-
