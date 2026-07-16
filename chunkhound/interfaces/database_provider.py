@@ -246,6 +246,40 @@ class DatabaseProvider(Protocol):
         """Delete all embeddings for a specific chunk."""
         ...
 
+    def get_chunks_without_embeddings_paginated(
+        self,
+        provider: str,
+        model: str,
+        *,
+        limit: int = 1000,
+        after_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return chunks that lack embeddings for provider/model, paginated by id.
+
+        Used for large-index embedding generation without loading the full
+        chunk table into memory. Results are ordered by chunk id ascending.
+
+        Args:
+            provider: Embedding provider name
+            model: Embedding model name
+            limit: Maximum number of chunks to return
+            after_id: When set, only return chunks with id greater than this
+                (keyset pagination). Omit for residual-shrink streaming: re-query
+                after inserting embeddings so each page is bounded by ``limit``.
+                Residual-shrink (``after_id=None``) is the large-index-safe mode.
+                Keyset mode is ordered and correct for small/medium residual sets;
+                LanceDB may scan remaining candidate ids per page until Phase 2
+                indexed filters land.
+
+        Returns:
+            List of provider-agnostic chunk dicts with at least:
+            id, file_id, code, symbol, file_path, start_line, end_line,
+            chunk_type, language. Empty list when no more chunks need embeddings
+            (and ``limit > 0``). Query/execution failures raise rather than
+            returning empty, so callers can distinguish errors from completion.
+        """
+        ...
+
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
         """Get all chunks with their metadata including file paths (provider-agnostic)."""
         ...

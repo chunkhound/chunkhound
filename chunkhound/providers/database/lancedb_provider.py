@@ -1588,6 +1588,269 @@ class LanceDBProvider(SerialDatabaseProvider):
         # In LanceDB, this would involve updating the chunk to remove embedding data
         pass
 
+    def get_chunks_without_embeddings_paginated(
+        self,
+        provider: str,
+        model: str,
+        *,
+        limit: int = 1000,
+        after_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return chunks missing embeddings for provider/model (paginated by id)."""
+        return self._execute_in_db_thread_sync(
+            "get_chunks_without_embeddings_paginated",
+            provider,
+            model,
+            limit,
+            after_id,
+        )
+
+    def _chunk_needs_embedding(
+        self, row: dict[str, Any], provider: str, model: str
+    ) -> bool:
+        """True when row lacks a valid embedding for provider/model."""
+        row_provider = row.get("provider") or ""
+        row_model = row.get("model") or ""
+        if row_provider == provider and row_model == model:
+            return not _has_valid_embedding(row.get("embedding"))
+        return True
+
+    def _deduplicate_prefer_embedded(
+        self, results: list[dict[str, Any]], provider: str, model: str
+    ) -> list[dict[str, Any]]:
+        """Deduplicate by id, preferring rows that already have a valid embedding.
+
+        LanceDB fragment scans can surface both pre- and post-embed versions of
+        the same chunk id; first-wins would keep the stale unembedded fragment.
+        """
+        if not results:
+            return results
+        best: dict[int, dict[str, Any]] = {}
+        for row in results:
+            raw_id = row.get("id")
+            if raw_id is None:
+                continue
+            chunk_id = int(raw_id)
+            prev = best.get(chunk_id)
+            if prev is None:
+                best[chunk_id] = row
+                continue
+            prev_has = not self._chunk_needs_embedding(prev, provider, model)
+            row_has = not self._chunk_needs_embedding(row, provider, model)
+            if row_has and not prev_has:
+                best[chunk_id] = row
+        return list(best.values())
+
+    def _executor_get_chunks_without_embeddings_paginated(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        provider: str,
+        model: str,
+        limit: int,
+        after_id: int | None,
+    ) -> list[dict[str, Any]]:
+        """Executor: paginated chunks without embeddings for provider/model.
+
+        Phase 1 uses provider/model/embedding columns (no signature column).
+        A row needs work when it does not already have a *valid* embedding for
+        the requested provider/model (aligned with get_existing_embeddings).
+
+        Pagination modes:
+        - after_id is None: residual-shrink — bounded ``limit`` fetch (large-index
+          safe when the caller inserts embeddings between pages).
+        - after_id is set: keyset — LanceDB ``limit`` is not id-ordered, so we
+          collect remaining candidate ids, sort, then fetch the page. Not ideal
+          for multi-million residual sets; use residual-shrink for large streams.
+          Phase 2 can replace this with indexed signature queries.
+        """
+        if not self._chunks_table or limit <= 0:
+            return []
+
+        try:
+            # Escape single quotes for LanceDB where-string literals
+            p = provider.replace("'", "''")
+            m = model.replace("'", "''")
+
+            # Push-down candidates: mismatch, empty/null labels, or null embedding.
+            # Zero/invalid vectors with matching labels are recovered in Python
+            # via _chunk_needs_embedding (same rule as get_existing_embeddings).
+            missing_clause = (
+                f"(provider IS NULL OR model IS NULL OR "
+                f"provider = '' OR model = '' OR "
+                f"provider != '{p}' OR model != '{m}' OR "
+                f"embedding IS NULL)"
+            )
+
+            if after_id is None:
+                # Residual-shrink: any matching page is fine; caller mutates set.
+                # Over-fetch so post-filter can still fill `limit`.
+                fetch_limit = max(limit, min(limit * 3, limit + 128))
+                candidates = (
+                    self._chunks_table.search()
+                    .where(missing_clause)
+                    .limit(fetch_limit)
+                    .to_list()
+                )
+                # Bounded scan for labeled rows with invalid/zero embeddings
+                # (legacy placeholders) that the push-down clause cannot express.
+                try:
+                    labeled = (
+                        self._chunks_table.search()
+                        .where(f"provider = '{p}' AND model = '{m}'")
+                        .limit(fetch_limit)
+                        .to_list()
+                    )
+                    candidates.extend(labeled)
+                except Exception:
+                    pass
+
+                # Re-fetch by id so fragment merge can prefer the embedded version
+                # (stale unembedded fragments can appear in the missing filter).
+                candidate_ids: list[int] = []
+                seen_ids: set[int] = set()
+                for row in candidates:
+                    raw_id = row.get("id")
+                    if raw_id is None:
+                        continue
+                    cid = int(raw_id)
+                    if cid not in seen_ids:
+                        seen_ids.add(cid)
+                        candidate_ids.append(cid)
+                if not candidate_ids:
+                    return []
+
+                ids_str = ", ".join(str(i) for i in candidate_ids)
+                results = (
+                    self._chunks_table.search()
+                    .where(f"id IN ({ids_str})")
+                    .to_list()
+                )
+                results = self._deduplicate_prefer_embedded(
+                    results, provider, model
+                )
+                results = [
+                    row
+                    for row in results
+                    if self._chunk_needs_embedding(row, provider, model)
+                ]
+                results.sort(key=lambda r: int(r.get("id") or 0))
+                results = results[:limit]
+            else:
+                # Keyset: remaining candidates with id > after_id, then full-row page.
+                # Include labeled provider/model rows so invalid/zero embeddings with
+                # matching labels are not skipped by missing_clause alone.
+                after = int(after_id)
+                id_where = f"{missing_clause} AND id > {after}"
+                labeled_where = (
+                    f"provider = '{p}' AND model = '{m}' AND id > {after}"
+                )
+                try:
+                    id_rows = (
+                        self._chunks_table.search()
+                        .where(id_where)
+                        .select(["id", "provider", "model", "embedding"])
+                        .to_list()
+                    )
+                    try:
+                        labeled_rows = (
+                            self._chunks_table.search()
+                            .where(labeled_where)
+                            .select(["id", "provider", "model", "embedding"])
+                            .to_list()
+                        )
+                        id_rows.extend(labeled_rows)
+                    except Exception:
+                        labeled_rows = (
+                            self._chunks_table.search()
+                            .where(labeled_where)
+                            .to_list()
+                        )
+                        id_rows.extend(labeled_rows)
+                except Exception:
+                    # Older LanceDB may not support select(); fall back to full rows.
+                    id_rows = (
+                        self._chunks_table.search().where(id_where).to_list()
+                    )
+                    try:
+                        id_rows.extend(
+                            self._chunks_table.search()
+                            .where(labeled_where)
+                            .to_list()
+                        )
+                    except Exception:
+                        pass
+
+                id_rows = self._deduplicate_prefer_embedded(
+                    id_rows, provider, model
+                )
+                page_ids: list[int] = []
+                for row in sorted(id_rows, key=lambda r: int(r.get("id") or 0)):
+                    row_id = int(row.get("id") or 0)
+                    if row_id <= after:
+                        continue
+                    if not self._chunk_needs_embedding(row, provider, model):
+                        continue
+                    page_ids.append(row_id)
+                    if len(page_ids) >= limit:
+                        break
+
+                if not page_ids:
+                    return []
+
+                ids_str = ", ".join(str(i) for i in page_ids)
+                results = (
+                    self._chunks_table.search()
+                    .where(f"id IN ({ids_str})")
+                    .to_list()
+                )
+                results = self._deduplicate_prefer_embedded(
+                    results, provider, model
+                )
+                results = [
+                    row
+                    for row in results
+                    if self._chunk_needs_embedding(row, provider, model)
+                ]
+                results.sort(key=lambda r: int(r.get("id") or 0))
+
+            file_ids = [
+                int(r["file_id"])
+                for r in results
+                if r.get("file_id") is not None
+            ]
+            file_paths = (
+                self._fetch_file_paths_by_ids(file_ids) if file_ids else {}
+            )
+
+            formatted: list[dict[str, Any]] = []
+            for chunk in results:
+                chunk_id = int(chunk["id"])
+                file_id = int(chunk.get("file_id") or 0)
+                formatted.append(
+                    {
+                        "id": chunk_id,
+                        "file_id": file_id,
+                        "chunk_type": chunk.get("chunk_type") or "",
+                        "symbol": chunk.get("name") or "",
+                        "code": chunk.get("content") or "",
+                        "start_line": int(chunk.get("start_line") or 0),
+                        "end_line": int(chunk.get("end_line") or 0),
+                        "language": chunk.get("language") or "",
+                        "file_path": file_paths.get(file_id, ""),
+                    }
+                )
+
+            logger.debug(
+                f"LanceDB: {len(formatted)} chunks without embeddings "
+                f"(provider={provider}, model={model}, limit={limit}, after_id={after_id})"
+            )
+            return formatted
+        except Exception as e:
+            # Empty means "done" for streaming callers — never soft-fail to [].
+            logger.error(f"Failed to get chunks without embeddings (paginated): {e}")
+            raise
+
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
         """Get all chunks with their metadata including file paths (provider-agnostic)."""
         return self._execute_in_db_thread_sync("get_all_chunks_with_metadata")

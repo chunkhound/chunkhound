@@ -3680,6 +3680,106 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Delete all embeddings for a specific chunk - delegate to embedding repository."""
         self._embedding_repository.delete_embeddings_by_chunk_id(chunk_id)
 
+    def get_chunks_without_embeddings_paginated(
+        self,
+        provider: str,
+        model: str,
+        *,
+        limit: int = 1000,
+        after_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return chunks missing embeddings for provider/model (paginated by id)."""
+        return cast(
+            list[dict[str, Any]],
+            self._execute_in_db_thread_sync(
+                "get_chunks_without_embeddings_paginated",
+                provider,
+                model,
+                limit,
+                after_id,
+            ),
+        )
+
+    def _executor_get_chunks_without_embeddings_paginated(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        provider: str,
+        model: str,
+        limit: int,
+        after_id: int | None,
+    ) -> list[dict[str, Any]]:
+        """Executor: paginated chunks without embeddings for provider/model."""
+        if limit <= 0:
+            return []
+
+        try:
+            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+
+            select_cols = """
+                c.id, c.file_id, c.chunk_type, c.symbol, c.code,
+                c.start_line, c.end_line, c.language, f.path AS file_path
+            """
+            where_parts: list[str] = []
+            params: list[Any] = []
+
+            if after_id is not None:
+                where_parts.append("c.id > ?")
+                params.append(after_id)
+
+            if embedding_tables:
+                not_exists_clauses: list[str] = []
+                for table_name in embedding_tables:
+                    not_exists_clauses.append(
+                        f"""
+                        NOT EXISTS (
+                            SELECT 1 FROM {table_name} e
+                            WHERE e.chunk_id = c.id
+                              AND e.provider = ?
+                              AND e.model = ?
+                        )
+                        """
+                    )
+                where_parts.append("(" + " AND ".join(not_exists_clauses) + ")")
+                params.extend([provider, model] * len(embedding_tables))
+
+            where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+            query = f"""
+                SELECT {select_cols}
+                FROM chunks c
+                JOIN files f ON c.file_id = f.id
+                {where_sql}
+                ORDER BY c.id
+                LIMIT ?
+            """
+            params.append(limit)
+
+            rows = conn.execute(query, params).fetchall()
+            chunks: list[dict[str, Any]] = []
+            for row in rows:
+                chunks.append(
+                    {
+                        "id": int(row[0]),
+                        "file_id": int(row[1]),
+                        "chunk_type": row[2] or "",
+                        "symbol": row[3] or "",
+                        "code": row[4] or "",
+                        "start_line": int(row[5] or 0),
+                        "end_line": int(row[6] or 0),
+                        "language": row[7] or "",
+                        "file_path": row[8] or "",
+                    }
+                )
+            logger.debug(
+                f"DuckDB: {len(chunks)} chunks without embeddings "
+                f"(provider={provider}, model={model}, limit={limit}, after_id={after_id})"
+            )
+            return chunks
+        except Exception as e:
+            # Empty means "done" for streaming callers — never soft-fail to [].
+            logger.error(f"Failed to get chunks without embeddings (paginated): {e}")
+            raise
+
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
         """Get all chunks with their metadata including file paths - delegate to chunk repository."""
         return cast(
