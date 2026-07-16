@@ -469,6 +469,16 @@ class Config(BaseModel):
             if self.embedding and not self.embedding.is_provider_configured():
                 errors.append("Embedding provider not properly configured")
 
+        if command == "mcp" and self.mcp.transport == "http":
+            loopback = {"127.0.0.1", "localhost", "::1"}
+            if self.mcp.host not in loopback and not self.mcp.auth_token:
+                errors.append(
+                    "mcp.host is non-loopback but no auth_token is set. Binding "
+                    "the HTTP transport to a non-localhost address without "
+                    "--auth-token is refused. Set --auth-token, or omit --host "
+                    "to bind to 127.0.0.1 (default)."
+                )
+
         if self.database.read_only:
             # _quickresearch always uses a :memory: DB (see quickresearch.py),
             # so a project-level read_only setting inherited via --config is

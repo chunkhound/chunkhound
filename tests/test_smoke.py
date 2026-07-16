@@ -14,14 +14,17 @@ import asyncio
 import importlib
 import os
 import pkgutil
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 # Import Windows-safe subprocess utilities
-from tests.utils import SubprocessJsonRpcClient
+from tests.utils import HttpMcpClient, SubprocessJsonRpcClient
 from tests.utils.windows_compat import get_fs_event_timeout, windows_safe_tempdir
 from tests.utils.windows_subprocess import (
     create_subprocess_exec_safe,
@@ -31,6 +34,36 @@ from tests.utils.windows_subprocess import (
 # Add parent directory to path to import chunkhound
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import chunkhound
+
+
+def _get_free_port() -> int:
+    """Bind an ephemeral loopback port and return it for a spawned server.
+
+    Simpler than the daemon's hash-based-port-with-bindability-check scheme:
+    that scheme exists so the daemon can be rediscovered at a stable address
+    across restarts, which tests don't need.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+async def _wait_for_http_ready(base_url: str, timeout: float) -> None:
+    """Poll ``/health`` until the HTTP MCP server accepts connections."""
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    async with httpx.AsyncClient() as probe:
+        while time.monotonic() < deadline:
+            try:
+                resp = await probe.get(f"{base_url}/health", timeout=2.0)
+                if resp.status_code == 200:
+                    return
+            except httpx.TransportError as exc:
+                last_error = exc
+            await asyncio.sleep(0.3)
+    raise AssertionError(
+        f"HTTP MCP server did not become ready at {base_url}: {last_error}"
+    )
 
 
 class TestModuleImports:
@@ -384,6 +417,253 @@ sys.exit(asyncio.run(test()))
                 except asyncio.CancelledError:
                     pass
 
+    @staticmethod
+    async def _spawn_http_mcp_server(
+        temp_path: Path, port: int, extra_args: list[str] | None = None
+    ) -> asyncio.subprocess.Process:
+        """Start `chunkhound mcp --transport http` against a minimal project."""
+        import json as _json
+
+        test_file = temp_path / "test.py"
+        test_file.write_text("def hello(): return 'world'")
+
+        config_path = temp_path / ".chunkhound.json"
+        db_path = temp_path / ".chunkhound" / "test.db"
+        db_path.parent.mkdir(exist_ok=True)
+        config = {
+            "database": {"path": str(db_path), "provider": "duckdb"},
+            "indexing": {"include": ["*.py"]},
+        }
+        config_path.write_text(_json.dumps(config))
+
+        mcp_env = get_safe_subprocess_env(os.environ)
+        mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
+
+        args = [
+            "uv",
+            "run",
+            "chunkhound",
+            "mcp",
+            "--transport",
+            "http",
+            "--port",
+            str(port),
+            *(extra_args or []),
+            str(temp_path),
+        ]
+
+        return await create_subprocess_exec_safe(
+            *args,
+            cwd=str(temp_path),
+            env=mcp_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    @staticmethod
+    async def _drain(stream: asyncio.StreamReader) -> None:
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+
+    async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+
+    @pytest.mark.asyncio
+    async def test_mcp_http_protocol_handshake(self):
+        """MCP HTTP server completes the full protocol handshake + tool call."""
+        import json
+
+        with windows_safe_tempdir() as temp_path:
+            port = _get_free_port()
+            proc = await self._spawn_http_mcp_server(temp_path, port)
+            drain_tasks = [
+                asyncio.create_task(self._drain(proc.stdout)),
+                asyncio.create_task(self._drain(proc.stderr)),
+            ]
+
+            base_url = f"http://127.0.0.1:{port}"
+            client = HttpMcpClient(base_url)
+            try:
+                ready_timeout = max(30.0, get_fs_event_timeout())
+                await _wait_for_http_ready(base_url, ready_timeout)
+
+                init_result = await client.initialize(timeout=15.0)
+                assert "serverInfo" in init_result, (
+                    f"No serverInfo in result: {init_result}"
+                )
+                assert init_result["serverInfo"]["name"] == "ChunkHound Code Search"
+
+                await client.send_notification("notifications/initialized")
+
+                tools_result = await client.send_request("tools/list", timeout=10.0)
+                tool_names = [t["name"] for t in tools_result.get("tools", [])]
+                assert "search" in tool_names, f"search not in tools: {tool_names}"
+                assert "daemon_status" in tool_names, (
+                    f"daemon_status not in tools: {tool_names}"
+                )
+
+                status_result = await client.send_request(
+                    "tools/call",
+                    {"name": "daemon_status", "arguments": {}},
+                    timeout=10.0,
+                )
+                status_content = status_result.get("content", [])
+                assert isinstance(status_content, list) and len(status_content) > 0
+
+                status_payload = json.loads(status_content[0]["text"])
+                assert status_payload["status"] in {
+                    "initializing",
+                    "ready",
+                    "degraded",
+                }
+                assert "scan_progress" in status_payload
+            finally:
+                await client.close()
+                await self._terminate(proc)
+                for task in drain_tasks:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+    @pytest.mark.asyncio
+    async def test_mcp_http_health_endpoint(self):
+        """A bare GET /health with no prior handshake returns a valid status."""
+        with windows_safe_tempdir() as temp_path:
+            port = _get_free_port()
+            proc = await self._spawn_http_mcp_server(temp_path, port)
+            drain_tasks = [
+                asyncio.create_task(self._drain(proc.stdout)),
+                asyncio.create_task(self._drain(proc.stderr)),
+            ]
+
+            base_url = f"http://127.0.0.1:{port}"
+            try:
+                ready_timeout = max(30.0, get_fs_event_timeout())
+                await _wait_for_http_ready(base_url, ready_timeout)
+
+                async with httpx.AsyncClient() as raw_client:
+                    resp = await raw_client.get(f"{base_url}/health", timeout=5.0)
+                assert resp.status_code == 200
+                payload = resp.json()
+                assert "status" in payload
+                assert "server_version" in payload
+                assert "query_ready" in payload
+                assert "scan_progress" in payload
+            finally:
+                await self._terminate(proc)
+                for task in drain_tasks:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+    @pytest.mark.asyncio
+    async def test_mcp_http_bearer_auth(self):
+        """Bearer auth gates /mcp but never /health, even when configured."""
+        with windows_safe_tempdir() as temp_path:
+            port = _get_free_port()
+            token = "secret123"
+            proc = await self._spawn_http_mcp_server(
+                temp_path, port, extra_args=["--auth-token", token]
+            )
+            drain_tasks = [
+                asyncio.create_task(self._drain(proc.stdout)),
+                asyncio.create_task(self._drain(proc.stderr)),
+            ]
+
+            base_url = f"http://127.0.0.1:{port}"
+            init_payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1.0"},
+                },
+            }
+            mcp_headers = {
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            }
+
+            client = None
+            try:
+                ready_timeout = max(30.0, get_fs_event_timeout())
+                await _wait_for_http_ready(base_url, ready_timeout)
+
+                async with httpx.AsyncClient() as raw_client:
+                    # No auth header -> 401
+                    resp = await raw_client.post(
+                        f"{base_url}/mcp",
+                        json=init_payload,
+                        headers=mcp_headers,
+                        timeout=5.0,
+                    )
+                    assert resp.status_code == 401
+
+                    # Wrong token -> 401
+                    resp = await raw_client.post(
+                        f"{base_url}/mcp",
+                        json=init_payload,
+                        headers={**mcp_headers, "Authorization": "Bearer wrong"},
+                        timeout=5.0,
+                    )
+                    assert resp.status_code == 401
+
+                    # /health stays reachable with no auth header at all.
+                    resp = await raw_client.get(f"{base_url}/health", timeout=5.0)
+                    assert resp.status_code == 200
+
+                # Correct token -> full handshake succeeds.
+                client = HttpMcpClient(base_url, auth_token=token)
+                init_result = await client.initialize(timeout=15.0)
+                assert init_result["serverInfo"]["name"] == "ChunkHound Code Search"
+            finally:
+                if client is not None:
+                    await client.close()
+                await self._terminate(proc)
+                for task in drain_tasks:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+    @pytest.mark.asyncio
+    async def test_mcp_http_no_token_nonlocal_host_rejected(self):
+        """Non-loopback --host with no --auth-token is refused at startup."""
+        with windows_safe_tempdir() as temp_path:
+            port = _get_free_port()
+            proc = await self._spawn_http_mcp_server(
+                temp_path, port, extra_args=["--host", "0.0.0.0"]
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                pytest.fail("Server did not exit promptly on rejected configuration")
+
+            assert proc.returncode != 0, (
+                "Server should refuse to start on a non-loopback host without "
+                "an auth token"
+            )
+            combined = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+            assert "auth_token" in combined or "non-loopback" in combined, combined
 
     @pytest.mark.asyncio
     async def test_mcp_websearch_stdio_mocked(self):

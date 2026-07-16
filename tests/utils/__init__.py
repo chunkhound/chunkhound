@@ -1,5 +1,6 @@
 """Test utilities for ChunkHound."""
 
+from .http_mcp_client import HttpMcpClient
 from .subprocess_jsonrpc import (
     JsonRpcResponseError,
     JsonRpcTimeoutError,
@@ -17,4 +18,5 @@ __all__ = [
     "SubprocessCrashError",
     "JsonRpcTimeoutError",
     "JsonRpcResponseError",
+    "HttpMcpClient",
 ]

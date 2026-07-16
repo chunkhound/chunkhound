@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -41,7 +42,7 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
     """
     # Handle --show-setup flag (display instructions and exit)
     if hasattr(args, "show_setup") and args.show_setup:
-        _show_mcp_setup_instructions(args, force_display=True)
+        _show_mcp_setup_instructions(args, config, force_display=True)
         sys.exit(0)
 
     # Set MCP mode environment early
@@ -54,6 +55,15 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
         import numpy  # noqa: F401
     except ImportError:
         pass
+
+    if config.mcp.transport == "http":
+        # HTTP already multiplexes many concurrent client connections over one
+        # port natively, so — unlike stdio — it needs no daemon/ClientProxy
+        # IPC bridge to serve multiple clients from one backend process.
+        from chunkhound.mcp_server.http_server import main as http_main
+
+        await http_main(args=args)
+        return
 
     # Daemon mode: route through ClientProxy unless explicitly disabled.
     # --stdio predates the daemon and implies single-process direct mode for
@@ -90,12 +100,13 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
 
 
 def _show_mcp_setup_instructions(
-    args: argparse.Namespace, force_display: bool = False
+    args: argparse.Namespace, config=None, force_display: bool = False
 ) -> None:
     """Show comprehensive MCP setup instructions for all MCP clients.
 
     Args:
         args: Command arguments containing project path
+        config: Pre-validated configuration instance (for transport-specific hints)
         force_display: If True, bypass all checks and show instructions
     """
     import shutil
@@ -105,11 +116,41 @@ def _show_mcp_setup_instructions(
     # Detect installation method
     is_tool_installed = shutil.which("chunkhound") is not None
 
+    is_http_transport = (
+        config is not None and getattr(config.mcp, "transport", "stdio") == "http"
+    )
+
     # Show setup instructions
     _safe_print("\n" + "=" * 70)
     _safe_print(" ChunkHound MCP Server - Setup Instructions")
     _safe_print("=" * 70)
-    _safe_print("\nStdio Transport Mode")
+    _safe_print(
+        "\nHTTP Transport Mode" if is_http_transport else "\nStdio Transport Mode"
+    )
+
+    if is_http_transport:
+        host = config.mcp.host
+        port = config.mcp.port
+        _safe_print("\n" + "-" * 70)
+        _safe_print(" HTTP Transport Client Configuration")
+        _safe_print("-" * 70)
+        http_client_config: dict[str, Any] = {
+            "type": "http",
+            "url": f"http://{host}:{port}/mcp",
+        }
+        if config.mcp.auth_token:
+            http_client_config["headers"] = {
+                "Authorization": "Bearer <TOKEN>",
+            }
+        _safe_print("\n" + json.dumps(http_client_config, indent=2))
+        _safe_print(
+            "\n• Generate a token with: "
+            'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+        )
+        _safe_print(
+            "• Set the same value via --auth-token on the server and in the "
+            "client's Authorization header."
+        )
 
     _safe_print("\n" + "-" * 70)
     _safe_print(" Configuration for Different MCP Clients")
