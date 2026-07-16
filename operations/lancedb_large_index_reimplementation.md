@@ -2,7 +2,7 @@
 
 **Branch:** `lance-take2` (based on upstream `chunkhound/chunkhound` main)  
 **Reference:** fork `main` worktree at `../chunkhound-fork-lancedb-ref`  
-**Status:** Phase 3 in progress (Phases 1–2 complete)  
+**Status:** Phase 4 in progress (Phases 1–3 complete)  
 **Date:** 2026-07-17
 
 ## Goal
@@ -153,12 +153,21 @@ DuckDB) for cheaper filters and permanent-failure skipping. Phase 1 must work
 - Regex pagination: disjoint pages, consistent total, ordered ids
 - Prior Phase 1–2 tests still green
 
-### Phase 4 — Coordinator / realtime / config
+### Phase 4 — Coordinator / realtime / config (current)
 
-- Indexing coordinator glue (provider-aware batch sizing / optimize)
-- Watchman/realtime: store first, then missing-embeddings path
-- Config knobs + docs for large LanceDB indexes
-- Optional debug scripts from fork
+**In scope**
+
+- Fragment-aware DB insert batch sizing when `get_fragment_count` exists
+- Post-batch-store `should_optimize` / `optimize_tables` during directory indexing
+- Default `indexing.exclude` into `generate_missing_embeddings` when patterns omitted (realtime + CLI)
+- CLI/env already had fragment threshold env; add CLI flag + operator docs
+
+**Acceptance**
+
+- High fragment counts reduce coordinator insert batch size
+- Store batches can trigger Lance optimize without re-entering executor deadlock class
+- Realtime embed path inherits config excludes
+- `operations/lancedb_large_indexes.md` documents knobs
 
 ### Phase 5 — Hardening
 
@@ -214,3 +223,5 @@ DuckDB) for cheaper filters and permanent-failure skipping. Phase 1 must work
 - **2026-07-17:** Phase 3 scaling: targeted `get_existing_embeddings`, post-write
   fragment optimize, lighter regex pagination; tests in
   `tests/integration/test_lancedb_large_index_scaling.py`.
+- **2026-07-17:** Phase 4 coordinator/realtime/config: fragment batch caps,
+  post-store optimize, exclude defaults, large-index ops doc.

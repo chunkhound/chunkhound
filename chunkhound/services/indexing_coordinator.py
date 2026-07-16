@@ -418,57 +418,126 @@ class IndexingCoordinator(BaseService):
     def _determine_db_batch_size(self, pending_inserts: list[Chunk]) -> int:
         """Compute an insert batch size using env/config or dynamic memory heuristics.
 
-        Priority:
+        Priority for the base size:
         - Env CHUNKHOUND_DB_BATCH_SIZE when set (>0)
         - Config indexing.db_batch_size when set (>0)
         - Dynamic: use a fraction of available memory with sane limits.
+
+        Always applies LanceDB fragment pressure caps when ``get_fragment_count``
+        exists, including after env/config base sizes.
         """
+        base_size: int | None = None
+
         # 1) Environment override
         try:
             env_bs = int(os.environ.get("CHUNKHOUND_DB_BATCH_SIZE", "0") or "0")
             if env_bs > 0:
-                return max(1, min(env_bs, 20000))
+                base_size = max(1, min(env_bs, 20000))
         except Exception:
             pass
 
         # 2) Config override
-        try:
-            if self.config and getattr(self.config, "indexing", None):
-                cfg_bs = int(getattr(self.config.indexing, "db_batch_size", 0) or 0)
-                if cfg_bs > 0:
-                    return max(1, min(cfg_bs, 20000))
-        except Exception:
-            pass
+        if base_size is None:
+            try:
+                if self.config and getattr(self.config, "indexing", None):
+                    cfg_bs = int(getattr(self.config.indexing, "db_batch_size", 0) or 0)
+                    if cfg_bs > 0:
+                        base_size = max(1, min(cfg_bs, 20000))
+            except Exception:
+                pass
 
         # 3) Dynamic heuristic
-        # - Budget 10% of available RAM (min 64MB, max 512MB)
-        # - Estimate average bytes per chunk from a sample (code length dominates)
-        # - Constrain final batch size to [1000, 20000]
-        avail = _mem_available_bytes()
-        if avail <= 0:
-            # Fallback when unknown: adopt a conservative default
-            avail = 512 * 1024 * 1024  # 512MB
+        if base_size is None:
+            # - Budget 10% of available RAM (min 64MB, max 512MB)
+            # - Estimate average bytes per chunk from a sample
+            # - Constrain final batch size to [1000, 20000]
+            avail = _mem_available_bytes()
+            if avail <= 0:
+                avail = 512 * 1024 * 1024  # 512MB
 
-        # Budget: 10% of available, clamped
-        budget = int(avail * 0.10)
-        budget = max(64 * 1024 * 1024, min(budget, 512 * 1024 * 1024))  # 64MB..512MB
+            budget = int(avail * 0.10)
+            budget = max(64 * 1024 * 1024, min(budget, 512 * 1024 * 1024))
 
-        # Estimate bytes per chunk from a small sample (code length dominates payload)
-        sample = pending_inserts[: min(200, len(pending_inserts))]
-        if not sample:
-            return 5000
-        total_bytes = 0
-        for ch in sample:
-            code = getattr(ch, "code", "") or ""
-            total_bytes += (
-                len(code.encode("utf-8", errors="ignore")) + 256
-            )  # overhead estimate
-        avg = max(512, total_bytes // len(sample))
+            sample = pending_inserts[: min(200, len(pending_inserts))]
+            if not sample:
+                base_size = 5000
+            else:
+                total_bytes = 0
+                for ch in sample:
+                    code = getattr(ch, "code", "") or ""
+                    total_bytes += (
+                        len(code.encode("utf-8", errors="ignore")) + 256
+                    )
+                avg = max(512, total_bytes // len(sample))
+                est = max(1, budget // avg)
+                base_size = max(1000, min(int(est), 20000))
 
-        # Compute batch size and clamp
-        est = max(1, budget // avg)
-        est = max(1000, min(int(est), 20000))
-        return est
+        return self._apply_fragment_batch_cap(base_size)
+
+    async def _insert_chunks_in_sized_batches(
+        self, chunks: list[Chunk]
+    ) -> list[int]:
+        """Insert chunks using fragment-aware batch sizes."""
+        if not chunks:
+            return []
+        batch_size = self._determine_db_batch_size(chunks)
+        all_ids: list[int] = []
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i : i + batch_size]
+            ids = await self._db.insert_chunks_batch_async(batch)
+            all_ids.extend(ids)
+        return all_ids
+
+    def _apply_fragment_batch_cap(self, base_size: int) -> int:
+        """Reduce insert batch size when LanceDB fragment pressure is high."""
+        get_fragments = getattr(self._db, "get_fragment_count", None)
+        if not callable(get_fragments):
+            return base_size
+        try:
+            counts = get_fragments()
+            chunks_fragments = int(counts.get("chunks", 0) or 0)
+        except Exception as e:
+            logger.debug(f"Could not check fragmentation for batch sizing: {e}")
+            return base_size
+
+        # Progressive shrink: keep inserts smaller when fragments pile up.
+        if chunks_fragments >= 500:
+            final_size = max(500, base_size // 4)
+        elif chunks_fragments >= 200:
+            final_size = max(500, base_size // 2)
+        elif chunks_fragments >= 100:
+            final_size = max(750, (base_size * 3) // 4)
+        else:
+            return base_size
+
+        if final_size < base_size:
+            logger.debug(
+                f"Reduced DB batch size from {base_size} to {final_size} "
+                f"due to high fragmentation ({chunks_fragments} chunk fragments)"
+            )
+        return final_size
+
+    def _maybe_optimize_after_store_batch(self) -> None:
+        """Run provider optimize when fragment pressure warrants it (LanceDB).
+
+        Only providers that expose ``get_fragment_count`` (LanceDB) participate.
+        DuckDB uses separate compaction boundaries and must not run
+        ``measure_fragmentation`` on every store batch.
+        """
+        if not callable(getattr(self._db, "get_fragment_count", None)):
+            return
+        should_opt = getattr(self._db, "should_optimize", None)
+        optimize = getattr(self._db, "optimize_tables", None)
+        if not callable(should_opt) or not callable(optimize):
+            return
+        try:
+            if should_opt(operation="post-batch-store"):
+                logger.info(
+                    "Running post-batch-store optimization to reduce fragmentation"
+                )
+                optimize()
+        except Exception as e:
+            logger.debug(f"Post-batch-store optimize skipped: {e}")
 
     async def _get_file_lock(self, file_path: Path) -> asyncio.Lock:
         """Get or create a lock for the given file path.
@@ -1133,15 +1202,11 @@ class IndexingCoordinator(BaseService):
                     # Store new/modified chunks (pass models directly)
                     chunks_to_store = chunk_diff.added + chunk_diff.modified
                     chunks_to_store = self._validate_chunk_sizes(chunks_to_store)
-                    ids = (
-                        await self._db.insert_chunks_batch_async(chunks_to_store)
-                        if chunks_to_store
-                        else []
-                    )
+                    ids = await self._insert_chunks_in_sized_batches(chunks_to_store)
                 else:
                     # New file or existing file with no chunks — store all
                     new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
-                    ids = await self._db.insert_chunks_batch_async(new_chunk_models)
+                    ids = await self._insert_chunks_in_sized_batches(new_chunk_models)
                 logger.debug(f"Batch inserted {len(ids)} chunks for file_id {file_id}")
                 stats["chunk_ids_needing_embeddings"].extend(ids)
                 stats["total_chunks"] += len(ids)
@@ -1501,6 +1566,10 @@ class IndexingCoordinator(BaseService):
                 agg_errors.extend(stats_part.get("errors", []))
                 agg_skipped_paths.extend(stats_part.get("skipped_paths", []))
 
+                # Provider-aware fragment compaction between store batches.
+                # Skipped when provider lacks get_fragment_count (e.g. DuckDB).
+                self._maybe_optimize_after_store_batch()
+
             # Parse files (streaming progress as batches complete and store concurrently)
             # Pass files_to_process directly - preserves hash for each file
             # Results flow to storage via on_batch=_on_batch_store; return value unused.
@@ -1831,7 +1900,9 @@ class IndexingCoordinator(BaseService):
         """Generate embeddings for chunks that don't have them.
 
         Args:
-            exclude_patterns: Optional file patterns to exclude from embedding generation
+            exclude_patterns: Optional file patterns to exclude from embedding
+                generation. When omitted, falls back to ``indexing.exclude``
+                from config (realtime and CLI paths share this).
 
         Returns:
             Dictionary with generation results
@@ -1857,6 +1928,17 @@ class IndexingCoordinator(BaseService):
             if self.config and self.config.indexing:
                 db_batch_size = self.config.indexing.db_batch_size
 
+            patterns = exclude_patterns
+            if patterns is None and self.config and getattr(self.config, "indexing", None):
+                indexing_cfg = self.config.indexing
+                get_effective = getattr(
+                    indexing_cfg, "get_effective_config_excludes", None
+                )
+                if callable(get_effective):
+                    patterns = list(get_effective())
+                else:
+                    patterns = list(getattr(indexing_cfg, "exclude", None) or [])
+
             embedding_service = EmbeddingService(
                 database_provider=self._db,
                 embedding_provider=self._embedding_provider,
@@ -1868,7 +1950,7 @@ class IndexingCoordinator(BaseService):
             )
 
             result = await embedding_service.generate_missing_embeddings(
-                exclude_patterns=exclude_patterns
+                exclude_patterns=patterns
             )
             return result
 

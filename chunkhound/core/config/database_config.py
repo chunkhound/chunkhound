@@ -177,6 +177,13 @@ class DatabaseConfig(BaseModel):
                  "(default: 30%%)",
         )
 
+        parser.add_argument(
+            "--lancedb-optimize-fragment-threshold",
+            type=int,
+            help="LanceDB: min fragment count before optimize (0=always, "
+            "default 100; lower is more aggressive for large indexes)",
+        )
+
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load database config from environment variables."""
@@ -193,7 +200,10 @@ class DatabaseConfig(BaseModel):
         if threshold := os.getenv(
             "CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD"
         ):
-            config["lancedb_optimize_fragment_threshold"] = int(threshold)
+            try:
+                config["lancedb_optimize_fragment_threshold"] = int(threshold)
+            except ValueError:
+                pass
         # Disk usage limit from environment
         if max_disk_gb := os.getenv("CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB"):
             try:
@@ -227,6 +237,13 @@ class DatabaseConfig(BaseModel):
             overrides["read_only"] = True
         if hasattr(args, "fragmentation_threshold_pct") and args.fragmentation_threshold_pct is not None:
             overrides["fragmentation_threshold_pct"] = float(args.fragmentation_threshold_pct)
+        if (
+            hasattr(args, "lancedb_optimize_fragment_threshold")
+            and args.lancedb_optimize_fragment_threshold is not None
+        ):
+            overrides["lancedb_optimize_fragment_threshold"] = int(
+                args.lancedb_optimize_fragment_threshold
+            )
         return overrides
 
     def __repr__(self) -> str:
