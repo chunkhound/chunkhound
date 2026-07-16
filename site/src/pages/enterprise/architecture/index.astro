@@ -1,0 +1,269 @@
+---
+import ArchitectureComparison from "../../../components/ArchitectureComparison.astro";
+import Community from "../../../components/Community.astro";
+import CurrentArchitectureDiagram from "../../../components/EnterpriseArchitectureDiagram.astro";
+import Nav from "../../../components/Nav.astro";
+import Base from "../../../layouts/Base.astro";
+
+const title = "Enterprise architecture: local-first or mixed? — ChunkHound";
+const description =
+  "An objective comparison of investing in ChunkHound's current local-first architecture versus adding a mixed local-first and server architecture.";
+---
+
+<Base
+  title={title}
+  description={description}
+  type="article"
+>
+  <Nav currentPath={Astro.url.pathname} />
+
+  <main>
+    <header class="hero">
+      <div class="container hero-inner">
+        <p class="eyebrow">Enterprise architecture</p>
+        <h1>Local-first today.<br /><span>Which direction next?</span></h1>
+        <p class="hero-lead">
+          ChunkHound currently indexes and searches code on the user's machine. The
+          enterprise decision is whether to focus the same effort on that workflow,
+          or also build and operate a server architecture for clients that cannot
+          run locally.
+        </p>
+        <div class="hero-actions" aria-label="Page links">
+          <a class="button primary" href="#paths">Compare the paths</a>
+          <a class="button secondary" href="#decision">Decision guide</a>
+        </div>
+      </div>
+    </header>
+
+    <section class="status-section" aria-labelledby="status-title">
+      <div class="container">
+        <div class="status-card">
+          <p class="status-label">Current versus proposed</p>
+          <div>
+            <h2 id="status-title">The server path is not shipped today</h2>
+            <p>
+              Shipped: local indexing, local regex and semantic search, local stdio
+              MCP, and a per-project daemon that owns the local database. The local-first
+              enterprise path adds centralized in-org storage plus automatic local DB
+              pulls and updates. The alternative server path adds a central service
+              boundary for query execution, upgrades, and authorization.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page-section" aria-labelledby="current-title">
+      <div class="container">
+        <p class="eyebrow">Current architecture</p>
+        <h2 id="current-title">The product is local-first</h2>
+        <p class="section-lead">
+          A local process owns the project database and keeps it current. External
+          embedding, reranking, or LLM providers are optional dependencies—not a
+          ChunkHound server. A server or CI job can also copy a pre-indexed DB, run
+          the local process against it, expose it through an external HTTP MCP proxy,
+          and then stop; that remains local-first at the workload boundary.
+        </p>
+        <CurrentArchitectureDiagram />
+      </div>
+    </section>
+
+    <section id="paths" class="page-section alt-section" aria-labelledby="paths-title">
+      <div class="container">
+        <p class="eyebrow">Two investment paths</p>
+        <h2 id="paths-title">Extend the current product—or build a second one</h2>
+        <p class="section-lead">
+          Both paths can serve developers. The choice is whether to polish one local
+          operating mode, or split product and engineering effort across local and
+          server operating modes.
+        </p>
+
+        <div class="path-grid">
+          <article class="path-card preferred">
+            <p class="card-kicker">Path A</p>
+            <h3>Focus on local-first</h3>
+            <p>
+              Keep query and indexing local, while adding a thin automatic management
+              layer that pulls signed DB updates from centralized in-org storage.
+              Make DB generations self-contained so non-developers can use them without
+              a code checkout. Continue polishing indexing, providers, worktrees, and
+              endpoint support.
+            </p>
+            <h4>Advantages</h4>
+            <ul>
+              <li>Focuses effort on one operating mode and a highly polished developer workflow.</li>
+              <li>Scales developer query load across their own machines.</li>
+              <li>Keeps permissions and authentication 1:1 with Git repository access.</li>
+              <li>Self-contained DB generations work without a code checkout.</li>
+              <li>A desktop-style manager periodically checks object storage and upgrades DBs on the user's behalf.</li>
+              <li>Server-only and CI workloads can copy a DB, query locally, proxy MCP, and exit.</li>
+              <li>Users can merge the repositories they care about for a personal point of view.</li>
+            </ul>
+            <h4>Costs</h4>
+            <ul>
+              <li>Upgrade procedures and endpoint monitoring are more complex.</li>
+              <li>Requires clients that can run local tooling and retain local DBs.</li>
+              <li>Does not provide central request-time enforcement when that is a requirement.</li>
+            </ul>
+          </article>
+
+          <article class="path-card">
+            <p class="card-kicker">Path B</p>
+            <h3>Add a mixed local-first/server architecture</h3>
+            <p>
+              Add a server operating mode beside local-first: central indexing or
+              ingestion, remote query/MCP access, server-side authorization, and the
+              service operations needed to run it reliably.
+            </p>
+            <h4>Advantages</h4>
+            <ul>
+              <li>Centralizes upgrades, rollouts, and monitoring.</li>
+              <li>Centralizes policy, audit, and request-time denial.</li>
+              <li>Still needs an ACL-aware vector backend; post-filtering semantic results is not a reliable authorization boundary.</li>
+            </ul>
+            <h4>Costs</h4>
+            <ul>
+              <li>Splits the product boundary and engineering effort across two operating modes.</li>
+              <li>Each mode receives less polish, testing, and operational attention.</li>
+              <li>Adds service availability, capacity, sync, and central data-boundary concerns.</li>
+              <li>Cross-repository search needs all repository permutations or a dynamic cross-DB join layer.</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="page-section" aria-labelledby="comparison-title">
+      <div class="container">
+        <p class="eyebrow">Trade-offs</p>
+        <h2 id="comparison-title">The trade-off is polish versus centralized control</h2>
+        <ArchitectureComparison />
+      </div>
+    </section>
+
+    <section class="page-section alt-section" aria-labelledby="index-maintenance-title">
+      <div class="container">
+        <p class="eyebrow">The hidden server cost</p>
+        <h2 id="index-maintenance-title">A live central index is a distributed database problem</h2>
+        <p class="section-lead">
+          A local copy periodically receives a published baseline, then maintains
+          one branch or revision with incremental indexing. A central service must
+          keep every queryable branch fresh to a tighter shared-view target while
+          serving reads. HNSW and IVF indexes can
+          accept some incremental writes, but deletes, retraining, compaction, and
+          rebuilds require a growing/sealed segment strategy and background capacity.
+          Production vector systems use WALs, segments, tombstones, replicas, and
+          shard-level maintenance to manage this lifecycle.
+        </p>
+        <div class="index-maintenance-grid">
+          <article>
+            <h3>Local copy</h3>
+            <p>
+              Periodically publish a self-contained DB baseline to centralized object
+              storage. A thin manager checks for fresh versions, verifies and activates
+              them, then local incremental indexing brings each branch or worktree
+              current. Non-developer usage stays independent of a code checkout; a
+              server or CI job can copy, query, proxy MCP, and exit.
+            </p>
+          </article>
+          <article>
+            <h3>Central live corpus</h3>
+            <p>
+              Ingest all repositories and branches, route queries across shards,
+              merge results, rebuild or compact indexes, replicate data, and preserve
+              freshness during failures. The current single-owner provider contract
+              does not provide these distributed semantics.
+            </p>
+          </article>
+        </div>
+        <aside class="index-scale-note">
+          <strong>Scale asymmetry:</strong> local-first targets at most roughly 10M
+          vectors per client. The current 256-dimensional envelope is about 30–40 GB
+          per client, with further compression still needed. The ~100M-vector figure
+          describes a centralized aggregate across multiple branches—not one local
+          copy. The server must store the branch permutations or execute dynamic
+          cross-DB joins, in addition to index, metadata, replica, backup, and rebuild
+          costs.
+          <span class="source-links">
+            See <a href="https://github.com/facebookresearch/faiss/wiki/Faiss-indexes">FAISS</a>,
+            <a href="https://docs.weaviate.io/weaviate/concepts/vector-index">Weaviate</a>,
+            and <a href="https://qdrant.tech/documentation/concepts/storage/">Qdrant</a>
+            for documented index and segment maintenance behavior.
+          </span>
+        </aside>
+      </div>
+    </section>
+
+    <section id="decision" class="page-section" aria-labelledby="decision-title">
+      <div class="container narrow">
+        <p class="eyebrow">Decision guide</p>
+        <h2 id="decision-title">Choose from validated constraints</h2>
+        <div class="decision-list">
+          <p><strong>Focus on local-first.</strong> Developer workloads are the dominant workload, and hundreds or thousands of developers can scale through their own machines. Supporting roughly twice the load for non-developers is usually a smaller cost than operating a second product mode.</p>
+          <p><strong>Choose the mixed path only for a concrete requirement.</strong> Its centralized upgrades, monitoring, and policy enforcement are valuable when a live centrally operated service is essential—but reliable semantic authorization requires ACL-aware vector filtering, not a simple post-filter.</p>
+          <p><strong>The default conclusion is local-first.</strong> A server path is a new distributed vector-database product: every local database assumption must be reconsidered for branch fanout, index maintenance, consistency, failure, and query routing. Splitting effort across both modes increases complexity and reduces the polish achievable in either one.</p>
+        </div>
+
+        <aside class="validation-callout">
+          <h3>Validate before committing</h3>
+          <ul>
+            <li>Which priority clients cannot run local stdio MCP?</li>
+            <li>Are search-only access and immediate denial actual requirements?</li>
+            <li>How many developers and non-developers need search, and where is the real workload?</li>
+            <li>Are centralized upgrades or permissions worth a second operating mode?</li>
+            <li>Can endpoint management and source-equivalent local data be accepted?</li>
+            <li>Which DB metadata and query features must be self-contained for non-developers?</li>
+          </ul>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <Community />
+</Base>
+
+<style>
+  .hero { padding: var(--space-10) 0; border-bottom: var(--border-w-subtle) solid var(--border-subtle); }
+  .container { max-width: 1120px; margin: 0 auto; padding: 0 var(--space-6); }
+  .narrow { max-width: 880px; }
+  .hero-inner { max-width: 1000px; }
+  .eyebrow, .card-kicker, .status-label { color: var(--text-tertiary); font-size: var(--text-xs); font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
+  .hero .eyebrow { margin-bottom: var(--space-4); color: var(--primary); }
+  h1 { max-width: 900px; color: var(--text-primary); font-size: var(--text-4xl); line-height: var(--lh-4xl); letter-spacing: -.02em; }
+  h1 span { color: var(--primary); }
+  .hero-lead { max-width: 780px; margin-top: var(--space-5); color: var(--text-secondary); font-size: var(--text-lg); line-height: var(--lh-lg); }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-7); }
+  .button { display: inline-flex; min-height: var(--target-lg); padding: 0 var(--space-6); align-items: center; justify-content: center; border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-md); font-size: var(--text-sm); font-weight: 600; text-decoration: none; }
+  .button:hover { text-decoration: none; }
+  .button.primary { border-color: var(--primary); color: var(--on-primary); background: var(--primary); }
+  .button.secondary { color: var(--text-primary); background: var(--bg-surface); }
+  .status-section { padding: var(--space-6) 0 0; }
+  .status-card { display: grid; grid-template-columns: 180px 1fr; gap: var(--space-5); padding: var(--space-5); border-left: var(--border-w-accent) solid var(--primary); border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg) var(--radius-sm); background: var(--bg-surface); }
+  .status-card h2 { margin-top: 0; margin-bottom: var(--space-2); font-size: var(--text-lg); }
+  .status-card p:not(.status-label), .path-card p, .path-card li, .decision-list p, .validation-callout li { color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  .page-section { padding: var(--space-10) 0; scroll-margin-top: var(--target-xl); }
+  .alt-section { border-block: var(--border-w-subtle) solid var(--border-subtle); background: var(--bg-surface); }
+  .eyebrow { margin-bottom: var(--space-3); }
+  h2 { color: var(--text-primary); font-size: var(--text-2xl); line-height: var(--lh-2xl); font-weight: 600; }
+  h3 { color: var(--text-primary); font-size: var(--text-lg); line-height: var(--lh-lg); }
+  h4 { margin-top: var(--space-5); color: var(--text-primary); font-size: var(--text-sm); }
+  .section-lead { max-width: 820px; margin-top: var(--space-4); color: var(--text-secondary); font-size: var(--text-base); line-height: var(--lh-base); }
+  .path-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); margin-top: var(--space-7); }
+  .path-card { padding: var(--space-6); border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-xl); background: var(--bg-page); }
+  .path-card.preferred { border-color: var(--primary); }
+  .card-kicker { margin-bottom: var(--space-3); color: var(--primary); }
+  .path-card > p:not(.card-kicker) { margin-top: var(--space-3); }
+  .path-card ul, .validation-callout ul { display: grid; gap: var(--space-2); margin-top: var(--space-3); padding-left: var(--space-5); }
+  .index-maintenance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); margin-top: var(--space-7); }
+  .index-maintenance-grid article { padding: var(--space-5); border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-page); }
+  .index-maintenance-grid p { margin-top: var(--space-3); color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  .index-scale-note { margin-top: var(--space-5); padding: var(--space-5); border-left: var(--border-w-accent) solid var(--primary); border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg) var(--radius-sm); color: var(--text-secondary); background: var(--bg-muted); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  .index-scale-note strong, .source-links a { color: var(--text-primary); }
+  .source-links { display: block; margin-top: var(--space-2); color: var(--text-tertiary); font-size: var(--text-xs); }
+  .decision-list { display: grid; gap: var(--space-4); margin-top: var(--space-6); }
+  .decision-list p { padding: var(--space-4) var(--space-5); border-left: var(--border-w-accent) solid var(--primary); border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg) var(--radius-sm); background: var(--bg-muted); }
+  .decision-list strong { color: var(--text-primary); }
+  .validation-callout { margin-top: var(--space-6); padding: var(--space-6); border-radius: var(--radius-xl); background: var(--primary-bg); }
+  .validation-callout h3, .validation-callout li { color: var(--on-primary-bg); }
+  @media (max-width: 700px) { .status-card, .path-grid, .index-maintenance-grid { grid-template-columns: 1fr; } .status-label { margin-bottom: 0; } }
+</style>
