@@ -154,6 +154,16 @@ def _title_content(html: str) -> str:
     return match.group(1)
 
 
+def _canonical_href(html: str) -> str | None:
+    for match in re.finditer(r"<link\s+[^>]*>", html):
+        attributes = dict(
+            re.findall(r'([^\s=/>]+)\s*=\s*"([^"]*)"', match.group(0))
+        )
+        if attributes.get("rel") == "canonical":
+            return attributes.get("href")
+    return None
+
+
 def test_site_build_outputs_platform_aware_onboarding() -> None:
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
     getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(
@@ -314,7 +324,9 @@ def test_built_site_has_og_meta_tags() -> None:
     )
 
     assert _title_content(homepage) == expected_title
+    assert _canonical_href(homepage) == "https://chunkhound.ai/"
     assert _meta_tag_content(homepage, "name", "description") == expected_description
+    assert _meta_tag_content(homepage, "property", "og:url") == "https://chunkhound.ai/"
     assert _meta_tag_content(homepage, "property", "og:title") == expected_title
     assert (
         _meta_tag_content(homepage, "property", "og:description")

@@ -220,3 +220,10 @@ svg {
   max-width: 100%;
   height: auto;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+    transition: none;
+  }
+}
