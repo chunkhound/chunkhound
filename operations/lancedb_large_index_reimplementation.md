@@ -2,7 +2,7 @@
 
 **Branch:** `lance-take2` (based on upstream `chunkhound/chunkhound` main)  
 **Reference:** fork `main` worktree at `../chunkhound-fork-lancedb-ref`  
-**Status:** Phase 4 in progress (Phases 1–3 complete)  
+**Status:** Phase 5 local hardening (Phases 1–4 complete; no upstream PR planned)  
 **Date:** 2026-07-17
 
 ## Goal
@@ -169,10 +169,21 @@ DuckDB) for cheaper filters and permanent-failure skipping. Phase 1 must work
 - Realtime embed path inherits config excludes
 - `operations/lancedb_large_indexes.md` documents knobs
 
-### Phase 5 — Hardening
+### Phase 5 — Local hardening (current)
 
-- Large synthetic / real-repo soak
-- Full pytest before any upstream PR
+**In scope (no upstream PR gate)**
+
+- CI-scale synthetic soak (multi-page stream-embed, dual backend)
+- Optional local soak script for larger runs (`scripts/soak_large_index.py`)
+- Regression suite over large-index integration tests
+- Document how to re-run soak locally
+
+**Acceptance**
+
+- Soak integration test embeds ~800 chunks without `get_all_chunks_with_metadata`
+- Exclude soak leaves vendor chunks unembedded
+- Local script can run Nk chunks with FakeEmbeddingProvider
+- Smoke + large-index integration suite green
 
 ## Explicit non-port list (from fork main)
 
@@ -225,3 +236,5 @@ DuckDB) for cheaper filters and permanent-failure skipping. Phase 1 must work
   `tests/integration/test_lancedb_large_index_scaling.py`.
 - **2026-07-17:** Phase 4 coordinator/realtime/config: fragment batch caps,
   post-store optimize, exclude defaults, large-index ops doc.
+- **2026-07-17:** Phase 5 local hardening: CI soak tests + `scripts/soak_large_index.py`
+  (no PR target).

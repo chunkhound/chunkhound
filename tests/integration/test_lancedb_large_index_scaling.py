@@ -255,3 +255,40 @@ def test_insert_chunks_triggers_optimize_when_over_threshold(
 
     _seed_chunks(lancedb_provider, count=2)
     assert optimize_calls == ["optimize"]
+
+
+def test_num_fragments_from_stats_supports_dict_and_object():
+    from types import SimpleNamespace
+
+    from chunkhound.providers.database.lancedb_provider import LanceDBProvider
+
+    assert LanceDBProvider._num_fragments_from_stats(None) == 0
+    assert (
+        LanceDBProvider._num_fragments_from_stats(
+            {"fragment_stats": {"num_fragments": 42}}
+        )
+        == 42
+    )
+    assert (
+        LanceDBProvider._num_fragments_from_stats(
+            SimpleNamespace(
+                fragment_stats=SimpleNamespace(num_fragments=7)
+            )
+        )
+        == 7
+    )
+    # Mixed nesting
+    assert (
+        LanceDBProvider._num_fragments_from_stats(
+            {"fragment_stats": SimpleNamespace(num_fragments=3)}
+        )
+        == 3
+    )
+    assert (
+        LanceDBProvider._num_fragments_from_stats(
+            SimpleNamespace(fragment_stats={"num_fragments": 9})
+        )
+        == 9
+    )
+    assert LanceDBProvider._num_fragments_from_stats({"num_fragments": 11}) == 11
+    assert LanceDBProvider._num_fragments_from_stats({"fragment_count": 13}) == 13

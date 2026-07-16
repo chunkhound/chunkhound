@@ -2678,6 +2678,42 @@ class LanceDBProvider(SerialDatabaseProvider):
         """
         return self._execute_in_db_thread_sync("get_fragment_count")
 
+    @staticmethod
+    def _stats_get(obj: Any, *keys: str) -> Any:
+        """Read a key from a dict or attribute from an object (mixed nesting)."""
+        cur: Any = obj
+        for key in keys:
+            if cur is None:
+                return None
+            if isinstance(cur, dict):
+                cur = cur.get(key)
+            else:
+                cur = getattr(cur, key, None)
+        return cur
+
+    @classmethod
+    def _num_fragments_from_stats(cls, stats: Any) -> int:
+        """Extract fragment count from Lance table stats (object, dict, or mixed)."""
+        if stats is None:
+            return 0
+
+        for path in (
+            ("fragment_stats", "num_fragments"),
+            ("fragment_stats", "fragment_count"),
+            ("fragment_stats", "count"),
+            ("fragments", "num_fragments"),
+            ("fragments", "fragment_count"),
+            ("num_fragments",),
+            ("fragment_count",),
+        ):
+            n = cls._stats_get(stats, *path)
+            if n is not None:
+                try:
+                    return int(n)
+                except (TypeError, ValueError):
+                    continue
+        return 0
+
     def _executor_get_fragment_count(
         self, conn: Any, state: dict[str, Any]
     ) -> dict[str, int]:
@@ -2687,7 +2723,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         if self._chunks_table:
             try:
                 stats = self._chunks_table.stats()
-                result["chunks"] = stats.fragment_stats.num_fragments
+                result["chunks"] = self._num_fragments_from_stats(stats)
             except Exception as e:
                 logger.debug(f"Could not get chunks fragment count: {e}")
                 result["chunks"] = 0
@@ -2695,7 +2731,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         if self._files_table:
             try:
                 stats = self._files_table.stats()
-                result["files"] = stats.fragment_stats.num_fragments
+                result["files"] = self._num_fragments_from_stats(stats)
             except Exception as e:
                 logger.debug(f"Could not get files fragment count: {e}")
                 result["files"] = 0
