@@ -78,15 +78,14 @@ dependencies = [
     "tree-sitter-php>=0.24.0",
     "tree-sitter-sql>=0.3.0",
     "tree-sitter-toml>=0.7.0",
-    "lancedb>=0.25.3",
+    # LanceDB 0.34+ (MemWAL merge_insert, unified create_index API).
+    # Co-upgrade pylance/pyarrow with lancedb; native wheels are tightly coupled.
+    "lancedb>=0.34.0",
     "pandas>=2.3.0",
-    "pylance>=0.31.0",
-    # pyarrow<24.0.0 due to Windows CI Access Violation (fatal exception)
-    # when importing pyarrow.dataset via lancedb (see win-3.14-CI.txt).
-    # This crash occurs on GitHub Windows runners (both 3.12 and 3.14)
-    # with pyarrow 24.x + lancedb 0.25.x due to native DLL conflicts.
-    # PyArrow 23.x is the last known stable range with LanceDB on Windows CI.
-    "pyarrow>=23.0.0,<24.0.0",
+    "pylance>=0.38.0",
+    # Floor only: upper pin was for lancedb 0.25.x + pyarrow 24 Windows AV.
+    # Revalidate Windows CI after lancedb upgrades.
+    "pyarrow>=23.0.0",
     "voyageai>=0.2.0",
     "httpx>=0.28.1",
     "pymupdf>=1.27.0",

@@ -199,7 +199,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         return f"path LIKE '{like}' ESCAPE '\\\\'"
 
     def _fetch_file_paths_by_ids(self, file_ids: list[int]) -> dict[int, str]:
-        if not self._files_table or not file_ids:
+        if self._files_table is None or not file_ids:
             return {}
 
         unique_ids = sorted({int(fid) for fid in file_ids if fid is not None})
@@ -227,7 +227,7 @@ class LanceDBProvider(SerialDatabaseProvider):
     def _count_chunks_for_file_ids(
         self, file_ids: list[int], batch_size: int = 1000
     ) -> int | None:
-        if not self._chunks_table or not file_ids:
+        if self._chunks_table is None or not file_ids:
             return 0
 
         total = 0
@@ -421,19 +421,21 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         # Create scalar index on chunks.id for merge_insert performance
         # merge_insert performs join on id column, index provides O(log n) vs O(n) lookup
-        if self._chunks_table:
+        if self._chunks_table is not None:
             try:
                 # Check if index already exists
                 indices = self._chunks_table.list_indices()
                 has_id_index = any(
-                    idx.columns == ["id"] or "id" in idx.columns for idx in indices
+                    list(getattr(idx, "columns", None) or []) == ["id"]
+                    or "id" in list(getattr(idx, "columns", None) or [])
+                    for idx in indices
                 )
 
                 if not has_id_index:
                     logger.info(
                         "Creating scalar index on chunks.id for merge_insert performance"
                     )
-                    self._chunks_table.create_scalar_index("id")
+                    self._create_scalar_btree_index(self._chunks_table, "id")
                     logger.info("Scalar index on chunks.id created successfully")
                 else:
                     logger.debug("Scalar index on chunks.id already exists")
@@ -441,9 +443,63 @@ class LanceDBProvider(SerialDatabaseProvider):
                 # Non-fatal: merge_insert works without index, just slower
                 logger.warning(
                     f"Could not create scalar index on chunks.id: {e}. "
-                    f"This is non-fatal but may slow down merge_insert operations. "
-                    f"Check LanceDB version supports create_scalar_index()."
+                    f"This is non-fatal but may slow down merge_insert operations."
                 )
+
+    @staticmethod
+    def _create_scalar_btree_index(table: Any, column: str) -> None:
+        """Create a BTree scalar index using the unified LanceDB index API.
+
+        Falls back to the legacy ``create_scalar_index`` when config objects
+        are unavailable (very old LanceDB installs).
+        """
+        try:
+            from lancedb.index import BTree
+
+            table.create_index(column, config=BTree())
+            return
+        except Exception:
+            # Legacy path (deprecated in 0.25+, still present through 0.34).
+            table.create_scalar_index(column)
+
+    @staticmethod
+    def _create_vector_index_on_table(
+        table: Any,
+        column: str,
+        index_type: str | None,
+        metric: str = "cosine",
+    ) -> None:
+        """Create a vector index with the unified API, legacy fallback if needed."""
+        distance = metric or "cosine"
+        try:
+            from lancedb.index import HnswSq, IvfPq, IvfRq
+
+            if index_type == "ivf_hnsw_sq":
+                config = HnswSq(distance_type=distance)
+            elif index_type == "ivf_rq":
+                config = IvfRq(distance_type=distance)
+            else:
+                # Default auto path historically used IVF_PQ-style create_index.
+                config = IvfPq(distance_type=distance)
+
+            table.create_index(column, config=config)
+            return
+        except Exception:
+            # Legacy kwargs API (deprecated; kept for older wheels).
+            if index_type == "ivf_hnsw_sq":
+                table.create_index(
+                    vector_column_name=column,
+                    index_type="IVF_HNSW_SQ",
+                    metric=distance,
+                )
+            elif index_type == "ivf_rq":
+                table.create_index(
+                    vector_column_name=column,
+                    index_type="IVF_RQ",
+                    metric=distance,
+                )
+            else:
+                table.create_index(vector_column_name=column, metric=distance)
 
     def create_vector_index(
         self, provider: str, model: str, dims: int, metric: str = "cosine"
@@ -463,7 +519,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         metric: str = "cosine",
     ) -> None:
         """Executor method for create_vector_index - runs in DB thread."""
-        if not self._chunks_table:
+        if self._chunks_table is None:
             return
 
         try:
@@ -489,24 +545,14 @@ class LanceDBProvider(SerialDatabaseProvider):
                 )
                 return
 
-            # Create vector index (wait_timeout not supported in LanceDB OSS)
-            if self.index_type == "ivf_hnsw_sq":
-                self._chunks_table.create_index(
-                    vector_column_name="embedding",
-                    index_type="IVF_HNSW_SQ",
-                    metric=metric,
-                )
-            elif self.index_type == "ivf_rq":
-                self._chunks_table.create_index(
-                    vector_column_name="embedding",
-                    index_type="IVF_RQ",
-                    metric=metric,
-                )
-            else:
-                # Default to auto-configured index with explicit vector column
-                self._chunks_table.create_index(
-                    vector_column_name="embedding", metric=metric
-                )
+            # Unified create_index API (LanceDB 0.34+); legacy kwargs still work
+            # but emit DeprecationWarning.
+            self._create_vector_index_on_table(
+                self._chunks_table,
+                column="embedding",
+                index_type=self.index_type,
+                metric=metric,
+            )
             logger.debug(
                 f"Created vector index for {provider}/{model} with metric={metric}"
             )
@@ -551,7 +597,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], file: File
     ) -> int:
         """Executor method for insert_file - runs in DB thread."""
-        if not self._files_table:
+        if self._files_table is None:
             self._executor_create_schema(conn, state)
 
         # Store path as-is (now relative with forward slashes from IndexingCoordinator)
@@ -615,7 +661,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         state: dict[str, Any],
         directory_prefix: str,
     ) -> list[str]:
-        if not self._files_table:
+        if self._files_table is None:
             return []
         try:  # type: ignore[unreachable]
             # Escape both SQL string-literal quotes and LIKE metacharacters
@@ -663,7 +709,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], path: str, as_model: bool = False
     ) -> dict[str, Any] | File | None:
         """Executor method for get_file_by_path - runs in DB thread."""
-        if not self._files_table:
+        if self._files_table is None:
             return None
 
         try:
@@ -704,7 +750,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], file_id: int, as_model: bool = False
     ) -> dict[str, Any] | File | None:
         """Executor method for get_file_by_id - runs in DB thread."""
-        if not self._files_table:
+        if self._files_table is None:
             return None
 
         try:
@@ -750,7 +796,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         **kwargs,
     ) -> None:
         """Executor method for update_file - runs in DB thread."""
-        if not self._files_table:
+        if self._files_table is None:
             return
 
         try:
@@ -811,7 +857,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         skip_reason: str,
     ) -> None:
         """Executor method for record_skipped_file - runs in DB thread."""
-        if not self._files_table:
+        if self._files_table is None:
             self._executor_create_schema(conn, state)
 
         # Preserve existing id so chunks.file_id references are not orphaned
@@ -856,11 +902,11 @@ class LanceDBProvider(SerialDatabaseProvider):
             file_id = file_record["id"]
 
             # Delete chunks first
-            if self._chunks_table:
+            if self._chunks_table is not None:
                 self._chunks_table.delete(f"file_id = {file_id}")
 
             # Delete file record
-            if self._files_table:
+            if self._files_table is not None:
                 self._files_table.delete(f"id = {file_id}")
 
             return True
@@ -877,7 +923,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], chunk: Chunk
     ) -> int:
         """Executor method for insert_chunk - runs in DB thread."""
-        if not self._chunks_table:
+        if self._chunks_table is None:
             self._executor_create_schema(conn, state)
 
         chunk_data = {
@@ -932,7 +978,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         if not chunks:
             return []
 
-        if not self._chunks_table:
+        if self._chunks_table is None:
             self._executor_create_schema(conn, state)
 
         # Process in optimal batch sizes (LanceDB best practice: 1000+ items)
@@ -1019,7 +1065,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], chunk_id: int, as_model: bool = False
     ) -> dict[str, Any] | Chunk | None:
         """Executor method for get_chunk_by_id - runs in DB thread."""
-        if not self._chunks_table:
+        if self._chunks_table is None:
             return None
 
         try:
@@ -1057,7 +1103,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], file_id: int, as_model: bool = False
     ) -> list[dict[str, Any] | Chunk]:
         """Executor method for get_chunks_by_file_id - runs in DB thread."""
-        if not self._chunks_table:
+        if self._chunks_table is None:
             return []
 
         try:
@@ -1113,7 +1159,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         Returns:
             List of chunk dictionaries overlapping the range, ordered by start_line
         """
-        if not self._chunks_table:
+        if self._chunks_table is None:
             return []
 
         try:
@@ -1172,7 +1218,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], file_id: int
     ) -> None:
         """Executor method for delete_file_chunks - runs in DB thread."""
-        if self._chunks_table:
+        if self._chunks_table is not None:
             try:
                 self._chunks_table.delete(f"file_id = {file_id}")
             except Exception as e:
@@ -1186,7 +1232,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], chunk_id: int
     ) -> None:
         """Executor method for delete_chunk - runs in DB thread."""
-        if self._chunks_table:
+        if self._chunks_table is not None:
             try:
                 self._chunks_table.delete(f"id = {chunk_id}")
             except Exception as e:
@@ -1223,7 +1269,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         batch_size: int | None = None,
     ) -> int:
         """Executor method for insert_embeddings_batch - runs in DB thread."""
-        if not embeddings_data or not self._chunks_table:
+        if not embeddings_data or self._chunks_table is None:
             return 0
 
         try:
@@ -1562,7 +1608,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         Uses targeted native filters (and batched IN queries) instead of loading
         the full chunks table into pandas — required for large indexes.
         """
-        if not self._chunks_table:
+        if self._chunks_table is None:
             return set()
 
         try:
@@ -1716,7 +1762,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         - Candidate collection may scan remaining lightweight rows; Phase 3+
           can replace this with indexed signature queries.
         """
-        if not self._chunks_table or limit <= 0:
+        if self._chunks_table is None or limit <= 0:
             return []
 
         try:
@@ -1864,7 +1910,7 @@ class LanceDBProvider(SerialDatabaseProvider):
     def _executor_get_scope_stats(
         self, conn: Any, state: dict[str, Any], scope_prefix: str | None
     ) -> tuple[int, int]:
-        if not self._files_table or not self._chunks_table:
+        if self._files_table is None or self._chunks_table is None:
             return 0, 0
 
         try:
@@ -1965,7 +2011,7 @@ class LanceDBProvider(SerialDatabaseProvider):
     def _executor_get_scope_file_paths(
         self, conn: Any, state: dict[str, Any], scope_prefix: str | None
     ) -> list[str]:
-        if not self._files_table:
+        if self._files_table is None:
             return []
 
         try:
@@ -1994,7 +2040,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any]
     ) -> list[dict[str, Any]]:
         """Executor method for get_all_chunks_with_metadata - runs in DB thread."""
-        if not self._chunks_table or not self._files_table:
+        if self._chunks_table is None or self._files_table is None:
             return []
 
         try:
@@ -2348,7 +2394,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         path_filter: str | None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Executor method for search_regex - runs in DB thread."""
-        if not self._chunks_table or not self._files_table:
+        if self._chunks_table is None or self._files_table is None:
             return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
 
         try:
@@ -2449,7 +2495,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Executor method for search_text - runs in DB thread."""
-        if not self._chunks_table:
+        if self._chunks_table is None:
             return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
 
         try:
@@ -2508,7 +2554,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         stats = {"files": 0, "chunks": 0, "embeddings": 0, "size_mb": 0}
 
         try:
-            if self._files_table:
+            if self._files_table is not None:
                 try:
                     stats["files"] = len(self._files_table.to_pandas())
                 except Exception as data_error:
@@ -2517,7 +2563,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     )
                     stats["files"] = 0
 
-            if self._chunks_table:
+            if self._chunks_table is not None:
                 try:
                     chunks_df = self._chunks_table.to_pandas()
                     stats["chunks"] = len(chunks_df)
@@ -2576,7 +2622,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], provider: str, model: str
     ) -> dict[str, Any]:
         """Executor method for get_provider_stats - runs in DB thread."""
-        if not self._chunks_table:
+        if self._chunks_table is None:
             return {"provider": provider, "model": model, "embedding_count": 0}
 
         try:
@@ -2612,7 +2658,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         - SELECT path, size, modified_time FROM files
         """
         try:
-            if not self._files_table:
+            if self._files_table is None:
                 return []
 
             q = (query or "").strip().lower().replace("\n", " ")
@@ -2720,7 +2766,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Executor method for get_fragment_count - runs in DB thread."""
         result = {}
 
-        if self._chunks_table:
+        if self._chunks_table is not None:
             try:
                 stats = self._chunks_table.stats()
                 result["chunks"] = self._num_fragments_from_stats(stats)
@@ -2728,7 +2774,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                 logger.debug(f"Could not get chunks fragment count: {e}")
                 result["chunks"] = 0
 
-        if self._files_table:
+        if self._files_table is not None:
             try:
                 stats = self._files_table.stats()
                 result["files"] = self._num_fragments_from_stats(stats)
@@ -2771,7 +2817,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         from datetime import timedelta
 
         try:
-            if self._chunks_table:
+            if self._chunks_table is not None:
                 logger.debug("Optimizing chunks table - compacting fragments...")
                 # Use minimal cleanup window (1 minute) to focus on fragment consolidation
                 # rather than time-based cleanup. The goal is compaction, not age-based deletion.
@@ -2784,7 +2830,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     )
                 logger.debug("Chunks table optimization complete")
 
-            if self._files_table:
+            if self._files_table is not None:
                 logger.debug("Optimizing files table - compacting fragments...")
                 stats = self._files_table.optimize(
                     cleanup_older_than=timedelta(minutes=1), delete_unverified=True
@@ -2817,7 +2863,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         }
 
         # Check for data corruption
-        if self.is_connected and self._chunks_table:
+        if self.is_connected and self._chunks_table is not None:
             try:
                 # Try to read a small sample to detect corruption
                 self._chunks_table.head(10).to_pandas()
