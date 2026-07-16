@@ -246,6 +246,11 @@ class FakeEmbeddingProvider:
         return self._model
 
     @property
+    def base_url(self) -> str | None:
+        """API base URL (unused for fake provider)."""
+        return None
+
+    @property
     def dims(self) -> int:
         """Current embedding output dimension."""
         if self._output_dims is not None:

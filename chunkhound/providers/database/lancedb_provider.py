@@ -1656,13 +1656,11 @@ class LanceDBProvider(SerialDatabaseProvider):
         A row needs work when it does not already have a *valid* embedding for
         the requested provider/model (aligned with get_existing_embeddings).
 
-        Pagination modes:
-        - after_id is None: residual-shrink — bounded ``limit`` fetch (large-index
-          safe when the caller inserts embeddings between pages).
-        - after_id is set: keyset — LanceDB ``limit`` is not id-ordered, so we
-          collect remaining candidate ids, sort, then fetch the page. Not ideal
-          for multi-million residual sets; use residual-shrink for large streams.
-          Phase 2 can replace this with indexed signature queries.
+        Pagination:
+        - always ordered by id (keyset). ``after_id=None`` is the first page;
+          subsequent pages use ``id > after_id``.
+        - Candidate collection may scan remaining lightweight rows; Phase 3+
+          can replace this with indexed signature queries.
         """
         if not self._chunks_table or limit <= 0:
             return []
@@ -1682,137 +1680,82 @@ class LanceDBProvider(SerialDatabaseProvider):
                 f"embedding IS NULL)"
             )
 
-            if after_id is None:
-                # Residual-shrink: any matching page is fine; caller mutates set.
-                # Over-fetch so post-filter can still fill `limit`.
-                fetch_limit = max(limit, min(limit * 3, limit + 128))
-                candidates = (
-                    self._chunks_table.search()
-                    .where(missing_clause)
-                    .limit(fetch_limit)
-                    .to_list()
-                )
-                # Bounded scan for labeled rows with invalid/zero embeddings
-                # (legacy placeholders) that the push-down clause cannot express.
-                try:
-                    labeled = (
-                        self._chunks_table.search()
-                        .where(f"provider = '{p}' AND model = '{m}'")
-                        .limit(fetch_limit)
-                        .to_list()
-                    )
-                    candidates.extend(labeled)
-                except Exception:
-                    pass
-
-                # Re-fetch by id so fragment merge can prefer the embedded version
-                # (stale unembedded fragments can appear in the missing filter).
-                candidate_ids: list[int] = []
-                seen_ids: set[int] = set()
-                for row in candidates:
-                    raw_id = row.get("id")
-                    if raw_id is None:
-                        continue
-                    cid = int(raw_id)
-                    if cid not in seen_ids:
-                        seen_ids.add(cid)
-                        candidate_ids.append(cid)
-                if not candidate_ids:
-                    return []
-
-                ids_str = ", ".join(str(i) for i in candidate_ids)
-                results = (
-                    self._chunks_table.search()
-                    .where(f"id IN ({ids_str})")
-                    .to_list()
-                )
-                results = self._deduplicate_prefer_embedded(
-                    results, provider, model
-                )
-                results = [
-                    row
-                    for row in results
-                    if self._chunk_needs_embedding(row, provider, model)
-                ]
-                results.sort(key=lambda r: int(r.get("id") or 0))
-                results = results[:limit]
+            # Ordered keyset for both first page (after_id=None) and continuation.
+            # Collect lightweight candidates, sort by id, then fetch full rows for
+            # the page. Include labeled provider/model rows so invalid/zero
+            # embeddings with matching labels are not skipped by missing_clause.
+            after: int | None = int(after_id) if after_id is not None else None
+            if after is None:
+                id_where = missing_clause
+                labeled_where = f"provider = '{p}' AND model = '{m}'"
             else:
-                # Keyset: remaining candidates with id > after_id, then full-row page.
-                # Include labeled provider/model rows so invalid/zero embeddings with
-                # matching labels are not skipped by missing_clause alone.
-                after = int(after_id)
+                # Avoid int64 min sentinel in filters — Lance may parse as float.
                 id_where = f"{missing_clause} AND id > {after}"
                 labeled_where = (
                     f"provider = '{p}' AND model = '{m}' AND id > {after}"
                 )
+
+            try:
+                id_rows = (
+                    self._chunks_table.search()
+                    .where(id_where)
+                    .select(["id", "provider", "model", "embedding"])
+                    .to_list()
+                )
                 try:
-                    id_rows = (
+                    labeled_rows = (
                         self._chunks_table.search()
-                        .where(id_where)
+                        .where(labeled_where)
                         .select(["id", "provider", "model", "embedding"])
                         .to_list()
                     )
-                    try:
-                        labeled_rows = (
-                            self._chunks_table.search()
-                            .where(labeled_where)
-                            .select(["id", "provider", "model", "embedding"])
-                            .to_list()
-                        )
-                        id_rows.extend(labeled_rows)
-                    except Exception:
-                        labeled_rows = (
-                            self._chunks_table.search()
-                            .where(labeled_where)
-                            .to_list()
-                        )
-                        id_rows.extend(labeled_rows)
+                    id_rows.extend(labeled_rows)
                 except Exception:
-                    # Older LanceDB may not support select(); fall back to full rows.
-                    id_rows = (
-                        self._chunks_table.search().where(id_where).to_list()
+                    id_rows.extend(
+                        self._chunks_table.search()
+                        .where(labeled_where)
+                        .to_list()
                     )
-                    try:
-                        id_rows.extend(
-                            self._chunks_table.search()
-                            .where(labeled_where)
-                            .to_list()
-                        )
-                    except Exception:
-                        pass
+            except Exception:
+                # Older LanceDB may not support select(); fall back to full rows.
+                id_rows = self._chunks_table.search().where(id_where).to_list()
+                try:
+                    id_rows.extend(
+                        self._chunks_table.search()
+                        .where(labeled_where)
+                        .to_list()
+                    )
+                except Exception:
+                    pass
 
-                id_rows = self._deduplicate_prefer_embedded(
-                    id_rows, provider, model
-                )
-                page_ids: list[int] = []
-                for row in sorted(id_rows, key=lambda r: int(r.get("id") or 0)):
-                    row_id = int(row.get("id") or 0)
-                    if row_id <= after:
-                        continue
-                    if not self._chunk_needs_embedding(row, provider, model):
-                        continue
-                    page_ids.append(row_id)
-                    if len(page_ids) >= limit:
-                        break
+            id_rows = self._deduplicate_prefer_embedded(id_rows, provider, model)
+            page_ids: list[int] = []
+            for row in sorted(id_rows, key=lambda r: int(r.get("id") or 0)):
+                row_id = int(row.get("id") or 0)
+                if after is not None and row_id <= after:
+                    continue
+                if not self._chunk_needs_embedding(row, provider, model):
+                    continue
+                page_ids.append(row_id)
+                if len(page_ids) >= limit:
+                    break
 
-                if not page_ids:
-                    return []
+            if not page_ids:
+                return []
 
-                ids_str = ", ".join(str(i) for i in page_ids)
-                results = (
-                    self._chunks_table.search()
-                    .where(f"id IN ({ids_str})")
-                    .to_list()
-                )
-                results = self._deduplicate_prefer_embedded(
-                    results, provider, model
-                )
-                results = [
-                    row
-                    for row in results
-                    if self._chunk_needs_embedding(row, provider, model)
-                ]
-                results.sort(key=lambda r: int(r.get("id") or 0))
+            ids_str = ", ".join(str(i) for i in page_ids)
+            results = (
+                self._chunks_table.search().where(f"id IN ({ids_str})").to_list()
+            )
+            results = self._deduplicate_prefer_embedded(
+                results, provider, model
+            )
+            results = [
+                row
+                for row in results
+                if self._chunk_needs_embedding(row, provider, model)
+            ]
+            results.sort(key=lambda r: int(r.get("id") or 0))
 
             file_ids = [
                 int(r["file_id"])

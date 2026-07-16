@@ -218,6 +218,16 @@ class EmbeddingService(BaseService):
     ) -> dict[str, Any]:
         """Generate embeddings for all chunks that don't have them yet.
 
+        Pages through missing chunks via
+        ``DatabaseProvider.get_chunks_without_embeddings_paginated`` so large
+        indexes never load full chunk content into memory.
+
+        Uses **ordered keyset** pagination (``id > after_id``) for the whole run.
+        That is correct for exclude patterns and both backends: LanceDB residual
+        pages are not globally id-ordered, so mixing residual with keyset can
+        skip lower ids. Failed/partial embeds never advance past still-missing
+        work.
+
         Args:
             provider_name: Optional specific provider to generate for
             model_name: Optional specific model to generate for
@@ -238,31 +248,75 @@ class EmbeddingService(BaseService):
             target_provider = provider_name or self._embedding_provider.name
             target_model = model_name or self._embedding_provider.model
 
-            # First, just get the count and IDs of chunks without embeddings (fast query)
-            chunk_ids_without_embeddings = self._get_chunk_ids_without_embeddings(
-                target_provider, target_model, exclude_patterns
-            )
+            page_size = max(1, int(self._embedding_batch_size or 1000))
+            total_generated = 0
+            total_attempted = 0
+            # None = first ordered page; then advance with last id (keyset).
+            after_id: int | None = None
+            # Safety cap: far above any realistic page count for a single run.
+            max_pages = 1_000_000
 
-            if not chunk_ids_without_embeddings:
+            for _page_num in range(max_pages):
+                page = self._db.get_chunks_without_embeddings_paginated(
+                    target_provider,
+                    target_model,
+                    limit=page_size,
+                    after_id=after_id,
+                )
+                if not page:
+                    break
+
+                page_last_id = int(page[-1]["id"])
+                work = self._filter_page_for_embedding(page, exclude_patterns)
+
+                if not work:
+                    # Excluded / empty only: advance past this ordered page.
+                    after_id = page_last_id
+                    continue
+
+                total_attempted += len(work)
+                chunk_id_list = [ChunkId(int(c["id"])) for c in work]
+                chunk_texts = [str(c.get("code") or "") for c in work]
+                generated_count = await self.generate_embeddings_for_chunks(
+                    chunk_id_list, chunk_texts, show_progress=True
+                )
+                total_generated += generated_count
+
+                work_ids = [int(c["id"]) for c in work]
+                if generated_count < len(work):
+                    existing = self._db.get_existing_embeddings(
+                        work_ids, target_provider, target_model
+                    )
+                    still_missing = [cid for cid in work_ids if cid not in existing]
+                    if still_missing:
+                        return {
+                            "status": "error",
+                            "error": (
+                                "Failed to generate embeddings for a page "
+                                f"({len(still_missing)}/{len(work)} still missing)"
+                            ),
+                            "generated": total_generated,
+                            "total_chunks": total_attempted,
+                            "provider": target_provider,
+                            "model": target_model,
+                        }
+
+                # Full page satisfied (embedded now or already present) — advance.
+                after_id = page_last_id
+
+            if total_generated == 0 and total_attempted == 0:
                 return {
                     "status": "complete",
                     "generated": 0,
-                    "message": "All chunks have embeddings",
+                    "message": "No embeddable chunks remaining",
+                    "provider": target_provider,
+                    "model": target_model,
                 }
-
-            # Load chunk content and generate embeddings
-            chunks_data = self._get_chunks_by_ids(chunk_ids_without_embeddings)
-            chunk_id_list = [chunk["id"] for chunk in chunks_data]
-            chunk_texts = [chunk["code"] for chunk in chunks_data]
-
-            generated_count = await self.generate_embeddings_for_chunks(
-                chunk_id_list, chunk_texts, show_progress=True
-            )
 
             return {
                 "status": "success",
-                "generated": generated_count,
-                "total_chunks": len(chunk_ids_without_embeddings),
+                "generated": total_generated,
+                "total_chunks": total_attempted,
                 "provider": target_provider,
                 "model": target_model,
             }
@@ -802,138 +856,49 @@ class EmbeddingService(BaseService):
         )
         return batches
 
-    def _get_chunk_ids_without_embeddings(
-        self, provider: str, model: str, exclude_patterns: list[str] | None = None
-    ) -> list[ChunkId]:
-        """Get just the IDs of chunks that don't have embeddings (provider-agnostic)."""
-        # Get all chunks with metadata using provider-agnostic method
-        all_chunks = self._db.get_all_chunks_with_metadata()
-
-        # Apply exclude patterns filter using fnmatch (no SQL dependency)
-        if exclude_patterns:
-            import fnmatch
-
-            filtered_chunks = []
-            for chunk in all_chunks:
-                file_path = chunk.get("file_path", "")
-                should_exclude = False
-                for pattern in exclude_patterns:
-                    if fnmatch.fnmatch(file_path, pattern):
-                        should_exclude = True
-                        break
-                if not should_exclude:
-                    filtered_chunks.append(chunk)
-            all_chunks = filtered_chunks
-
-        # Extract chunk IDs with consistent field handling
-        # DuckDB uses "chunk_id", LanceDB uses "id" - handle both
-        # Import locally to avoid circular import
-        from chunkhound.core.utils.chunk_utils import get_chunk_id
-
-        all_chunk_ids: list[int] = []
-        for chunk in all_chunks:
-            chunk_id = get_chunk_id(chunk)
-            if chunk_id is not None:
-                all_chunk_ids.append(int(chunk_id))
-
-        if not all_chunk_ids:
-            return []
-
-        # Use provider-agnostic get_existing_embeddings to check which chunks already have embeddings
-        existing_chunk_ids = self._db.get_existing_embeddings(
-            chunk_ids=all_chunk_ids, provider=provider, model=model
-        )
-
-        # Return only chunks that don't have embeddings (convert back to ChunkId)
-        return [
-            ChunkId(chunk_id)
-            for chunk_id in all_chunk_ids
-            if chunk_id not in existing_chunk_ids
-        ]
-
-    def _get_chunks_without_embeddings(
-        self, provider: str, model: str
+    def _filter_page_for_embedding(
+        self,
+        page: list[dict[str, Any]],
+        exclude_patterns: list[str] | None,
     ) -> list[dict[str, Any]]:
-        """Get chunks that don't have embeddings for the specified provider/model."""
-        # Get all embedding tables
-        embedding_tables = self._get_all_embedding_tables()
+        """Drop excluded paths and empty content from a missing-embeddings page."""
+        import fnmatch
 
-        if not embedding_tables:
-            # No embedding tables exist, return all chunks (but fetch IDs first for progress)
-            query = """
-                SELECT c.id
-                FROM chunks c
-                ORDER BY c.id
-            """
-            chunk_ids_result = self._db.execute_query(query)
-            chunk_ids = [row["id"] for row in chunk_ids_result]
-
-            # Now fetch full data
-            if chunk_ids:
-                return self._get_chunks_by_ids(chunk_ids)
-            return []
-
-        # Build NOT EXISTS clauses for all embedding tables
-        not_exists_clauses = []
-        for table_name in embedding_tables:
-            not_exists_clauses.append(f"""
-                NOT EXISTS (
-                    SELECT 1 FROM {table_name} e
-                    WHERE e.chunk_id = c.id
-                    AND e.provider = ?
-                    AND e.model = ?
-                )
-            """)
-
-        # First get just the IDs (much faster query)
-        query = f"""
-            SELECT c.id
-            FROM chunks c
-            WHERE {" AND ".join(not_exists_clauses)}
-            ORDER BY c.id
-        """
-
-        # Parameters need to be repeated for each table
-        params = [provider, model] * len(embedding_tables)
-        chunk_ids_result = self._db.execute_query(query, params)
-        chunk_ids = [row["id"] for row in chunk_ids_result]
-
-        # Now fetch full data for these chunks
-        if chunk_ids:
-            return self._get_chunks_by_ids(chunk_ids)
-        return []
+        work: list[dict[str, Any]] = []
+        for chunk in page:
+            file_path = str(chunk.get("file_path") or "")
+            if exclude_patterns:
+                if any(
+                    fnmatch.fnmatch(file_path, pattern) for pattern in exclude_patterns
+                ):
+                    continue
+            code = str(chunk.get("code") or "")
+            if not code.strip():
+                continue
+            work.append(chunk)
+        return work
 
     def _get_chunks_by_ids(self, chunk_ids: list[ChunkId]) -> list[dict[str, Any]]:
-        """Get chunk data for specific chunk IDs."""
+        """Get chunk data for specific chunk IDs without loading the full table."""
         if not chunk_ids:
             return []
 
-        # Use provider-agnostic method to get all chunks with metadata
-        all_chunks_data = self._db.get_all_chunks_with_metadata()
-
-        # Filter to only the requested chunk IDs
-        chunk_id_set = set(chunk_ids)
-        filtered_chunks = []
-
-        # Import locally to avoid circular import
-        from chunkhound.core.utils.chunk_utils import get_chunk_id
-
-        for chunk in all_chunks_data:
-            chunk_id = get_chunk_id(chunk)
-            if chunk_id in chunk_id_set:
-                # Ensure we have the expected fields
-                filtered_chunk = {
-                    "id": chunk_id,
-                    "code": chunk.get(
-                        "content", chunk.get("code", "")
-                    ),  # LanceDB uses 'content'
-                    "symbol": chunk.get(
-                        "name", chunk.get("symbol", "")
-                    ),  # LanceDB uses 'name'
-                    "path": chunk.get("file_path", ""),
+        filtered_chunks: list[dict[str, Any]] = []
+        for raw_id in chunk_ids:
+            chunk_id = int(raw_id)
+            row = self._db.get_chunk_by_id(chunk_id, as_model=False)
+            if not row:
+                continue
+            if not isinstance(row, dict):
+                continue
+            filtered_chunks.append(
+                {
+                    "id": int(row.get("id", chunk_id)),
+                    "code": row.get("content", row.get("code", "")) or "",
+                    "symbol": row.get("name", row.get("symbol", "")) or "",
+                    "path": row.get("file_path", row.get("path", "")) or "",
                 }
-                filtered_chunks.append(filtered_chunk)
-
+            )
         return filtered_chunks
 
     def _get_chunks_by_file_path(self, file_path: str) -> list[dict[str, Any]]:

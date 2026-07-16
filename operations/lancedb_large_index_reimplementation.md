@@ -2,8 +2,8 @@
 
 **Branch:** `lance-take2` (based on upstream `chunkhound/chunkhound` main)  
 **Reference:** fork `main` worktree at `../chunkhound-fork-lancedb-ref`  
-**Status:** Phase 1 in progress  
-**Date:** 2026-07-16
+**Status:** Phase 2 in progress (Phase 1 complete)  
+**Date:** 2026-07-17
 
 ## Goal
 
@@ -113,13 +113,27 @@ DuckDB) for cheaper filters and permanent-failure skipping. Phase 1 must work
 - Existing smoke tests pass
 - DuckDB default path unchanged for CLI/MCP
 
-### Phase 2 — Schema + streaming embed service
+### Phase 2 — Streaming embed service (current)
 
-- LanceDB columns + indexes for signature/status (additive migration)
-- Rewrite `generate_missing_embeddings` to page via Phase 1 API
+**In scope**
+
+- Rewrite `generate_missing_embeddings` to page via Phase 1 API (ordered keyset walk)
 - Stop using `get_all_chunks_with_metadata` on the missing-embeddings hot path
-- Error classification / permanent failure status (as needed)
-- Preserve Matryoshka and current embedding config wiring
+- Fix `_get_chunks_by_ids` to fetch by id (no full-table load) for regenerate paths
+- Preserve Matryoshka / current provider config wiring and existing return status shape
+
+**Deferred (still optional later / Phase 3 prep)**
+
+- LanceDB `embedding_signature` / `embedding_status` schema + indexes
+- Full embedding error-classification / permanent-failure status machine from the fork
+
+**Acceptance**
+
+- `generate_missing_embeddings` never calls `get_all_chunks_with_metadata`
+- Ordered keyset walk embeds all missing chunks (fake provider + dual backend)
+- Exclude patterns advance without infinite loop or skipped keep-ids
+- Failed/partial embed page returns error (does not advance past still-missing work)
+- Existing embedding pipeline integration tests still pass when API keys available
 
 ### Phase 3 — LanceDB write/read scaling
 
@@ -183,3 +197,6 @@ DuckDB) for cheaper filters and permanent-failure skipping. Phase 1 must work
 - **2026-07-17:** Finish-work review fixes: raise on query failure; Lance missing
   predicate includes null/empty labels + null embedding + invalid/zero recovery;
   residual is documented as large-index mode; contract tests expanded.
+- **2026-07-17:** Phase 2 streaming: `generate_missing_embeddings` pages via
+  Phase 1 API; no full-table metadata load on hot path; tests in
+  `tests/integration/test_streaming_missing_embeddings.py`.
