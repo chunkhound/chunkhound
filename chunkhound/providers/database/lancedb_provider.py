@@ -993,6 +993,20 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.debug(f"Bulk inserted batch of {len(batch_chunks)} chunks")
 
         logger.debug(f"Completed bulk insert of {len(chunks)} chunks in batches")
+
+        # Compact when chunk inserts create many fragments (in-thread check).
+        try:
+            counts = self._executor_get_fragment_count(conn, state)
+            chunks_fragments = counts.get("chunks", 0)
+            if chunks_fragments >= self._fragment_threshold:
+                logger.info(
+                    f"Post-chunk-insert optimize: {chunks_fragments} chunk fragments "
+                    f">= threshold {self._fragment_threshold}"
+                )
+                self._executor_optimize_tables(conn, state)
+        except Exception as opt_err:
+            logger.debug(f"Post-chunk-insert optimize skipped: {opt_err}")
+
         return all_chunk_ids
 
     def get_chunk_by_id(
@@ -1486,6 +1500,21 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.debug(
                 f"Successfully updated {total_updated} embeddings using merge_insert"
             )
+
+            # Compact fragments when write volume pushes past threshold (in-thread
+            # check — must not call should_optimize() which re-enters the executor).
+            try:
+                counts = self._executor_get_fragment_count(conn, state)
+                chunks_fragments = counts.get("chunks", 0)
+                if chunks_fragments >= self._fragment_threshold:
+                    logger.info(
+                        f"Post-embedding optimize: {chunks_fragments} chunk fragments "
+                        f">= threshold {self._fragment_threshold}"
+                    )
+                    self._executor_optimize_tables(conn, state)
+            except Exception as opt_err:
+                logger.debug(f"Post-embedding optimize skipped: {opt_err}")
+
             return total_updated
 
         except Exception as e:
@@ -1528,60 +1557,85 @@ class LanceDBProvider(SerialDatabaseProvider):
         provider: str,
         model: str,
     ) -> set[int]:
-        """Executor method for get_existing_embeddings - runs in DB thread."""
+        """Executor method for get_existing_embeddings - runs in DB thread.
+
+        Uses targeted native filters (and batched IN queries) instead of loading
+        the full chunks table into pandas — required for large indexes.
+        """
         if not self._chunks_table:
             return set()
 
         try:
-            # In LanceDB, we store embeddings directly in the chunks table
-            # A chunk has embeddings if the embedding field is not null AND
-            # the provider/model match what we're looking for
-            chunks_count = self._chunks_table.count_rows()
-            try:
-                all_chunks_df = self._chunks_table.head(chunks_count).to_pandas()
-            except Exception as data_error:
-                logger.error(
-                    f"LanceDB data corruption detected in chunks table: {data_error}"
-                )
-                logger.info("Attempting table recovery by recreating indexes...")
-                # Try to recover by optimizing the table
-                try:
-                    self._chunks_table.optimize()
-                    all_chunks_df = self._chunks_table.head(chunks_count).to_pandas()
-                except Exception as recovery_error:
-                    logger.error(f"Failed to recover chunks table: {recovery_error}")
-                    return set()
+            p = provider.replace("'", "''")
+            m = model.replace("'", "''")
+            existing: set[int] = set()
 
-            # Handle embeddings that are lists - pandas notna() might not work correctly with lists
-            # Also check embedding is not all zeros (defense-in-depth for legacy placeholder vectors)
-            embeddings_mask = all_chunks_df["embedding"].apply(_has_valid_embedding)
-
-            # If no specific chunk_ids provided, check all chunks
             if not chunk_ids:
-                # Find all chunks that have embeddings for this provider/model
-                existing_embeddings_df = all_chunks_df[
-                    embeddings_mask
-                    & (all_chunks_df["provider"] == provider)
-                    & (all_chunks_df["model"] == model)
-                ]
-            else:
-                # Filter to only the requested chunk IDs
-                filtered_df = all_chunks_df[all_chunks_df["id"].isin(chunk_ids)]
-                filtered_embeddings_mask = filtered_df.index.isin(
-                    all_chunks_df[embeddings_mask].index
-                )
+                # Provider/model-scoped scan (no full-table pandas).
+                try:
+                    rows = (
+                        self._chunks_table.search()
+                        .where(
+                            f"provider = '{p}' AND model = '{m}' "
+                            f"AND embedding IS NOT NULL"
+                        )
+                        .select(["id", "provider", "model", "embedding"])
+                        .to_list()
+                    )
+                except Exception:
+                    rows = (
+                        self._chunks_table.search()
+                        .where(
+                            f"provider = '{p}' AND model = '{m}' "
+                            f"AND embedding IS NOT NULL"
+                        )
+                        .to_list()
+                    )
+                rows = self._deduplicate_prefer_embedded(rows, provider, model)
+                for row in rows:
+                    if not self._chunk_needs_embedding(row, provider, model):
+                        existing.add(int(row["id"]))
+                return existing
 
-                # Find chunks that have embeddings for this provider/model
-                existing_embeddings_df = filtered_df[
-                    filtered_embeddings_mask
-                    & (filtered_df["provider"] == provider)
-                    & (filtered_df["model"] == model)
-                ]
+            # Targeted batches — avoid one huge IN list and full-table loads.
+            batch_size = 500
+            for i in range(0, len(chunk_ids), batch_size):
+                batch = [int(cid) for cid in chunk_ids[i : i + batch_size]]
+                if not batch:
+                    continue
+                ids_str = ",".join(str(cid) for cid in batch)
+                rows: list[dict[str, Any]] = []
+                try:
+                    table = self._chunks_table.to_lance().to_table(
+                        filter=f"id IN ({ids_str})",
+                        columns=["id", "provider", "model", "embedding"],
+                    )
+                    rows = table.to_pylist()
+                except Exception:
+                    try:
+                        rows = (
+                            self._chunks_table.search()
+                            .where(f"id IN ({ids_str})")
+                            .select(["id", "provider", "model", "embedding"])
+                            .to_list()
+                        )
+                    except Exception:
+                        rows = (
+                            self._chunks_table.search()
+                            .where(f"id IN ({ids_str})")
+                            .to_list()
+                        )
 
-            return set(existing_embeddings_df["id"].tolist())
+                rows = self._deduplicate_prefer_embedded(rows, provider, model)
+                for row in rows:
+                    if not self._chunk_needs_embedding(row, provider, model):
+                        existing.add(int(row["id"]))
+
+            return existing
         except Exception as e:
+            # Empty set means "nothing embedded" — never soft-fail query errors.
             logger.error(f"Error getting existing embeddings: {e}")
-            return set()
+            raise
 
     def delete_embeddings_by_chunk_id(self, chunk_id: int) -> None:
         """Delete all embeddings for a specific chunk."""
@@ -2303,12 +2357,24 @@ class LanceDBProvider(SerialDatabaseProvider):
             escaped_pattern = pattern.replace("'", "''")
             where_clause = f"regexp_match(content, '{escaped_pattern}')"
 
-            # Get all matching chunks
-            # Note: .search().where() without vector may return duplicates across fragments
-            results = self._chunks_table.search().where(where_clause).to_list()
+            # Lightweight match scan (id + file_id) then fetch full rows for the page.
+            # Avoids materializing full content for every match when paginating.
+            try:
+                id_rows = (
+                    self._chunks_table.search()
+                    .where(where_clause)
+                    .select(["id", "file_id"])
+                    .to_list()
+                )
+            except Exception as select_err:
+                logger.warning(
+                    f"Regex id-only select unavailable, loading full match rows: "
+                    f"{select_err}"
+                )
+                id_rows = self._chunks_table.search().where(where_clause).to_list()
 
             # Deduplicate across fragments (critical fix for fragmentation bug)
-            results = _deduplicate_by_id(results)
+            id_rows = _deduplicate_by_id(id_rows)
 
             # Apply path filter if provided
             if path_filter:
@@ -2317,12 +2383,27 @@ class LanceDBProvider(SerialDatabaseProvider):
                 clause = self._build_path_like_clause(normalized_path)
                 file_results = self._files_table.search().where(clause).to_list()
                 valid_file_ids = {r["id"] for r in file_results}
-                results = [r for r in results if r["file_id"] in valid_file_ids]
+                id_rows = [r for r in id_rows if r.get("file_id") in valid_file_ids]
 
-            total_count = len(results)
+            total_count = len(id_rows)
+            id_rows.sort(key=lambda r: int(r.get("id") or 0))
+            page_meta = id_rows[offset : offset + page_size]
+            if not page_meta:
+                return [], {
+                    "offset": offset,
+                    "page_size": 0,
+                    "has_more": False,
+                    "total": total_count,
+                }
 
-            # Apply pagination
-            paginated = results[offset : offset + page_size]
+            page_ids = [int(r["id"]) for r in page_meta]
+            ids_str = ",".join(str(i) for i in page_ids)
+            results = (
+                self._chunks_table.search().where(f"id IN ({ids_str})").to_list()
+            )
+            results = _deduplicate_by_id(results)
+            by_id = {int(r["id"]): r for r in results}
+            paginated = [by_id[i] for i in page_ids if i in by_id]
 
             # Format results with file paths
             file_map = self._fetch_file_paths_by_ids(

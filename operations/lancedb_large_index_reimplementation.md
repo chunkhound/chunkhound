@@ -2,7 +2,7 @@
 
 **Branch:** `lance-take2` (based on upstream `chunkhound/chunkhound` main)  
 **Reference:** fork `main` worktree at `../chunkhound-fork-lancedb-ref`  
-**Status:** Phase 2 in progress (Phase 1 complete)  
+**Status:** Phase 3 in progress (Phases 1–2 complete)  
 **Date:** 2026-07-17
 
 ## Goal
@@ -135,12 +135,23 @@ DuckDB) for cheaper filters and permanent-failure skipping. Phase 1 must work
 - Failed/partial embed page returns error (does not advance past still-missing work)
 - Existing embedding pipeline integration tests still pass when API keys available
 
-### Phase 3 — LanceDB write/read scaling
+### Phase 3 — LanceDB write/read scaling (current)
 
-- Dedup on insert/read where fragments cause duplicates
-- Optimize via existing `should_optimize` / `optimize_tables` at batch boundaries
-- Harden `get_existing_embeddings` and other full-load paths
-- Regex pagination correctness
+**In scope**
+
+- Harden `get_existing_embeddings` (no full-table `head().to_pandas()`; batched IN + prefer-embedded)
+- Post-write optimize when fragment count ≥ threshold (chunk insert + embedding insert, in-executor)
+- Regex: lightweight id scan + full-row fetch for page only; stable totals/pagination
+- Fragment-aware dedup already used on read/missing paths (prefer embedded)
+
+**Acceptance**
+
+- `get_existing_embeddings` never full-loads the table on targeted lookups (`head` / unfiltered `to_pandas`); query failures raise
+- Empty `chunk_ids` scans provider/model-matching rows only (vectors included; count callers may still be heavy on huge DBs)
+- Zero-vector placeholders are not treated as existing embeddings
+- Embedding/chunk insert runs optimize when over fragment threshold (in-executor only)
+- Regex pagination: disjoint pages, consistent total, ordered ids
+- Prior Phase 1–2 tests still green
 
 ### Phase 4 — Coordinator / realtime / config
 
@@ -200,3 +211,6 @@ DuckDB) for cheaper filters and permanent-failure skipping. Phase 1 must work
 - **2026-07-17:** Phase 2 streaming: `generate_missing_embeddings` pages via
   Phase 1 API; no full-table metadata load on hot path; tests in
   `tests/integration/test_streaming_missing_embeddings.py`.
+- **2026-07-17:** Phase 3 scaling: targeted `get_existing_embeddings`, post-write
+  fragment optimize, lighter regex pagination; tests in
+  `tests/integration/test_lancedb_large_index_scaling.py`.
