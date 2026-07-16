@@ -362,6 +362,19 @@ def test_readme_branding_assets_exist() -> None:
         ).read_text(encoding="utf-8")
 
 
+def test_social_preview_accent_dot_matches_wordmark_spacing() -> None:
+    """Accent dot sits at cx=595 after the wordmark in every site OG SVG.
+
+    cx=595 was hand-tuned for the site/public OG layout (cyan dot #0891b2/#22d3ee,
+    "Your entire engineering context..." tagline). The old cx=597 was off by 2px.
+    site/public/ is the source of truth; brand/ copies were removed to avoid drift.
+    """
+    for name in ("og-image-dark.svg", "og-image-light.svg"):
+        svg = (ROOT / "site" / "public" / name).read_text(encoding="utf-8")
+        assert '<circle cx="595" cy="64" r="8"' in svg, name
+        assert '<circle cx="597" cy="64" r="8"' not in svg, name
+
+
 def test_built_site_has_changelog_page() -> None:
     """Changelog page is built from the current root changelog content."""
     changelog = (DIST / "docs" / "changelog" / "index.html").read_text(encoding="utf-8")
