@@ -355,6 +355,20 @@ class DatabaseProvider(Protocol):
         """Perform regex search on code content (asynchronous)."""
         ...
 
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        """Batch cosine similarity between a query embedding and stored chunk embeddings.
+
+        Returns:
+            Dict mapping chunk_id to cosine similarity score (0.0 for missing embeddings).
+        """
+        ...
+
     def list_file_paths_under_directory(self, directory_prefix: str) -> list[str]:
         """Return every ``files.path`` under a relative directory prefix.
 

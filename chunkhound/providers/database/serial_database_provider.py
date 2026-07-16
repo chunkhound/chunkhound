@@ -283,6 +283,23 @@ class SerialDatabaseProvider(ABC):
             "search_regex", pattern, page_size, offset, path_filter
         )
 
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        """Async: batch cosine similarity between query embedding and stored chunk embeddings."""
+        if not hasattr(self, "_executor_get_chunk_similarities"):
+            return {}
+        return cast(
+            dict[int, float],
+            await self._execute_in_db_thread(
+                "get_chunk_similarities", chunk_ids, query_embedding, provider, model
+            ),
+        )
+
     async def get_stats_async(self) -> dict[str, int]:
         """Async variant of get_stats."""
         return cast(dict[str, int], await self._execute_in_db_thread("get_stats"))

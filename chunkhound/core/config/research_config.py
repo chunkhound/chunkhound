@@ -17,7 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # These are duplicated here to avoid circular imports between config and services.
 # If you change these values, update the corresponding constants in models.py.
 _DEFAULT_RELEVANCE_THRESHOLD = 0.5
-_DEFAULT_MAX_SYMBOLS = 5
+_DEFAULT_MAX_SYMBOLS = 3
 _DEFAULT_REGEX_AUGMENTATION_RATIO = 0.3
 _DEFAULT_REGEX_MIN_RESULTS = 20
 _DEFAULT_MAX_BOUNDARY_EXPANSION_LINES = 300

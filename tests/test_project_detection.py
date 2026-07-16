@@ -205,11 +205,81 @@ class TestProjectRootDetection:
             finally:
                 os.chdir(original_cwd)
 
-    def test_stops_at_home_directory(self):
-        """Should not walk above home directory."""
-        # This test is hard to verify without mocking, but we document the behavior
-        # The code has: while current != current.parent and current != home
-        pass
+    def test_finds_marker_when_cwd_is_home(self, monkeypatch):
+        """Should find .chunkhound.json in CWD even when CWD == Path.home().
+
+        Regression: on Windows, running a command from C:\\Users\\<name> —
+        which is both CWD and Path.home() — used to abort the walk before
+        inspecting any directory, causing a spurious "No ChunkHound project
+        found" error even when .chunkhound.json sat right in the home dir.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir).resolve()
+            (fake_home / ".chunkhound.json").touch()
+            monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(fake_home)
+                result = find_project_root()
+                assert result == fake_home
+            finally:
+                os.chdir(original_cwd)
+
+    def test_does_not_walk_above_home(self, monkeypatch):
+        """Should not walk above home even when no markers are found."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir).resolve() / "home"
+            above_home = fake_home.parent
+            fake_home.mkdir()
+            # Marker above home must be ignored.
+            (above_home / ".chunkhound.json").touch()
+            monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(fake_home)
+                with pytest.raises(SystemExit) as exc_info:
+                    find_project_root()
+                assert exc_info.value.code == 1
+            finally:
+                os.chdir(original_cwd)
+
+    def test_walk_continues_past_inaccessible_parent(self, monkeypatch):
+        """Should not crash when Path.exists() raises during upward walk.
+
+        Regression: on Windows, walking up through an ACL-denied ancestor
+        (e.g. probing markers inside C:\\Users\\<name>\\) propagates
+        PermissionError out of Path.exists() and used to abort the walk
+        before reaching a valid project root higher up.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir).resolve() / "home"
+            project = fake_home / "project"
+            locked = project / "locked"
+            deep = locked / "deep"
+            deep.mkdir(parents=True)
+            (project / ".chunkhound.json").touch()
+
+            monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+            real_exists = Path.exists
+
+            def guarded_exists(self):
+                # Deny probes at or beneath `locked`; allow probes above it.
+                if self == locked or locked in self.parents:
+                    raise PermissionError("simulated ACL on locked/")
+                return real_exists(self)
+
+            monkeypatch.setattr(Path, "exists", guarded_exists)
+
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(deep)
+                result = find_project_root()
+                assert result == project
+            finally:
+                os.chdir(original_cwd)
 
     def test_multiple_nested_levels(self):
         """Should work from deeply nested directories."""

@@ -4162,6 +4162,33 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "total": 0,
             }
 
+    def _executor_get_chunk_similarities(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        """Executor: batch cosine similarity between query embedding and stored chunk embeddings."""
+        if not chunk_ids:
+            return {}
+        dims = len(query_embedding)
+        table_name = f"embeddings_{dims}"
+        if not self._executor_table_exists(conn, state, table_name):
+            return {}
+        placeholders = ", ".join(["?"] * len(chunk_ids))
+        query = f"""
+            SELECT e.chunk_id,
+                   array_cosine_similarity(e.embedding, ?::FLOAT[{dims}]) as similarity
+            FROM {table_name} e
+            WHERE e.chunk_id IN ({placeholders})
+              AND e.provider = ? AND e.model = ?
+        """
+        rows = conn.execute(query, [query_embedding, *chunk_ids, provider, model]).fetchall()
+        return {int(row[0]): float(row[1]) for row in rows}
+
     def find_similar_chunks(
         self,
         chunk_id: int,

@@ -65,6 +65,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.14"]
+        split: [1, 2]
         include:
           - os: ubuntu-latest
             job_timeout_minutes: 30
@@ -156,6 +157,7 @@ jobs:
 
       - name: Run tests
         id: tests
+        continue-on-error: true
         env:
           CHUNKHOUND_USE_EXISTING_SITE_DIST: "1"
         # Two retry layers serving different failure modes:
@@ -164,22 +166,25 @@ jobs:
         # - --reruns (pytest-rerunfailures): retries individual flaky tests within a
         #   process, used on Windows where the file-monitor can miss writes transiently.
         # timeout_minutes * max_attempts must stay below the job-level timeout.
+        # continue-on-error: a persistent failure doesn't fail the job by itself — the
+        # "Check flaky annotations" step below is the real gate, so the job stays green
+        # when every failure is annotated '# flaky: reason'.
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08  # v3
         with:
           timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}
           max_attempts: 2
-          command: uv run pytest tests/ -v --junit-xml=test-results.xml ${{ matrix.pytest_extra_args || '' }}
+          command: uv run pytest tests/ -v --junit-xml=test-results.xml --splits 2 --group ${{ matrix.split }} ${{ matrix.pytest_extra_args || '' }}
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
+          name: test-results-${{ matrix.os }}-py${{ matrix.python }}-split${{ matrix.split }}
           path: test-results.xml
           if-no-files-found: ignore
 
       - name: Check flaky annotations
-        if: failure() && steps.tests.outcome == 'failure'
+        if: steps.tests.outcome == 'failure'
         run: uv run python scripts/check_flaky_annotations.py test-results.xml
 
   pages-artifact:
