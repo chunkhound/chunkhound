@@ -47,7 +47,8 @@ async def _run(provider_name: str, chunk_count: int, page_size: int, work_dir: P
         cfg = DatabaseConfig(
             path=work_dir,
             provider="lancedb",
-            lancedb_optimize_fragment_threshold=50,
+            # Match product DatabaseConfig default (L4: thr=50 no better, thr≥200 hurts wall)
+            lancedb_optimize_fragment_threshold=100,
         )
         provider = LanceDBProvider(str(cfg.get_db_path()), base_directory=work_dir, config=cfg)
     else:

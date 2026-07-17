@@ -213,6 +213,29 @@ seed*, not as an absolute wall gate vs the L2-fix ~336s figure.
 3. Fake embed is ~18% — real Voyage will dominate this slice; do not over-optimize it under fake.  
 4. Chunk model construction is negligible.
 
+### L4 — optimize fragment threshold A/B (wall gate)
+
+Harness: `--optimize-ladder` / `--optimize-threshold` (soak default now **100** = product).
+
+**50k defer ladder:**
+
+| thr | wall_s | opt_n / opt_s | mi_s | write_s | peak MB |
+|-----|--------|---------------|------|---------|---------|
+| 50 | 28.6 | 5 / 1.4 | 5.7 | 9.9 | 316 |
+| **100** | **26.4** | 4 / 1.2 | 5.9 | 10.1 | 324 |
+| 200 | 32.9 | 2 / 0.8 | 7.2 | 12.4 | 350 |
+| 500 | 59.5 | 1 / 0.9 | 12.0 | 23.3 | 459 |
+| 10000 | 57.8 | 0 / 0 | 11.8 | 22.0 | 452 |
+
+**500k thr=50 vs thr=100 (back-to-back):**
+
+| thr | wall_s | opt_n / opt_s | mi_s | file_s | write_s | remaining |
+|-----|--------|---------------|------|--------|---------|-----------|
+| 50 | 316.2 | 51 / 51.5 | 78.2 | 91.7 | 156.6 | 0 |
+| **100** | **310.6** | 49 / 50.1 | 76.5 | 90.9 | 153.3 | 0 |
+
+**Conclusion:** Raising threshold to “save optimize time” **increases** wall — fragment drag slows merge_insert *and* `insert_file`. Product default **100** is near the sweet spot; thr=50 (old soak hard-code) is no better at 500k. **No product default change.** Next wall lever is **file insert batching**, not fewer optimizes.
+
 ---
 
 ## 5. Re-evaluation: L2 and remaining ideas (wall-first)
@@ -255,8 +278,8 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 | **Done** | **L2-fix** | Revert cross-file buffer; per-file L1 flush | Beat L2 wall (~350→~336); RSS ~1.2→~1.0 GB | **Done** |
 | **Done** | **Instr** | Soak sub-phases: `seed_file_insert` / `seed_chunk_build` / `seed_embed` / `seed_chunk_write` (+ existing `db.merge_insert_s` / `optimize_s`) | Attribute wall inside seed | **Done** |
 | **P2** | **L1-hold** | Keep defer default; no clever write paths without wall gate | Protects the only proven large win (vs classic) | Hold |
-| **P3** | **L4** | Optimize threshold / fragment policy under per-file defer | Instr: **~50s optimize** inside `seed_chunk_write` on 500k | Measure; tune only if wall↓ |
-| **P3b** | **File batch** | Cheaper / batched `insert_file` (5000 serial @ ~91s) | Instr: **~30% of seed** | New candidate after L4 |
+| **Done** | **L4** | Optimize threshold A/B (50/100/200/500/10k) | **Keep product default 100**; thr≥200 **raises** wall (fragment drag on merge + file insert) | **Done** (measure, no product change) |
+| **P3** | **File batch** | Cheaper / batched `insert_file` (5000 serial @ ~91s) | Instr: **~30% of seed** — next wall lever | **Do next** |
 | **P4** | **L6** | Fixed-dim schema at first connect | One-time first-embed rewrite | Worth doing; one-shot wall |
 | **P5** | **L5** | Reindex smart-diff / hash-only skip | Product reindex wall (not cold soak) | Measure real reindex |
 | **P6** | **L3** | Residual missing scan cheaper | Residual empty on cold+defer success | Deprioritize default cold bulk |
@@ -290,7 +313,8 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 ### Next (wall-first)
 
 - [x] **Instr:** soak sub-phases `seed_file_insert` / `seed_chunk_build` / `seed_embed` / `seed_chunk_write`  
-- [ ] **L4 measure:** optimize threshold A/B on wall under per-file defer (optimize share of `seed_chunk_write`)  
+- [x] **L4 measure:** optimize threshold A/B — product **100** wins; soak default aligned to 100; do not raise  
+- [ ] **File batch:** reduce serial `insert_file` cost (~30% of seed at 500k)  
 - [ ] **L6:** fixed-size embedding schema when dims known (one-time rewrite avoidance)  
 
 ### Later (product path / real profiles)
@@ -341,7 +365,7 @@ file). Tune it for classic/residual batch size and fragment pressure, not for
 {
   "database": {
     "provider": "lancedb",
-    "lancedb_optimize_fragment_threshold": 50
+    "lancedb_optimize_fragment_threshold": 100
   },
   "indexing": {
     "defer_chunk_write": true,
@@ -350,7 +374,11 @@ file). Tune it for classic/residual batch size and fragment pressure, not for
 }
 ```
 
+L4: keep threshold **100** (do not raise to 500 “to avoid optimize”). Soak harness
+defaults to 100; use `--optimize-ladder` to re-check on a machine.
+
 ```powershell
 $env:CHUNKHOUND_INDEXING__DEFER_CHUNK_WRITE = "true"
 uv run python scripts/profile_index.py --scale --page-size 256
+uv run python scripts/profile_index.py --optimize-ladder --chunks 50000 --page-size 512
 ```

@@ -13,6 +13,9 @@ Examples:
 
   # Compare classic two-write vs deferred single-write (synthetic)
   uv run python scripts/profile_index.py --mode soak --chunks 10000 --defer-write
+
+  # L4: optimize fragment-threshold A/B (wall gate; default thr=100 = product)
+  uv run python scripts/profile_index.py --optimize-ladder --chunks 50000 --page-size 512
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ async def _run_soak(
     page_size: int,
     work_dir: Path,
     defer_write: bool,
+    optimize_threshold: int = 100,
 ) -> dict:
     """Synthetic insert + stream embed (or single-write path simulation)."""
     from chunkhound.core.config.database_config import DatabaseConfig
@@ -65,13 +69,15 @@ async def _run_soak(
             "defer_write": defer_write,
             "provider": "lancedb",
             "embed": "fake",
+            "optimize_threshold": optimize_threshold,
         }
     )
 
     cfg = DatabaseConfig(
         path=work_dir,
         provider="lancedb",
-        lancedb_optimize_fragment_threshold=50,
+        # Default matches DatabaseConfig product default (was hard-coded 50).
+        lancedb_optimize_fragment_threshold=optimize_threshold,
     )
     db = LanceDBProvider(
         str(cfg.get_db_path()), base_directory=work_dir, config=cfg
@@ -173,6 +179,7 @@ async def _run_index(
     work_dir: Path,
     defer_write: bool,
     page_size: int,
+    optimize_threshold: int = 100,
 ) -> dict:
     """Full IndexingCoordinator process_directory + generate_missing."""
     from chunkhound.core.config.config import Config
@@ -193,6 +200,7 @@ async def _run_index(
             "page_size": page_size,
             "provider": "lancedb",
             "embed": "fake",
+            "optimize_threshold": optimize_threshold,
         }
     )
 
@@ -200,7 +208,7 @@ async def _run_index(
         database=DatabaseConfig(
             path=work_dir,
             provider="lancedb",
-            lancedb_optimize_fragment_threshold=50,
+            lancedb_optimize_fragment_threshold=optimize_threshold,
         ),
         indexing=IndexingConfig(
             defer_chunk_write=defer_write,
@@ -316,6 +324,23 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--optimize-threshold",
+        type=int,
+        default=100,
+        help=(
+            "LanceDB fragment count before mid-write optimize "
+            "(default 100 = product DatabaseConfig default; applies to soak and index)"
+        ),
+    )
+    parser.add_argument(
+        "--optimize-ladder",
+        action="store_true",
+        help=(
+            "L4 A/B: soak at --chunks for thresholds 50/100/200/500/10000 "
+            "(defer only). Wall is the gate metric."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable JSON report",
@@ -327,6 +352,8 @@ def main() -> int:
         help="Keep work DB directory (default: temp, deleted on exit)",
     )
     args = parser.parse_args()
+    if args.optimize_threshold < 0:
+        parser.error("--optimize-threshold must be >= 0")
     _quiet_logs()
 
     work = args.keep_dir
@@ -369,10 +396,63 @@ def main() -> int:
         print(f"  wall_s={report.get('wall_s')}")
 
     try:
+        if args.optimize_ladder:
+            # L4: fragment-threshold A/B under defer (wall gate).
+            thresholds = [50, 100, 200, 500, 10_000]
+            rows: list[dict] = []
+            for thr in thresholds:
+                sub = work / f"opt_thr{thr}"
+                if sub.exists():
+                    shutil.rmtree(sub, ignore_errors=True)
+                sub.mkdir(parents=True, exist_ok=True)
+                t0 = time.perf_counter()
+                report = asyncio.run(
+                    _run_soak(
+                        chunks=args.chunks,
+                        page_size=args.page_size,
+                        work_dir=sub,
+                        defer_write=True,
+                        optimize_threshold=thr,
+                    )
+                )
+                report["wall_s"] = round(time.perf_counter() - t0, 4)
+                rows.append(report)
+                if not args.json:
+                    db = report.get("db", {})
+                    print(
+                        f"\n--- thr={thr} wall={report['wall_s']}s "
+                        f"opt={db.get('optimize_calls')}/{db.get('optimize_s')}s "
+                        f"mi_s={db.get('merge_insert_s')} "
+                        f"peak={report.get('peak_rss_mb')} ---"
+                    )
+                    _print_report(report)
+            if args.json:
+                print(json.dumps(rows, indent=2))
+            else:
+                print("\n=== L4 optimize-threshold ladder (defer, fake embed) ===")
+                print(
+                    f"{'thr':>6} {'wall':>8} {'opt_n':>6} {'opt_s':>8} "
+                    f"{'mi_s':>8} {'write_s':>8} {'peak_mb':>8}"
+                )
+                for r in rows:
+                    db = r.get("db", {})
+                    phases = r.get("phases_s", {})
+                    print(
+                        f"{r['meta'].get('optimize_threshold', 0):6d} "
+                        f"{r.get('wall_s', 0):8.2f} "
+                        f"{db.get('optimize_calls', 0):6d} "
+                        f"{db.get('optimize_s', 0):8.2f} "
+                        f"{db.get('merge_insert_s', 0):8.2f} "
+                        f"{phases.get('seed_chunk_write', 0):8.2f} "
+                        f"{r.get('peak_rss_mb') or 0:8.1f}"
+                    )
+            ok = all(r.get("meta", {}).get("remaining_missing", 1) == 0 for r in rows)
+            return 0 if ok else 1
+
         if args.scale:
             # DB scale ladder: only FakeEmbeddingProvider, measure classic vs defer.
             sizes = [2_000, 10_000, 25_000, 50_000]
-            rows: list[dict] = []
+            rows = []
             for n in sizes:
                 for defer in (False, True):
                     sub = work / f"n{n}_{'defer' if defer else 'classic'}"
@@ -386,6 +466,7 @@ def main() -> int:
                             page_size=args.page_size,
                             work_dir=sub,
                             defer_write=defer,
+                            optimize_threshold=args.optimize_threshold,
                         )
                     )
                     report["wall_s"] = round(time.perf_counter() - t0, 4)
@@ -426,6 +507,7 @@ def main() -> int:
                     page_size=args.page_size,
                     work_dir=work,
                     defer_write=args.defer_write,
+                    optimize_threshold=args.optimize_threshold,
                 )
             )
         else:
@@ -436,6 +518,7 @@ def main() -> int:
                     work_dir=work,
                     defer_write=args.defer_write,
                     page_size=args.page_size,
+                    optimize_threshold=args.optimize_threshold,
                 )
             )
         report["wall_s"] = round(time.perf_counter() - t0, 4)
