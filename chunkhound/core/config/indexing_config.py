@@ -49,12 +49,14 @@ class IndexingConfig(BaseModel):
     # When True (and an embedding provider is configured), new files embed in
     # memory then write chunks once with vectors — one merge_insert instead of
     # store-then-embed. Memory stays batch-bounded; reindex-with-existing-chunks
-    # still uses the classic two-write path. See operations/indexing_performance_plan.md.
+    # still uses the classic two-write path. Realtime skip_embeddings still
+    # forces classic store + residual. See operations/indexing_performance_plan.md.
     defer_chunk_write: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Embed then single-write new chunks (fewer DB ops). "
-            "Requires embedding provider; only applies when file has no prior chunks."
+            "Embed then single-write new chunks (fewer DB ops; default on). "
+            "Requires embedding provider; only applies when file has no prior chunks. "
+            "Set false to force classic store-then-embed residual path."
         ),
     )
     cleanup: bool = Field(default=True, description="Internal cleanup setting")

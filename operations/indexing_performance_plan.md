@@ -177,7 +177,7 @@ JSON artifacts (local, not committed): `profile_500k_classic.json`, `profile_500
 
 | ID | Issue | Why it hurts large repos | Next step |
 |----|--------|---------------------------|-----------|
-| **L1** | Classic two-write still default | 2× merge_insert always | Product default / flag docs; promote defer for cold index |
+| **L1** | ~~Classic two-write still default~~ | ~~2× merge_insert always~~ | **Done:** `defer_chunk_write` defaults **true** |
 | **L2** | Seed/store **many tiny merge_inserts** (per file / small db_batch) | Fixed cost × files | Batch inserts across files; raise `db_batch_size` under defer |
 | **L3** | Residual missing scan (`search().where` over growing table) | Pages still scan candidates | Indexed signature / better filter; keep keyset |
 | **L4** | Fragment growth + optimize | Spikes wall mid-run | Cooldown done; tune threshold vs LSM 0.34 |
@@ -204,7 +204,7 @@ JSON artifacts (local, not committed): `profile_500k_classic.json`, `profile_500
 - [ ] Run `--scale` ladder to 50k/100k; record in this doc if superlinear  
 - [ ] Multi-file **batched** deferred insert (reduce per-file merge_insert count)  
 - [ ] Prefer fixed-size embedding schema at first connect when fake/real dims known  
-- [ ] Consider default `defer_chunk_write=true` after more soak confidence  
+- [x] Default `defer_chunk_write=true` (L1)
 - [ ] Residual candidate scan: avoid loading `embedding` column in id candidate pass where possible  
 
 ### Later

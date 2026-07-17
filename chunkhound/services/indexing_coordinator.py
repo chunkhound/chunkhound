@@ -481,7 +481,7 @@ class IndexingCoordinator(BaseService):
         try:
             if self.config and getattr(self.config, "indexing", None):
                 return bool(
-                    getattr(self.config.indexing, "defer_chunk_write", False)
+                    getattr(self.config.indexing, "defer_chunk_write", True)
                 )
         except Exception:
             pass
