@@ -1,21 +1,42 @@
 #!/usr/bin/env python3
 """Profile indexing flow with FakeEmbeddingProvider (no API keys).
 
-Measures phase wall times, DB merge_insert/optimize counters, and peak RSS.
+Two harnesses share one entrypoint:
+
+  soak   — synthetic DB seed (no discovery/parse); isolates write+embed path.
+  full   — product IndexingCoordinator path (discover → change-detect →
+           parse → store → residual embed). Fake vectors only — embeddings are
+           meaningless for search quality but realistic for wall / RSS / Lance
+           write cost when --dims matches production (default 1024).
+
+Modes:
+  soak   DB-only synthetic seed (legacy scale / optimize ladders)
+  full   Full product index path (preferred for end-to-end tuning)
+  index  Alias of full (kept for older docs / scripts)
 
 Examples:
 
-  # Synthetic seed + stream-embed (DB-bound)
+  # DB soak (write path only)
   uv run python scripts/profile_index.py --mode soak --chunks 5000
-
-  # Full index of a directory (parse + store + residual embed)
-  uv run python scripts/profile_index.py --mode index --root . --defer-write
-
-  # Compare classic two-write vs deferred single-write (synthetic)
   uv run python scripts/profile_index.py --mode soak --chunks 10000 --defer-write
-
-  # L4: optimize fragment-threshold A/B (wall gate; default thr=100 = product)
+  uv run python scripts/profile_index.py --scale --page-size 256
   uv run python scripts/profile_index.py --optimize-ladder --chunks 50000 --page-size 512
+
+  # Full-flow cold start on synthetic corpus (recommended gate)
+  uv run python scripts/profile_index.py --mode full --corpus synthetic \\
+      --files 200 --funcs-per-file 20 --defer-write
+
+  # Full-flow on a real tree (still fake embeds)
+  uv run python scripts/profile_index.py --mode full --root . --defer-write
+
+  # Cold then resume (unchanged files should skip) into --keep-dir
+  uv run python scripts/profile_index.py --mode full --corpus synthetic \\
+      --files 100 --scenario cold --keep-dir .bench-full
+  uv run python scripts/profile_index.py --mode full --corpus synthetic \\
+      --files 100 --scenario resume --keep-dir .bench-full
+
+  # Full-flow scale ladder (synthetic cold, fake embed)
+  uv run python scripts/profile_index.py --full-scale --defer-write
 """
 
 from __future__ import annotations
@@ -33,6 +54,25 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+# Voyage-code-3-ish width: vector payload size matters for Lance add / merge.
+_DEFAULT_FULL_DIMS = 1024
+_DEFAULT_SOAK_DIMS = 32
+
+_DEFAULT_EXCLUDES = [
+    "**/.git/**",
+    "**/node_modules/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "**/.chunkhound/**",
+    "**/__pycache__/**",
+    "**/target/**",
+    "**/dist/**",
+    "**/.pytest_cache/**",
+    "**/.bench-full/**",
+    "**/chunkhound-profile-*/**",
+    "**/chunkhound-full-*/**",
+]
+
 
 def _quiet_logs() -> None:
     try:
@@ -43,6 +83,97 @@ def _quiet_logs() -> None:
         pass
 
 
+def _write_synthetic_corpus(
+    root: Path,
+    *,
+    files: int,
+    funcs_per_file: int,
+    seed: int = 0,
+) -> dict:
+    """Write a deterministic Python tree that exercises real parse+chunk.
+
+    Each file has ``funcs_per_file`` top-level functions plus a small class so
+    tree-sitter yields multiple chunks per file. Content is unique per path so
+    content-hash chunk ids stay distinct.
+    """
+    if files < 1:
+        raise ValueError("files must be >= 1")
+    if funcs_per_file < 1:
+        raise ValueError("funcs_per_file must be >= 1")
+
+    root = root.resolve()
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+
+    # Spread across packages so discovery sees multiple top-level dirs
+    # (enables parallel discovery when threshold is met).
+    n_pkgs = max(4, min(16, files // 25 or 4))
+    total_lines = 0
+    for i in range(files):
+        pkg = f"pkg_{i % n_pkgs:02d}"
+        pkg_dir = root / pkg
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        # Package markers keep import-like structure without affecting parse much.
+        init = pkg_dir / "__init__.py"
+        if not init.exists():
+            init.write_text(f'"""Synthetic package {pkg} (seed={seed})."""\n', encoding="utf-8")
+            total_lines += 1
+
+        body_lines: list[str] = [
+            f'"""Synthetic module m_{i:05d} (seed={seed})."""',
+            "from __future__ import annotations",
+            "",
+            f"MODULE_ID = {i}",
+            f"SEED = {seed}",
+            "",
+        ]
+        for j in range(funcs_per_file):
+            body_lines.extend(
+                [
+                    f"def fn_{i:05d}_{j:03d}(x: int = {j}, y: int = {i}) -> int:",
+                    f'    """Doc for fn_{i:05d}_{j:03d}."""',
+                    f"    # unique payload {seed}-{i}-{j}",
+                    f"    acc = x + y + {j} + MODULE_ID",
+                    "    for k in range(3):",
+                    "        acc += k * SEED",
+                    "    return acc",
+                    "",
+                ]
+            )
+        body_lines.extend(
+            [
+                f"class Widget_{i:05d}:",
+                f'    """Class body for file {i}."""',
+                f"    tag = {i}",
+                "",
+                "    def run(self, n: int = 1) -> int:",
+                f"        return fn_{i:05d}_000(n) + self.tag",
+                "",
+                f"def main_{i:05d}() -> None:",
+                f"    w = Widget_{i:05d}()",
+                "    print(w.run())",
+                "",
+                f'if __name__ == "__main__":',
+                f"    main_{i:05d}()",
+                "",
+            ]
+        )
+        text = "\n".join(body_lines)
+        path = pkg_dir / f"m_{i:05d}.py"
+        path.write_text(text, encoding="utf-8")
+        total_lines += text.count("\n") + 1
+
+    return {
+        "files": files,
+        "funcs_per_file": funcs_per_file,
+        "packages": n_pkgs,
+        "approx_lines": total_lines,
+        "seed": seed,
+        "root": str(root),
+    }
+
+
 async def _run_soak(
     *,
     chunks: int,
@@ -50,6 +181,7 @@ async def _run_soak(
     work_dir: Path,
     defer_write: bool,
     optimize_threshold: int = 100,
+    dims: int = _DEFAULT_SOAK_DIMS,
 ) -> dict:
     """Synthetic insert + stream embed (or single-write path simulation)."""
     from chunkhound.core.config.database_config import DatabaseConfig
@@ -69,6 +201,7 @@ async def _run_soak(
             "defer_write": defer_write,
             "provider": "lancedb",
             "embed": "fake",
+            "dims": dims,
             "optimize_threshold": optimize_threshold,
         }
     )
@@ -85,7 +218,7 @@ async def _run_soak(
     db.set_index_profile(profile)
     db.connect()
     try:
-        fake = FakeEmbeddingProvider(dims=32, batch_size=page_size)
+        fake = FakeEmbeddingProvider(dims=dims, batch_size=page_size)
         files_n = max(1, chunks // 100)
         per = chunks // files_n
         rem = chunks % files_n
@@ -180,15 +313,24 @@ async def _run_soak(
         db.disconnect()
 
 
-async def _run_index(
+async def _run_full(
     *,
     root: Path,
-    work_dir: Path,
+    db_dir: Path,
     defer_write: bool,
     page_size: int,
     optimize_threshold: int = 100,
+    dims: int = _DEFAULT_FULL_DIMS,
+    scenario: str = "cold",
+    force_reindex: bool = False,
+    cleanup: bool = False,
+    per_file_timeout_seconds: float = 60.0,
 ) -> dict:
-    """Full IndexingCoordinator process_directory + generate_missing."""
+    """Full product path: discover → change-detect → parse → store → residual.
+
+    Embeddings use FakeEmbeddingProvider (no network). Vectors are not useful for
+    semantic quality, but vector width (``dims``) still stresses Lance writes.
+    """
     from chunkhound.core.config.config import Config
     from chunkhound.core.config.database_config import DatabaseConfig
     from chunkhound.core.config.embedding_config import EmbeddingConfig
@@ -198,29 +340,49 @@ async def _run_index(
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
     from tests.fixtures.fake_providers import FakeEmbeddingProvider
 
+    root = root.resolve()
+    db_dir = db_dir.resolve()
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    if scenario == "cold":
+        # Fresh DB so change-detect does not skip anything.
+        for child in list(db_dir.iterdir()):
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+
     profile = IndexProfile()
     profile.meta.update(
         {
-            "mode": "index",
-            "root": str(root.resolve()),
+            "mode": "full",
+            "scenario": scenario,
+            "root": str(root),
+            "db_dir": str(db_dir),
             "defer_write": defer_write,
             "page_size": page_size,
             "provider": "lancedb",
             "embed": "fake",
+            "dims": dims,
             "optimize_threshold": optimize_threshold,
+            "force_reindex": force_reindex,
+            "cleanup": cleanup,
         }
     )
 
     cfg = Config(
         database=DatabaseConfig(
-            path=work_dir,
+            path=db_dir,
             provider="lancedb",
             lancedb_optimize_fragment_threshold=optimize_threshold,
         ),
         indexing=IndexingConfig(
             defer_chunk_write=defer_write,
             db_batch_size=max(100, page_size),
-            cleanup=False,
+            cleanup=cleanup,
+            force_reindex=force_reindex,
+            per_file_timeout_seconds=per_file_timeout_seconds,
+            per_file_timeout_min_size_kb=128,
         ),
         embedding=EmbeddingConfig(
             provider="openai",  # unused — we inject FakeEmbeddingProvider
@@ -231,37 +393,29 @@ async def _run_index(
 
     db = LanceDBProvider(
         str(cfg.database.get_db_path()),
-        base_directory=root.resolve(),
+        base_directory=root,
         config=cfg.database,
     )
     db.set_index_profile(profile)
     db.connect()
-    fake = FakeEmbeddingProvider(dims=32, batch_size=page_size)
+    fake = FakeEmbeddingProvider(dims=dims, batch_size=page_size)
     try:
         coord = IndexingCoordinator(
             database_provider=db,
-            base_directory=root.resolve(),
+            base_directory=root,
             embedding_provider=fake,  # type: ignore[arg-type]
             config=cfg,
         )
         coord.attach_index_profile(profile)
 
+        # Coordinator already records discover / change_detect / parse_store /
+        # store / store_optimize. Outer phase is total product wall for the
+        # directory pass (gate metric with generate_missing).
         with profile.phase("process_directory"):
-            # Explicit patterns so discovery does not require full CLI config layer.
             dir_result = await coord.process_directory(
-                root.resolve(),
+                root,
                 patterns=["**/*"],
-                exclude_patterns=[
-                    "**/.git/**",
-                    "**/node_modules/**",
-                    "**/.venv/**",
-                    "**/venv/**",
-                    "**/.chunkhound/**",
-                    "**/__pycache__/**",
-                    "**/target/**",
-                    "**/dist/**",
-                    "**/.pytest_cache/**",
-                ],
+                exclude_patterns=list(_DEFAULT_EXCLUDES),
             )
         profile.meta["dir_result"] = {
             k: dir_result.get(k)
@@ -271,63 +425,185 @@ async def _run_index(
                 "total_chunks",
                 "skipped",
                 "skipped_unchanged",
+                "errors",
             )
             if k in dir_result
         }
 
-        if not defer_write:
-            with profile.phase("generate_missing"):
-                emb_result = await coord.generate_missing_embeddings()
-            profile.meta["embed_result"] = {
-                "status": emb_result.get("status"),
-                "generated": emb_result.get("generated"),
-            }
-        else:
-            # Residual pass should be near-empty for new files under defer.
-            with profile.phase("generate_missing"):
-                emb_result = await coord.generate_missing_embeddings()
-            profile.meta["embed_result"] = {
-                "status": emb_result.get("status"),
-                "generated": emb_result.get("generated"),
-            }
+        with profile.phase("generate_missing"):
+            emb_result = await coord.generate_missing_embeddings()
+        profile.meta["embed_result"] = {
+            "status": emb_result.get("status"),
+            "generated": emb_result.get("generated"),
+        }
 
         remaining = db.get_chunks_without_embeddings_paginated(
             fake.name, fake.model, limit=20
         )
         profile.meta["remaining_missing"] = len(remaining)
+
+        files_n = int(dir_result.get("files_processed") or 0)
+        chunks_n = int(dir_result.get("total_chunks") or 0)
+        profile.meta["files_processed"] = files_n
+        profile.meta["total_chunks"] = chunks_n
+        if fake._embeddings_generated:
+            profile.meta["fake_embeddings_generated"] = fake._embeddings_generated
+            profile.meta["fake_embed_requests"] = fake._requests_made
+
         profile.sample_rss()
         return profile.as_dict()
     finally:
         db.disconnect()
 
 
+def _throughput(report: dict) -> dict:
+    """Derive files/s and chunks/s from wall and meta counts."""
+    wall = float(report.get("wall_s") or report.get("total_s") or 0.0)
+    meta = report.get("meta") or {}
+    files_n = int(meta.get("files_processed") or 0)
+    chunks_n = int(meta.get("total_chunks") or meta.get("chunks") or meta.get("ids") or 0)
+    out: dict = {}
+    if wall > 0 and files_n > 0:
+        out["files_per_s"] = round(files_n / wall, 2)
+    if wall > 0 and chunks_n > 0:
+        out["chunks_per_s"] = round(chunks_n / wall, 1)
+    return out
+
+
+def _print_report(report: dict) -> None:
+    print("=== index profile ===")
+    # Nested phases are listed flat; do not sum all phases_s keys — use
+    # total_s/wall_s, or process_directory / seed_insert as parents.
+    for k, v in report.get("phases_s", {}).items():
+        print(f"  {k:22s} {v:8.3f}s")
+    print(f"  {'TOTAL':22s} {report.get('total_s', 0):8.3f}s")
+    thr = _throughput(report)
+    if thr:
+        print(
+            f"  throughput files/s={thr.get('files_per_s', 'n/a')} "
+            f"chunks/s={thr.get('chunks_per_s', 'n/a')}"
+        )
+    print(
+        f"  rss start={report.get('start_rss_mb')} "
+        f"peak={report.get('peak_rss_mb')} MB"
+    )
+    db = report.get("db", {})
+    print(
+        "  db merge_insert calls={merge_insert_calls} "
+        "rows={merge_insert_rows} s={merge_insert_s} | "
+        "optimize calls={optimize_calls} s={optimize_s}".format(
+            merge_insert_calls=db.get("merge_insert_calls", 0),
+            merge_insert_rows=db.get("merge_insert_rows", 0),
+            merge_insert_s=db.get("merge_insert_s", 0),
+            optimize_calls=db.get("optimize_calls", 0),
+            optimize_s=db.get("optimize_s", 0),
+        )
+    )
+    print(
+        f"  db chunk_batches={db.get('chunk_insert_batches')} "
+        f"embed_batches={db.get('embedding_insert_batches')}"
+    )
+    for k, v in report.get("meta", {}).items():
+        print(f"  {k}={v}")
+    print(f"  wall_s={report.get('wall_s')}")
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--mode",
-        choices=["soak", "index"],
+        choices=["soak", "index", "full"],
         default="soak",
-        help="soak=synthetic DB path; index=full coordinator over --root",
+        help=(
+            "soak=synthetic DB path; full/index=product IndexingCoordinator "
+            "(discover+parse+store+residual) with fake embeds"
+        ),
     )
-    parser.add_argument("--chunks", type=int, default=5000)
+    parser.add_argument("--chunks", type=int, default=5000, help="Soak chunk count")
     parser.add_argument("--page-size", type=int, default=128)
+    parser.add_argument(
+        "--dims",
+        type=int,
+        default=None,
+        help=(
+            f"Fake embedding dims (soak default {_DEFAULT_SOAK_DIMS}; "
+            f"full default {_DEFAULT_FULL_DIMS} ≈ voyage-code-3 width)"
+        ),
+    )
     parser.add_argument(
         "--root",
         type=Path,
         default=None,
-        help="Directory to index (mode=index). Defaults to repo root.",
+        help="Directory to index (mode=full/index, corpus=root). Default: repo root.",
+    )
+    parser.add_argument(
+        "--corpus",
+        choices=["root", "synthetic"],
+        default="root",
+        help=(
+            "full mode source tree: root=--root (or repo); synthetic=generated "
+            "Python packages under the work dir"
+        ),
+    )
+    parser.add_argument(
+        "--files",
+        type=int,
+        default=100,
+        help="Synthetic corpus file count (excluding __init__.py packages)",
+    )
+    parser.add_argument(
+        "--funcs-per-file",
+        type=int,
+        default=15,
+        help="Functions per synthetic file (drives chunks/file roughly)",
+    )
+    parser.add_argument(
+        "--corpus-seed",
+        type=int,
+        default=0,
+        help="Seed baked into synthetic source (content uniqueness)",
+    )
+    parser.add_argument(
+        "--scenario",
+        choices=["cold", "resume"],
+        default="cold",
+        help=(
+            "cold=wipe DB then index; resume=reuse DB under --keep-dir "
+            "(unchanged files should skip). Resume requires --keep-dir."
+        ),
+    )
+    parser.add_argument(
+        "--force-reindex",
+        action="store_true",
+        help="full mode: reprocess all files even if mtime/size match",
+    )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="full mode: enable orphan cleanup (default off for clean benches)",
     )
     parser.add_argument(
         "--defer-write",
         action="store_true",
-        help="Use embed-then-single-write for new chunks",
+        help="Use embed-then-single-write for new chunks (product default path)",
     )
     parser.add_argument(
         "--scale",
         action="store_true",
         help=(
-            "Run soak ladder 2k/10k/25k/50k (fake embed) for both classic and "
-            "defer paths; prints a comparison table. Ignores --chunks."
+            "Soak ladder 2k/10k/25k/50k (fake embed) classic vs defer. "
+            "Ignores --chunks."
+        ),
+    )
+    parser.add_argument(
+        "--full-scale",
+        action="store_true",
+        help=(
+            "Full-flow synthetic cold ladder (files=50/200/500/1000) with "
+            "fake embeds; wall is the gate. Implies --mode full --corpus synthetic."
         ),
     )
     parser.add_argument(
@@ -336,7 +612,7 @@ def main() -> int:
         default=100,
         help=(
             "LanceDB fragment count before mid-write optimize "
-            "(default 100 = product DatabaseConfig default; applies to soak and index)"
+            "(default 100 = product DatabaseConfig default)"
         ),
     )
     parser.add_argument(
@@ -356,51 +632,36 @@ def main() -> int:
         "--keep-dir",
         type=Path,
         default=None,
-        help="Keep work DB directory (default: temp, deleted on exit)",
+        help=(
+            "Work directory for DB (+ synthetic corpus). Default: temp, deleted "
+            "on exit. Required for --scenario resume."
+        ),
     )
     args = parser.parse_args()
     if args.optimize_threshold < 0:
         parser.error("--optimize-threshold must be >= 0")
+    if args.scenario == "resume" and args.keep_dir is None:
+        parser.error("--scenario resume requires --keep-dir (reuse prior cold DB)")
+    if args.files < 1:
+        parser.error("--files must be >= 1")
+    if args.funcs_per_file < 1:
+        parser.error("--funcs-per-file must be >= 1")
+    if args.dims is not None and args.dims < 1:
+        parser.error("--dims must be >= 1")
     _quiet_logs()
 
     work = args.keep_dir
     cleanup = False
     if work is None:
-        work = Path(tempfile.mkdtemp(prefix="chunkhound-profile-"))
+        work = Path(tempfile.mkdtemp(prefix="chunkhound-full-"))
         cleanup = True
     else:
         work.mkdir(parents=True, exist_ok=True)
 
-    def _print_report(report: dict) -> None:
-        print("=== index profile ===")
-        # Nested phases (e.g. seed_* under seed_insert) are listed flat; do not
-        # sum all phases_s keys — use total_s/wall_s, or seed_insert as parent.
-        for k, v in report.get("phases_s", {}).items():
-            print(f"  {k:20s} {v:8.3f}s")
-        print(f"  {'TOTAL':20s} {report.get('total_s', 0):8.3f}s")
-        print(
-            f"  rss start={report.get('start_rss_mb')} "
-            f"peak={report.get('peak_rss_mb')} MB"
-        )
-        db = report.get("db", {})
-        print(
-            "  db merge_insert calls={merge_insert_calls} "
-            "rows={merge_insert_rows} s={merge_insert_s} | "
-            "optimize calls={optimize_calls} s={optimize_s}".format(
-                merge_insert_calls=db.get("merge_insert_calls", 0),
-                merge_insert_rows=db.get("merge_insert_rows", 0),
-                merge_insert_s=db.get("merge_insert_s", 0),
-                optimize_calls=db.get("optimize_calls", 0),
-                optimize_s=db.get("optimize_s", 0),
-            )
-        )
-        print(
-            f"  db chunk_batches={db.get('chunk_insert_batches')} "
-            f"embed_batches={db.get('embedding_insert_batches')}"
-        )
-        for k, v in report.get("meta", {}).items():
-            print(f"  {k}={v}")
-        print(f"  wall_s={report.get('wall_s')}")
+    def _dims_for(mode: str) -> int:
+        if args.dims is not None:
+            return args.dims
+        return _DEFAULT_FULL_DIMS if mode in ("full", "index") else _DEFAULT_SOAK_DIMS
 
     try:
         if args.optimize_ladder:
@@ -420,9 +681,11 @@ def main() -> int:
                         work_dir=sub,
                         defer_write=True,
                         optimize_threshold=thr,
+                        dims=_dims_for("soak"),
                     )
                 )
                 report["wall_s"] = round(time.perf_counter() - t0, 4)
+                report.update(_throughput(report))
                 rows.append(report)
                 if not args.json:
                     db = report.get("db", {})
@@ -474,9 +737,11 @@ def main() -> int:
                             work_dir=sub,
                             defer_write=defer,
                             optimize_threshold=args.optimize_threshold,
+                            dims=_dims_for("soak"),
                         )
                     )
                     report["wall_s"] = round(time.perf_counter() - t0, 4)
+                    report.update(_throughput(report))
                     rows.append(report)
                     if not args.json:
                         print(
@@ -506,6 +771,82 @@ def main() -> int:
             ok = all(r.get("meta", {}).get("remaining_missing", 1) == 0 for r in rows)
             return 0 if ok else 1
 
+        if args.full_scale:
+            # Full product path scale ladder (synthetic cold only).
+            file_counts = [50, 200, 500, 1000]
+            rows = []
+            for n_files in file_counts:
+                sub = work / f"full_n{n_files}"
+                if sub.exists():
+                    shutil.rmtree(sub, ignore_errors=True)
+                sub.mkdir(parents=True, exist_ok=True)
+                corpus = sub / "corpus"
+                db_dir = sub / "db"
+                corpus_meta = _write_synthetic_corpus(
+                    corpus,
+                    files=n_files,
+                    funcs_per_file=args.funcs_per_file,
+                    seed=args.corpus_seed,
+                )
+                t0 = time.perf_counter()
+                report = asyncio.run(
+                    _run_full(
+                        root=corpus,
+                        db_dir=db_dir,
+                        defer_write=args.defer_write,
+                        page_size=args.page_size,
+                        optimize_threshold=args.optimize_threshold,
+                        dims=_dims_for("full"),
+                        scenario="cold",
+                        force_reindex=False,
+                        cleanup=False,
+                    )
+                )
+                report["wall_s"] = round(time.perf_counter() - t0, 4)
+                report["meta"]["corpus"] = corpus_meta
+                report.update(_throughput(report))
+                rows.append(report)
+                if not args.json:
+                    print(
+                        f"\n--- full files={n_files} defer={args.defer_write} "
+                        f"wall={report['wall_s']}s peak={report.get('peak_rss_mb')} ---"
+                    )
+                    _print_report(report)
+            if args.json:
+                print(json.dumps(rows, indent=2))
+            else:
+                print("\n=== full-flow scale (synthetic cold, fake embed) ===")
+                print(
+                    f"{'files':>8} {'chunks':>8} {'wall':>8} {'parse_store':>12} "
+                    f"{'store':>8} {'residual':>8} {'mi_s':>8} {'peak_mb':>8} "
+                    f"{'ch/s':>8}"
+                )
+                for r in rows:
+                    db = r.get("db", {})
+                    phases = r.get("phases_s", {})
+                    meta = r.get("meta", {})
+                    thr = _throughput(r)
+                    print(
+                        f"{meta.get('files_processed', 0):8d} "
+                        f"{meta.get('total_chunks', 0):8d} "
+                        f"{r.get('wall_s', 0):8.2f} "
+                        f"{phases.get('parse_store', 0):12.2f} "
+                        f"{phases.get('store', 0):8.2f} "
+                        f"{phases.get('generate_missing', 0):8.2f} "
+                        f"{db.get('merge_insert_s', 0):8.2f} "
+                        f"{r.get('peak_rss_mb') or 0:8.1f} "
+                        f"{thr.get('chunks_per_s') or 0:8.1f}"
+                    )
+            ok = all(
+                r.get("meta", {}).get("remaining_missing", 1) == 0
+                and (r.get("meta", {}).get("dir_result") or {}).get("status")
+                in ("success", "no_files")
+                and (r.get("meta", {}).get("embed_result") or {}).get("status")
+                in ("success", "complete", "deferred_in_seed")
+                for r in rows
+            )
+            return 0 if ok else 1
+
         t0 = time.perf_counter()
         if args.mode == "soak":
             report = asyncio.run(
@@ -515,20 +856,52 @@ def main() -> int:
                     work_dir=work,
                     defer_write=args.defer_write,
                     optimize_threshold=args.optimize_threshold,
+                    dims=_dims_for("soak"),
                 )
             )
         else:
-            root = args.root or _REPO_ROOT
+            # full / index — product path
+            if args.corpus == "synthetic":
+                corpus = work / "corpus"
+                # Resume keeps corpus; cold regenerates for determinism.
+                if args.scenario == "cold" or not corpus.exists():
+                    corpus_meta = _write_synthetic_corpus(
+                        corpus,
+                        files=args.files,
+                        funcs_per_file=args.funcs_per_file,
+                        seed=args.corpus_seed,
+                    )
+                else:
+                    corpus_meta = {
+                        "files": args.files,
+                        "funcs_per_file": args.funcs_per_file,
+                        "seed": args.corpus_seed,
+                        "root": str(corpus),
+                        "reused": True,
+                    }
+                root = corpus
+                db_dir = work / "db"
+            else:
+                root = (args.root or _REPO_ROOT).resolve()
+                db_dir = work / "db" if args.keep_dir else work
+                corpus_meta = {"kind": "root", "root": str(root)}
+
             report = asyncio.run(
-                _run_index(
+                _run_full(
                     root=root,
-                    work_dir=work,
+                    db_dir=db_dir,
                     defer_write=args.defer_write,
                     page_size=args.page_size,
                     optimize_threshold=args.optimize_threshold,
+                    dims=_dims_for("full"),
+                    scenario=args.scenario,
+                    force_reindex=args.force_reindex,
+                    cleanup=args.cleanup,
                 )
             )
+            report["meta"]["corpus"] = corpus_meta
         report["wall_s"] = round(time.perf_counter() - t0, 4)
+        report.update(_throughput(report))
 
         if args.json:
             print(json.dumps(report, indent=2))
@@ -536,7 +909,20 @@ def main() -> int:
             _print_report(report)
 
         remaining = report.get("meta", {}).get("remaining_missing", 0)
-        return 0 if remaining == 0 else 1
+        if remaining != 0:
+            return 1
+        if args.mode in ("full", "index"):
+            dir_status = (report.get("meta", {}).get("dir_result") or {}).get(
+                "status"
+            )
+            emb_status = (report.get("meta", {}).get("embed_result") or {}).get(
+                "status"
+            )
+            if dir_status not in (None, "success", "no_files"):
+                return 1
+            if emb_status not in (None, "success", "complete", "deferred_in_seed"):
+                return 1
+        return 0
     finally:
         if cleanup:
             shutil.rmtree(work, ignore_errors=True)

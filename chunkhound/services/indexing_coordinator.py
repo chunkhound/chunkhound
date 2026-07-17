@@ -1862,10 +1862,21 @@ class IndexingCoordinator(BaseService):
                         if (r.error or "").lower() == "timeout":
                             agg_skipped_timeout.append(str(r.file_path))
 
-                # Store this batch immediately
-                stats_part = await self._store_parsed_results(
-                    batch, store_task, cumulative_counters=store_progress_counters
-                )
+                # Store this batch immediately (serial DB path — profile as "store").
+                # parse_store wall includes concurrent parse; store isolates DB work.
+                if _prof is not None:
+                    with _prof.phase("store"):
+                        stats_part = await self._store_parsed_results(
+                            batch,
+                            store_task,
+                            cumulative_counters=store_progress_counters,
+                        )
+                else:
+                    stats_part = await self._store_parsed_results(
+                        batch,
+                        store_task,
+                        cumulative_counters=store_progress_counters,
+                    )
 
                 agg_total_files += stats_part.get("total_files", 0)
                 agg_total_chunks += stats_part.get("total_chunks", 0)
@@ -1874,7 +1885,11 @@ class IndexingCoordinator(BaseService):
 
                 # Provider-aware fragment compaction between store batches.
                 # Skipped when provider lacks get_fragment_count (e.g. DuckDB).
-                self._maybe_optimize_after_store_batch()
+                if _prof is not None:
+                    with _prof.phase("store_optimize"):
+                        self._maybe_optimize_after_store_batch()
+                else:
+                    self._maybe_optimize_after_store_batch()
 
             # Parse files (streaming progress as batches complete and store concurrently)
             # Pass files_to_process directly - preserves hash for each file

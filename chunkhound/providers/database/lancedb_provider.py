@@ -1187,57 +1187,82 @@ class LanceDBProvider(SerialDatabaseProvider):
         if self._chunks_table is None:
             self._executor_create_schema(conn, state)
 
-        # Ensure fixed-size embedding schema before first vector write.
-        first_vec = embeddings[0]
-        dims = len(first_vec)
-        self._ensure_fixed_embedding_schema(conn, dims)
+        # Pair chunks with valid embeddings only — zeros must not be labeled
+        # as complete (same L3-empty contract as insert_embeddings_batch).
+        # Invalid vectors still insert the chunk row (null emb) so residual
+        # can fill them; never drop content.
+        paired: list[tuple[Chunk, list[float]]] = []
+        invalid_chunks: list[Chunk] = []
+        for chunk, vec in zip(chunks, embeddings):
+            emb = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+            if _has_valid_embedding(emb):
+                paired.append((chunk, emb))
+            else:
+                invalid_chunks.append(chunk)
+                logger.warning(
+                    "LanceDB deferred write: invalid/zero embedding for "
+                    "symbol=%s — storing chunk without vector",
+                    getattr(chunk, "symbol", None),
+                )
 
-        schema = get_chunks_schema(dims)
-        batch_size = 1000
         all_ids: list[int] = []
         now = time.time()
-        for i in range(0, len(chunks), batch_size):
-            batch_chunks = chunks[i : i + batch_size]
-            batch_embs = embeddings[i : i + batch_size]
-            rows = []
-            ids = []
-            for chunk, vec in zip(batch_chunks, batch_embs):
-                cid = self._generate_chunk_id_safe(chunk)
-                ids.append(cid)
-                emb = vec.tolist() if hasattr(vec, "tolist") else list(vec)
-                rows.append(
-                    {
-                        "id": cid,
-                        "file_id": chunk.file_id,
-                        "content": chunk.code or "",
-                        "start_line": chunk.start_line,
-                        "end_line": chunk.end_line,
-                        "chunk_type": str(
-                            chunk.chunk_type.value
-                            if hasattr(chunk.chunk_type, "value")
-                            else chunk.chunk_type
-                        ),
-                        "language": str(
-                            chunk.language.value
-                            if hasattr(chunk.language, "value")
-                            else chunk.language
-                        ),
-                        "name": chunk.symbol or "",
-                        "embedding": emb,
-                        "provider": provider,
-                        "model": model,
-                        "created_time": now,
-                        "metadata": _serialize_metadata(chunk.metadata),
-                    }
-                )
-            tbl = pa.Table.from_pylist(rows, schema=schema)
-            # Cold deferred path: new unique ids → append beats merge_insert wall.
-            self._append_chunks(tbl, row_count=len(rows))
-            all_ids.extend(ids)
 
-        self._maybe_optimize_after_write(
-            conn, state, reason="post-deferred-chunk-insert"
-        )
+        if paired:
+            first_vec = paired[0][1]
+            dims = len(first_vec)
+            self._ensure_fixed_embedding_schema(conn, dims)
+            schema = get_chunks_schema(dims)
+            batch_size = 1000
+            for i in range(0, len(paired), batch_size):
+                batch = paired[i : i + batch_size]
+                rows = []
+                ids = []
+                for chunk, emb in batch:
+                    cid = self._generate_chunk_id_safe(chunk)
+                    ids.append(cid)
+                    rows.append(
+                        {
+                            "id": cid,
+                            "file_id": chunk.file_id,
+                            "content": chunk.code or "",
+                            "start_line": chunk.start_line,
+                            "end_line": chunk.end_line,
+                            "chunk_type": str(
+                                chunk.chunk_type.value
+                                if hasattr(chunk.chunk_type, "value")
+                                else chunk.chunk_type
+                            ),
+                            "language": str(
+                                chunk.language.value
+                                if hasattr(chunk.language, "value")
+                                else chunk.language
+                            ),
+                            "name": chunk.symbol or "",
+                            "embedding": emb,
+                            "provider": provider,
+                            "model": model,
+                            "created_time": now,
+                            "metadata": _serialize_metadata(chunk.metadata),
+                        }
+                    )
+                tbl = pa.Table.from_pylist(rows, schema=schema)
+                # Cold deferred path: new unique ids → append beats merge_insert wall.
+                self._append_chunks(tbl, row_count=len(rows))
+                all_ids.extend(ids)
+
+        if invalid_chunks:
+            # Classic text-only insert for residual to embed later.
+            all_ids.extend(
+                int(x) for x in self._executor_insert_chunks_batch(
+                    conn, state, invalid_chunks
+                )
+            )
+
+        if paired or invalid_chunks:
+            self._maybe_optimize_after_write(
+                conn, state, reason="post-deferred-chunk-insert"
+            )
         return all_ids
 
     def _ensure_fixed_embedding_schema(self, conn: Any, dims: int) -> None:
@@ -1722,6 +1747,28 @@ class LanceDBProvider(SerialDatabaseProvider):
             return 0
 
         try:
+            # Refuse zero/empty vectors as "complete" embeddings. Storing them
+            # with provider/model labels would hide chunks from the missing-
+            # clause residual scan (which deliberately does not load all
+            # labeled vectors to check for zeros — L3-empty wall fix).
+            valid_embeddings_data: list[dict] = []
+            skipped_invalid = 0
+            for e in embeddings_data:
+                emb = e.get("embedding", e.get("vector"))
+                if _has_valid_embedding(emb):
+                    valid_embeddings_data.append(e)
+                else:
+                    skipped_invalid += 1
+            if skipped_invalid:
+                logger.warning(
+                    "LanceDB: skipped %s invalid/zero embedding(s) "
+                    "(left as residual candidates; not labeled complete)",
+                    skipped_invalid,
+                )
+            embeddings_data = valid_embeddings_data
+            if not embeddings_data:
+                return 0
+
             # Determine embedding dimensions from the first embedding
             first_embedding = embeddings_data[0].get(
                 "embedding", embeddings_data[0].get("vector")
@@ -2064,6 +2111,70 @@ class LanceDBProvider(SerialDatabaseProvider):
                 best[chunk_id] = row
         return list(best.values())
 
+    def _collect_missing_embedding_ids(
+        self,
+        *,
+        provider: str,
+        model: str,
+        after: int | None,
+        limit: int,
+    ) -> list[int]:
+        """IDs needing embeddings via SQL push-down only (no vector materialization).
+
+        Matches provider/model mismatch, empty labels, or null embedding.
+        Does **not** load the embedding column — critical for empty residual wall
+        on fully-embedded tables (was O(N)×dims when scanning labeled vectors).
+
+        Does not surface rows that already have matching provider/model labels
+        with non-null all-zero vectors (legacy placeholders). New writes refuse
+        to label zero vectors as complete; upgrade those DBs with force-reindex.
+        """
+        if self._chunks_table is None or limit <= 0:
+            return []
+        p = provider.replace("'", "''")
+        m = model.replace("'", "''")
+        missing_clause = (
+            f"(provider IS NULL OR model IS NULL OR "
+            f"provider = '' OR model = '' OR "
+            f"provider != '{p}' OR model != '{m}' OR "
+            f"embedding IS NULL)"
+        )
+        if after is None:
+            id_where = missing_clause
+        else:
+            # Avoid int64 min sentinel in filters — Lance may parse as float.
+            id_where = f"{missing_clause} AND id > {after}"
+
+        try:
+            id_rows = (
+                self._chunks_table.search()
+                .where(id_where)
+                .select(["id"])
+                .to_list()
+            )
+        except Exception:
+            # Older LanceDB may not support select(); fall back to full rows
+            # (may re-materialize vectors — log so L3 win is not silently lost).
+            logger.warning(
+                "LanceDB missing-embed id select() failed; falling back to "
+                "full-row scan (slower residual empty path)"
+            )
+            id_rows = self._chunks_table.search().where(id_where).to_list()
+
+        page_ids: list[int] = []
+        seen: set[int] = set()
+        for row in sorted(id_rows, key=lambda r: int(r.get("id") or 0)):
+            row_id = int(row.get("id") or 0)
+            if after is not None and row_id <= after:
+                continue
+            if row_id in seen:
+                continue
+            seen.add(row_id)
+            page_ids.append(row_id)
+            if len(page_ids) >= limit:
+                break
+        return page_ids
+
     def _executor_get_chunks_without_embeddings_paginated(
         self,
         conn: Any,
@@ -2075,93 +2186,30 @@ class LanceDBProvider(SerialDatabaseProvider):
     ) -> list[dict[str, Any]]:
         """Executor: paginated chunks without embeddings for provider/model.
 
-        Phase 1 uses provider/model/embedding columns (no signature column).
-        A row needs work when it does not already have a *valid* embedding for
-        the requested provider/model (aligned with get_existing_embeddings).
+        Candidate collection (L3-empty / wall-critical): SQL missing-clause
+        only (provider/model mismatch or null embedding), selecting **id** —
+        no embedding vectors materialised. Empty residual on a fully-embedded
+        table is a cheap filter, not an O(N)×dims labeled scan.
 
-        Pagination:
-        - always ordered by id (keyset). ``after_id=None`` is the first page;
-          subsequent pages use ``id > after_id``.
-        - Candidate collection may scan remaining lightweight rows; Phase 3+
-          can replace this with indexed signature queries.
+        Labeled non-null all-zero placeholders are not recovered here; new
+        writes refuse to store them as complete. Force-reindex upgrades legacy
+        DBs that already contain labeled zeros.
+
+        Pagination: ordered by id (keyset). ``after_id=None`` is the first page;
+        subsequent pages use ``id > after_id``.
         """
         if self._chunks_table is None or limit <= 0:
             return []
 
         try:
-            # Escape single quotes for LanceDB where-string literals
-            p = provider.replace("'", "''")
-            m = model.replace("'", "''")
-
-            # Push-down candidates: mismatch, empty/null labels, or null embedding.
-            # Zero/invalid vectors with matching labels are recovered in Python
-            # via _chunk_needs_embedding (same rule as get_existing_embeddings).
-            missing_clause = (
-                f"(provider IS NULL OR model IS NULL OR "
-                f"provider = '' OR model = '' OR "
-                f"provider != '{p}' OR model != '{m}' OR "
-                f"embedding IS NULL)"
-            )
-
-            # Ordered keyset for both first page (after_id=None) and continuation.
-            # Collect lightweight candidates, sort by id, then fetch full rows for
-            # the page. Include labeled provider/model rows so invalid/zero
-            # embeddings with matching labels are not skipped by missing_clause.
             after: int | None = int(after_id) if after_id is not None else None
-            if after is None:
-                id_where = missing_clause
-                labeled_where = f"provider = '{p}' AND model = '{m}'"
-            else:
-                # Avoid int64 min sentinel in filters — Lance may parse as float.
-                id_where = f"{missing_clause} AND id > {after}"
-                labeled_where = (
-                    f"provider = '{p}' AND model = '{m}' AND id > {after}"
-                )
 
-            try:
-                id_rows = (
-                    self._chunks_table.search()
-                    .where(id_where)
-                    .select(["id", "provider", "model", "embedding"])
-                    .to_list()
-                )
-                try:
-                    labeled_rows = (
-                        self._chunks_table.search()
-                        .where(labeled_where)
-                        .select(["id", "provider", "model", "embedding"])
-                        .to_list()
-                    )
-                    id_rows.extend(labeled_rows)
-                except Exception:
-                    id_rows.extend(
-                        self._chunks_table.search()
-                        .where(labeled_where)
-                        .to_list()
-                    )
-            except Exception:
-                # Older LanceDB may not support select(); fall back to full rows.
-                id_rows = self._chunks_table.search().where(id_where).to_list()
-                try:
-                    id_rows.extend(
-                        self._chunks_table.search()
-                        .where(labeled_where)
-                        .to_list()
-                    )
-                except Exception:
-                    pass
-
-            id_rows = self._deduplicate_prefer_embedded(id_rows, provider, model)
-            page_ids: list[int] = []
-            for row in sorted(id_rows, key=lambda r: int(r.get("id") or 0)):
-                row_id = int(row.get("id") or 0)
-                if after is not None and row_id <= after:
-                    continue
-                if not self._chunk_needs_embedding(row, provider, model):
-                    continue
-                page_ids.append(row_id)
-                if len(page_ids) >= limit:
-                    break
+            page_ids = self._collect_missing_embedding_ids(
+                provider=provider,
+                model=model,
+                after=after,
+                limit=limit,
+            )
 
             if not page_ids:
                 return []

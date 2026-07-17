@@ -281,12 +281,17 @@ def test_paginated_duckdb_multiple_embedding_dim_tables(duckdb_provider):
 
 
 def test_paginated_lancedb_invalid_zero_embedding_still_missing(lancedb_provider):
-    """LanceDB treats zero-vector placeholders as not a valid embedding."""
+    """Zero vectors are not stored as complete embeds; residual still sees the chunk.
+
+    L3-empty: residual uses SQL missing-clause only (no full labeled-vector
+    scan). insert_embeddings_batch therefore refuses to label zero vectors so
+    they remain residual candidates.
+    """
     provider = lancedb_provider
     file_id = _insert_file(provider)
     chunk_ids = _insert_chunks(provider, file_id, 2)
 
-    # Valid embedding on first; zero-vector "embedding" on second (legacy placeholder).
+    # Valid embedding on first; zero-vector refused for second.
     _embed(provider, [chunk_ids[0]], dims=8)
     stored = provider.insert_embeddings_batch(
         [
@@ -299,7 +304,7 @@ def test_paginated_lancedb_invalid_zero_embedding_still_missing(lancedb_provider
             }
         ]
     )
-    assert stored == 1
+    assert stored == 0
 
     page = provider.get_chunks_without_embeddings_paginated(
         "test", "test-model", limit=100
@@ -309,15 +314,15 @@ def test_paginated_lancedb_invalid_zero_embedding_still_missing(lancedb_provider
     assert chunk_ids[1] in returned
 
 
-def test_paginated_lancedb_keyset_includes_zero_vector_labeled_chunks(
+def test_paginated_lancedb_keyset_includes_chunks_after_zero_insert_refused(
     lancedb_provider,
 ):
-    """Keyset walk must surface invalid labeled embeddings (not only unlabeled)."""
+    """Keyset walk still covers chunks when zero-vector insert is refused."""
     provider = lancedb_provider
     file_id = _insert_file(provider)
     chunk_ids = _insert_chunks(provider, file_id, 4)
 
-    # Two valid, one zero-vector labeled, one completely unembedded.
+    # Two valid; zero insert refused (stays missing); one never embedded.
     _embed(provider, chunk_ids[:2], dims=8)
     stored = provider.insert_embeddings_batch(
         [
@@ -330,7 +335,7 @@ def test_paginated_lancedb_keyset_includes_zero_vector_labeled_chunks(
             }
         ]
     )
-    assert stored == 1
+    assert stored == 0
 
     walked = _walk_pages(
         provider, provider_name="test", model="test-model", limit=2

@@ -338,4 +338,6 @@ HUMAN_REVIEW.md
 
 # local profile harness output
 profile_*.json
+.bench-full*/
+.bench-full-baseline/
 

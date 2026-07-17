@@ -101,18 +101,25 @@ As the table grows, (2) dominates even with free embeds. Missing-embed **pages a
 ### 3.4 Profiling harness (fake only)
 
 ```powershell
-# Single soak
+# Single soak (DB write path only — no parse)
 uv run python scripts/profile_index.py --mode soak --chunks 10000 --page-size 256
 uv run python scripts/profile_index.py --mode soak --chunks 10000 --page-size 256 --defer-write
 
 # Scale ladder 2k/10k/25k/50k classic + defer
 uv run python scripts/profile_index.py --scale --page-size 256
 
-# Full tree index with fake (no Voyage)
-uv run python scripts/profile_index.py --mode index --root . --defer-write
+# Full product path with fake embeds (discover+parse+store+residual)
+# Prefer synthetic corpus for A/B; dims default 1024 for vector payload cost.
+uv run python scripts/profile_index.py --mode full --corpus synthetic `
+  --files 200 --funcs-per-file 20 --defer-write
+uv run python scripts/profile_index.py --full-scale --defer-write
+
+# Real tree index with fake (no Voyage)
+uv run python scripts/profile_index.py --mode full --root . --defer-write
 ```
 
-Never use Voyage for these measurements.
+**System gate for product wall** = `--mode full` (see `operations/full_flow_tuning_plan.md`).  
+Soak remains the write-path microbench. Never use Voyage for these measurements.
 
 ---
 
@@ -332,11 +339,23 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 - [ ] **L6:** fixed-size embedding schema when dims known — product safety / avoid O(N) rewrite; **not** a clean cold-start wall win  
 - [ ] **L5:** reindex smart-diff cost — incremental path only  
 
+### Full-flow gate (product path, fake embeds)
+
+- [x] **Full harness:** `--mode full` / `--full-scale` + synthetic corpus + store phase split  
+- [x] **Baseline full-flow (2026-07-17):** 200 wall ~17–23s; 1000 (~49k ch) wall **~79.5s**; ledger updated  
+- [x] **Attribute:** **store 57%** (Lance write only **7%**); **empty residual 15%**; parse ~9%  
+- [x] **P0 L3-empty residual** — missing-clause id-only; residual 11.7→**0.1s** @ 49k; wall 79.5→**71**  
+- [ ] **P1 F1** cross-file **append** batch (not L2 merge) — store still ~84% wall post-L3  
+- [ ] **P2 F5** thr ladder under full cadence after F1  
+- [ ] **P3 F2** parse only if still material  
+- See **`operations/full_flow_tuning_plan.md`** + ledger full-flow section.
+
 ### Later (product path / real profiles)
 
 - [ ] **L3:** residual scan only if residual path still appears on measured product runs  
 - [ ] Pipeline: parse ∥ embed ∥ DB with bounded queues (one DB writer) — only if wall profile shows idle DB waiting on parse  
 - [ ] Free-threaded parse only after above  
+- [ ] **Resume track:** `--scenario resume` after cold full-flow is stable  
 
 ### Parked
 
@@ -361,11 +380,12 @@ Real Voyage is only for **manual end-to-end** quality, not for deciding DB optim
 
 ## 8. References
 
-- `scripts/profile_index.py` — soak / scale / index modes  
+- `scripts/profile_index.py` — soak / scale / **full** / full-scale / resume scaffolding  
+- `operations/full_flow_tuning_plan.md` — full-flow methodology & improvement backlog  
 - `chunkhound/core/diagnostics/index_profile.py`  
 - `chunkhound/services/embedding_service.py` — `row_fields` residual path  
 - `chunkhound/providers/database/lancedb_provider.py` — deferred insert + no-re-read merge  
-- `chunkhound/services/indexing_coordinator.py` — `defer_chunk_write`  
+- `chunkhound/services/indexing_coordinator.py` — `defer_chunk_write`, profile phases  
 - `tests/fixtures/fake_providers.py` — `FakeEmbeddingProvider`  
 - `operations/lancedb_large_index_reimplementation.md` — streaming invariants  
 

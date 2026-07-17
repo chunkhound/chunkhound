@@ -129,6 +129,87 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 | **File-id** skip path lookup after insert | file 91→51s; wall 311→297 | **Keep** (product Lance path) |
 | **P3 File batch** | file 51→0.14s; wall 297→214; RSS 1.0→0.77 GB | **Keep** |
 | **Write append** | deferred path uses `add` not merge; wall 214→138; write 145→77 | **Keep** |
+| **Full-flow baseline** | store 57% wall; residual empty 15%; Lance write only 7% @ 49k | Led to L3-empty |
+| **L3-empty residual** | missing-clause id-only; no labeled vector scan; refuse zero labels | residual 11.7→0.1s; wall 79.5→71 @ 49k; **Keep** |
+
+---
+
+## Full-flow baseline (2026-07-17) — post L1/P3/append/etc.
+
+**Harness:** `scripts/profile_index.py --mode full` · fake embed · dims=**1024** · thr=100 · defer · Windows  
+**Corpus:** synthetic Python (`--funcs-per-file 20`) · cold · artifacts under `.bench-full-baseline/`  
+**Note:** All prior soak write wins are **already in place**. This is the new **product-path** baseline.
+
+### Medium gate (standalone, files=200 → 208 paths incl. `__init__`)
+
+| Metric | dims=1024 | dims=32 A/B |
+|--------|-----------|-------------|
+| **wall_s** | **22.6** | **14.9** |
+| process_directory | 14.3 | 11.5 |
+| parse_store | 13.0 | 10.3 |
+| **store** | **10.6** (47% wall) | **8.0** |
+| store_optimize | 0.17 | 0.37 |
+| generate_missing (gen=0) | **2.63** | **0.12** |
+| change_detect | 0.67 | 0.66 |
+| discover | 0.60 | 0.55 |
+| mi_calls / mi_s | 208 / 1.30 | 208 / 1.32 |
+| chunks / ch/s | 9808 / 434 | 9808 / 656 |
+| peak RSS MB | 270 | 273 |
+| remaining_missing | 0 | 0 |
+
+**dims A/B takeaway:** Lance write time (~mi_s) **unchanged**; wall drop is mostly residual scan + some store overhead when vectors are narrower. Fake embed at 1024 is **not** the whole store cost (store still ~8s at dims=32).
+
+### Full-scale ladder (cold, defer, dims=1024, page=128)
+
+| files* | chunks | wall_s | parse_store | store | residual | mi_s | opt_n/s | peak MB | ch/s |
+|--------|--------|--------|-------------|-------|----------|------|---------|---------|------|
+| 54 | 2454 | **8.7** | 3.9 | 2.0 | 0.66 | 0.27 | 0 / 0 | 235 | 283 |
+| 208 | 9808 | **16.8** | 11.1 | 8.7 | 2.27 | 1.16 | 2 / 0.32 | 276 | 584 |
+| 516 | 24516 | **38.1** | 24.5 | 21.0 | 5.74 | 2.69 | 5 / 1.32 | 335 | 643 |
+| 1016 | 49016 | **79.5** | 52.6 | **45.1** | **11.7** | 5.79 | 10 / 4.74 | 445 | 617 |
+
+\*file count includes package `__init__.py` (e.g. 200 modules → 208 paths).
+
+### Phase share @ ~49k chunks (1000 modules)
+
+| Phase | s | % wall |
+|-------|---|--------|
+| **store** (serial product store loop) | 45.1 | **57%** |
+| └ of which Lance write (mi_s / append) | 5.8 | **7%** |
+| └ of which store_optimize | 5.4 | **7%** |
+| └ remainder (defer fake embed + row build + file/chunk orchestration) | ~34 | **~43%** |
+| generate_missing **empty residual** | 11.7 | **15%** |
+| parse (approx parse_store − store) | ~7.5 | **~9%** |
+| change_detect | 2.8 | 4% |
+| discover | 0.8 | 1% |
+
+### Soak write reference (same day, dims=**32**, not 1024)
+
+| chunks | wall_s | seed_embed | seed_write | mi_s | ch/s | miss |
+|--------|--------|------------|------------|------|------|------|
+| 50k | **14.1** | 4.5 | 5.8 | 2.6 | 3542 | 0 |
+
+Full ~49k chunks @ 617 ch/s vs soak 50k @ 3542 ch/s → product path ~**5.7×** slower per chunk than pure DB soak (parse + per-file product store + residual + wider vectors).
+
+### Findings → next work (ranked)
+
+1. ~~**Empty residual is a first-class full-flow tax**~~ → **L3-empty done (2026-07-17)**  
+2. **Store dominates (~57% pre-L3; still ~84% of wall post-L3 @ 49k)** — Lance append only ~10% of wall; next is **F1 cross-file append batch** (per-file product overhead).  
+3. **Parse is secondary** — F2 only after F1.  
+4. **Optimize mid-store** — re-check thr under product cadence after F1.  
+5. **change_detect** — not top priority yet.
+
+### L3-empty residual (2026-07-17) — measured
+
+Root cause: residual loaded **all labeled rows with full embedding vectors** (O(N)×dims) to recover rare zero placeholders.  
+Fix: missing-clause **id-only** query; refuse to label zero vectors on insert.
+
+| Size | residual before | residual after | wall before | wall after |
+|------|----------------:|---------------:|------------:|-----------:|
+| 200 modules (~9.8k ch) | **2.63s** | **0.022s** | 22.6 | **18.3** |
+| 1000 modules (~49k ch) | **11.7s** | **0.096s** | 79.5 | **71.0** |
+
+remaining_missing=0 both sizes.
 
 ---
 
@@ -136,7 +217,10 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 
 | ID | Hypothesis | Protocol |
 |----|------------|----------|
-| **Write batch (optional)** | Cross-file chunk buffer + append after Write append | only if wall still needs cut |
+| ~~**L3-empty**~~ | ~~Empty residual scan too heavy~~ | **Done** — residual 11.7→0.1s @ 49k |
+| **F1 write batch** | Cross-file append buffer cuts store wall | full 200/1000 + soak 50k; wall gate |
+| **F5 thr@full** | thr=100 still best under product store cadence | full 1000 thr ladder after F1 |
+| **F2 parse** | only if store still leaves parse material | full phase share recheck |
 | (later) L6 / L5 | Out of cold-start scope | product safety / reindex |
 
 ---
@@ -154,6 +238,15 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 | (session) | L4 thr100 | 500k thr=100 | **310.6** | 300.6 | 90.9 | 1.1 | 54.5 | 153.3 | 76.5 | 50.1 | 1025 | 0 | prior baseline |
 | (session) | File-id skip search | 500k thr=100 | **296.6** | 285.8 | **51.2** | 1.3 | 57.8 | 174.7 | 87.0 | 55.3 | 1046 | 0 | prior |
 | (session) | P3 file batch | 500k thr=100 batch | **213.5** | 203.4 | **0.14** | 1.1 | 56.7 | 144.9 | 85.5 | 28.6 | 773 | 0 | prior |
-| (session) | Write append | 500k thr=100 append | **138.3** | 128.1 | 0.14 | 1.0 | 49.7 | **76.7** | **24.4** | 21.7 | 807 | 0 | **current baseline** |
+| (session) | Write append | 500k thr=100 append | **138.3** | 128.1 | 0.14 | 1.0 | 49.7 | **76.7** | **24.4** | 21.7 | 807 | 0 | **current soak baseline** |
+| 2026-07-17 | **full baseline** | full synth 200 fp20 dims1024 thr100 | **22.6** | — | — | — | — | store 10.6 | 1.30 | 0.38 | 270 | 0 | residual 2.6 gen=0 |
+| 2026-07-17 | full dims32 A/B | full synth 200 fp20 dims32 thr100 | **14.9** | — | — | — | — | store 8.0 | 1.32 | 0.33 | 273 | 0 | residual 0.12 |
+| 2026-07-17 | full-scale 50 | full synth 50 fp20 dims1024 | **8.7** | — | — | — | — | store 2.0 | 0.27 | 0 | 235 | 0 | 2.5k ch |
+| 2026-07-17 | full-scale 200 | full synth 200 fp20 dims1024 | **16.8** | — | — | — | — | store 8.7 | 1.16 | 0.32 | 276 | 0 | ladder |
+| 2026-07-17 | full-scale 500 | full synth 500 fp20 dims1024 | **38.1** | — | — | — | — | store 21.0 | 2.69 | 1.32 | 335 | 0 | residual 5.7 |
+| 2026-07-17 | full-scale 1000 | full synth 1000 fp20 dims1024 | **79.5** | — | — | — | — | store 45.1 | 5.79 | 4.74 | 445 | 0 | residual 11.7; **full gate** |
+| 2026-07-17 | soak 50k ref | soak 50k page128 defer dims32 | **14.1** | 10.5 | 0.01 | 0.11 | 4.5 | 5.8 | 2.6 | 0.33 | 286 | 0 | write ref |
+| 2026-07-17 | **L3-empty** | full synth 200 dims1024 | **18.3** | — | — | — | — | store 11.3 | 1.43 | 0.41 | 269 | 0 | residual **0.022** (was 2.63) |
+| 2026-07-17 | **L3-empty** | full synth 1000 dims1024 | **71.0** | — | — | — | — | store 59.6 | 7.15 | 6.04 | 422 | 0 | residual **0.096** (was 11.7); **new full gate** |
 
 *Add new rows below as work continues.*
