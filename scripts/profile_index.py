@@ -87,46 +87,53 @@ async def _run_soak(
         # Per-file deferred flush (L1). Cross-file batching (L2) raised wall.
         profile.meta["flush_policy"] = "per_file" if defer_write else "classic"
 
+        # Sub-phases under seed_insert (Instr): attribute wall, not just merge_s.
+        # Nested phase() accumulates; seed_insert ≈ sum of sub-phases.
         with profile.phase("seed_insert"):
             all_chunks: list[Chunk] = []
             all_ids: list[int] = []
             for f in range(files_n):
                 n = per + (1 if f < rem else 0)
-                file_id = int(
-                    db.insert_file(
-                        File(
-                            path=f"soak/f_{f:05d}.py",
-                            mtime=1_700_000_000.0 + f,
-                            language=Language.PYTHON,
-                            size_bytes=64 * n,
+                with profile.phase("seed_file_insert"):
+                    file_id = int(
+                        db.insert_file(
+                            File(
+                                path=f"soak/f_{f:05d}.py",
+                                mtime=1_700_000_000.0 + f,
+                                language=Language.PYTHON,
+                                size_bytes=64 * n,
+                            )
                         )
                     )
-                )
-                batch = [
-                    Chunk(
-                        file_id=file_id,
-                        code=f"def soak_{f}_{i}():\n    return {i}\n",
-                        start_line=i * 3 + 1,
-                        end_line=i * 3 + 2,
-                        chunk_type=ChunkType.FUNCTION,
-                        language=Language.PYTHON,
-                        symbol=f"soak_{f}_{i}",
-                    )
-                    for i in range(n)
-                ]
+                with profile.phase("seed_chunk_build"):
+                    batch = [
+                        Chunk(
+                            file_id=file_id,
+                            code=f"def soak_{f}_{i}():\n    return {i}\n",
+                            start_line=i * 3 + 1,
+                            end_line=i * 3 + 2,
+                            chunk_type=ChunkType.FUNCTION,
+                            language=Language.PYTHON,
+                            symbol=f"soak_{f}_{i}",
+                        )
+                        for i in range(n)
+                    ]
                 if defer_write:
-                    texts = [c.code or "" for c in batch]
-                    vecs = await fake.embed_batch(texts)
-                    vec_lists = [list(v) for v in vecs]
-                    ids = db.insert_chunks_with_embeddings_batch(
-                        batch,
-                        vec_lists,
-                        fake.name,
-                        fake.model,
-                    )
-                    all_ids.extend(int(x) for x in ids)
+                    with profile.phase("seed_embed"):
+                        texts = [c.code or "" for c in batch]
+                        vecs = await fake.embed_batch(texts)
+                        vec_lists = [list(v) for v in vecs]
+                    with profile.phase("seed_chunk_write"):
+                        ids = db.insert_chunks_with_embeddings_batch(
+                            batch,
+                            vec_lists,
+                            fake.name,
+                            fake.model,
+                        )
+                        all_ids.extend(int(x) for x in ids)
                 else:
-                    all_ids.extend(int(x) for x in db.insert_chunks_batch(batch))
+                    with profile.phase("seed_chunk_write"):
+                        all_ids.extend(int(x) for x in db.insert_chunks_batch(batch))
                     all_chunks.extend(batch)
 
         if not defer_write:
@@ -332,6 +339,8 @@ def main() -> int:
 
     def _print_report(report: dict) -> None:
         print("=== index profile ===")
+        # Nested phases (e.g. seed_* under seed_insert) are listed flat; do not
+        # sum all phases_s keys — use total_s/wall_s, or seed_insert as parent.
         for k, v in report.get("phases_s", {}).items():
             print(f"  {k:20s} {v:8.3f}s")
         print(f"  {'TOTAL':20s} {report.get('total_s', 0):8.3f}s")

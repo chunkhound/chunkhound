@@ -337,5 +337,5 @@ AGENT_REVIEW.md
 HUMAN_REVIEW.md
 
 # local profile harness output
-profile_500k_*.json
+profile_*.json
 

@@ -30,3 +30,17 @@ def test_index_profile_phases() -> None:
     assert d["phases_s"]["a"] >= 0.0
     report = p.format_report()
     assert "index profile" in report
+
+
+def test_index_profile_nested_phases_accumulate_independently() -> None:
+    """Outer and inner phase timers both accumulate (Instr soak sub-phases)."""
+    p = IndexProfile()
+    with p.phase("outer"):
+        with p.phase("inner"):
+            pass
+        with p.phase("inner"):
+            pass
+    d = p.as_dict()
+    assert "outer" in d["phases_s"]
+    assert "inner" in d["phases_s"]
+    assert d["phases_s"]["outer"] >= d["phases_s"]["inner"]

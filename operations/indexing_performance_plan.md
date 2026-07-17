@@ -190,6 +190,29 @@ JSON artifacts (local, not committed): `profile_500k_classic.json`, `profile_500
 
 **Conclusion:** L2 improved DB diagnostics but **raised wall ~18%**. L2-fix restores per-file flush: **wall better than L2** (~350→~336), **RSS back to ~1 GB**, correctness OK. Historical ~295 is not fully recovered on this run (likely machine noise + time since that baseline); gate is “beat L2 wall,” which holds. See re-evaluation below.
 
+### 500k defer — Instr sub-phases (after L2-fix, per-file)
+
+Same flush policy as L2-fix (per-file); **different run** — use for *share of
+seed*, not as an absolute wall gate vs the L2-fix ~336s figure.
+
+| Phase | s | % of seed |
+|-------|---|-----------|
+| **seed_chunk_write** | **154.3** | **51%** |
+| └ db.merge_insert_s | 77.6 | (inside write) |
+| └ db.optimize_s | 49.9 | (inside write when threshold hits) |
+| **seed_file_insert** | **91.3** | **30%** |
+| **seed_embed** (fake) | **55.1** | **18%** |
+| seed_chunk_build | 1.2 | ~0% |
+| seed_insert (sum) | 302.6 | 100% |
+| **wall_s** | **313.0** | remaining_missing=0, peak RSS ~1009 MB |
+
+**Implications (wall-first):**
+
+1. **Chunk write path is still the largest single slice** (~half of seed), of which merge+optimize ≈ 128s. **L4** (optimize policy) is the next DB knob that can move wall without L2-style batching.  
+2. **`insert_file` is ~30% of seed** (5000 serial file rows) — not free; batching/cheaper file upserts would matter more than cross-file *chunk* buffer.  
+3. Fake embed is ~18% — real Voyage will dominate this slice; do not over-optimize it under fake.  
+4. Chunk model construction is negligible.
+
 ---
 
 ## 5. Re-evaluation: L2 and remaining ideas (wall-first)
@@ -230,9 +253,10 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 | Priority | ID | Idea | Wall impact under current defaults | Verdict |
 |----------|-----|------|------------------------------------|---------|
 | **Done** | **L2-fix** | Revert cross-file buffer; per-file L1 flush | Beat L2 wall (~350→~336); RSS ~1.2→~1.0 GB | **Done** |
-| **P1** | **Instr** | Sub-phase timers in soak (file / embed / build / merge / optimize) | Stops optimizing the wrong counter; explains ~295 vs ~336 drift | **Do next** |
+| **Done** | **Instr** | Soak sub-phases: `seed_file_insert` / `seed_chunk_build` / `seed_embed` / `seed_chunk_write` (+ existing `db.merge_insert_s` / `optimize_s`) | Attribute wall inside seed | **Done** |
 | **P2** | **L1-hold** | Keep defer default; no clever write paths without wall gate | Protects the only proven large win (vs classic) | Hold |
-| **P3** | **L4** | Optimize threshold / fragment policy under per-file defer | ~57s optimize on 500k L2-fix — real wall if reducible | Measure; tune only if wall↓ |
+| **P3** | **L4** | Optimize threshold / fragment policy under per-file defer | Instr: **~50s optimize** inside `seed_chunk_write` on 500k | Measure; tune only if wall↓ |
+| **P3b** | **File batch** | Cheaper / batched `insert_file` (5000 serial @ ~91s) | Instr: **~30% of seed** | New candidate after L4 |
 | **P4** | **L6** | Fixed-dim schema at first connect | One-time first-embed rewrite | Worth doing; one-shot wall |
 | **P5** | **L5** | Reindex smart-diff / hash-only skip | Product reindex wall (not cold soak) | Measure real reindex |
 | **P6** | **L3** | Residual missing scan cheaper | Residual empty on cold+defer success | Deprioritize default cold bulk |
@@ -265,8 +289,8 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 
 ### Next (wall-first)
 
-- [ ] **Instr:** sub-phase timers (file insert / embed / build / merge / optimize)  
-- [ ] **L4 measure:** optimize threshold A/B on wall under per-file defer (~57s optimize on 500k)  
+- [x] **Instr:** soak sub-phases `seed_file_insert` / `seed_chunk_build` / `seed_embed` / `seed_chunk_write`  
+- [ ] **L4 measure:** optimize threshold A/B on wall under per-file defer (optimize share of `seed_chunk_write`)  
 - [ ] **L6:** fixed-size embedding schema when dims known (one-time rewrite avoidance)  
 
 ### Later (product path / real profiles)
