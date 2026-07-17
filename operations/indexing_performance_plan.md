@@ -178,7 +178,7 @@ JSON artifacts (local, not committed): `profile_500k_classic.json`, `profile_500
 | ID | Issue | Why it hurts large repos | Next step |
 |----|--------|---------------------------|-----------|
 | **L1** | ~~Classic two-write still default~~ | ~~2× merge_insert always~~ | **Done:** `defer_chunk_write` defaults **true** |
-| **L2** | Seed/store **many tiny merge_inserts** (per file / small db_batch) | Fixed cost × files | Batch inserts across files; raise `db_batch_size` under defer |
+| **L2** | ~~Seed/store many tiny merge_inserts~~ | ~~Fixed cost × files~~ | **Done:** cross-file deferred buffer flushes at `db_batch_size` |
 | **L3** | Residual missing scan (`search().where` over growing table) | Pages still scan candidates | Indexed signature / better filter; keep keyset |
 | **L4** | Fragment growth + optimize | Spikes wall mid-run | Cooldown done; tune threshold vs LSM 0.34 |
 | **L5** | Reindex smart-diff loads all file chunks | Large files | Hash-only skip more often; optional chunk-level signatures |
@@ -194,18 +194,18 @@ JSON artifacts (local, not committed): `profile_500k_classic.json`, `profile_500
 ### Done
 
 - [x] Profile harness + DB counters + RSS (`scripts/profile_index.py`, `IndexProfile`)  
-- [x] Deferred single write for **new** files (flagged)  
+- [x] Deferred single write for **new** files  
 - [x] Residual embed **no re-read** when page carries row fields  
 - [x] Optimize cooldown  
-- [x] Fake-only scale soaks (2k / 10k)  
+- [x] Fake-only scale soaks (2k / 10k / 500k)  
+- [x] Default `defer_chunk_write=true` (**L1**)  
+- [x] Cross-file deferred buffer at `db_batch_size` (**L2**) — 10k soak: **100 → 10** merge_inserts  
 
 ### Next (DB scale)
 
-- [ ] Run `--scale` ladder to 50k/100k; record in this doc if superlinear  
-- [ ] Multi-file **batched** deferred insert (reduce per-file merge_insert count)  
-- [ ] Prefer fixed-size embedding schema at first connect when fake/real dims known  
-- [x] Default `defer_chunk_write=true` (L1)
-- [ ] Residual candidate scan: avoid loading `embedding` column in id candidate pass where possible  
+- [ ] Prefer fixed-size embedding schema at first connect when dims known (**L6**)  
+- [ ] Residual candidate scan: avoid loading `embedding` column in id candidate pass (**L3**)  
+- [ ] Optional 500k re-soak after L2 (expect ~500 flushes vs 5000)
 
 ### Later
 

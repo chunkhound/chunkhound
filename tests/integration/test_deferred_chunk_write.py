@@ -160,6 +160,70 @@ async def test_classic_then_residual_clears_missing(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cross_file_deferred_buffer_fewer_merge_inserts(
+    tmp_path: Path,
+) -> None:
+    """Many small files should share merge_insert flushes (L2)."""
+    from chunkhound.core.diagnostics.index_profile import IndexProfile
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(20):
+        (src / f"f{i:02d}.py").write_text(f"def f{i}():\n    return {i}\n")
+
+    db_dir = tmp_path / "db"
+    cfg = Config(
+        database=DatabaseConfig(
+            path=db_dir,
+            provider="lancedb",
+            lancedb_optimize_fragment_threshold=10_000,
+        ),
+        # Small flush threshold so 20 tiny files still exercise buffering.
+        indexing=IndexingConfig(
+            defer_chunk_write=True,
+            cleanup=False,
+            db_batch_size=50,  # > chunks per file (~1-2) so multiple files per flush
+        ),
+        embedding=EmbeddingConfig(
+            provider="openai", model="fake-embeddings", batch_size=50
+        ),
+    )
+    db = LanceDBProvider(
+        str(cfg.database.get_db_path()),
+        base_directory=src,
+        config=cfg.database,
+    )
+    profile = IndexProfile()
+    db.set_index_profile(profile)
+    db.connect()
+    fake = FakeEmbeddingProvider(dims=32, batch_size=50)
+    try:
+        coord = IndexingCoordinator(
+            database_provider=db,
+            base_directory=src,
+            embedding_provider=fake,  # type: ignore[arg-type]
+            config=cfg,
+        )
+        result = await coord.process_directory(
+            src, patterns=["**/*.py"], exclude_patterns=[]
+        )
+        assert result.get("status") == "success", result
+        mi_calls = profile.db.merge_insert_calls
+        # 20 files × 1 insert would be 20; with buffer we expect fewer chunk merges.
+        # (file table merge_inserts also exist — count only chunk path via batches.)
+        assert profile.db.chunk_insert_batches < 20, (
+            f"expected cross-file flush, got chunk_insert_batches="
+            f"{profile.db.chunk_insert_batches} merge_insert_calls={mi_calls}"
+        )
+        missing = db.get_chunks_without_embeddings_paginated(
+            fake.name, fake.model, limit=50
+        )
+        assert missing == []
+    finally:
+        db.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_insert_chunks_with_embeddings_batch_roundtrip(
     tmp_path: Path,
 ) -> None:
