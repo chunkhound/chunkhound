@@ -134,17 +134,42 @@ Never use Voyage for these measurements.
 |------|-------|------|----------|------|----------|----------|
 | 25.8s | ~27.3s | 5.2s | **500** | 50k | 5 calls / 1.4s | ~316 MB |
 
-~1.8k chunks/s end-to-end; pure `merge_insert` ~10k rows/s.  
-**500 merge_insert calls** = still one write per synthetic file (100 chunks) — fixed per-call overhead scales with file count, not just row count → **L2 batching across files** is the next DB win.
+### 500k chunks, page 512 — **before vs after (headline)**
+
+Fake embed only. Same machine. Synthetic seed (5000 files × 100 chunks).
+
+| | **BEFORE** classic two-write | **AFTER** `defer_chunk_write` | Improvement |
+|--|------------------------------|-------------------------------|-------------|
+| **Wall clock** | **1220.6 s** (~20.3 min) | **294.8 s** (~4.9 min) | **4.1× faster** |
+| TOTAL phases | 1216.6 s | 292.2 s | −76% |
+| seed_insert | 250.1 s | 285.7 s | (includes embed+write) |
+| stream_embed | **960.3 s** | — (not needed) | **eliminated** |
+| merge_insert rows | **1_000_000** | **500_000** | **half** |
+| merge_insert calls | 6953 | 5000 | −28% |
+| merge_insert wall | 104.7 s | 69.5 s | −34% |
+| optimize calls / wall | 82 / 72.4 s | 48 / 44.6 s | −41% time |
+| peak RSS | **2080 MB** | **1019 MB** | **~half memory** |
+| remaining missing | 0 | 0 | both correct |
+
+**Throughput:** classic ~410 chunks/s → defer **~1700 chunks/s** (fake embed).
+
+**Interpretation at large-codebase scale:**
+
+1. Residual **stream_embed** is ~79% of classic wall (960/1217) — the real large-N DB tax.  
+2. Defer removes that phase entirely for cold new-file ingest.  
+3. Memory halves because we never hold a second full-table RMW pipeline / fewer concurrent full-row merges.  
+4. Still **5000 merge_insert calls** (one per file) — next win is multi-file batching (L2).
+
+JSON artifacts (local, not committed): `profile_500k_classic.json`, `profile_500k_defer.json`.
 
 **Takeaways:**
 
 1. **DB is the bottleneck** with free embeds (`stream_embed` ≫ fake compute).  
-2. **Defer halves write amplification** and wins overall wall at 10k.  
-3. Residual **no-re-read** cut classic `stream_embed` ~30% at 10k; still loses to defer because of second write + page scan.  
-4. At 50k, **call count** (many small merge_inserts) and **optimize** matter; not just row count.  
-5. For large cold indexes of **new** codebases, **default lean is `defer_chunk_write=true`** once product-ready; residual path remains for reindex / crash recovery / realtime.  
-6. Peak RSS stayed ~O(batch) (~300 MB) even at 50k — memory model is OK; do not “go faster” by loading the corpus.
+2. **Defer halves write amplification** and wins overall wall at every measured scale.  
+3. Residual **no-re-read** helps classic residual; at 500k, **avoiding residual entirely** via defer is the step-change.  
+4. At 50k–500k, **call count** (many small merge_inserts) and **optimize** matter; not just row count.  
+5. For large cold indexes of **new** codebases, **default lean is `defer_chunk_write=true`**.  
+6. Peak RSS at 500k defer ~1 GB still batch-dominated vs classic ~2 GB — do not load the corpus to go faster.
 
 ---
 
