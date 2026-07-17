@@ -224,7 +224,7 @@ seed*, not as an absolute wall gate vs the L2-fix ~336s figure.
 
 ### L4 — optimize fragment threshold A/B (wall gate)
 
-Harness: `--optimize-ladder` / `--optimize-threshold` (soak default now **100** = product).
+Harness: `--optimize-ladder` / `--optimize-threshold` (historical soak default **100**).
 
 **50k defer ladder:**
 
@@ -243,7 +243,9 @@ Harness: `--optimize-ladder` / `--optimize-threshold` (soak default now **100** 
 | 50 | 316.2 | 51 / 51.5 | 78.2 | 91.7 | 156.6 | 0 |
 | **100** | **310.6** | 49 / 50.1 | 76.5 | 90.9 | 153.3 | 0 |
 
-**Conclusion:** Raising threshold to “save optimize time” **increases** wall — fragment drag slows merge_insert *and* `insert_file`. Product default **100** is near the sweet spot; thr=50 (old soak hard-code) is no better at 500k. **No product default change.** Next wall lever is **file insert batching**, not fewer optimizes.
+**Conclusion (L4 soak era):** Raising threshold to “save optimize time” **increases** wall — fragment drag slows merge_insert *and* `insert_file`. On soak, thr=100 edged thr=50; thr≥200 hurts.  
+
+**Superseded for product default by F5:** full-flow + F1 cadence prefers thr=**50** at ~49k chunks (see §5 F5 / ledger). Product default is now **50**.
 
 ---
 
@@ -287,14 +289,14 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 | **Done** | **L2-fix** | Revert cross-file buffer; per-file L1 flush | Beat L2 wall (~350→~336); RSS ~1.2→~1.0 GB | **Done** |
 | **Done** | **Instr** | Soak sub-phases: `seed_file_insert` / `seed_chunk_build` / `seed_embed` / `seed_chunk_write` (+ existing `db.merge_insert_s` / `optimize_s`) | Attribute wall inside seed | **Done** |
 | **P2** | **L1-hold** | Keep defer default; no clever write paths without wall gate | Protects the only proven large win (vs classic) | Hold |
-| **Done** | **L4** | Optimize threshold A/B (50/100/200/500/10k) | **Keep product default 100**; thr≥200 **raises** wall (fragment drag on merge + file insert) | **Done** (measure, no product change) |
+| **Done** | **L4** | Optimize threshold A/B (soak) | Soak preferred thr=100; thr≥200 **raises** wall | **Done** (soak) |
 | **Done** | **File-id** | Skip post-`insert_file` path search; return pre-assigned id | file 91→51s; wall 311→297 at 500k | **Done** |
 | **Done** | **File batch (P3)** | `insert_files_batch` multi-file merge | file 51→**0.14s**; wall 297→**214**; peak **0.77 GB** | **Done** |
 | **Done** | **Write append** | Deferred chunk write uses `add` (new ids) not merge_insert | wall 214→**138**; write 145→**77**; mi_s 85→**24** | **Done** |
 | **Done** | **F1 Write batch** | Cross-file deferred buffer + **append** (`defer_flush_chunks=1000`) | full 1000: wall **~70→61s**; batches 1016→254; RSS↓ | **Done** (default 1000) |
 | **Done** | **L3-empty** | Residual missing-clause id-only (no labeled vector scan) | residual 11.7→0.1s; wall 79.5→71 @ 49k full-flow | **Done** |
-| **P2** | **F5 thr@full** | Optimize threshold under product store cadence | after F1 | **Next** |
-| **P3** | **F2 parse** | Parse∥store balance | only if still material after F1 | Pending |
+| **Done** | **F5 thr@full** | Full-flow thr ladder under F1 | thr=**50** best @ 49k (~46s vs ~49–53 thr=100) | **Product default 50** |
+| **P3** | **F2 parse** | Parse∥store balance | only if still material | Pending |
 | **Out of cold-start scope** | **L6** | Fixed-dim schema when dims known | One-shot footgun (O(rows) only if variable schema already full); **does not improve clean cold index wall** when empty/fixed schema | Later product safety |
 | **Out of cold-start scope** | **L5** | Reindex smart-diff / hash-only | **Incremental reindex**, not cold bulk | Later reindex profile |
 | **Later** | **L7** | Parse ∥ pipeline / free-threading | After DB path wall-stable | Profile first |
@@ -330,7 +332,8 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 ### Next (wall-first)
 
 - [x] **Instr:** soak sub-phases `seed_file_insert` / `seed_chunk_build` / `seed_embed` / `seed_chunk_write`  
-- [x] **L4 measure:** optimize threshold A/B — product **100** wins; soak default aligned to 100; do not raise  
+- [x] **L4 measure:** soak thr A/B — thr=100 ok on soak; thr≥200 hurts  
+- [x] **F5 full-flow thr:** under F1, thr=**50** wins wall @ 49k → product default **50**  
 - [x] **File-id:** skip post-`insert_file` path search (500k file ~91→51s, wall ~311→297)  
 - [x] **File batch (P3):** multi-file `insert_files_batch` (500k file ~51→0.14s, wall ~297→214)  
 - [x] **Write append:** deferred `insert_chunks_with_embeddings` uses append (500k wall ~214→138)  
@@ -348,7 +351,7 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 - [x] **Attribute:** **store 57%** (Lance write only **7%**); **empty residual 15%**; parse ~9%  
 - [x] **P0 L3-empty residual** — missing-clause id-only; residual 11.7→**0.1s** @ 49k; wall 79.5→**71**  
 - [x] **P1 F1** cross-file **append** batch — wall ~70→**61s** @ 49k; batches 1016→254; default flush=1000  
-- [ ] **P2 F5** thr ladder under full cadence after F1  
+- [x] **P2 F5** thr ladder under full+F1 — thr=**50** best; product default 100→**50**  
 - [ ] **P3 F2** parse only if still material  
 - See **`operations/full_flow_tuning_plan.md`** + ledger full-flow section.
 
@@ -400,13 +403,13 @@ Real Voyage is only for **manual end-to-end** quality, not for deciding DB optim
 | `indexing.defer_chunk_write` | Embed-then-single-write new files (default true) |
 | `indexing.defer_flush_chunks` | **F1:** max chunks buffered across new files before one Lance **append** (default **1000**; `1` = per-file L1) |
 | `indexing.db_batch_size` | Classic/residual insert sizing + fragment pressure floor; F1 flush raises ceiling to `defer_flush_chunks` via `prefer_large_append` |
-| `database.lancedb_optimize_fragment_threshold` | Mid-write optimize (product **100**) |
+| `database.lancedb_optimize_fragment_threshold` | Mid-write optimize (product **50** after F5) |
 
 ```json
 {
   "database": {
     "provider": "lancedb",
-    "lancedb_optimize_fragment_threshold": 100
+    "lancedb_optimize_fragment_threshold": 50
   },
   "indexing": {
     "defer_chunk_write": true,
@@ -416,10 +419,10 @@ Real Voyage is only for **manual end-to-end** quality, not for deciding DB optim
 }
 ```
 
-L4: keep threshold **100**. Full-flow gate:
+F5: keep threshold **50** under full-flow + F1 (do not raise to 200+). Re-check:
 
 ```powershell
+uv run python scripts/profile_index.py --full-optimize-ladder --files 500 --defer-flush-chunks 1000
 uv run python scripts/profile_index.py --mode full --corpus synthetic `
-  --files 200 --funcs-per-file 20 --defer-write --defer-flush-chunks 1000
-uv run python scripts/profile_index.py --full-scale --defer-write
+  --files 1000 --funcs-per-file 20 --defer-write --optimize-threshold 50
 ```

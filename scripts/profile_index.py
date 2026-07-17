@@ -37,6 +37,10 @@ Examples:
 
   # Full-flow scale ladder (synthetic cold, fake embed)
   uv run python scripts/profile_index.py --full-scale --defer-write
+
+  # F5: full-flow optimize-threshold ladder (gate size example)
+  uv run python scripts/profile_index.py --full-optimize-ladder \\
+      --files 1000 --funcs-per-file 20 --defer-flush-chunks 1000
 """
 
 from __future__ import annotations
@@ -180,7 +184,7 @@ async def _run_soak(
     page_size: int,
     work_dir: Path,
     defer_write: bool,
-    optimize_threshold: int = 100,
+    optimize_threshold: int = 50,
     dims: int = _DEFAULT_SOAK_DIMS,
 ) -> dict:
     """Synthetic insert + stream embed (or single-write path simulation)."""
@@ -319,7 +323,7 @@ async def _run_full(
     db_dir: Path,
     defer_write: bool,
     page_size: int,
-    optimize_threshold: int = 100,
+    optimize_threshold: int = 50,
     dims: int = _DEFAULT_FULL_DIMS,
     scenario: str = "cold",
     force_reindex: bool = False,
@@ -621,10 +625,10 @@ def main() -> int:
     parser.add_argument(
         "--optimize-threshold",
         type=int,
-        default=100,
+        default=50,
         help=(
             "LanceDB fragment count before mid-write optimize "
-            "(default 100 = product DatabaseConfig default)"
+            "(default 50 = product DatabaseConfig default after F5)"
         ),
     )
     parser.add_argument(
@@ -633,6 +637,16 @@ def main() -> int:
         help=(
             "L4 A/B: soak at --chunks for thresholds 50/100/200/500/10000 "
             "(defer only). Wall is the gate metric."
+        ),
+    )
+    parser.add_argument(
+        "--full-optimize-ladder",
+        action="store_true",
+        help=(
+            "F5 A/B: full synthetic cold path for thresholds 50/100/200/500/10000 "
+            "with F1 defer flush (default --defer-flush-chunks). Wall is the gate. "
+            "Uses --files / --funcs-per-file / --dims. "
+            "Gate size: --files 1000 --funcs-per-file 20."
         ),
     )
     parser.add_argument(
@@ -676,6 +690,90 @@ def main() -> int:
         return _DEFAULT_FULL_DIMS if mode in ("full", "index") else _DEFAULT_SOAK_DIMS
 
     try:
+        if args.full_optimize_ladder:
+            # F5: product full-flow thr A/B under F1 store cadence (wall gate).
+            thresholds = [50, 100, 200, 500, 10_000]
+            rows: list[dict] = []
+            for thr in thresholds:
+                sub = work / f"full_opt_thr{thr}"
+                if sub.exists():
+                    shutil.rmtree(sub, ignore_errors=True)
+                sub.mkdir(parents=True, exist_ok=True)
+                corpus = sub / "corpus"
+                db_dir = sub / "db"
+                corpus_meta = _write_synthetic_corpus(
+                    corpus,
+                    files=args.files,
+                    funcs_per_file=args.funcs_per_file,
+                    seed=args.corpus_seed,
+                )
+                t0 = time.perf_counter()
+                report = asyncio.run(
+                    _run_full(
+                        root=corpus,
+                        db_dir=db_dir,
+                        defer_write=True,
+                        page_size=args.page_size,
+                        optimize_threshold=thr,
+                        dims=_dims_for("full"),
+                        scenario="cold",
+                        force_reindex=False,
+                        cleanup=False,
+                        defer_flush_chunks=args.defer_flush_chunks,
+                    )
+                )
+                report["wall_s"] = round(time.perf_counter() - t0, 4)
+                report["meta"]["corpus"] = corpus_meta
+                report.update(_throughput(report))
+                rows.append(report)
+                if not args.json:
+                    db = report.get("db", {})
+                    phases = report.get("phases_s", {})
+                    print(
+                        f"\n--- full thr={thr} wall={report['wall_s']}s "
+                        f"store={phases.get('store', 0):.2f}s "
+                        f"opt={db.get('optimize_calls')}/{db.get('optimize_s')}s "
+                        f"batches={db.get('chunk_insert_batches')} "
+                        f"peak={report.get('peak_rss_mb')} ---"
+                    )
+                    _print_report(report)
+            if args.json:
+                print(json.dumps(rows, indent=2))
+            else:
+                print(
+                    "\n=== F5 full-flow optimize-threshold ladder "
+                    f"(synthetic cold, F1 flush={args.defer_flush_chunks}) ==="
+                )
+                print(
+                    f"{'thr':>6} {'wall':>8} {'store':>8} {'opt_n':>6} "
+                    f"{'opt_s':>8} {'mi_s':>8} {'batches':>8} {'peak_mb':>8} "
+                    f"{'ch/s':>8}"
+                )
+                for r in rows:
+                    db = r.get("db", {})
+                    phases = r.get("phases_s", {})
+                    thr_m = _throughput(r)
+                    print(
+                        f"{r['meta'].get('optimize_threshold', 0):6d} "
+                        f"{r.get('wall_s', 0):8.2f} "
+                        f"{phases.get('store', 0):8.2f} "
+                        f"{db.get('optimize_calls', 0):6d} "
+                        f"{db.get('optimize_s', 0):8.2f} "
+                        f"{db.get('merge_insert_s', 0):8.2f} "
+                        f"{db.get('chunk_insert_batches', 0):8d} "
+                        f"{r.get('peak_rss_mb') or 0:8.1f} "
+                        f"{thr_m.get('chunks_per_s') or 0:8.1f}"
+                    )
+            ok = all(
+                r.get("meta", {}).get("remaining_missing", 1) == 0
+                and (r.get("meta", {}).get("dir_result") or {}).get("status")
+                in ("success", "no_files")
+                and (r.get("meta", {}).get("embed_result") or {}).get("status")
+                in ("success", "complete", "deferred_in_seed")
+                for r in rows
+            )
+            return 0 if ok else 1
+
         if args.optimize_ladder:
             # L4: fragment-threshold A/B under defer (wall gate).
             thresholds = [50, 100, 200, 500, 10_000]

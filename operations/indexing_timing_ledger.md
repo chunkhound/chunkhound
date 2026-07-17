@@ -12,7 +12,7 @@ Update this file after every meaningful soak. Prefer new rows over editing old o
 ## How to add a run
 
 ```powershell
-uv run python scripts/profile_index.py --mode soak --chunks N --page-size P --defer-write --optimize-threshold 100 --json
+uv run python scripts/profile_index.py --mode soak --chunks N --page-size P --defer-write --optimize-threshold 50 --json
 ```
 
 Record: date, commit/label, thr, flush policy, wall + sub-phases if present, remaining_missing, peak RSS.
@@ -82,7 +82,8 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 | 500 | 59.5 | 1 / 0.9 | 12.0 | 23.3 | 459 |
 | 10000 | 57.8 | 0 / 0 | 11.8 | 22.0 | 452 |
 
-**Takeaway:** thr≥200 **raises** wall (fragment drag). Keep product default **100**.
+**Takeaway (L4 soak):** thr≥200 **raises** wall (fragment drag). Soak preferred thr=100.  
+**F5 (full-flow + F1):** product default is **50** (see full-flow F5 rows below).
 
 ---
 
@@ -125,7 +126,8 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 | **L2** cross-file buffer | wall 295 → 350 | **Revert** |
 | **L2-fix** per-file | wall 350 → 336, RSS 1.2→1.0 GB | **Keep** |
 | **Instr** sub-phases | write 51% / file 30% / embed 18% | **Keep**; drives priority |
-| **L4** raise thr to cut optimize | thr 200+ doubles wall at 50k; 500k thr 50≈100 | **No product change**; thr=100 |
+| **L4** raise thr to cut optimize | thr 200+ doubles wall at 50k; 500k thr 50≈100 | Soak kept thr=100 then |
+| **F5** full-flow thr under F1 | thr=50 ~46s vs thr=100 ~49–53s @ 49k | **Product default 50** |
 | **File-id** skip path lookup after insert | file 91→51s; wall 311→297 | **Keep** (product Lance path) |
 | **P3 File batch** | file 51→0.14s; wall 297→214; RSS 1.0→0.77 GB | **Keep** |
 | **Write append** | deferred path uses `add` not merge; wall 214→138; write 145→77 | **Keep** |
@@ -218,8 +220,8 @@ remaining_missing=0 both sizes.
 | ID | Hypothesis | Protocol |
 |----|------------|----------|
 | ~~**L3-empty**~~ | ~~Empty residual scan too heavy~~ | **Done** — residual 11.7→0.1s @ 49k |
-| **F1 write batch** | Cross-file append buffer cuts store wall | full 200/1000 + soak 50k; wall gate |
-| **F5 thr@full** | thr=100 still best under product store cadence | full 1000 thr ladder after F1 |
+| ~~**F1 write batch**~~ | ~~Cross-file append buffer~~ | **Done** — wall ~70→61s @ 49k |
+| ~~**F5 thr@full**~~ | ~~thr under product cadence~~ | **Done** — thr=50 product default |
 | **F2 parse** | only if store still leaves parse material | full phase share recheck |
 | (later) L6 / L5 | Out of cold-start scope | product safety / reindex |
 
@@ -253,5 +255,11 @@ remaining_missing=0 both sizes.
 | 2026-07-17 | F1 flush=1000 | full 200 dims1024 | **15.3** | — | — | — | — | store 8.6 | 0.45 | 0 | 262 | 0 | batches 52 |
 | 2026-07-17 | L1 flush=1 A/B | full 200 dims1024 | **17.6** | — | — | — | — | store 10.8 | 1.36 | 0.40 | 271 | 0 | batches 208 |
 | 2026-07-17 | F1 dir-end flush | full 1000 (rejected) | **73.0** | — | — | — | — | store 60.1 | 0.66 | 0 | 397 | 0 | batches 50; **wall↑** |
+| 2026-07-17 | **F5** thr=50 | full 1000 F1 dims1024 | **45.4** / **46.0** | — | — | — | — | store ~35–36 | ~1.95 | ~1.63 | ~378 | 0 | opt 5; **best** |
+| 2026-07-17 | F5 thr=100 | full 1000 F1 dims1024 | **52.6** / **49.2** | — | — | — | — | store ~39–42 | ~2.0 | ~0.66 | ~374 | 0 | opt 2 |
+| 2026-07-17 | F5 thr=200 | full 1000 F1 dims1024 | **58.7** | — | — | — | — | store 47.7 | 1.99 | 0.45 | 386 | 0 | opt 1; worse |
+| 2026-07-17 | F5 ladder 500 | thr 50/100/200/500/10k | 25.3/**23.5**/26.4/26.2/26.4 | — | — | — | — | — | — | — | ~320 | 0 | medium: thr100 slight edge |
+
+**F5 takeaway:** under full-flow + F1, product default **50** (was 100). thr≥200 raises wall.
 
 *Add new rows below as work continues.*

@@ -190,13 +190,13 @@ Priorities below are **hypotheses** until measured under `--mode full`.
 | **F2** | Parse∥store balance (queue depth, worker count) | full; phase split store vs parse | wall↓ when store was starved or parse oversubscribed |
 | **F3** | Fake-embed CPU (dims=1024 hash vectors) vs I/O split | dims 32 vs 1024 full | Informs whether product Voyage will hide DB (it will) — still optimize DB for free-embed and for defer CPU |
 | **F4** | `db_batch_size` / page-size ladder on **full** path | full 200 | wall↓ at some size; no fragment storm |
-| **F5** | Optimize threshold re-check under **product batch cadence** | full 1000 + thr 50/100/200 | Confirm thr=100 still wins when store batches ≠ soak |
+| ~~**F5**~~ | ~~Optimize thr under product batch cadence~~ | **Done:** thr=**50** best @ 49k full+F1; product default **50** | wall gate |
 | **F6** | Change-detect / hash cost on large trees | full root + resume | Only if discover/change_detect share is material |
 | **F7** | Timeout / large-file path | full with large synthetic files | No silent skip regression; wall honesty |
 | **L5** | Reindex smart-diff | resume + force-reindex | Out of cold-start; later |
 | **L6** | Fixed embedding schema | full dims switch mid-run | Product safety, not clean cold wall |
 
-**Already done on soak (re-validate under full before claiming product):** L1 defer, File-id, P3 file batch, Write append, L4 thr=100.
+**Done (soak + full revalidated):** L1 defer, File-id, P3 file batch, Write append, L3-empty, F1, F5 thr=50.
 
 ---
 
@@ -227,8 +227,8 @@ See **`operations/indexing_timing_ledger.md` → Full-flow baseline**.
 |----------|------|-----|---------|
 | ~~**P0**~~ | ~~**L3-empty residual**~~ | **Done:** residual 11.7→0.1s @ 49k; wall 79.5→71 | residual ≪1s |
 | ~~**P1**~~ | ~~**F1 cross-file append batch**~~ | **Done:** wall ~70→**61s** @ 49k; batches 1016→254; RSS 429→375 MB; `defer_flush_chunks=1000` | full wall↓ |
-| **P2** | **F5 thr under full cadence** | opt still material (L1 had 10 opts); F1 reduced opts | re-ladder next |
-| **P3** | **F2 parse pipeline** | secondary | after F5 if needed |
+| ~~**P2**~~ | ~~**F5 thr under full cadence**~~ | **Done:** thr=**50** best @ 49k (~46s vs ~49–53 thr=100); product default **50** | thr ladder |
+| **P3** | **F2 parse pipeline** | store still dominates; parse secondary | next if wall still needed |
 | **Later** | Resume / L5 | scaffold ready | after cold stable |
 
 ### L3-empty (done)
@@ -244,9 +244,17 @@ See **`operations/indexing_timing_ledger.md` → Full-flow baseline**.
 - Per-store-batch remainder flush (directory-wide single flush cut calls but **raised wall** — rejected).  
 - Prefer large append batches on flush (`prefer_large_append`).  
 
-### Next (P2 F5)
+### F5 (done)
 
-Re-ladder optimize threshold under full-flow + F1 store cadence.
+- Harness: `--full-optimize-ladder`  
+- Full synthetic 500: thr 50/100/200/500/10k — thr=**100** slightly best (~23.5s), thr≥200 ~26s  
+- Full synthetic 1000 (gate, 2×): thr=**50** ~**46s**, thr=100 ~49–53s, thr=200 ~59s  
+- **Product default** `lancedb_optimize_fragment_threshold`: **100 → 50**  
+- Do not raise thr to “avoid optimize” under F1 append cadence  
+
+### Next (P3 F2)
+
+Parse share is secondary after F1/L3; profile before investing.
 
 ---
 

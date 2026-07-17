@@ -183,7 +183,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         self.index_type = config.lancedb_index_type if config else None
         self._fragment_threshold = (
-            config.lancedb_optimize_fragment_threshold if config else 100
+            config.lancedb_optimize_fragment_threshold if config else 50
         )
         self.connection: Any | None = (
             None  # For backward compatibility only - do not use directly
