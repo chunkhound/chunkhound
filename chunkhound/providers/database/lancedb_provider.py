@@ -1423,6 +1423,159 @@ class LanceDBProvider(SerialDatabaseProvider):
         # This is a no-op since we use insert_embeddings_batch for efficiency
         return embedding.id or 0
 
+    def _normalize_embedding_vector(self, embedding: Any) -> list[float]:
+        if hasattr(embedding, "tolist"):
+            return list(embedding.tolist())
+        if not isinstance(embedding, list):
+            return list(embedding)
+        return embedding
+
+    def _row_fields_complete_for_merge(self, e: dict[str, Any]) -> bool:
+        """True when embeddings_data entry already carries full merge_insert columns."""
+        required = (
+            "file_id",
+            "content",
+            "start_line",
+            "end_line",
+            "chunk_type",
+            "language",
+            "name",
+        )
+        return all(k in e and e[k] is not None for k in required)
+
+    def _build_embedding_merge_rows(
+        self, batch: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Build full-schema rows for embedding merge_insert.
+
+        Prefer in-payload row fields (from missing-embed pages) to avoid re-reading
+        the table. Fall back to filtered Lance read only for incomplete payloads.
+        """
+        if self._chunks_table is None or not batch:
+            return []
+
+        complete: list[dict[str, Any]] = []
+        incomplete: list[dict[str, Any]] = []
+        for e in batch:
+            if self._row_fields_complete_for_merge(e):
+                complete.append(e)
+            else:
+                incomplete.append(e)
+
+        merge_data: list[dict[str, Any]] = []
+        now = time.time()
+        for e in complete:
+            emb = self._normalize_embedding_vector(
+                e.get("embedding", e.get("vector"))
+            )
+            merge_data.append(
+                {
+                    "id": int(e["chunk_id"]),
+                    "file_id": int(e["file_id"]),
+                    "content": e.get("content") or "",
+                    "start_line": int(e["start_line"]),
+                    "end_line": int(e["end_line"]),
+                    "chunk_type": e.get("chunk_type") or "",
+                    "language": e.get("language") or "",
+                    "name": e.get("name") or "",
+                    "embedding": emb,
+                    "provider": e["provider"],
+                    "model": e["model"],
+                    "created_time": float(e["created_time"])
+                    if e.get("created_time") is not None
+                    else now,
+                    "metadata": _serialize_metadata(
+                        _deserialize_metadata(e.get("metadata"))
+                    ),
+                }
+            )
+
+        if not incomplete:
+            return merge_data
+
+        # Fallback: re-read incomplete ids (legacy callers / single-id path)
+        embedding_lookup: dict[int, dict[str, Any]] = {}
+        for e in incomplete:
+            emb = self._normalize_embedding_vector(
+                e.get("embedding", e.get("vector"))
+            )
+            embedding_lookup[int(e["chunk_id"])] = {
+                "embedding": emb,
+                "provider": e["provider"],
+                "model": e["model"],
+            }
+
+        chunk_ids = list(embedding_lookup.keys())
+        chunk_ids_str = ",".join(map(str, chunk_ids))
+        try:
+            existing_df = (
+                self._chunks_table.to_lance()
+                .to_table(filter=f"id IN ({chunk_ids_str})")
+                .to_pandas()
+            )
+        except Exception as lance_err:
+            total_rows = self._chunks_table.count_rows()
+            logger.warning(
+                f"Lance SQL filter unavailable, using paginated fallback for "
+                f"{total_rows:,} rows. Error: {lance_err}"
+            )
+            page_size = 10_000
+            existing_rows: list[dict[str, Any]] = []
+            chunk_ids_set = set(chunk_ids)
+            for offset in range(0, total_rows, page_size):
+                try:
+                    batch_df = self._chunks_table.to_pandas(
+                        offset=offset, limit=page_size
+                    )
+                except TypeError:
+                    if offset == 0:
+                        all_chunks_df = self._chunks_table.to_pandas()
+                        batch_df = all_chunks_df[
+                            all_chunks_df["id"].isin(chunk_ids)
+                        ]
+                        existing_rows.extend(batch_df.to_dict("records"))
+                    break
+                matching = batch_df[batch_df["id"].isin(chunk_ids_set)]
+                if len(matching) > 0:
+                    existing_rows.extend(matching.to_dict("records"))
+                if len(existing_rows) >= len(chunk_ids):
+                    break
+            existing_df = (
+                pd.DataFrame(existing_rows) if existing_rows else pd.DataFrame()
+            )
+
+        if len(existing_df) == 0 and chunk_ids:
+            logger.warning(
+                f"Embedding update: re-read found 0/{len(chunk_ids)} rows "
+                f"(table may be empty or filter failed)"
+            )
+
+        for _, row in existing_df.iterrows():
+            chunk_id = int(row["id"])
+            if chunk_id not in embedding_lookup:
+                continue
+            emb_data = embedding_lookup[chunk_id]
+            merge_data.append(
+                {
+                    "id": row["id"],
+                    "file_id": row["file_id"],
+                    "content": row["content"],
+                    "start_line": row["start_line"],
+                    "end_line": row["end_line"],
+                    "chunk_type": row["chunk_type"],
+                    "language": row["language"],
+                    "name": row["name"],
+                    "embedding": emb_data["embedding"],
+                    "provider": emb_data["provider"],
+                    "model": emb_data["model"],
+                    "created_time": row["created_time"],
+                    "metadata": _serialize_metadata(
+                        _deserialize_metadata(row.get("metadata"))
+                    ),
+                }
+            )
+        return merge_data
+
     def insert_embeddings_batch(
         self,
         embeddings_data: list[dict],
@@ -1560,129 +1713,13 @@ class LanceDBProvider(SerialDatabaseProvider):
             total_updated = 0
 
             # Process in batches for better memory management
-            # Use read-modify-write pattern: LanceDB's when_matched_update_all()
-            # requires ALL columns in source data to match target schema
+            # LanceDB when_matched_update_all requires full row schema.
+            # Prefer caller-supplied row fields (from missing-embed page) to
+            # avoid O(batch) re-reads as the table grows — the real large-index cost.
             for i in range(0, len(embeddings_data), batch_size):
                 batch = embeddings_data[i : i + batch_size]
+                merge_data = self._build_embedding_merge_rows(batch)
 
-                # Build lookup of chunk_id -> embedding data
-                embedding_lookup = {}
-                for e in batch:
-                    embedding = e.get("embedding", e.get("vector"))
-                    # Ensure embedding is a list
-                    if hasattr(embedding, "tolist"):
-                        embedding = embedding.tolist()
-                    elif not isinstance(embedding, list):
-                        embedding = list(embedding)
-                    embedding_lookup[e["chunk_id"]] = {
-                        "embedding": embedding,
-                        "provider": e["provider"],
-                        "model": e["model"],
-                    }
-
-                # Read existing rows for these chunk IDs
-                # NOTE: Using Lance SQL filter instead of .search() because .search()
-                # may not reliably find rows with NULL embedding columns (vector search semantics)
-                chunk_ids = list(embedding_lookup.keys())
-                chunk_ids_str = ",".join(map(str, chunk_ids))
-
-                try:
-                    # Primary: Use LanceDB's native Lance filter (efficient for large tables)
-                    existing_df = (
-                        self._chunks_table.to_lance()
-                        .to_table(filter=f"id IN ({chunk_ids_str})")
-                        .to_pandas()
-                    )
-                except Exception as lance_err:
-                    # Fallback: Paginated pandas filtering (memory-safe for large tables)
-                    total_rows = self._chunks_table.count_rows()
-
-                    logger.warning(
-                        f"Lance SQL filter unavailable, using paginated fallback for {total_rows:,} rows. "
-                        f"Error: {lance_err}"
-                    )
-
-                    # Paginate to avoid loading entire table into memory
-                    page_size = 10_000
-                    existing_rows = []
-                    chunk_ids_set = set(chunk_ids)  # For faster lookup
-
-                    for offset in range(0, total_rows, page_size):
-                        # Load batch of rows
-                        try:
-                            batch_df = self._chunks_table.to_pandas(
-                                offset=offset, limit=page_size
-                            )
-                        except TypeError:
-                            # LanceDB may not support offset/limit in to_pandas()
-                            # Fall back to loading all and slicing (less efficient but works)
-                            if offset == 0:
-                                logger.debug(
-                                    "LanceDB to_pandas() doesn't support pagination, loading full table"
-                                )
-                                all_chunks_df = self._chunks_table.to_pandas()
-                                batch_df = all_chunks_df[
-                                    all_chunks_df["id"].isin(chunk_ids)
-                                ]
-                                existing_rows.extend(batch_df.to_dict("records"))
-                                break
-                            else:
-                                break
-
-                        # Filter to requested chunk IDs
-                        matching = batch_df[batch_df["id"].isin(chunk_ids_set)]
-                        if len(matching) > 0:
-                            existing_rows.extend(matching.to_dict("records"))
-
-                        # Early termination if we found all requested chunks
-                        if len(existing_rows) >= len(chunk_ids):
-                            break
-
-                    # Convert to DataFrame for consistent downstream handling
-                    existing_df = (
-                        pd.DataFrame(existing_rows) if existing_rows else pd.DataFrame()
-                    )
-
-                # Diagnostic logging
-                logger.debug(
-                    f"Looking for {len(chunk_ids)} chunk IDs, found {len(existing_df)} existing chunks"
-                )
-                if len(existing_df) == 0 and len(chunk_ids) > 0:
-                    total_rows = self._chunks_table.count_rows()
-                    logger.warning(
-                        f"Embedding update: search returned 0 results but table has {total_rows} rows. "
-                        f"This indicates a LanceDB query issue. Using paginated fallback. "
-                        f"Chunk IDs requested: {chunk_ids[:5]}{'...' if len(chunk_ids) > 5 else ''}"
-                    )
-
-                # Merge embedding data into existing rows (full row data required)
-                merge_data = []
-                for _, row in existing_df.iterrows():
-                    chunk_id = row["id"]
-                    if chunk_id in embedding_lookup:
-                        emb_data = embedding_lookup[chunk_id]
-                        merge_data.append(
-                            {
-                                "id": row["id"],
-                                "file_id": row["file_id"],
-                                "content": row["content"],
-                                "start_line": row["start_line"],
-                                "end_line": row["end_line"],
-                                "chunk_type": row["chunk_type"],
-                                "language": row["language"],
-                                "name": row["name"],
-                                "embedding": emb_data["embedding"],
-                                "provider": emb_data["provider"],
-                                "model": emb_data["model"],
-                                "created_time": row["created_time"],
-                                "metadata": _serialize_metadata(
-                                    _deserialize_metadata(row.get("metadata"))
-                                ),  # Serialize metadata
-                            }
-                        )
-
-                # merge_insert with PyArrow table to avoid nullable field mismatches
-                # (see LanceDB GitHub issue #2366)
                 if merge_data:
                     merge_table = pa.Table.from_pylist(
                         merge_data, schema=get_chunks_schema(embedding_dims)
@@ -2044,6 +2081,10 @@ class LanceDBProvider(SerialDatabaseProvider):
                         "end_line": int(chunk.get("end_line") or 0),
                         "language": chunk.get("language") or "",
                         "file_path": file_paths.get(file_id, ""),
+                        # Carried for residual embed path so insert_embeddings can
+                        # merge_insert without re-reading full rows (scale-critical).
+                        "created_time": chunk.get("created_time"),
+                        "metadata": chunk.get("metadata"),
                     }
                 )
 

@@ -132,6 +132,7 @@ class EmbeddingService(BaseService):
         chunk_ids: list[ChunkId],
         chunk_texts: list[str],
         show_progress: bool = True,
+        row_fields: list[dict[str, Any]] | None = None,
     ) -> int:
         """Generate embeddings for a list of chunks.
 
@@ -139,6 +140,8 @@ class EmbeddingService(BaseService):
             chunk_ids: List of chunk IDs to generate embeddings for
             chunk_texts: Corresponding text content for each chunk
             show_progress: Whether to show progress bar (default True)
+            row_fields: Optional parallel list of DB row fields (from missing-embed
+                pages). When provided, Lance residual writes can skip re-reads.
 
         Returns:
             Number of embeddings successfully generated
@@ -149,6 +152,8 @@ class EmbeddingService(BaseService):
 
         if len(chunk_ids) != len(chunk_texts):
             raise ValueError("chunk_ids and chunk_texts must have the same length")
+        if row_fields is not None and len(row_fields) != len(chunk_ids):
+            raise ValueError("row_fields must align with chunk_ids when provided")
 
         try:
             # Debug log entry point to confirm our code executes
@@ -170,7 +175,7 @@ class EmbeddingService(BaseService):
 
             # Filter out chunks that already have embeddings
             filtered_chunks = await self._filter_existing_embeddings(
-                chunk_ids, chunk_texts
+                chunk_ids, chunk_texts, row_fields=row_fields
             )
 
             if not filtered_chunks:
@@ -277,8 +282,13 @@ class EmbeddingService(BaseService):
                 total_attempted += len(work)
                 chunk_id_list = [ChunkId(int(c["id"])) for c in work]
                 chunk_texts = [str(c.get("code") or "") for c in work]
+                # Pass full page rows so Lance residual merge_insert can avoid
+                # re-reading the growing table (dominant cost at large N).
                 generated_count = await self.generate_embeddings_for_chunks(
-                    chunk_id_list, chunk_texts, show_progress=True
+                    chunk_id_list,
+                    chunk_texts,
+                    show_progress=True,
+                    row_fields=work,
                 )
                 total_generated += generated_count
 
@@ -467,16 +477,20 @@ class EmbeddingService(BaseService):
             return {"error": str(e)}
 
     async def _filter_existing_embeddings(
-        self, chunk_ids: list[ChunkId], chunk_texts: list[str]
-    ) -> list[tuple[ChunkId, str]]:
+        self,
+        chunk_ids: list[ChunkId],
+        chunk_texts: list[str],
+        row_fields: list[dict[str, Any]] | None = None,
+    ) -> list[tuple[ChunkId, str, dict[str, Any] | None]]:
         """Filter out chunks that already have embeddings.
 
         Args:
             chunk_ids: List of chunk IDs
             chunk_texts: Corresponding chunk texts
+            row_fields: Optional parallel row metadata for residual DB writes
 
         Returns:
-            List of (chunk_id, text) tuples for chunks without embeddings
+            List of (chunk_id, text, row_fields|None) for chunks without embeddings
         """
         if not self._embedding_provider:
             return []
@@ -486,16 +500,6 @@ class EmbeddingService(BaseService):
 
         # Get existing embeddings from database
         try:
-            # Determine table name based on embedding dimensions
-            # We need to check what dimensions this provider/model uses
-            if hasattr(self._embedding_provider, "get_dimensions"):
-                dims = self._embedding_provider.get_dimensions()
-            else:
-                # Default to 1536 for most embedding models (OpenAI, etc.)
-                dims = 1536
-
-            table_name = f"embeddings_{dims}"
-
             existing_chunk_ids = self._db.get_existing_embeddings(
                 chunk_ids=[int(cid) for cid in chunk_ids],
                 provider=provider_name,
@@ -506,16 +510,17 @@ class EmbeddingService(BaseService):
             existing_chunk_ids = set()
 
         # Filter out chunks that already have embeddings or would be empty after normalization
-        filtered_chunks = []
+        filtered_chunks: list[tuple[ChunkId, str, dict[str, Any] | None]] = []
         skipped_empty = 0
-        for chunk_id, text in zip(chunk_ids, chunk_texts):
+        for i, (chunk_id, text) in enumerate(zip(chunk_ids, chunk_texts)):
             if chunk_id not in existing_chunk_ids:
                 # Text is already normalized by IndexingCoordinator
                 if not text.strip():
                     skipped_empty += 1
                     logger.debug(f"Skipping chunk {chunk_id}: empty content")
                     continue
-                filtered_chunks.append((chunk_id, text))
+                row = row_fields[i] if row_fields is not None else None
+                filtered_chunks.append((chunk_id, text, row))
 
         if skipped_empty > 0:
             logger.info(
@@ -528,12 +533,14 @@ class EmbeddingService(BaseService):
         return filtered_chunks
 
     async def _generate_embeddings_in_batches(
-        self, chunk_data: list[tuple[ChunkId, str]], show_progress: bool = True
+        self,
+        chunk_data: list[tuple[ChunkId, str, dict[str, Any] | None]],
+        show_progress: bool = True,
     ) -> int:
         """Generate embeddings for chunks in optimized batches.
 
         Args:
-            chunk_data: List of (chunk_id, text) tuples
+            chunk_data: List of (chunk_id, text, row_fields|None) tuples
 
         Returns:
             Number of embeddings successfully generated
@@ -555,7 +562,7 @@ class EmbeddingService(BaseService):
         semaphore = asyncio.Semaphore(self._max_concurrent_batches)
 
         async def process_batch(
-            batch: list[tuple[ChunkId, str]],
+            batch: list[tuple[ChunkId, str, dict[str, Any] | None]],
             batch_num: int,
             retry_depth: int = 0,
         ) -> int:
@@ -572,8 +579,8 @@ class EmbeddingService(BaseService):
                     )
 
                     # Extract chunk IDs and texts
-                    chunk_ids = [chunk_id for chunk_id, _ in batch]
-                    texts = [text for _, text in batch]
+                    chunk_ids = [chunk_id for chunk_id, _, _ in batch]
+                    texts = [text for _, text, _ in batch]
 
                     # Generate embeddings
                     if not self._embedding_provider:
@@ -592,20 +599,41 @@ class EmbeddingService(BaseService):
 
                     # Prepare embedding data for database
                     embeddings_data = []
-                    for chunk_id, vector in zip(chunk_ids, embedding_results):
-                        embeddings_data.append(
-                            {
-                                "chunk_id": chunk_id,
-                                "provider": self._embedding_provider.name
-                                if self._embedding_provider
-                                else "unknown",
-                                "model": self._embedding_provider.model
-                                if self._embedding_provider
-                                else "unknown",
-                                "dims": len(vector),
-                                "embedding": vector,
-                            }
-                        )
+                    for (chunk_id, _text, row), vector in zip(
+                        batch, embedding_results
+                    ):
+                        entry: dict[str, Any] = {
+                            "chunk_id": chunk_id,
+                            "provider": self._embedding_provider.name
+                            if self._embedding_provider
+                            else "unknown",
+                            "model": self._embedding_provider.model
+                            if self._embedding_provider
+                            else "unknown",
+                            "dims": len(vector),
+                            "embedding": vector,
+                        }
+                        # Residual page fields: enable no-re-read merge_insert on LanceDB
+                        if isinstance(row, dict):
+                            if row.get("file_id") is not None:
+                                entry["file_id"] = int(row["file_id"])
+                            entry["content"] = row.get("code") or row.get("content") or ""
+                            if row.get("start_line") is not None:
+                                entry["start_line"] = int(row["start_line"])
+                            if row.get("end_line") is not None:
+                                entry["end_line"] = int(row["end_line"])
+                            entry["chunk_type"] = (
+                                row.get("chunk_type") or ""
+                            )
+                            entry["language"] = row.get("language") or ""
+                            entry["name"] = (
+                                row.get("symbol") or row.get("name") or ""
+                            )
+                            if row.get("created_time") is not None:
+                                entry["created_time"] = row.get("created_time")
+                            if "metadata" in row:
+                                entry["metadata"] = row.get("metadata")
+                        embeddings_data.append(entry)
 
                     # Store in database with configurable batch size
                     if timing:
@@ -650,7 +678,7 @@ class EmbeddingService(BaseService):
                         return result1 + result2
 
                     # Log batch details for non-retryable errors or max retries exceeded
-                    batch_sizes = [len(text) for _, text in batch]
+                    batch_sizes = [len(text) for _, text, _ in batch]
                     max_size = max(batch_sizes) if batch_sizes else 0
                     # Debug log to trace execution path
                     import os
@@ -691,7 +719,7 @@ class EmbeddingService(BaseService):
         processed_count = 0
 
         async def process_batch_with_optional_progress(
-            batch: list[tuple[ChunkId, str]], batch_num: int
+            batch: list[tuple[ChunkId, str, dict[str, Any] | None]], batch_num: int
         ) -> int:
             nonlocal processed_count
             result = await process_batch(batch, batch_num)
@@ -761,12 +789,12 @@ class EmbeddingService(BaseService):
         return total_generated
 
     def _create_token_aware_batches(
-        self, chunk_data: list[tuple[ChunkId, str]]
-    ) -> list[list[tuple[ChunkId, str]]]:
+        self, chunk_data: list[tuple[ChunkId, str, dict[str, Any] | None]]
+    ) -> list[list[tuple[ChunkId, str, dict[str, Any] | None]]]:
         """Create batches that respect provider token limits using provider-agnostic logic.
 
         Args:
-            chunk_data: List of (chunk_id, text) tuples
+            chunk_data: List of (chunk_id, text, row_fields|None) tuples
 
         Returns:
             List of optimized batches that respect provider token limits
@@ -806,10 +834,10 @@ class EmbeddingService(BaseService):
 
         # Provider-agnostic token-aware batching
         batches = []
-        current_batch: list[tuple[ChunkId, str]] = []
+        current_batch: list[tuple[ChunkId, str, dict[str, Any] | None]] = []
         current_tokens = 0
 
-        for chunk_id, text in chunk_data:
+        for chunk_id, text, row in chunk_data:
             # Use accurate provider-specific token estimation
             if self._embedding_provider:
                 text_tokens = estimate_tokens(
@@ -830,10 +858,10 @@ class EmbeddingService(BaseService):
             ):
                 # Start new batch
                 batches.append(current_batch)
-                current_batch = [(chunk_id, text)]
+                current_batch = [(chunk_id, text, row)]
                 current_tokens = text_tokens
             else:
-                current_batch.append((chunk_id, text))
+                current_batch.append((chunk_id, text, row))
                 current_tokens += text_tokens
 
         # Add remaining batch if not empty

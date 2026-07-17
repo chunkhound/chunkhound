@@ -294,6 +294,14 @@ def main() -> int:
         help="Use embed-then-single-write for new chunks",
     )
     parser.add_argument(
+        "--scale",
+        action="store_true",
+        help=(
+            "Run soak ladder 2k/10k/25k/50k (fake embed) for both classic and "
+            "defer paths; prints a comparison table. Ignores --chunks."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable JSON report",
@@ -315,7 +323,85 @@ def main() -> int:
     else:
         work.mkdir(parents=True, exist_ok=True)
 
+    def _print_report(report: dict) -> None:
+        print("=== index profile ===")
+        for k, v in report.get("phases_s", {}).items():
+            print(f"  {k:20s} {v:8.3f}s")
+        print(f"  {'TOTAL':20s} {report.get('total_s', 0):8.3f}s")
+        print(
+            f"  rss start={report.get('start_rss_mb')} "
+            f"peak={report.get('peak_rss_mb')} MB"
+        )
+        db = report.get("db", {})
+        print(
+            "  db merge_insert calls={merge_insert_calls} "
+            "rows={merge_insert_rows} s={merge_insert_s} | "
+            "optimize calls={optimize_calls} s={optimize_s}".format(
+                merge_insert_calls=db.get("merge_insert_calls", 0),
+                merge_insert_rows=db.get("merge_insert_rows", 0),
+                merge_insert_s=db.get("merge_insert_s", 0),
+                optimize_calls=db.get("optimize_calls", 0),
+                optimize_s=db.get("optimize_s", 0),
+            )
+        )
+        print(
+            f"  db chunk_batches={db.get('chunk_insert_batches')} "
+            f"embed_batches={db.get('embedding_insert_batches')}"
+        )
+        for k, v in report.get("meta", {}).items():
+            print(f"  {k}={v}")
+        print(f"  wall_s={report.get('wall_s')}")
+
     try:
+        if args.scale:
+            # DB scale ladder: only FakeEmbeddingProvider, measure classic vs defer.
+            sizes = [2_000, 10_000, 25_000, 50_000]
+            rows: list[dict] = []
+            for n in sizes:
+                for defer in (False, True):
+                    sub = work / f"n{n}_{'defer' if defer else 'classic'}"
+                    if sub.exists():
+                        shutil.rmtree(sub, ignore_errors=True)
+                    sub.mkdir(parents=True, exist_ok=True)
+                    t0 = time.perf_counter()
+                    report = asyncio.run(
+                        _run_soak(
+                            chunks=n,
+                            page_size=args.page_size,
+                            work_dir=sub,
+                            defer_write=defer,
+                        )
+                    )
+                    report["wall_s"] = round(time.perf_counter() - t0, 4)
+                    rows.append(report)
+                    if not args.json:
+                        print(
+                            f"\n--- n={n} defer={defer} wall={report['wall_s']}s "
+                            f"peak_rss={report.get('peak_rss_mb')} ---"
+                        )
+                        _print_report(report)
+            if args.json:
+                print(json.dumps(rows, indent=2))
+            else:
+                print("\n=== scale summary (fake embed, LanceDB) ===")
+                print(
+                    f"{'n':>8} {'path':>8} {'total_s':>8} {'mi_s':>8} "
+                    f"{'mi_calls':>8} {'mi_rows':>8} {'peak_mb':>8}"
+                )
+                for r in rows:
+                    db = r.get("db", {})
+                    print(
+                        f"{r['meta']['chunks']:8d} "
+                        f"{'defer' if r['meta']['defer_write'] else 'classic':>8} "
+                        f"{r.get('total_s', 0):8.3f} "
+                        f"{db.get('merge_insert_s', 0):8.3f} "
+                        f"{db.get('merge_insert_calls', 0):8d} "
+                        f"{db.get('merge_insert_rows', 0):8d} "
+                        f"{r.get('peak_rss_mb') or 0:8.1f}"
+                    )
+            ok = all(r.get("meta", {}).get("remaining_missing", 1) == 0 for r in rows)
+            return 0 if ok else 1
+
         t0 = time.perf_counter()
         if args.mode == "soak":
             report = asyncio.run(
@@ -341,37 +427,7 @@ def main() -> int:
         if args.json:
             print(json.dumps(report, indent=2))
         else:
-            # Human report
-            from chunkhound.core.diagnostics.index_profile import IndexProfile
-
-            # Reconstruct printable report from dict
-            print("=== index profile ===")
-            for k, v in report.get("phases_s", {}).items():
-                print(f"  {k:20s} {v:8.3f}s")
-            print(f"  {'TOTAL':20s} {report.get('total_s', 0):8.3f}s")
-            print(
-                f"  rss start={report.get('start_rss_mb')} "
-                f"peak={report.get('peak_rss_mb')} MB"
-            )
-            db = report.get("db", {})
-            print(
-                "  db merge_insert calls={merge_insert_calls} "
-                "rows={merge_insert_rows} s={merge_insert_s} | "
-                "optimize calls={optimize_calls} s={optimize_s}".format(
-                    merge_insert_calls=db.get("merge_insert_calls", 0),
-                    merge_insert_rows=db.get("merge_insert_rows", 0),
-                    merge_insert_s=db.get("merge_insert_s", 0),
-                    optimize_calls=db.get("optimize_calls", 0),
-                    optimize_s=db.get("optimize_s", 0),
-                )
-            )
-            print(
-                f"  db chunk_batches={db.get('chunk_insert_batches')} "
-                f"embed_batches={db.get('embedding_insert_batches')}"
-            )
-            for k, v in report.get("meta", {}).items():
-                print(f"  {k}={v}")
-            print(f"  wall_s={report.get('wall_s')}")
+            _print_report(report)
 
         remaining = report.get("meta", {}).get("remaining_missing", 0)
         return 0 if remaining == 0 else 1

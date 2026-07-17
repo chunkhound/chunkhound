@@ -1,8 +1,22 @@
 # Indexing Flow Performance Plan
 
 **Branch:** `lance-index-perf` (from `lance-upgrade-0.34` / LanceDB 0.34)  
-**Scope:** Bulk `chunkhound index` throughput and memory for large codebases  
-**Non-goals:** Real embedding API latency (use fake provider), search quality, MCP
+**Scope:** Bulk indexing **DB path** for large codebases  
+**Non-goals:** Voyage/API embedding latency (always use **FakeEmbeddingProvider** for tests), search quality, MCP UX
+
+---
+
+## 0. North star (updated)
+
+We are **not** optimizing Voyage wall time. External embed IO will dominate real runs and that is fine.
+
+We optimize what still hurts at large N **even when embed is free**:
+
+1. How many Lance **writes** happen per chunk  
+2. How expensive each write is as the table grows (re-reads, fragments, optimize)  
+3. Memory staying **O(batch/page)**, never O(corpus)
+
+**Primary bottleneck hypothesis (validated):** LanceDB serial `merge_insert` + residual **read-modify-write** that re-fetched full rows while the table grew. Fake embed makes this visible; real Voyage would hide it under network time but the DB cost still adds.
 
 ---
 
@@ -10,317 +24,212 @@
 
 | Goal | Constraint |
 |------|------------|
-| Maximize **chunks/sec** through parse → store → embed | Memory stays **O(page/batch)**, not O(corpus) |
-| Make **DB write path** as small as possible | LanceDB OSS: single serial DB executor thread |
-| Keep large-index invariants from lance-take2 | Ordered keyset missing-embed pages; no full-table loads |
-| Fake embeddings for profiling | Embed CPU must not dominate wall time |
+| Cut DB work per indexed chunk | Lance OSS: **one serial DB executor** |
+| Scale to large codebases (10⁵–10⁶ chunks) | No full-table loads / full `to_pandas` on hot path |
+| Keep lance-take2 streaming invariants | Ordered keyset missing-embed pages |
+| Profile only with fake embeddings | Embed must not dominate wall time |
 
-**Success metric (profiled, not guessed):**  
-For N chunks on LanceDB + `FakeEmbeddingProvider`, report wall split:
+**Success metrics (fake embed):**
 
-```
-discovery | parse | change-detect | chunk-store (merge_insert) | embed (fake) | embed-store (merge_insert) | optimize
-```
-
-Target after improvements: **chunk-store + embed-store dominate less**; ideally wall ≈ parse + fake-embed floor, with DB overhead clearly measured.
+| Metric | Meaning |
+|--------|---------|
+| `merge_insert_calls` / `merge_insert_rows` | Write amplification |
+| `merge_insert_s` | Pure DB write wall |
+| `stream_embed` phase | Residual path (page + fake embed + DB write) |
+| `peak_rss_mb` | Memory ceiling |
+| chunks/s at 2k → 50k | Superlinear DB slowdown detection |
 
 ---
 
-## 2. Current indexing pipeline (where time goes)
-
-### 2.1 Directory index (`IndexingCoordinator.process_directory`)
+## 2. Current pipeline and DB cost model
 
 ```
-Discover files (parallel)
-  → Cleanup orphans (optional)
-  → Change detection (batch meta + per-file mtime/size/hash)
-  → Parse batches (ProcessPool / CPU)
-  → Store per file (serial DB thread):
-        begin_tx
+Discover → change-detect → parse (CPU)
+  → per-file serial DB:
         upsert file
-        load existing chunks (if reindex)  ← smart diff
-        delete modified/removed chunks
-        insert_chunks_batch (merge_insert)  ← WRITE #1 (no/null embedding)
-        commit
-  → (per file or later) generate embeddings
-  → generate_missing_embeddings (paginated residual):
-        page missing chunks
-        FakeEmbeddingProvider.embed_batch
-        insert_embeddings_batch (merge_insert)  ← WRITE #2 (vectors)
-        maybe optimize fragments
+        smart-diff load existing chunks (reindex only)
+        WRITE A: insert_chunks_batch (merge_insert)     [classic]
+        or WRITE A': insert_chunks_with_embeddings      [defer_chunk_write, new files]
+  → residual generate_missing (if any):
+        keyset page missing rows
+        fake embed_batch
+        WRITE B: insert_embeddings_batch (merge_insert full rows)
+        maybe optimize
 ```
 
-### 2.2 Hot paths already correct for large indexes
+### Cost per new chunk
 
-- **Missing-embed stream** pages via keyset (`get_chunks_without_embeddings_paginated`) — do not reintroduce full-table scans.
-- **Soak script** `scripts/soak_large_index.py` already uses `FakeEmbeddingProvider` for insert + stream-embed timing.
-- **`BatchMetricsCollector`** + `perf_analyzer` exist for embed API vs DB insert split within embedding service.
+| Path | Lance merge_inserts | Notes |
+|------|---------------------|--------|
+| **Classic** | **2** (text then vector RMW) | Residual re-read was O(table) pain |
+| **`defer_chunk_write`** | **1** (text+vector) | New files only; reindex still classic |
 
-### 2.3 Double write (user idea — primary optimization candidate)
+### Why residual was the large-N killer
 
-Today a new chunk typically incurs **two Lance `merge_insert`s**:
+`insert_embeddings_batch` used to:
 
-1. `insert_chunks_batch` — text + metadata, embedding null/empty  
-2. `insert_embeddings_batch` — same row id, fill embedding/provider/model  
+1. Receive only `(chunk_id, vector)`  
+2. **Re-read full rows** from Lance (`id IN (...)`) for every batch  
+3. `merge_insert` full schema back  
 
-Each merge_insert:
-
-- Joins on `id` (scalar index helps)
-- May create fragments → threshold optimize
-- Serializes on the **single DB executor**
-
-**Hypothesis:** With fake embeddings (near-zero IO), wall time is dominated by **#1 + #2 + optimize**, not embed math.
-
-**Proposed direction (defer materialize):**
-
-- Hold parsed chunks in memory **only for the current parse/store batch** (bounded).
-- Embed while still in-process (no intermediate DB row, or only file-level bookkeeping).
-- **Single** `merge_insert` of fully formed rows (content + vector).
-
-**Must preserve:**
-
-| Concern | Approach |
-|---------|----------|
-| Crash safety | File not marked fully indexed until commit; resume re-parses incomplete files |
-| Smart diff / embed preserve | Diff in memory against existing rows still works; unchanged chunks keep vectors |
-| Realtime path | Realtime already often `skip_embeddings=True` then async embed — keep or align carefully |
-| Memory | Never accumulate all repo chunks; cap by batch (e.g. `db_batch_size` / parse batch) |
-| Partial embed failure | Either all-or-nothing per file batch, or write without vector only for failed subset (document choice) |
+As the table grows, (2) dominates even with free embeds. Missing-embed **pages already had full row data** and discarded it.
 
 ---
 
-## 3. Other bottleneck candidates (profile to rank)
+## 3. Implemented optimizations
 
-Ordered by likelihood under **fake embed + large N**:
+### 3.1 Deferred single write (new files)
 
-| ID | Bottleneck | Why | Memory risk if “fixed wrong” |
-|----|------------|-----|------------------------------|
-| B1 | **Double merge_insert** | 2× join/write/fragment | Deferred write reduces DB ops; keep batch-bounded |
-| B2 | **Serial DB executor** | All Lance ops on one thread | Parallel writers need careful MVCC + locks; prefer fewer ops first |
-| B3 | **Per-file transactions** | High commit overhead at small files | Multi-file commit batches (bounded) |
-| B4 | **Reindex: load all file chunks** | `get_chunks_by_file_id` full file for smart diff | Diff by content hash index later; keep per-file only |
-| B5 | **Schema migration `to_pandas()`** | First fixed-dim embed may rewrite whole table | Ensure dims known at create; never migrate mid-large-index |
-| B6 | **Fragment optimize storms** | Post-write optimize on every threshold cross | Coalesce optimize; raise threshold under LSM 0.34 |
-| B7 | **Change detection** | Large path maps | Already batch meta; profile only if cold start heavy |
-| B8 | **Parse pool** | CPU-bound tree-sitter | 3.14 free-threading may help; measure vs ProcessPool |
-| B9 | **Fake embed still copies large text lists** | Batch build overhead | Stream pages; avoid duplicate text buffers |
+- Config: `indexing.defer_chunk_write` / `CHUNKHOUND_INDEXING__DEFER_CHUNK_WRITE`  
+- Embed in memory (batch-bounded) → one `insert_chunks_with_embeddings_batch`  
+- Reindex / existing-chunk smart-diff: still two-write (preserve embeddings)  
 
-**Explicitly out of scope for “faster by loading more”:** loading all chunks into RAM, full-table sorts, building giant PyArrow tables spanning the repo.
+### 3.2 Residual path: no re-read when page fields present
 
----
+- Missing-embed pages carry `content`, `file_id`, lines, types, metadata, `created_time`  
+- `EmbeddingService` passes `row_fields` into embed batches  
+- Lance `insert_embeddings_batch` builds merge rows from payload; re-read only if fields incomplete  
 
-## 4. Profiling methodology
+### 3.3 Optimize coalesce
 
-### 4.1 Environment
+- 5s cooldown after optimize to avoid fragment-threshold storms  
 
-- Branch: `lance-index-perf`
-- DB: LanceDB 0.34 (this fork)
-- Embed: `tests.fixtures.fake_providers.FakeEmbeddingProvider` (deterministic, no network)
-- Python in current venv: **3.12.12** — free-threading experiments need a separate **3.13t/3.14t** interpreter later
-- Prefer **fresh temp DB** for cold profile; optional second run for warm reindex
-
-### 4.2 Workloads
-
-| Workload | Purpose |
-|----------|---------|
-| **Synthetic soak** (`scripts/soak_large_index.py`) | Isolate seed insert + stream-embed DB cost (no parse) |
-| **Full index of this repo** (or a fixed fixture tree) | Real parse + change-detect + store + embed |
-| **Scale ladder** | 1k / 10k / 50k chunks (synthetic) — detect non-linear fragment blowups |
-
-### 4.3 Instrumentation plan (Phase 0 — implement first)
-
-1. **Phase timers** in `process_directory` (extend `profile_startup` pattern to full phases):
-   - discover, cleanup, change_detect, parse, store, embed_missing, optimize
-2. **DB op counters** on Lance provider (thread-local or provider-level):
-   - `merge_insert` count + rows + wall
-   - `optimize` count + wall
-   - `list_indices` / scalar create
-3. **Reuse** `BatchMetricsCollector` for embed_api vs db_insert inside embedding service
-4. **Optional:** `pyinstrument` or `cProfile` one-shot on `uv run chunkhound index` with fake provider wired via test harness or small CLI flag
-5. **Memory:** sample `tracemalloc` or `psutil` RSS at phase boundaries (peak, not continuous)
-
-### 4.4 Fake provider wiring for full CLI index
-
-Today soak uses FakeEmbeddingProvider in-process. For full CLI profile, add one of:
-
-- **Preferred for experiments:** thin harness `scripts/profile_index.py` that builds coordinator + FakeEmbeddingProvider + LanceDB (no API keys), mirrors `chunkhound index` phases  
-- Or config provider plugin later — do not block profiling on productized CLI flags
-
-Harness must:
-
-- Stream/page embeddings (existing EmbeddingService path)
-- Print phase table + RSS peak
-- Exit non-zero if residual missing embeddings remain
-
-### 4.5 What “good profile” looks like
-
-Example target output:
-
-```
-chunks=10000 files=100 provider=lancedb embed=fake
-discover     0.12s
-parse        1.80s
-store        4.50s   merge_insert_chunks=100  rows=10000
-embed_fake   0.40s
-embed_store  4.20s   merge_insert_embed=10   rows=10000
-optimize     1.10s   calls=5
-TOTAL       12.1s   peak_rss=420MB
-```
-
-If `store + embed_store + optimize` ≫ parse + embed_fake → deferred-write and/or fragment policy wins.
-
----
-
-## 5. Improvement tracks (after profile ranks them)
-
-### Track A — Deferred single write (user idea) — likely highest impact
-
-**Design sketch:**
-
-1. Parse batch → list of `Chunk` models (memory-bounded by batch).
-2. Format texts → `FakeEmbeddingProvider.embed_batch` (or real provider).
-3. Build PyArrow rows with embedding filled.
-4. One `merge_insert` per batch (or per file batch).
-5. File row upsert still first (path/mtime/hash) so change detection works; file can be marked incomplete until chunk commit succeeds.
-
-**Incremental rollout:**
-
-| Step | Deliverable | Risk |
-|------|-------------|------|
-| A0 | Profile harness + baseline numbers | None |
-| A1 | Feature flag `indexing.defer_chunk_write` / env | Easy off-ramp |
-| A2 | New-file path only (no existing chunks) | Lower |
-| A3 | Reindex path with smart diff | Higher |
-| A4 | Realtime alignment | Careful |
-
-**Contract tests:**
-
-- Crash mid-batch: re-run indexes cleanly  
-- Unchanged file still skips  
-- Residual missing empty after successful run  
-- Soak: no full-table load mocks still pass  
-
-### Track B — DB write hygiene (safe with 0.34 MemWAL)
-
-- Ensure scalar `id` BTree exists **before** bulk merges (already on connect; verified empty-table fix).
-- Coalesce optimize: once per N batches or wall interval, not every threshold trip mid-page.
-- Prefer fixed-size embedding schema at table create when dims known from Fake/provider (avoid B5).
-- Larger `db_batch_size` only after measuring fragment + RSS (do not default to “huge”).
-
-### Track C — Parallelism (Python free-threading)
-
-| Layer | Today | 3.14 free-threading option |
-|-------|-------|----------------------------|
-| Parse | ProcessPool | Could try threads on free-threaded build if tree-sitter GIL-free enough |
-| Embed API | async concurrent batches | Keep; fake is CPU of hash+vector |
-| **DB** | **One serial executor** | Keep serial for Lance correctness; free-threading does **not** magically parallelize Lance OSS safely |
-
-**Rule:** Use free-threading for **CPU-side** work (parse, text prep, fake embed) that can run while the DB thread is busy — **pipeline**, not multi-writer DB.
-
-Concrete idea after A0:
-
-```
-[parse batch k+1]  ||  [embed batch k]  ||  [DB write batch k-1]
-```
-
-Bounded queues between stages; backpressure when queue depth × batch size exceeds memory budget.
-
-### Track D — Smart diff cost
-
-- Only load existing chunks for files that **failed** cheap mtime/size/hash skip.
-- Already mostly true; profile reindex-all (`force_reindex`) separately.
-
----
-
-## 6. Memory budget rules (non-negotiable)
-
-1. **No** `get_all_chunks_with_metadata` / full `to_pandas` on hot path.
-2. Page size for missing embeds ≤ `embedding.batch_size` (or explicit profile page size).
-3. Parse result buffer ≤ one process-pool batch (or explicit cap).
-4. Deferred-write buffer ≤ one store batch of chunks × (text + vector dims × 4 bytes).
-5. Schema migration that loads entire table is **forbidden** mid large index — fail closed with “recreate DB” or preconfigure dims.
-
-Rough vector memory:  
-`rows × dims × 4` — e.g. 10k × 1536 × 4 ≈ **60 MB** per in-flight batch; keep concurrent batches small.
-
----
-
-## 7. Phase plan
-
-### Phase 0 — Measure (this branch first work)
-
-- [x] `scripts/profile_index.py` with phase timers + RSS + merge_insert counters  
-- [x] `IndexProfile` / `DbOpStats` + LanceDB op hooks  
-- [x] Baseline soak classic vs deferred (see sample below)  
-- [ ] Optional: full-repo `mode=index` baseline on large tree  
-
-### Phase 1 — Cheap wins
-
-- [x] Optimize coalesce cooldown (5s) after write-path optimizes  
-- [x] Fixed-size schema on empty table when deferred write knows dims  
-- [ ] Broader threshold tuning for 0.34 after more soaks  
-
-### Phase 2 — Deferred single write (flagged)
-
-- [x] `indexing.defer_chunk_write` + env `CHUNKHOUND_INDEXING__DEFER_CHUNK_WRITE`  
-- [x] New-file path: embed then `insert_chunks_with_embeddings_batch`  
-- [x] Tests: residual empty + batch roundtrip  
-- [x] Re-measure vs Phase 0 (sample: 2k chunks, fake embed)
-
-**Sample soak (2k chunks, page 100, LanceDB 0.34):**
-
-| Mode | merge_insert calls | rows | TOTAL s | peak RSS MB |
-|------|-------------------|------|---------|-------------|
-| classic two-write | 40 | 4000 | ~3.9 | ~262 |
-| `--defer-write` | 20 | 2000 | ~2.3 | ~225 |
-
-### Phase 3 — Pipeline concurrency
-
-### Phase 3 — Pipeline concurrency
-
-- [ ] Overlap parse / embed / DB with bounded queues  
-- [ ] Optional free-threaded Python smoke (if available)  
-- [ ] Re-measure  
-
-### Phase 4 — Decide defaults
-
-- [ ] Promote flag if ≥X% faster at same RSS peak on large soak  
-- [ ] Document ops knobs in `operations/lancedb_large_indexes.md`  
-
----
-
-## 8. Risks and open decisions
-
-| Decision | Options | Default lean |
-|----------|---------|--------------|
-| Crash mid deferred batch | Drop in-memory; re-parse file | Yes |
-| Failed embeds in batch | Split write naked chunks vs fail file | Fail file / retry page (match current residual semantics) |
-| Realtime | Keep skip_embeddings + background residual | Yes until Phase 2 proven |
-| Free-threading | Optional CI matrix later | Measure on 3.12 first; 3.14t optional |
-
----
-
-## 9. Immediate next commands (when implementing Phase 0)
+### 3.4 Profiling harness (fake only)
 
 ```powershell
-git checkout lance-index-perf
-uv sync
+# Single soak
+uv run python scripts/profile_index.py --mode soak --chunks 10000 --page-size 256
+uv run python scripts/profile_index.py --mode soak --chunks 10000 --page-size 256 --defer-write
 
-# Synthetic DB-bound soak (already FakeEmbeddingProvider)
-uv run python scripts/soak_large_index.py --provider lancedb --chunks 10000
+# Scale ladder 2k/10k/25k/50k classic + defer
+uv run python scripts/profile_index.py --scale --page-size 256
 
-# After profile harness exists:
-# uv run python scripts/profile_index.py --provider lancedb --root . --chunks-cap none
+# Full tree index with fake (no Voyage)
+uv run python scripts/profile_index.py --mode index --root . --defer-write
 ```
+
+Never use Voyage for these measurements.
 
 ---
 
-## 10. References in tree
+## 4. Measured results (fake, LanceDB 0.34, Windows)
 
-- `chunkhound/services/indexing_coordinator.py` — process_directory, store, embed  
-- `chunkhound/services/embedding_service.py` — paginated missing embed  
-- `chunkhound/providers/database/lancedb_provider.py` — merge_insert, optimize, fragments  
-- `chunkhound/core/diagnostics/batch_metrics.py` — embed vs DB timing  
+### 2k chunks, page 100
+
+| Path | merge_insert calls | rows | TOTAL s | peak RSS |
+|------|-------------------|------|---------|----------|
+| classic | 40 | 4000 | ~3.9 | ~262 MB |
+| defer | 20 | 2000 | ~2.3 | ~225 MB |
+
+### 10k chunks, page 256 (after residual no-re-read)
+
+| Path | seed | stream_embed | TOTAL s | mi_s | mi_calls | rows | peak RSS |
+|------|------|--------------|--------|------|----------|------|----------|
+| classic | 2.5s | **4.4s** (was ~6.2 before no-re-read) | ~7.9 | 1.3 | 140 | 20k | ~308 MB |
+| defer | 4.4s | — | **~5.4** | 0.9 | 100 | 10k | ~243 MB |
+
+### 50k chunks, page 512, **defer only**
+
+| seed | TOTAL | mi_s | mi_calls | rows | optimize | peak RSS |
+|------|-------|------|----------|------|----------|----------|
+| 25.8s | ~27.3s | 5.2s | **500** | 50k | 5 calls / 1.4s | ~316 MB |
+
+~1.8k chunks/s end-to-end; pure `merge_insert` ~10k rows/s.  
+**500 merge_insert calls** = still one write per synthetic file (100 chunks) — fixed per-call overhead scales with file count, not just row count → **L2 batching across files** is the next DB win.
+
+**Takeaways:**
+
+1. **DB is the bottleneck** with free embeds (`stream_embed` ≫ fake compute).  
+2. **Defer halves write amplification** and wins overall wall at 10k.  
+3. Residual **no-re-read** cut classic `stream_embed` ~30% at 10k; still loses to defer because of second write + page scan.  
+4. At 50k, **call count** (many small merge_inserts) and **optimize** matter; not just row count.  
+5. For large cold indexes of **new** codebases, **default lean is `defer_chunk_write=true`** once product-ready; residual path remains for reindex / crash recovery / realtime.  
+6. Peak RSS stayed ~O(batch) (~300 MB) even at 50k — memory model is OK; do not “go faster” by loading the corpus.
+
+---
+
+## 5. Remaining large-N bottlenecks (priority order)
+
+| ID | Issue | Why it hurts large repos | Next step |
+|----|--------|---------------------------|-----------|
+| **L1** | Classic two-write still default | 2× merge_insert always | Product default / flag docs; promote defer for cold index |
+| **L2** | Seed/store **many tiny merge_inserts** (per file / small db_batch) | Fixed cost × files | Batch inserts across files; raise `db_batch_size` under defer |
+| **L3** | Residual missing scan (`search().where` over growing table) | Pages still scan candidates | Indexed signature / better filter; keep keyset |
+| **L4** | Fragment growth + optimize | Spikes wall mid-run | Cooldown done; tune threshold vs LSM 0.34 |
+| **L5** | Reindex smart-diff loads all file chunks | Large files | Hash-only skip more often; optional chunk-level signatures |
+| **L6** | Schema migration full table rewrite | One-time disaster at first embed | Always create fixed-dim schema when dims known |
+| **L7** | Parse/discovery | Real but secondary when DB is free-embed bottleneck | Free-threading / pipeline after L1–L4 |
+
+**Do not:** load more of the corpus into RAM to go “faster.”
+
+---
+
+## 6. Phase plan (revised)
+
+### Done
+
+- [x] Profile harness + DB counters + RSS (`scripts/profile_index.py`, `IndexProfile`)  
+- [x] Deferred single write for **new** files (flagged)  
+- [x] Residual embed **no re-read** when page carries row fields  
+- [x] Optimize cooldown  
+- [x] Fake-only scale soaks (2k / 10k)  
+
+### Next (DB scale)
+
+- [ ] Run `--scale` ladder to 50k/100k; record in this doc if superlinear  
+- [ ] Multi-file **batched** deferred insert (reduce per-file merge_insert count)  
+- [ ] Prefer fixed-size embedding schema at first connect when fake/real dims known  
+- [ ] Consider default `defer_chunk_write=true` after more soak confidence  
+- [ ] Residual candidate scan: avoid loading `embedding` column in id candidate pass where possible  
+
+### Later
+
+- [ ] Pipeline: parse ∥ embed ∥ DB with bounded queues (still one DB writer)  
+- [ ] Optional free-threaded Python for parse only (not multi-writer DB)  
+- [ ] Reindex path smart-diff cost  
+
+---
+
+## 7. Testing policy
+
+| Allowed | Forbidden for perf claims |
+|---------|---------------------------|
+| `FakeEmbeddingProvider` | Voyage / OpenAI / real network embeds |
+| `scripts/profile_index.py` | Claiming “index is fast” based on Voyage-less wall alone for product UX |
+| Integration tests with fake | Tests that require API keys |
+
+Real Voyage is only for **manual end-to-end** quality, not for deciding DB optimizations.
+
+---
+
+## 8. References
+
+- `scripts/profile_index.py` — soak / scale / index modes  
+- `chunkhound/core/diagnostics/index_profile.py`  
+- `chunkhound/services/embedding_service.py` — `row_fields` residual path  
+- `chunkhound/providers/database/lancedb_provider.py` — deferred insert + no-re-read merge  
+- `chunkhound/services/indexing_coordinator.py` — `defer_chunk_write`  
 - `tests/fixtures/fake_providers.py` — `FakeEmbeddingProvider`  
-- `scripts/soak_large_index.py` — synthetic soak  
-- Prior large-index design: `operations/lancedb_large_index_reimplementation.md`
+- `operations/lancedb_large_index_reimplementation.md` — streaming invariants  
+
+---
+
+## 9. Operator knobs
+
+```json
+{
+  "database": {
+    "provider": "lancedb",
+    "lancedb_optimize_fragment_threshold": 50
+  },
+  "indexing": {
+    "defer_chunk_write": true,
+    "db_batch_size": 2000
+  }
+}
+```
+
+```powershell
+$env:CHUNKHOUND_INDEXING__DEFER_CHUNK_WRITE = "true"
+uv run python scripts/profile_index.py --scale --page-size 256
+```
