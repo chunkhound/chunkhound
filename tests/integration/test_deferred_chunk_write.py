@@ -160,12 +160,14 @@ async def test_classic_then_residual_clears_missing(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cross_file_deferred_buffer_fewer_merge_inserts(
+async def test_multi_file_defer_leaves_no_missing_embeds(
     tmp_path: Path,
 ) -> None:
-    """Many small files should share merge_insert flushes (L2)."""
-    from chunkhound.core.diagnostics.index_profile import IndexProfile
+    """Many small files under defer_chunk_write leave zero missing embeds.
 
+    L2 cross-file batching was reverted (raised end-to-end wall). Guards the
+    multi-file correctness contract only — not merge_insert call reduction.
+    """
     src = tmp_path / "src"
     src.mkdir()
     for i in range(20):
@@ -178,12 +180,7 @@ async def test_cross_file_deferred_buffer_fewer_merge_inserts(
             provider="lancedb",
             lancedb_optimize_fragment_threshold=10_000,
         ),
-        # Small flush threshold so 20 tiny files still exercise buffering.
-        indexing=IndexingConfig(
-            defer_chunk_write=True,
-            cleanup=False,
-            db_batch_size=50,  # > chunks per file (~1-2) so multiple files per flush
-        ),
+        indexing=IndexingConfig(defer_chunk_write=True, cleanup=False),
         embedding=EmbeddingConfig(
             provider="openai", model="fake-embeddings", batch_size=50
         ),
@@ -193,8 +190,6 @@ async def test_cross_file_deferred_buffer_fewer_merge_inserts(
         base_directory=src,
         config=cfg.database,
     )
-    profile = IndexProfile()
-    db.set_index_profile(profile)
     db.connect()
     fake = FakeEmbeddingProvider(dims=32, batch_size=50)
     try:
@@ -208,17 +203,11 @@ async def test_cross_file_deferred_buffer_fewer_merge_inserts(
             src, patterns=["**/*.py"], exclude_patterns=[]
         )
         assert result.get("status") == "success", result
-        mi_calls = profile.db.merge_insert_calls
-        # 20 files × 1 insert would be 20; with buffer we expect fewer chunk merges.
-        # (file table merge_inserts also exist — count only chunk path via batches.)
-        assert profile.db.chunk_insert_batches < 20, (
-            f"expected cross-file flush, got chunk_insert_batches="
-            f"{profile.db.chunk_insert_batches} merge_insert_calls={mi_calls}"
-        )
+        assert int(result.get("total_chunks", 0)) >= 20
         missing = db.get_chunks_without_embeddings_paginated(
             fake.name, fake.model, limit=50
         )
-        assert missing == []
+        assert missing == [], f"expected no missing embeds, got {len(missing)}"
     finally:
         db.disconnect()
 

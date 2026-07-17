@@ -84,15 +84,12 @@ async def _run_soak(
         per = chunks // files_n
         rem = chunks % files_n
 
-        # Cross-file flush size for defer (L2): one merge_insert covers many files.
-        flush_size = max(page_size, 1000)
-        profile.meta["flush_size"] = flush_size
+        # Per-file deferred flush (L1). Cross-file batching (L2) raised wall.
+        profile.meta["flush_policy"] = "per_file" if defer_write else "classic"
 
         with profile.phase("seed_insert"):
             all_chunks: list[Chunk] = []
             all_ids: list[int] = []
-            buf_chunks: list[Chunk] = []
-            buf_vecs: list[list[float]] = []
             for f in range(files_n):
                 n = per + (1 if f < rem else 0)
                 file_id = int(
@@ -120,27 +117,17 @@ async def _run_soak(
                 if defer_write:
                     texts = [c.code or "" for c in batch]
                     vecs = await fake.embed_batch(texts)
-                    buf_chunks.extend(batch)
-                    buf_vecs.extend([list(v) for v in vecs])
-                    while len(buf_chunks) >= flush_size:
-                        take = flush_size
-                        ids = db.insert_chunks_with_embeddings_batch(
-                            buf_chunks[:take],
-                            buf_vecs[:take],
-                            fake.name,
-                            fake.model,
-                        )
-                        all_ids.extend(int(x) for x in ids)
-                        buf_chunks = buf_chunks[take:]
-                        buf_vecs = buf_vecs[take:]
+                    vec_lists = [list(v) for v in vecs]
+                    ids = db.insert_chunks_with_embeddings_batch(
+                        batch,
+                        vec_lists,
+                        fake.name,
+                        fake.model,
+                    )
+                    all_ids.extend(int(x) for x in ids)
                 else:
                     all_ids.extend(int(x) for x in db.insert_chunks_batch(batch))
                     all_chunks.extend(batch)
-            if defer_write and buf_chunks:
-                ids = db.insert_chunks_with_embeddings_batch(
-                    buf_chunks, buf_vecs, fake.name, fake.model
-                )
-                all_ids.extend(int(x) for x in ids)
 
         if not defer_write:
             with profile.phase("stream_embed"):

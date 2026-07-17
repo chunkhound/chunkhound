@@ -1,22 +1,24 @@
 # Indexing Flow Performance Plan
 
 **Branch:** `lance-index-perf` (from `lance-upgrade-0.34` / LanceDB 0.34)  
-**Scope:** Bulk indexing **DB path** for large codebases  
+**Scope:** Bulk **end-to-end indexing flow** for large codebases (DB is the usual cost center under free embeds, not the goal)  
 **Non-goals:** Voyage/API embedding latency (always use **FakeEmbeddingProvider** for tests), search quality, MCP UX
 
 ---
 
-## 0. North star (updated)
+## 0. North star (corrected)
 
-We are **not** optimizing Voyage wall time. External embed IO will dominate real runs and that is fine.
+**What matters:** overall indexing flow wall time (`wall_s` / full product index path).
 
-We optimize what still hurts at large N **even when embed is free**:
+DB counters (`merge_insert_*`, optimize) are **diagnostics** — they explain *where* time goes. Reducing DB work while shifting cost elsewhere so **total wall increases is a regression**, even if call counts look better.
 
-1. How many Lance **writes** happen per chunk  
-2. How expensive each write is as the table grows (re-reads, fragments, optimize)  
-3. Memory staying **O(batch/page)**, never O(corpus)
+We use fake embeds so embed network does not hide the rest of the flow. Under free embed:
 
-**Primary bottleneck hypothesis (validated):** LanceDB serial `merge_insert` + residual **read-modify-write** that re-fetched full rows while the table grew. Fake embed makes this visible; real Voyage would hide it under network time but the DB cost still adds.
+1. Prefer fewer **expensive** Lance operations *only when wall falls*  
+2. Memory stays **O(batch/page)**, never O(corpus)  
+3. Do not optimize a sub-metric at the expense of the full path  
+
+**Primary bottleneck hypothesis (validated for L1):** LanceDB serial `merge_insert` + residual **read-modify-write** re-fetching full rows. **L1 (defer single write)** cut wall ~4× at 500k. **L2 (cross-file flush)** cut merge calls ~10× but **increased wall ~18%** — rejected as a wall win (see §5).
 
 ---
 
@@ -24,20 +26,22 @@ We optimize what still hurts at large N **even when embed is free**:
 
 | Goal | Constraint |
 |------|------------|
-| Cut DB work per indexed chunk | Lance OSS: **one serial DB executor** |
+| **Lower end-to-end index wall** | Lance OSS: **one serial DB executor** |
 | Scale to large codebases (10⁵–10⁶ chunks) | No full-table loads / full `to_pandas` on hot path |
 | Keep lance-take2 streaming invariants | Ordered keyset missing-embed pages |
 | Profile only with fake embeddings | Embed must not dominate wall time |
 
-**Success metrics (fake embed):**
+**Success metrics (fake embed) — ranked:**
 
-| Metric | Meaning |
-|--------|---------|
-| `merge_insert_calls` / `merge_insert_rows` | Write amplification |
-| `merge_insert_s` | Pure DB write wall |
-| `stream_embed` phase | Residual path (page + fake embed + DB write) |
-| `peak_rss_mb` | Memory ceiling |
-| chunks/s at 2k → 50k | Superlinear DB slowdown detection |
+| Rank | Metric | Role |
+|------|--------|------|
+| **1 (gate)** | `wall_s` / TOTAL phase wall | Ship / keep only if this improves (or holds with clear memory win) |
+| **2** | `peak_rss_mb` | Ceiling; must stay O(batch) |
+| **3 (diag)** | `merge_insert_s`, calls, rows | Explain DB share of wall |
+| **3 (diag)** | `optimize_s` / calls | Fragment tax |
+| **3 (diag)** | phase split (`seed_insert`, residual, etc.) | Where non-DB time moved |
+
+A change that improves rank-3 while hurting rank-1 is **not done**.
 
 ---
 
@@ -151,67 +155,130 @@ Fake embed only. Same machine. Synthetic seed (5000 files × 100 chunks).
 | peak RSS | **2080 MB** | **1019 MB** | **~half memory** |
 | remaining missing | 0 | 0 | both correct |
 
-**Throughput:** classic ~410 chunks/s → defer **~1700 chunks/s** (fake embed).
+**Throughput:** classic ~410 chunks/s → defer (pre-L2) **~1700 chunks/s** (fake embed).
 
 **Interpretation at large-codebase scale:**
 
-1. Residual **stream_embed** is ~79% of classic wall (960/1217) — the real large-N DB tax.  
-2. Defer removes that phase entirely for cold new-file ingest.  
-3. Memory halves because we never hold a second full-table RMW pipeline / fewer concurrent full-row merges.  
-4. Still **5000 merge_insert calls** (one per file) — next win is multi-file batching (L2).
+1. Residual **stream_embed** is ~79% of classic wall (960/1217) — the real large-N DB tax under free embed.  
+2. Defer removes that phase for cold new-file ingest → **wall** wins (L1).  
+3. Memory halves (no second full-table RMW pipeline).  
+4. Pre-L2 still had **5000** merge_inserts (one per file). L2 tried multi-file batching — see §5 (wall regression).
 
 JSON artifacts (local, not committed): `profile_500k_classic.json`, `profile_500k_defer.json`.
 
-**Takeaways:**
+**Takeaways (still true):**
 
-1. **DB is the bottleneck** with free embeds (`stream_embed` ≫ fake compute).  
-2. **Defer halves write amplification** and wins overall wall at every measured scale.  
-3. Residual **no-re-read** helps classic residual; at 500k, **avoiding residual entirely** via defer is the step-change.  
-4. At 50k–500k, **call count** (many small merge_inserts) and **optimize** matter; not just row count.  
-5. For large cold indexes of **new** codebases, **default lean is `defer_chunk_write=true`**.  
-6. Peak RSS at 500k defer ~1 GB still batch-dominated vs classic ~2 GB — do not load the corpus to go faster.
+1. Under free embed, residual two-write DB path dominates classic wall — fix that first.  
+2. **L1 defer** halves write amplification and **wins overall wall**.  
+3. Residual **no-re-read** helps classic residual; avoiding residual via defer is the step-change for cold new files.  
+4. Call-count and optimize are useful diagnostics; they are **not** success criteria alone.  
+5. Default `defer_chunk_write=true` is correct for cold new-file bulk index.  
+6. Do not load the corpus into RAM to go “faster.”
+
+### 500k — L2 vs L2-fix (same harness, defer on)
+
+| | Pre-L2 (historical) | L2 (`flush=1000`, 2 runs) | **L2-fix** (per-file, this run) |
+|--|---------------------|---------------------------|----------------------------------|
+| **wall_s** | ~295 | ~349 / ~350 | **~336** |
+| seed_insert | ~286 | ~339 / ~337 | **~325** |
+| merge_insert calls | 5000 | 500 | **5000** |
+| merge_insert_s | ~69.5 | ~8.0–8.2 | **~86** |
+| optimize calls / s | 48 / ~45 | 10 / ~12.5 | **54 / ~57** |
+| peak RSS MB | ~1019 | ~1234–1236 | **~1007** |
+| remaining_missing | 0 | 0 | **0** |
+| flush_policy | per_file | cross_file | **per_file** |
+
+**Conclusion:** L2 improved DB diagnostics but **raised wall ~18%**. L2-fix restores per-file flush: **wall better than L2** (~350→~336), **RSS back to ~1 GB**, correctness OK. Historical ~295 is not fully recovered on this run (likely machine noise + time since that baseline); gate is “beat L2 wall,” which holds. See re-evaluation below.
 
 ---
 
-## 5. Remaining large-N bottlenecks (priority order)
+## 5. Re-evaluation: L2 and remaining ideas (wall-first)
 
-| ID | Issue | Why it hurts large repos | Next step |
-|----|--------|---------------------------|-----------|
-| **L1** | ~~Classic two-write still default~~ | ~~2× merge_insert always~~ | **Done:** `defer_chunk_write` defaults **true** |
-| **L2** | ~~Seed/store many tiny merge_inserts~~ | ~~Fixed cost × files~~ | **Done:** cross-file deferred buffer flushes at `db_batch_size` |
-| **L3** | Residual missing scan (`search().where` over growing table) | Pages still scan candidates | Indexed signature / better filter; keep keyset |
-| **L4** | Fragment growth + optimize | Spikes wall mid-run | Cooldown done; tune threshold vs LSM 0.34 |
-| **L5** | Reindex smart-diff loads all file chunks | Large files | Hash-only skip more often; optional chunk-level signatures |
-| **L6** | Schema migration full table rewrite | One-time disaster at first embed | Always create fixed-dim schema when dims known |
-| **L7** | Parse/discovery | Real but secondary when DB is free-embed bottleneck | Free-threading / pipeline after L1–L4 |
+### Decision rule
 
-**Do not:** load more of the corpus into RAM to go “faster.”
+```
+ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
+                       DB counters only explain why
+```
+
+### L1 — defer single write — **KEEP (validated wall win)**
+
+- Wall −76% at 500k classic → defer; peak RSS ~half.  
+- Correct default for cold new-file path.
+
+### L2 — cross-file deferred buffer — **REVERTED (L2-fix done)**
+
+| Claim | L2 result | After L2-fix |
+|-------|-----------|----------------|
+| Fewer merge_inserts | 5000 → 500 | Back to 5000 (per-file) |
+| Lower merge_insert_s / optimize_s | Yes | Back to ~86s / ~57s |
+| Lower end-to-end wall | **False** (~350s) | **~336s** (beats L2; gate) |
+| Lower peak RSS | **False** (~1.2 GB) | **~1.0 GB** (recovered) |
+
+**Why L2 was wrong as shipped:** optimized call count / pure DB write time; **wall** rose. Larger batches + buffer churn + RSS did not repay merge fixed-cost savings under free embed.
+
+**What we did (L2-fix):**
+
+- Product: `_store_parsed_results` uses per-file `_embed_and_store_new_chunks` again (no cross-file buffer).  
+- Soak: `flush_policy=per_file` (no cross-file buffer).  
+- Tests: L2 call-count assertion removed; multi-file defer contract = no missing embeds.
+
+**If revisiting batching later:** sub-phase timers + flush-size ladder with **wall as gate**. Only ship a size that beats current per-file wall.
+
+### Remaining ideas — re-ranked by expected **end-to-end wall** impact
+
+| Priority | ID | Idea | Wall impact under current defaults | Verdict |
+|----------|-----|------|------------------------------------|---------|
+| **Done** | **L2-fix** | Revert cross-file buffer; per-file L1 flush | Beat L2 wall (~350→~336); RSS ~1.2→~1.0 GB | **Done** |
+| **P1** | **Instr** | Sub-phase timers in soak (file / embed / build / merge / optimize) | Stops optimizing the wrong counter; explains ~295 vs ~336 drift | **Do next** |
+| **P2** | **L1-hold** | Keep defer default; no clever write paths without wall gate | Protects the only proven large win (vs classic) | Hold |
+| **P3** | **L4** | Optimize threshold / fragment policy under per-file defer | ~57s optimize on 500k L2-fix — real wall if reducible | Measure; tune only if wall↓ |
+| **P4** | **L6** | Fixed-dim schema at first connect | One-time first-embed rewrite | Worth doing; one-shot wall |
+| **P5** | **L5** | Reindex smart-diff / hash-only skip | Product reindex wall (not cold soak) | Measure real reindex |
+| **P6** | **L3** | Residual missing scan cheaper | Residual empty on cold+defer success | Deprioritize default cold bulk |
+| **P7** | **L7** | Parse ∥ pipeline / free-threading | After DB path wall-stable | Profile first |
+| **Park** | **L2-retry** | Cross-file batch only if flush ladder shows wall↓ | Only after Instr baseline | Parked |
+
+**Do not:**
+
+- Load more of the corpus into RAM to go “faster.”  
+- Ship DB-call reductions that raise wall or peak RSS without a clear product reason.  
+- Prioritize residual-scan work (L3) for the default cold+defer path where residual is already empty.
 
 ---
 
 ## 6. Phase plan (revised)
 
-### Done
+### Done (wall-validated)
 
 - [x] Profile harness + DB counters + RSS (`scripts/profile_index.py`, `IndexProfile`)  
-- [x] Deferred single write for **new** files  
-- [x] Residual embed **no re-read** when page carries row fields  
+- [x] Deferred single write for **new** files (**L1** — wall win)  
+- [x] Residual embed **no re-read** when page fields present  
 - [x] Optimize cooldown  
-- [x] Fake-only scale soaks (2k / 10k / 500k)  
+- [x] Fake-only scale soaks (2k / 10k / 500k classic vs defer)  
 - [x] Default `defer_chunk_write=true` (**L1**)  
-- [x] Cross-file deferred buffer at `db_batch_size` (**L2**) — 10k soak: **100 → 10** merge_inserts  
 
-### Next (DB scale)
+### Reverted (wall regression)
 
-- [ ] Prefer fixed-size embedding schema at first connect when dims known (**L6**)  
-- [ ] Residual candidate scan: avoid loading `embedding` column in id candidate pass (**L3**)  
-- [ ] Optional 500k re-soak after L2 (expect ~500 flushes vs 5000)
+- [x] Cross-file deferred buffer (**L2**) — shipped then **L2-fix** removed (calls↓ wall↑)  
+- [x] **L2-fix:** per-file deferred flush restored; 500k wall ~336s (beats L2 ~350s); RSS ~1 GB  
 
-### Later
+### Next (wall-first)
 
-- [ ] Pipeline: parse ∥ embed ∥ DB with bounded queues (still one DB writer)  
-- [ ] Optional free-threaded Python for parse only (not multi-writer DB)  
-- [ ] Reindex path smart-diff cost  
+- [ ] **Instr:** sub-phase timers (file insert / embed / build / merge / optimize)  
+- [ ] **L4 measure:** optimize threshold A/B on wall under per-file defer (~57s optimize on 500k)  
+- [ ] **L6:** fixed-size embedding schema when dims known (one-time rewrite avoidance)  
+
+### Later (product path / real profiles)
+
+- [ ] **L5:** reindex smart-diff cost (not covered by cold soak)  
+- [ ] **L3:** residual scan only if residual path still appears on measured product runs  
+- [ ] Pipeline: parse ∥ embed ∥ DB with bounded queues (one DB writer) — only if wall profile shows idle DB waiting on parse  
+- [ ] Free-threaded parse only after above  
+
+### Parked
+
+- [ ] Cross-file batching (**L2-retry**) until a flush size beats per-file **wall**
 
 ---
 
@@ -240,6 +307,11 @@ Real Voyage is only for **manual end-to-end** quality, not for deciding DB optim
 ---
 
 ## 9. Operator knobs
+
+After L2-fix, **`db_batch_size` is insert/fragment batch sizing only** — it does
+**not** control cross-file deferred flush (defer writes one merge_insert per new
+file). Tune it for classic/residual batch size and fragment pressure, not for
+“fewer merge_inserts across files.”
 
 ```json
 {

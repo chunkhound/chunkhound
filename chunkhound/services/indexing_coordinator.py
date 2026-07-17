@@ -592,22 +592,12 @@ class IndexingCoordinator(BaseService):
                 embeddable.append((chunk, text))
         return empty_chunks, embeddable
 
-    def _defer_flush_batch_size(self) -> int:
-        """Target chunk count before a cross-file deferred merge_insert flush."""
-        try:
-            if self.config and getattr(self.config, "indexing", None):
-                raw = int(getattr(self.config.indexing, "db_batch_size", 100) or 100)
-                return max(100, raw)
-        except Exception:
-            pass
-        return 1000
-
     async def _flush_deferred_pairs(
         self,
         chunks: list[Chunk],
         vectors: list[list[float]],
     ) -> list[int]:
-        """Write accumulated (chunk, vector) pairs; may span multiple files."""
+        """Write one file's (chunk, vector) pairs as a single deferred insert."""
         if not chunks:
             return []
         if not self._embedding_provider:
@@ -627,8 +617,8 @@ class IndexingCoordinator(BaseService):
     ) -> tuple[list[int], list[int]]:
         """Embed in memory then insert chunks with vectors (deferred write).
 
-        Single-file path (process_file / small batches). For multi-file store
-        batches, prefer the cross-file buffer in ``_store_parsed_results``.
+        Per-file flush (L1). Cross-file buffering (L2) was reverted: fewer
+        merge_insert calls raised end-to-end wall time on large soaks.
 
         Returns:
             (all_stored_ids, residual_ids). residual_ids need a later embed pass.
@@ -1279,36 +1269,6 @@ class IndexingCoordinator(BaseService):
         # Track file_ids for single-file case
         file_ids: list[int] = []
 
-        # Cross-file deferred buffer: accumulate (chunk, vector) until flush size
-        # so one merge_insert can cover many small files (L2).
-        defer_buf_chunks: list[Chunk] = []
-        defer_buf_vectors: list[list[float]] = []
-        flush_size = self._defer_flush_batch_size()
-
-        async def _flush_defer_buffer() -> list[int]:
-            nonlocal defer_buf_chunks, defer_buf_vectors
-            if not defer_buf_chunks:
-                return []
-            try:
-                ids = await self._flush_deferred_pairs(
-                    defer_buf_chunks, defer_buf_vectors
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Cross-file deferred flush failed ({e}); "
-                    "falling back to classic insert for buffer"
-                )
-                ids = await self._insert_chunks_in_sized_batches(defer_buf_chunks)
-                stats["chunk_ids_needing_embeddings"].extend(ids)
-            else:
-                # Successfully embedded writes — no residual for these ids
-                pass
-            n = len(defer_buf_chunks)
-            defer_buf_chunks = []
-            defer_buf_vectors = []
-            logger.debug(f"Flushed deferred buffer: {n} chunks → {len(ids)} ids")
-            return ids
-
         # Process each file independently (per-file transaction for file row)
         for result in results:
             # Handle errors
@@ -1448,64 +1408,19 @@ class IndexingCoordinator(BaseService):
                         and bool(new_chunk_models)
                     )
                     if use_defer:
-                        # Embed this file; buffer vectors for cross-file flush (L2).
+                        # Per-file embed + single write (L1). Flush immediately —
+                        # cross-file batching (L2) raised end-to-end wall at scale.
                         rel_path = self._get_relative_path(
                             result.file_path
                         ).as_posix()
-                        empty_chunks, embeddable = self._split_empty_and_embeddable(
+                        stored_ids, residual_ids = await self._embed_and_store_new_chunks(
                             new_chunk_models, file_path=rel_path
                         )
-                        n_this_file = 0
-                        if empty_chunks:
-                            empty_ids = await self._insert_chunks_in_sized_batches(
-                                empty_chunks
-                            )
-                            n_this_file += len(empty_ids)
-                        if embeddable and self._embedding_provider is not None:
-                            valid_chunks = [c for c, _ in embeddable]
-                            texts = [t for _, t in embeddable]
-                            try:
-                                vectors = await self._embedding_provider.embed_batch(
-                                    texts
-                                )
-                                if len(vectors) != len(valid_chunks):
-                                    raise ValueError(
-                                        f"embed count mismatch "
-                                        f"{len(vectors)} vs {len(valid_chunks)}"
-                                    )
-                                vec_lists = [
-                                    list(v) if not isinstance(v, list) else v
-                                    for v in vectors
-                                ]
-                                defer_buf_chunks.extend(valid_chunks)
-                                defer_buf_vectors.extend(vec_lists)
-                                n_this_file += len(valid_chunks)
-                                while len(defer_buf_chunks) >= flush_size:
-                                    await _flush_defer_buffer()
-                            except Exception as e:
-                                logger.warning(
-                                    f"Deferred embed/buffer failed for {rel_path} "
-                                    f"({e}); classic insert"
-                                )
-                                classic_ids = (
-                                    await self._insert_chunks_in_sized_batches(
-                                        valid_chunks
-                                    )
-                                )
-                                n_this_file += len(classic_ids)
-                                stats["chunk_ids_needing_embeddings"].extend(
-                                    classic_ids
-                                )
-                        elif embeddable:
-                            classic_ids = await self._insert_chunks_in_sized_batches(
-                                [c for c, _ in embeddable]
-                            )
-                            n_this_file += len(classic_ids)
-                            stats["chunk_ids_needing_embeddings"].extend(classic_ids)
-                        stats["total_chunks"] += n_this_file
+                        stats["chunk_ids_needing_embeddings"].extend(residual_ids)
+                        stats["total_chunks"] += len(stored_ids)
                         logger.debug(
-                            f"Deferred path file_id={file_id}: {n_this_file} chunks "
-                            f"(buffer={len(defer_buf_chunks)})"
+                            f"Deferred path file_id={file_id}: "
+                            f"{len(stored_ids)} chunks ({len(residual_ids)} residual)"
                         )
                     else:
                         ids = await self._insert_chunks_in_sized_batches(
@@ -1557,13 +1472,6 @@ class IndexingCoordinator(BaseService):
                             info=_progress_info(stored, skipped, errs, chunks_so_far),
                         )
                 continue
-
-        # Final flush of cross-file deferred buffer (remaining < flush_size).
-        if defer_buf_chunks:
-            try:
-                await _flush_defer_buffer()
-            except Exception as e:
-                logger.warning(f"Final deferred buffer flush failed: {e}")
 
         # Update external cumulative counters
         if cumulative_counters is not None:
