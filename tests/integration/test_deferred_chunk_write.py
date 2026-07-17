@@ -67,6 +67,99 @@ async def test_deferred_write_indexes_new_file_with_vectors(
 
 
 @pytest.mark.asyncio
+async def test_defer_respects_skip_embeddings_for_realtime(
+    tmp_path: Path,
+) -> None:
+    """skip_embeddings=True must not embed even when defer_chunk_write is on."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "b.py").write_text("def a():\n    return 1\n")
+
+    db_dir = tmp_path / "db"
+    cfg = Config(
+        database=DatabaseConfig(path=db_dir, provider="lancedb"),
+        indexing=IndexingConfig(defer_chunk_write=True, cleanup=False),
+        embedding=EmbeddingConfig(
+            provider="openai", model="fake-embeddings", batch_size=50
+        ),
+    )
+    db = LanceDBProvider(
+        str(cfg.database.get_db_path()),
+        base_directory=src,
+        config=cfg.database,
+    )
+    db.connect()
+    fake = FakeEmbeddingProvider(dims=32, batch_size=50)
+    embed_calls = {"n": 0}
+    original_embed = fake.embed_batch
+
+    async def counting_embed(texts):  # type: ignore[no-untyped-def]
+        embed_calls["n"] += 1
+        return await original_embed(texts)
+
+    fake.embed_batch = counting_embed  # type: ignore[method-assign]
+    try:
+        coord = IndexingCoordinator(
+            database_provider=db,
+            base_directory=src,
+            embedding_provider=fake,  # type: ignore[arg-type]
+            config=cfg,
+        )
+        result = await coord.process_file(src / "b.py", skip_embeddings=True)
+        assert result.get("status") == "success", result
+        assert embed_calls["n"] == 0, "skip_embeddings must not call embed API"
+        missing = db.get_chunks_without_embeddings_paginated(
+            fake.name, fake.model, limit=50
+        )
+        assert len(missing) >= 1, "chunks should remain for residual embed"
+    finally:
+        db.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_classic_then_residual_clears_missing(tmp_path: Path) -> None:
+    """Store without defer then generate_missing leaves no missing embeds."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "c.py").write_text("def z():\n    return 9\n")
+
+    db_dir = tmp_path / "db"
+    cfg = Config(
+        database=DatabaseConfig(path=db_dir, provider="lancedb"),
+        indexing=IndexingConfig(defer_chunk_write=False, cleanup=False),
+        embedding=EmbeddingConfig(
+            provider="openai", model="fake-embeddings", batch_size=50
+        ),
+    )
+    db = LanceDBProvider(
+        str(cfg.database.get_db_path()),
+        base_directory=src,
+        config=cfg.database,
+    )
+    db.connect()
+    fake = FakeEmbeddingProvider(dims=32, batch_size=50)
+    try:
+        coord = IndexingCoordinator(
+            database_provider=db,
+            base_directory=src,
+            embedding_provider=fake,  # type: ignore[arg-type]
+            config=cfg,
+        )
+        await coord.process_directory(
+            src, patterns=["**/*.py"], exclude_patterns=[]
+        )
+        # Without per-file embed, residual fills vectors
+        emb = await coord.generate_missing_embeddings()
+        assert emb.get("status") in ("success", "complete"), emb
+        missing = db.get_chunks_without_embeddings_paginated(
+            fake.name, fake.model, limit=50
+        )
+        assert missing == []
+    finally:
+        db.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_insert_chunks_with_embeddings_batch_roundtrip(
     tmp_path: Path,
 ) -> None:

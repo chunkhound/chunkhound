@@ -281,7 +281,35 @@ class EmbeddingService(BaseService):
 
                 total_attempted += len(work)
                 chunk_id_list = [ChunkId(int(c["id"])) for c in work]
-                chunk_texts = [str(c.get("code") or "") for c in work]
+                # Same embed-text contract as deferred write / process_file path.
+                from chunkhound.core.utils import format_chunk_for_embedding
+                from chunkhound.utils.normalization import normalize_content
+
+                chunk_texts: list[str] = []
+                for c in work:
+                    code = normalize_content(str(c.get("code") or ""))
+                    raw_meta = c.get("metadata")
+                    meta: dict[str, Any] = {}
+                    if isinstance(raw_meta, dict):
+                        meta = raw_meta
+                    elif isinstance(raw_meta, str) and raw_meta.strip():
+                        try:
+                            import json
+
+                            parsed = json.loads(raw_meta)
+                            if isinstance(parsed, dict):
+                                meta = parsed
+                        except Exception:
+                            meta = {}
+                    chunk_texts.append(
+                        format_chunk_for_embedding(
+                            code=code,
+                            file_path=str(c.get("file_path") or "") or None,
+                            language=str(c.get("language") or "") or None,
+                            constants=meta.get("constants"),
+                            rule_target=meta.get("rule_target"),
+                        )
+                    )
                 # Pass full page rows so Lance residual merge_insert can avoid
                 # re-reading the growing table (dominant cost at large N).
                 generated_count = await self.generate_embeddings_for_chunks(

@@ -546,59 +546,109 @@ class IndexingCoordinator(BaseService):
             all_ids.extend(ids)
         return all_ids
 
-    async def _embed_and_store_new_chunks(
-        self, chunks: list[Chunk]
-    ) -> list[int]:
-        """Embed in memory then insert chunks with vectors (deferred write).
-
-        Only for files with no prior chunks. Memory bounded by caller batch size.
-        """
-        if not chunks or not self._embedding_provider:
-            return await self._insert_chunks_in_sized_batches(chunks)
-
+    def _text_for_embedding(
+        self, code: str, *, file_path: str | None, language: str | None, metadata: Any
+    ) -> str:
+        """Single embed-text contract for defer and residual paths."""
         from chunkhound.core.utils import format_chunk_for_embedding
         from chunkhound.utils.normalization import normalize_content
 
-        valid: list[tuple[Chunk, str]] = []
+        normalized = normalize_content(code or "")
+        meta = metadata if isinstance(metadata, dict) else {}
+        return format_chunk_for_embedding(
+            code=normalized,
+            file_path=file_path,
+            language=language,
+            constants=meta.get("constants"),
+            rule_target=meta.get("rule_target"),
+        )
+
+    async def _embed_and_store_new_chunks(
+        self,
+        chunks: list[Chunk],
+        *,
+        file_path: str | None = None,
+    ) -> tuple[list[int], list[int]]:
+        """Embed in memory then insert chunks with vectors (deferred write).
+
+        Only for files with no prior chunks. Memory bounded by caller batch size.
+
+        Returns:
+            (all_stored_ids, residual_ids). residual_ids need a later embed pass
+            (empty or classic-fallback rows). Empty residual means fully embedded.
+        """
+        if not chunks or not self._embedding_provider:
+            ids = await self._insert_chunks_in_sized_batches(chunks)
+            return ids, list(ids)
+
+        # Preserve classic semantics: store empty chunks without vectors.
+        embeddable: list[tuple[Chunk, str]] = []
+        empty_chunks: list[Chunk] = []
         for chunk in chunks:
-            code = normalize_content(chunk.code or "")
-            if not code:
-                continue
-            metadata = chunk.metadata or {}
-            text = format_chunk_for_embedding(
-                code=code,
-                file_path=None,
-                language=str(
-                    chunk.language.value
-                    if hasattr(chunk.language, "value")
-                    else chunk.language
-                ),
-                constants=metadata.get("constants") if isinstance(metadata, dict) else None,
-                rule_target=metadata.get("rule_target")
-                if isinstance(metadata, dict)
-                else None,
+            lang = str(
+                chunk.language.value
+                if hasattr(chunk.language, "value")
+                else chunk.language
             )
-            valid.append((chunk, text))
+            text = self._text_for_embedding(
+                chunk.code or "",
+                file_path=file_path,
+                language=lang,
+                metadata=chunk.metadata,
+            )
+            from chunkhound.utils.normalization import normalize_content
 
-        if not valid:
-            return await self._insert_chunks_in_sized_batches(chunks)
+            if not normalize_content(chunk.code or "").strip():
+                empty_chunks.append(chunk)
+            else:
+                embeddable.append((chunk, text))
 
-        valid_chunks = [c for c, _ in valid]
-        texts = [t for _, t in valid]
-        vectors = await self._embedding_provider.embed_batch(texts)
+        empty_ids: list[int] = []
+        if empty_chunks:
+            empty_ids = await self._insert_chunks_in_sized_batches(empty_chunks)
+
+        if not embeddable:
+            # Only empty chunks: stored classic; residual will skip empty text.
+            return empty_ids, list(empty_ids)
+
+        valid_chunks = [c for c, _ in embeddable]
+        texts = [t for _, t in embeddable]
+        try:
+            vectors = await self._embedding_provider.embed_batch(texts)
+        except Exception as e:
+            logger.warning(
+                f"Deferred write: embed failed ({e}); falling back to two-write"
+            )
+            ids = await self._insert_chunks_in_sized_batches(valid_chunks)
+            all_ids = empty_ids + ids
+            return all_ids, list(all_ids)
+
         if len(vectors) != len(valid_chunks):
             logger.warning(
                 "Deferred write: embed count mismatch "
                 f"({len(vectors)} vs {len(valid_chunks)}); falling back to two-write"
             )
-            return await self._insert_chunks_in_sized_batches(chunks)
+            ids = await self._insert_chunks_in_sized_batches(valid_chunks)
+            all_ids = empty_ids + ids
+            return all_ids, list(all_ids)
 
-        return await self._insert_chunks_with_embeddings_sized(
-            valid_chunks,
-            [list(v) if not isinstance(v, list) else v for v in vectors],
-            self._embedding_provider.name,
-            self._embedding_provider.model,
-        )
+        try:
+            embedded_ids = await self._insert_chunks_with_embeddings_sized(
+                valid_chunks,
+                [list(v) if not isinstance(v, list) else v for v in vectors],
+                self._embedding_provider.name,
+                self._embedding_provider.model,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Deferred write: single-insert failed ({e}); falling back to two-write"
+            )
+            ids = await self._insert_chunks_in_sized_batches(valid_chunks)
+            all_ids = empty_ids + ids
+            return all_ids, list(all_ids)
+
+        # Only empty (unembedded) IDs need residual; embedded_ids are done.
+        return empty_ids + embedded_ids, list(empty_ids)
 
     def _apply_fragment_batch_cap(self, base_size: int) -> int:
         """Reduce insert batch size when LanceDB fragment pressure is high."""
@@ -760,8 +810,10 @@ class IndexingCoordinator(BaseService):
                     )
                 return {"status": "skipped", "reason": result.error, "chunks": 0}
 
-            # Store the single file result
-            stats = await self._store_parsed_results([result], file_task=None)
+            # Store the single file result (honor skip_embeddings for realtime).
+            stats = await self._store_parsed_results(
+                [result], file_task=None, skip_embeddings=skip_embeddings
+            )
             file_id = stats.get("file_id")
 
             # Check for disk limit exceeded error and raise it immediately
@@ -1155,12 +1207,16 @@ class IndexingCoordinator(BaseService):
         results: list[ParsedFileResult],
         file_task: TaskID | None = None,
         cumulative_counters: dict[str, int] | None = None,
+        *,
+        skip_embeddings: bool = False,
     ) -> dict[str, Any]:
         """Store all parsed results in database (single-threaded).
 
         Args:
             results: List of parsed file results from batch processing
             file_task: Optional progress task ID for tracking
+            skip_embeddings: When True (realtime path), never defer-embed;
+                always classic insert and queue residual IDs.
 
         Returns:
             Dictionary with processing statistics. For single-file callers,
@@ -1320,14 +1376,20 @@ class IndexingCoordinator(BaseService):
                 else:
                     # New file or existing file with no chunks — store all
                     new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
-                    if (
-                        self._defer_chunk_write_enabled()
+                    use_defer = (
+                        not skip_embeddings
+                        and self._defer_chunk_write_enabled()
                         and self._embedding_provider is not None
-                        and new_chunk_models
-                    ):
+                        and bool(new_chunk_models)
+                    )
+                    if use_defer:
                         # Single merge_insert with vectors (batch-bounded memory).
-                        ids = await self._embed_and_store_new_chunks(new_chunk_models)
-                        # Already embedded — do not queue for residual embed.
+                        rel_path = self._get_relative_path(result.file_path).as_posix()
+                        ids, residual_ids = await self._embed_and_store_new_chunks(
+                            new_chunk_models, file_path=rel_path
+                        )
+                        if residual_ids:
+                            stats["chunk_ids_needing_embeddings"].extend(residual_ids)
                     else:
                         ids = await self._insert_chunks_in_sized_batches(
                             new_chunk_models

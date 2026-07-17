@@ -1128,31 +1128,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Ensure fixed-size embedding schema before first vector write.
         first_vec = embeddings[0]
         dims = len(first_vec)
-        # Reuse embedding insert path schema migration by writing via full rows.
-        # Ensure table has fixed-size list if needed.
-        current_schema = self._chunks_table.schema
-        emb_field = None
-        for field in current_schema:
-            if field.name == "embedding":
-                emb_field = field
-                break
-        if emb_field is None or not pa.types.is_fixed_size_list(emb_field.type):
-            # Force schema upgrade using existing migration (empty/variable → fixed).
-            # Build a no-op path: call internal ensure via a tiny embedding update
-            # is heavy; recreate only when empty variable-size.
-            try:
-                row_count = int(self._chunks_table.count_rows())
-            except Exception:
-                row_count = 0
-            if row_count == 0:
-                conn.drop_table("chunks")
-                self._chunks_table = conn.create_table(
-                    "chunks", schema=get_chunks_schema(dims)
-                )
-            else:
-                # Non-empty variable schema: fall back is not supported here —
-                # insert without fixed schema using variable list if present.
-                pass
+        self._ensure_fixed_embedding_schema(conn, dims)
 
         schema = get_chunks_schema(dims)
         batch_size = 1000
@@ -1200,6 +1176,90 @@ class LanceDBProvider(SerialDatabaseProvider):
             conn, state, reason="post-deferred-chunk-insert"
         )
         return all_ids
+
+    def _ensure_fixed_embedding_schema(self, conn: Any, dims: int) -> None:
+        """Ensure chunks.embedding is a fixed-size list of ``dims``.
+
+        Empty tables are recreated. Non-empty variable or wrong-dim tables use
+        the same one-time migration as insert_embeddings_batch. Raises on
+        failure so deferred write can fall back to classic two-write.
+        """
+        if self._chunks_table is None:
+            raise RuntimeError("chunks table missing")
+
+        emb_field = None
+        for field in self._chunks_table.schema:
+            if field.name == "embedding":
+                emb_field = field
+                break
+
+        needs_migration = False
+        if emb_field is None:
+            needs_migration = True
+        elif not pa.types.is_fixed_size_list(emb_field.type):
+            needs_migration = True
+        elif (
+            hasattr(emb_field.type, "list_size")
+            and emb_field.type.list_size != dims
+        ):
+            needs_migration = True
+
+        if not needs_migration:
+            return
+
+        try:
+            row_count = int(self._chunks_table.count_rows())
+        except Exception:
+            row_count = 0
+
+        if row_count == 0:
+            conn.drop_table("chunks")
+            self._chunks_table = conn.create_table(
+                "chunks", schema=get_chunks_schema(dims)
+            )
+            logger.info(
+                f"Created chunks table with fixed-size embedding schema ({dims} dims)"
+            )
+            return
+
+        # Non-empty: one-time migration (same pattern as residual embed path).
+        existing_data_df = self._chunks_table.to_pandas()
+        logger.info(
+            f"Migrating chunks table to fixed-size embedding schema ({dims} dims) "
+            f"for deferred write; {len(existing_data_df):,} rows"
+        )
+        conn.drop_table("chunks")
+        self._chunks_table = conn.create_table(
+            "chunks", schema=get_chunks_schema(dims)
+        )
+        if len(existing_data_df) > 0:
+            restore_batch_size = 1000
+            chunks_to_restore = []
+            for _, row in existing_data_df.iterrows():
+                chunks_to_restore.append(
+                    {
+                        "id": row["id"],
+                        "file_id": row["file_id"],
+                        "content": row["content"],
+                        "start_line": row["start_line"],
+                        "end_line": row["end_line"],
+                        "chunk_type": row["chunk_type"],
+                        "language": row["language"],
+                        "name": row["name"],
+                        "embedding": None,
+                        "provider": "",
+                        "model": "",
+                        "created_time": row.get("created_time", time.time()),
+                        "metadata": _serialize_metadata(
+                            _deserialize_metadata(row.get("metadata"))
+                        ),
+                    }
+                )
+            new_schema = get_chunks_schema(dims)
+            for i in range(0, len(chunks_to_restore), restore_batch_size):
+                batch = chunks_to_restore[i : i + restore_batch_size]
+                restore_table = pa.Table.from_pylist(batch, schema=new_schema)
+                self._chunks_table.add(restore_table, mode="append")
 
     def _maybe_optimize_after_write(
         self, conn: Any, state: dict[str, Any], *, reason: str
