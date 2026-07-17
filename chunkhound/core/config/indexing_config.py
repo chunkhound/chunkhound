@@ -47,7 +47,7 @@ class IndexingConfig(BaseModel):
     db_batch_size: int = Field(default=100, description="Internal DB batch size")
     max_concurrent: int = Field(default=5, description="Internal concurrency")
     # When True (and an embedding provider is configured), new files embed in
-    # memory then write chunks once with vectors — one merge_insert instead of
+    # memory then write chunks once with vectors — one append/write instead of
     # store-then-embed. Memory stays batch-bounded; reindex-with-existing-chunks
     # still uses the classic two-write path. Realtime skip_embeddings still
     # forces classic store + residual. See operations/indexing_performance_plan.md.
@@ -55,7 +55,7 @@ class IndexingConfig(BaseModel):
         default=True,
         description=(
             "Embed then single-write new chunks (fewer DB ops; default on). "
-            "Requires embedding provider; only applies when file has no prior chunks. "
+            "Requires embedding provider; brand-new files only (not reindex). "
             "Set false to force classic store-then-embed residual path."
         ),
     )

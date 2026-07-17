@@ -283,7 +283,8 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 | **Done** | **L4** | Optimize threshold A/B (50/100/200/500/10k) | **Keep product default 100**; thr≥200 **raises** wall (fragment drag on merge + file insert) | **Done** (measure, no product change) |
 | **Done** | **File-id** | Skip post-`insert_file` path search; return pre-assigned id | file 91→51s; wall 311→297 at 500k | **Done** |
 | **Done** | **File batch (P3)** | `insert_files_batch` multi-file merge | file 51→**0.14s**; wall 297→**214**; peak **0.77 GB** | **Done** |
-| **P3** | **Write path** | Chunk merge/optimize still dominant | ~145s write / ~85s mi / ~29s opt at 500k | **Do next** |
+| **Done** | **Write append** | Deferred chunk write uses `add` (new ids) not merge_insert | wall 214→**138**; write 145→**77**; mi_s 85→**24** | **Done** |
+| **P3** | **Write batch** | Cross-file deferred chunk buffer + append (L2-style but append) | write still ~77s / ~60% seed | Optional if wall still needs it |
 | **Out of cold-start scope** | **L6** | Fixed-dim schema when dims known | One-shot footgun (O(rows) only if variable schema already full); **does not improve clean cold index wall** when empty/fixed schema | Later product safety |
 | **Out of cold-start scope** | **L5** | Reindex smart-diff / hash-only | **Incremental reindex**, not cold bulk | Later reindex profile |
 | **Later** | **L3** | Residual missing scan cheaper | Residual empty on cold+defer success | Deprioritize default cold bulk |
@@ -323,7 +324,8 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 - [x] **L4 measure:** optimize threshold A/B — product **100** wins; soak default aligned to 100; do not raise  
 - [x] **File-id:** skip post-`insert_file` path search (500k file ~91→51s, wall ~311→297)  
 - [x] **File batch (P3):** multi-file `insert_files_batch` (500k file ~51→0.14s, wall ~297→214)  
-- [ ] **Write path:** reduce merge/optimize share of seed (~145s write at 500k)  
+- [x] **Write append:** deferred `insert_chunks_with_embeddings` uses append (500k wall ~214→138)  
+- [ ] **Write batch (optional):** cross-file buffer + append if more wall needed  
 
 ### Out of cold-start scope (address later)
 

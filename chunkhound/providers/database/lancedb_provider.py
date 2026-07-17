@@ -987,6 +987,22 @@ class LanceDBProvider(SerialDatabaseProvider):
             stats.record_merge_insert(row_count, elapsed)
             stats.chunk_insert_batches += 1
 
+    def _append_chunks(self, table: Any, *, row_count: int) -> None:
+        """Append-only chunk write for cold new ids (faster than merge_insert).
+
+        Deferred single-write path pre-assigns unique chunk ids; no match needed.
+        Profile accounting reuses merge_insert_* counters as write-wall diagnostics.
+        """
+        if self._chunks_table is None:
+            return
+        t0 = time.perf_counter()
+        self._chunks_table.add(table, mode="append")
+        elapsed = time.perf_counter() - t0
+        stats = self._db_stats()
+        if stats is not None:
+            stats.record_merge_insert(row_count, elapsed)
+            stats.chunk_insert_batches += 1
+
     def _merge_insert_embeddings_table(self, table: Any, *, row_count: int) -> None:
         """when_matched_update_all merge for embedding fill-in."""
         if self._chunks_table is None:
@@ -1120,9 +1136,14 @@ class LanceDBProvider(SerialDatabaseProvider):
         provider: str,
         model: str,
     ) -> list[int]:
-        """Insert chunks already paired with vectors (single merge_insert).
+        """Insert new chunks already paired with vectors (append-only cold path).
 
-        Used by deferred-write indexing: one DB write instead of store-then-embed.
+        Used by deferred-write indexing for **brand-new files**: one append write
+        instead of store-then-embed. Pre-assigns content-hash ids and uses
+        ``table.add`` (not merge_insert). **Not safe for reindex/upsert** — if a
+        row with the same id already exists, append duplicates rather than
+        updating. Callers must only use this when no prior chunks exist for
+        those ids (coordinator: new file only).
         """
         return self._execute_in_db_thread_sync(
             "insert_chunks_with_embeddings_batch",
@@ -1210,7 +1231,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                     }
                 )
             tbl = pa.Table.from_pylist(rows, schema=schema)
-            self._merge_insert_chunks(tbl, row_count=len(rows))
+            # Cold deferred path: new unique ids → append beats merge_insert wall.
+            self._append_chunks(tbl, row_count=len(rows))
             all_ids.extend(ids)
 
         self._maybe_optimize_after_write(

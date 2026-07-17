@@ -67,6 +67,79 @@ async def test_deferred_write_indexes_new_file_with_vectors(
 
 
 @pytest.mark.asyncio
+async def test_reindex_after_defer_does_not_duplicate_chunk_ids(
+    tmp_path: Path,
+) -> None:
+    """Modify+reindex after cold defer must not leave duplicate content-hash ids.
+
+    Deferred Lance writes use append; reindex must stay on classic merge path
+    so updates do not stack duplicate rows for the same chunk id.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    target = src / "m.py"
+    target.write_text("def a():\n    return 1\n")
+
+    db_dir = tmp_path / "db"
+    cfg = Config(
+        database=DatabaseConfig(
+            path=db_dir,
+            provider="lancedb",
+            lancedb_optimize_fragment_threshold=10_000,
+        ),
+        indexing=IndexingConfig(defer_chunk_write=True, cleanup=False),
+        embedding=EmbeddingConfig(
+            provider="openai", model="fake-embeddings", batch_size=50
+        ),
+    )
+    db = LanceDBProvider(
+        str(cfg.database.get_db_path()),
+        base_directory=src,
+        config=cfg.database,
+    )
+    db.connect()
+    fake = FakeEmbeddingProvider(dims=32, batch_size=50)
+    try:
+        coord = IndexingCoordinator(
+            database_provider=db,
+            base_directory=src,
+            embedding_provider=fake,  # type: ignore[arg-type]
+            config=cfg,
+        )
+        r1 = await coord.process_directory(
+            src, patterns=["**/*.py"], exclude_patterns=[]
+        )
+        assert r1.get("status") == "success", r1
+        rows1 = db._chunks_table.search().to_list() if db._chunks_table else []
+        ids1 = [int(r["id"]) for r in rows1]
+        assert ids1, "expected chunks after first index"
+        assert len(ids1) == len(set(ids1)), "duplicate ids after cold defer"
+
+        # Change content so reindex is not skipped
+        target.write_text("def a():\n    return 2\n\ndef b():\n    return 3\n")
+        r2 = await coord.process_directory(
+            src, patterns=["**/*.py"], exclude_patterns=[]
+        )
+        assert r2.get("status") == "success", r2
+        emb = await coord.generate_missing_embeddings()
+        assert emb.get("status") in ("success", "complete", "no_provider"), emb
+
+        rows2 = db._chunks_table.search().to_list() if db._chunks_table else []
+        ids2 = [int(r["id"]) for r in rows2]
+        assert ids2, "expected chunks after reindex"
+        assert len(ids2) == len(set(ids2)), (
+            f"duplicate chunk ids after reindex: {len(ids2)} rows, "
+            f"{len(set(ids2))} unique"
+        )
+        missing = db.get_chunks_without_embeddings_paginated(
+            fake.name, fake.model, limit=50
+        )
+        assert missing == [], f"expected no missing embeds, got {len(missing)}"
+    finally:
+        db.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_defer_respects_skip_embeddings_for_realtime(
     tmp_path: Path,
 ) -> None:

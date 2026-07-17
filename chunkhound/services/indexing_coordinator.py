@@ -1459,8 +1459,12 @@ class IndexingCoordinator(BaseService):
                 else:
                     # New file or existing file with no chunks — store all
                     new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
+                    # Lance deferred write uses append (not merge). Only brand-new
+                    # files: existing file with zero chunks may still have orphan
+                    # rows; reindex must stay on classic merge_insert path.
                     use_defer = (
-                        not skip_embeddings
+                        not is_existing
+                        and not skip_embeddings
                         and self._defer_chunk_write_enabled()
                         and self._embedding_provider is not None
                         and bool(new_chunk_models)
