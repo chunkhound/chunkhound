@@ -35,6 +35,11 @@
   --code-accent: #22d3ee;
   --logo-invert: 1;
 
+  /* Green palette — success/shipped state, auto-invert per theme */
+  --green: #22c55e;
+  --green-bg: #14532d;
+  --on-green-bg: #bbf7d0;
+
   /* Spacing */
   --space-0: 0;
   --space-1: 4px;
@@ -111,6 +116,10 @@
   --code-muted: #9b9b9b;
   --code-accent: #22d3ee;
   --logo-invert: 0;
+
+  --green: #16a34a;
+  --green-bg: #dcfce7;
+  --on-green-bg: #166534;
 }
 
 /* Colors — light mode (OS preference auto-detection) */
@@ -144,6 +153,10 @@
     --code-muted: #9b9b9b;
     --code-accent: #22d3ee;
     --logo-invert: 0;
+
+  --green: #16a34a;
+  --green-bg: #dcfce7;
+  --on-green-bg: #166534;
   }
 }
 
