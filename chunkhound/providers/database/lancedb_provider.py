@@ -193,6 +193,12 @@ class LanceDBProvider(SerialDatabaseProvider):
         self._files_table = None
         self._chunks_table = None
 
+        # Optional indexing profile counters (set by profile harness / coordinator)
+        self._index_profile: Any | None = None
+        # Coalesce optimize storms: skip if last optimize was recent (seconds)
+        self._optimize_cooldown_s: float = 5.0
+        self._last_optimize_mono: float = 0.0
+
     def _build_path_like_clause(self, prefix: str) -> str:
         escaped = _escape_like_pattern(prefix)
         like = f"{escaped}%"
@@ -915,6 +921,47 @@ class LanceDBProvider(SerialDatabaseProvider):
             return False
 
     # Chunk Operations
+    def set_index_profile(self, profile: Any | None) -> None:
+        """Attach optional IndexProfile for DB op timing (profile harness)."""
+        self._index_profile = profile
+
+    def _db_stats(self) -> Any | None:
+        prof = self._index_profile
+        return getattr(prof, "db", None) if prof is not None else None
+
+    def _merge_insert_chunks(self, table: Any, *, row_count: int) -> None:
+        """merge_insert into chunks with optional profile accounting."""
+        if self._chunks_table is None:
+            return
+        t0 = time.perf_counter()
+        (
+            self._chunks_table.merge_insert("id")
+            .when_matched_update_all()
+            .when_not_matched_insert_all()
+            .execute(table)
+        )
+        elapsed = time.perf_counter() - t0
+        stats = self._db_stats()
+        if stats is not None:
+            stats.record_merge_insert(row_count, elapsed)
+            stats.chunk_insert_batches += 1
+
+    def _merge_insert_embeddings_table(self, table: Any, *, row_count: int) -> None:
+        """when_matched_update_all merge for embedding fill-in."""
+        if self._chunks_table is None:
+            return
+        t0 = time.perf_counter()
+        (
+            self._chunks_table.merge_insert("id")
+            .when_matched_update_all()
+            .execute(table)
+        )
+        elapsed = time.perf_counter() - t0
+        stats = self._db_stats()
+        if stats is not None:
+            stats.record_merge_insert(row_count, elapsed)
+            stats.embedding_insert_batches += 1
+
     def insert_chunk(self, chunk: Chunk) -> int:
         """Insert chunk record and return chunk ID."""
         return self._execute_in_db_thread_sync("insert_chunk", chunk)
@@ -951,20 +998,9 @@ class LanceDBProvider(SerialDatabaseProvider):
         }
 
         # Use PyArrow Table directly to avoid LanceDB DataFrame schema alignment bug
-        # Convert single item to proper format for pa.table
         chunk_data_list = [chunk_data]
         chunk_table = pa.Table.from_pylist(chunk_data_list, schema=get_chunks_schema())
-
-        # Use merge_insert for atomic upsert with conflict-free semantics
-        # Handles idempotency (same file indexed multiple times) and concurrent writes
-        # (initial scan + file watcher, multiple processes, multiple file events)
-        # LanceDB's MVCC ensures conflicts are resolved via automatic retries
-        (
-            self._chunks_table.merge_insert("id")
-            .when_matched_update_all()
-            .when_not_matched_insert_all()
-            .execute(chunk_table)
-        )
+        self._merge_insert_chunks(chunk_table, row_count=1)
         return chunk_data["id"]
 
     def insert_chunks_batch(self, chunks: list[Chunk]) -> list[int]:
@@ -1024,16 +1060,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                 chunk_data_list, schema=get_chunks_schema()
             )
 
-            # Use merge_insert for atomic upsert with conflict-free semantics
-            # Handles idempotency (same file indexed multiple times) and concurrent writes
-            # (initial scan + file watcher, multiple processes, multiple file events)
-            # LanceDB's MVCC ensures conflicts are resolved via automatic retries
-            (
-                self._chunks_table.merge_insert("id")
-                .when_matched_update_all()
-                .when_not_matched_insert_all()
-                .execute(chunks_table)
-            )
+            self._merge_insert_chunks(chunks_table, row_count=len(chunk_data_list))
             all_chunk_ids.extend(chunk_ids)
 
             logger.debug(f"Bulk inserted batch of {len(batch_chunks)} chunks")
@@ -1041,19 +1068,165 @@ class LanceDBProvider(SerialDatabaseProvider):
         logger.debug(f"Completed bulk insert of {len(chunks)} chunks in batches")
 
         # Compact when chunk inserts create many fragments (in-thread check).
+        self._maybe_optimize_after_write(conn, state, reason="post-chunk-insert")
+
+        return all_chunk_ids
+
+    def insert_chunks_with_embeddings_batch(
+        self,
+        chunks: list[Chunk],
+        embeddings: list[list[float]],
+        provider: str,
+        model: str,
+    ) -> list[int]:
+        """Insert chunks already paired with vectors (single merge_insert).
+
+        Used by deferred-write indexing: one DB write instead of store-then-embed.
+        """
+        return self._execute_in_db_thread_sync(
+            "insert_chunks_with_embeddings_batch",
+            chunks,
+            embeddings,
+            provider,
+            model,
+        )
+
+    async def insert_chunks_with_embeddings_batch_async(
+        self,
+        chunks: list[Chunk],
+        embeddings: list[list[float]],
+        provider: str,
+        model: str,
+    ) -> list[int]:
+        """Async variant of insert_chunks_with_embeddings_batch."""
+        return await self._execute_in_db_thread(
+            "insert_chunks_with_embeddings_batch",
+            chunks,
+            embeddings,
+            provider,
+            model,
+        )
+
+    def _executor_insert_chunks_with_embeddings_batch(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunks: list[Chunk],
+        embeddings: list[list[float]],
+        provider: str,
+        model: str,
+    ) -> list[int]:
+        if not chunks:
+            return []
+        if len(chunks) != len(embeddings):
+            raise ValueError(
+                f"chunks/embeddings length mismatch: {len(chunks)} vs {len(embeddings)}"
+            )
+        if self._chunks_table is None:
+            self._executor_create_schema(conn, state)
+
+        # Ensure fixed-size embedding schema before first vector write.
+        first_vec = embeddings[0]
+        dims = len(first_vec)
+        # Reuse embedding insert path schema migration by writing via full rows.
+        # Ensure table has fixed-size list if needed.
+        current_schema = self._chunks_table.schema
+        emb_field = None
+        for field in current_schema:
+            if field.name == "embedding":
+                emb_field = field
+                break
+        if emb_field is None or not pa.types.is_fixed_size_list(emb_field.type):
+            # Force schema upgrade using existing migration (empty/variable → fixed).
+            # Build a no-op path: call internal ensure via a tiny embedding update
+            # is heavy; recreate only when empty variable-size.
+            try:
+                row_count = int(self._chunks_table.count_rows())
+            except Exception:
+                row_count = 0
+            if row_count == 0:
+                conn.drop_table("chunks")
+                self._chunks_table = conn.create_table(
+                    "chunks", schema=get_chunks_schema(dims)
+                )
+            else:
+                # Non-empty variable schema: fall back is not supported here —
+                # insert without fixed schema using variable list if present.
+                pass
+
+        schema = get_chunks_schema(dims)
+        batch_size = 1000
+        all_ids: list[int] = []
+        now = time.time()
+        for i in range(0, len(chunks), batch_size):
+            batch_chunks = chunks[i : i + batch_size]
+            batch_embs = embeddings[i : i + batch_size]
+            rows = []
+            ids = []
+            for chunk, vec in zip(batch_chunks, batch_embs):
+                cid = self._generate_chunk_id_safe(chunk)
+                ids.append(cid)
+                emb = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+                rows.append(
+                    {
+                        "id": cid,
+                        "file_id": chunk.file_id,
+                        "content": chunk.code or "",
+                        "start_line": chunk.start_line,
+                        "end_line": chunk.end_line,
+                        "chunk_type": str(
+                            chunk.chunk_type.value
+                            if hasattr(chunk.chunk_type, "value")
+                            else chunk.chunk_type
+                        ),
+                        "language": str(
+                            chunk.language.value
+                            if hasattr(chunk.language, "value")
+                            else chunk.language
+                        ),
+                        "name": chunk.symbol or "",
+                        "embedding": emb,
+                        "provider": provider,
+                        "model": model,
+                        "created_time": now,
+                        "metadata": _serialize_metadata(chunk.metadata),
+                    }
+                )
+            tbl = pa.Table.from_pylist(rows, schema=schema)
+            self._merge_insert_chunks(tbl, row_count=len(rows))
+            all_ids.extend(ids)
+
+        self._maybe_optimize_after_write(
+            conn, state, reason="post-deferred-chunk-insert"
+        )
+        return all_ids
+
+    def _maybe_optimize_after_write(
+        self, conn: Any, state: dict[str, Any], *, reason: str
+    ) -> None:
+        """Fragment-threshold optimize with cooldown to avoid storms."""
         try:
             counts = self._executor_get_fragment_count(conn, state)
             chunks_fragments = counts.get("chunks", 0)
-            if chunks_fragments >= self._fragment_threshold:
-                logger.info(
-                    f"Post-chunk-insert optimize: {chunks_fragments} chunk fragments "
-                    f">= threshold {self._fragment_threshold}"
+            if chunks_fragments < self._fragment_threshold:
+                return
+            now = time.monotonic()
+            if (
+                self._last_optimize_mono
+                and (now - self._last_optimize_mono) < self._optimize_cooldown_s
+            ):
+                logger.debug(
+                    f"Skip {reason} optimize: cooldown "
+                    f"({chunks_fragments} fragments)"
                 )
-                self._executor_optimize_tables(conn, state)
+                return
+            logger.info(
+                f"{reason} optimize: {chunks_fragments} chunk fragments "
+                f">= threshold {self._fragment_threshold}"
+            )
+            self._executor_optimize_tables(conn, state)
         except Exception as opt_err:
-            logger.debug(f"Post-chunk-insert optimize skipped: {opt_err}")
-
-        return all_chunk_ids
+            logger.debug(f"{reason} optimize skipped: {opt_err}")
 
     def get_chunk_by_id(
         self, chunk_id: int, as_model: bool = False
@@ -1514,10 +1687,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                     merge_table = pa.Table.from_pylist(
                         merge_data, schema=get_chunks_schema(embedding_dims)
                     )
-                    (
-                        self._chunks_table.merge_insert("id")
-                        .when_matched_update_all()
-                        .execute(merge_table)
+                    self._merge_insert_embeddings_table(
+                        merge_table, row_count=len(merge_data)
                     )
 
                 total_updated += len(merge_data)
@@ -1549,17 +1720,9 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             # Compact fragments when write volume pushes past threshold (in-thread
             # check — must not call should_optimize() which re-enters the executor).
-            try:
-                counts = self._executor_get_fragment_count(conn, state)
-                chunks_fragments = counts.get("chunks", 0)
-                if chunks_fragments >= self._fragment_threshold:
-                    logger.info(
-                        f"Post-embedding optimize: {chunks_fragments} chunk fragments "
-                        f">= threshold {self._fragment_threshold}"
-                    )
-                    self._executor_optimize_tables(conn, state)
-            except Exception as opt_err:
-                logger.debug(f"Post-embedding optimize skipped: {opt_err}")
+            self._maybe_optimize_after_write(
+                conn, state, reason="post-embedding"
+            )
 
             return total_updated
 
@@ -2816,6 +2979,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Executor method for optimize_tables - runs in DB thread."""
         from datetime import timedelta
 
+        t0 = time.perf_counter()
         try:
             if self._chunks_table is not None:
                 logger.debug("Optimizing chunks table - compacting fragments...")
@@ -2825,9 +2989,11 @@ class LanceDBProvider(SerialDatabaseProvider):
                     cleanup_older_than=timedelta(minutes=1), delete_unverified=True
                 )
                 if stats is not None:
-                    logger.debug(
-                        f"Chunks table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
-                    )
+                    freed = getattr(stats, "bytes_removed", None)
+                    if freed is not None:
+                        logger.debug(
+                            f"Chunks table cleanup freed {freed / 1024 / 1024:.2f} MB"
+                        )
                 logger.debug("Chunks table optimization complete")
 
             if self._files_table is not None:
@@ -2836,10 +3002,17 @@ class LanceDBProvider(SerialDatabaseProvider):
                     cleanup_older_than=timedelta(minutes=1), delete_unverified=True
                 )
                 if stats is not None:
-                    logger.debug(
-                        f"Files table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
-                    )
+                    freed = getattr(stats, "bytes_removed", None)
+                    if freed is not None:
+                        logger.debug(
+                            f"Files table cleanup freed {freed / 1024 / 1024:.2f} MB"
+                        )
                 logger.debug("Files table optimization complete")
+
+            self._last_optimize_mono = time.monotonic()
+            db_stats = self._db_stats()
+            if db_stats is not None:
+                db_stats.record_optimize(time.perf_counter() - t0)
 
         except Exception as e:
             logger.warning(f"Failed to optimize tables: {e}")

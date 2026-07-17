@@ -46,6 +46,17 @@ class IndexingConfig(BaseModel):
     batch_size: int = Field(default=50, description="Internal batch size")
     db_batch_size: int = Field(default=100, description="Internal DB batch size")
     max_concurrent: int = Field(default=5, description="Internal concurrency")
+    # When True (and an embedding provider is configured), new files embed in
+    # memory then write chunks once with vectors — one merge_insert instead of
+    # store-then-embed. Memory stays batch-bounded; reindex-with-existing-chunks
+    # still uses the classic two-write path. See operations/indexing_performance_plan.md.
+    defer_chunk_write: bool = Field(
+        default=False,
+        description=(
+            "Embed then single-write new chunks (fewer DB ops). "
+            "Requires embedding provider; only applies when file has no prior chunks."
+        ),
+    )
     cleanup: bool = Field(default=True, description="Internal cleanup setting")
     ignore_gitignore: bool = Field(
         default=False, description="Internal gitignore setting"
@@ -404,6 +415,13 @@ class IndexingConfig(BaseModel):
 
         if force_reindex := os.getenv("CHUNKHOUND_INDEXING__FORCE_REINDEX"):
             config["force_reindex"] = force_reindex.lower() in ("true", "1", "yes")
+
+        if defer_chunk_write := os.getenv("CHUNKHOUND_INDEXING__DEFER_CHUNK_WRITE"):
+            config["defer_chunk_write"] = defer_chunk_write.lower() in (
+                "true",
+                "1",
+                "yes",
+            )
 
         # Handle comma-separated include/exclude patterns
         if include := os.getenv("CHUNKHOUND_INDEXING__INCLUDE"):

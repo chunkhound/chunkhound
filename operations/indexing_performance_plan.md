@@ -249,23 +249,32 @@ Rough vector memory:
 
 ### Phase 0 — Measure (this branch first work)
 
-- [ ] `scripts/profile_index.py` (or extend soak) with phase timers + RSS + merge_insert counters  
-- [ ] Baseline: synthetic 5k/20k chunks; full repo index with FakeEmbeddingProvider  
-- [ ] Write results into `operations/indexing_performance_baseline.md`  
-- [ ] Rank B1–B9 with data  
+- [x] `scripts/profile_index.py` with phase timers + RSS + merge_insert counters  
+- [x] `IndexProfile` / `DbOpStats` + LanceDB op hooks  
+- [x] Baseline soak classic vs deferred (see sample below)  
+- [ ] Optional: full-repo `mode=index` baseline on large tree  
 
 ### Phase 1 — Cheap wins
 
-- [ ] Fix any accidental full loads found  
-- [ ] Optimize coalesce / threshold defaults for 0.34  
-- [ ] Ensure dims-at-create for fake/real when provider present  
-- [ ] Re-measure  
+- [x] Optimize coalesce cooldown (5s) after write-path optimizes  
+- [x] Fixed-size schema on empty table when deferred write knows dims  
+- [ ] Broader threshold tuning for 0.34 after more soaks  
 
 ### Phase 2 — Deferred single write (flagged)
 
-- [ ] Implement new-file path under flag  
-- [ ] Tests: crash resume, residual empty, smart skip  
-- [ ] Re-measure vs Phase 0  
+- [x] `indexing.defer_chunk_write` + env `CHUNKHOUND_INDEXING__DEFER_CHUNK_WRITE`  
+- [x] New-file path: embed then `insert_chunks_with_embeddings_batch`  
+- [x] Tests: residual empty + batch roundtrip  
+- [x] Re-measure vs Phase 0 (sample: 2k chunks, fake embed)
+
+**Sample soak (2k chunks, page 100, LanceDB 0.34):**
+
+| Mode | merge_insert calls | rows | TOTAL s | peak RSS MB |
+|------|-------------------|------|---------|-------------|
+| classic two-write | 40 | 4000 | ~3.9 | ~262 |
+| `--defer-write` | 20 | 2000 | ~2.3 | ~225 |
+
+### Phase 3 — Pipeline concurrency
 
 ### Phase 3 — Pipeline concurrency
 

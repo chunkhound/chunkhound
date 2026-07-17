@@ -1,4 +1,5 @@
 from .batch_metrics import BatchMetricsCollector, BatchTiming
+from .index_profile import DbOpStats, IndexProfile
 from .perf_analyzer import (
     OutlierBatch,
     PerfAnalyzer,
@@ -9,6 +10,8 @@ from .perf_analyzer import (
 __all__ = [
     "BatchMetricsCollector",
     "BatchTiming",
+    "DbOpStats",
+    "IndexProfile",
     "OutlierBatch",
     "PerfAnalyzer",
     "PerformanceDiagnostics",

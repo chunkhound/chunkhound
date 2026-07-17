@@ -228,6 +228,8 @@ class IndexingCoordinator(BaseService):
         self.progress = progress
         self._language_parsers = language_parsers or {}
         self.config = config
+        # Optional IndexProfile for phase/DB timing (profile harness).
+        self._index_profile: Any | None = None
 
         # Performance optimization: shared instances
         self._parser_cache: dict[Language, UniversalParser] = {}
@@ -474,6 +476,24 @@ class IndexingCoordinator(BaseService):
 
         return self._apply_fragment_batch_cap(base_size)
 
+    def _defer_chunk_write_enabled(self) -> bool:
+        """Whether to embed-then-single-write new files (config flag)."""
+        try:
+            if self.config and getattr(self.config, "indexing", None):
+                return bool(
+                    getattr(self.config.indexing, "defer_chunk_write", False)
+                )
+        except Exception:
+            pass
+        return False
+
+    def attach_index_profile(self, profile: Any | None) -> None:
+        """Attach IndexProfile to coordinator and DB provider (if supported)."""
+        self._index_profile = profile
+        setter = getattr(self._db, "set_index_profile", None)
+        if callable(setter):
+            setter(profile)
+
     async def _insert_chunks_in_sized_batches(
         self, chunks: list[Chunk]
     ) -> list[int]:
@@ -487,6 +507,98 @@ class IndexingCoordinator(BaseService):
             ids = await self._db.insert_chunks_batch_async(batch)
             all_ids.extend(ids)
         return all_ids
+
+    async def _insert_chunks_with_embeddings_sized(
+        self,
+        chunks: list[Chunk],
+        embeddings: list[list[float]],
+        provider: str,
+        model: str,
+    ) -> list[int]:
+        """Single-write path: chunks + vectors via provider-specific batch API."""
+        insert_fn = getattr(
+            self._db, "insert_chunks_with_embeddings_batch_async", None
+        )
+        if not callable(insert_fn):
+            # Fallback: classic two-write path
+            ids = await self._insert_chunks_in_sized_batches(chunks)
+            # Best-effort second write
+            data = [
+                {
+                    "chunk_id": cid,
+                    "provider": provider,
+                    "model": model,
+                    "dims": len(vec),
+                    "embedding": vec,
+                }
+                for cid, vec in zip(ids, embeddings)
+            ]
+            if data:
+                self._db.insert_embeddings_batch(data)
+            return ids
+
+        batch_size = self._determine_db_batch_size(chunks)
+        all_ids: list[int] = []
+        for i in range(0, len(chunks), batch_size):
+            cbatch = chunks[i : i + batch_size]
+            ebatch = embeddings[i : i + batch_size]
+            ids = await insert_fn(cbatch, ebatch, provider, model)
+            all_ids.extend(ids)
+        return all_ids
+
+    async def _embed_and_store_new_chunks(
+        self, chunks: list[Chunk]
+    ) -> list[int]:
+        """Embed in memory then insert chunks with vectors (deferred write).
+
+        Only for files with no prior chunks. Memory bounded by caller batch size.
+        """
+        if not chunks or not self._embedding_provider:
+            return await self._insert_chunks_in_sized_batches(chunks)
+
+        from chunkhound.core.utils import format_chunk_for_embedding
+        from chunkhound.utils.normalization import normalize_content
+
+        valid: list[tuple[Chunk, str]] = []
+        for chunk in chunks:
+            code = normalize_content(chunk.code or "")
+            if not code:
+                continue
+            metadata = chunk.metadata or {}
+            text = format_chunk_for_embedding(
+                code=code,
+                file_path=None,
+                language=str(
+                    chunk.language.value
+                    if hasattr(chunk.language, "value")
+                    else chunk.language
+                ),
+                constants=metadata.get("constants") if isinstance(metadata, dict) else None,
+                rule_target=metadata.get("rule_target")
+                if isinstance(metadata, dict)
+                else None,
+            )
+            valid.append((chunk, text))
+
+        if not valid:
+            return await self._insert_chunks_in_sized_batches(chunks)
+
+        valid_chunks = [c for c, _ in valid]
+        texts = [t for _, t in valid]
+        vectors = await self._embedding_provider.embed_batch(texts)
+        if len(vectors) != len(valid_chunks):
+            logger.warning(
+                "Deferred write: embed count mismatch "
+                f"({len(vectors)} vs {len(valid_chunks)}); falling back to two-write"
+            )
+            return await self._insert_chunks_in_sized_batches(chunks)
+
+        return await self._insert_chunks_with_embeddings_sized(
+            valid_chunks,
+            [list(v) if not isinstance(v, list) else v for v in vectors],
+            self._embedding_provider.name,
+            self._embedding_provider.model,
+        )
 
     def _apply_fragment_batch_cap(self, base_size: int) -> int:
         """Reduce insert batch size when LanceDB fragment pressure is high."""
@@ -1202,13 +1314,26 @@ class IndexingCoordinator(BaseService):
                     # Store new/modified chunks (pass models directly)
                     chunks_to_store = chunk_diff.added + chunk_diff.modified
                     chunks_to_store = self._validate_chunk_sizes(chunks_to_store)
+                    # Reindex path keeps classic two-write (smart-diff preserve).
                     ids = await self._insert_chunks_in_sized_batches(chunks_to_store)
+                    stats["chunk_ids_needing_embeddings"].extend(ids)
                 else:
                     # New file or existing file with no chunks — store all
                     new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
-                    ids = await self._insert_chunks_in_sized_batches(new_chunk_models)
+                    if (
+                        self._defer_chunk_write_enabled()
+                        and self._embedding_provider is not None
+                        and new_chunk_models
+                    ):
+                        # Single merge_insert with vectors (batch-bounded memory).
+                        ids = await self._embed_and_store_new_chunks(new_chunk_models)
+                        # Already embedded — do not queue for residual embed.
+                    else:
+                        ids = await self._insert_chunks_in_sized_batches(
+                            new_chunk_models
+                        )
+                        stats["chunk_ids_needing_embeddings"].extend(ids)
                 logger.debug(f"Batch inserted {len(ids)} chunks for file_id {file_id}")
-                stats["chunk_ids_needing_embeddings"].extend(ids)
                 stats["total_chunks"] += len(ids)
                 # Count this file as processed successfully (stored or updated)
                 stats["total_files"] += 1
@@ -1305,8 +1430,17 @@ class IndexingCoordinator(BaseService):
 
             _t0 = _t.perf_counter() if getattr(self, "profile_startup", False) else None
             _t2 = _t3 = _t4 = _t5 = None
+            _prof = self._index_profile
             # Phase 1: Discovery - Discover files in directory (now parallelized)
-            files = await self._discover_files(directory, patterns, exclude_patterns)
+            if _prof is not None:
+                with _prof.phase("discover"):
+                    files = await self._discover_files(
+                        directory, patterns, exclude_patterns
+                    )
+            else:
+                files = await self._discover_files(
+                    directory, patterns, exclude_patterns
+                )
             _t1 = _t.perf_counter() if _t0 is not None else None
 
             if not files:
@@ -1319,9 +1453,15 @@ class IndexingCoordinator(BaseService):
                 do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
             if do_cleanup:
                 _t2 = _t.perf_counter() if _t0 is not None else None
-                cleaned_files = self._cleanup_orphaned_files(
-                    directory, files, patterns, exclude_patterns
-                )
+                if _prof is not None:
+                    with _prof.phase("cleanup"):
+                        cleaned_files = self._cleanup_orphaned_files(
+                            directory, files, patterns, exclude_patterns
+                        )
+                else:
+                    cleaned_files = self._cleanup_orphaned_files(
+                        directory, files, patterns, exclude_patterns
+                    )
                 _t3 = _t.perf_counter() if _t0 is not None else None
             else:
                 logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
@@ -1344,6 +1484,7 @@ class IndexingCoordinator(BaseService):
             skipped_unchanged = 0
             if not force_reindex:
                 _t4 = _t.perf_counter() if _t0 is not None else None
+                _cd0 = _t.perf_counter() if _prof is not None else None
                 change_task: TaskID | None = None
                 if self.progress:
                     change_task = self.progress.add_task(
@@ -1504,6 +1645,12 @@ class IndexingCoordinator(BaseService):
                         self.progress.update(change_task, completed=task.total)
                 files_to_process = files_to_process_with_hashes
                 _t5 = _t.perf_counter() if _t0 is not None else None
+                if _cd0 is not None and _prof is not None:
+                    _prof.phases_s["change_detect"] = (
+                        _prof.phases_s.get("change_detect", 0.0)
+                        + (_t.perf_counter() - _cd0)
+                    )
+                    _prof.sample_rss()
                 if debug_skip:
                     logger.warning(
                         f"Skip-check summary: ok={reasons['ok']} not_found={reasons['not_found']} "
@@ -1524,6 +1671,7 @@ class IndexingCoordinator(BaseService):
                     speed="",
                     info="",
                 )
+            _ps0 = _t.perf_counter() if _prof is not None else None
 
             # Aggregators for streamed storage
             agg_total_files = 0
@@ -1579,6 +1727,13 @@ class IndexingCoordinator(BaseService):
                 parse_task,
                 on_batch=_on_batch_store,
             )
+            if _ps0 is not None and _prof is not None:
+                # Combined parse+store (store runs via on_batch during parse).
+                _prof.phases_s["parse_store"] = (
+                    _prof.phases_s.get("parse_store", 0.0)
+                    + (_t.perf_counter() - _ps0)
+                )
+                _prof.sample_rss()
 
             # Mark parse task complete
             if parse_task is not None and self.progress:
