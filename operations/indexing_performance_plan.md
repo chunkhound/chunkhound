@@ -118,6 +118,8 @@ Never use Voyage for these measurements.
 
 ## 4. Measured results (fake, LanceDB 0.34, Windows)
 
+**Living ledger (append after every soak):** [`operations/indexing_timing_ledger.md`](indexing_timing_ledger.md)
+
 ### 2k chunks, page 100
 
 | Path | merge_insert calls | rows | TOTAL s | peak RSS |
