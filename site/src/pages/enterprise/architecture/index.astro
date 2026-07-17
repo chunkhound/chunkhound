@@ -5,265 +5,774 @@ import CurrentArchitectureDiagram from "../../../components/EnterpriseArchitectu
 import Nav from "../../../components/Nav.astro";
 import Base from "../../../layouts/Base.astro";
 
-const title = "Enterprise architecture: local-first or mixed? — ChunkHound";
+const title = "Enterprise architecture roadmap: local-first — ChunkHound";
 const description =
-  "An objective comparison of investing in ChunkHound's current local-first architecture versus adding a mixed local-first and server architecture.";
+    "Why organizations reach for a central server, and the phased roadmap for solving those pain points in the local-only model.";
 ---
 
-<Base
-  title={title}
-  description={description}
-  type="article"
->
-  <Nav currentPath={Astro.url.pathname} />
+<Base title={title} description={description} type="article">
+    <Nav currentPath={Astro.url.pathname} />
 
-  <main>
-    <header class="hero">
-      <div class="container hero-inner">
-        <p class="eyebrow">Enterprise architecture</p>
-        <h1>Local-first today.<br /><span>Which direction next?</span></h1>
-        <p class="hero-lead">
-          ChunkHound currently indexes and searches code on the user's machine. The
-          enterprise decision is whether to focus the same effort on that workflow,
-          or also build and operate a server architecture for clients that cannot
-          run locally.
-        </p>
-        <div class="hero-actions" aria-label="Page links">
-          <a class="button primary" href="#paths">Compare the paths</a>
-          <a class="button secondary" href="#decision">Decision guide</a>
-        </div>
-      </div>
-    </header>
+    <main>
+        <header class="hero">
+            <div class="container hero-inner">
+                <p class="eyebrow">Enterprise roadmap</p>
+                <h1>
+                    The pressure to centralize is a symptom.<br /><span
+                        >The cure is a better DB.</span>
+                </h1>
+                <p class="hero-lead">
+                    ChunkHound is local-only by design. The database is where
+                    the friction lives: it is large, slow to build, and requires
+                    source alongside it. Organizations naturally look at a
+                    server to solve these problems. Our thesis: fix the DB
+                    itself, and the server isn't needed. This page names each
+                    friction point, then shows the phased roadmap for removing
+                    it.
+                </p>
+                <div class="hero-actions" aria-label="Page links">
+                    <a class="button primary" href="#why-centralize"
+                        >Why centralize?</a
+                    >
+                    <a class="button secondary" href="#roadmap">The roadmap</a>
+                </div>
+            </div>
+        </header>
 
-    <section class="status-section" aria-labelledby="status-title">
-      <div class="container">
-        <div class="status-card">
-          <p class="status-label">Current versus proposed</p>
-          <div>
-            <h2 id="status-title">The server path is not shipped today</h2>
-            <p>
-              Shipped: local indexing, local regex and semantic search, local stdio
-              MCP, and a per-project daemon that owns the local database. The local-first
-              enterprise path adds centralized in-org storage plus automatic local DB
-              pulls and updates. The alternative server path adds a central service
-              boundary for query execution, upgrades, and authorization.
-            </p>
-          </div>
-        </div>
-      </div>
-    </section>
+        <section class="page-section" aria-labelledby="current-title">
+            <div class="container">
+                <p class="eyebrow">Current architecture</p>
+                <h2 id="current-title">The product is local-first</h2>
+                <p class="section-lead">
+                    A local process owns the project database and keeps it
+                    current. External embedding, reranking, or LLM providers are
+                    optional dependencies—not a ChunkHound server. A server or
+                    CI job can also copy a pre-indexed DB, run the local process
+                    against it, expose it through an external HTTP MCP proxy,
+                    and then stop; that remains local-first at the workload
+                    boundary.
+                </p>
+                <CurrentArchitectureDiagram />
+            </div>
+        </section>
 
-    <section class="page-section" aria-labelledby="current-title">
-      <div class="container">
-        <p class="eyebrow">Current architecture</p>
-        <h2 id="current-title">The product is local-first</h2>
-        <p class="section-lead">
-          A local process owns the project database and keeps it current. External
-          embedding, reranking, or LLM providers are optional dependencies—not a
-          ChunkHound server. A server or CI job can also copy a pre-indexed DB, run
-          the local process against it, expose it through an external HTTP MCP proxy,
-          and then stop; that remains local-first at the workload boundary.
-        </p>
-        <CurrentArchitectureDiagram />
-      </div>
-    </section>
+        <section
+            id="why-centralize"
+            class="page-section alt-section"
+            aria-labelledby="gaps-title"
+        >
+            <div class="container">
+                <p class="eyebrow">Why organizations centralize</p>
+                <h2 id="gaps-title">The database is the bottleneck</h2>
+                <p class="section-lead">
+                    Every reason we hear for wanting a central ChunkHound server
+                    traces back to friction with the database. Here are the most
+                    common ones.
+                </p>
 
-    <section id="paths" class="page-section alt-section" aria-labelledby="paths-title">
-      <div class="container">
-        <p class="eyebrow">Two investment paths</p>
-        <h2 id="paths-title">Extend the current product—or build a second one</h2>
-        <p class="section-lead">
-          Both paths can serve developers. The choice is whether to polish one local
-          operating mode, or split product and engineering effort across local and
-          server operating modes.
-        </p>
+                <div class="gap-grid">
+                    <article class="gap-card">
+                        <span class="gap-number">1</span>
+                        <h3>DBs require a source checkout</h3>
+                        <p>
+                            Today the DB lives inside a project clone.
+                            Non-developers cannot use ChunkHound without
+                            checking out code they do not need, and CI workflows
+                            must carry the entire repository alongside the
+                            index.
+                        </p>
+                    </article>
+                    <article class="gap-card">
+                        <span class="gap-number">2</span>
+                        <h3>DB artifacts are too large</h3>
+                        <p>
+                            An uncompressed project index can be several
+                            gigabytes. Distributing it to every developer or CI
+                            runner is expensive and slow. Organizations assume a
+                            server must own the data so clients do not have to.
+                        </p>
+                    </article>
+                    <article class="gap-card">
+                        <span class="gap-number">3</span>
+                        <h3>Indexing is slow</h3>
+                        <p>
+                            Each developer indexes from scratch or
+                            incrementally. Python-level bottlenecks (file
+                            scanning, chunking, vector index builds) make a
+                            central service that indexes once and serves many
+                            feel like the obvious fix.
+                        </p>
+                    </article>
+                    <article class="gap-card">
+                        <span class="gap-number">4</span>
+                        <h3>No central upgrade or distribution</h3>
+                        <p>
+                            There is no mechanism today to push a fresh DB to
+                            every machine, roll back a bad one, or notify users
+                            of an available upgrade. Teams manage this manually
+                            or skip it.
+                        </p>
+                    </article>
+                    <article class="gap-card">
+                        <span class="gap-number">5</span>
+                        <h3>No central policy or audit</h3>
+                        <p>
+                            Every DB is fully local. Organizations that need
+                            request-time enforcement or an audit trail see a
+                            central query service as the natural authorization
+                            boundary.
+                        </p>
+                    </article>
+                </div>
+            </div>
+        </section>
 
-        <div class="path-grid">
-          <article class="path-card preferred">
-            <p class="card-kicker">Path A</p>
-            <h3>Focus on local-first</h3>
-            <p>
-              Keep query and indexing local, while adding a thin automatic management
-              layer that pulls signed DB updates from centralized in-org storage.
-              Make DB generations self-contained so non-developers can use them without
-              a code checkout. Continue polishing indexing, providers, worktrees, and
-              endpoint support.
-            </p>
-            <h4>Advantages</h4>
-            <ul>
-              <li>Focuses effort on one operating mode and a highly polished developer workflow.</li>
-              <li>Scales developer query load across their own machines.</li>
-              <li>Keeps permissions and authentication 1:1 with Git repository access.</li>
-              <li>Self-contained DB generations work without a code checkout.</li>
-              <li>A desktop-style manager periodically checks object storage and upgrades DBs on the user's behalf.</li>
-              <li>Server-only and CI workloads can copy a DB, query locally, proxy MCP, and exit.</li>
-              <li>Users can merge the repositories they care about for a personal point of view.</li>
-            </ul>
-            <h4>Costs</h4>
-            <ul>
-              <li>Upgrade procedures and endpoint monitoring are more complex.</li>
-              <li>Requires clients that can run local tooling and retain local DBs.</li>
-              <li>Does not provide central request-time enforcement when that is a requirement.</li>
-            </ul>
-          </article>
+        <section
+            id="roadmap"
+            class="page-section"
+            aria-labelledby="roadmap-title"
+        >
+            <div class="container">
+                <p class="eyebrow">Roadmap</p>
+                <h2 id="roadmap-title">Solving what tempts centralization</h2>
+                <p class="section-lead">
+                    Each gap above has a fix in the local-only model. The phases
+                    below show what ships when. After Phase 2 the common reasons
+                    for a server are gone; Phase 3 addresses the remaining edge
+                    cases.
+                </p>
 
-          <article class="path-card">
-            <p class="card-kicker">Path B</p>
-            <h3>Add a mixed local-first/server architecture</h3>
-            <p>
-              Add a server operating mode beside local-first: central indexing or
-              ingestion, remote query/MCP access, server-side authorization, and the
-              service operations needed to run it reliably.
-            </p>
-            <h4>Advantages</h4>
-            <ul>
-              <li>Centralizes upgrades, rollouts, and monitoring.</li>
-              <li>Centralizes policy, audit, and request-time denial.</li>
-              <li>Still needs an ACL-aware vector backend; post-filtering semantic results is not a reliable authorization boundary.</li>
-            </ul>
-            <h4>Costs</h4>
-            <ul>
-              <li>Splits the product boundary and engineering effort across two operating modes.</li>
-              <li>Each mode receives less polish, testing, and operational attention.</li>
-              <li>Adds service availability, capacity, sync, and central data-boundary concerns.</li>
-              <li>Cross-repository search needs all repository permutations or a dynamic cross-DB join layer.</li>
-            </ul>
-          </article>
-        </div>
-      </div>
-    </section>
+                <div class="phase-list">
+                    <article class="phase-card shipped">
+                        <span class="phase-badge">Shipped</span>
+                        <h3>Rust-native file scanner</h3>
+                        <p>
+                            Directory scanning now uses a Rust extension built
+                            on the <code>ignore</code>
+                            crate's parallel walker, replacing <code
+                                >os.walk</code
+                            >. First increment of a broader Rust-native
+                            pipeline.
+                        </p>
+                        <p class="phase-gaps">
+                            <strong>Solves:</strong> gap 3 — faster file scanning.
+                        </p>
+                    </article>
 
-    <section class="page-section" aria-labelledby="comparison-title">
-      <div class="container">
-        <p class="eyebrow">Trade-offs</p>
-        <h2 id="comparison-title">The trade-off is polish versus centralized control</h2>
-        <ArchitectureComparison />
-      </div>
-    </section>
+                    <article class="phase-card shipped">
+                        <span class="phase-badge">Shipped</span>
+                        <h3>DB auto-compaction</h3>
+                        <p>
+                            DuckDB databases auto-compact via atomic swap when
+                            fragmentation crosses a configurable threshold.
+                            Solved what used to be hundreds of GBs of bloat,
+                            bringing DBs down to single-digit GBs.
+                        </p>
+                        <p class="phase-gaps">
+                            <strong>Solves:</strong> gap 2 — reclaims disk space from
+                            fragmentation with no indexing downtime.
+                        </p>
+                    </article>
 
-    <section class="page-section alt-section" aria-labelledby="index-maintenance-title">
-      <div class="container">
-        <p class="eyebrow">The hidden server cost</p>
-        <h2 id="index-maintenance-title">A live central index is a distributed database problem</h2>
-        <p class="section-lead">
-          A local copy periodically receives a published baseline, then maintains
-          one branch or revision with incremental indexing. A central service must
-          keep every queryable branch fresh to a tighter shared-view target while
-          serving reads. HNSW and IVF indexes can
-          accept some incremental writes, but deletes, retraining, compaction, and
-          rebuilds require a growing/sealed segment strategy and background capacity.
-          Production vector systems use WALs, segments, tombstones, replicas, and
-          shard-level maintenance to manage this lifecycle.
-        </p>
-        <div class="index-maintenance-grid">
-          <article>
-            <h3>Local copy</h3>
-            <p>
-              Periodically publish a self-contained DB baseline to centralized object
-              storage. A thin manager checks for fresh versions, verifies and activates
-              them, then local incremental indexing brings each branch or worktree
-              current. Non-developer usage stays independent of a code checkout; a
-              server or CI job can copy, query, proxy MCP, and exit.
-            </p>
-          </article>
-          <article>
-            <h3>Central live corpus</h3>
-            <p>
-              Ingest all repositories and branches, route queries across shards,
-              merge results, rebuild or compact indexes, replicate data, and preserve
-              freshness during failures. The current single-owner provider contract
-              does not provide these distributed semantics.
-            </p>
-          </article>
-        </div>
-        <aside class="index-scale-note">
-          <strong>Scale asymmetry:</strong> local-first targets at most roughly 10M
-          vectors per client. The current 256-dimensional envelope is about 30–40 GB
-          per client, with further compression still needed. The ~100M-vector figure
-          describes a centralized aggregate across multiple branches—not one local
-          copy. The server must store the branch permutations or execute dynamic
-          cross-DB joins, in addition to index, metadata, replica, backup, and rebuild
-          costs.
-          <span class="source-links">
-            See <a href="https://github.com/facebookresearch/faiss/wiki/Faiss-indexes">FAISS</a>,
-            <a href="https://docs.weaviate.io/weaviate/concepts/vector-index">Weaviate</a>,
-            and <a href="https://qdrant.tech/documentation/concepts/storage/">Qdrant</a>
-            for documented index and segment maintenance behavior.
-          </span>
-        </aside>
-      </div>
-    </section>
+                    <article class="phase-card in-progress">
+                        <span class="phase-badge">In progress</span>
+                        <h3>Rust pipeline rewrite — operating at max speed</h3>
+                        <p>
+                            <a
+                                href="https://github.com/chunkhound/chunkhound/pull/375"
+                                >PR #375</a
+                            >
+                            (Phase 0 Rust DB writer) already proves the direction:
+                            cumulative 4.4x speedup on 4000 files by replacing Python
+                            per-file DB writes with native Rust batch operations,
+                            direct PyO3 extraction (no JSON serialization), and an
+                            HNSW bookend protocol (drop once before writes, rebuild
+                            once after). The end goal: CH infra is no longer the bottleneck
+                            — indexing runs at the speed of the embeddings provider.
+                        </p>
+                        <p class="phase-gaps">
+                            <strong>Solves:</strong> gap 3 — operating the underlying
+                            DB and HNSW at max throughput, eliminating Python overhead
+                            from the hot path.
+                        </p>
+                    </article>
 
-    <section id="decision" class="page-section" aria-labelledby="decision-title">
-      <div class="container narrow">
-        <p class="eyebrow">Decision guide</p>
-        <h2 id="decision-title">Choose from validated constraints</h2>
-        <div class="decision-list">
-          <p><strong>Focus on local-first.</strong> Developer workloads are the dominant workload, and hundreds or thousands of developers can scale through their own machines. Supporting roughly twice the load for non-developers is usually a smaller cost than operating a second product mode.</p>
-          <p><strong>Choose the mixed path only for a concrete requirement.</strong> Its centralized upgrades, monitoring, and policy enforcement are valuable when a live centrally operated service is essential—but reliable semantic authorization requires ACL-aware vector filtering, not a simple post-filter.</p>
-          <p><strong>The default conclusion is local-first.</strong> A server path is a new distributed vector-database product: every local database assumption must be reconsidered for branch fanout, index maintenance, consistency, failure, and query routing. Splitting effort across both modes increases complexity and reduces the polish achievable in either one.</p>
-        </div>
+                    <article class="phase-card future">
+                        <span class="phase-badge">Future</span>
+                        <h3>LSM-Vec: concurrent in-place index building</h3>
+                        <p>
+                            Plan to integrate <a
+                                href="https://github.com/el-yawd/lsm-vec"
+                                >LSM-Vec</a
+                            >, an embedded Rust vector index whose LSM-tree
+                            design supports true in-place efficient updates —
+                            unlike HNSW and IVF which need full rebuilds or
+                            expensive incremental segment management. This lets
+                            index building run concurrently with the ingestion
+                            pipeline instead of blocking at the end, further
+                            optimizing overall indexing time.
+                        </p>
+                        <p class="phase-gaps">
+                            <strong>Solves:</strong> gap 3 — eliminates the blocking
+                            index build phase. Index stays current incrementally as
+                            chunks arrive.
+                        </p>
+                    </article>
 
-        <aside class="validation-callout">
-          <h3>Validate before committing</h3>
-          <ul>
-            <li>Which priority clients cannot run local stdio MCP?</li>
-            <li>Are search-only access and immediate denial actual requirements?</li>
-            <li>How many developers and non-developers need search, and where is the real workload?</li>
-            <li>Are centralized upgrades or permissions worth a second operating mode?</li>
-            <li>Can endpoint management and source-equivalent local data be accepted?</li>
-            <li>Which DB metadata and query features must be self-contained for non-developers?</li>
-          </ul>
-        </aside>
-      </div>
-    </section>
-  </main>
+                    <article class="phase-card future">
+                        <span class="phase-badge">Future</span>
+                        <h3>Self-contained DBs</h3>
+                        <p>
+                            Audit and fix all code paths that assume source
+                            files are available alongside the DB. Replace with
+                            chunk data from the index. The current chunking
+                            algorithm applies chunk overlaps, so reconstruction
+                            must account for that carefully.
+                        </p>
+                        <p class="phase-gaps">
+                            <strong>Solves:</strong> gap 1. Non-developers and CI
+                            can use the DB without a repository clone.
+                        </p>
+                    </article>
 
-  <Community />
+                    <article class="phase-card future">
+                        <span class="phase-badge">Future</span>
+                        <h3>DB split/merge for independent indexing</h3>
+                        <p>
+                            Split and merge DBs to index individual repos
+                            independently, then combine into one unified
+                            artifact for distribution. Shopware's use case:
+                            index each microservice repo separately, merge
+                            into a single searchable DB. This also enables
+                            horizontally scalable indexing — a centralized CI
+                            can index repos in parallel across machines, then
+                            merge into one artifact.
+                        </p>
+                        <p class="phase-gaps">
+                            <strong>Solves:</strong> gaps 1 and 4 — no source
+                            checkout needed on consuming side; enables
+                            automated CI distribution pipelines without a
+                            central server.
+                        </p>
+                    </article>
+
+                    <article class="phase-card future">
+                        <span class="phase-badge">Future</span>
+                        <h3>Artifact optimization + auto-distribution</h3>
+                        <p>
+                            Compress text chunks via DB-level compression; ship
+                            baselines without the vector index and let clients
+                            build vector index locally; shard the DB by paths or
+                            semantic units with partial updates building on
+                            join/split. Combined with auto-distribution (CI
+                            publishes once, clients pull incrementally).
+                        </p>
+                        <p class="phase-gaps">
+                            <strong>Solves:</strong> gaps 2 and 4.
+                        </p>
+                    </article>
+
+                    <article class="phase-card future">
+                        <span class="phase-badge">Future</span>
+                        <h3>Permission-aware merge and distribution pipeline</h3>
+                        <p>
+                            Permissions are handled at the object store level.
+                            The store integrates with the org's identity
+                            provider — if you can access the artifact, you also
+                            have access to the source repo. The constraint
+                            shifts to the merge pipeline: don't combine repos
+                            into one artifact when consumers may only be
+                            authorized for a subset. Distribution must respect
+                            per-repo access boundaries.
+                        </p>
+                        <p class="phase-gaps">
+                            <strong>Solves:</strong> gap 5. No central query
+                            service, no separate policy system — permissions
+                            inherit from the object store's existing ACLs.
+                        </p>
+                    </article>
+                </div>
+
+                <aside class="timeline-note">
+                    <strong>What about the server alternative?</strong>
+                    Centralizing means either delegating to a distributed vector DB
+                    (ChromaDB, LanceDB, Qdrant — with their ops, sharding, replication
+                    overhead) or re-solving every bottleneck above in a server context.
+                    The LSM-Vec roadmap is the opposite: solve each bottleneck at
+                    the embedded library level so the local model needs nothing a
+                    developer doesn't already run locally.
+                </aside>
+                <aside class="timeline-note" style="margin-top: var(--space-3)">
+                    <strong>Need something before the roadmap delivers?</strong>
+                    Wrap the local process in a lightweight HTTP MCP proxy with transport-layer
+                    authorization. Same local binary behind a network boundary, same
+                    maintenance surface. Full server trade-offs documented in the
+                    comparison table below.
+                </aside>
+            </div>
+        </section>
+
+        <section
+            class="page-section alt-section"
+            aria-labelledby="index-maintenance-title"
+        >
+            <div class="container">
+                <p class="eyebrow">The hidden server cost</p>
+                <h2 id="index-maintenance-title">
+                    A live central index is a distributed database problem
+                </h2>
+                <p class="section-lead">
+                    A local copy periodically receives a published baseline,
+                    then maintains one branch or revision with incremental
+                    indexing. A central service must keep every queryable branch
+                    fresh to a tighter shared-view target while serving reads.
+                    HNSW and IVF indexes can accept some incremental writes, but
+                    deletes, retraining, compaction, and rebuilds require a
+                    growing/sealed segment strategy and background capacity.
+                    Production vector systems use WALs, segments, tombstones,
+                    replicas, and shard-level maintenance to manage this
+                    lifecycle.
+                </p>
+                <div class="index-maintenance-grid">
+                    <article>
+                        <h3>Local copy with embedded index</h3>
+                        <p>
+                            Periodically publish a self-contained DB baseline to
+                            object storage. Thin manager checks for fresh
+                            versions, verifies, activates. The roadmap's LSM-Vec
+                            backend keeps vectors on disk and graph edges in an
+                            LSM-tree, avoiding all-in-memory HNSW rebuilds. A
+                            server or CI job can copy, query, proxy MCP, and
+                            exit.
+                        </p>
+                    </article>
+                    <article>
+                        <h3>Central live corpus</h3>
+                        <p>
+                            Ingest all repositories and branches, route queries
+                            across shards, merge results, rebuild or compact
+                            indexes, replicate data, and preserve freshness
+                            during failures. A central operator must also manage
+                            a distributed vector DB (ChromaDB, LanceDB, Qdrant)
+                            with its own cluster lifecycle, capacity, backups,
+                            and incident response.
+                        </p>
+                    </article>
+                </div>
+                <aside class="index-scale-note">
+                    <strong>Scale asymmetry:</strong> local-first targets at most
+                    roughly 10M vectors per client. The current 256-dimensional envelope
+                    is about 30–40 GB per client, with further compression still needed.
+                    The ~100M-vector figure describes a centralized aggregate across
+                    multiple branches—not one local copy. The server must store the
+                    branch permutations or execute dynamic cross-DB joins, in addition
+                    to index, metadata, replica, backup, and rebuild costs.
+                    <span class="source-links">
+                        See <a
+                            href="https://github.com/facebookresearch/faiss/wiki/Faiss-indexes"
+                            >FAISS</a
+                        >,
+                        <a
+                            href="https://docs.weaviate.io/weaviate/concepts/vector-index"
+                            >Weaviate</a
+                        >,
+                        <a
+                            href="https://qdrant.tech/documentation/concepts/storage/"
+                            >Qdrant</a
+                        >, and <a href="https://github.com/el-yawd/lsm-vec"
+                            >LSM-Vec (LSM-tree-based vector index)</a
+                        >.
+                    </span>
+                </aside>
+            </div>
+        </section>
+
+        <section class="page-section" aria-labelledby="comparison-title">
+            <div class="container">
+                <p class="eyebrow">Trade-offs</p>
+                <h2 id="comparison-title">Every dimension, side by side</h2>
+                <ArchitectureComparison />
+            </div>
+        </section>
+
+        <section
+            id="discuss"
+            class="page-section alt-section"
+            aria-labelledby="discuss-title"
+        >
+            <div class="container narrow">
+                <p class="eyebrow">Discussion</p>
+                <h2 id="discuss-title">
+                    This is a roadmap, not a manifesto.<br />
+                    <span>Challenge it.</span>
+                </h2>
+
+                <aside class="validation-callout">
+                    <h3>Open questions we're still working through</h3>
+                    <ul>
+                        <li>
+                            Is the Rust pipeline rewrite or LSM-Vec the bigger
+                            lever for indexing speed?
+                        </li>
+                        <li>
+                            Should the merged DB artifact preserve per-repo
+                            shard boundaries, or rely on the object store for
+                            access control?
+                        </li>
+                        <li>
+                            Can DB compression alone make artifact sizes small
+                            enough to skip shipping without the vector index?
+                        </li>
+                        <li>
+                            Does the object store permission model scale to
+                            orgs with thousands of repos and fine-grained
+                            team access?
+                        </li>
+                    </ul>
+                    <p>
+                        This roadmap is shaped by real production constraints.
+                        If you see a flaw, a missing gap, or a better path —
+                        open an issue or PR. We'd rather be wrong early than
+                        build the wrong thing.
+                    </p>
+                </aside>
+            </div>
+        </section>
+    </main>
+
+    <Community />
 </Base>
 
 <style>
-  .hero { padding: var(--space-10) 0; border-bottom: var(--border-w-subtle) solid var(--border-subtle); }
-  .container { max-width: 1120px; margin: 0 auto; padding: 0 var(--space-6); }
-  .narrow { max-width: 880px; }
-  .hero-inner { max-width: 1000px; }
-  .eyebrow, .card-kicker, .status-label { color: var(--text-tertiary); font-size: var(--text-xs); font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
-  .hero .eyebrow { margin-bottom: var(--space-4); color: var(--primary); }
-  h1 { max-width: 900px; color: var(--text-primary); font-size: var(--text-4xl); line-height: var(--lh-4xl); letter-spacing: -.02em; }
-  h1 span { color: var(--primary); }
-  .hero-lead { max-width: 780px; margin-top: var(--space-5); color: var(--text-secondary); font-size: var(--text-lg); line-height: var(--lh-lg); }
-  .hero-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-7); }
-  .button { display: inline-flex; min-height: var(--target-lg); padding: 0 var(--space-6); align-items: center; justify-content: center; border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-md); font-size: var(--text-sm); font-weight: 600; text-decoration: none; }
-  .button:hover { text-decoration: none; }
-  .button.primary { border-color: var(--primary); color: var(--on-primary); background: var(--primary); }
-  .button.secondary { color: var(--text-primary); background: var(--bg-surface); }
-  .status-section { padding: var(--space-6) 0 0; }
-  .status-card { display: grid; grid-template-columns: 180px 1fr; gap: var(--space-5); padding: var(--space-5); border-left: var(--border-w-accent) solid var(--primary); border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg) var(--radius-sm); background: var(--bg-surface); }
-  .status-card h2 { margin-top: 0; margin-bottom: var(--space-2); font-size: var(--text-lg); }
-  .status-card p:not(.status-label), .path-card p, .path-card li, .decision-list p, .validation-callout li { color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--lh-sm); }
-  .page-section { padding: var(--space-10) 0; scroll-margin-top: var(--target-xl); }
-  .alt-section { border-block: var(--border-w-subtle) solid var(--border-subtle); background: var(--bg-surface); }
-  .eyebrow { margin-bottom: var(--space-3); }
-  h2 { color: var(--text-primary); font-size: var(--text-2xl); line-height: var(--lh-2xl); font-weight: 600; }
-  h3 { color: var(--text-primary); font-size: var(--text-lg); line-height: var(--lh-lg); }
-  h4 { margin-top: var(--space-5); color: var(--text-primary); font-size: var(--text-sm); }
-  .section-lead { max-width: 820px; margin-top: var(--space-4); color: var(--text-secondary); font-size: var(--text-base); line-height: var(--lh-base); }
-  .path-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); margin-top: var(--space-7); }
-  .path-card { padding: var(--space-6); border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-xl); background: var(--bg-page); }
-  .path-card.preferred { border-color: var(--primary); }
-  .card-kicker { margin-bottom: var(--space-3); color: var(--primary); }
-  .path-card > p:not(.card-kicker) { margin-top: var(--space-3); }
-  .path-card ul, .validation-callout ul { display: grid; gap: var(--space-2); margin-top: var(--space-3); padding-left: var(--space-5); }
-  .index-maintenance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); margin-top: var(--space-7); }
-  .index-maintenance-grid article { padding: var(--space-5); border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-page); }
-  .index-maintenance-grid p { margin-top: var(--space-3); color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--lh-sm); }
-  .index-scale-note { margin-top: var(--space-5); padding: var(--space-5); border-left: var(--border-w-accent) solid var(--primary); border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg) var(--radius-sm); color: var(--text-secondary); background: var(--bg-muted); font-size: var(--text-sm); line-height: var(--lh-sm); }
-  .index-scale-note strong, .source-links a { color: var(--text-primary); }
-  .source-links { display: block; margin-top: var(--space-2); color: var(--text-tertiary); font-size: var(--text-xs); }
-  .decision-list { display: grid; gap: var(--space-4); margin-top: var(--space-6); }
-  .decision-list p { padding: var(--space-4) var(--space-5); border-left: var(--border-w-accent) solid var(--primary); border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg) var(--radius-sm); background: var(--bg-muted); }
-  .decision-list strong { color: var(--text-primary); }
-  .validation-callout { margin-top: var(--space-6); padding: var(--space-6); border-radius: var(--radius-xl); background: var(--primary-bg); }
-  .validation-callout h3, .validation-callout li { color: var(--on-primary-bg); }
-  @media (max-width: 700px) { .status-card, .path-grid, .index-maintenance-grid { grid-template-columns: 1fr; } .status-label { margin-bottom: 0; } }
+    .hero {
+        padding: var(--space-10) 0;
+        border-bottom: var(--border-w-subtle) solid var(--border-subtle);
+    }
+
+    .narrow {
+        max-width: 880px;
+    }
+    .hero-inner {
+        max-width: 1000px;
+    }
+    .eyebrow,
+    .phase-badge {
+        color: var(--text-tertiary);
+        font-size: var(--text-xs);
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        margin-bottom: var(--space-3);
+    }
+    .hero .eyebrow {
+        margin-bottom: var(--space-4);
+        color: var(--primary);
+    }
+    h1 {
+        max-width: 900px;
+        color: var(--text-primary);
+        font-size: var(--text-4xl);
+        line-height: var(--lh-4xl);
+        letter-spacing: -0.02em;
+    }
+    h1 span {
+        color: var(--primary);
+    }
+    .hero-lead {
+        max-width: 780px;
+        margin-top: var(--space-5);
+        color: var(--text-secondary);
+        font-size: var(--text-lg);
+        line-height: var(--lh-lg);
+    }
+    .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-3);
+        margin-top: var(--space-7);
+    }
+    .button {
+        display: inline-flex;
+        min-height: var(--target-lg);
+        padding: 0 var(--space-6);
+        align-items: center;
+        justify-content: center;
+        border: var(--border-w-default) solid var(--border-color);
+        border-radius: var(--radius-md);
+        font-size: var(--text-sm);
+        font-weight: 600;
+        text-decoration: none;
+    }
+    .button:focus-visible {
+        outline: var(--border-w-emphasis) solid var(--link-focus);
+        outline-offset: 3px;
+    }
+    .button:hover {
+        text-decoration: none;
+    }
+    .button.primary {
+        border-color: var(--primary);
+        color: var(--on-primary);
+        background: var(--primary);
+    }
+    .button.secondary {
+        color: var(--text-primary);
+        background: var(--bg-surface);
+    }
+    .page-section {
+        padding: var(--space-10) 0;
+        scroll-margin-top: var(--target-xl);
+    }
+    .alt-section {
+        border-block: var(--border-w-subtle) solid var(--border-subtle);
+        background: var(--bg-surface);
+    }
+
+    h2 {
+        color: var(--text-primary);
+        font-size: var(--text-2xl);
+        line-height: var(--lh-2xl);
+        font-weight: 600;
+    }
+    h3 {
+        color: var(--text-primary);
+        font-size: var(--text-lg);
+        line-height: var(--lh-lg);
+    }
+    .section-lead {
+        max-width: 820px;
+        margin-top: var(--space-4);
+        color: var(--text-secondary);
+        font-size: var(--text-base);
+        line-height: var(--lh-base);
+    }
+    .gap-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: var(--space-4);
+        margin-top: var(--space-7);
+    }
+    .gap-card {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+        padding: var(--space-5);
+        border: var(--border-w-default) solid var(--border-color);
+        border-radius: var(--radius-lg);
+        background: var(--bg-page);
+    }
+    .gap-card p {
+        color: var(--text-secondary);
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+    }
+    .gap-number {
+        color: var(--primary);
+        font-size: var(--text-2xl);
+        font-weight: 700;
+        line-height: 1;
+    }
+    .phase-list {
+        display: grid;
+        gap: var(--space-5);
+        margin-top: var(--space-7);
+    }
+    .phase-card {
+        padding: var(--space-6);
+        border: var(--border-w-default) solid var(--border-color);
+        border-radius: var(--radius-xl);
+        background: var(--bg-page);
+    }
+    .phase-card p {
+        color: var(--text-secondary);
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+    }
+    .phase-card p:not(:first-of-type) {
+        margin-top: var(--space-3);
+    }
+    .phase-badge {
+        display: inline-flex;
+        align-items: center;
+        margin-bottom: var(--space-3);
+        padding: var(--space-1) var(--space-3);
+        border-radius: var(--radius-full);
+        font-size: var(--text-xs);
+        letter-spacing: 0.1em;
+    }
+    .phase-card.shipped {
+        border-color: var(--green);
+    }
+    .phase-card.shipped .phase-badge {
+        color: var(--on-green-bg);
+        background: var(--green-bg);
+    }
+    .phase-card.in-progress {
+        border-color: var(--primary);
+    }
+    .phase-card.in-progress .phase-badge {
+        color: var(--on-primary);
+        background: var(--primary);
+    }
+    .phase-card.future {
+        border-color: var(--border-color);
+    }
+    .phase-card.future .phase-badge {
+        color: var(--text-tertiary);
+        background: var(--bg-muted);
+    }
+    .phase-gaps strong {
+        color: var(--text-primary);
+    }
+    .timeline-note {
+        margin-top: var(--space-5);
+        padding: var(--space-5);
+        border-left: var(--border-w-accent) solid var(--primary);
+        border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg)
+            var(--radius-sm);
+        color: var(--text-secondary);
+        background: var(--bg-muted);
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+    }
+    .timeline-note strong {
+        color: var(--text-primary);
+    }
+    .index-maintenance-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--space-5);
+        margin-top: var(--space-7);
+    }
+    .index-maintenance-grid article {
+        padding: var(--space-5);
+        border: var(--border-w-default) solid var(--border-color);
+        border-radius: var(--radius-lg);
+        background: var(--bg-page);
+    }
+    .index-maintenance-grid p {
+        margin-top: var(--space-3);
+        color: var(--text-secondary);
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+    }
+    .index-scale-note {
+        margin-top: var(--space-5);
+        padding: var(--space-5);
+        border-left: var(--border-w-accent) solid var(--primary);
+        border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg)
+            var(--radius-sm);
+        color: var(--text-secondary);
+        background: var(--bg-muted);
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+    }
+    .index-scale-note strong,
+    .source-links a {
+        color: var(--text-primary);
+    }
+    .source-links {
+        display: block;
+        margin-top: var(--space-2);
+        color: var(--text-tertiary);
+        font-size: var(--text-xs);
+    }
+    .decision-list {
+        display: grid;
+        gap: var(--space-4);
+        margin-top: var(--space-6);
+    }
+    .decision-list p {
+        padding: var(--space-4) var(--space-5);
+        border-left: var(--border-w-accent) solid var(--primary);
+        border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg)
+            var(--radius-sm);
+        background: var(--bg-muted);
+    }
+    .decision-list strong,
+    .decision-list code {
+        color: var(--text-primary);
+    }
+    .decision-list code {
+        font-size: var(--text-xs);
+    }
+    .validation-callout {
+        margin-top: var(--space-6);
+        padding: var(--space-6);
+        border-radius: var(--radius-xl);
+        background: var(--primary-bg);
+    }
+    .validation-callout h3,
+    .validation-callout li {
+        color: var(--on-primary-bg);
+    }
+    .validation-callout ul {
+        display: grid;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
+        padding-left: var(--space-5);
+    }
+    .status-section {
+        padding: var(--space-6) 0 0;
+    }
+    .status-card {
+        display: grid;
+        grid-template-columns: 180px 1fr;
+        gap: var(--space-5);
+        padding: var(--space-5);
+        border-left: var(--border-w-accent) solid var(--primary);
+        border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg)
+            var(--radius-sm);
+        background: var(--bg-surface);
+    }
+    .status-card h2 {
+        margin-top: 0;
+        margin-bottom: var(--space-2);
+        font-size: var(--text-lg);
+    }
+    .status-card p:not(.status-label),
+    .path-card p,
+    .path-card li,
+    .decision-list p,
+    .validation-callout li {
+        color: var(--text-secondary);
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+    }
+    .path-card {
+        padding: var(--space-6);
+        border: var(--border-w-default) solid var(--border-color);
+        border-radius: var(--radius-xl);
+        background: var(--bg-page);
+    }
+    .card-kicker {
+        margin-bottom: var(--space-3);
+        color: var(--primary);
+    }
+    .path-card > p:not(.card-kicker) {
+        margin-top: var(--space-3);
+    }
+    .path-card ul,
+    .validation-callout ul {
+        display: grid;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
+        padding-left: var(--space-5);
+    }
+    .path-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--space-5);
+        margin-top: var(--space-7);
+    }
+    @media (max-width: 768px) {
+        .status-card,
+        .path-grid,
+        .index-maintenance-grid {
+            grid-template-columns: 1fr;
+        }
+        .status-label {
+            margin-bottom: 0;
+        }
+    }
 </style>
