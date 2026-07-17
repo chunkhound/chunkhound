@@ -10,7 +10,7 @@ Guidance for running ChunkHound against very large codebases when
   "database": {
     "provider": "lancedb",
     "path": ".chunkhound",
-    "lancedb_optimize_fragment_threshold": 50,
+    "lancedb_optimize_fragment_threshold": 100,
     "lancedb_index_type": "ivf_hnsw_sq"
   },
   "indexing": {
@@ -25,7 +25,7 @@ Guidance for running ChunkHound against very large codebases when
 
 | Knob | Role |
 |------|------|
-| `lancedb_optimize_fragment_threshold` | Min chunk fragments before optimize (0 = always). Product default **50** is the wall sweet spot under full-flow + F1 (F5); thr≥200 raises wall (see L4/F5 in `indexing_performance_plan.md`). Env: `CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD`. CLI: `--lancedb-optimize-fragment-threshold`. |
+| `lancedb_optimize_fragment_threshold` | Min chunk fragments before optimize (0 = always). Product default **100** (OpenJDK-scale preferred thr=100 over 50; thr=50 over-optimizes). thr≥200 raises wall on soaks. Env: `CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD`. CLI: `--lancedb-optimize-fragment-threshold`. |
 | `indexing.db_batch_size` | Base chunk insert batch size (coordinator splits large per-file inserts). Further reduced when LanceDB fragment count is high. Env: `CHUNKHOUND_DB_BATCH_SIZE`. |
 | `embedding.batch_size` | Page size for streaming `generate_missing_embeddings` keyset walk. |
 
@@ -45,7 +45,7 @@ Guidance for running ChunkHound against very large codebases when
 ## Operational tips
 
 - Prefer an absolute `database.path` when the CWD is not the project root.
-- Keep fragment threshold near the product default (50); raising it to “skip optimize” usually increases bulk index wall time.
+- Keep fragment threshold near the product default (100); thr=50 can over-optimize large trees (OpenJDK evidence).
 - DuckDB remains the default provider; LanceDB is optional for this scale path.
 - See `operations/lancedb_large_index_reimplementation.md` for the phased design.
 

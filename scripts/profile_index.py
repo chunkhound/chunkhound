@@ -41,6 +41,11 @@ Examples:
   # F5: full-flow optimize-threshold ladder (gate size example)
   uv run python scripts/profile_index.py --full-optimize-ladder \\
       --files 1000 --funcs-per-file 20 --defer-flush-chunks 1000
+
+Isolation:
+  This harness never loads global/user config (~/.config/chunkhound, etc.),
+  project .chunkhound.json, or CHUNKHOUND_* env config layers. Config is built
+  only from CLI flags + in-process defaults (controlled mode).
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -61,6 +67,8 @@ if str(_REPO_ROOT) not in sys.path:
 # Voyage-code-3-ish width: vector payload size matters for Lance add / merge.
 _DEFAULT_FULL_DIMS = 1024
 _DEFAULT_SOAK_DIMS = 32
+# Soft safety for --corpus root: refuse accidental huge trees (e.g. full AOSP).
+_DEFAULT_MAX_TREE_FILES = 150_000
 
 _DEFAULT_EXCLUDES = [
     "**/.git/**",
@@ -76,6 +84,90 @@ _DEFAULT_EXCLUDES = [
     "**/chunkhound-profile-*/**",
     "**/chunkhound-full-*/**",
 ]
+
+
+def _isolate_from_global_config() -> None:
+    """Prevent Config hierarchical loader from seeing global/env config.
+
+    Even when callers build nested DatabaseConfig/IndexingConfig, ``Config()``
+    still deep-merges env + ~/.config/chunkhound + local .chunkhound.json.
+    Clear the env knobs that enable that before any Config construction.
+    """
+    for key in list(os.environ):
+        if key == "CHUNKHOUND_GLOBAL_CONFIG_FILE" or key == "CHUNKHOUND_CONFIG_FILE":
+            os.environ.pop(key, None)
+        elif key.startswith("CHUNKHOUND_"):
+            # Leave nothing from the user's shell global/env profile.
+            os.environ.pop(key, None)
+
+
+def _build_isolated_config(
+    *,
+    db_dir: Path,
+    optimize_threshold: int,
+    defer_write: bool,
+    defer_flush_chunks: int,
+    page_size: int,
+    cleanup: bool,
+    force_reindex: bool,
+    per_file_timeout_seconds: float,
+    target_dir: Path,
+) -> object:
+    """Build Config without hierarchical global/local/env merge.
+
+    Uses ``model_construct`` so ``Config.__init__`` (which loads globals) is
+    never invoked.
+    """
+    from chunkhound.core.config.config import Config
+    from chunkhound.core.config.database_config import DatabaseConfig
+    from chunkhound.core.config.embedding_config import EmbeddingConfig
+    from chunkhound.core.config.indexing_config import IndexingConfig
+
+    database = DatabaseConfig(
+        path=db_dir,
+        provider="lancedb",
+        lancedb_optimize_fragment_threshold=optimize_threshold,
+    )
+    indexing = IndexingConfig(
+        defer_chunk_write=defer_write,
+        defer_flush_chunks=max(1, int(defer_flush_chunks)),
+        db_batch_size=max(100, page_size),
+        cleanup=cleanup,
+        force_reindex=force_reindex,
+        per_file_timeout_seconds=per_file_timeout_seconds,
+        per_file_timeout_min_size_kb=128,
+    )
+    embedding = EmbeddingConfig(
+        provider="openai",  # unused — FakeEmbeddingProvider is injected
+        model="fake-embeddings",
+        batch_size=page_size,
+    )
+    return Config.model_construct(
+        database=database,
+        indexing=indexing,
+        embedding=embedding,
+        target_dir=target_dir.resolve(),
+        config_file=None,
+        local_config_file=None,
+        global_config_file=None,
+    )
+
+
+def _count_tree_files(root: Path, *, max_files: int) -> int:
+    """Count files under root (skip .git). Stops early if over max_files."""
+    n = 0
+    root = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune .git and other heavy non-source dirs for counting.
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in {".git", "node_modules", ".venv", "venv", "__pycache__"}
+        ]
+        n += len(filenames)
+        if n > max_files:
+            return n
+    return n
 
 
 def _quiet_logs() -> None:
@@ -184,10 +276,11 @@ async def _run_soak(
     page_size: int,
     work_dir: Path,
     defer_write: bool,
-    optimize_threshold: int = 50,
+    optimize_threshold: int = 100,
     dims: int = _DEFAULT_SOAK_DIMS,
 ) -> dict:
     """Synthetic insert + stream embed (or single-write path simulation)."""
+    _isolate_from_global_config()
     from chunkhound.core.config.database_config import DatabaseConfig
     from chunkhound.core.diagnostics.index_profile import IndexProfile
     from chunkhound.core.models import Chunk, File
@@ -323,31 +416,39 @@ async def _run_full(
     db_dir: Path,
     defer_write: bool,
     page_size: int,
-    optimize_threshold: int = 50,
+    optimize_threshold: int = 100,
     dims: int = _DEFAULT_FULL_DIMS,
     scenario: str = "cold",
     force_reindex: bool = False,
     cleanup: bool = False,
     per_file_timeout_seconds: float = 60.0,
     defer_flush_chunks: int = 1000,
+    max_tree_files: int = _DEFAULT_MAX_TREE_FILES,
 ) -> dict:
     """Full product path: discover → change-detect → parse → store → residual.
 
     Embeddings use FakeEmbeddingProvider (no network). Vectors are not useful for
     semantic quality, but vector width (``dims``) still stresses Lance writes.
+
+    Config is fully isolated: no global/user/project config layers.
     """
-    from chunkhound.core.config.config import Config
-    from chunkhound.core.config.database_config import DatabaseConfig
-    from chunkhound.core.config.embedding_config import EmbeddingConfig
-    from chunkhound.core.config.indexing_config import IndexingConfig
     from chunkhound.core.diagnostics.index_profile import IndexProfile
     from chunkhound.providers.database.lancedb_provider import LanceDBProvider
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
     from tests.fixtures.fake_providers import FakeEmbeddingProvider
 
+    _isolate_from_global_config()
+
     root = root.resolve()
     db_dir = db_dir.resolve()
     db_dir.mkdir(parents=True, exist_ok=True)
+
+    tree_files = _count_tree_files(root, max_files=max_tree_files)
+    if tree_files > max_tree_files:
+        raise RuntimeError(
+            f"Tree too large for controlled profile: {tree_files} files under "
+            f"{root} (max_tree_files={max_tree_files}). Refuse to run."
+        )
 
     if scenario == "cold":
         # Fresh DB so change-detect does not skip anything.
@@ -373,29 +474,22 @@ async def _run_full(
             "force_reindex": force_reindex,
             "cleanup": cleanup,
             "defer_flush_chunks": defer_flush_chunks,
+            "config_isolation": "model_construct+env_cleared",
+            "tree_files_precheck": tree_files,
+            "max_tree_files": max_tree_files,
         }
     )
 
-    cfg = Config(
-        database=DatabaseConfig(
-            path=db_dir,
-            provider="lancedb",
-            lancedb_optimize_fragment_threshold=optimize_threshold,
-        ),
-        indexing=IndexingConfig(
-            defer_chunk_write=defer_write,
-            defer_flush_chunks=max(1, int(defer_flush_chunks)),
-            db_batch_size=max(100, page_size),
-            cleanup=cleanup,
-            force_reindex=force_reindex,
-            per_file_timeout_seconds=per_file_timeout_seconds,
-            per_file_timeout_min_size_kb=128,
-        ),
-        embedding=EmbeddingConfig(
-            provider="openai",  # unused — we inject FakeEmbeddingProvider
-            model="fake-embeddings",
-            batch_size=page_size,
-        ),
+    cfg = _build_isolated_config(
+        db_dir=db_dir,
+        optimize_threshold=optimize_threshold,
+        defer_write=defer_write,
+        defer_flush_chunks=defer_flush_chunks,
+        page_size=page_size,
+        cleanup=cleanup,
+        force_reindex=force_reindex,
+        per_file_timeout_seconds=per_file_timeout_seconds,
+        target_dir=root,
     )
 
     db = LanceDBProvider(
@@ -456,6 +550,28 @@ async def _run_full(
         if fake._embeddings_generated:
             profile.meta["fake_embeddings_generated"] = fake._embeddings_generated
             profile.meta["fake_embed_requests"] = fake._requests_made
+
+        # Bottleneck helpers for large-tree analysis
+        phases = profile.phases_s
+        store_s = float(phases.get("store", 0.0))
+        parse_store_s = float(phases.get("parse_store", 0.0))
+        wall_hint = max(profile.total_s(), 1e-9)
+        profile.meta["bottleneck"] = {
+            "parse_approx_s": round(max(0.0, parse_store_s - store_s), 4),
+            "store_minus_lance_s": round(
+                max(0.0, store_s - float(profile.db.merge_insert_s)), 4
+            ),
+            "lance_write_s": round(float(profile.db.merge_insert_s), 4),
+            "optimize_s": round(float(profile.db.optimize_s), 4),
+            "chunks_per_embed_request": (
+                round(chunks_n / fake._requests_made, 2)
+                if fake._requests_made
+                else None
+            ),
+            "phase_share_of_total": {
+                k: round(v / wall_hint, 4) for k, v in sorted(phases.items())
+            },
+        }
 
         profile.sample_rss()
         return profile.as_dict()
@@ -625,10 +741,10 @@ def main() -> int:
     parser.add_argument(
         "--optimize-threshold",
         type=int,
-        default=50,
+        default=100,
         help=(
             "LanceDB fragment count before mid-write optimize "
-            "(default 50 = product DatabaseConfig default after F5)"
+            "(default 100 = product default; thr=50 over-optimizes large trees)"
         ),
     )
     parser.add_argument(
@@ -663,6 +779,15 @@ def main() -> int:
             "on exit. Required for --scenario resume."
         ),
     )
+    parser.add_argument(
+        "--max-tree-files",
+        type=int,
+        default=_DEFAULT_MAX_TREE_FILES,
+        help=(
+            "Refuse --corpus root if tree exceeds this many files "
+            f"(default {_DEFAULT_MAX_TREE_FILES}; 200k is considered too large)."
+        ),
+    )
     args = parser.parse_args()
     if args.optimize_threshold < 0:
         parser.error("--optimize-threshold must be >= 0")
@@ -674,6 +799,10 @@ def main() -> int:
         parser.error("--funcs-per-file must be >= 1")
     if args.dims is not None and args.dims < 1:
         parser.error("--dims must be >= 1")
+    if args.max_tree_files < 1:
+        parser.error("--max-tree-files must be >= 1")
+    # Controlled mode: drop global/env config before any Config/import side paths.
+    _isolate_from_global_config()
     _quiet_logs()
 
     work = args.keep_dir
@@ -720,6 +849,7 @@ def main() -> int:
                         force_reindex=False,
                         cleanup=False,
                         defer_flush_chunks=args.defer_flush_chunks,
+                        max_tree_files=args.max_tree_files,
                     )
                 )
                 report["wall_s"] = round(time.perf_counter() - t0, 4)
@@ -742,7 +872,8 @@ def main() -> int:
             else:
                 print(
                     "\n=== F5 full-flow optimize-threshold ladder "
-                    f"(synthetic cold, F1 flush={args.defer_flush_chunks}) ==="
+                    f"(synthetic cold, F1 flush={args.defer_flush_chunks}, "
+                    "isolated config) ==="
                 )
                 print(
                     f"{'thr':>6} {'wall':>8} {'store':>8} {'opt_n':>6} "
@@ -911,6 +1042,7 @@ def main() -> int:
                         force_reindex=False,
                         cleanup=False,
                         defer_flush_chunks=args.defer_flush_chunks,
+                        max_tree_files=args.max_tree_files,
                     )
                 )
                 report["wall_s"] = round(time.perf_counter() - t0, 4)
@@ -1009,6 +1141,7 @@ def main() -> int:
                     force_reindex=args.force_reindex,
                     cleanup=args.cleanup,
                     defer_flush_chunks=args.defer_flush_chunks,
+                    max_tree_files=args.max_tree_files,
                 )
             )
             report["meta"]["corpus"] = corpus_meta

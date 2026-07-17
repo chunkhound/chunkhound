@@ -183,7 +183,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         self.index_type = config.lancedb_index_type if config else None
         self._fragment_threshold = (
-            config.lancedb_optimize_fragment_threshold if config else 50
+            config.lancedb_optimize_fragment_threshold if config else 100
         )
         self.connection: Any | None = (
             None  # For backward compatibility only - do not use directly
@@ -578,7 +578,10 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Generate chunk ID with fallback to hash-based ID.
 
         Returns chunk.id if present, otherwise generates deterministic
-        hash-based ID from file_id, content, and chunk type.
+        hash-based ID from file_id, content, chunk type, and line span.
+        Line span prevents identical copy-pasted blocks in one file from
+        sharing a primary key (Lance append would duplicate; merge_insert
+        would then fail with an ambiguous match).
 
         Args:
             chunk: Chunk object to generate ID for
@@ -586,7 +589,9 @@ class LanceDBProvider(SerialDatabaseProvider):
         Returns:
             Chunk ID (existing or generated)
         """
-        return chunk.id or generate_chunk_id(
+        if chunk.id is not None:
+            return int(chunk.id)
+        return generate_chunk_id(
             chunk.file_id,
             chunk.code or "",
             concept=str(
@@ -594,7 +599,34 @@ class LanceDBProvider(SerialDatabaseProvider):
                 if hasattr(chunk.chunk_type, "value")
                 else chunk.chunk_type
             ),
+            start_line=int(chunk.start_line) if chunk.start_line is not None else None,
+            end_line=int(chunk.end_line) if chunk.end_line is not None else None,
         )
+
+    def _dedupe_chunk_rows_by_id(
+        self, rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Keep one row per chunk id (last wins). Prevents Lance merge/append PK issues.
+
+        Within a batch, identical IDs should be rare after positional hashing;
+        this is a safety net so source tables never present ambiguous keys.
+        """
+        if len(rows) < 2:
+            return rows
+        by_id: dict[int, dict[str, Any]] = {}
+        order: list[int] = []
+        for row in rows:
+            rid = int(row["id"])
+            if rid not in by_id:
+                order.append(rid)
+            by_id[rid] = row
+        if len(by_id) == len(rows):
+            return rows
+        logger.warning(
+            "LanceDB: dropped %s in-batch duplicate chunk id(s) before write",
+            len(rows) - len(by_id),
+        )
+        return [by_id[i] for i in order]
 
     # File Operations
     def insert_file(self, file: File) -> int:
@@ -1085,32 +1117,34 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             for chunk in batch_chunks:
                 chunk_id = self._generate_chunk_id_safe(chunk)
-                chunk_ids.append(chunk_id)
+                chunk_data_list.append(
+                    {
+                        "id": chunk_id,
+                        "file_id": chunk.file_id,
+                        "content": chunk.code or "",
+                        "start_line": chunk.start_line,
+                        "end_line": chunk.end_line,
+                        "chunk_type": str(
+                            chunk.chunk_type.value
+                            if hasattr(chunk.chunk_type, "value")
+                            else chunk.chunk_type
+                        ),
+                        "language": str(
+                            chunk.language.value
+                            if hasattr(chunk.language, "value")
+                            else chunk.language
+                        ),
+                        "name": chunk.symbol or "",
+                        "embedding": None,
+                        "provider": "",
+                        "model": "",
+                        "created_time": time.time(),
+                        "metadata": _serialize_metadata(chunk.metadata),
+                    }
+                )
 
-                chunk_data = {
-                    "id": chunk_id,
-                    "file_id": chunk.file_id,
-                    "content": chunk.code or "",
-                    "start_line": chunk.start_line,
-                    "end_line": chunk.end_line,
-                    "chunk_type": str(
-                        chunk.chunk_type.value
-                        if hasattr(chunk.chunk_type, "value")
-                        else chunk.chunk_type
-                    ),
-                    "language": str(
-                        chunk.language.value
-                        if hasattr(chunk.language, "value")
-                        else chunk.language
-                    ),
-                    "name": chunk.symbol or "",
-                    "embedding": None,
-                    "provider": "",
-                    "model": "",
-                    "created_time": time.time(),
-                    "metadata": _serialize_metadata(chunk.metadata),
-                }
-                chunk_data_list.append(chunk_data)
+            chunk_data_list = self._dedupe_chunk_rows_by_id(chunk_data_list)
+            chunk_ids = [int(r["id"]) for r in chunk_data_list]
 
             # Use PyArrow Table directly to avoid LanceDB DataFrame schema alignment bug
             chunks_table = pa.Table.from_pylist(
@@ -1217,10 +1251,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             for i in range(0, len(paired), batch_size):
                 batch = paired[i : i + batch_size]
                 rows = []
-                ids = []
                 for chunk, emb in batch:
                     cid = self._generate_chunk_id_safe(chunk)
-                    ids.append(cid)
                     rows.append(
                         {
                             "id": cid,
@@ -1246,9 +1278,27 @@ class LanceDBProvider(SerialDatabaseProvider):
                             "metadata": _serialize_metadata(chunk.metadata),
                         }
                     )
+                # Same content at different lines now hashes differently; still
+                # fold any residual in-batch id collisions before append.
+                rows = self._dedupe_chunk_rows_by_id(rows)
+                ids = [int(r["id"]) for r in rows]
                 tbl = pa.Table.from_pylist(rows, schema=schema)
-                # Cold deferred path: new unique ids → append beats merge_insert wall.
-                self._append_chunks(tbl, row_count=len(rows))
+                # Cold deferred path: unique ids (incl. line span) → append.
+                # Fallback only recovers hard append failures (I/O, schema), not
+                # silent duplicate-PK rows: Lance add() usually succeeds even when
+                # ids already exist. Uniqueness is from positional hashing +
+                # in-batch dedupe; reindex uses merge_insert, not this path.
+                try:
+                    self._append_chunks(tbl, row_count=len(rows))
+                except Exception as append_err:
+                    logger.warning(
+                        "LanceDB append failed (%s); falling back to merge_insert "
+                        "for %s chunk(s)",
+                        append_err,
+                        len(rows),
+                        exc_info=True,
+                    )
+                    self._merge_insert_chunks(tbl, row_count=len(rows))
                 all_ids.extend(ids)
 
         if invalid_chunks:

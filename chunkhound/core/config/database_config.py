@@ -39,13 +39,14 @@ class DatabaseConfig(BaseModel):
     )
 
     lancedb_optimize_fragment_threshold: int = Field(
-        default=50,
+        default=100,
         ge=0,
         description=(
             "Minimum fragment count to trigger mid-write optimization "
-            "(0 = always). Product default 50 is the full-flow + F1 wall "
-            "sweet spot; thr≥200 raises wall (fragment drag). "
-            "See operations/indexing_performance_plan.md (L4/F5)."
+            "(0 = always). Product default 100: OpenJDK-scale full-flow "
+            "(~2M chunks) preferred thr=100 over 50 (thr=50 over-optimizes). "
+            "Synthetic small full-flow slightly preferred 50; thr≥200 raises "
+            "wall. See operations/indexing_timing_ledger.md OpenJDK section."
         ),
     )
 
@@ -186,7 +187,7 @@ class DatabaseConfig(BaseModel):
             "--lancedb-optimize-fragment-threshold",
             type=int,
             help="LanceDB: min fragment count before optimize (0=always, "
-            "default 50; thr>=200 often raises full-index wall)",
+            "default 100; thr=50 can over-optimize large trees)",
         )
 
     @classmethod

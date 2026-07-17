@@ -245,7 +245,7 @@ Harness: `--optimize-ladder` / `--optimize-threshold` (historical soak default *
 
 **Conclusion (L4 soak era):** Raising threshold to “save optimize time” **increases** wall — fragment drag slows merge_insert *and* `insert_file`. On soak, thr=100 edged thr=50; thr≥200 hurts.  
 
-**Superseded for product default by F5:** full-flow + F1 cadence prefers thr=**50** at ~49k chunks (see §5 F5 / ledger). Product default is now **50**.
+**F5 / OpenJDK:** synthetic ~49k slightly preferred thr=50; **OpenJDK ~1.9M prefers thr=100** (thr=50 over-optimizes). **Product default remains 100** (see ledger OpenJDK section).
 
 ---
 
@@ -295,7 +295,7 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 | **Done** | **Write append** | Deferred chunk write uses `add` (new ids) not merge_insert | wall 214→**138**; write 145→**77**; mi_s 85→**24** | **Done** |
 | **Done** | **F1 Write batch** | Cross-file deferred buffer + **append** (`defer_flush_chunks=1000`) | full 1000: wall **~70→61s**; batches 1016→254; RSS↓ | **Done** (default 1000) |
 | **Done** | **L3-empty** | Residual missing-clause id-only (no labeled vector scan) | residual 11.7→0.1s; wall 79.5→71 @ 49k full-flow | **Done** |
-| **Done** | **F5 thr@full** | Full-flow thr ladder under F1 | thr=**50** best @ 49k (~46s vs ~49–53 thr=100) | **Product default 50** |
+| **Done** | **F5 thr@full** | Full-flow thr ladder under F1 | Synthetic ~49k preferred thr=50; **OpenJDK ~1.9M prefers thr=100** (thr=50 over-optimizes) | **Product default 100** |
 | **P3** | **F2 parse** | Parse∥store balance | only if still material | Pending |
 | **Out of cold-start scope** | **L6** | Fixed-dim schema when dims known | One-shot footgun (O(rows) only if variable schema already full); **does not improve clean cold index wall** when empty/fixed schema | Later product safety |
 | **Out of cold-start scope** | **L5** | Reindex smart-diff / hash-only | **Incremental reindex**, not cold bulk | Later reindex profile |
@@ -333,7 +333,7 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 
 - [x] **Instr:** soak sub-phases `seed_file_insert` / `seed_chunk_build` / `seed_embed` / `seed_chunk_write`  
 - [x] **L4 measure:** soak thr A/B — thr=100 ok on soak; thr≥200 hurts  
-- [x] **F5 full-flow thr:** under F1, thr=**50** wins wall @ 49k → product default **50**  
+- [x] **F5 full-flow thr:** synthetic thr=50; OpenJDK thr=**100** → product default **100**  
 - [x] **File-id:** skip post-`insert_file` path search (500k file ~91→51s, wall ~311→297)  
 - [x] **File batch (P3):** multi-file `insert_files_batch` (500k file ~51→0.14s, wall ~297→214)  
 - [x] **Write append:** deferred `insert_chunks_with_embeddings` uses append (500k wall ~214→138)  
@@ -351,7 +351,7 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 - [x] **Attribute:** **store 57%** (Lance write only **7%**); **empty residual 15%**; parse ~9%  
 - [x] **P0 L3-empty residual** — missing-clause id-only; residual 11.7→**0.1s** @ 49k; wall 79.5→**71**  
 - [x] **P1 F1** cross-file **append** batch — wall ~70→**61s** @ 49k; batches 1016→254; default flush=1000  
-- [x] **P2 F5** thr ladder under full+F1 — thr=**50** best; product default 100→**50**  
+- [x] **P2 F5** thr ladder — synthetic thr=50; OpenJDK thr=**100** (keep product **100**)  
 - [ ] **P3 F2** parse only if still material  
 - See **`operations/full_flow_tuning_plan.md`** + ledger full-flow section.
 
@@ -403,13 +403,13 @@ Real Voyage is only for **manual end-to-end** quality, not for deciding DB optim
 | `indexing.defer_chunk_write` | Embed-then-single-write new files (default true) |
 | `indexing.defer_flush_chunks` | **F1:** max chunks buffered across new files before one Lance **append** (default **1000**; `1` = per-file L1) |
 | `indexing.db_batch_size` | Classic/residual insert sizing + fragment pressure floor; F1 flush raises ceiling to `defer_flush_chunks` via `prefer_large_append` |
-| `database.lancedb_optimize_fragment_threshold` | Mid-write optimize (product **50** after F5) |
+| `database.lancedb_optimize_fragment_threshold` | Mid-write optimize (product **100**; thr=50 over-optimizes large trees) |
 
 ```json
 {
   "database": {
     "provider": "lancedb",
-    "lancedb_optimize_fragment_threshold": 50
+    "lancedb_optimize_fragment_threshold": 100
   },
   "indexing": {
     "defer_chunk_write": true,
@@ -419,10 +419,10 @@ Real Voyage is only for **manual end-to-end** quality, not for deciding DB optim
 }
 ```
 
-F5: keep threshold **50** under full-flow + F1 (do not raise to 200+). Re-check:
+F5 + OpenJDK: prefer **100** for large real codebases. Re-check:
 
 ```powershell
 uv run python scripts/profile_index.py --full-optimize-ladder --files 500 --defer-flush-chunks 1000
-uv run python scripts/profile_index.py --mode full --corpus synthetic `
-  --files 1000 --funcs-per-file 20 --defer-write --optimize-threshold 50
+uv run python scripts/profile_index.py --mode full --corpus root --root D:\path\to\large `
+  --defer-write --optimize-threshold 100 --max-tree-files 150000
 ```

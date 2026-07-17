@@ -472,3 +472,87 @@ async def test_insert_chunks_with_embeddings_batch_roundtrip(
         assert missing == []
     finally:
         db.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_identical_content_different_lines_append_then_merge(
+    tmp_path: Path,
+) -> None:
+    """Copy-pasted blocks must not create duplicate PKs / ambiguous merge_insert.
+
+    Regression for Lance 'ambiguous' match when append wrote two rows with the
+    same content-hash id (id ignored start_line).
+    """
+    from chunkhound.core.models import Chunk, File
+    from chunkhound.core.types.common import ChunkType, Language
+
+    cfg = DatabaseConfig(path=tmp_path, provider="lancedb")
+    db = LanceDBProvider(
+        str(cfg.get_db_path()), base_directory=tmp_path, config=cfg
+    )
+    db.connect()
+    try:
+        fid = int(
+            db.insert_file(
+                File(
+                    path="dup.py",
+                    mtime=1.0,
+                    language=Language.PYTHON,
+                    size_bytes=100,
+                )
+            )
+        )
+        body = "def foo():\n    return 1\n"
+        chunks = [
+            Chunk(
+                file_id=fid,
+                code=body,
+                start_line=1,
+                end_line=2,
+                chunk_type=ChunkType.FUNCTION,
+                language=Language.PYTHON,
+                symbol="foo",
+            ),
+            Chunk(
+                file_id=fid,
+                code=body,
+                start_line=20,
+                end_line=21,
+                chunk_type=ChunkType.FUNCTION,
+                language=Language.PYTHON,
+                symbol="foo",
+            ),
+        ]
+        vecs = [[0.1 + i * 0.01] * 32 for i in range(2)]
+        ids = db.insert_chunks_with_embeddings_batch(
+            chunks, vecs, "fake", "fake-embeddings"
+        )
+        assert len(ids) == 2
+        assert len(set(ids)) == 2, f"expected distinct ids, got {ids}"
+
+        # Residual-style merge must not raise ambiguous match on id.
+        n = db.insert_embeddings_batch(
+            [
+                {
+                    "chunk_id": ids[0],
+                    "provider": "fake",
+                    "model": "fake-embeddings",
+                    "dims": 32,
+                    "embedding": [0.2] * 32,
+                    "file_id": fid,
+                    "content": body,
+                    "start_line": 1,
+                    "end_line": 2,
+                    "chunk_type": "function",
+                    "language": "python",
+                    "name": "foo",
+                }
+            ]
+        )
+        assert n == 1
+        missing = db.get_chunks_without_embeddings_paginated(
+            "fake", "fake-embeddings", limit=10
+        )
+        assert missing == []
+    finally:
+        db.disconnect()

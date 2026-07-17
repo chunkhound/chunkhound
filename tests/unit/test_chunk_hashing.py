@@ -161,6 +161,30 @@ class TestChunkHashing:
         assert id1 == id2, \
             "Same file_id + content + concept should produce identical IDs"
 
+    def test_chunk_id_same_content_different_start_line(self):
+        """Identical content at different lines must not share a primary key.
+
+        Lance append + merge_insert fail when two rows share the same id.
+        """
+        file_id = 1
+        code = "def foo():\n    return 1\n"
+        id_a = generate_chunk_id(file_id, code, concept="function", start_line=1, end_line=2)
+        id_b = generate_chunk_id(file_id, code, concept="function", start_line=10, end_line=11)
+        assert id_a != id_b
+
+    def test_chunk_id_same_content_same_lines_stable(self):
+        file_id = 1
+        code = "x = 1"
+        a = generate_chunk_id(file_id, code, start_line=3, end_line=3)
+        b = generate_chunk_id(file_id, code, start_line=3, end_line=3)
+        assert a == b
+
+    def test_chunk_id_same_content_different_files_still_distinct(self):
+        code = "def foo(): pass"
+        assert generate_chunk_id(1, code, start_line=1) != generate_chunk_id(
+            2, code, start_line=1
+        )
+
 
 class TestLanceDBProviderChunkIDGeneration:
     """Tests for LanceDBProvider._generate_chunk_id_safe() method."""
@@ -207,7 +231,7 @@ class TestLanceDBProviderChunkIDGeneration:
 
         result_id = provider._generate_chunk_id_safe(chunk)
         assert isinstance(result_id, int), "Should generate integer ID"
-        assert result_id > 0, "Generated ID should be positive"
+        assert -(2**63) <= result_id <= (2**63 - 1), "ID must fit signed int64"
 
     def test_generate_chunk_id_safe_deterministic(self, provider):
         """Verify same chunk generates same ID consistently."""
@@ -236,6 +260,20 @@ class TestLanceDBProviderChunkIDGeneration:
         id2 = provider._generate_chunk_id_safe(chunk2)
 
         assert id1 == id2, "Same chunk content should produce same ID"
+
+    def test_generate_chunk_id_safe_duplicate_content_different_lines(self, provider):
+        """Copy-pasted identical blocks at different lines get distinct IDs."""
+        common = dict(
+            symbol="foo",
+            code="def foo(): pass",
+            chunk_type=ChunkType.FUNCTION,
+            file_id=1,
+            language=Language.PYTHON,
+            id=None,
+        )
+        a = Chunk(start_line=1, end_line=1, **common)
+        b = Chunk(start_line=20, end_line=20, **common)
+        assert provider._generate_chunk_id_safe(a) != provider._generate_chunk_id_safe(b)
 
     def test_generate_chunk_id_safe_different_content(self, provider):
         """Verify different content produces different IDs."""

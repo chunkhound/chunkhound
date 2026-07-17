@@ -83,7 +83,7 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 | 10000 | 57.8 | 0 / 0 | 11.8 | 22.0 | 452 |
 
 **Takeaway (L4 soak):** thr≥200 **raises** wall (fragment drag). Soak preferred thr=100.  
-**F5 (full-flow + F1):** product default is **50** (see full-flow F5 rows below).
+**F5 + OpenJDK:** synthetic thr=50 slight; large-tree thr=**100** preferred. **Product default 100.**
 
 ---
 
@@ -127,7 +127,7 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 | **L2-fix** per-file | wall 350 → 336, RSS 1.2→1.0 GB | **Keep** |
 | **Instr** sub-phases | write 51% / file 30% / embed 18% | **Keep**; drives priority |
 | **L4** raise thr to cut optimize | thr 200+ doubles wall at 50k; 500k thr 50≈100 | Soak kept thr=100 then |
-| **F5** full-flow thr under F1 | thr=50 ~46s vs thr=100 ~49–53s @ 49k | **Product default 50** |
+| **F5** full-flow thr under F1 | synthetic thr=50 slight; **OpenJDK thr=100** (opt tax) | **Product default 100** |
 | **File-id** skip path lookup after insert | file 91→51s; wall 311→297 | **Keep** (product Lance path) |
 | **P3 File batch** | file 51→0.14s; wall 297→214; RSS 1.0→0.77 GB | **Keep** |
 | **Write append** | deferred path uses `add` not merge; wall 214→138; write 145→77 | **Keep** |
@@ -221,8 +221,9 @@ remaining_missing=0 both sizes.
 |----|------------|----------|
 | ~~**L3-empty**~~ | ~~Empty residual scan too heavy~~ | **Done** — residual 11.7→0.1s @ 49k |
 | ~~**F1 write batch**~~ | ~~Cross-file append buffer~~ | **Done** — wall ~70→61s @ 49k |
-| ~~**F5 thr@full**~~ | ~~thr under product cadence~~ | **Done** — thr=50 product default |
+| ~~**F5 thr@full**~~ | ~~thr under product cadence~~ | **Done** — product default **100** (OpenJDK) |
 | **F2 parse** | only if store still leaves parse material | full phase share recheck |
+| **Smart-diff multiplicity** | Content-only smart-diff can collapse N identical blocks to 1 on reindex | reindex with 2 identical bodies at different lines |
 | (later) L6 / L5 | Out of cold-start scope | product safety / reindex |
 
 ---
@@ -260,6 +261,21 @@ remaining_missing=0 both sizes.
 | 2026-07-17 | F5 thr=200 | full 1000 F1 dims1024 | **58.7** | — | — | — | — | store 47.7 | 1.99 | 0.45 | 386 | 0 | opt 1; worse |
 | 2026-07-17 | F5 ladder 500 | thr 50/100/200/500/10k | 25.3/**23.5**/26.4/26.2/26.4 | — | — | — | — | — | — | — | ~320 | 0 | medium: thr100 slight edge |
 
-**F5 takeaway:** under full-flow + F1, product default **50** (was 100). thr≥200 raises wall.
+**F5 takeaway (synthetic ~49k chunks):** thr=**50** edged thr=100.  
+**OpenJDK takeaway (~1.9M chunks, 64k files):** thr=**100** wins wall — thr=50 **over-optimizes** (opt 1232s vs 621s). Prefer thr=**100** for large real trees; synthetic F5 is scale-limited.
+
+### OpenJDK full-flow (2026-07-17) — isolated config, fake embed dims=1024
+
+**Tree:** `H:\dev\github\jdk` shallow `openjdk/jdk` · `git ls-files`=**70837** (under 200k cap) · ~52k `.java`  
+**Harness:** `profile_index --mode full --corpus root` · F1 flush=1000 · config isolation on · max_tree_files=150000
+
+| thr | wall_s | store | parse≈ | discover | change_detect | residual | mi_s | opt_n/opt_s | batches | peak MB | miss | ch/s |
+|-----|--------|-------|--------|----------|---------------|----------|------|-------------|---------|---------|------|------|
+| **50** | **4959** | 4584 | 66 | 90 | 206 | 6.1 | 144 | **355 / 1232** | 17174 | 5388 | 6 | 389 |
+| **100** | **4720** | 4299 | 95 | 77 | 232 | 5.7 | 143 | **174 / 621** | 17174 | 5458 | 6 | 409 |
+
+Both: files_processed=63660, chunks=**1,931,149**, skipped=6045, fake_embed_requests=67731 (~28.5 chunks/req).
+
+**Bottleneck (large tree):** store ~**91–92%** of wall; of that, Lance write only ~**3%**, optimize **13–25%** (thr-dependent), rest ~**per-file fake embed + orchestration** (~67k embed calls). Parse ~1–2%. Residual empty-path fine. **thr=100 better than 50 at this scale** (saves ~10 min primarily via fewer/cheaper optimizes).
 
 *Add new rows below as work continues.*
