@@ -90,27 +90,34 @@ async def _run_soak(
         per = chunks // files_n
         rem = chunks % files_n
 
-        # Per-file deferred flush (L1). Cross-file batching (L2) raised wall.
+        # Per-file deferred chunk flush (L1). File rows use batch insert (P3).
         profile.meta["flush_policy"] = "per_file" if defer_write else "classic"
+        profile.meta["file_insert"] = "batch"
 
         # Sub-phases under seed_insert (Instr): attribute wall, not just merge_s.
         # Nested phase() accumulates; seed_insert ≈ sum of sub-phases.
         with profile.phase("seed_insert"):
             all_chunks: list[Chunk] = []
             all_ids: list[int] = []
+            file_models: list[File] = []
+            per_file_counts: list[int] = []
             for f in range(files_n):
                 n = per + (1 if f < rem else 0)
-                with profile.phase("seed_file_insert"):
-                    file_id = int(
-                        db.insert_file(
-                            File(
-                                path=f"soak/f_{f:05d}.py",
-                                mtime=1_700_000_000.0 + f,
-                                language=Language.PYTHON,
-                                size_bytes=64 * n,
-                            )
-                        )
+                per_file_counts.append(n)
+                file_models.append(
+                    File(
+                        path=f"soak/f_{f:05d}.py",
+                        mtime=1_700_000_000.0 + f,
+                        language=Language.PYTHON,
+                        size_bytes=64 * n,
                     )
+                )
+
+            with profile.phase("seed_file_insert"):
+                file_ids = [int(x) for x in db.insert_files_batch(file_models)]
+
+            for f, file_id in enumerate(file_ids):
+                n = per_file_counts[f]
                 with profile.phase("seed_chunk_build"):
                     batch = [
                         Chunk(

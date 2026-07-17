@@ -601,10 +601,39 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Insert file record and return file ID."""
         return self._execute_in_db_thread_sync("insert_file", file)
 
+    def insert_files_batch(self, files: list[File]) -> list[int]:
+        """Insert many new file rows in few merge_insert calls (cold bulk)."""
+        return cast(
+            list[int],
+            self._execute_in_db_thread_sync("insert_files_batch", files),
+        )
+
     def _allocate_file_id(self) -> int:
         """Next unique file id (DB executor is single-threaded)."""
         self._file_id_seq += 1
         return self._file_id_seq
+
+    def _file_row_dict(self, file: File, file_id: int, *, indexed_time: float) -> dict[str, Any]:
+        """Build a files-table row dict (shared by single and batch insert)."""
+        return {
+            "id": file_id,
+            "path": file.path,
+            "size": file.size_bytes,
+            "modified_time": file.mtime,
+            "content_hash": getattr(file, "content_hash", None) or "",
+            "indexed_time": indexed_time,
+            "language": str(
+                file.language.value
+                if hasattr(file.language, "value")
+                else file.language
+            ),
+            "encoding": "utf-8",
+            "line_count": 0,
+            # Explicitly clear skip_reason so re-indexing a previously-skipped file
+            # doesn't leave stale skip_reason in the row (when_matched_update_all only
+            # updates columns present in the source dict).
+            "skip_reason": None,
+        }
 
     def _executor_insert_file(
         self, conn: Any, state: dict[str, Any], file: File
@@ -619,30 +648,8 @@ class LanceDBProvider(SerialDatabaseProvider):
         if self._files_table is None:
             self._executor_create_schema(conn, state)
 
-        # Store path as-is (now relative with forward slashes from IndexingCoordinator)
-        normalized_path = file.path
         file_id = int(file.id) if file.id is not None else self._allocate_file_id()
-
-        # Prepare file data
-        file_data = {
-            "id": file_id,
-            "path": normalized_path,
-            "size": file.size_bytes,
-            "modified_time": file.mtime,
-            "content_hash": getattr(file, "content_hash", None) or "",
-            "indexed_time": time.time(),
-            "language": str(
-                file.language.value
-                if hasattr(file.language, "value")
-                else file.language
-            ),
-            "encoding": "utf-8",
-            "line_count": 0,
-            # Explicitly clear skip_reason so re-indexing a previously-skipped file
-            # doesn't leave stale skip_reason in the row (when_matched_update_all only
-            # updates columns present in the source dict).
-            "skip_reason": None,
-        }
+        file_data = self._file_row_dict(file, file_id, indexed_time=time.time())
 
         # merge_insert keeps path upsert safety if a row appears between check
         # and write (single DB executor makes that rare). Prefer add() when we
@@ -654,6 +661,36 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Return pre-assigned id (no path search). Coordinator uses update_file
         # for existing paths; soak/product cold path is insert-only here.
         return file_id
+
+    def _executor_insert_files_batch(
+        self, conn: Any, state: dict[str, Any], files: list[File]
+    ) -> list[int]:
+        """Batch-insert new file rows (P3 cold bulk). One merge_insert per batch.
+
+        Pre-assigns ids and returns them without path lookups. Callers must only
+        pass paths that are not already in the table (coordinator checks first).
+        """
+        if not files:
+            return []
+        if self._files_table is None:
+            self._executor_create_schema(conn, state)
+
+        now = time.time()
+        ids: list[int] = []
+        rows: list[dict[str, Any]] = []
+        for file in files:
+            file_id = int(file.id) if file.id is not None else self._allocate_file_id()
+            ids.append(file_id)
+            rows.append(self._file_row_dict(file, file_id, indexed_time=now))
+
+        # Cap batch size to bound Arrow build / merge cost per call.
+        # Insert-only: do not when_matched_update_all (would rewrite id on path hit).
+        batch_size = 500
+        for i in range(0, len(rows), batch_size):
+            self._files_table.merge_insert(
+                "path"
+            ).when_not_matched_insert_all().execute(rows[i : i + batch_size])
+        return ids
 
     def list_file_paths_under_directory(
         self, directory_prefix: str

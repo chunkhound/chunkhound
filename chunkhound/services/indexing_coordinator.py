@@ -1269,7 +1269,54 @@ class IndexingCoordinator(BaseService):
         # Track file_ids for single-file case
         file_ids: list[int] = []
 
-        # Process each file independently (per-file transaction for file row)
+        # P3 cold bulk (Lance only): pre-lookup paths; batch-insert *new* file rows
+        # outside the per-file txn. DuckDB keeps real transactions — never durable-
+        # write file rows before chunks there (skip-as-unchanged after failed store).
+        # Existing paths: lookup id only; mtime/size/hash update stays inside txn.
+        pre_file: dict[str, tuple[int, bool]] = {}
+        new_file_models: list[File] = []
+        new_file_keys: list[str] = []
+        # Bulk pre-insert only when provider implements real multi-file merge
+        # (_executor_insert_files_batch). Serial fallback is NOT safe out-of-txn.
+        bulk_file_preinsert = hasattr(self._db, "_executor_insert_files_batch")
+        for result in results:
+            if result.status in ("error", "skipped"):
+                continue
+            rel = self._get_relative_path(result.file_path).as_posix()
+            existing = cast(
+                dict[str, Any] | None,
+                await self._db.get_file_by_path_async(rel),
+            )
+            content_hash = getattr(result, "content_hash", None)
+            if existing is not None:
+                pre_file[rel] = (int(existing["id"]), True)
+            elif bulk_file_preinsert:
+                language = result.language or Language.UNKNOWN
+                new_file_models.append(
+                    File(
+                        path=FilePath(rel),
+                        size_bytes=int(result.file_size),
+                        mtime=float(result.file_mtime),
+                        language=language,
+                        content_hash=content_hash,
+                    )
+                )
+                new_file_keys.append(rel)
+            # else: new path left out of pre_file → _store_file_record inside txn
+
+        if new_file_models and bulk_file_preinsert:
+            new_ids = cast(
+                list[int], await self._db.insert_files_batch_async(new_file_models)
+            )
+            if len(new_ids) != len(new_file_keys):
+                raise RuntimeError(
+                    f"insert_files_batch returned {len(new_ids)} ids for "
+                    f"{len(new_file_keys)} files"
+                )
+            for key, fid in zip(new_file_keys, new_ids, strict=True):
+                pre_file[key] = (int(fid), False)
+
+        # Process each file independently (per-file transaction for chunks)
         for result in results:
             # Handle errors
             if result.status == "error":
@@ -1341,13 +1388,24 @@ class IndexingCoordinator(BaseService):
             # Per-file transaction boundaries
             try:
                 await self._db.begin_transaction_async()
-                # Create stat object for _store_file_record
-                file_stat = _StatResult(result.file_size, result.file_mtime)
-                # Extract content hash if available (from parsing result or precomputed)
+                rel = self._get_relative_path(result.file_path).as_posix()
                 content_hash = getattr(result, "content_hash", None)
-                file_id, is_existing = await self._store_file_record(
-                    result.file_path, file_stat, language, content_hash
-                )
+                if rel in pre_file:
+                    file_id, is_existing = pre_file[rel]
+                    if is_existing:
+                        # Metadata update must stay inside the per-file txn (DuckDB).
+                        await self._db.update_file_async(
+                            file_id,
+                            size_bytes=result.file_size,
+                            mtime=result.file_mtime,
+                            content_hash=content_hash,
+                        )
+                else:
+                    # New file without bulk pre-insert (DuckDB / no bulk executor).
+                    file_stat = _StatResult(result.file_size, result.file_mtime)
+                    file_id, is_existing = await self._store_file_record(
+                        result.file_path, file_stat, language, content_hash
+                    )
 
                 # Track file_id for single-file case
                 file_ids.append(file_id)

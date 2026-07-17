@@ -99,6 +99,18 @@ class DatabaseProvider(Protocol):
         """Insert file record and return file ID."""
         ...
 
+    def insert_files_batch(self, files: list[File]) -> list[int]:
+        """Insert many new file records; return ids in the same order.
+
+        Cold-bulk optimization. Default implementations may fall back to
+        sequential insert_file. Callers must only pass paths not already stored.
+        """
+        ...
+
+    async def insert_files_batch_async(self, files: list[File]) -> list[int]:
+        """Async variant of insert_files_batch."""
+        ...
+
     def get_file_by_path(
         self, path: str, as_model: bool = False
     ) -> dict[str, Any] | File | None:

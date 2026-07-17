@@ -372,6 +372,34 @@ class SerialDatabaseProvider(ABC):
         """Async variant of insert_file."""
         return cast(int, await self._execute_in_db_thread("insert_file", file))
 
+    def insert_files_batch(self, files: list[File]) -> list[int]:
+        """Insert many new files; providers may override for bulk merge.
+
+        Default: sequential insert_file (correct but not cold-bulk optimal).
+        """
+        if not files:
+            return []
+        if hasattr(self, "_executor_insert_files_batch"):
+            return cast(
+                list[int],
+                self._execute_in_db_thread_sync("insert_files_batch", files),
+            )
+        return [self.insert_file(f) for f in files]
+
+    async def insert_files_batch_async(self, files: list[File]) -> list[int]:
+        """Async variant of insert_files_batch."""
+        if not files:
+            return []
+        if hasattr(self, "_executor_insert_files_batch"):
+            return cast(
+                list[int],
+                await self._execute_in_db_thread("insert_files_batch", files),
+            )
+        out: list[int] = []
+        for f in files:
+            out.append(await self.insert_file_async(f))
+        return out
+
     async def record_skipped_file_async(
         self,
         path: str,

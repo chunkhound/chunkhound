@@ -282,13 +282,16 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 | **P2** | **L1-hold** | Keep defer default; no clever write paths without wall gate | Protects the only proven large win (vs classic) | Hold |
 | **Done** | **L4** | Optimize threshold A/B (50/100/200/500/10k) | **Keep product default 100**; thr≥200 **raises** wall (fragment drag on merge + file insert) | **Done** (measure, no product change) |
 | **Done** | **File-id** | Skip post-`insert_file` path search; return pre-assigned id | file 91→51s; wall 311→297 at 500k | **Done** |
-| **P3** | **File batch** | One merge_insert for many new files (microbench ≫ serial) | Further file-path wall after File-id | Later if wall still needs it |
-| **P4** | **L6** | Fixed-dim schema at first connect | One-time first-embed rewrite | Worth doing; one-shot wall |
-| **P5** | **L5** | Reindex smart-diff / hash-only skip | Product reindex wall (not cold soak) | Measure real reindex |
-| **P6** | **L3** | Residual missing scan cheaper | Residual empty on cold+defer success | Deprioritize default cold bulk |
-| **P7** | **L7** | Parse ∥ pipeline / free-threading | After DB path wall-stable | Profile first |
+| **Done** | **File batch (P3)** | `insert_files_batch` multi-file merge | file 51→**0.14s**; wall 297→**214**; peak **0.77 GB** | **Done** |
+| **P3** | **Write path** | Chunk merge/optimize still dominant | ~145s write / ~85s mi / ~29s opt at 500k | **Do next** |
+| **Out of cold-start scope** | **L6** | Fixed-dim schema when dims known | One-shot footgun (O(rows) only if variable schema already full); **does not improve clean cold index wall** when empty/fixed schema | Later product safety |
+| **Out of cold-start scope** | **L5** | Reindex smart-diff / hash-only | **Incremental reindex**, not cold bulk | Later reindex profile |
+| **Later** | **L3** | Residual missing scan cheaper | Residual empty on cold+defer success | Deprioritize default cold bulk |
+| **Later** | **L7** | Parse ∥ pipeline / free-threading | After DB path wall-stable | Profile first |
 | **Park** | **L2-retry** | Cross-file batch only if flush ladder shows wall↓ | Only after Instr baseline | Parked |
 | **Park** | **Read-backend** | After Lance **write** path is done: if DuckDB is faster for **search/read**, optionally rebuild final Lance tables into DuckDB (similar to existing Duck→Duck compaction) | Search latency, not index wall | **Later — only when evaluating Lance for searches** |
+
+**Cold-start focus:** large-codebase **first index** wall (new files + defer). L5/L6 remain valid work later but are **out of scope** for this cold-start track.
 
 **Do not:**
 
@@ -319,12 +322,16 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 - [x] **Instr:** soak sub-phases `seed_file_insert` / `seed_chunk_build` / `seed_embed` / `seed_chunk_write`  
 - [x] **L4 measure:** optimize threshold A/B — product **100** wins; soak default aligned to 100; do not raise  
 - [x] **File-id:** skip post-`insert_file` path search (500k file ~91→51s, wall ~311→297)  
-- [ ] **File batch:** further multi-file merge for new files (~18% of seed after File-id) if wall still needs it  
-- [ ] **L6:** fixed-size embedding schema when dims known (one-time rewrite avoidance)  
+- [x] **File batch (P3):** multi-file `insert_files_batch` (500k file ~51→0.14s, wall ~297→214)  
+- [ ] **Write path:** reduce merge/optimize share of seed (~145s write at 500k)  
+
+### Out of cold-start scope (address later)
+
+- [ ] **L6:** fixed-size embedding schema when dims known — product safety / avoid O(N) rewrite; **not** a clean cold-start wall win  
+- [ ] **L5:** reindex smart-diff cost — incremental path only  
 
 ### Later (product path / real profiles)
 
-- [ ] **L5:** reindex smart-diff cost (not covered by cold soak)  
 - [ ] **L3:** residual scan only if residual path still appears on measured product runs  
 - [ ] Pipeline: parse ∥ embed ∥ DB with bounded queues (one DB writer) — only if wall profile shows idle DB waiting on parse  
 - [ ] Free-threaded parse only after above  

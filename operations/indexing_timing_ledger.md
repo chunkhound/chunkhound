@@ -33,7 +33,8 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 | Instr | sub-phases first | 50* | per_file | **313.0** | 302.6 | 5000 | 77.6 | 50 / 49.9 | 1009 | 0 | see sub-phase table |
 | L4 | thr=50 retest | **50** | per_file | **316.2** | 306.1 | 5000 | 78.2 | 51 / 51.5 | 1012 | 0 | old soak default |
 | L4 | thr=100 retest | **100** | per_file | **310.6** | 300.6 | 5000 | 76.5 | 49 / 50.1 | 1025 | 0 | product thr |
-| **File-id** | skip post-insert path search | **100** | per_file | **296.6** | 285.8 | 5000 | 87.0 | 46 / 55.3 | 1046 | 0 | **current best** |
+| **File-id** | skip post-insert path search | **100** | per_file | **296.6** | 285.8 | 5000 | 87.0 | 46 / 55.3 | 1046 | 0 | prior |
+| **P3 File batch** | insert_files_batch | **100** | per_file+batch_files | **213.5** | 203.4 | 5000 | 85.5 | 35 / 28.6 | 773 | 0 | **current best** |
 
 \* Early soaks hard-coded thr=50 in harness; product default was already 100.
 
@@ -41,10 +42,11 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 
 | Metric | Value |
 |--------|-------|
-| **wall_s** | **~297** (file-id skip search, thr=100) |
-| seed_insert | ~286 |
-| seed_file_insert | **~51** (was ~91) |
-| peak RSS | ~1.0 GB |
+| **wall_s** | **~214** (P3 file batch + File-id, thr=100) |
+| seed_insert | ~203 |
+| seed_file_insert | **~0.14** (was ~51 after File-id, ~91 before) |
+| seed_chunk_write | ~145 |
+| peak RSS | **~0.77 GB** |
 | remaining_missing | 0 |
 | flush | per_file (L1) |
 | optimize_threshold | **100** |
@@ -123,6 +125,7 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 | **Instr** sub-phases | write 51% / file 30% / embed 18% | **Keep**; drives priority |
 | **L4** raise thr to cut optimize | thr 200+ doubles wall at 50k; 500k thr 50≈100 | **No product change**; thr=100 |
 | **File-id** skip path lookup after insert | file 91→51s; wall 311→297 | **Keep** (product Lance path) |
+| **P3 File batch** | file 51→0.14s; wall 297→214; RSS 1.0→0.77 GB | **Keep** |
 
 ---
 
@@ -130,9 +133,8 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 
 | ID | Hypothesis | Protocol |
 |----|------------|----------|
-| **File batch** | One merge_insert for many new files (microbench ~1000× vs serial) | product batch API + store loop; wall gate |
-| **Write path** | Still ~half of seed (~175s write / ~87s mi / ~55s opt) | after file work settles |
-| (later) L6 schema | One-shot first embed rewrite | cold index mode, not soak seed |
+| **Write path** | Chunk merge/optimize still ~71% of seed after P3 | thr=100 defer 500k; wall gate |
+| (later) L6 / L5 | Out of cold-start scope | product safety / reindex |
 
 ---
 
@@ -147,6 +149,7 @@ Same machine family; run-to-run noise is real (~±5–10% wall). Use for directi
 | (session) | Instr | 500k per_file thr50* | 313.0 | 302.6 | 91.3 | 1.2 | 55.1 | 154.3 | 77.6 | 49.9 | 1009 | 0 | first sub-phases |
 | (session) | L4 thr50 | 500k thr=50 | 316.2 | 306.1 | 91.7 | 1.2 | 55.8 | 156.6 | 78.2 | 51.5 | 1012 | 0 | |
 | (session) | L4 thr100 | 500k thr=100 | **310.6** | 300.6 | 90.9 | 1.1 | 54.5 | 153.3 | 76.5 | 50.1 | 1025 | 0 | prior baseline |
-| (session) | File-id skip search | 500k thr=100 | **296.6** | 285.8 | **51.2** | 1.3 | 57.8 | 174.7 | 87.0 | 55.3 | 1046 | 0 | **current baseline**; product insert_file |
+| (session) | File-id skip search | 500k thr=100 | **296.6** | 285.8 | **51.2** | 1.3 | 57.8 | 174.7 | 87.0 | 55.3 | 1046 | 0 | prior |
+| (session) | P3 file batch | 500k thr=100 batch | **213.5** | 203.4 | **0.14** | 1.1 | 56.7 | 144.9 | 85.5 | 28.6 | 773 | 0 | **current baseline** |
 
 *Add new rows below as work continues.*
