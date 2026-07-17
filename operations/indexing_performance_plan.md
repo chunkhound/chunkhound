@@ -281,12 +281,14 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 | **Done** | **Instr** | Soak sub-phases: `seed_file_insert` / `seed_chunk_build` / `seed_embed` / `seed_chunk_write` (+ existing `db.merge_insert_s` / `optimize_s`) | Attribute wall inside seed | **Done** |
 | **P2** | **L1-hold** | Keep defer default; no clever write paths without wall gate | Protects the only proven large win (vs classic) | Hold |
 | **Done** | **L4** | Optimize threshold A/B (50/100/200/500/10k) | **Keep product default 100**; thr≥200 **raises** wall (fragment drag on merge + file insert) | **Done** (measure, no product change) |
-| **P3** | **File batch** | Cheaper / batched `insert_file` (5000 serial @ ~91s) | Instr: **~30% of seed** — next wall lever | **Do next** |
+| **Done** | **File-id** | Skip post-`insert_file` path search; return pre-assigned id | file 91→51s; wall 311→297 at 500k | **Done** |
+| **P3** | **File batch** | One merge_insert for many new files (microbench ≫ serial) | Further file-path wall after File-id | Later if wall still needs it |
 | **P4** | **L6** | Fixed-dim schema at first connect | One-time first-embed rewrite | Worth doing; one-shot wall |
 | **P5** | **L5** | Reindex smart-diff / hash-only skip | Product reindex wall (not cold soak) | Measure real reindex |
 | **P6** | **L3** | Residual missing scan cheaper | Residual empty on cold+defer success | Deprioritize default cold bulk |
 | **P7** | **L7** | Parse ∥ pipeline / free-threading | After DB path wall-stable | Profile first |
 | **Park** | **L2-retry** | Cross-file batch only if flush ladder shows wall↓ | Only after Instr baseline | Parked |
+| **Park** | **Read-backend** | After Lance **write** path is done: if DuckDB is faster for **search/read**, optionally rebuild final Lance tables into DuckDB (similar to existing Duck→Duck compaction) | Search latency, not index wall | **Later — only when evaluating Lance for searches** |
 
 **Do not:**
 
@@ -316,7 +318,8 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 
 - [x] **Instr:** soak sub-phases `seed_file_insert` / `seed_chunk_build` / `seed_embed` / `seed_chunk_write`  
 - [x] **L4 measure:** optimize threshold A/B — product **100** wins; soak default aligned to 100; do not raise  
-- [ ] **File batch:** reduce serial `insert_file` cost (~30% of seed at 500k)  
+- [x] **File-id:** skip post-`insert_file` path search (500k file ~91→51s, wall ~311→297)  
+- [ ] **File batch:** further multi-file merge for new files (~18% of seed after File-id) if wall still needs it  
 - [ ] **L6:** fixed-size embedding schema when dims known (one-time rewrite avoidance)  
 
 ### Later (product path / real profiles)
@@ -328,7 +331,8 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 
 ### Parked
 
-- [ ] Cross-file batching (**L2-retry**) until a flush size beats per-file **wall**
+- [ ] Cross-file batching (**L2-retry**) until a flush size beats per-file **wall**  
+- [ ] **Read-backend (post-Lance-write):** When testing **search** with LanceDB, if DuckDB is faster on reads, optionally rebuild finished Lance data into DuckDB (similar to Duck→Duck compaction). Indexing-wall work stays Lance-only until write path is done; see ranking table **Read-backend**.
 
 ---
 

@@ -198,6 +198,8 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Coalesce optimize storms: skip if last optimize was recent (seconds)
         self._optimize_cooldown_s: float = 5.0
         self._last_optimize_mono: float = 0.0
+        # Monotonic file id allocator for new inserts (DB executor is single-threaded).
+        self._file_id_seq: int = int(time.time() * 1_000_000)
 
     def _build_path_like_clause(self, prefix: str) -> str:
         escaped = _escape_like_pattern(prefix)
@@ -599,19 +601,31 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Insert file record and return file ID."""
         return self._execute_in_db_thread_sync("insert_file", file)
 
+    def _allocate_file_id(self) -> int:
+        """Next unique file id (DB executor is single-threaded)."""
+        self._file_id_seq += 1
+        return self._file_id_seq
+
     def _executor_insert_file(
         self, conn: Any, state: dict[str, Any], file: File
     ) -> int:
-        """Executor method for insert_file - runs in DB thread."""
+        """Executor method for insert_file - runs in DB thread.
+
+        Cold-index path: coordinator only calls this for paths that are not yet
+        in the DB. We pre-assign the id and return it without a post-write
+        path lookup — that search was ~2× the merge_insert cost at scale and
+        dominated seed_file_insert (~30% of 500k soak wall).
+        """
         if self._files_table is None:
             self._executor_create_schema(conn, state)
 
         # Store path as-is (now relative with forward slashes from IndexingCoordinator)
         normalized_path = file.path
+        file_id = int(file.id) if file.id is not None else self._allocate_file_id()
 
         # Prepare file data
         file_data = {
-            "id": file.id or int(time.time() * 1000000),
+            "id": file_id,
             "path": normalized_path,
             "size": file.size_bytes,
             "modified_time": file.mtime,
@@ -630,26 +644,16 @@ class LanceDBProvider(SerialDatabaseProvider):
             "skip_reason": None,
         }
 
-        # Use merge_insert for atomic upsert based on path
-        # This eliminates the TOCTOU race condition by making the
-        # check-and-insert/update operation atomic at the database level
+        # merge_insert keeps path upsert safety if a row appears between check
+        # and write (single DB executor makes that rare). Prefer add() when we
+        # know the path is new would be faster, but merge is the safer default.
         self._files_table.merge_insert(
             "path"
         ).when_matched_update_all().when_not_matched_insert_all().execute([file_data])
 
-        # Get the file ID (either newly inserted or existing)
-        # We need to query back because merge_insert doesn't return the ID
-        result = (
-            self._files_table.search().where(f"path = '{normalized_path}'").to_list()
-        )
-        if result:
-            return result[0]["id"]
-        else:
-            # This should not happen, but handle gracefully
-            logger.error(
-                f"Failed to retrieve file ID after merge_insert for path: {normalized_path}"
-            )
-            return file_data["id"]
+        # Return pre-assigned id (no path search). Coordinator uses update_file
+        # for existing paths; soak/product cold path is insert-only here.
+        return file_id
 
     def list_file_paths_under_directory(
         self, directory_prefix: str
