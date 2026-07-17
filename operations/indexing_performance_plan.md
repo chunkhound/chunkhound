@@ -341,7 +341,9 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 ### Parked
 
 - [ ] Cross-file batching (**L2-retry**) until a flush size beats per-file **wall**  
-- [ ] **Read-backend (post-Lance-write):** When testing **search** with LanceDB, if DuckDB is faster on reads, optionally rebuild finished Lance data into DuckDB (similar to Duck→Duck compaction). Indexing-wall work stays Lance-only until write path is done; see ranking table **Read-backend**.
+- [x] **Read-backend util:** Lance→DuckDB materialization + config activation  
+  (`chunkhound/utils/lance_to_duckdb.py`, `scripts/convert_lancedb_to_duckdb.py --activate`).  
+  Use after cold Lance index when comparing/using DuckDB for search — not on the write hot path.
 
 ---
 
