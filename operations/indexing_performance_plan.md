@@ -291,10 +291,12 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 | **Done** | **File-id** | Skip post-`insert_file` path search; return pre-assigned id | file 91→51s; wall 311→297 at 500k | **Done** |
 | **Done** | **File batch (P3)** | `insert_files_batch` multi-file merge | file 51→**0.14s**; wall 297→**214**; peak **0.77 GB** | **Done** |
 | **Done** | **Write append** | Deferred chunk write uses `add` (new ids) not merge_insert | wall 214→**138**; write 145→**77**; mi_s 85→**24** | **Done** |
-| **P3** | **Write batch** | Cross-file deferred chunk buffer + append (L2-style but append) | write still ~77s / ~60% seed | Optional if wall still needs it |
+| **Done** | **F1 Write batch** | Cross-file deferred buffer + **append** (`defer_flush_chunks=1000`) | full 1000: wall **~70→61s**; batches 1016→254; RSS↓ | **Done** (default 1000) |
+| **Done** | **L3-empty** | Residual missing-clause id-only (no labeled vector scan) | residual 11.7→0.1s; wall 79.5→71 @ 49k full-flow | **Done** |
+| **P2** | **F5 thr@full** | Optimize threshold under product store cadence | after F1 | **Next** |
+| **P3** | **F2 parse** | Parse∥store balance | only if still material after F1 | Pending |
 | **Out of cold-start scope** | **L6** | Fixed-dim schema when dims known | One-shot footgun (O(rows) only if variable schema already full); **does not improve clean cold index wall** when empty/fixed schema | Later product safety |
 | **Out of cold-start scope** | **L5** | Reindex smart-diff / hash-only | **Incremental reindex**, not cold bulk | Later reindex profile |
-| **Later** | **L3** | Residual missing scan cheaper | Residual empty on cold+defer success | Deprioritize default cold bulk |
 | **Later** | **L7** | Parse ∥ pipeline / free-threading | After DB path wall-stable | Profile first |
 | **Park** | **L2-retry** | Cross-file batch only if flush ladder shows wall↓ | Only after Instr baseline | Parked |
 | **Park** | **Read-backend** | After Lance **write** path is done: if DuckDB is faster for **search/read**, optionally rebuild final Lance tables into DuckDB (similar to existing Duck→Duck compaction) | Search latency, not index wall | **Later — only when evaluating Lance for searches** |
@@ -332,7 +334,7 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 - [x] **File-id:** skip post-`insert_file` path search (500k file ~91→51s, wall ~311→297)  
 - [x] **File batch (P3):** multi-file `insert_files_batch` (500k file ~51→0.14s, wall ~297→214)  
 - [x] **Write append:** deferred `insert_chunks_with_embeddings` uses append (500k wall ~214→138)  
-- [ ] **Write batch (optional):** cross-file buffer + append if more wall needed  
+- [x] **F1 Write batch:** cross-file buffer + append (`defer_flush_chunks=1000`; not L2 merge)  
 
 ### Out of cold-start scope (address later)
 
@@ -345,14 +347,14 @@ ship / keep change  ⇔  wall_s improves (or holds) AND peak_rss acceptable
 - [x] **Baseline full-flow (2026-07-17):** 200 wall ~17–23s; 1000 (~49k ch) wall **~79.5s**; ledger updated  
 - [x] **Attribute:** **store 57%** (Lance write only **7%**); **empty residual 15%**; parse ~9%  
 - [x] **P0 L3-empty residual** — missing-clause id-only; residual 11.7→**0.1s** @ 49k; wall 79.5→**71**  
-- [ ] **P1 F1** cross-file **append** batch (not L2 merge) — store still ~84% wall post-L3  
+- [x] **P1 F1** cross-file **append** batch — wall ~70→**61s** @ 49k; batches 1016→254; default flush=1000  
 - [ ] **P2 F5** thr ladder under full cadence after F1  
 - [ ] **P3 F2** parse only if still material  
 - See **`operations/full_flow_tuning_plan.md`** + ledger full-flow section.
 
 ### Later (product path / real profiles)
 
-- [ ] **L3:** residual scan only if residual path still appears on measured product runs  
+- [x] **L3-empty residual** — done on full-flow gate (id-only missing clause)  
 - [ ] Pipeline: parse ∥ embed ∥ DB with bounded queues (one DB writer) — only if wall profile shows idle DB waiting on parse  
 - [ ] Free-threaded parse only after above  
 - [ ] **Resume track:** `--scenario resume` after cold full-flow is stable  
@@ -393,10 +395,12 @@ Real Voyage is only for **manual end-to-end** quality, not for deciding DB optim
 
 ## 9. Operator knobs
 
-After L2-fix, **`db_batch_size` is insert/fragment batch sizing only** — it does
-**not** control cross-file deferred flush (defer writes one merge_insert per new
-file). Tune it for classic/residual batch size and fragment pressure, not for
-“fewer merge_inserts across files.”
+| Knob | Role |
+|------|------|
+| `indexing.defer_chunk_write` | Embed-then-single-write new files (default true) |
+| `indexing.defer_flush_chunks` | **F1:** max chunks buffered across new files before one Lance **append** (default **1000**; `1` = per-file L1) |
+| `indexing.db_batch_size` | Classic/residual insert sizing + fragment pressure floor; F1 flush raises ceiling to `defer_flush_chunks` via `prefer_large_append` |
+| `database.lancedb_optimize_fragment_threshold` | Mid-write optimize (product **100**) |
 
 ```json
 {
@@ -406,16 +410,16 @@ file). Tune it for classic/residual batch size and fragment pressure, not for
   },
   "indexing": {
     "defer_chunk_write": true,
+    "defer_flush_chunks": 1000,
     "db_batch_size": 2000
   }
 }
 ```
 
-L4: keep threshold **100** (do not raise to 500 “to avoid optimize”). Soak harness
-defaults to 100; use `--optimize-ladder` to re-check on a machine.
+L4: keep threshold **100**. Full-flow gate:
 
 ```powershell
-$env:CHUNKHOUND_INDEXING__DEFER_CHUNK_WRITE = "true"
-uv run python scripts/profile_index.py --scale --page-size 256
-uv run python scripts/profile_index.py --optimize-ladder --chunks 50000 --page-size 512
+uv run python scripts/profile_index.py --mode full --corpus synthetic `
+  --files 200 --funcs-per-file 20 --defer-write --defer-flush-chunks 1000
+uv run python scripts/profile_index.py --full-scale --defer-write
 ```

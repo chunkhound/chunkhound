@@ -230,6 +230,9 @@ class IndexingCoordinator(BaseService):
         self.config = config
         # Optional IndexProfile for phase/DB timing (profile harness).
         self._index_profile: Any | None = None
+        # F1: cross-file deferred (chunk, vector) buffer for append flush.
+        self._defer_buf_chunks: list[Chunk] = []
+        self._defer_buf_vectors: list[list[float]] = []
 
         # Performance optimization: shared instances
         self._parser_cache: dict[Language, UniversalParser] = {}
@@ -487,6 +490,33 @@ class IndexingCoordinator(BaseService):
             pass
         return False
 
+    def _defer_flush_chunk_limit(self) -> int:
+        """Max chunks to hold in the cross-file deferred buffer before append.
+
+        1 = per-file flush (L1). Values >1 enable F1 cross-file append batching.
+        """
+        try:
+            if self.config and getattr(self.config, "indexing", None):
+                n = int(
+                    getattr(self.config.indexing, "defer_flush_chunks", 1000) or 1000
+                )
+                return max(1, min(n, 50_000))
+        except Exception:
+            pass
+        return 1000
+
+    def _cross_file_defer_buffer_enabled(self) -> bool:
+        """F1 buffer only when append single-write exists and flush_n > 1.
+
+        DuckDB has no insert_chunks_with_embeddings; Lance uses append for
+        cold new ids. Cross-file merge batching (L2) was wall-regressive.
+        """
+        if self._defer_flush_chunk_limit() <= 1:
+            return False
+        return callable(
+            getattr(self._db, "insert_chunks_with_embeddings_batch_async", None)
+        )
+
     def attach_index_profile(self, profile: Any | None) -> None:
         """Attach IndexProfile to coordinator and DB provider (if supported)."""
         self._index_profile = profile
@@ -514,8 +544,15 @@ class IndexingCoordinator(BaseService):
         embeddings: list[list[float]],
         provider: str,
         model: str,
+        *,
+        prefer_large_append: bool = False,
     ) -> list[int]:
-        """Single-write path: chunks + vectors via provider-specific batch API."""
+        """Single-write path: chunks + vectors via provider-specific batch API.
+
+        When ``prefer_large_append`` is True (F1 buffer flush), write batches
+        up to ``defer_flush_chunks`` so cold appends are not re-split down to
+        the smaller classic ``db_batch_size`` (which undoes cross-file batching).
+        """
         insert_fn = getattr(
             self._db, "insert_chunks_with_embeddings_batch_async", None
         )
@@ -536,6 +573,12 @@ class IndexingCoordinator(BaseService):
             if data:
                 self._db.insert_embeddings_batch(data)
             return ids
+
+        # prefer_large_append: always one provider call for the whole slice so a
+        # mid-batch failure cannot append some rows then classic-merge the rest
+        # (Lance merge would wipe embeddings). Callers pass ≤ flush_cap units.
+        if prefer_large_append and chunks:
+            return list(await insert_fn(chunks, embeddings, provider, model))
 
         batch_size = self._determine_db_batch_size(chunks)
         all_ids: list[int] = []
@@ -597,7 +640,7 @@ class IndexingCoordinator(BaseService):
         chunks: list[Chunk],
         vectors: list[list[float]],
     ) -> list[int]:
-        """Write one file's (chunk, vector) pairs as a single deferred insert."""
+        """Write (chunk, vector) pairs via deferred single-write (append on Lance)."""
         if not chunks:
             return []
         if not self._embedding_provider:
@@ -607,25 +650,119 @@ class IndexingCoordinator(BaseService):
             vectors,
             self._embedding_provider.name,
             self._embedding_provider.model,
+            prefer_large_append=True,
         )
+
+    async def _write_deferred_slice(
+        self,
+        chunks: list[Chunk],
+        vectors: list[list[float]],
+    ) -> tuple[list[int], list[int]]:
+        """Write one deferred slice. Returns (written_ids, residual_ids).
+
+        On single-write failure, classic-inserts **this slice only** (no vectors)
+        and returns those ids as residual. Does not clear the caller's buffer —
+        callers drop the slice only after this returns without raising.
+        """
+        if not chunks:
+            return [], []
+        try:
+            return await self._flush_deferred_pairs(chunks, vectors), []
+        except Exception as e:
+            logger.warning(
+                f"Deferred single-write failed ({e}); classic insert for "
+                f"{len(chunks)} chunks (residual embed)"
+            )
+            ids = await self._insert_chunks_in_sized_batches(chunks)
+            return ids, list(ids)
+
+    async def _flush_deferred_buffer(self) -> tuple[list[int], list[int]]:
+        """Flush cross-file deferred buffer (F1). No-op if empty.
+
+        Drains in ``defer_flush_chunks``-sized slices (same as mid-buffer drain).
+        Each slice is dropped only after a successful write; a failed slice leaves
+        itself + remaining buffer intact. Returns (written_ids, residual_ids).
+        """
+        if not self._defer_buf_chunks:
+            return [], []
+        limit = self._defer_flush_chunk_limit()
+        written: list[int] = []
+        residual: list[int] = []
+        while self._defer_buf_chunks:
+            take = min(limit, len(self._defer_buf_chunks))
+            part_c = list(self._defer_buf_chunks[:take])
+            part_v = list(self._defer_buf_vectors[:take])
+            try:
+                w, r = await self._write_deferred_slice(part_c, part_v)
+            except Exception:
+                # Failed head remains in buffer for caller error handling.
+                raise
+            self._defer_buf_chunks = self._defer_buf_chunks[take:]
+            self._defer_buf_vectors = self._defer_buf_vectors[take:]
+            written.extend(w)
+            residual.extend(r)
+        return written, residual
+
+    async def _buffer_deferred_pairs(
+        self,
+        chunks: list[Chunk],
+        vectors: list[list[float]],
+    ) -> tuple[list[int], list[int]]:
+        """Append pairs to F1 buffer; flush when over ``defer_flush_chunks``.
+
+        Returns (written_ids, residual_ids). Slices are removed from the buffer
+        only after a successful write. Never classic-inserts pairs that may
+        already have been append-written (avoids Lance merge wiping vectors).
+        """
+        if not chunks:
+            return [], []
+        if len(chunks) != len(vectors):
+            raise ValueError(
+                f"buffer length mismatch: {len(chunks)} chunks vs {len(vectors)} vectors"
+            )
+        # Per-file path when cross-file buffer disabled.
+        if not self._cross_file_defer_buffer_enabled():
+            return await self._write_deferred_slice(chunks, vectors)
+
+        self._defer_buf_chunks.extend(chunks)
+        self._defer_buf_vectors.extend(vectors)
+        limit = self._defer_flush_chunk_limit()
+        written: list[int] = []
+        residual: list[int] = []
+        # Drain in sized flushes so a huge file cannot grow O(corpus) beyond limit
+        # by more than one file's worth (caller embeds per file).
+        while len(self._defer_buf_chunks) >= limit:
+            part_c = list(self._defer_buf_chunks[:limit])
+            part_v = list(self._defer_buf_vectors[:limit])
+            try:
+                w, r = await self._write_deferred_slice(part_c, part_v)
+            except Exception:
+                # Leave failed slice + remainder in buffer; do not outer classic-all.
+                raise
+            # Drop only after durable write of this slice.
+            self._defer_buf_chunks = self._defer_buf_chunks[limit:]
+            self._defer_buf_vectors = self._defer_buf_vectors[limit:]
+            written.extend(w)
+            residual.extend(r)
+        return written, residual
 
     async def _embed_and_store_new_chunks(
         self,
         chunks: list[Chunk],
         *,
         file_path: str | None = None,
-    ) -> tuple[list[int], list[int]]:
-        """Embed in memory then insert chunks with vectors (deferred write).
-
-        Per-file flush (L1). Cross-file buffering (L2) was reverted: fewer
-        merge_insert calls raised end-to-end wall time on large soaks.
+    ) -> tuple[list[int], list[int], int]:
+        """Embed in memory then deferred-write (per-file or F1 cross-file buffer).
 
         Returns:
-            (all_stored_ids, residual_ids). residual_ids need a later embed pass.
+            (known_ids, residual_ids, chunks_accounted).
+            ``chunks_accounted`` is the number of chunks this call owns for
+            stats (buffered or written). residual_ids need a later embed pass
+            (empty content / classic fallback).
         """
         if not chunks or not self._embedding_provider:
             ids = await self._insert_chunks_in_sized_batches(chunks)
-            return ids, list(ids)
+            return ids, list(ids), len(ids)
 
         empty_chunks, embeddable = self._split_empty_and_embeddable(
             chunks, file_path=file_path
@@ -635,7 +772,7 @@ class IndexingCoordinator(BaseService):
             empty_ids = await self._insert_chunks_in_sized_batches(empty_chunks)
 
         if not embeddable:
-            return empty_ids, list(empty_ids)
+            return empty_ids, list(empty_ids), len(empty_ids)
 
         valid_chunks = [c for c, _ in embeddable]
         texts = [t for _, t in embeddable]
@@ -647,7 +784,7 @@ class IndexingCoordinator(BaseService):
             )
             ids = await self._insert_chunks_in_sized_batches(valid_chunks)
             all_ids = empty_ids + ids
-            return all_ids, list(all_ids)
+            return all_ids, list(all_ids), len(all_ids)
 
         if len(vectors) != len(valid_chunks):
             logger.warning(
@@ -656,20 +793,31 @@ class IndexingCoordinator(BaseService):
             )
             ids = await self._insert_chunks_in_sized_batches(valid_chunks)
             all_ids = empty_ids + ids
-            return all_ids, list(all_ids)
+            return all_ids, list(all_ids), len(all_ids)
 
+        vec_lists = [list(v) if not isinstance(v, list) else v for v in vectors]
         try:
-            vec_lists = [list(v) if not isinstance(v, list) else v for v in vectors]
-            embedded_ids = await self._flush_deferred_pairs(valid_chunks, vec_lists)
-        except Exception as e:
-            logger.warning(
-                f"Deferred write: single-insert failed ({e}); falling back to two-write"
+            flushed_ids, flush_residual = await self._buffer_deferred_pairs(
+                valid_chunks, vec_lists
             )
-            ids = await self._insert_chunks_in_sized_batches(valid_chunks)
-            all_ids = empty_ids + ids
-            return all_ids, list(all_ids)
+        except Exception as e:
+            # Pairs may still be in the F1 buffer (unflushed) or partially
+            # written. Never classic-insert the whole file — that can merge
+            # over already-appended rows and wipe embeddings.
+            logger.warning(
+                f"Deferred write: buffer/flush failed ({e}); "
+                f"leaving unflushed pairs for end-of-batch flush"
+            )
+            accounted = len(empty_ids) + len(valid_chunks)
+            return empty_ids, list(empty_ids), accounted
 
-        return empty_ids + embedded_ids, list(empty_ids)
+        # Buffered chunks are accounted even when flush deferred (ids may be empty).
+        accounted = len(empty_ids) + len(valid_chunks)
+        return (
+            empty_ids + flushed_ids,
+            list(empty_ids) + flush_residual,
+            accounted,
+        )
 
     def _apply_fragment_batch_cap(self, base_size: int) -> int:
         """Reduce insert batch size when LanceDB fragment pressure is high."""
@@ -1470,19 +1618,23 @@ class IndexingCoordinator(BaseService):
                         and bool(new_chunk_models)
                     )
                     if use_defer:
-                        # Per-file embed + single write (L1). Flush immediately —
-                        # cross-file batching (L2) raised end-to-end wall at scale.
+                        # Embed + deferred write: per-file (flush=1) or F1
+                        # cross-file append buffer (flush_n>1, Lance).
                         rel_path = self._get_relative_path(
                             result.file_path
                         ).as_posix()
-                        stored_ids, residual_ids = await self._embed_and_store_new_chunks(
+                        (
+                            _stored_ids,
+                            residual_ids,
+                            accounted,
+                        ) = await self._embed_and_store_new_chunks(
                             new_chunk_models, file_path=rel_path
                         )
                         stats["chunk_ids_needing_embeddings"].extend(residual_ids)
-                        stats["total_chunks"] += len(stored_ids)
+                        stats["total_chunks"] += accounted
                         logger.debug(
                             f"Deferred path file_id={file_id}: "
-                            f"{len(stored_ids)} chunks ({len(residual_ids)} residual)"
+                            f"{accounted} chunks ({len(residual_ids)} residual)"
                         )
                     else:
                         ids = await self._insert_chunks_in_sized_batches(
@@ -1534,6 +1686,25 @@ class IndexingCoordinator(BaseService):
                             info=_progress_info(stored, skipped, errs, chunks_so_far),
                         )
                 continue
+
+        # F1: flush remainder after this store batch. (Directory-wide single
+        # flush cut Lance calls but raised wall — keep per-store-batch flush.)
+        if self._defer_buf_chunks:
+            try:
+                _w, residual = await self._flush_deferred_buffer()
+                if residual:
+                    stats["chunk_ids_needing_embeddings"].extend(residual)
+            except Exception as e:
+                logger.warning(
+                    f"Final deferred buffer flush failed: {e}"
+                )
+                stats["errors"].append(
+                    {
+                        "file": None,
+                        "error": f"deferred buffer flush failed: {e}",
+                        "deferred_flush_failed": True,
+                    }
+                )
 
         # Update external cumulative counters
         if cumulative_counters is not None:

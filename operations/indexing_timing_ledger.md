@@ -248,5 +248,10 @@ remaining_missing=0 both sizes.
 | 2026-07-17 | soak 50k ref | soak 50k page128 defer dims32 | **14.1** | 10.5 | 0.01 | 0.11 | 4.5 | 5.8 | 2.6 | 0.33 | 286 | 0 | write ref |
 | 2026-07-17 | **L3-empty** | full synth 200 dims1024 | **18.3** | — | — | — | — | store 11.3 | 1.43 | 0.41 | 269 | 0 | residual **0.022** (was 2.63) |
 | 2026-07-17 | **L3-empty** | full synth 1000 dims1024 | **71.0** | — | — | — | — | store 59.6 | 7.15 | 6.04 | 422 | 0 | residual **0.096** (was 11.7); **new full gate** |
+| 2026-07-17 | **F1** flush=1000 | full 1000 dims1024 | **61.3** | — | — | — | — | store 49.2 | 2.16 | 0.77 | 375 | 0 | batches **254** (was 1016) |
+| 2026-07-17 | L1 flush=1 A/B | full 1000 dims1024 | **69.9** | — | — | — | — | store 57.9 | 6.85 | 5.88 | 429 | 0 | batches 1016 control |
+| 2026-07-17 | F1 flush=1000 | full 200 dims1024 | **15.3** | — | — | — | — | store 8.6 | 0.45 | 0 | 262 | 0 | batches 52 |
+| 2026-07-17 | L1 flush=1 A/B | full 200 dims1024 | **17.6** | — | — | — | — | store 10.8 | 1.36 | 0.40 | 271 | 0 | batches 208 |
+| 2026-07-17 | F1 dir-end flush | full 1000 (rejected) | **73.0** | — | — | — | — | store 60.1 | 0.66 | 0 | 397 | 0 | batches 50; **wall↑** |
 
 *Add new rows below as work continues.*

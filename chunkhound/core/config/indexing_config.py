@@ -59,6 +59,20 @@ class IndexingConfig(BaseModel):
             "Set false to force classic store-then-embed residual path."
         ),
     )
+    # F1: cross-file append buffer for deferred new-file writes (Lance).
+    # 1 = per-file flush (L1). Larger values batch appends across files.
+    # Memory O(flush_chunks × dims); never hold the whole corpus.
+    defer_flush_chunks: int = Field(
+        default=1000,
+        ge=1,
+        le=50_000,
+        description=(
+            "When defer_chunk_write is on, flush deferred (chunk, vector) pairs "
+            "after this many chunks across brand-new files (append path). "
+            "1 forces per-file flush. Default 1000 reduces Lance append "
+            "round-trips without O(corpus) memory."
+        ),
+    )
     cleanup: bool = Field(default=True, description="Internal cleanup setting")
     ignore_gitignore: bool = Field(
         default=False, description="Internal gitignore setting"
@@ -424,6 +438,11 @@ class IndexingConfig(BaseModel):
                 "1",
                 "yes",
             )
+        if defer_flush := os.getenv("CHUNKHOUND_INDEXING__DEFER_FLUSH_CHUNKS"):
+            try:
+                config["defer_flush_chunks"] = int(defer_flush)
+            except ValueError:
+                pass
 
         # Handle comma-separated include/exclude patterns
         if include := os.getenv("CHUNKHOUND_INDEXING__INCLUDE"):

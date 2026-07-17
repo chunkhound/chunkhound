@@ -325,6 +325,7 @@ async def _run_full(
     force_reindex: bool = False,
     cleanup: bool = False,
     per_file_timeout_seconds: float = 60.0,
+    defer_flush_chunks: int = 1000,
 ) -> dict:
     """Full product path: discover → change-detect → parse → store → residual.
 
@@ -367,6 +368,7 @@ async def _run_full(
             "optimize_threshold": optimize_threshold,
             "force_reindex": force_reindex,
             "cleanup": cleanup,
+            "defer_flush_chunks": defer_flush_chunks,
         }
     )
 
@@ -378,6 +380,7 @@ async def _run_full(
         ),
         indexing=IndexingConfig(
             defer_chunk_write=defer_write,
+            defer_flush_chunks=max(1, int(defer_flush_chunks)),
             db_batch_size=max(100, page_size),
             cleanup=cleanup,
             force_reindex=force_reindex,
@@ -591,6 +594,15 @@ def main() -> int:
         help="Use embed-then-single-write for new chunks (product default path)",
     )
     parser.add_argument(
+        "--defer-flush-chunks",
+        type=int,
+        default=1000,
+        help=(
+            "F1: flush deferred (chunk,vector) buffer after this many chunks "
+            "across new files (1=per-file L1). Default 1000."
+        ),
+    )
+    parser.add_argument(
         "--scale",
         action="store_true",
         help=(
@@ -800,6 +812,7 @@ def main() -> int:
                         scenario="cold",
                         force_reindex=False,
                         cleanup=False,
+                        defer_flush_chunks=args.defer_flush_chunks,
                     )
                 )
                 report["wall_s"] = round(time.perf_counter() - t0, 4)
@@ -897,6 +910,7 @@ def main() -> int:
                     scenario=args.scenario,
                     force_reindex=args.force_reindex,
                     cleanup=args.cleanup,
+                    defer_flush_chunks=args.defer_flush_chunks,
                 )
             )
             report["meta"]["corpus"] = corpus_meta

@@ -238,8 +238,8 @@ async def test_multi_file_defer_leaves_no_missing_embeds(
 ) -> None:
     """Many small files under defer_chunk_write leave zero missing embeds.
 
-    L2 cross-file batching was reverted (raised end-to-end wall). Guards the
-    multi-file correctness contract only — not merge_insert call reduction.
+    Covers F1 cross-file append buffer (default flush) correctness — not
+    call-count reduction.
     """
     src = tmp_path / "src"
     src.mkdir()
@@ -253,7 +253,11 @@ async def test_multi_file_defer_leaves_no_missing_embeds(
             provider="lancedb",
             lancedb_optimize_fragment_threshold=10_000,
         ),
-        indexing=IndexingConfig(defer_chunk_write=True, cleanup=False),
+        indexing=IndexingConfig(
+            defer_chunk_write=True,
+            defer_flush_chunks=1000,
+            cleanup=False,
+        ),
         embedding=EmbeddingConfig(
             provider="openai", model="fake-embeddings", batch_size=50
         ),
@@ -281,6 +285,144 @@ async def test_multi_file_defer_leaves_no_missing_embeds(
             fake.name, fake.model, limit=50
         )
         assert missing == [], f"expected no missing embeds, got {len(missing)}"
+    finally:
+        db.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_f1_cross_file_flush_fewer_chunk_batches_than_files(
+    tmp_path: Path,
+) -> None:
+    """F1: many tiny new files should produce fewer deferred appends than files."""
+    from chunkhound.core.diagnostics.index_profile import IndexProfile
+
+    src = tmp_path / "src"
+    src.mkdir()
+    n_files = 40
+    for i in range(n_files):
+        (src / f"f{i:02d}.py").write_text(
+            f"def f{i}():\n    return {i}\n\ndef g{i}():\n    return {i}\n"
+        )
+
+    db_dir = tmp_path / "db"
+    cfg = Config(
+        database=DatabaseConfig(
+            path=db_dir,
+            provider="lancedb",
+            lancedb_optimize_fragment_threshold=10_000,
+        ),
+        indexing=IndexingConfig(
+            defer_chunk_write=True,
+            defer_flush_chunks=50,  # well above chunks-per-file, below total
+            cleanup=False,
+        ),
+        embedding=EmbeddingConfig(
+            provider="openai", model="fake-embeddings", batch_size=100
+        ),
+    )
+    db = LanceDBProvider(
+        str(cfg.database.get_db_path()),
+        base_directory=src,
+        config=cfg.database,
+    )
+    profile = IndexProfile()
+    db.set_index_profile(profile)
+    db.connect()
+    fake = FakeEmbeddingProvider(dims=32, batch_size=100)
+    try:
+        coord = IndexingCoordinator(
+            database_provider=db,
+            base_directory=src,
+            embedding_provider=fake,  # type: ignore[arg-type]
+            config=cfg,
+        )
+        coord.attach_index_profile(profile)
+        result = await coord.process_directory(
+            src, patterns=["**/*.py"], exclude_patterns=[]
+        )
+        assert result.get("status") == "success", result
+        missing = db.get_chunks_without_embeddings_paginated(
+            fake.name, fake.model, limit=50
+        )
+        assert missing == []
+        # Per-file L1 would be ~n_files chunk batches; F1 should be far fewer.
+        batches = int(profile.db.chunk_insert_batches)
+        assert batches < n_files, (
+            f"expected F1 fewer chunk batches than files: "
+            f"batches={batches} files={n_files}"
+        )
+        assert batches >= 1
+    finally:
+        db.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_f1_flush_failure_does_not_wipe_appended_embeddings(
+    tmp_path: Path,
+) -> None:
+    """Partial F1 flush failure must not classic-merge over already-appended rows."""
+    from unittest.mock import AsyncMock
+
+    src = tmp_path / "src"
+    src.mkdir()
+    # Enough chunks that two flush slices of 10 are needed mid-file.
+    lines = "\n\n".join(f"def f{i}():\n    return {i}\n" for i in range(25))
+    (src / "big.py").write_text(lines)
+
+    db_dir = tmp_path / "db"
+    cfg = Config(
+        database=DatabaseConfig(
+            path=db_dir,
+            provider="lancedb",
+            lancedb_optimize_fragment_threshold=10_000,
+        ),
+        indexing=IndexingConfig(
+            defer_chunk_write=True,
+            defer_flush_chunks=10,
+            cleanup=False,
+        ),
+        embedding=EmbeddingConfig(
+            provider="openai", model="fake-embeddings", batch_size=100
+        ),
+    )
+    db = LanceDBProvider(
+        str(cfg.database.get_db_path()),
+        base_directory=src,
+        config=cfg.database,
+    )
+    db.connect()
+    fake = FakeEmbeddingProvider(dims=32, batch_size=100)
+    real_insert = db.insert_chunks_with_embeddings_batch_async
+    calls = {"n": 0}
+
+    async def flaky_insert(chunks, embeddings, provider, model):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated append failure")
+        return await real_insert(chunks, embeddings, provider, model)
+
+    db.insert_chunks_with_embeddings_batch_async = AsyncMock(  # type: ignore[method-assign]
+        side_effect=flaky_insert
+    )
+    try:
+        coord = IndexingCoordinator(
+            database_provider=db,
+            base_directory=src,
+            embedding_provider=fake,  # type: ignore[arg-type]
+            config=cfg,
+        )
+        result = await coord.process_directory(
+            src, patterns=["**/*.py"], exclude_patterns=[]
+        )
+        # May succeed via classic residual on failed slice, or end flush retry.
+        assert result.get("status") in ("success", "error"), result
+        # Chunks that were append-written must not lose vectors (merge wipe).
+        emb = await coord.generate_missing_embeddings()
+        assert emb.get("status") in ("success", "complete"), emb
+        missing = db.get_chunks_without_embeddings_paginated(
+            fake.name, fake.model, limit=50
+        )
+        assert missing == [], f"still missing after residual: {len(missing)}"
     finally:
         db.disconnect()
 

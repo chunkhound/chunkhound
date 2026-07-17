@@ -225,10 +225,10 @@ See **`operations/indexing_timing_ledger.md` → Full-flow baseline**.
 
 | Priority | Work | Why | Success |
 |----------|------|-----|---------|
-| ~~**P0**~~ | ~~**L3-empty residual**~~ | **Done 2026-07-17:** residual 11.7→0.1s @ 49k; wall 79.5→71 | residual ≪1s |
-| **P1** | **F1 cross-file append batch** | Post-L3 store still ~60s / ~84% wall @ 49k; 1 write per file | full wall↓; RSS not O(N) |
-| **P2** | **F5 thr under full cadence** | opt still material inside store path | re-ladder after F1 |
-| **P3** | **F2 parse pipeline** | secondary | after F1 |
+| ~~**P0**~~ | ~~**L3-empty residual**~~ | **Done:** residual 11.7→0.1s @ 49k; wall 79.5→71 | residual ≪1s |
+| ~~**P1**~~ | ~~**F1 cross-file append batch**~~ | **Done:** wall ~70→**61s** @ 49k; batches 1016→254; RSS 429→375 MB; `defer_flush_chunks=1000` | full wall↓ |
+| **P2** | **F5 thr under full cadence** | opt still material (L1 had 10 opts); F1 reduced opts | re-ladder next |
+| **P3** | **F2 parse pipeline** | secondary | after F5 if needed |
 | **Later** | Resume / L5 | scaffold ready | after cold stable |
 
 ### L3-empty (done)
@@ -237,11 +237,16 @@ See **`operations/indexing_timing_ledger.md` → Full-flow baseline**.
 - `insert_embeddings_batch` / deferred write **refuse zero vectors as complete labels** so zeros stay residual candidates without an O(N)×dims scan.  
 - **Legacy DBs** that already store labeled all-zero embeddings are **not** auto-repaired by residual; use **force-reindex** (or rebuild) to clear them. Search still treats zeros as invalid via `_has_valid_embedding`.
 
-### Next (P1)
+### F1 (done)
 
-1. Buffer N deferred `(chunks, vectors)` across files; flush with `insert_chunks_with_embeddings` append (unique ids).  
-2. Flush on size (e.g. 500–2000 chunks) or end-of-directory — **not** the old L2 merge-heavy design.  
-3. Gate on full wall; reject if RSS tracks corpus.
+- Config: `indexing.defer_flush_chunks` (default **1000**; `1` = per-file L1).  
+- Cross-file buffer of `(chunk, vector)` for brand-new deferred files; flush via Lance **append**.  
+- Per-store-batch remainder flush (directory-wide single flush cut calls but **raised wall** — rejected).  
+- Prefer large append batches on flush (`prefer_large_append`).  
+
+### Next (P2 F5)
+
+Re-ladder optimize threshold under full-flow + F1 store cadence.
 
 ---
 
