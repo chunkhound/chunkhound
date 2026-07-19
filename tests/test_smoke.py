@@ -703,6 +703,70 @@ sys.exit(asyncio.run(test()))
             assert "auth_token" in combined or "non-loopback" in combined, combined
 
     @pytest.mark.asyncio
+    async def test_mcp_http_cors_without_token_rejected(self):
+        """--cors with no --auth-token is refused at startup, even on loopback.
+
+        Without a token, any website open in the same browser could read from
+        the HTTP transport via CORS — this must be rejected regardless of
+        --host, not just when --host is non-loopback.
+        """
+        with windows_safe_tempdir() as temp_path:
+            port = _get_free_port()
+            proc = await self._spawn_http_mcp_server(
+                temp_path, port, extra_args=["--cors"]
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                pytest.fail("Server did not exit promptly on rejected configuration")
+
+            assert proc.returncode != 0, (
+                "Server should refuse to start with --cors and no --auth-token"
+            )
+            combined = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+            assert "auth_token" in combined or "cors" in combined.lower(), combined
+
+    @pytest.mark.asyncio
+    async def test_mcp_http_cors_with_token_allowed(self):
+        """--cors with --auth-token starts up and sends CORS response headers."""
+        with windows_safe_tempdir() as temp_path:
+            port = _get_free_port()
+            token = "secret123"
+            proc = await self._spawn_http_mcp_server(
+                temp_path, port, extra_args=["--cors", "--auth-token", token]
+            )
+            drain_tasks = [
+                asyncio.create_task(self._drain(proc.stdout)),
+                asyncio.create_task(self._drain(proc.stderr)),
+            ]
+
+            base_url = f"http://127.0.0.1:{port}"
+            try:
+                ready_timeout = max(30.0, get_fs_event_timeout())
+                await _wait_for_http_ready(base_url, ready_timeout)
+
+                async with httpx.AsyncClient() as raw_client:
+                    resp = await raw_client.get(
+                        f"{base_url}/health",
+                        headers={"Origin": "https://example.com"},
+                        timeout=5.0,
+                    )
+                assert resp.status_code == 200
+                assert resp.headers.get("access-control-allow-origin") == "*"
+            finally:
+                await self._terminate(proc)
+                for task in drain_tasks:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+    @pytest.mark.asyncio
     async def test_mcp_websearch_stdio_mocked(self):
         """MCP stdio roundtrip for websearch with external calls stubbed out.
 

@@ -234,6 +234,8 @@ chunkhound mcp --transport http --host 0.0.0.0 --port 5173 --auth-token "$TOKEN"
 ```
 
 > **Note:** binding to a non-loopback `--host` without `--auth-token` is refused at startup.
+> `--cors` also requires `--auth-token` — without a token, any website open in the same
+> browser could read from the HTTP transport, even on the default loopback host.
 
 ## `chunkhound map`
 

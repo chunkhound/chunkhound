@@ -478,6 +478,13 @@ class Config(BaseModel):
                     "--auth-token is refused. Set --auth-token, or omit --host "
                     "to bind to 127.0.0.1 (default)."
                 )
+            if self.mcp.cors and not self.mcp.auth_token:
+                errors.append(
+                    "mcp.cors is enabled but no auth_token is set. Enabling CORS "
+                    "without --auth-token lets any website open in the same "
+                    "browser read from the HTTP transport, even on a loopback "
+                    "host. Set --auth-token, or omit --cors."
+                )
 
         if self.database.read_only:
             # _quickresearch always uses a :memory: DB (see quickresearch.py),
