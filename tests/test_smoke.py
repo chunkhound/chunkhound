@@ -48,12 +48,26 @@ def _get_free_port() -> int:
         return sock.getsockname()[1]
 
 
-async def _wait_for_http_ready(base_url: str, timeout: float) -> None:
-    """Poll ``/health`` until the HTTP MCP server accepts connections."""
+async def _wait_for_http_ready(
+    base_url: str,
+    timeout: float,
+    proc: asyncio.subprocess.Process | None = None,
+) -> None:
+    """Poll ``/health`` until the HTTP MCP server accepts connections.
+
+    If ``proc`` is given and exits before becoming ready, fail immediately
+    instead of spinning for the full timeout — a crashed server will never
+    start answering ``/health``.
+    """
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     async with httpx.AsyncClient() as probe:
         while time.monotonic() < deadline:
+            if proc is not None and proc.returncode is not None:
+                raise AssertionError(
+                    f"HTTP MCP server process exited early with code "
+                    f"{proc.returncode} before becoming ready at {base_url}"
+                )
             try:
                 resp = await probe.get(f"{base_url}/health", timeout=2.0)
                 if resp.status_code == 200:
@@ -530,7 +544,7 @@ sys.exit(asyncio.run(test()))
             client = HttpMcpClient(base_url)
             try:
                 ready_timeout = max(30.0, get_fs_event_timeout())
-                await _wait_for_http_ready(base_url, ready_timeout)
+                await _wait_for_http_ready(base_url, ready_timeout, proc=proc)
 
                 init_result = await client.initialize(timeout=15.0)
                 assert "serverInfo" in init_result, (
@@ -586,7 +600,7 @@ sys.exit(asyncio.run(test()))
             base_url = f"http://127.0.0.1:{port}"
             try:
                 ready_timeout = max(30.0, get_fs_event_timeout())
-                await _wait_for_http_ready(base_url, ready_timeout)
+                await _wait_for_http_ready(base_url, ready_timeout, proc=proc)
 
                 async with httpx.AsyncClient() as raw_client:
                     resp = await raw_client.get(f"{base_url}/health", timeout=5.0)
@@ -638,7 +652,7 @@ sys.exit(asyncio.run(test()))
             client = None
             try:
                 ready_timeout = max(30.0, get_fs_event_timeout())
-                await _wait_for_http_ready(base_url, ready_timeout)
+                await _wait_for_http_ready(base_url, ready_timeout, proc=proc)
 
                 async with httpx.AsyncClient() as raw_client:
                     # No auth header -> 401
@@ -691,8 +705,12 @@ sys.exit(asyncio.run(test()))
                     proc.communicate(), timeout=30.0
                 )
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                # Use the full process-tree terminate, not a bare kill: if the
+                # startup-validation gate regressed and the server actually
+                # started serving, `uv run`'s real child/grandchild process
+                # would otherwise survive a top-level kill and leak a
+                # locked DB/port (see _terminate's docstring).
+                await self._terminate(proc)
                 pytest.fail("Server did not exit promptly on rejected configuration")
 
             assert proc.returncode != 0, (
@@ -720,8 +738,12 @@ sys.exit(asyncio.run(test()))
                     proc.communicate(), timeout=30.0
                 )
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                # Use the full process-tree terminate, not a bare kill: if the
+                # startup-validation gate regressed and the server actually
+                # started serving, `uv run`'s real child/grandchild process
+                # would otherwise survive a top-level kill and leak a
+                # locked DB/port (see _terminate's docstring).
+                await self._terminate(proc)
                 pytest.fail("Server did not exit promptly on rejected configuration")
 
             assert proc.returncode != 0, (
@@ -747,7 +769,7 @@ sys.exit(asyncio.run(test()))
             base_url = f"http://127.0.0.1:{port}"
             try:
                 ready_timeout = max(30.0, get_fs_event_timeout())
-                await _wait_for_http_ready(base_url, ready_timeout)
+                await _wait_for_http_ready(base_url, ready_timeout, proc=proc)
 
                 async with httpx.AsyncClient() as raw_client:
                     resp = await raw_client.get(
@@ -755,8 +777,57 @@ sys.exit(asyncio.run(test()))
                         headers={"Origin": "https://example.com"},
                         timeout=5.0,
                     )
-                assert resp.status_code == 200
-                assert resp.headers.get("access-control-allow-origin") == "*"
+                    assert resp.status_code == 200
+                    assert resp.headers.get("access-control-allow-origin") == "*"
+
+                    # The load-bearing case: a browser CORS preflight OPTIONS
+                    # request to /mcp carries no Authorization header. CORS
+                    # middleware must answer it directly (200, with CORS
+                    # headers) rather than let bearer-auth 401 it — see
+                    # _BearerAuthMiddleware's docstring for why ordering
+                    # matters here.
+                    preflight = await raw_client.options(
+                        f"{base_url}/mcp",
+                        headers={
+                            "Origin": "https://example.com",
+                            "Access-Control-Request-Method": "POST",
+                            "Access-Control-Request-Headers": (
+                                "authorization,content-type"
+                            ),
+                        },
+                        timeout=5.0,
+                    )
+                    assert preflight.status_code == 200, preflight.text
+                    assert preflight.headers.get("access-control-allow-origin") == "*"
+
+                    # A real, authenticated request to /mcp with an Origin
+                    # header must succeed and still carry CORS response
+                    # headers, proving CORS and bearer-auth compose correctly
+                    # (not just CORS alone on the auth-exempt /health
+                    # endpoint).
+                    init_payload = {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "clientInfo": {"name": "test", "version": "1.0"},
+                        },
+                    }
+                    resp = await raw_client.post(
+                        f"{base_url}/mcp",
+                        json=init_payload,
+                        headers={
+                            "Accept": "application/json, text/event-stream",
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {token}",
+                            "Origin": "https://example.com",
+                        },
+                        timeout=15.0,
+                    )
+                    assert resp.status_code == 200, resp.text
+                    assert resp.headers.get("access-control-allow-origin") == "*"
             finally:
                 await self._terminate(proc)
                 for task in drain_tasks:

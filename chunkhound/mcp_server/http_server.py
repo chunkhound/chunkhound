@@ -206,11 +206,14 @@ class HttpMCPServer(MCPServerBase):
         await server.serve()
 
 
-async def main(args: Any = None) -> None:
+async def main(args: Any = None, config: Config | None = None) -> None:
     """Main entry point for the MCP HTTP server.
 
     Args:
         args: Pre-parsed arguments. If None, will parse from sys.argv.
+        config: Pre-validated configuration. If provided (e.g. by
+            ``mcp_command``, which already validated it once), validation is
+            not repeated; otherwise a fresh one is built and validated here.
     """
     import argparse
 
@@ -231,13 +234,14 @@ async def main(args: Any = None) -> None:
     # Mark process as MCP mode so downstream code avoids interactive prompts
     os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
-    # Create and validate configuration
-    config, validation_errors = create_validated_config(args, "mcp")
+    if config is None:
+        # Create and validate configuration
+        config, validation_errors = create_validated_config(args, "mcp")
 
-    if validation_errors:
-        msg = "; ".join(str(e) for e in validation_errors)
-        logger.error(f"ChunkHound MCP HTTP server configuration errors: {msg}")
-        sys.exit(1)
+        if validation_errors:
+            msg = "; ".join(str(e) for e in validation_errors)
+            logger.error(f"ChunkHound MCP HTTP server configuration errors: {msg}")
+            sys.exit(1)
 
     try:
         server = HttpMCPServer(config, args=args)

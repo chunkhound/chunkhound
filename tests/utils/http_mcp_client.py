@@ -11,11 +11,8 @@ from typing import Any
 
 import httpx
 
-from .subprocess_jsonrpc import (
-    JsonRpcResponseError,
-    JsonRpcTimeoutError,
-    SubprocessJsonRpcError,
-)
+from .jsonrpc_envelope import build_notification, build_request, unwrap_result
+from .subprocess_jsonrpc import JsonRpcTimeoutError, SubprocessJsonRpcError
 
 _ACCEPT_HEADER = "application/json, text/event-stream"
 
@@ -67,10 +64,7 @@ class HttpMcpClient:
         request_id = self._next_request_id
         self._next_request_id += 1
 
-        payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
-        if params is not None:
-            payload["params"] = params
-
+        payload = build_request(method, params, request_id)
         response = await self._post(payload, timeout=timeout)
 
         if response.status_code != 200:
@@ -79,25 +73,13 @@ class HttpMcpClient:
             )
 
         body = _parse_sse_data(response.text)
-        if "error" in body:
-            error = body["error"]
-            raise JsonRpcResponseError(
-                code=error.get("code", -1),
-                message=error.get("message", "Unknown error"),
-                data=error.get("data"),
-            )
-        if "result" not in body:
-            raise SubprocessJsonRpcError(f"Response missing 'result': {body}")
-        return body["result"]
+        return unwrap_result(body, method)
 
     async def send_notification(
         self, method: str, params: dict[str, Any] | None = None
     ) -> None:
         """Send a JSON-RPC notification (no response expected)."""
-        payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-        if params is not None:
-            payload["params"] = params
-        await self._post(payload, timeout=5.0)
+        await self._post(build_notification(method, params), timeout=5.0)
 
     async def get(self, path: str, timeout: float = 5.0) -> httpx.Response:
         """GET an arbitrary path on the server (e.g. ``/health``)."""

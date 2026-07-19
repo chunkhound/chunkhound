@@ -103,14 +103,13 @@ class MCPServerBase(ABC):
         self.llm_manager: LLMManager | None = None
         self.realtime_indexing: RealtimeIndexingService | None = None
 
-        # Underlying MCP protocol server, shared by every transport.
+        # Underlying MCP protocol server. Constructed lazily in
+        # _register_common_tool_handlers() by subclasses that actually
+        # dispatch tools through the SDK (stdio/HTTP); left None for
+        # subclasses whose _register_tools() is a no-op (e.g. the daemon,
+        # which dispatches tools via its own JSON-RPC IPC loop instead).
         self._initialization_complete = asyncio.Event()
-        if not _MCP_AVAILABLE:
-            self.server = None  # type: ignore[assignment]
-        else:
-            self.server: Server = Server(
-                "ChunkHound Code Search", version=__version__
-            )
+        self.server: Server | None = None
 
         # Initialization state
         self._initialized = False
@@ -1356,6 +1355,8 @@ class MCPServerBase(ABC):
         if not _MCP_AVAILABLE:
             return  # no-op when SDK not available
 
+        self.server = Server("ChunkHound Code Search", version=__version__)
+
         # The MCP SDK's call_tool decorator expects a SINGLE handler function
         # with signature (tool_name: str, arguments: dict) that handles ALL tools
         @self.server.call_tool()  # type: ignore[misc]
@@ -1384,6 +1385,9 @@ class MCPServerBase(ABC):
 
     def _register_list_tools(self) -> None:
         """Register the list_tools handler shared by every transport."""
+        # Only called from _register_common_tool_handlers(), which constructs
+        # self.server immediately before calling this.
+        assert self.server is not None
 
         @self.server.list_tools()  # type: ignore[misc]
         async def list_tools() -> list[types.Tool]:

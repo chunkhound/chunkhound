@@ -1,6 +1,7 @@
 """MCP command module - handles Model Context Protocol server operations."""
 
 import argparse
+import ipaddress
 import json
 import os
 import sys
@@ -11,6 +12,23 @@ from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.utils.windows_constants import IS_WINDOWS
+
+
+def _client_url_host(host: str) -> str:
+    """Best-effort reachable host for a printed client config URL.
+
+    ``host`` may be a bind-all address (``0.0.0.0``, ``::``) that the
+    *server* binds to but that a client can never connect to directly —
+    substitute the loopback form so a copy-pasted local config still works.
+    IPv6 literals must be bracketed per RFC 3986 to form a valid URL.
+    """
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return host  # hostname, not a literal address — printed as-is
+    if addr.is_unspecified:
+        addr = ipaddress.ip_address("::1" if addr.version == 6 else "127.0.0.1")
+    return f"[{addr}]" if addr.version == 6 else str(addr)
 
 
 def _safe_print(text: str) -> None:
@@ -58,12 +76,18 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
         pass
 
     if config.mcp.transport == "http":
+        if getattr(args, "stdio", False):
+            logger.warning(
+                "chunkhound mcp: --stdio has no effect with --transport http; "
+                "starting the HTTP transport."
+            )
+
         # HTTP already multiplexes many concurrent client connections over one
         # port natively, so — unlike stdio — it needs no daemon/ClientProxy
         # IPC bridge to serve multiple clients from one backend process.
         from chunkhound.mcp_server.http_server import main as http_main
 
-        await http_main(args=args)
+        await http_main(args=args, config=config)
         return
 
     # Daemon mode: route through ClientProxy unless explicitly disabled.
@@ -133,18 +157,25 @@ def _show_mcp_setup_instructions(
     if is_http_transport and config is not None:
         host = config.mcp.host
         port = config.mcp.port
+        display_host = _client_url_host(host)
         _safe_print("\n" + "-" * 70)
         _safe_print(" HTTP Transport Client Configuration")
         _safe_print("-" * 70)
         http_client_config = {
             "type": "http",
-            "url": f"http://{host}:{port}/mcp",
+            "url": f"http://{display_host}:{port}/mcp",
         }
         if config.mcp.auth_token:
             http_client_config["headers"] = {
                 "Authorization": "Bearer <TOKEN>",
             }
         _safe_print("\n" + json.dumps(http_client_config, indent=2))
+        if display_host != host:
+            _safe_print(
+                f"\n• Server is bound to {host} (all interfaces); the URL above "
+                "uses the local loopback address. Replace it with the "
+                "server's actual reachable hostname/IP for remote clients."
+            )
         _safe_print(
             "\n• Generate a token with: "
             'python -c "import secrets; print(secrets.token_urlsafe(32))"'
