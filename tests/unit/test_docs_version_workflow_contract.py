@@ -555,6 +555,7 @@ class TestDocsVersionWorkflowContract:
         assert job["needs"] == [
             "site-build",
             "tests",
+            "rust-checks",
             "site-build-validation",
             "watchman-rollout-gate",
         ]
