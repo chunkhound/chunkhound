@@ -24,7 +24,12 @@ from chunkhound.core.config.claude_model_resolution import (
     resolve_claude_cli_model,
 )
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
-from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
+from chunkhound.providers.llm.base_cli_provider import (
+    BaseCLIProvider,
+    build_cli_argv,
+    resolve_cli_binary,
+    terminate_cli_process,
+)
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
 
@@ -108,25 +113,34 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
         Raises:
             RuntimeError: If CLI command fails
         """
-        # Build CLI command
+        # Resolve via PATH/PATHEXT (Windows: claude.cmd npm shims). Bare "claude"
+        # with create_subprocess_exec fails with WinError 2 when only .cmd exists.
+        try:
+            claude_bin = resolve_cli_binary("claude")
+        except FileNotFoundError as e:
+            raise RuntimeError(str(e)) from e
+
         model_arg = self._map_model_to_cli_arg(self._model)
-        cmd = ["claude", "--print", "--model", model_arg, "--output-format", "text"]
-
-        # Disable all tools for vanilla LLM behavior.
-        cmd.extend(["--tools", ""])
-
-        # Prevent MCP server loading for clean LLM access
-        cmd.extend(["--mcp-config", '{"mcpServers":{}}'])
-        cmd.append("--strict-mcp-config")  # Ignore user/project MCP configs
-
-        # Prevent session persistence (avoid context bleed between calls)
-        cmd.append("--no-session-persistence")
-
-        # Add system prompt if provided (appends to default)
+        # Prompt is passed via stdin, not CLI args (avoids ARG_MAX limit).
+        cli_args = [
+            "--print",
+            "--model",
+            model_arg,
+            "--output-format",
+            "text",
+            # Disable all tools for vanilla LLM behavior.
+            "--tools",
+            "",
+            # Prevent MCP server loading for clean LLM access.
+            "--mcp-config",
+            '{"mcpServers":{}}',
+            "--strict-mcp-config",
+            # Prevent session persistence (avoid context bleed between calls).
+            "--no-session-persistence",
+        ]
         if system:
-            cmd.extend(["--append-system-prompt", system])
-
-        # Note: prompt is passed via stdin, not CLI args (avoids ARG_MAX limit)
+            cli_args.extend(["--append-system-prompt", system])
+        cmd = build_cli_argv(claude_bin, *cli_args)
 
         # Set environment for subscription-based auth
         env = os.environ.copy()
@@ -183,13 +197,12 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 return stdout.decode("utf-8").strip()
 
             except asyncio.TimeoutError as e:
-                # Kill the subprocess if it's still running
-                if process and process.returncode is None:
+                # Kill cmd.exe + Node/CLI tree when wrapping a .cmd shim
+                if process is not None:
                     try:
-                        process.kill()
+                        await terminate_cli_process(process)
                     except ProcessLookupError:
                         pass
-                    await process.wait()
 
                 last_error = RuntimeError(
                     f"CLI command timed out after {request_timeout}s"
@@ -202,13 +215,11 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             except Exception as e:
                 if isinstance(e, RuntimeError):
                     raise
-                # Kill the subprocess if it's still running on unexpected errors
-                if process and process.returncode is None:
+                if process is not None:
                     try:
-                        process.kill()
+                        await terminate_cli_process(process)
                     except ProcessLookupError:
                         pass
-                    await process.wait()
 
                 last_error = RuntimeError(f"CLI command failed: {e}")
                 if attempt < self._max_retries - 1:

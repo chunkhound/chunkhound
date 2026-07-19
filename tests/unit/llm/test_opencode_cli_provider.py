@@ -31,8 +31,14 @@ class TestOpenCodeCLIProvider:
     @pytest.fixture
     def provider(self):
         """Create a provider with a dummy model."""
-        with patch.object(
-            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        with (
+            patch.object(
+                OpenCodeCLIProvider, "_opencode_available", return_value=True
+            ),
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
         ):
             yield OpenCodeCLIProvider(
                 model="test-provider/test-model",
@@ -726,12 +732,21 @@ class TestOpenCodeCLIProvider:
             assert mock_subprocess.call_count == provider._max_retries
             self._assert_json_then_plain(mock_subprocess)
 
+    @staticmethod
+    def _argv_blob(call_args: tuple) -> str:
+        """Join create_subprocess_exec argv for assertions (handles cmd /c wrap)."""
+        return " ".join(str(a) for a in call_args)
+
     @pytest.mark.asyncio
     async def test_run_cli_command_json_fallback_respects_single_attempt_budget(self):
         """max_retries=1 leaves no plain-text budget after a JSON probe."""
         status_event = json.dumps({"type": "status", "data": "running"})
-        with patch.object(
-            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        with (
+            patch.object(OpenCodeCLIProvider, "_opencode_available", return_value=True),
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
         ):
             provider = OpenCodeCLIProvider(
                 model="test-provider/test-model",
@@ -739,20 +754,21 @@ class TestOpenCodeCLIProvider:
                 max_retries=1,
             )
 
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
-            mock_first = AsyncMock()
-            mock_first.communicate.return_value = (status_event.encode(), b"")
-            mock_first.returncode = 0
-            mock_subprocess.return_value = mock_first
+            with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+                mock_first = AsyncMock()
+                mock_first.communicate.return_value = (status_event.encode(), b"")
+                mock_first.returncode = 0
+                mock_subprocess.return_value = mock_first
 
-            with pytest.raises(
-                RuntimeError, match="exhausted retry budget before plain-text fallback"
-            ):
-                await provider._run_cli_command("Test prompt")
+                with pytest.raises(
+                    RuntimeError,
+                    match="exhausted retry budget before plain-text fallback",
+                ):
+                    await provider._run_cli_command("Test prompt")
 
-            assert mock_subprocess.call_count == 1
-            first_args = mock_subprocess.call_args_list[0][0]
-            assert "--format" in first_args
+                assert mock_subprocess.call_count == 1
+                first_blob = self._argv_blob(mock_subprocess.call_args_list[0][0])
+                assert "--format" in first_blob
 
     @pytest.mark.asyncio
     async def test_run_cli_command_json_fallback_preserves_remaining_attempt_budget(
@@ -760,8 +776,12 @@ class TestOpenCodeCLIProvider:
     ):
         """JSON fallback should only spend the primary model's remaining attempts."""
         status_event = json.dumps({"type": "status", "data": "running"})
-        with patch.object(
-            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        with (
+            patch.object(OpenCodeCLIProvider, "_opencode_available", return_value=True),
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
         ):
             provider = OpenCodeCLIProvider(
                 model="test-provider/test-model",
@@ -769,35 +789,35 @@ class TestOpenCodeCLIProvider:
                 max_retries=3,
             )
 
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
-            mock_json = AsyncMock()
-            mock_json.communicate.return_value = (status_event.encode(), b"")
-            mock_json.returncode = 0
+            with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+                mock_json = AsyncMock()
+                mock_json.communicate.return_value = (status_event.encode(), b"")
+                mock_json.returncode = 0
 
-            mock_plain_fail = AsyncMock()
-            mock_plain_fail.communicate.return_value = (b"", b"")
-            mock_plain_fail.returncode = 0
+                mock_plain_fail = AsyncMock()
+                mock_plain_fail.communicate.return_value = (b"", b"")
+                mock_plain_fail.returncode = 0
 
-            mock_plain_success = AsyncMock()
-            mock_plain_success.communicate.return_value = (b"Success response", b"")
-            mock_plain_success.returncode = 0
+                mock_plain_success = AsyncMock()
+                mock_plain_success.communicate.return_value = (b"Success response", b"")
+                mock_plain_success.returncode = 0
 
-            mock_subprocess.side_effect = [
-                mock_json,
-                mock_plain_fail,
-                mock_plain_success,
-            ]
+                mock_subprocess.side_effect = [
+                    mock_json,
+                    mock_plain_fail,
+                    mock_plain_success,
+                ]
 
-            result = await provider._run_cli_command("Test prompt")
+                result = await provider._run_cli_command("Test prompt")
 
-            assert result == "Success response"
-            assert mock_subprocess.call_count == 3
-            first_args = mock_subprocess.call_args_list[0][0]
-            second_args = mock_subprocess.call_args_list[1][0]
-            third_args = mock_subprocess.call_args_list[2][0]
-            assert "--format" in first_args
-            assert "--format" not in second_args
-            assert "--format" not in third_args
+                assert result == "Success response"
+                assert mock_subprocess.call_count == 3
+                first_blob = self._argv_blob(mock_subprocess.call_args_list[0][0])
+                second_blob = self._argv_blob(mock_subprocess.call_args_list[1][0])
+                third_blob = self._argv_blob(mock_subprocess.call_args_list[2][0])
+                assert "--format" in first_blob
+                assert "--format" not in second_blob
+                assert "--format" not in third_blob
 
     @pytest.mark.asyncio
     async def test_run_cli_command_multiple_text_events(self, provider):

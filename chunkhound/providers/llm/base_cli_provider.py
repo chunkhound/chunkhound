@@ -5,8 +5,17 @@ This base class contains shared logic for CLI-based providers
 consistent behavior.
 """
 
+from __future__ import annotations
+
+import asyncio
 import json
+import os
+import re
+import shutil
+import subprocess
+import sys
 from abc import abstractmethod
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -15,6 +24,138 @@ from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.utils.json_extraction import parse_and_validate_structured_json
+
+# Characters that require quoting as a cmd.exe token (beyond whitespace).
+_CMD_META_RE = re.compile(r'[\s"&|<>^()%!\[\]{}^=;!\'+,`~]')
+
+
+def resolve_cli_binary(
+    name: str,
+    *,
+    env_var: str | None = None,
+) -> str:
+    """Resolve a CLI executable path for ``create_subprocess_exec``.
+
+    Interactive shells on Windows find ``claude.cmd`` / ``codex.cmd`` via
+    PATHEXT. ``asyncio.create_subprocess_exec`` / CreateProcess with a bare
+    name does not — often only ``.exe`` is tried, causing WinError 2.
+
+    ``shutil.which`` respects PATHEXT and returns the full path to the shim.
+
+    Args:
+        name: Default command name (e.g. ``claude``).
+        env_var: Optional env var override (absolute path or name on PATH).
+
+    Returns:
+        Absolute path to the executable (or override path that exists / which found).
+
+    Raises:
+        FileNotFoundError: If no matching binary is found.
+    """
+    candidates: list[str] = []
+    if env_var:
+        env_val = os.environ.get(env_var)
+        if env_val and env_val.strip():
+            candidates.append(env_val.strip())
+    candidates.append(name)
+
+    for cand in candidates:
+        path = Path(cand)
+        # Only treat as an explicit filesystem path when it has a directory
+        # component (or is absolute). Bare names always go through which/PATH.
+        if (path.is_absolute() or os.path.dirname(cand)) and path.is_file():
+            return str(path.resolve())
+        found = shutil.which(cand)
+        if found:
+            return found
+
+    hint = f" (checked env {env_var} and PATH)" if env_var else " (checked PATH)"
+    raise FileNotFoundError(
+        f"CLI binary {name!r} not found{hint}. "
+        f"Install it or ensure it is on PATH. On Windows npm shims are often "
+        f"{name}.cmd — use a shell or this resolver, not a bare name with "
+        f"CreateProcess."
+    )
+
+
+def escape_cmd_argument(arg: str) -> str:
+    """Escape one token so it is safe under ``cmd.exe /c``.
+
+    ``%`` expands even inside quotes — double them. Other metacharacters are
+    neutralized by wrapping the token in double quotes (internal ``"`` doubled).
+    """
+    # Percent expansion is independent of quoting.
+    escaped = arg.replace("%", "%%")
+    if not escaped:
+        return '""'
+    if _CMD_META_RE.search(escaped):
+        return '"' + escaped.replace('"', '""') + '"'
+    return escaped
+
+
+def build_cli_argv(binary: str, *args: str) -> list[str]:
+    """Build argv for ``create_subprocess_exec`` given a resolved binary.
+
+    CreateProcess cannot run ``.cmd`` / ``.bat`` directly even with a full
+    path (WinError 193). On Windows those shims are invoked via
+    ``COMSPEC /d /s /c <escaped-command-line>`` so untrusted argv (system
+    prompts, models) cannot inject ``&`` / ``|`` shell commands.
+    """
+    lower = binary.lower()
+    if sys.platform == "win32" and (
+        lower.endswith(".cmd") or lower.endswith(".bat")
+    ):
+        comspec = os.environ.get("COMSPEC") or "cmd.exe"
+        # Single /c command string: each token cmd-escaped so CreateProcess
+        # joining cannot leave metacharacters unquoted for cmd reparse.
+        cmdline = " ".join(
+            escape_cmd_argument(part) for part in (binary, *args)
+        )
+        # /d = no AutoRun; /s + /c = standard non-interactive form.
+        return [comspec, "/d", "/s", "/c", cmdline]
+    return [binary, *args]
+
+
+async def terminate_cli_process(process: asyncio.subprocess.Process) -> None:
+    """Kill a CLI subprocess, including the Windows process tree when needed.
+
+    When the child is ``cmd.exe`` wrapping a ``.cmd`` shim, ``process.kill()``
+    only stops cmd and can leave Node/CLI grandchildren running.
+    """
+    if process.returncode is not None:
+        return
+    if sys.platform == "win32" and process.pid:
+        taskkill_ok = False
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                check=False,
+                timeout=10,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            taskkill_ok = result.returncode == 0
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            taskkill_ok = False
+        if not taskkill_ok:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
+        return
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        await process.wait()
+    except ProcessLookupError:
+        pass
 
 
 class BaseCLIProvider(LLMProvider):

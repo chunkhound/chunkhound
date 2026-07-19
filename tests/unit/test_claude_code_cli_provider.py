@@ -29,7 +29,18 @@ def provider():
 @pytest.fixture
 def mock_subprocess():
     """Mock subprocess calls to avoid calling actual CLI."""
-    with patch("asyncio.create_subprocess_exec") as mock:
+    # Resolve bare "claude" to a fake .exe so argv stays multi-token (not cmd /c).
+    with (
+        patch("asyncio.create_subprocess_exec") as mock,
+        patch(
+            "chunkhound.providers.llm.claude_code_cli_provider.resolve_cli_binary",
+            return_value=(
+                r"C:\fake\claude.exe"
+                if __import__("sys").platform == "win32"
+                else "/fake/claude"
+            ),
+        ),
+    ):
         yield mock
 
 
@@ -171,16 +182,20 @@ class TestClaudeCodeCLIProvider:
         mock_process = AsyncMock()
         mock_process.returncode = None  # Process still running
         mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
-        mock_process.kill = MagicMock()  # Use MagicMock since kill() is not async
-        mock_process.wait = AsyncMock()
         mock_subprocess.return_value = mock_process
 
-        with pytest.raises(RuntimeError, match="CLI command timed out"):
+        with (
+            patch(
+                "chunkhound.providers.llm.claude_code_cli_provider.terminate_cli_process",
+                new_callable=AsyncMock,
+            ) as mock_term,
+            pytest.raises(RuntimeError, match="CLI command timed out"),
+        ):
             await provider.complete("Test prompt", timeout=1)
 
-        # Verify process was killed and waited for (3 times due to retries)
-        assert mock_process.kill.call_count == 3  # max_retries = 3
-        assert mock_process.wait.call_count == 3
+        # Tree kill on each of max_retries attempts
+        assert mock_term.await_count == 3
+        assert all(c.args[0] is mock_process for c in mock_term.await_args_list)
 
     @pytest.mark.asyncio
     async def test_complete_timeout_ignores_stale_process_lookup_error(
@@ -190,14 +205,19 @@ class TestClaudeCodeCLIProvider:
         mock_process = AsyncMock()
         mock_process.returncode = None
         mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
-        mock_process.kill = MagicMock(side_effect=ProcessLookupError())
-        mock_process.wait = AsyncMock()
         mock_subprocess.return_value = mock_process
 
-        with pytest.raises(RuntimeError, match="CLI command timed out"):
-            await provider.complete("Test prompt", timeout=1)
+        async def _term_raises(_proc: object) -> None:
+            raise ProcessLookupError()
 
-        assert mock_process.wait.await_count == 3
+        with (
+            patch(
+                "chunkhound.providers.llm.claude_code_cli_provider.terminate_cli_process",
+                side_effect=_term_raises,
+            ),
+            pytest.raises(RuntimeError, match="CLI command timed out"),
+        ):
+            await provider.complete("Test prompt", timeout=1)
 
     @pytest.mark.asyncio
     async def test_complete_generic_failure_ignores_stale_process_lookup_error(
@@ -207,14 +227,19 @@ class TestClaudeCodeCLIProvider:
         mock_process = AsyncMock()
         mock_process.returncode = None
         mock_process.communicate = AsyncMock(side_effect=ValueError("boom"))
-        mock_process.kill = MagicMock(side_effect=ProcessLookupError())
-        mock_process.wait = AsyncMock()
         mock_subprocess.return_value = mock_process
 
-        with pytest.raises(RuntimeError, match="CLI command failed: boom"):
-            await provider.complete("Test prompt")
+        async def _term_raises(_proc: object) -> None:
+            raise ProcessLookupError()
 
-        assert mock_process.wait.await_count == 3
+        with (
+            patch(
+                "chunkhound.providers.llm.claude_code_cli_provider.terminate_cli_process",
+                side_effect=_term_raises,
+            ),
+            pytest.raises(RuntimeError, match="CLI command failed: boom"),
+        ):
+            await provider.complete("Test prompt")
 
     @pytest.mark.asyncio
     async def test_complete_cli_error(self, provider, mock_subprocess):
@@ -498,10 +523,15 @@ class TestClaudeCodeCLIProvider:
         mock_process.wait = AsyncMock()
         mock_subprocess.return_value = mock_process
 
-        with pytest.raises(RuntimeError, match="CLI command timed out"):
+        with (
+            patch(
+                "chunkhound.providers.llm.claude_code_cli_provider.terminate_cli_process",
+                new_callable=AsyncMock,
+            ) as mock_term,
+            pytest.raises(RuntimeError, match="CLI command timed out"),
+        ):
             await provider.complete("Test prompt", timeout=1)
 
-        # Verify process was NOT killed (since returncode was set)
-        # With retries, this will be called 3 times but each time returncode is 0
+        # terminate_cli_process is still invoked; it no-ops when returncode is set
+        assert mock_term.await_count == 3
         mock_process.kill.assert_not_called()
-        mock_process.wait.assert_not_called()

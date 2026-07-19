@@ -20,7 +20,11 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
-from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
+from chunkhound.providers.llm.base_cli_provider import (
+    BaseCLIProvider,
+    build_cli_argv,
+    resolve_cli_binary,
+)
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
 # Default synthesis-grade reasoning model for Codex CLI.
@@ -289,8 +293,9 @@ class CodexCLIProvider(BaseCLIProvider):
         auth or config) so health checks can report correctly.
         """
         try:
+            codex_bin = resolve_cli_binary("codex", env_var="CHUNKHOUND_CODEX_BIN")
             res = subprocess.run(
-                ["codex", "--version"],
+                build_cli_argv(codex_bin, "--version"),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=self.VERSION_CHECK_TIMEOUT,
@@ -315,10 +320,10 @@ class CodexCLIProvider(BaseCLIProvider):
 
         Returns None if the command fails or no visible models are found.
         """
-        codex_bin = os.getenv("CHUNKHOUND_CODEX_BIN", "codex")
         try:
+            codex_bin = resolve_cli_binary("codex", env_var="CHUNKHOUND_CODEX_BIN")
             result = subprocess.run(
-                [codex_bin, "debug", "models"],
+                build_cli_argv(codex_bin, "debug", "models"),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
@@ -372,7 +377,10 @@ class CodexCLIProvider(BaseCLIProvider):
         model: str | None,
     ) -> str:
         """Run `codex exec` and capture stdout with robust fallbacks."""
-        binary = os.getenv("CHUNKHOUND_CODEX_BIN", "codex")
+        try:
+            binary = resolve_cli_binary("codex", env_var="CHUNKHOUND_CODEX_BIN")
+        except FileNotFoundError as e:
+            raise RuntimeError(str(e)) from e
         overlay_home: str | None = None
         config_file_path: str | None = None
         extra_args: list[str] = []
@@ -504,12 +512,14 @@ class CodexCLIProvider(BaseCLIProvider):
                                 add_skip_git,
                             )
                         proc = await asyncio.create_subprocess_exec(
-                            binary,
-                            "exec",
-                            "-",
-                            *(["--json"] if json_mode else []),
-                            *extra_args,
-                            *(["--skip-git-repo-check"] if add_skip_git else []),
+                            *build_cli_argv(
+                                binary,
+                                "exec",
+                                "-",
+                                *(["--json"] if json_mode else []),
+                                *extra_args,
+                                *(["--skip-git-repo-check"] if add_skip_git else []),
+                            ),
                             cwd=cwd,
                             stdin=asyncio.subprocess.PIPE,
                             stdout=asyncio.subprocess.PIPE,
@@ -532,12 +542,14 @@ class CodexCLIProvider(BaseCLIProvider):
                                 add_skip_git,
                             )
                         proc = await asyncio.create_subprocess_exec(
-                            binary,
-                            "exec",
-                            content,
-                            *(["--json"] if json_mode else []),
-                            *extra_args,
-                            *(["--skip-git-repo-check"] if add_skip_git else []),
+                            *build_cli_argv(
+                                binary,
+                                "exec",
+                                content,
+                                *(["--json"] if json_mode else []),
+                                *extra_args,
+                                *(["--skip-git-repo-check"] if add_skip_git else []),
+                            ),
                             cwd=cwd,
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE,

@@ -98,10 +98,23 @@ def test_codex_cli_effort_resolution_default(monkeypatch: pytest.MonkeyPatch) ->
     assert source == "default"
 
 
+def _stub_codex_bin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
+    # Static discovery is lru_cached; clear between cases that change fake_run.
+    from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+
+    CodexCLIProvider.get_highest_priority_available_model.cache_clear()
+
+
 def test_codex_cli_model_discovery_nonzero_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+
+    _stub_codex_bin(monkeypatch)
 
     def fake_run(*args, **kwargs):  # noqa: ANN001, ARG001
         return type("Result", (), {"returncode": 1, "stdout": b""})()
@@ -116,6 +129,7 @@ def test_codex_cli_model_discovery_no_visible_models(
 ) -> None:
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
+    _stub_codex_bin(monkeypatch)
     output = b'{"models":[{"slug":"hidden","visibility":"hidden","priority":10}]}\n'
 
     def fake_run(*args, **kwargs):  # noqa: ANN001, ARG001
@@ -131,6 +145,8 @@ def test_codex_cli_model_discovery_malformed_output(
 ) -> None:
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
+    _stub_codex_bin(monkeypatch)
+
     def fake_run(*args, **kwargs):  # noqa: ANN001, ARG001
         return type("Result", (), {"returncode": 0, "stdout": b"not json\n"})()
 
@@ -144,6 +160,7 @@ def test_codex_cli_model_discovery_priority_selection(
 ) -> None:
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
+    _stub_codex_bin(monkeypatch)
     output = (
         b'{"models":['
         b'{"slug":"low","visibility":"list","priority":1},'

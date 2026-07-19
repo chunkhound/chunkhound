@@ -23,6 +23,10 @@ async def test_codex_cli_provider_passes_model_max_output_tokens_override(
         return DummyProc(out=b"OK", stdin=DummyPipe())
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
 
     provider = CodexCLIProvider(model="test-explicit-model", reasoning_effort="high")
 
@@ -55,6 +59,10 @@ async def test_codex_cli_provider_parses_agent_message_from_jsonl_stdout(
         return DummyProc(out=fixture, stdin=DummyPipe())
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
 
     provider = CodexCLIProvider(model="test-explicit-model", reasoning_effort="high")
     resp = await provider.complete("hi", max_completion_tokens=123)
