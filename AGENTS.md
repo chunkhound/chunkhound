@@ -139,6 +139,24 @@ setup and the environment-scoping gotcha that causes a confusing `403` if it's m
 ```bash
 rust-check: make rust-check   # cargo fmt --check + clippy -D warnings
 rust-test:  make rust-test    # cargo test
+
+# Build the native extension (required before running tests that import chunkhound_native)
+#
+# CI (has internet): DUCKDB_DOWNLOAD_LIB=1 downloads the precompiled shared library from GitHub.
+#   DUCKDB_DOWNLOAD_LIB=1 uv run maturin develop
+#
+# Local (no internet / air-gapped): reuse the static library compiled by a prior release build.
+#   The .a lives under target/release/build/libduckdb-sys-*/out/libduckdb.a — find it with:
+#     find target/release/build -name "libduckdb.a" | head -1
+#   Then build against it (symlink gives libduckdb-sys the name it expects):
+#     OUT=$(find "$(pwd)/target/release/build" -name "libduckdb.a" -printf "%h\n" | head -1)
+#     ln -sf "$OUT/libduckdb.a" "$OUT/libduckdb_static.a"
+#     DUCKDB_LIB_DIR="$OUT" DUCKDB_STATIC=1 RUSTFLAGS="-C link-arg=-lstdc++" uv run maturin develop --release
+#
+#   RUSTFLAGS note: -lstdc++ is required when statically linking DuckDB. The static
+#   .a includes C++ exception-handling code (__gxx_personality_v0) that lives in
+#   libstdc++.so. Without this flag the .so builds cleanly but fails at Python import
+#   with "undefined symbol: __gxx_personality_v0".
 ```
 
 ## PROJECT_MAINTENANCE
