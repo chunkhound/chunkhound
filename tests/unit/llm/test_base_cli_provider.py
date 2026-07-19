@@ -149,6 +149,35 @@ def test_build_cli_argv_quotes_spaces_in_binary_path(monkeypatch):
     assert f'"{path}"' in argv[4]
 
 
+def test_escape_cmd_argument_does_not_quote_8dot3_short_paths():
+    """Windows short paths use ``~``; quoting them breaks ``cmd /s /c``."""
+    short = r"C:\Users\USER~1\AppData\Roaming\npm\claude.cmd"
+    assert escape_cmd_argument(short) == short
+    assert not escape_cmd_argument(short).startswith('"')
+
+
+def test_build_cli_argv_8dot3_short_path_cmdline_does_not_start_with_quote(
+    monkeypatch,
+):
+    """``cmd /s`` strips first+last quote when the /c string starts with ``"``.
+
+    An 8.3 path like ``...\\USER~1\\...`` must stay unquoted so /s does not
+    mangle the line into ``...claude.cmd" --print ...``.
+    """
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    monkeypatch.delenv("COMSPEC", raising=False)
+    short = r"C:\Users\USER~1\AppData\Roaming\npm\claude.cmd"
+    argv = build_cli_argv(short, "--print", "--model", "haiku")
+    assert argv[1:4] == ["/d", "/s", "/c"]
+    cmdline = argv[4]
+    assert not cmdline.startswith('"'), cmdline
+    assert cmdline.startswith(short)
+    assert "--print" in cmdline
+    assert "--model haiku" in cmdline
+
+
 def test_build_cli_argv_no_wrap_for_exe(monkeypatch):
     monkeypatch.setattr(
         "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"

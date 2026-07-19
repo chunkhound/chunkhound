@@ -26,7 +26,11 @@ from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.utils.json_extraction import parse_and_validate_structured_json
 
 # Characters that require quoting as a cmd.exe token (beyond whitespace).
-_CMD_META_RE = re.compile(r'[\s"&|<>^()%!\[\]{}^=;!\'+,`~]')
+# Note: do NOT treat ``~`` as meta — Windows 8.3 short paths use it
+# (e.g. ``C:\Users\USER~1\...``). Quoting those makes the cmdline start with
+# ``"``, and ``cmd /s /c`` then strips the first and last quote on the line,
+# mangling the command. Bare ``~`` is not a cmd command separator.
+_CMD_META_RE = re.compile(r'[\s"&|<>^()%!\[\]{}^=;!\'+,`]')
 
 
 def resolve_cli_binary(
