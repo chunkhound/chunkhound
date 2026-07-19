@@ -207,6 +207,12 @@ chunkhound mcp [path] [options]
 | Flag | Description |
 |---|---|
 | `--no-daemon` | Run without daemon (single client mode) |
+| `--read-only` | Open the database read-only; disables indexing/watcher and runs without the daemon (DuckDB only) |
+| `--transport {stdio,http}` | Transport type for MCP server (default: `stdio`) |
+| `--host HOST` | Host to bind the HTTP transport to (default: `127.0.0.1`) |
+| `--port PORT` | Port to bind the HTTP transport to (default: `5173`) |
+| `--auth-token TOKEN` | Bearer token required to authenticate HTTP transport requests |
+| `--cors` | Enable CORS for the HTTP transport (for browser-based clients) |
 | `--config PATH` | Path to configuration file |
 | `--verbose` | Verbose output |
 | `--debug` | Debug output |
@@ -214,12 +220,20 @@ chunkhound mcp [path] [options]
 **Examples:**
 
 ```bash
-# Start MCP server for current directory
+# Start MCP server for current directory (stdio)
 chunkhound mcp
 
 # Start MCP server for a specific project
 chunkhound mcp /path/to/project
+
+# Start MCP server over HTTP transport
+chunkhound mcp --transport http --port 5173
+
+# HTTP transport bound to all interfaces, with auth required
+chunkhound mcp --transport http --host 0.0.0.0 --port 5173 --auth-token "$TOKEN" --cors
 ```
+
+> **Note:** binding to a non-loopback `--host` without `--auth-token` is refused at startup.
 
 ## `chunkhound map`
 
