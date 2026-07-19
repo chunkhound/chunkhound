@@ -1072,6 +1072,28 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         result
     }
 
+    fn read_chunks(&mut self) -> Result<Vec<crate::db::ChunkRow>, DbError> {
+        let conn = self.conn.as_ref().ok_or_else(|| {
+            DbError::Other("backend not connected".into())
+        })?;
+        let mut stmt = conn
+            .prepare("SELECT c.id, c.code FROM chunks c ORDER BY c.id")
+            .map_err(DbError::DuckDb)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(crate::db::ChunkRow {
+                    id: row.get(0)?,
+                    code: row.get(1)?,
+                })
+            })
+            .map_err(DbError::DuckDb)?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(DbError::DuckDb)?);
+        }
+        Ok(result)
+    }
+
     fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
         // Step 0a: Handle delete_paths OUTSIDE transaction (Invariant: DuckDB rejects
         // FK parent-row deletes inside an explicit transaction after child deletes).
