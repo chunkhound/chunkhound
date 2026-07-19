@@ -109,7 +109,11 @@ class _BearerAuthMiddleware:
         auth_header = headers.get(b"authorization", b"").decode("latin-1")
         expected = f"Bearer {self.token}"
         if not secrets.compare_digest(auth_header, expected):
-            response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+            response = JSONResponse(
+                {"error": "Unauthorized"},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Bearer realm="ChunkHound MCP"'},
+            )
             await response(scope, receive, send)
             return
 
