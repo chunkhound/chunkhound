@@ -6,7 +6,7 @@ This module provides a base class that handles:
 - Lifecycle management (startup/shutdown)
 - Common error handling patterns
 
-Architecture Note: MCP server (stdio-only) inherits from this base
+Architecture Note: every transport (stdio, HTTP) inherits from this base
 to ensure consistent initialization while respecting protocol-specific constraints.
 """
 
@@ -74,7 +74,7 @@ class MCPServerBase(ABC):
     """Base class for MCP server implementations.
 
     Provides common initialization, configuration validation, and lifecycle
-    management for stdio MCP server.
+    management shared by every transport (stdio, HTTP).
 
     Subclasses must implement:
     - _register_tools(): Register protocol-specific tool handlers
@@ -1331,9 +1331,8 @@ class MCPServerBase(ABC):
         filtered_count = len(TOOL_REGISTRY) - len(tools)
         if filtered_count > 0:
             has_llm = self.llm_manager is not None
-            has_emb = (
-                self.embedding_manager is not None
-                and bool(self.embedding_manager.list_providers())
+            has_emb = self.embedding_manager is not None and bool(
+                self.embedding_manager.list_providers()
             )
             has_reranker = has_reranker_support(self.embedding_manager)
             if debug_log := getattr(self, "debug_log", None):

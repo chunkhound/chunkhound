@@ -24,7 +24,7 @@ import httpx
 import pytest
 
 # Import Windows-safe subprocess utilities
-from tests.utils import HttpMcpClient, SubprocessJsonRpcClient
+from tests.utils import HttpMcpClient, SubprocessJsonRpcClient, SubprocessJsonRpcError
 from tests.utils.windows_compat import get_fs_event_timeout, windows_safe_tempdir
 from tests.utils.windows_subprocess import (
     create_subprocess_exec_safe,
@@ -576,6 +576,44 @@ sys.exit(asyncio.run(test()))
                     "degraded",
                 }
                 assert "scan_progress" in status_payload
+            finally:
+                await client.close()
+                await self._terminate(proc)
+                for task in drain_tasks:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+    @pytest.mark.asyncio
+    async def test_mcp_http_session_teardown(self):
+        """DELETE /mcp with Mcp-Session-Id explicitly terminates the session."""
+        with windows_safe_tempdir() as temp_path:
+            port = _get_free_port()
+            proc = await self._spawn_http_mcp_server(temp_path, port)
+            drain_tasks = [
+                asyncio.create_task(self._drain(proc.stdout)),
+                asyncio.create_task(self._drain(proc.stderr)),
+            ]
+
+            base_url = f"http://127.0.0.1:{port}"
+            client = HttpMcpClient(base_url)
+            try:
+                ready_timeout = max(30.0, get_fs_event_timeout())
+                await _wait_for_http_ready(base_url, ready_timeout, proc=proc)
+
+                await client.initialize(timeout=15.0)
+                await client.send_notification("notifications/initialized")
+
+                terminate_resp = await client.terminate_session(timeout=5.0)
+                assert terminate_resp.status_code == 200, terminate_resp.text
+
+                # The now-terminated session ID must be rejected, not silently
+                # resumed — proves DELETE actually tore down server-side state
+                # rather than being a no-op the client can't observe.
+                with pytest.raises(SubprocessJsonRpcError):
+                    await client.send_request("tools/list", timeout=5.0)
             finally:
                 await client.close()
                 await self._terminate(proc)

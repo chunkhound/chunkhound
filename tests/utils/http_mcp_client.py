@@ -11,8 +11,13 @@ from typing import Any
 
 import httpx
 
-from .jsonrpc_envelope import build_notification, build_request, unwrap_result
-from .subprocess_jsonrpc import JsonRpcTimeoutError, SubprocessJsonRpcError
+from .jsonrpc_envelope import (
+    JsonRpcTimeoutError,
+    SubprocessJsonRpcError,
+    build_notification,
+    build_request,
+    unwrap_result,
+)
 
 _ACCEPT_HEADER = "application/json, text/event-stream"
 
@@ -84,6 +89,22 @@ class HttpMcpClient:
     async def get(self, path: str, timeout: float = 5.0) -> httpx.Response:
         """GET an arbitrary path on the server (e.g. ``/health``)."""
         return await self._client.get(f"{self._base_url}{path}", timeout=timeout)
+
+    async def terminate_session(self, timeout: float = 5.0) -> httpx.Response:
+        """Explicitly tear down the current session via ``DELETE /mcp``.
+
+        Requires a prior ``initialize()`` call to have captured a session ID.
+        """
+        if self._session_id is None:
+            raise SubprocessJsonRpcError(
+                "terminate_session() called before a session ID was captured "
+                "(call initialize() first)"
+            )
+        return await self._client.delete(
+            self._mcp_url,
+            headers={"Mcp-Session-Id": self._session_id},
+            timeout=timeout,
+        )
 
     async def _post(self, payload: dict[str, Any], timeout: float) -> httpx.Response:
         headers = {"Accept": _ACCEPT_HEADER, "Content-Type": "application/json"}

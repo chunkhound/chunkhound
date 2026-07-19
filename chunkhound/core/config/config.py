@@ -14,7 +14,6 @@ indexing rules, etc.) in one place instead of copying .chunkhound.json
 to every project directory. Project-local files override the global layer.
 """
 
-import ipaddress
 import json
 import os
 from pathlib import Path
@@ -26,24 +25,8 @@ from .database_config import DatabaseConfig
 from .embedding_config import EmbeddingConfig
 from .indexing_config import IndexingConfig
 from .llm_config import LLMConfig
-from .mcp_config import MCPConfig
+from .mcp_config import MCPConfig, is_loopback_host
 from .research_config import ResearchConfig
-
-
-def _is_loopback_host(host: str) -> bool:
-    """True if ``host`` is a loopback address/hostname.
-
-    Handles "localhost" (case-insensitively) plus any valid loopback IP
-    literal — not just the exact strings "127.0.0.1"/"::1" — so e.g.
-    "127.0.0.2" or the expanded "0:0:0:0:0:0:0:1" IPv6 form are also
-    recognized as loopback rather than tripping the non-loopback-host check.
-    """
-    if host.strip().lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 class Config(BaseModel):
@@ -487,7 +470,7 @@ class Config(BaseModel):
                 errors.append("Embedding provider not properly configured")
 
         if command == "mcp" and self.mcp.transport == "http":
-            if not _is_loopback_host(self.mcp.host) and not self.mcp.auth_token:
+            if not is_loopback_host(self.mcp.host) and not self.mcp.auth_token:
                 errors.append(
                     "mcp.host is non-loopback but no auth_token is set. Binding "
                     "the HTTP transport to a non-localhost address without "

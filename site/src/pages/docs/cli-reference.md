@@ -208,6 +208,8 @@ chunkhound mcp [path] [options]
 |---|---|
 | `--no-daemon` | Run without daemon (single client mode) |
 | `--read-only` | Open the database read-only; disables indexing/watcher and runs without the daemon (DuckDB only) |
+| `--stdio` | Use stdio transport (default, without the daemon) |
+| `--show-setup` | Display MCP setup instructions and exit |
 | `--transport {stdio,http}` | Transport type for MCP server (default: `stdio`) |
 | `--host HOST` | Host to bind the HTTP transport to (default: `127.0.0.1`) |
 | `--port PORT` | Port to bind the HTTP transport to (default: `5173`) |

@@ -48,6 +48,20 @@ class _StreamableHttpEndpoint:
     Also: unlike ``Mount``, which only matches ``/mcp/*`` and 307-redirects
     a bare ``/mcp`` to ``/mcp/``, ``Route`` matches the exact ``/mcp`` path
     that MCP clients (and the issue's own curl example) are configured with.
+
+    Session teardown: this class is a plain callable (not a function/method),
+    so Starlette's ``Route`` never restricts it to specific HTTP methods —
+    ``DELETE /mcp`` reaches ``handle_request`` exactly like ``GET``/``POST``.
+    The MCP SDK's stateful ``StreamableHTTPSessionManager`` already handles
+    ``DELETE`` itself: given a valid ``Mcp-Session-Id`` header, it closes that
+    session's streams and marks it terminated, so subsequent requests with
+    the same session ID get 404 instead of resuming it. No extra routing is
+    needed here for a client to explicitly tear down its session. Note the
+    SDK keeps the terminated transport's dict entry (not just its streams)
+    for the life of the process — a server that serves many short-lived
+    stateful clients will accumulate small terminated-session entries over
+    time; this is an upstream SDK characteristic, not something this module
+    works around.
     """
 
     def __init__(self, session_manager: Any):
@@ -138,6 +152,11 @@ class HttpMCPServer(MCPServerBase):
         from starlette.routing import Route
 
         async def health(request: Any) -> JSONResponse:
+            # Deliberately unauthenticated (see _BearerAuthMiddleware) so
+            # load balancers/readiness probes can reach it without a token.
+            # derive_daemon_status can include scan_error/last_error text
+            # (e.g. file paths from a failed scan) — an accepted tradeoff
+            # for operational visibility, not an oversight.
             return JSONResponse(derive_daemon_status(self._scan_progress))
 
         from starlette.middleware import Middleware
@@ -155,6 +174,12 @@ class HttpMCPServer(MCPServerBase):
         if self.cors:
             from starlette.middleware.cors import CORSMiddleware
 
+            # allow_credentials is deliberately omitted: this transport uses
+            # bearer-token auth (sent explicitly via the Authorization header
+            # by the client code), never cookies, so there is nothing for
+            # "credentials" to carry. Wildcard allow_origins is also mutually
+            # exclusive with allow_credentials=True per the CORS spec — do
+            # not "helpfully" add it alongside allow_origins=["*"].
             middleware.append(
                 Middleware(
                     CORSMiddleware,

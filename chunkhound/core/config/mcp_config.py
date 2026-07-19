@@ -5,10 +5,27 @@ transport settings (stdio or HTTP) and server behavior.
 """
 
 import argparse
+import ipaddress
 import os
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+
+def is_loopback_host(host: str) -> bool:
+    """True if ``host`` is a loopback address/hostname.
+
+    Handles "localhost" (case-insensitively) plus any valid loopback IP
+    literal — not just the exact strings "127.0.0.1"/"::1" — so e.g.
+    "127.0.0.2" or the expanded "0:0:0:0:0:0:0:1" IPv6 form are also
+    recognized as loopback rather than tripping the non-loopback-host check.
+    """
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class MCPConfig(BaseModel):
@@ -27,14 +44,17 @@ class MCPConfig(BaseModel):
     host: str = Field(
         default="127.0.0.1", description="Host to bind the HTTP transport to"
     )
-    port: int = Field(default=5173, description="Port to bind the HTTP transport to")
+    port: int = Field(
+        default=5173,
+        ge=1,
+        le=65535,
+        description="Port to bind the HTTP transport to",
+    )
     auth_token: str | None = Field(
         default=None,
         description="Bearer token required to authenticate HTTP transport requests",
     )
-    cors: bool = Field(
-        default=False, description="Enable CORS for the HTTP transport"
-    )
+    cors: bool = Field(default=False, description="Enable CORS for the HTTP transport")
 
     # Internal settings
     max_concurrent_requests: int = Field(
