@@ -64,6 +64,16 @@ class _BearerAuthMiddleware:
     entire response body and would break SSE streaming. ``/health`` is
     always exempt, and every request passes through unchecked when no token
     is configured.
+
+    Registered as a Starlette ``Middleware`` entry (see ``_build_app``)
+    ordered AFTER ``CORSMiddleware`` rather than wrapped outside the whole
+    app: browsers send CORS preflight ``OPTIONS`` requests without an
+    ``Authorization`` header, so if this ran before ``CORSMiddleware`` it
+    would 401 every preflight (with no CORS headers on the response) and
+    break browser-based clients whenever both ``--cors`` and
+    ``--auth-token`` are set. ``CORSMiddleware`` answers preflight requests
+    itself and never forwards them further in, so this middleware only ever
+    sees real requests.
     """
 
     def __init__(self, app: Any, token: str | None):
@@ -130,14 +140,19 @@ class HttpMCPServer(MCPServerBase):
         async def health(request: Any) -> JSONResponse:
             return JSONResponse(derive_daemon_status(self._scan_progress))
 
+        from starlette.middleware import Middleware
+
         routes = [
             Route("/health", health, methods=["GET"]),
             Route("/mcp", _StreamableHttpEndpoint(self._session_manager)),
         ]
 
+        # Order matters: CORSMiddleware must be OUTERMOST (listed first) so it
+        # can answer preflight OPTIONS requests directly, before they ever
+        # reach the bearer-auth middleware. See _BearerAuthMiddleware's
+        # docstring for why the reverse order breaks browser clients.
         middleware = []
         if self.cors:
-            from starlette.middleware import Middleware
             from starlette.middleware.cors import CORSMiddleware
 
             middleware.append(
@@ -148,13 +163,13 @@ class HttpMCPServer(MCPServerBase):
                     allow_headers=["*"],
                 )
             )
+        middleware.append(Middleware(_BearerAuthMiddleware, token=self.auth_token))
 
-        app = Starlette(
+        return Starlette(
             routes=routes,
             middleware=middleware,
             lifespan=self._lifespan,
         )
-        return _BearerAuthMiddleware(app, self.auth_token)
 
     @asynccontextmanager
     async def _lifespan(self, app: Starlette) -> AsyncIterator[None]:

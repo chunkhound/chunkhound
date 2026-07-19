@@ -468,13 +468,50 @@ sys.exit(asyncio.run(test()))
                 break
 
     async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
-        if proc.returncode is None:
-            proc.terminate()
+        """Terminate a spawned ``uv run chunkhound mcp ...`` process tree.
+
+        ``uv run`` execs the real server as a child (or grandchild) process;
+        terminating only the ``uv``-tracked PID leaves that real process
+        running on Windows, where child processes are not part of the same
+        process group by default. That orphan keeps listening on its port
+        and holding an exclusive lock on its DB file indefinitely. Killing
+        the whole descendant tree (via psutil) avoids that leak.
+        """
+        if proc.returncode is not None:
+            return
+
+        import psutil
+
+        try:
+            parent = psutil.Process(proc.pid)
+            children = parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            children = []
+            parent = None
+
+        for child in children:
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                child.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        if parent is not None:
+            try:
+                parent.terminate()
+            except psutil.NoSuchProcess:
+                pass
+
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+
+        gone, alive = psutil.wait_procs(children, timeout=5.0)
+        for child in alive:
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
 
     @pytest.mark.asyncio
     async def test_mcp_http_protocol_handshake(self):
