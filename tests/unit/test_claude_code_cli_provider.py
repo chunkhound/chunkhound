@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -139,6 +140,119 @@ class TestClaudeCodeCLIProvider:
 
         cmd = mock_subprocess.call_args.args
         assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-5-20250929"
+
+    @pytest.mark.asyncio
+    async def test_complete_passes_mcp_config_as_temp_file_path(
+        self, provider, mock_subprocess
+    ):
+        """Inline JSON is not used; path to empty mcpServers file is passed."""
+        from pathlib import Path
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"ok", b"")
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("Test prompt")
+
+        cmd = mock_subprocess.call_args.args
+        # argv may be multi-token (.exe) or a single /c string (.cmd wrap)
+        blob = " ".join(str(a) for a in cmd)
+        assert "--mcp-config" in blob
+        assert "mcpServers" not in blob  # no inline JSON payload
+        assert '{"mcpServers":{}}' not in blob
+
+        # Resolve config path from multi-token argv when possible
+        if "--mcp-config" in cmd:
+            cfg = Path(cmd[cmd.index("--mcp-config") + 1])
+            assert cfg.suffix == ".json"
+            assert "chunkhound_claude_mcp_" in cfg.name
+            # File is removed after the call
+            assert not cfg.exists()
+        else:
+            # Windows cmd /c: path appears in the joined command string
+            assert "chunkhound_claude_mcp_" in blob
+            assert ".json" in blob
+
+    @pytest.mark.asyncio
+    async def test_complete_uses_disallowed_tools_not_empty_tools(
+        self, provider, mock_subprocess
+    ):
+        """Bare --disallowedTools denies all tools; avoid empty --tools ""."""
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"ok", b"")
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("Test prompt")
+
+        cmd = mock_subprocess.call_args.args
+        # mock_subprocess fixture uses a .exe path → multi-token argv
+        assert cmd[-1] == "--disallowedTools"
+        assert "--tools" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_complete_disallowed_tools_last_even_with_system_prompt(
+        self, provider, mock_subprocess
+    ):
+        """System prompt must not follow --disallowedTools."""
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"ok", b"")
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("User prompt", system="System instructions")
+
+        cmd = mock_subprocess.call_args.args
+        assert "--append-system-prompt" in cmd
+        assert cmd[cmd.index("--append-system-prompt") + 1] == "System instructions"
+        assert cmd[-1] == "--disallowedTools"
+
+    @pytest.mark.asyncio
+    async def test_mcp_config_temp_file_removed_after_cli_error(
+        self, provider, mock_subprocess
+    ):
+        """Temp MCP config is unlinked even when the CLI fails."""
+        from pathlib import Path
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 1
+        mock_process.communicate.return_value = (b"", b"fail")
+        mock_subprocess.return_value = mock_process
+        provider._max_retries = 1
+
+        with pytest.raises(RuntimeError, match="CLI command failed"):
+            await provider.complete("Test prompt")
+
+        cmd = mock_subprocess.call_args.args
+        assert "--mcp-config" in cmd
+        cfg = Path(cmd[cmd.index("--mcp-config") + 1])
+        assert not cfg.exists()
+
+    @pytest.mark.asyncio
+    async def test_write_empty_mcp_config_file_contents(self, tmp_path, monkeypatch):
+        """Temp MCP config is valid empty-servers JSON."""
+        import json
+
+        from chunkhound.providers.llm import claude_code_cli_provider as mod
+
+        monkeypatch.setattr(
+            mod.tempfile,
+            "mkstemp",
+            lambda **kwargs: (
+                os.open(
+                    str(tmp_path / "chunkhound_claude_mcp_test.json"),
+                    os.O_RDWR | os.O_CREAT | os.O_TRUNC,
+                ),
+                str(tmp_path / "chunkhound_claude_mcp_test.json"),
+            ),
+        )
+        path = mod._write_empty_mcp_config_file()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            assert data == {"mcpServers": {}}
+        finally:
+            path.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_complete_success(self, provider, mock_subprocess):

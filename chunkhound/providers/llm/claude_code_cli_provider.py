@@ -4,16 +4,21 @@ This provider wraps the Claude Code CLI (claude --print) to enable deep research
 using the user's existing Claude subscription instead of API credits.
 
 Note: This provider is configured for vanilla LLM behavior:
-- All tools disabled via --tools ""
-- MCP servers disabled via empty --mcp-config
+- All tools disabled via bare ``--disallowedTools`` (CLI: flag alone = deny all;
+  avoids empty ``--tools ""`` which Windows ``.cmd`` shims garble)
+- MCP servers disabled via empty --mcp-config (temp JSON file on disk so
+  Windows ``claude.cmd`` shims do not garble inline JSON quotes)
 - Workspace isolation (runs from temp directory to prevent context gathering)
 - Clean API access without workspace overhead
 """
+
+from __future__ import annotations
 
 import asyncio
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 
 from loguru import logger
 
@@ -31,6 +36,30 @@ from chunkhound.providers.llm.base_cli_provider import (
     terminate_cli_process,
 )
 from chunkhound.utils.text_sanitization import sanitize_error_text
+
+# Empty MCP config: no servers. Passed as a file path (not inline JSON) so
+# Windows cmd.exe / .cmd batch reparse cannot mangle embedded quotes.
+_EMPTY_MCP_CONFIG_JSON = b'{"mcpServers":{}}\n'
+
+
+def _write_empty_mcp_config_file() -> Path:
+    """Write a unique empty MCP config JSON file; caller must unlink it."""
+    fd, name = tempfile.mkstemp(
+        prefix="chunkhound_claude_mcp_",
+        suffix=".json",
+        text=False,
+    )
+    path = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(_EMPTY_MCP_CONFIG_JSON)
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return path.resolve()
 
 
 class ClaudeCodeCLIProvider(BaseCLIProvider):
@@ -121,111 +150,133 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             raise RuntimeError(str(e)) from e
 
         model_arg = self._map_model_to_cli_arg(self._model)
-        # Prompt is passed via stdin, not CLI args (avoids ARG_MAX limit).
-        cli_args = [
-            "--print",
-            "--model",
-            model_arg,
-            "--output-format",
-            "text",
-            # Disable all tools for vanilla LLM behavior.
-            "--tools",
-            "",
-            # Prevent MCP server loading for clean LLM access.
-            "--mcp-config",
-            '{"mcpServers":{}}',
-            "--strict-mcp-config",
-            # Prevent session persistence (avoid context bleed between calls).
-            "--no-session-persistence",
-        ]
-        if system:
-            cli_args.extend(["--append-system-prompt", system])
-        cmd = build_cli_argv(claude_bin, *cli_args)
 
-        # Set environment for subscription-based auth
-        env = os.environ.copy()
-        env["CLAUDE_USE_SUBSCRIPTION"] = "true"
+        # Inline JSON on --mcp-config is mangled by Windows cmd.exe / .cmd
+        # batch reparse (nested quotes). CLI accepts a file path instead.
+        mcp_config_path = _write_empty_mcp_config_file()
+        try:
+            # Prompt is passed via stdin, not CLI args (avoids ARG_MAX limit).
+            cli_args = [
+                "--print",
+                "--model",
+                model_arg,
+                "--output-format",
+                "text",
+                # Empty MCP servers via file path (not inline JSON).
+                "--mcp-config",
+                str(mcp_config_path),
+                "--strict-mcp-config",
+                # Prevent session persistence (avoid context bleed between calls).
+                "--no-session-persistence",
+            ]
+            if system:
+                cli_args.extend(["--append-system-prompt", system])
+            # Deny all tools (flag alone per claude --help). Non-empty token so
+            # Windows .cmd reparse cannot garble an empty --tools "" value.
+            # Always last so a value-taking parser cannot swallow a following
+            # --option (e.g. --append-system-prompt) as a tool name.
+            cli_args.append("--disallowedTools")
+            cmd = build_cli_argv(claude_bin, *cli_args)
 
-        # Suppress the CLI's auto-updater: updates should be driven by the
-        # user's interactive `claude` sessions, not ChunkHound subprocess calls.
-        env["DISABLE_AUTOUPDATER"] = "1"
+            # Set environment for subscription-based auth
+            env = os.environ.copy()
+            env["CLAUDE_USE_SUBSCRIPTION"] = "true"
 
-        # Remove ANTHROPIC_API_KEY if present to force subscription auth
-        env.pop("ANTHROPIC_API_KEY", None)
+            # Suppress the CLI's auto-updater: updates should be driven by the
+            # user's interactive `claude` sessions, not ChunkHound subprocess calls.
+            env["DISABLE_AUTOUPDATER"] = "1"
 
-        # Use provided timeout or default
-        request_timeout = timeout if timeout is not None else self._timeout
+            # Remove ANTHROPIC_API_KEY if present to force subscription auth
+            env.pop("ANTHROPIC_API_KEY", None)
 
-        # Run command with retry logic
-        last_error = None
-        for attempt in range(self._max_retries):
-            process = None
-            try:
-                # Create subprocess with neutral CWD to prevent workspace scanning
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdin=subprocess.PIPE,  # Pass prompt via stdin (avoids ARG_MAX)
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=env,
-                    cwd=tempfile.gettempdir(),  # Cross-platform temp directory
-                )
+            # Use provided timeout or default
+            request_timeout = timeout if timeout is not None else self._timeout
 
-                # Wrap communicate() with timeout (this is the long-running part)
-                # Pass prompt via stdin to avoid OS ARG_MAX limits (~256KB on macOS)
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=prompt.encode("utf-8")),
-                    timeout=request_timeout,
-                )
-
-                if process.returncode != 0:
-                    raw_err = (stderr or stdout or b"").decode("utf-8", errors="ignore")
-                    error_msg = (
-                        sanitize_error_text(raw_err.strip())
-                        or f"Exit code {process.returncode}"
+            # Run command with retry logic
+            last_error = None
+            for attempt in range(self._max_retries):
+                process = None
+                try:
+                    # Create subprocess with neutral CWD to prevent workspace scanning
+                    process = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdin=subprocess.PIPE,  # Pass prompt via stdin (avoids ARG_MAX)
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        env=env,
+                        cwd=tempfile.gettempdir(),  # Cross-platform temp directory
                     )
+
+                    # Wrap communicate() with timeout (this is the long-running part)
+                    # Pass prompt via stdin to avoid OS ARG_MAX limits (~256KB on macOS)
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(input=prompt.encode("utf-8")),
+                        timeout=request_timeout,
+                    )
+
+                    if process.returncode != 0:
+                        raw_err = (stderr or stdout or b"").decode(
+                            "utf-8", errors="ignore"
+                        )
+                        error_msg = (
+                            sanitize_error_text(raw_err.strip())
+                            or f"Exit code {process.returncode}"
+                        )
+                        last_error = RuntimeError(
+                            f"CLI command failed (exit {process.returncode}): "
+                            f"{error_msg}"
+                        )
+                        if attempt < self._max_retries - 1:
+                            logger.warning(
+                                f"CLI attempt {attempt + 1} failed, retrying: "
+                                f"{error_msg}"
+                            )
+                            continue
+                        raise last_error
+
+                    return stdout.decode("utf-8").strip()
+
+                except asyncio.TimeoutError as e:
+                    # Kill cmd.exe + Node/CLI tree when wrapping a .cmd shim
+                    if process is not None:
+                        try:
+                            await terminate_cli_process(process)
+                        except ProcessLookupError:
+                            pass
+
                     last_error = RuntimeError(
-                        f"CLI command failed (exit {process.returncode}): {error_msg}"
+                        f"CLI command timed out after {request_timeout}s"
                     )
                     if attempt < self._max_retries - 1:
                         logger.warning(
-                            f"CLI attempt {attempt + 1} failed, retrying: {error_msg}"
+                            f"CLI attempt {attempt + 1} timed out, retrying"
                         )
                         continue
-                    raise last_error
+                    raise last_error from e
 
-                return stdout.decode("utf-8").strip()
+                except Exception as e:
+                    if isinstance(e, RuntimeError):
+                        raise
+                    if process is not None:
+                        try:
+                            await terminate_cli_process(process)
+                        except ProcessLookupError:
+                            pass
 
-            except asyncio.TimeoutError as e:
-                # Kill cmd.exe + Node/CLI tree when wrapping a .cmd shim
-                if process is not None:
-                    try:
-                        await terminate_cli_process(process)
-                    except ProcessLookupError:
-                        pass
+                    last_error = RuntimeError(f"CLI command failed: {e}")
+                    if attempt < self._max_retries - 1:
+                        logger.warning(f"CLI attempt {attempt + 1} failed: {e}")
+                        continue
+                    raise last_error from e
 
-                last_error = RuntimeError(
-                    f"CLI command timed out after {request_timeout}s"
+            # Should not reach here, but just in case
+            raise last_error or RuntimeError("CLI command failed after retries")
+        finally:
+            try:
+                mcp_config_path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.debug(
+                    "Failed to remove temp MCP config {}: {}",
+                    mcp_config_path,
+                    e,
                 )
-                if attempt < self._max_retries - 1:
-                    logger.warning(f"CLI attempt {attempt + 1} timed out, retrying")
-                    continue
-                raise last_error from e
-
-            except Exception as e:
-                if isinstance(e, RuntimeError):
-                    raise
-                if process is not None:
-                    try:
-                        await terminate_cli_process(process)
-                    except ProcessLookupError:
-                        pass
-
-                last_error = RuntimeError(f"CLI command failed: {e}")
-                if attempt < self._max_retries - 1:
-                    logger.warning(f"CLI attempt {attempt + 1} failed: {e}")
-                    continue
-                raise last_error from e
-
-        # Should not reach here, but just in case
-        raise last_error or RuntimeError("CLI command failed after retries")
