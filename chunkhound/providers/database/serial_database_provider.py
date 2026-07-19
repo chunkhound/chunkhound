@@ -54,8 +54,15 @@ class SerialDatabaseProvider(ABC):
         self.config = config
         self._db_path = db_path
 
-        # Create serial executor for all database operations
-        self._executor = SerialDatabaseExecutor()
+        # Create serial executor for all database operations.
+        # Timeout comes from DatabaseConfig (JSON/env/CLI); None keeps the
+        # built-in per-operation defaults (30s normal, 660s compaction).
+        execute_timeout = (
+            config.execute_timeout_seconds if config is not None else None
+        )
+        self._executor = SerialDatabaseExecutor(
+            execute_timeout_seconds=execute_timeout
+        )
 
         # Service layer components
         self._indexing_coordinator: IndexingCoordinator | None = None
