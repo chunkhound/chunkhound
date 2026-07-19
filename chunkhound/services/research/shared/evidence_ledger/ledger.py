@@ -14,9 +14,11 @@ Combines ConstantsLedger and FactsLedger into a single class for:
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import Any
 
 from .models import ConfidenceLevel, ConstantEntry, EntityLink, FactConflict, FactEntry
 from .prompts import (
@@ -26,8 +28,27 @@ from .prompts import (
     FACTS_REDUCE_INSTRUCTION,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Iterable
+
+def _coerce_chunk_metadata(raw: Any) -> dict[str, Any]:
+    """Coerce chunk metadata to a dict (Lance may leave JSON as str)."""
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        if not raw.strip():
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except json.JSONDecodeError:
+                return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 # Negation patterns that suggest conflicting facts
@@ -108,10 +129,14 @@ class EvidenceLedger:
         ledger = cls()
         for chunk in chunks:
             file_path = chunk.get("file_path", "")
-            metadata = chunk.get("metadata") or {}
+            metadata = _coerce_chunk_metadata(chunk.get("metadata"))
             chunk_constants = metadata.get("constants") or []
+            if not isinstance(chunk_constants, list):
+                continue
 
             for const in chunk_constants:
+                if not isinstance(const, dict):
+                    continue
                 name = const.get("name")
                 if not name:
                     continue

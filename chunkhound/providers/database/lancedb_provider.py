@@ -130,17 +130,39 @@ def _serialize_metadata(metadata: dict | None) -> str | None:
     return json.dumps(metadata) if metadata else None
 
 
-def _deserialize_metadata(metadata_json: str | float | None) -> dict:
-    """Deserialize chunk metadata from JSON string.
+def _deserialize_metadata(metadata_json: Any) -> dict:
+    """Deserialize chunk metadata from Lance storage into a dict.
 
-    Handles pandas NaN values (float) which represent NULL string fields.
+    Storage is a JSON string column. Callers sometimes also pass an already
+    parsed dict. Handles pandas NaN (NULL string fields). Never returns a
+    bare str — consumers call ``.get`` on the result.
     """
-    if metadata_json is None or (isinstance(metadata_json, float) and np.isnan(metadata_json)):
+    if metadata_json is None or (
+        isinstance(metadata_json, float) and np.isnan(metadata_json)
+    ):
         return {}
+    if isinstance(metadata_json, dict):
+        return metadata_json
     if isinstance(metadata_json, str):
-        return json.loads(metadata_json)
-    # Handle unexpected types by converting to string first
-    return json.loads(str(metadata_json))
+        if not metadata_json.strip():
+            return {}
+        try:
+            parsed = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            return {}
+        # Double-encoded JSON string → parse once more
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except json.JSONDecodeError:
+                return {}
+        return parsed if isinstance(parsed, dict) else {}
+    # Unexpected types: best-effort via str()
+    try:
+        parsed = json.loads(str(metadata_json))
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
 
 
 def _escape_like_pattern(value: str) -> str:
@@ -1499,7 +1521,22 @@ class LanceDBProvider(SerialDatabaseProvider):
                     )
                     for result in results
                 ]
-            return results
+            # Dict path: keep Lance columns (incl. embedding for get_file_stats)
+            # and only normalize metadata + dual aliases for research/DuckDB parity.
+            # Research import-resolution uses as_model=False and metadata.get(...).
+            formatted: list[dict[str, Any]] = []
+            for result in results:
+                row = dict(result)
+                row["metadata"] = _deserialize_metadata(row.get("metadata"))
+                # Dual keys: search/research often use symbol/code/chunk_id
+                if "name" in row and "symbol" not in row:
+                    row["symbol"] = row.get("name") or ""
+                if "content" in row and "code" not in row:
+                    row["code"] = row.get("content") or ""
+                if "id" in row and "chunk_id" not in row:
+                    row["chunk_id"] = row["id"]
+                formatted.append(row)
+            return formatted
         except Exception as e:
             logger.error(f"Error getting chunks by file ID: {e}")
             return []
@@ -2305,7 +2342,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                         # Carried for residual embed path so insert_embeddings can
                         # merge_insert without re-reading full rows (scale-critical).
                         "created_time": chunk.get("created_time"),
-                        "metadata": chunk.get("metadata"),
+                        "metadata": _deserialize_metadata(chunk.get("metadata")),
                     }
                 )
 

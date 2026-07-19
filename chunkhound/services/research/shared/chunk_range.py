@@ -5,6 +5,7 @@ Expands raw start/end lines to encompass complete language constructs
 and brace-matching for C-family languages.
 """
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -54,7 +55,18 @@ def expand_to_natural_boundaries(
         return start_idx, end_idx
 
     # Check if chunk metadata indicates this is already a complete unit
-    metadata = chunk.get("metadata", {})
+    # Lance may leave metadata as a JSON string if a code path skipped deserialize.
+    raw_meta = chunk.get("metadata", {})
+    if isinstance(raw_meta, str):
+        try:
+            parsed = json.loads(raw_meta) if raw_meta.strip() else {}
+            metadata = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            metadata = {}
+    elif isinstance(raw_meta, dict):
+        metadata = raw_meta
+    else:
+        metadata = {}
     chunk_kind = metadata.get("kind") or chunk.get("symbol_type", "")
 
     # If this chunk is marked as a complete function/class/method, use its exact boundaries
