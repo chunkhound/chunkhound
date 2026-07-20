@@ -1,4 +1,6 @@
 mod config;
+mod differ;
+#[allow(clippy::module_inception)]
 mod pipeline;
 mod report;
 mod state;

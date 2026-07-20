@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use super::config::PipelineConfig;
+use super::differ::{DbFileEntry, DiffResult};
 use super::report::PipelineReport;
 
 use crate::db::{create_backend, DbBackend, DbConfig};
@@ -31,8 +32,8 @@ impl IndexingPipeline {
     ///
     /// Called from Python via `asyncio.to_thread(pipeline.run, ...)`.
     ///
-    /// Phase 1 (current): single-threaded parse → store, no embeddings, no diffing.
-    #[pyo3(signature = (files, parse_callback, embed_callback=None, progress_callback=None))]
+    /// Pipeline order: parse → embed → write (single transaction).
+    #[pyo3(signature = (files, parse_callback, embed_callback=None, progress_callback=None, incremental=false))]
     fn run(
         &mut self,
         py: Python<'_>,
@@ -40,23 +41,87 @@ impl IndexingPipeline {
         parse_callback: Py<PyAny>,
         embed_callback: Option<Py<PyAny>>,
         progress_callback: Option<Py<PyAny>>,
+        incremental: bool,
     ) -> PyResult<PipelineReport> {
-        let _ = (&embed_callback, &progress_callback); // unused in Phase 1
+        let _ = &progress_callback; // unused — callback reserved for future progress reporting
         let started = Instant::now();
 
         if files.is_empty() {
             return Ok(PipelineReport::empty());
         }
 
-        let file_count = files.len() as u64;
-        let batch_paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+        let mut file_count = files.len() as u64;
+        let mut batch_paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+
+        // ── Incremental diff (Phase 3) ─────────────────────────
+        let delete_paths: Vec<String>;
+        if incremental {
+            let diff = self.compute_diff_blocking(&batch_paths)?;
+            // Only process changed files
+            batch_paths = diff.changed;
+            delete_paths = diff.removed;
+            // Update file_count to reflect what will actually be processed
+            file_count = batch_paths.len() as u64;
+        } else {
+            delete_paths = Vec::new();
+        }
 
         // Phase 1: single-threaded parse.
-        let parsed = self.parse_batch(py, &batch_paths, &parse_callback)?;
+        let mut parsed = self.parse_batch(py, &batch_paths, &parse_callback)?;
+
+        // ── Embed (before write) ───────────────────────────────
+        if let Some(ref embed_py) = embed_callback {
+            if !self.config.skip_embeddings {
+                // Collect all chunk texts with their positions for back-mapping.
+                let mut embed_targets: Vec<(usize, usize, String)> = Vec::new();
+                for (fi, pf) in parsed.iter().enumerate() {
+                    if pf.error.is_some() {
+                        continue;
+                    }
+                    for (ci, ch) in pf.chunks.iter().enumerate() {
+                        let text = ch
+                            .embed_text
+                            .as_deref()
+                            .unwrap_or(&ch.code)
+                            .to_string();
+                        embed_targets.push((fi, ci, text));
+                    }
+                }
+
+                if !embed_targets.is_empty() {
+                    let batch_size = self.config.embed_batch_size.max(1);
+                    let provider = self.config.embedding_provider.clone();
+                    let model = self.config.embedding_model.clone();
+
+                    for batch in embed_targets.chunks(batch_size) {
+                        let texts: Vec<String> =
+                            batch.iter().map(|(_, _, t)| t.clone()).collect();
+
+                        let embed_cb = embed_py.bind(py);
+                        let vectors: Vec<Vec<f64>> =
+                            embed_cb.call1((texts,))?.extract()?;
+
+                        if vectors.is_empty() {
+                            continue;
+                        }
+
+                        // Map vectors back to NewChunk in parsed files.
+                        for (i, (fi, ci, _)) in batch.iter().enumerate() {
+                            if let Some(vec) = vectors.get(i) {
+                                let chunk = &mut parsed[*fi].chunks[*ci];
+                                chunk.embedding =
+                                    Some(vec.iter().map(|x| *x as f32).collect());
+                                chunk.provider = Some(provider.clone());
+                                chunk.model = Some(model.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Build DbWriterBatch from parsed results.
         let mut file_records = Vec::with_capacity(parsed.len());
-        let delete_paths: Vec<String> = Vec::new();
 
         for pf in &parsed {
             if pf.error.is_some() {
@@ -81,9 +146,9 @@ impl IndexingPipeline {
                     end_byte: ch.end_byte,
                     language: ch.language.clone(),
                     metadata: ch.metadata.clone(),
-                    embedding: None,
-                    provider: None,
-                    model: None,
+                    embedding: ch.embedding.clone(),
+                    provider: ch.provider.clone(),
+                    model: ch.model.clone(),
                 })
                 .collect();
 
@@ -123,7 +188,7 @@ impl IndexingPipeline {
 
         // Resolve directory→db file path.
         let db_file: PathBuf = if self.config.db_path.as_os_str().is_empty()
-            || self.config.db_path == PathBuf::from(":memory:")
+            || self.config.db_path.as_os_str() == ":memory:"
         {
             PathBuf::from(":memory:")
         } else {
@@ -143,90 +208,25 @@ impl IndexingPipeline {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
                         "Failed to create db directory {}: {}",
-                        parent.display(), e
+                        parent.display(),
+                        e
                     ))
                 })?;
             }
         }
 
-        let result: BatchResult = py.allow_threads(|| {
-            let mut backend: Box<dyn DbBackend> = create_backend(db_config);
-            backend.open()?;
-            let res = backend.write_batch(&batch)?;
-            backend.close()?;
-            Ok::<_, crate::error::DbError>(res)
-        })
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let result: BatchResult = py
+            .allow_threads(|| {
+                let mut backend: Box<dyn DbBackend> = create_backend(db_config);
+                backend.open()?;
+                let res = backend.write_batch(&batch)?;
+                backend.close()?;
+                Ok::<_, crate::error::DbError>(res)
+            })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let chunks_written = result.chunks_written;
-        let mut embeddings_generated: u64 = result.embeddings_written;
-
-        // Phase 2: Generate embeddings if callback provided and not skipped.
-        if let Some(ref embed_py) = embed_callback {
-            if !self.config.skip_embeddings && chunks_written > 0 {
-                let db_path = self.config.db_path.join("chunks.db");
-                let db_path_str = db_path.to_string_lossy().into_owned();
-
-                // Read chunks from the DB (re-open connection).
-                let db_cfg = DbConfig {
-                    db_path: db_path_str.clone(),
-                    compaction_batch_threshold: self.config.compaction_batch_threshold,
-                    compaction_threshold: self.config.compaction_threshold,
-                    compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024
-                        * 1024,
-                };
-
-                let chunks = py.allow_threads(|| {
-                    let mut backend: Box<dyn DbBackend> = create_backend(db_cfg);
-                    backend.open()?;
-                    let chunks = backend.read_chunks()?;
-                    backend.close()?;
-                    Ok::<_, crate::error::DbError>(chunks)
-                })
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-                if !chunks.is_empty() {
-                    // Batch the chunks
-                    let batch_size = self.config.embed_batch_size as usize;
-                    for batch_chunks in chunks.chunks(batch_size) {
-                        let texts: Vec<String> =
-                            batch_chunks.iter().map(|c| c.code.clone()).collect();
-
-                        // Call Python embed_callback
-                        let embed_cb = embed_py.bind(py);
-                        let vectors: Vec<Vec<f64>> = embed_cb
-                            .call1((texts,))?
-                            .extract()?;
-
-                        if vectors.is_empty() {
-                            continue;
-                        }
-                        let dims = vectors[0].len();
-
-                        // Build Python list of dicts for the store callback
-                        let py_list = PyList::empty_bound(py);
-                        for (chunk, vec) in batch_chunks.iter().zip(vectors.iter()) {
-                            let py_dict = PyDict::new_bound(py);
-                            py_dict.set_item("chunk_id", chunk.id)?;
-                            py_dict.set_item("provider", self.config.embedding_provider.as_str())?;
-                            py_dict.set_item("model", self.config.embedding_model.as_str())?;
-                            py_dict.set_item("embedding", vec.clone())?;
-                            py_dict.set_item("dims", dims)?;
-                            py_list.append(py_dict)?;
-                        }
-
-                        // Call Python store_embeddings_callback via the registry
-                        let store_fn = py
-                            .import_bound("chunkhound.pipeline_bridge")?
-                            .getattr("store_embeddings_callback")?;
-                        let stored: u64 = store_fn
-                            .call1((db_path_str.as_str(), py_list))?
-                            .extract()?;
-                        embeddings_generated += stored;
-                    }
-                }
-            }
-        }
+        let embeddings_generated = result.embeddings_written;
 
         Ok(PipelineReport {
             files_processed: file_count,
@@ -243,6 +243,104 @@ impl IndexingPipeline {
 // ── Internal helpers ────────────────────────────────────────────
 
 impl IndexingPipeline {
+    /// Read the DB state and compute which files changed.
+    fn compute_diff_blocking(&self, files: &[PathBuf]) -> PyResult<DiffResult> {
+        let db_file = if self.config.db_path.as_os_str().is_empty()
+            || self.config.db_path.as_os_str() == ":memory:"
+        {
+            return Ok(DiffResult {
+                changed: files.to_vec(),
+                removed: Vec::new(),
+                files_scanned: files.len(),
+            });
+        } else {
+            self.config.db_path.join("chunks.db")
+        };
+
+        if !db_file.exists() {
+            return Ok(DiffResult {
+                changed: files.to_vec(),
+                removed: Vec::new(),
+                files_scanned: files.len(),
+            });
+        }
+
+        let conn = duckdb::Connection::open(&db_file)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let mut stmt = conn
+            .prepare("SELECT path, EXTRACT(EPOCH FROM modified_time) FROM files")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let db_entries: Vec<DbFileEntry> = stmt
+            .query_map([], |row| {
+                let path: String = row.get(0)?;
+                let mtime: f64 = row.get(1)?;
+                Ok(DbFileEntry { path, mtime })
+            })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // DuckDB stores to_timestamp(epoch) using local time, so EXTRACT(EPOCH)
+        // returns a value shifted by the timezone offset.  Compute the median
+        // offset (db_mtime - disk_mtime) and normalize.
+        let disk_mtimes: Vec<Option<f64>> = files
+            .iter()
+            .map(|p| {
+                std::fs::metadata(p)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64())
+                            .unwrap_or(0.0)
+                    })
+            })
+            .collect();
+
+        let mut offsets: Vec<f64> = Vec::new();
+        for e in &db_entries {
+            // Find matching disk mtime by relative path
+            for (fp, dm_opt) in files.iter().zip(disk_mtimes.iter()) {
+                if let Some(dm) = dm_opt {
+                    let rel = fp
+                        .strip_prefix(&self.config.project_root)
+                        .ok()
+                        .map(|r| r.to_string_lossy().replace('\\', "/"));
+                    if rel.as_deref() == Some(&e.path) {
+                        offsets.push(e.mtime - dm);
+                        break;
+                    }
+                }
+            }
+        }
+
+        offsets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let tz_offset = if offsets.len() >= 2 {
+            offsets[offsets.len() / 2]
+        } else {
+            offsets.first().copied().unwrap_or(0.0)
+        };
+
+        let normalized: Vec<DbFileEntry> = db_entries
+            .iter()
+            .map(|e| DbFileEntry {
+                path: e.path.clone(),
+                mtime: e.mtime - tz_offset,
+            })
+            .collect();
+
+        let result = super::differ::compute_diff(
+            &normalized,
+            files,
+            &self.config.project_root,
+            self.config.mtime_epsilon_seconds,
+        );
+
+        Ok(result)
+    }
+
     /// Parse a batch of files using the Python callback.
     fn parse_batch(
         &self,
@@ -262,14 +360,9 @@ impl IndexingPipeline {
                 Ok(ret) => {
                     // Callback returns (language: str, chunks: list[dict])
                     let tuple: Bound<'_, PyAny> = ret;
-                    let lang: String = tuple
-                        .get_item(0)?
-                        .extract::<String>()
-                        .unwrap_or_default();
-                    let chunks_py: Bound<'_, PyList> = tuple
-                        .get_item(1)?
-                        .downcast_into::<PyList>()
-                        .map_err(|_| {
+                    let lang: String = tuple.get_item(0)?.extract::<String>().unwrap_or_default();
+                    let chunks_py: Bound<'_, PyList> =
+                        tuple.get_item(1)?.downcast_into::<PyList>().map_err(|_| {
                             pyo3::exceptions::PyTypeError::new_err(
                                 "parse callback must return (str, list[dict])",
                             )
@@ -318,7 +411,10 @@ impl IndexingPipeline {
     }
 
     /// Extract NewChunk structs from a Python list[dict].
-    fn extract_chunks(py: Python<'_>, chunks_py: &Bound<'_, PyList>) -> Vec<super::types::NewChunk> {
+    fn extract_chunks(
+        py: Python<'_>,
+        chunks_py: &Bound<'_, PyList>,
+    ) -> Vec<super::types::NewChunk> {
         let mut chunks = Vec::with_capacity(chunks_py.len());
 
         for item in chunks_py.iter() {

@@ -51,8 +51,7 @@ impl PipelineConfig {
             project_root: get_str_or(dict, "project_root", "")?.into(),
             db_path: get_str_or(dict, "db_path", "")?.into(),
             db_batch_size: get_u64_or(dict, "db_batch_size", 100)? as usize,
-            compaction_batch_threshold: get_u64_or(dict, "compaction_batch_threshold", 10)?
-                as u32,
+            compaction_batch_threshold: get_u64_or(dict, "compaction_batch_threshold", 10)? as u32,
             compaction_threshold: get_f64_or(dict, "compaction_threshold", 0.60)?,
             compaction_min_size_mb: get_u64_or(dict, "compaction_min_size_mb", 10)?,
             disk_usage_limit_mb: get_opt_f64(dict, "disk_usage_limit_mb")?,
@@ -67,17 +66,11 @@ impl PipelineConfig {
             skip_embeddings: get_bool_or(dict, "skip_embeddings", false)?,
 
             per_file_timeout_secs: get_f64_or(dict, "per_file_timeout_secs", 3.0)?,
-            per_file_timeout_min_size_kb: get_u64_or(
-                dict,
-                "per_file_timeout_min_size_kb",
-                128,
-            )? as u32,
+            per_file_timeout_min_size_kb: get_u64_or(dict, "per_file_timeout_min_size_kb", 128)?
+                as u32,
             detect_embedded_sql: get_bool_or(dict, "detect_embedded_sql", true)?,
-            config_file_size_threshold_kb: get_u64_or(
-                dict,
-                "config_file_size_threshold_kb",
-                20,
-            )? as u32,
+            config_file_size_threshold_kb: get_u64_or(dict, "config_file_size_threshold_kb", 20)?
+                as u32,
 
             embedding_provider: get_str_or(dict, "embedding_provider", "")?,
             embedding_model: get_str_or(dict, "embedding_model", "")?,

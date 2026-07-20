@@ -4,18 +4,10 @@ use crate::types::{BatchResult, DbWriterBatch};
 pub mod duckdb_backend;
 pub use duckdb_backend::DuckDbHnswBackend;
 
-/// A single chunk row returned by read_chunks.
-#[derive(Debug, Clone)]
-pub struct ChunkRow {
-    pub id: i64,
-    pub code: String,
-}
-
 pub trait DbBackend: Send {
     fn open(&mut self) -> Result<(), DbError>;
     fn close(&mut self) -> Result<(), DbError>;
     fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError>;
-    fn read_chunks(&mut self) -> Result<Vec<ChunkRow>, DbError>;
     fn needs_compaction(&self) -> Result<bool, DbError>;
     fn run_compaction(&mut self) -> Result<(), DbError>;
     fn drop_all_hnsw_indexes(&mut self) -> Result<(), DbError> {

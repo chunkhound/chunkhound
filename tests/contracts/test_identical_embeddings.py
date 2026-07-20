@@ -75,7 +75,7 @@ async def _index_with_rust(
     report = pipeline.run(
         files=file_paths,
         parse_callback=parse_file_callback,
-        embed_callback=embed_texts,  # Phase 2: deterministic embed
+        embed_callback=embed_texts,
         progress_callback=None,
     )
 
@@ -143,6 +143,36 @@ def _collect_embedding_tuples(
 
 class TestIdenticalEmbeddings:
     """Python and Rust pipelines must produce identical embedding output."""
+
+    @pytest.mark.asyncio
+    async def test_embed_before_write_no_store_callback(self):
+        """Embeddings are written inline — store_embeddings_callback is never called.
+
+        ``chunkhound.pipeline_bridge.store_embeddings_callback`` has been removed
+        entirely.  The Rust pipeline writes embeddings inline inside
+        ``write_batch``.  This test runs the pipeline and asserts that
+        ``embeddings_generated == chunks_written`` — proving every chunk has an
+        inline embedding.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_dir = Path(tmp) / "db"
+            db_dir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                result = await _index_with_rust(
+                    FIXTURE_DIR, db_dir, skip_embeddings=False
+                )
+            except NotImplementedError as e:
+                pytest.fail(f"Rust pipeline not implemented yet: {e}")
+
+            assert result.embeddings_generated > 0, (
+                "embeddings_generated must be > 0 when embed_callback is provided"
+            )
+            assert result.embeddings_generated == result.chunks_written, (
+                f"All chunks should have inline embeddings: "
+                f"embeddings_generated={result.embeddings_generated}, "
+                f"chunks_written={result.chunks_written}"
+            )
 
     @pytest.mark.asyncio
     async def test_identical_embeddings(self):
