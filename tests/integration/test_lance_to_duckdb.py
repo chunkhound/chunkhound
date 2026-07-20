@@ -68,7 +68,12 @@ def test_convert_lancedb_to_duckdb_roundtrip(tmp_path: Path) -> None:
     lance_dir = _seed_lance(tmp_path)
     dest = tmp_path / "duck_out" / "chunks.db"
     stats = convert_lancedb_to_duckdb(
-        lance_dir, dest, overwrite=True, batch_size=1, compact="never"
+        lance_dir,
+        dest,
+        overwrite=True,
+        batch_size=1,
+        compact="never",
+        progress=None,
     )
     assert stats.files == 1
     assert stats.chunks == 1

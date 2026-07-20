@@ -150,17 +150,24 @@ def main() -> int:
         print("error: --batch-size must be >= 1", file=sys.stderr)
         return 2
 
+    # Progress on stderr by default; silence when --json so stdout is JSON-only.
+    common_kwargs: dict = {
+        "overwrite": args.overwrite,
+        "batch_size": args.batch_size,
+        "compact": args.compact,
+        "allow_full_scan": args.allow_full_scan,
+    }
+    if args.json:
+        common_kwargs["progress"] = None
+
     if args.activate:
         stats = convert_and_activate(
             project,
             source=source,
             dest=dest,
-            overwrite=args.overwrite,
             activate=True,
             database_path=args.database_path,
-            batch_size=args.batch_size,
-            compact=args.compact,
-            allow_full_scan=args.allow_full_scan,
+            **common_kwargs,
         )
         activated_path = args.database_path or config_path_for_dest(
             project, Path(stats.dest_duckdb)
@@ -169,11 +176,8 @@ def main() -> int:
         stats = convert_lancedb_to_duckdb(
             source,
             dest,
-            overwrite=args.overwrite,
-            batch_size=args.batch_size,
-            compact=args.compact,
             base_directory=project,
-            allow_full_scan=args.allow_full_scan,
+            **common_kwargs,
         )
         activated_path = None
 
