@@ -67,12 +67,16 @@ def _seed_lance(tmp: Path) -> Path:
 def test_convert_lancedb_to_duckdb_roundtrip(tmp_path: Path) -> None:
     lance_dir = _seed_lance(tmp_path)
     dest = tmp_path / "duck_out" / "chunks.db"
-    stats = convert_lancedb_to_duckdb(lance_dir, dest, overwrite=True)
+    stats = convert_lancedb_to_duckdb(
+        lance_dir, dest, overwrite=True, batch_size=1, compact="never"
+    )
     assert stats.files == 1
     assert stats.chunks == 1
     assert stats.embeddings == 1
     assert 32 in stats.embedding_dims
     assert dest.is_file()
+    assert stats.stream_batch_size == 1
+    assert stats.compacted is False
 
     # Verify with raw DuckDB (avoids provider disconnect/HNSW edge cases in CI)
     conn = duckdb.connect(str(dest), read_only=True)

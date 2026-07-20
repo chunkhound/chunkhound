@@ -16,6 +16,8 @@ Flags:
                    normal DuckDB index). Does not remove Lance data.
   --activate-only  Only rewrite config (no conversion).
   --overwrite      Replace existing destination chunks.db.
+  --batch-size N   Stream/insert batch size (default 2000; keep modest for 4M+ rows).
+  --compact MODE   auto|always|never (default auto = product fragmentation check).
   --source / --dest  Override Lance source / Duck dest paths.
 """
 
@@ -91,6 +93,32 @@ def main() -> int:
         action="store_true",
         help="Print ConversionStats as JSON",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=2000,
+        help=(
+            "Lance scan + Duck INSERT batch size in rows (default 2000). "
+            "Lower if convert OOMs; higher can speed small indexes."
+        ),
+    )
+    parser.add_argument(
+        "--compact",
+        choices=["auto", "always", "never"],
+        default="auto",
+        help=(
+            "After convert: auto = compact when fragmentation exceeds product "
+            "threshold; always = force compact_database; never = skip"
+        ),
+    )
+    parser.add_argument(
+        "--allow-full-scan",
+        action="store_true",
+        help=(
+            "If Lance streaming fails, allow full-table load (unsafe for "
+            "multi-million-row indexes; default is refuse)"
+        ),
+    )
     args = parser.parse_args()
 
     from chunkhound.utils.lance_to_duckdb import (
@@ -118,6 +146,10 @@ def main() -> int:
 
     from chunkhound.utils.lance_to_duckdb import config_path_for_dest
 
+    if args.batch_size < 1:
+        print("error: --batch-size must be >= 1", file=sys.stderr)
+        return 2
+
     if args.activate:
         stats = convert_and_activate(
             project,
@@ -126,13 +158,22 @@ def main() -> int:
             overwrite=args.overwrite,
             activate=True,
             database_path=args.database_path,
+            batch_size=args.batch_size,
+            compact=args.compact,
+            allow_full_scan=args.allow_full_scan,
         )
         activated_path = args.database_path or config_path_for_dest(
             project, Path(stats.dest_duckdb)
         )
     else:
         stats = convert_lancedb_to_duckdb(
-            source, dest, overwrite=args.overwrite
+            source,
+            dest,
+            overwrite=args.overwrite,
+            batch_size=args.batch_size,
+            compact=args.compact,
+            base_directory=project,
+            allow_full_scan=args.allow_full_scan,
         )
         activated_path = None
 
@@ -145,6 +186,8 @@ def main() -> int:
         print(f"  files:   {stats.files}")
         print(f"  chunks:  {stats.chunks}")
         print(f"  embeds:  {stats.embeddings}  dims={stats.embedding_dims}")
+        print(f"  batch:   {stats.stream_batch_size}")
+        print(f"  compact: {stats.compacted}")
         if stats.skipped_invalid_embeddings:
             print(
                 f"  skipped invalid embeddings: {stats.skipped_invalid_embeddings}"

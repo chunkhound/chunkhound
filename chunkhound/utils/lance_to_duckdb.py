@@ -5,15 +5,21 @@ corpus had been indexed into DuckDB originally (files, chunks, embeddings + HNSW
 
 This is a one-shot materialization utility for the post-Lance-write "read backend"
 path — not part of the cold-index hot path.
+
+**Memory:** Lance tables are scanned in Arrow record batches (streaming). DuckDB
+inserts are batched. Embedding vectors are not accumulated for the full corpus;
+HNSW indexes are built only after all vectors for a dimension are loaded.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from chunkhound.providers.database.duckdb.schema_constants import (
     _CHUNKS_TABLE_COLUMNS,
@@ -28,6 +34,12 @@ from chunkhound.providers.database.duckdb.schema_constants import (
 )
 from chunkhound.providers.database.lancedb_provider import _has_valid_embedding
 
+logger = logging.getLogger(__name__)
+
+# Default Lance scan / Duck insert batch size (rows). Keep modest so peak RSS
+# stays ~O(batch × dims × sizeof(float)) not O(corpus).
+_DEFAULT_BATCH_SIZE = 2_000
+
 
 @dataclass
 class ConversionStats:
@@ -40,6 +52,8 @@ class ConversionStats:
     source_lance: str = ""
     dest_duckdb: str = ""
     skipped_invalid_embeddings: int = 0
+    compacted: bool = False
+    stream_batch_size: int = _DEFAULT_BATCH_SIZE
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +64,8 @@ class ConversionStats:
             "source_lance": self.source_lance,
             "dest_duckdb": self.dest_duckdb,
             "skipped_invalid_embeddings": self.skipped_invalid_embeddings,
+            "compacted": self.compacted,
+            "stream_batch_size": self.stream_batch_size,
         }
 
 
@@ -107,58 +123,76 @@ def _path_name_ext(path: str) -> tuple[str, str]:
     return p.name or path, p.suffix or ""
 
 
-def _dedupe_rows_by_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[int] = set()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        rid = row.get("id")
-        if rid is None:
-            continue
-        iid = int(rid)
-        if iid in seen:
-            continue
-        seen.add(iid)
-        out.append(row)
-    return out
+def _table_row_count(table: Any) -> int | None:
+    """Best-effort row count for safety checks (None if unavailable)."""
+    for attr in ("count_rows", "count"):
+        if hasattr(table, attr):
+            try:
+                return int(getattr(table, attr)())
+            except Exception:
+                pass
+    return None
 
 
-def _read_lance_tables(lance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    import lancedb
+def _iter_lance_table_batches(
+    table: Any,
+    *,
+    batch_size: int,
+    allow_full_scan: bool = False,
+) -> Iterator[list[dict[str, Any]]]:
+    """Yield row dicts from a Lance table without full-table materialization.
 
-    db = lancedb.connect(str(lance_dir))
-    try:
-        files_tbl = db.open_table("files")
-        chunks_tbl = db.open_table("chunks")
-    except Exception as e:
+    Prefers ``table.to_lance().to_batches(batch_size=...)`` (Lance 0.34+).
+    Full-table materialization is refused for large tables unless
+    ``allow_full_scan`` is True (avoids silent OOM on multi-million-row indexes).
+    """
+    stream_errors: list[str] = []
+
+    # Preferred: native Lance dataset streaming
+    if hasattr(table, "to_lance"):
+        try:
+            dataset = table.to_lance()
+            if hasattr(dataset, "to_batches"):
+                for batch in dataset.to_batches(batch_size=batch_size):
+                    yield batch.to_pylist()
+                return
+            stream_errors.append("to_lance() has no to_batches")
+        except Exception as e:
+            stream_errors.append(f"to_lance/to_batches: {e}")
+
+    # Scanner API if present (must stream — never to_table() full load)
+    if hasattr(table, "scanner"):
+        try:
+            scanner = table.scanner(batch_size=batch_size)
+            if hasattr(scanner, "to_batches"):
+                for batch in scanner.to_batches():
+                    yield batch.to_pylist()
+                return
+            stream_errors.append("scanner has no to_batches")
+        except Exception as e:
+            stream_errors.append(f"scanner: {e}")
+
+    n = _table_row_count(table)
+    detail = "; ".join(stream_errors) if stream_errors else "no stream API"
+    if not allow_full_scan and (n is None or n > batch_size):
         raise RuntimeError(
-            f"Failed to open LanceDB tables in {lance_dir}: {e}"
-        ) from e
-
-    def _table_rows(table: Any) -> list[dict[str, Any]]:
-        # Full-table export — never silently cap (search().limit is not OK here).
-        if hasattr(table, "to_arrow"):
-            try:
-                return table.to_arrow().to_pylist()
-            except Exception:
-                pass
-        if hasattr(table, "to_pandas"):
-            try:
-                return table.to_pandas().to_dict(orient="records")
-            except Exception:
-                pass
-        # Last resort: scanner if present
-        if hasattr(table, "scanner"):
-            try:
-                return table.scanner().to_table().to_pylist()
-            except Exception:
-                pass
-        raise RuntimeError(
-            "Cannot full-scan Lance table (no to_arrow/to_pandas/scanner)"
+            "Streaming Lance scan failed; refusing full-table materialization "
+            f"(rows={n}, batch_size={batch_size}). {detail}. "
+            "Pass allow_full_scan=True only for small tables."
         )
 
-    files = _dedupe_rows_by_id(_table_rows(files_tbl))
-    chunks = _dedupe_rows_by_id(_table_rows(chunks_tbl))
-    return files, chunks
+    logger.warning(
+        "Streaming Lance scan unavailable (%s); full scan (rows=%s)", detail, n
+    )
+    if hasattr(table, "to_arrow"):
+        yield table.to_arrow().to_pylist()
+        return
+    if hasattr(table, "to_pandas"):
+        yield table.to_pandas().to_dict(orient="records")
+        return
+    raise RuntimeError(
+        "Cannot scan Lance table (no to_lance/to_batches, scanner, to_arrow, or to_pandas)"
+    )
 
 
 def _open_duck_for_write(dest_file: Path) -> Any:
@@ -198,8 +232,8 @@ def _create_duck_schema(conn: Any) -> None:
             "INSERT INTO schema_version (version, description) "
             "VALUES (1, 'Imported from LanceDB')"
         )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id)")
+    # Secondary indexes (files/chunks) are created only after bulk load
+    # — see convert_lancedb_to_duckdb — so inserts stay index-free.
 
 
 def _reseed_sequence(conn: Any, name: str, max_id: int) -> None:
@@ -233,14 +267,15 @@ def _ensure_embedding_table(conn: Any, dims: int) -> str:
 
 
 def _create_embedding_indexes(conn: Any, dims: int) -> None:
+    """Create HNSW + supporting indexes after bulk load for one dims table."""
     table = _embedding_table_name(dims)
     try:
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS {_embedding_hnsw_index_name(dims)} "
             f"ON {table} USING HNSW (embedding) WITH (metric = 'cosine')"
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("HNSW index create failed for dims=%s: %s", dims, e)
     conn.execute(
         f"CREATE INDEX IF NOT EXISTS {_embedding_chunk_id_index_name(dims)} "
         f"ON {table}(chunk_id)"
@@ -258,29 +293,109 @@ def _create_embedding_indexes(conn: Any, dims: int) -> None:
         pass
 
 
+def _flush_embedding_batch(
+    conn: Any,
+    dims: int,
+    emb_rows: list[tuple[Any, ...]],
+    *,
+    emb_id_start: int,
+) -> int:
+    """Insert embedding rows for one dims table. Returns next emb_id."""
+    if not emb_rows:
+        return emb_id_start
+    table = _ensure_embedding_table(conn, dims)
+    payload: list[tuple[Any, ...]] = []
+    emb_id = emb_id_start
+    for chunk_id, provider, model, vec, d in emb_rows:
+        emb_id += 1
+        payload.append((emb_id, chunk_id, provider, model, vec, d))
+    conn.executemany(
+        f"""
+        INSERT INTO {table} (
+            id, chunk_id, provider, model, embedding, dims
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        payload,
+    )
+    return emb_id
+
+
+def _maybe_compact_converted_db(
+    dest_file: Path,
+    *,
+    mode: Literal["auto", "always", "never"],
+    base_directory: Path | None,
+) -> bool:
+    """Run product DuckDB compaction if needed (or always/never).
+
+    Uses DuckDBProvider.should_optimize / compact_database so HNSW and
+    file-swap behavior match live indexes.
+    """
+    if mode == "never":
+        return False
+
+    from chunkhound.core.config.database_config import DatabaseConfig
+    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+
+    dest_file = dest_file.expanduser().resolve()
+    # Explicit .db path so get_db_path / connection open the converted file.
+    cfg = DatabaseConfig(path=dest_file, provider="duckdb")
+    base = (base_directory or dest_file.parent).resolve()
+    provider = DuckDBProvider(dest_file, base_directory=base, config=cfg)
+
+    try:
+        provider.connect()
+        if mode == "always" or provider.should_optimize():
+            provider.compact_database()
+            return True
+        return False
+    finally:
+        try:
+            provider.disconnect(skip_checkpoint=False)
+        except Exception:
+            pass
+
+
 def convert_lancedb_to_duckdb(
     source: Path,
     dest: Path,
     *,
     overwrite: bool = False,
-    batch_size: int = 2000,
+    batch_size: int = _DEFAULT_BATCH_SIZE,
+    compact: Literal["auto", "always", "never"] = "auto",
+    base_directory: Path | None = None,
+    allow_full_scan: bool = False,
 ) -> ConversionStats:
     """Copy LanceDB files/chunks/embeddings into a DuckDB ``chunks.db``.
+
+    Streams Lance tables in ``batch_size`` row batches so multi-million-row
+    indexes (4M+ embeddings) do not require loading the full corpus into RAM.
+    Embedding vectors are inserted per batch; **all** indexes (files/chunks
+    b-tree + embedding HNSW) are created only after bulk load.
 
     Args:
         source: Lance dir, config dir, or project root containing LanceDB.
         dest: DuckDB file, or directory (writes ``chunks.db`` inside).
         overwrite: If True, replace an existing destination file.
-        batch_size: Rows per INSERT batch.
+        batch_size: Lance scan + Duck INSERT batch size (rows).
+        compact: After convert — ``auto`` (product fragmentation check),
+            ``always`` (force compact_database), or ``never``.
+        base_directory: Project root for DuckDBProvider compaction (optional).
+        allow_full_scan: If True, permit full-table materialization when
+            streaming APIs fail (unsafe for multi-million-row indexes).
 
     Returns:
         ConversionStats with counts and paths.
     """
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+
     lance_dir = resolve_lancedb_dir(source)
     dest_file = resolve_duckdb_file(dest)
     stats = ConversionStats(
         source_lance=str(lance_dir),
         dest_duckdb=str(dest_file),
+        stream_batch_size=batch_size,
     )
 
     if dest_file.exists():
@@ -293,36 +408,29 @@ def convert_lancedb_to_duckdb(
         if wal.exists():
             wal.unlink()
 
-    files_rows, chunks_rows = _read_lance_tables(lance_dir)
+    import lancedb
+
+    db = lancedb.connect(str(lance_dir))
+    try:
+        files_tbl = db.open_table("files")
+        chunks_tbl = db.open_table("chunks")
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to open LanceDB tables in {lance_dir}: {e}"
+        ) from e
+
     conn = _open_duck_for_write(dest_file)
     try:
         _create_duck_schema(conn)
 
-        # Lance uses 64-bit content-hash ids; DuckDB INTEGER PKs are 32-bit.
-        # Remap to dense sequential ids so the result matches a native Duck index.
+        # --- Files (streamed; usually small) ---
         file_id_map: dict[int, int] = {}
+        seen_file_ids: set[int] = set()
         file_batch: list[tuple[Any, ...]] = []
-        for row in files_rows:
-            old_fid = int(row["id"])
-            new_fid = len(file_id_map) + 1
-            file_id_map[old_fid] = new_fid
-            path = str(row.get("path") or "")
-            name, ext = _path_name_ext(path)
-            file_batch.append(
-                (
-                    new_fid,
-                    path,
-                    name,
-                    ext,
-                    int(row["size"]) if row.get("size") is not None else None,
-                    _unix_to_datetime(row.get("modified_time")),
-                    str(row.get("content_hash") or "") or None,
-                    str(row.get("language") or "") or None,
-                    row.get("skip_reason"),
-                )
-            )
-        for i in range(0, len(file_batch), batch_size):
-            part = file_batch[i : i + batch_size]
+
+        def _flush_files() -> None:
+            if not file_batch:
+                return
             conn.executemany(
                 """
                 INSERT INTO files (
@@ -330,99 +438,210 @@ def convert_lancedb_to_duckdb(
                     content_hash, language, skip_reason
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                part,
+                file_batch,
             )
-        stats.files = len(file_batch)
-        if file_batch:
-            _reseed_sequence(conn, "files_id_seq", len(file_batch))
+            stats.files += len(file_batch)
+            file_batch.clear()
 
-        # Chunks + collect embeddings
-        emb_by_dims: dict[int, list[tuple[Any, ...]]] = {}
+        for rows in _iter_lance_table_batches(
+            files_tbl, batch_size=batch_size, allow_full_scan=allow_full_scan
+        ):
+            for row in rows:
+                rid = row.get("id")
+                if rid is None:
+                    continue
+                old_fid = int(rid)
+                if old_fid in seen_file_ids:
+                    continue
+                seen_file_ids.add(old_fid)
+                new_fid = len(file_id_map) + 1
+                file_id_map[old_fid] = new_fid
+                path = str(row.get("path") or "")
+                name, ext = _path_name_ext(path)
+                file_batch.append(
+                    (
+                        new_fid,
+                        path,
+                        name,
+                        ext,
+                        int(row["size"]) if row.get("size") is not None else None,
+                        _unix_to_datetime(row.get("modified_time")),
+                        str(row.get("content_hash") or "") or None,
+                        str(row.get("language") or "") or None,
+                        row.get("skip_reason"),
+                    )
+                )
+                if len(file_batch) >= batch_size:
+                    _flush_files()
+        _flush_files()
+        if stats.files:
+            _reseed_sequence(conn, "files_id_seq", stats.files)
+        logger.info("Converted %s files", stats.files)
+
+        # --- Chunks + embeddings (streamed; peak ~O(batch × dims)) ---
+        # old_cid -> (new_cid, has_valid_embedding) for prefer-embedded dedupe
+        chunk_state: dict[int, tuple[int, bool]] = {}
+        next_cid = 0
         chunk_batch: list[tuple[Any, ...]] = []
-        chunk_id_map: dict[int, int] = {}
-        for row in chunks_rows:
-            old_cid = int(row["id"])
-            new_cid = len(chunk_id_map) + 1
-            chunk_id_map[old_cid] = new_cid
-            old_fid = int(row["file_id"]) if row.get("file_id") is not None else None
-            new_fid = file_id_map.get(old_fid) if old_fid is not None else None
-            meta = row.get("metadata")
-            if meta is not None and not isinstance(meta, str):
-                try:
-                    meta = json.dumps(meta)
-                except Exception:
-                    meta = None
-            chunk_batch.append(
-                (
-                    new_cid,
-                    new_fid,
-                    str(row.get("chunk_type") or "unknown"),
-                    str(row.get("name") or "") or None,
-                    str(row.get("content") or ""),
-                    int(row["start_line"]) if row.get("start_line") is not None else None,
-                    int(row["end_line"]) if row.get("end_line") is not None else None,
-                    None,  # start_byte
-                    None,  # end_byte
-                    str(row.get("language") or "") or None,
-                    meta if meta else None,
-                )
-            )
-            emb = row.get("embedding")
-            if _has_valid_embedding(emb):
-                vec = emb.tolist() if hasattr(emb, "tolist") else list(emb)
-                dims = len(vec)
-                provider = str(row.get("provider") or "unknown")
-                model = str(row.get("model") or "unknown")
-                emb_by_dims.setdefault(dims, []).append(
-                    (new_cid, provider, model, vec, dims)
-                )
-            elif emb is not None:
-                stats.skipped_invalid_embeddings += 1
-
-        for i in range(0, len(chunk_batch), batch_size):
-            part = chunk_batch[i : i + batch_size]
-            conn.executemany(
-                """
-                INSERT INTO chunks (
-                    id, file_id, chunk_type, symbol, code,
-                    start_line, end_line, start_byte, end_byte,
-                    language, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                part,
-            )
-        stats.chunks = len(chunk_batch)
-        if chunk_batch:
-            _reseed_sequence(conn, "chunks_id_seq", len(chunk_batch))
-
-        # Embeddings (separate table per dims)
+        emb_pending: dict[int, list[tuple[Any, ...]]] = {}
         emb_id = 0
-        for dims, rows in sorted(emb_by_dims.items()):
-            table = _ensure_embedding_table(conn, dims)
-            for i in range(0, len(rows), batch_size):
-                part = rows[i : i + batch_size]
-                payload = []
-                for chunk_id, provider, model, vec, d in part:
-                    emb_id += 1
-                    payload.append((emb_id, chunk_id, provider, model, vec, d))
-                conn.executemany(
-                    f"""
-                    INSERT INTO {table} (
-                        id, chunk_id, provider, model, embedding, dims
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    payload,
-                )
-            stats.embeddings += len(rows)
-            stats.embedding_dims.append(dims)
-            _create_embedding_indexes(conn, dims)
+        dims_seen: set[int] = set()
 
+        def _flush_chunks_and_embeddings() -> None:
+            nonlocal emb_id
+            if chunk_batch:
+                conn.executemany(
+                    """
+                    INSERT INTO chunks (
+                        id, file_id, chunk_type, symbol, code,
+                        start_line, end_line, start_byte, end_byte,
+                        language, metadata
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    chunk_batch,
+                )
+                stats.chunks += len(chunk_batch)
+                chunk_batch.clear()
+            for dims, erows in list(emb_pending.items()):
+                if not erows:
+                    continue
+                emb_id = _flush_embedding_batch(
+                    conn, dims, erows, emb_id_start=emb_id
+                )
+                stats.embeddings += len(erows)
+                dims_seen.add(dims)
+                erows.clear()
+            emb_pending.clear()
+
+        for rows in _iter_lance_table_batches(
+            chunks_tbl, batch_size=batch_size, allow_full_scan=allow_full_scan
+        ):
+            for row in rows:
+                rid = row.get("id")
+                if rid is None:
+                    continue
+                old_cid = int(rid)
+                emb = row.get("embedding")
+                has_emb = _has_valid_embedding(emb)
+
+                if old_cid in chunk_state:
+                    # Prefer-embedded: Lance fragments can surface pre/post-embed
+                    # rows for the same id; first-wins would drop the vector.
+                    new_cid, prev_has = chunk_state[old_cid]
+                    if has_emb and not prev_has:
+                        vec = emb.tolist() if hasattr(emb, "tolist") else list(emb)
+                        dims = len(vec)
+                        provider = str(row.get("provider") or "unknown")
+                        model = str(row.get("model") or "unknown")
+                        emb_pending.setdefault(dims, []).append(
+                            (new_cid, provider, model, vec, dims)
+                        )
+                        chunk_state[old_cid] = (new_cid, True)
+                    continue
+
+                next_cid += 1
+                new_cid = next_cid
+                chunk_state[old_cid] = (new_cid, has_emb)
+                old_fid = (
+                    int(row["file_id"]) if row.get("file_id") is not None else None
+                )
+                new_fid = file_id_map.get(old_fid) if old_fid is not None else None
+                meta = row.get("metadata")
+                if meta is not None and not isinstance(meta, str):
+                    try:
+                        meta = json.dumps(meta)
+                    except Exception:
+                        meta = None
+                chunk_batch.append(
+                    (
+                        new_cid,
+                        new_fid,
+                        str(row.get("chunk_type") or "unknown"),
+                        str(row.get("name") or "") or None,
+                        str(row.get("content") or ""),
+                        int(row["start_line"])
+                        if row.get("start_line") is not None
+                        else None,
+                        int(row["end_line"])
+                        if row.get("end_line") is not None
+                        else None,
+                        None,  # start_byte
+                        None,  # end_byte
+                        str(row.get("language") or "") or None,
+                        meta if meta else None,
+                    )
+                )
+                if has_emb:
+                    vec = emb.tolist() if hasattr(emb, "tolist") else list(emb)
+                    dims = len(vec)
+                    provider = str(row.get("provider") or "unknown")
+                    model = str(row.get("model") or "unknown")
+                    emb_pending.setdefault(dims, []).append(
+                        (new_cid, provider, model, vec, dims)
+                    )
+                elif emb is not None:
+                    stats.skipped_invalid_embeddings += 1
+
+                if len(chunk_batch) >= batch_size:
+                    _flush_chunks_and_embeddings()
+                    if stats.chunks % (batch_size * 50) < batch_size:
+                        logger.info(
+                            "Convert progress: chunks=%s embeddings=%s",
+                            stats.chunks,
+                            stats.embeddings,
+                        )
+
+        _flush_chunks_and_embeddings()
+        if stats.chunks:
+            _reseed_sequence(conn, "chunks_id_seq", stats.chunks)
         if emb_id > 0:
             _reseed_sequence(conn, "embeddings_id_seq", emb_id)
 
+        # All indexes only after bulk load (product file/chunk set + HNSW).
+        logger.info("Building files/chunks indexes after bulk load …")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_language ON files(language)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(chunk_type)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol)"
+        )
+        stats.embedding_dims = sorted(dims_seen)
+        for dims in stats.embedding_dims:
+            logger.info("Building DuckDB indexes for embeddings_%s …", dims)
+            _create_embedding_indexes(conn, dims)
+
         conn.execute("CHECKPOINT")
+        logger.info(
+            "Conversion load complete: files=%s chunks=%s embeddings=%s dims=%s",
+            stats.files,
+            stats.chunks,
+            stats.embeddings,
+            stats.embedding_dims,
+        )
     finally:
         conn.close()
+
+    # Compaction may rename/reopen the file — run after connection closed.
+    if compact != "never":
+        try:
+            stats.compacted = _maybe_compact_converted_db(
+                dest_file,
+                mode=compact,
+                base_directory=base_directory,
+            )
+            if stats.compacted:
+                logger.info("DuckDB compaction applied to %s", dest_file)
+        except Exception as e:
+            logger.warning(
+                "Post-convert compaction skipped/failed for %s: %s", dest_file, e
+            )
 
     return stats
 
@@ -470,7 +689,6 @@ def activate_duckdb_in_config(
     data["database"] = db
 
     if require_db_exists:
-        # Resolve like DatabaseConfig: dir → chunks.db, or explicit .db file
         p = Path(db["path"])
         if not p.is_absolute():
             p = project_dir / p
@@ -491,9 +709,7 @@ def activate_duckdb_in_config(
     return config_path
 
 
-def config_path_for_dest(
-    project_dir: Path, dest_duckdb_file: Path
-) -> str:
+def config_path_for_dest(project_dir: Path, dest_duckdb_file: Path) -> str:
     """Choose database.path for config so get_db_path() opens dest_duckdb_file.
 
     - Explicit ``*.db`` / ``*.duckdb`` file → path is that file.
@@ -519,6 +735,9 @@ def convert_and_activate(
     overwrite: bool = False,
     activate: bool = True,
     database_path: str | Path | None = None,
+    batch_size: int = _DEFAULT_BATCH_SIZE,
+    compact: Literal["auto", "always", "never"] = "auto",
+    allow_full_scan: bool = False,
 ) -> ConversionStats:
     """Convert project LanceDB → DuckDB and optionally switch config to DuckDB.
 
@@ -531,7 +750,15 @@ def convert_and_activate(
     project_dir = project_dir.expanduser().resolve()
     src = source or (project_dir / ".chunkhound")
     dst = dest or (project_dir / ".chunkhound")
-    stats = convert_lancedb_to_duckdb(src, dst, overwrite=overwrite)
+    stats = convert_lancedb_to_duckdb(
+        src,
+        dst,
+        overwrite=overwrite,
+        batch_size=batch_size,
+        compact=compact,
+        base_directory=project_dir,
+        allow_full_scan=allow_full_scan,
+    )
     if activate:
         if database_path is not None:
             cfg_path_val = str(database_path).replace("\\", "/")
