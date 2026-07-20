@@ -557,18 +557,18 @@ class TestFeatureFlag:
         assert _get_use_rust() is False
 
     def test_rust_enabled_by_default_when_native_present(self, monkeypatch):
-        """Without override, _get_use_rust() mirrors native extension availability."""
+        """Without override, _get_use_rust() returns False (opt-in only)."""
         monkeypatch.delenv("CHUNKHOUND_USE_RUST", raising=False)
 
         from chunkhound.providers.database.pipeline_bridge import _get_use_rust
 
-        try:
-            import chunkhound_native  # noqa: F401
-            native_present = True
-        except ImportError:
-            native_present = False
+        # Default is always False regardless of native extension presence.
+        # Users must explicitly set CHUNKHOUND_USE_RUST=1 to enable the Rust path.
+        assert _get_use_rust() is False
 
-        assert _get_use_rust() == native_present
+        # Setting CHUNKHOUND_USE_RUST=1 enables it.
+        monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
+        assert _get_use_rust() is True
 
 
 # ---------------------------------------------------------------------------

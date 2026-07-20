@@ -1485,7 +1485,11 @@ class IndexingCoordinator(BaseService):
                 # The Rust pipeline handles parse → embed → write in one call.
                 from chunkhound.pipeline_bridge import run_rust_pipeline
 
-                db_path = Path(str(self._db.db_path)).parent
+                # Test DB fakes may not have db_path — fall through to Python.
+                if not hasattr(self._db, "db_path"):
+                    _use_rust = False
+                else:
+                    db_path = Path(str(self._db.db_path)).parent
                 skip_embeddings = (
                     self.config.embeddings_disabled
                     if self.config and hasattr(self.config, "embeddings_disabled")

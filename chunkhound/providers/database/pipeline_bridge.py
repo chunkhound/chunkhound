@@ -20,5 +20,9 @@ except ImportError:
 
 
 def _get_use_rust() -> bool:
-    """Read the CHUNKHOUND_USE_RUST env var at call time (avoids module-reload in tests)."""
-    return os.environ.get("CHUNKHOUND_USE_RUST", "1" if _RUST_AVAILABLE else "0") == "1"
+    """Read the CHUNKHOUND_USE_RUST env var at call time (avoids module-reload in tests).
+
+    Defaults to False (opt-in only). Set CHUNKHOUND_USE_RUST=1 to enable the Rust
+    pipeline for parse→embed→write.
+    """
+    return os.environ.get("CHUNKHOUND_USE_RUST", "0") == "1"
