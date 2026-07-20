@@ -12,7 +12,7 @@ MOCK_PROVIDER = "mock-contract"
 MOCK_MODEL = "mock-v1"
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
+def embed_texts(texts: list[str], provider: str = "", model: str = "") -> list[list[float]]:
     """Generate deterministic 8-dim embedding vectors from text hashes.
 
     Each vector element is a float in [0, 1] derived from the SHA-256 hash

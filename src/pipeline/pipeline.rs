@@ -82,23 +82,31 @@ impl IndexingPipeline {
                 let parse_cb = parse_cb.clone_ref(py);
                 let embed_cb = embed_batch_callback.as_ref().map(|cb| cb.clone_ref(py));
                 let seq_embed_cb = embed_callback.as_ref().map(|cb| cb.clone_ref(py));
-                py.allow_threads(|| {
-                    self.pipeline_parse_and_embed(
-                        &batch_paths,
-                        parse_cb,
-                        embed_cb,
-                        seq_embed_cb,
-                        &provider,
-                        &model,
-                    )
-                })
-                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+                let t_parse_embed = Instant::now();
+                let result = py
+                    .allow_threads(|| {
+                        self.pipeline_parse_and_embed(
+                            &batch_paths,
+                            parse_cb,
+                            embed_cb,
+                            seq_embed_cb,
+                            &provider,
+                            &model,
+                        )
+                    })
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                log::info!(
+                    "pipeline parse+embed: {:.2}s",
+                    t_parse_embed.elapsed().as_secs_f64()
+                );
+                result
             } else {
                 // Should not reach here — pipeline_parallel requires batch callback.
                 self.parse_batch(py, &batch_paths, &parse_callback)?
             }
         } else {
             // ── Sequential parse ──────────────────────────
+            let t_parse = Instant::now();
             let mut parsed = if self.config.parse_thread_pool_size > 1 {
                 if let Some(ref batch_cb) = parse_batch_callback {
                     let cb = batch_cb.clone_ref(py);
@@ -111,8 +119,10 @@ impl IndexingPipeline {
             } else {
                 self.parse_batch(py, &batch_paths, &parse_callback)?
             };
+            log::info!("pipeline parse: {:.2}s", t_parse.elapsed().as_secs_f64());
 
             // ── Sequential embed ──────────────────────────
+            let t_embed = Instant::now();
             if !self.config.skip_embeddings {
                 // Collect all chunk texts with their positions for back-mapping.
                 let mut embed_targets: Vec<(usize, usize, String)> = Vec::new();
@@ -154,7 +164,9 @@ impl IndexingPipeline {
                                     batch.iter().map(|(_, _, t)| t.clone()).collect();
 
                                 let embed_cb = embed_py.bind(py);
-                                let vectors: Vec<Vec<f64>> = embed_cb.call1((texts,))?.extract()?;
+                                let vectors: Vec<Vec<f64>> = embed_cb
+                                    .call1((texts, provider.as_str(), model.as_str()))?
+                                    .extract()?;
 
                                 if vectors.is_empty() {
                                     continue;
@@ -174,6 +186,7 @@ impl IndexingPipeline {
                     }
                 }
             }
+            log::info!("pipeline embed: {:.2}s", t_embed.elapsed().as_secs_f64());
             parsed
         };
 
@@ -272,6 +285,7 @@ impl IndexingPipeline {
             }
         }
 
+        let t_write = Instant::now();
         let result: BatchResult = py
             .allow_threads(|| {
                 let mut backend: Box<dyn DbBackend> = create_backend(db_config);
@@ -284,16 +298,22 @@ impl IndexingPipeline {
                 Ok::<_, crate::error::DbError>(res)
             })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        log::info!("pipeline write: {:.2}s", t_write.elapsed().as_secs_f64());
 
         let chunks_written = result.chunks_written;
         let embeddings_generated = result.embeddings_written;
+        let total_secs = started.elapsed().as_secs_f64();
+
+        log::info!(
+            "pipeline total: {total_secs:.2}s (files={file_count}, chunks={chunks_written}, embeds={embeddings_generated})"
+        );
 
         Ok(PipelineReport {
             files_processed: file_count,
             files_skipped: 0,
             chunks_written,
             embeddings_generated,
-            elapsed_secs: started.elapsed().as_secs_f64(),
+            elapsed_secs: total_secs,
             errors: Vec::new(),
             peak_rss_mb: None,
         })
