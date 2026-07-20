@@ -34,7 +34,7 @@ impl IndexingPipeline {
     ///
     /// Pipeline order: parse → embed → write (single transaction).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (files, parse_callback, embed_callback=None, progress_callback=None, incremental=false, parse_batch_callback=None))]
+    #[pyo3(signature = (files, parse_callback, embed_callback=None, progress_callback=None, incremental=false, parse_batch_callback=None, embed_batch_callback=None))]
     fn run(
         &mut self,
         py: Python<'_>,
@@ -44,6 +44,7 @@ impl IndexingPipeline {
         progress_callback: Option<Py<PyAny>>,
         incremental: bool,
         parse_batch_callback: Option<Py<PyAny>>,
+        embed_batch_callback: Option<Py<PyAny>>,
     ) -> PyResult<PipelineReport> {
         let _ = &progress_callback; // unused — callback reserved for future progress reporting
         let started = Instant::now();
@@ -83,42 +84,65 @@ impl IndexingPipeline {
         };
 
         // ── Embed (before write) ───────────────────────────────
-        if let Some(ref embed_py) = embed_callback {
-            if !self.config.skip_embeddings {
-                // Collect all chunk texts with their positions for back-mapping.
-                let mut embed_targets: Vec<(usize, usize, String)> = Vec::new();
-                for (fi, pf) in parsed.iter().enumerate() {
-                    if pf.error.is_some() {
-                        continue;
-                    }
-                    for (ci, ch) in pf.chunks.iter().enumerate() {
-                        let text = ch.embed_text.as_deref().unwrap_or(&ch.code).to_string();
-                        embed_targets.push((fi, ci, text));
+        if !self.config.skip_embeddings {
+            // Collect all chunk texts with their positions for back-mapping.
+            let mut embed_targets: Vec<(usize, usize, String)> = Vec::new();
+            for (fi, pf) in parsed.iter().enumerate() {
+                if pf.error.is_some() {
+                    continue;
+                }
+                for (ci, ch) in pf.chunks.iter().enumerate() {
+                    let text = ch.embed_text.as_deref().unwrap_or(&ch.code).to_string();
+                    embed_targets.push((fi, ci, text));
+                }
+            }
+
+            if !embed_targets.is_empty() {
+                let provider = self.config.embedding_provider.clone();
+                let model = self.config.embedding_model.clone();
+
+                // ── Parallel embed (embed_batch_callback + rayon) ──
+                if let Some(ref batch_cb) = embed_batch_callback {
+                    if self.config.parse_thread_pool_size > 1 {
+                        let cb = batch_cb.clone_ref(py);
+                        py.allow_threads(|| {
+                            self.embed_batch_parallel(
+                                &mut parsed,
+                                &embed_targets,
+                                &cb,
+                                &provider,
+                                &model,
+                            )
+                        })
+                        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
                     }
                 }
 
-                if !embed_targets.is_empty() {
-                    let batch_size = self.config.embed_batch_size.max(1);
-                    let provider = self.config.embedding_provider.clone();
-                    let model = self.config.embedding_model.clone();
+                // ── Sequential embed (fallback / backward-compat) ──
+                // Skip if parallel embed already populated embeddings.
+                if embed_batch_callback.is_none() || self.config.parse_thread_pool_size <= 1 {
+                    if let Some(ref embed_py) = embed_callback {
+                        let batch_size = self.config.embed_batch_size.max(1);
 
-                    for batch in embed_targets.chunks(batch_size) {
-                        let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
+                        for batch in embed_targets.chunks(batch_size) {
+                            let texts: Vec<String> =
+                                batch.iter().map(|(_, _, t)| t.clone()).collect();
 
-                        let embed_cb = embed_py.bind(py);
-                        let vectors: Vec<Vec<f64>> = embed_cb.call1((texts,))?.extract()?;
+                            let embed_cb = embed_py.bind(py);
+                            let vectors: Vec<Vec<f64>> = embed_cb.call1((texts,))?.extract()?;
 
-                        if vectors.is_empty() {
-                            continue;
-                        }
+                            if vectors.is_empty() {
+                                continue;
+                            }
 
-                        // Map vectors back to NewChunk in parsed files.
-                        for (i, (fi, ci, _)) in batch.iter().enumerate() {
-                            if let Some(vec) = vectors.get(i) {
-                                let chunk = &mut parsed[*fi].chunks[*ci];
-                                chunk.embedding = Some(vec.iter().map(|x| *x as f32).collect());
-                                chunk.provider = Some(provider.clone());
-                                chunk.model = Some(model.clone());
+                            // Map vectors back to NewChunk in parsed files.
+                            for (i, (fi, ci, _)) in batch.iter().enumerate() {
+                                if let Some(vec) = vectors.get(i) {
+                                    let chunk = &mut parsed[*fi].chunks[*ci];
+                                    chunk.embedding = Some(vec.iter().map(|x| *x as f32).collect());
+                                    chunk.provider = Some(provider.clone());
+                                    chunk.model = Some(model.clone());
+                                }
                             }
                         }
                     }
@@ -488,6 +512,90 @@ impl IndexingPipeline {
         }
 
         Ok(parsed)
+    }
+
+    /// Dispatch embed batches via rayon to a Python batch callback.
+    ///
+    /// Each batch calls Python's ``embed_batch_callback(texts) → List[List[float]]``.
+    /// Results are collected and applied to ``parsed`` after all batches complete.
+    ///
+    /// **Caller must release the GIL** before entering this method (via
+    /// ``py.allow_threads()``).  Each rayon thread re-acquires the GIL
+    /// independently via ``Python::with_gil()``.
+    fn embed_batch_parallel(
+        &self,
+        parsed: &mut [super::types::ParsedFile],
+        targets: &[(usize, usize, String)],
+        callback: &Py<PyAny>,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), String> {
+        use rayon::prelude::*;
+        use std::sync::Mutex;
+
+        let batch_size = self.config.embed_batch_size.max(1);
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.config.parse_thread_pool_size.max(1))
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let error: Mutex<Option<String>> = Mutex::new(None);
+        let all_results: Mutex<Vec<(usize, usize, Vec<f32>)>> = Mutex::new(Vec::new());
+
+        pool.install(|| {
+            targets.par_chunks(batch_size).for_each(|batch| {
+                if error.lock().unwrap().is_some() {
+                    return;
+                }
+
+                let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
+                let indices: Vec<(usize, usize)> =
+                    batch.iter().map(|(fi, ci, _)| (*fi, *ci)).collect();
+
+                match Python::with_gil(|gil_py| {
+                    let cb = callback.bind(gil_py);
+                    let ret = cb.call1((texts,))?;
+                    let vectors: Vec<Vec<f64>> = ret.extract()?;
+                    Ok::<_, pyo3::PyErr>(vectors)
+                }) {
+                    Ok(vectors) => {
+                        let mut batch_results = Vec::with_capacity(batch.len());
+                        for (i, (fi, ci)) in indices.iter().enumerate() {
+                            if let Some(vec) = vectors.get(i) {
+                                batch_results.push((
+                                    *fi,
+                                    *ci,
+                                    vec.iter().map(|x| *x as f32).collect(),
+                                ));
+                            }
+                        }
+                        all_results.lock().unwrap().extend(batch_results);
+                    }
+                    Err(e) => {
+                        let mut err = error.lock().unwrap();
+                        if err.is_none() {
+                            *err = Some(e.to_string());
+                        }
+                    }
+                }
+            });
+        });
+
+        if let Some(e) = error.into_inner().unwrap() {
+            return Err(e);
+        }
+
+        // Apply embeddings to parsed chunks (single-threaded, after all batches).
+        // Mutating pure-Rust Vec<f32> fields — no GIL required.
+        for (fi, ci, vec) in all_results.into_inner().unwrap() {
+            let chunk = &mut parsed[fi].chunks[ci];
+            chunk.embedding = Some(vec);
+            chunk.provider = Some(provider.to_string());
+            chunk.model = Some(model.to_string());
+        }
+
+        Ok(())
     }
 
     /// Parse files using the single-file callback (serial).
