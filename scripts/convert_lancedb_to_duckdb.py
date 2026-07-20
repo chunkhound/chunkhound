@@ -19,6 +19,9 @@ Flags:
   --batch-size N   Stream/insert batch size (default 2000; keep modest for 4M+ rows).
   --compact MODE   auto|always|never (default auto = product fragmentation check).
   --source / --dest  Override Lance source / Duck dest paths.
+  --json           ConversionStats on stdout only; silences phase progress on stderr.
+                   Without --json, phase progress (scanned/total, duck size) goes
+                   to stderr; a short human summary goes to stdout.
 """
 
 from __future__ import annotations
@@ -91,7 +94,10 @@ def main() -> int:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Print ConversionStats as JSON",
+        help=(
+            "Print ConversionStats as JSON on stdout and silence phase progress "
+            "(stderr progress is enabled by default without this flag)"
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -122,7 +128,9 @@ def main() -> int:
     args = parser.parse_args()
 
     from chunkhound.utils.lance_to_duckdb import (
+        _default_progress,
         activate_duckdb_in_config,
+        config_path_for_dest,
         convert_and_activate,
         convert_lancedb_to_duckdb,
     )
@@ -144,21 +152,18 @@ def main() -> int:
     source = args.source or (project / ".chunkhound")
     dest = args.dest or (project / ".chunkhound")
 
-    from chunkhound.utils.lance_to_duckdb import config_path_for_dest
-
     if args.batch_size < 1:
         print("error: --batch-size must be >= 1", file=sys.stderr)
         return 2
 
-    # Progress on stderr by default; silence when --json so stdout is JSON-only.
-    common_kwargs: dict = {
+    # Library progress defaults to silent; CLI enables stderr progress unless --json.
+    common_kwargs: dict[str, object] = {
         "overwrite": args.overwrite,
         "batch_size": args.batch_size,
         "compact": args.compact,
         "allow_full_scan": args.allow_full_scan,
+        "progress": None if args.json else _default_progress,
     }
-    if args.json:
-        common_kwargs["progress"] = None
 
     if args.activate:
         stats = convert_and_activate(
@@ -193,9 +198,7 @@ def main() -> int:
         print(f"  batch:   {stats.stream_batch_size}")
         print(f"  compact: {stats.compacted}")
         if stats.skipped_invalid_embeddings:
-            print(
-                f"  skipped invalid embeddings: {stats.skipped_invalid_embeddings}"
-            )
+            print(f"  skipped invalid embeddings: {stats.skipped_invalid_embeddings}")
         if args.activate and activated_path is not None:
             print(
                 f"  activated: {project / '.chunkhound.json'} "

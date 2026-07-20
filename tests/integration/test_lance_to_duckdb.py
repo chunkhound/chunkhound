@@ -91,15 +91,13 @@ def test_convert_lancedb_to_duckdb_roundtrip(tmp_path: Path) -> None:
         assert n_files == 1
         assert n_chunks == 1
         path, code = conn.execute(
-            "SELECT f.path, c.code FROM files f "
-            "JOIN chunks c ON c.file_id = f.id"
+            "SELECT f.path, c.code FROM files f JOIN chunks c ON c.file_id = f.id"
         ).fetchone()
         assert path == "src/hello.py"
         assert "def hello" in code
 
         emb_row = conn.execute(
-            "SELECT chunk_id, provider, model, len(embedding), dims "
-            "FROM embeddings_32"
+            "SELECT chunk_id, provider, model, len(embedding), dims FROM embeddings_32"
         ).fetchone()
         assert emb_row is not None
         chunk_id, provider, model, emb_len, dims = emb_row
@@ -119,6 +117,62 @@ def test_convert_lancedb_to_duckdb_roundtrip(tmp_path: Path) -> None:
         )
     finally:
         conn.close()
+
+
+def test_convert_progress_callback_emits_phases(tmp_path: Path) -> None:
+    """Progress callback receives phase markers and scanned/total lines."""
+    lance_dir = _seed_lance(tmp_path)
+    dest = tmp_path / "duck_progress" / "chunks.db"
+    lines: list[str] = []
+
+    stats = convert_lancedb_to_duckdb(
+        lance_dir,
+        dest,
+        overwrite=True,
+        batch_size=1,
+        compact="never",
+        progress=lines.append,
+    )
+    assert stats.chunks == 1
+    joined = "\n".join(lines)
+    assert "=== Phase 0: initialize ===" in joined
+    assert "counting Lance rows" in joined
+    assert "=== Phase 2: files ===" in joined
+    assert "=== Phase 3: chunks" in joined
+    assert "scanned " in joined
+    assert "duck=" in joined
+    assert "=== done ===" in joined
+    # Phase 0 must announce before inventory work lines complete.
+    assert lines[0].startswith("=== Phase 0:")
+
+
+def test_convert_progress_none_and_default_silent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Default and progress=None leave stdout/stderr free of phase noise (--json)."""
+    lance_dir = _seed_lance(tmp_path)
+    dest = tmp_path / "duck_silent" / "chunks.db"
+
+    convert_lancedb_to_duckdb(
+        lance_dir,
+        dest,
+        overwrite=True,
+        compact="never",
+        progress=None,
+    )
+    captured = capsys.readouterr()
+    assert "Phase" not in captured.out
+    assert "Phase" not in captured.err
+
+    convert_lancedb_to_duckdb(
+        lance_dir,
+        dest,
+        overwrite=True,
+        compact="never",
+    )
+    captured = capsys.readouterr()
+    assert "Phase" not in captured.out
+    assert "Phase" not in captured.err
 
 
 def test_activate_duckdb_in_config_writes_provider(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -59,7 +60,7 @@ def _format_bytes(n: int) -> str:
                 return f"{int(size)} {unit}"
             return f"{size:.1f} {unit}"
         size /= 1024.0
-    return f"{n} B"
+    return f"{int(size)} B"  # unreachable; keeps mypy/exhaustive happy
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -297,8 +298,7 @@ def _reseed_sequence(conn: Any, name: str, max_id: int) -> None:
     if max_id < 1:
         return
     cur = conn.execute(
-        "SELECT last_value FROM duckdb_sequences() "
-        f"WHERE sequence_name = '{name}'"
+        f"SELECT last_value FROM duckdb_sequences() WHERE sequence_name = '{name}'"
     ).fetchone()
     current = int(cur[0]) if cur and cur[0] is not None else 0
     if current == 0:
@@ -421,7 +421,7 @@ def convert_lancedb_to_duckdb(
     compact: Literal["auto", "always", "never"] = "auto",
     base_directory: Path | None = None,
     allow_full_scan: bool = False,
-    progress: ProgressFn | None = _default_progress,
+    progress: ProgressFn | None = None,
 ) -> ConversionStats:
     """Copy LanceDB files/chunks/embeddings into a DuckDB ``chunks.db``.
 
@@ -440,8 +440,10 @@ def convert_lancedb_to_duckdb(
         base_directory: Project root for DuckDBProvider compaction (optional).
         allow_full_scan: If True, permit full-table materialization when
             streaming APIs fail (unsafe for multi-million-row indexes).
-        progress: Optional callback for phase/batch progress (default: print).
-            Pass ``None`` to silence progress lines.
+        progress: Optional callback for phase/batch progress lines.
+            Default ``None`` is silent (library-safe). CLI passes
+            ``_default_progress`` (stderr). ``duck=`` sizes are on-disk
+            estimates and may lag until checkpoint.
 
     Returns:
         ConversionStats with counts and paths.
@@ -459,6 +461,20 @@ def convert_lancedb_to_duckdb(
         stream_batch_size=batch_size,
     )
 
+    # Announce immediately so large indexes are never silent during inventory.
+    report("=== Phase 0: initialize ===")
+    report(f"  source LanceDB:  {lance_dir}")
+    report(f"  dest DuckDB:     {dest_file}")
+    report(f"  batch_size:      {batch_size}")
+    report(f"  compact mode:    {compact}")
+    report(f"  allow_full_scan: {allow_full_scan}")
+    logger.info(
+        "Lance→Duck convert start source=%s dest=%s batch_size=%s",
+        lance_dir,
+        dest_file,
+        batch_size,
+    )
+
     if dest_file.exists():
         if not overwrite:
             raise FileExistsError(
@@ -471,17 +487,15 @@ def convert_lancedb_to_duckdb(
 
     import lancedb
 
+    report("  opening Lance tables …")
     db = lancedb.connect(str(lance_dir))
     try:
         files_tbl = db.open_table("files")
         chunks_tbl = db.open_table("chunks")
     except Exception as e:
-        raise RuntimeError(
-            f"Failed to open LanceDB tables in {lance_dir}: {e}"
-        ) from e
+        raise RuntimeError(f"Failed to open LanceDB tables in {lance_dir}: {e}") from e
 
-    # --- Phase 0: source inventory ---
-    lance_bytes = _dir_size_bytes(lance_dir)
+    report("  counting Lance rows …")
     total_files = _table_row_count(files_tbl)
     total_chunks = _table_row_count(chunks_tbl)
     file_batches_est = (
@@ -490,10 +504,6 @@ def convert_lancedb_to_duckdb(
     chunk_batches_est = (
         (total_chunks + batch_size - 1) // batch_size if total_chunks else None
     )
-    report("=== Phase 0: initialize ===")
-    report(f"  source LanceDB:  {lance_dir}")
-    report(f"  dest DuckDB:     {dest_file}")
-    report(f"  Lance on-disk:   {_format_bytes(lance_bytes)}")
     report(
         f"  Lance files:     {total_files if total_files is not None else '?'}"
         f"  (row count; dups rare)"
@@ -502,13 +512,14 @@ def convert_lancedb_to_duckdb(
         f"  Lance chunks:    {total_chunks if total_chunks is not None else '?'}"
         f"  (row count; fragment dups possible)"
     )
-    report(f"  batch_size:      {batch_size}")
     if file_batches_est is not None:
         report(f"  est. file scan batches:  ~{file_batches_est}")
     if chunk_batches_est is not None:
         report(f"  est. chunk scan batches: ~{chunk_batches_est}")
-    report(f"  compact mode:    {compact}")
-    report(f"  allow_full_scan: {allow_full_scan}")
+
+    report("  sizing Lance on disk (may take a while on large indexes) …")
+    lance_bytes = _dir_size_bytes(lance_dir)
+    report(f"  Lance on-disk:   {_format_bytes(lance_bytes)}")
 
     conn = _open_duck_for_write(dest_file)
     try:
@@ -620,9 +631,7 @@ def convert_lancedb_to_duckdb(
             for dims, erows in list(emb_pending.items()):
                 if not erows:
                     continue
-                emb_id = _flush_embedding_batch(
-                    conn, dims, erows, emb_id_start=emb_id
-                )
+                emb_id = _flush_embedding_batch(conn, dims, erows, emb_id_start=emb_id)
                 stats.embeddings += len(erows)
                 dims_seen.add(dims)
                 erows.clear()
@@ -727,30 +736,28 @@ def convert_lancedb_to_duckdb(
 
         # --- Phase 4: indexes ---
         report("=== Phase 4: indexes (after bulk load) ===")
+        logger.info("Lance→Duck convert: building indexes after bulk load")
         report("  creating files/chunks b-tree indexes …")
+        t_idx = time.perf_counter()
         conn.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_files_language ON files(language)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(chunk_type)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_files_language ON files(language)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(chunk_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol)")
         report(
-            f"  files/chunks indexes done"
+            f"  files/chunks indexes done in {time.perf_counter() - t_idx:.1f}s"
             f"  duck={_format_bytes(_duck_on_disk_bytes(dest_file))}"
         )
         stats.embedding_dims = sorted(dims_seen)
         for dims in stats.embedding_dims:
-            report(f"  building embeddings_{dims} indexes (incl. HNSW) …")
+            report(
+                f"  building embeddings_{dims} indexes (incl. HNSW; may take a while) …"
+            )
+            t_hnsw = time.perf_counter()
             _create_embedding_indexes(conn, dims)
             report(
-                f"  embeddings_{dims} indexes done"
+                f"  embeddings_{dims} indexes done in "
+                f"{time.perf_counter() - t_hnsw:.1f}s"
                 f"  duck={_format_bytes(_duck_on_disk_bytes(dest_file))}"
             )
 
@@ -758,10 +765,17 @@ def convert_lancedb_to_duckdb(
         conn.execute("CHECKPOINT")
         report(
             f"  checkpoint done  duck={_format_bytes(_duck_on_disk_bytes(dest_file))}"
+            f"  (on-disk size is current after checkpoint)"
         )
         report(
             f"  load complete: files={stats.files} chunks={stats.chunks} "
             f"embeddings={stats.embeddings} dims={stats.embedding_dims}"
+        )
+        logger.info(
+            "Lance→Duck convert load complete files=%s chunks=%s embeddings=%s",
+            stats.files,
+            stats.chunks,
+            stats.embeddings,
         )
     finally:
         conn.close()
@@ -895,7 +909,7 @@ def convert_and_activate(
     batch_size: int = _DEFAULT_BATCH_SIZE,
     compact: Literal["auto", "always", "never"] = "auto",
     allow_full_scan: bool = False,
-    progress: ProgressFn | None = _default_progress,
+    progress: ProgressFn | None = None,
 ) -> ConversionStats:
     """Convert project LanceDB → DuckDB and optionally switch config to DuckDB.
 
@@ -904,6 +918,8 @@ def convert_and_activate(
         source:  <project>/.chunkhound/lancedb.lancedb
         dest:    <project>/.chunkhound/chunks.db
         config:  database.provider=duckdb, database.path=.chunkhound
+
+    ``progress`` defaults to silent; pass ``_default_progress`` for stderr UX.
     """
     project_dir = project_dir.expanduser().resolve()
     src = source or (project_dir / ".chunkhound")
@@ -922,8 +938,6 @@ def convert_and_activate(
         if database_path is not None:
             cfg_path_val = str(database_path).replace("\\", "/")
         else:
-            cfg_path_val = config_path_for_dest(
-                project_dir, Path(stats.dest_duckdb)
-            )
+            cfg_path_val = config_path_for_dest(project_dir, Path(stats.dest_duckdb))
         activate_duckdb_in_config(project_dir, database_path=cfg_path_val)
     return stats
