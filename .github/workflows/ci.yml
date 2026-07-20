@@ -148,6 +148,7 @@ jobs:
 
       - name: Build Rust extension (maturin develop)
         if: hashFiles('Cargo.toml') != ''
+        shell: bash
         env:
           DUCKDB_DOWNLOAD_LIB: "1"
         run: |
