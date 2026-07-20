@@ -22,6 +22,7 @@ pub(crate) struct PipelineConfig {
     pub parse_batch_size: usize,
     pub parse_thread_pool_size: usize,
     pub embed_batch_size: usize,
+    pub pipeline_parallel: bool,
 
     // Change detection
     pub force_reindex: bool,
@@ -59,6 +60,7 @@ impl PipelineConfig {
             parse_batch_size: get_u64_or(dict, "parse_batch_size", 200)? as usize,
             parse_thread_pool_size: get_u64_or(dict, "parse_thread_pool_size", 0)? as usize,
             embed_batch_size: get_u64_or(dict, "embed_batch_size", 200)? as usize,
+            pipeline_parallel: get_bool_or(dict, "pipeline_parallel", false)?,
 
             force_reindex: get_bool_or(dict, "force_reindex", false)?,
             mtime_epsilon_seconds: get_f64_or(dict, "mtime_epsilon_seconds", 0.01)?,

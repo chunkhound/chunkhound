@@ -18,6 +18,11 @@ pub struct DuckDbHnswBackend {
     // Used to detect new dimensions mid-session so the HNSW cache can be
     // invalidated and a fresh HNSW index created after the first commit.
     known_dims: HashSet<u32>,
+    // Pipeline-parallel state: HNSW index DDL to recreate after all batches commit.
+    // Set by prepare_write(), consumed by finish_write().
+    pending_hnsw_indexes: Vec<HnswIndexInfo>,
+    // Pipeline-parallel state: new dimension tables that need HNSW indexes.
+    pending_new_dims: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +64,8 @@ impl DuckDbHnswBackend {
             hnsw_cache: None,
             hnsw_bulk_mode: false,
             known_dims: HashSet::new(),
+            pending_hnsw_indexes: Vec::new(),
+            pending_new_dims: Vec::new(),
         }
     }
 
@@ -1073,36 +1080,34 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
-        // Step 0a: Handle delete_paths OUTSIDE transaction (Invariant: DuckDB rejects
-        // FK parent-row deletes inside an explicit transaction after child deletes).
-        //
-        // Atomicity gap: if the process crashes after delete_paths commits but before
-        // the write transaction below commits, the deleted files are permanently absent
-        // from the DB.  Unlike the upsert path (file rows survive → self-healing),
-        // delete_paths removes the file rows themselves.  The caller must be prepared
-        // to re-submit delete requests after a crash — the indexer has no way to know
-        // which files were intended for deletion.  Source files on disk are never
-        // touched by this code path.
+        self.prepare_write(batch)?;
+        let result = match self.write_batch_incremental(batch) {
+            Ok(r) => r,
+            Err(e) => {
+                // Restore HNSW indexes on error to maintain Invariant 14.
+                let _ = self.finish_write();
+                return Err(e);
+            }
+        };
+        self.finish_write()?;
+        self.write_count += 1;
+        Ok(result)
+    }
+
+    fn prepare_write(&mut self, batch: &DbWriterBatch) -> Result<(), DbError> {
+        // Step 0a: Handle delete_paths OUTSIDE transaction.
         if !batch.delete_paths.is_empty() {
             let conn = self.conn_or_err()?;
             Self::delete_paths(conn, &batch.delete_paths)?;
         }
 
         // Step 0b: Pre-delete chunks/embeddings for files being upserted, OUTSIDE transaction.
-        // DuckDB's FK check engine sees the committed DB state, not the current transaction's
-        // in-flight deletes.  Any UPDATE on files inside a txn where child chunks were deleted
-        // earlier in that same txn is rejected — even though no FK is violated at commit time.
-        // Running these deletes before BEGIN avoids the spurious constraint error.
         {
             let conn = self.conn_or_err()?;
             Self::pre_delete_for_upsert(conn, batch)?;
         }
 
         // Step 0c: Ensure embedding tables outside txn (Invariant 13).
-        // Track which dims are genuinely new so we can (a) invalidate the stale
-        // HNSW cache and (b) create a fresh HNSW index for the new table after
-        // the commit (Step 5+).  The per-batch bookend only manages EXISTING
-        // indexes, so a brand-new embeddings_N table would never get one otherwise.
         let unique_dims = Self::collect_unique_dims(batch);
         let new_dims: Vec<u32> = unique_dims.difference(&self.known_dims).copied().collect();
         {
@@ -1113,16 +1118,13 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         }
         self.known_dims.extend(unique_dims.iter().copied());
         if !new_dims.is_empty() {
-            // The cached HNSW snapshot predates the new table(s) — force rediscovery.
             self.hnsw_cache = None;
         }
 
-        // Step 1: Count embeddings to decide HNSW lifecycle
+        // Step 1: Count embeddings to decide HNSW lifecycle.
         let total_emb = Self::count_total_embeddings(batch);
 
         // Step 2: Discover + DROP HNSW indexes BEFORE BEGIN (Invariant 14).
-        // Cache the index DDL after first successful discovery to skip the
-        // catalog query on every subsequent batch.
         let hnsw_indexes = {
             let conn = self
                 .conn
@@ -1133,8 +1135,6 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                     Some(cached) => cached.clone(),
                     None => {
                         let discovered = Self::discover_hnsw_indexes(conn)?;
-                        // Cache even an empty result so subsequent batches don't
-                        // re-query the catalog when no HNSW indexes exist yet.
                         self.hnsw_cache = Some(discovered.clone());
                         discovered
                     }
@@ -1148,7 +1148,14 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             }
         };
 
-        // Step 3: Transaction
+        // Save state for finish_write() to restore later.
+        self.pending_hnsw_indexes = hnsw_indexes;
+        self.pending_new_dims = new_dims;
+        Ok(())
+    }
+
+    fn write_batch_incremental(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
+        // BEGIN + write inner.
         let batch_inner = {
             let conn = self.conn_or_err()?;
             conn.execute_batch("BEGIN")?;
@@ -1157,10 +1164,6 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                 Ok(inner) => inner,
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK");
-                    // Try to restore HNSW even on error (Invariant 14)
-                    if !hnsw_indexes.is_empty() {
-                        let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
-                    }
                     return Err(e);
                 }
             }
@@ -1171,7 +1174,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             batch_inner.embedding_pairs,
         );
 
-        // Step 3e: Insert embeddings (still inside txn)
+        // Insert embeddings (still inside txn).
         let embeddings_written = {
             let conn = self
                 .conn
@@ -1181,15 +1184,12 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                 Ok(n) => n,
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK");
-                    if !hnsw_indexes.is_empty() {
-                        let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
-                    }
                     return Err(e);
                 }
             }
         };
 
-        // Step 4: COMMIT
+        // COMMIT + CHECKPOINT.
         {
             let conn = self
                 .conn
@@ -1197,37 +1197,36 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                 .expect("conn is Some: open() succeeded and BEGIN passed");
             if let Err(e) = conn.execute_batch("COMMIT") {
                 let _ = conn.execute_batch("ROLLBACK");
-                if !hnsw_indexes.is_empty() {
-                    let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
-                }
                 return Err(DbError::DuckDb(e));
             }
-            // Force CHECKPOINT after COMMIT to flush all data to the main DB file.
-            // This is critical when the initial DB was created by a different DuckDB
-            // library (e.g. Python), which may leave a WAL whose replay state must be
-            // merged with our writes before subsequent connections can see the data.
+            // CHECKPOINT flushes WAL → main DB file so subsequent connections
+            // (e.g. Python DuckDB) see the data.
             conn.execute_batch("CHECKPOINT")?;
         }
 
-        // Step 5: RECREATE HNSW AFTER COMMIT (Invariant 14)
+        Ok(BatchResult {
+            file_ids,
+            chunks_written,
+            embeddings_written,
+        })
+    }
+
+    fn finish_write(&mut self) -> Result<(), DbError> {
+        let hnsw_indexes = std::mem::take(&mut self.pending_hnsw_indexes);
+        let new_dims = std::mem::take(&mut self.pending_new_dims);
+
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| DbError::Other("not open".into()))?;
+
+        // Step 5: Recreate HNSW indexes that were dropped in prepare_write.
         if !hnsw_indexes.is_empty() {
-            let conn = self
-                .conn
-                .as_ref()
-                .expect("conn is Some: open() succeeded and COMMIT passed");
             Self::recreate_hnsw_indexes(conn, &hnsw_indexes)?;
         }
 
-        // Step 5+: Create HNSW indexes for newly-introduced embedding dimensions.
-        // The bookend above only recreates indexes that existed before Step 2's drop;
-        // a brand-new embeddings_N table has no HNSW yet.  Create it now so that
-        // subsequent batches can manage it through the normal drop/recreate cycle.
-        // hnsw_cache was already invalidated in Step 0c, so the next batch rediscovers.
+        // Step 5+: Create HNSW for newly-introduced embedding dimensions.
         if !new_dims.is_empty() && self.has_vss {
-            let conn = self
-                .conn
-                .as_ref()
-                .expect("conn is Some: open() succeeded and COMMIT passed");
             for &dims in &new_dims {
                 let hnsw_name = format!("idx_hnsw_{dims}");
                 let table = format!("embeddings_{dims}");
@@ -1237,12 +1236,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             }
         }
 
-        self.write_count += 1;
-        Ok(BatchResult {
-            file_ids,
-            chunks_written,
-            embeddings_written,
-        })
+        Ok(())
     }
 
     fn needs_compaction(&self) -> Result<bool, DbError> {

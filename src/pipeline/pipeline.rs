@@ -69,86 +69,113 @@ impl IndexingPipeline {
             delete_paths = Vec::new();
         }
 
-        // Phase 1: parse (single-threaded or parallel).
-        let mut parsed = if self.config.parse_thread_pool_size > 1 {
-            if let Some(ref batch_cb) = parse_batch_callback {
-                let cb = batch_cb.clone_ref(py);
-                let parsed_result =
-                    py.allow_threads(|| self.parse_batch_parallel(&batch_paths, &cb));
-                parsed_result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+        // ── Parse + Embed (with optional pipeline parallelism) ──
+        let provider = self.config.embedding_provider.clone();
+        let model = self.config.embedding_model.clone();
+
+        let parsed: Vec<super::types::ParsedFile> = if self.config.pipeline_parallel
+            && self.config.parse_thread_pool_size > 1
+        {
+            if let Some(parse_cb) = &parse_batch_callback {
+                // Pipeline-parallel: parse and embed overlap via channels.
+                // Clone Python references before releasing the GIL.
+                let parse_cb = parse_cb.clone_ref(py);
+                let embed_cb = embed_batch_callback.as_ref().map(|cb| cb.clone_ref(py));
+                let seq_embed_cb = embed_callback.as_ref().map(|cb| cb.clone_ref(py));
+                py.allow_threads(|| {
+                    self.pipeline_parse_and_embed(
+                        &batch_paths,
+                        parse_cb,
+                        embed_cb,
+                        seq_embed_cb,
+                        &provider,
+                        &model,
+                    )
+                })
+                .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
             } else {
+                // Should not reach here — pipeline_parallel requires batch callback.
                 self.parse_batch(py, &batch_paths, &parse_callback)?
             }
         } else {
-            self.parse_batch(py, &batch_paths, &parse_callback)?
-        };
-
-        // ── Embed (before write) ───────────────────────────────
-        if !self.config.skip_embeddings {
-            // Collect all chunk texts with their positions for back-mapping.
-            let mut embed_targets: Vec<(usize, usize, String)> = Vec::new();
-            for (fi, pf) in parsed.iter().enumerate() {
-                if pf.error.is_some() {
-                    continue;
+            // ── Sequential parse ──────────────────────────
+            let mut parsed = if self.config.parse_thread_pool_size > 1 {
+                if let Some(ref batch_cb) = parse_batch_callback {
+                    let cb = batch_cb.clone_ref(py);
+                    let parsed_result =
+                        py.allow_threads(|| self.parse_batch_parallel(&batch_paths, &cb));
+                    parsed_result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+                } else {
+                    self.parse_batch(py, &batch_paths, &parse_callback)?
                 }
-                for (ci, ch) in pf.chunks.iter().enumerate() {
-                    let text = ch.embed_text.as_deref().unwrap_or(&ch.code).to_string();
-                    embed_targets.push((fi, ci, text));
-                }
-            }
+            } else {
+                self.parse_batch(py, &batch_paths, &parse_callback)?
+            };
 
-            if !embed_targets.is_empty() {
-                let provider = self.config.embedding_provider.clone();
-                let model = self.config.embedding_model.clone();
-
-                // ── Parallel embed (embed_batch_callback + rayon) ──
-                if let Some(ref batch_cb) = embed_batch_callback {
-                    if self.config.parse_thread_pool_size > 1 {
-                        let cb = batch_cb.clone_ref(py);
-                        py.allow_threads(|| {
-                            self.embed_batch_parallel(
-                                &mut parsed,
-                                &embed_targets,
-                                &cb,
-                                &provider,
-                                &model,
-                            )
-                        })
-                        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+            // ── Sequential embed ──────────────────────────
+            if !self.config.skip_embeddings {
+                // Collect all chunk texts with their positions for back-mapping.
+                let mut embed_targets: Vec<(usize, usize, String)> = Vec::new();
+                for (fi, pf) in parsed.iter().enumerate() {
+                    if pf.error.is_some() {
+                        continue;
+                    }
+                    for (ci, ch) in pf.chunks.iter().enumerate() {
+                        let text = ch.embed_text.as_deref().unwrap_or(&ch.code).to_string();
+                        embed_targets.push((fi, ci, text));
                     }
                 }
 
-                // ── Sequential embed (fallback / backward-compat) ──
-                // Skip if parallel embed already populated embeddings.
-                if embed_batch_callback.is_none() || self.config.parse_thread_pool_size <= 1 {
-                    if let Some(ref embed_py) = embed_callback {
-                        let batch_size = self.config.embed_batch_size.max(1);
+                if !embed_targets.is_empty() {
+                    // ── Parallel embed (embed_batch_callback + rayon) ──
+                    if let Some(ref batch_cb) = embed_batch_callback {
+                        if self.config.parse_thread_pool_size > 1 {
+                            let cb = batch_cb.clone_ref(py);
+                            py.allow_threads(|| {
+                                self.embed_batch_parallel(
+                                    &mut parsed,
+                                    &embed_targets,
+                                    &cb,
+                                    &provider,
+                                    &model,
+                                )
+                            })
+                            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+                        }
+                    }
 
-                        for batch in embed_targets.chunks(batch_size) {
-                            let texts: Vec<String> =
-                                batch.iter().map(|(_, _, t)| t.clone()).collect();
+                    // ── Sequential embed (fallback) ───────
+                    if embed_batch_callback.is_none() || self.config.parse_thread_pool_size <= 1 {
+                        if let Some(ref embed_py) = embed_callback {
+                            let batch_size = self.config.embed_batch_size.max(1);
 
-                            let embed_cb = embed_py.bind(py);
-                            let vectors: Vec<Vec<f64>> = embed_cb.call1((texts,))?.extract()?;
+                            for batch in embed_targets.chunks(batch_size) {
+                                let texts: Vec<String> =
+                                    batch.iter().map(|(_, _, t)| t.clone()).collect();
 
-                            if vectors.is_empty() {
-                                continue;
-                            }
+                                let embed_cb = embed_py.bind(py);
+                                let vectors: Vec<Vec<f64>> = embed_cb.call1((texts,))?.extract()?;
 
-                            // Map vectors back to NewChunk in parsed files.
-                            for (i, (fi, ci, _)) in batch.iter().enumerate() {
-                                if let Some(vec) = vectors.get(i) {
-                                    let chunk = &mut parsed[*fi].chunks[*ci];
-                                    chunk.embedding = Some(vec.iter().map(|x| *x as f32).collect());
-                                    chunk.provider = Some(provider.clone());
-                                    chunk.model = Some(model.clone());
+                                if vectors.is_empty() {
+                                    continue;
+                                }
+
+                                for (i, (fi, ci, _)) in batch.iter().enumerate() {
+                                    if let Some(vec) = vectors.get(i) {
+                                        let chunk = &mut parsed[*fi].chunks[*ci];
+                                        chunk.embedding =
+                                            Some(vec.iter().map(|x| *x as f32).collect());
+                                        chunk.provider = Some(provider.clone());
+                                        chunk.model = Some(model.clone());
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-        }
+            parsed
+        };
 
         // Build DbWriterBatch from parsed results.
         let mut file_records = Vec::with_capacity(parsed.len());
@@ -372,6 +399,230 @@ impl IndexingPipeline {
         );
 
         Ok(result)
+    }
+
+    // ── Pipeline-parallel parse+embed (Phase 8) ───────────────────
+
+    /// Overlap parse and embed via a producer-consumer channel.
+    ///
+    /// A parse thread batches files, parses them via the batch callback,
+    /// and sends results through a channel.  The calling thread receives
+    /// parsed batches and embeds them while the parse thread works on the
+    /// next batch.  Returns all ParsedFiles with embeddings populated.
+    ///
+    /// **Caller must release the GIL** before entering this method.
+    /// Each thread re-acquires the GIL independently via ``Python::with_gil()``.
+    fn pipeline_parse_and_embed(
+        &self,
+        files: &[PathBuf],
+        parse_cb: Py<PyAny>,
+        embed_cb: Option<Py<PyAny>>,
+        seq_embed_cb: Option<Py<PyAny>>,
+        provider: &str,
+        model: &str,
+    ) -> Result<Vec<super::types::ParsedFile>, String> {
+        use std::sync::mpsc;
+        use std::sync::{Arc, Mutex};
+
+        let batch_size = self.config.parse_batch_size.max(1);
+        let detect_sql = self.config.detect_embedded_sql;
+        let parse_thread_pool_size = self.config.parse_thread_pool_size;
+        let embed_batch_size = self.config.embed_batch_size.max(1);
+        let skip_embeddings = self.config.skip_embeddings;
+        let provider = provider.to_string();
+        let model = model.to_string();
+
+        // Build file batches (indices into `files` slice).
+        let batches: Vec<(usize, Vec<PathBuf>)> = files
+            .chunks(batch_size)
+            .enumerate()
+            .map(|(i, chunk)| (i, chunk.to_vec()))
+            .collect();
+        let batch_count = batches.len();
+
+        let (parse_tx, parse_rx) = mpsc::channel::<(usize, Vec<super::types::ParsedFile>)>();
+        let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+        // ── Parse thread ──────────────────────────────────────
+        let parse_handle = {
+            let error = Arc::clone(&error);
+            std::thread::spawn(move || {
+                for (batch_idx, batch) in batches {
+                    if error.lock().unwrap().is_some() {
+                        break;
+                    }
+
+                    let paths: Vec<String> = batch
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect();
+
+                    let parsed = match Python::with_gil(|gil_py| {
+                        // Use parallel parse dispatch within the batch.
+                        if parse_thread_pool_size > 1 {
+                            // Build a mini-pipeline config for this batch.
+                            Self::parse_one_batch(gil_py, &parse_cb, &paths, &batch, detect_sql)
+                        } else {
+                            // Single-file fallback — not recommended for pipeline mode.
+                            let cb = parse_cb.bind(gil_py);
+                            let mut results = Vec::with_capacity(batch.len());
+                            for p in batch.iter() {
+                                let path_str = p.to_string_lossy();
+                                let ret = cb.call1((path_str.as_ref(), detect_sql));
+                                match ret {
+                                    Ok(ret) => {
+                                        let lang: String = ret
+                                            .get_item(0)
+                                            .ok()
+                                            .and_then(|v| v.extract::<String>().ok())
+                                            .unwrap_or_default();
+                                        let chunks_py = ret
+                                            .get_item(1)
+                                            .ok()
+                                            .and_then(|v| v.downcast_into::<PyList>().ok());
+                                        let chunks = match chunks_py {
+                                            Some(l) => Self::extract_chunks(gil_py, &l),
+                                            None => vec![],
+                                        };
+                                        let meta =
+                                            std::fs::metadata(p).map(|m| (m.len(), m.modified()));
+                                        let (file_size, mtime) = match meta {
+                                            Ok((s, mt)) => {
+                                                let mtime_secs = mt
+                                                    .unwrap_or(std::time::UNIX_EPOCH)
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .map(|d| d.as_secs_f64())
+                                                    .unwrap_or(0.0);
+                                                (s, mtime_secs)
+                                            }
+                                            Err(_) => (0, 0.0),
+                                        };
+                                        results.push(super::types::ParsedFile {
+                                            path: p.clone(),
+                                            language: if lang.is_empty() {
+                                                None
+                                            } else {
+                                                Some(lang)
+                                            },
+                                            file_size,
+                                            mtime,
+                                            content_hash: String::new(),
+                                            chunks,
+                                            error: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        results.push(super::types::ParsedFile {
+                                            path: p.clone(),
+                                            language: None,
+                                            file_size: 0,
+                                            mtime: 0.0,
+                                            content_hash: String::new(),
+                                            chunks: vec![],
+                                            error: Some(e.to_string()),
+                                        });
+                                    }
+                                }
+                            }
+                            Ok(results)
+                        }
+                    }) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            let mut err = error.lock().unwrap();
+                            if err.is_none() {
+                                *err = Some(e);
+                            }
+                            break;
+                        }
+                    };
+
+                    if parse_tx.send((batch_idx, parsed)).is_err() {
+                        // Receiver dropped (main thread error) — stop.
+                        break;
+                    }
+                }
+            })
+        };
+
+        // ── Main thread: receive + embed ─────────────────────
+        let mut all_parsed: Vec<super::types::ParsedFile> = Vec::new();
+        let mut received = 0usize;
+
+        while received < batch_count {
+            match parse_rx.recv() {
+                Ok((_batch_idx, mut parsed_files)) => {
+                    received += 1;
+
+                    if !skip_embeddings && !parsed_files.is_empty() {
+                        // Embed this batch's chunks.
+                        let mut embed_targets: Vec<(usize, usize, String)> = Vec::new();
+                        for (fi, pf) in parsed_files.iter().enumerate() {
+                            if pf.error.is_some() {
+                                continue;
+                            }
+                            for (ci, ch) in pf.chunks.iter().enumerate() {
+                                let text = ch.embed_text.as_deref().unwrap_or(&ch.code).to_string();
+                                embed_targets.push((fi, ci, text));
+                            }
+                        }
+
+                        if !embed_targets.is_empty() {
+                            if let Some(ref batch_cb) = embed_cb {
+                                // Parallel embed dispatch.
+                                self.embed_batch_parallel(
+                                    &mut parsed_files,
+                                    &embed_targets,
+                                    batch_cb,
+                                    &provider,
+                                    &model,
+                                )?;
+                            } else if let Some(ref seq_cb) = seq_embed_cb {
+                                // Sequential fallback: call per-batch embed callback.
+                                Python::with_gil(|gil_py| -> Result<(), String> {
+                                    let cb = seq_cb.bind(gil_py);
+                                    for chunk_batch in embed_targets.chunks(embed_batch_size) {
+                                        let texts: Vec<String> =
+                                            chunk_batch.iter().map(|(_, _, t)| t.clone()).collect();
+                                        let vectors: Vec<Vec<f64>> = cb
+                                            .call1((texts,))
+                                            .map_err(|e| e.to_string())?
+                                            .extract()
+                                            .map_err(|e: pyo3::PyErr| e.to_string())?;
+                                        for (i, (fi, ci, _)) in chunk_batch.iter().enumerate() {
+                                            if let Some(vec) = vectors.get(i) {
+                                                let chunk = &mut parsed_files[*fi].chunks[*ci];
+                                                chunk.embedding =
+                                                    Some(vec.iter().map(|x| *x as f32).collect());
+                                                chunk.provider = Some(provider.clone());
+                                                chunk.model = Some(model.clone());
+                                            }
+                                        }
+                                    }
+                                    Ok(())
+                                })?;
+                            }
+                        }
+                    }
+
+                    all_parsed.extend(parsed_files);
+                }
+                Err(_) => {
+                    // Channel closed — parse thread panicked or errored.
+                    break;
+                }
+            }
+        }
+
+        // Wait for parse thread to exit.
+        let _ = parse_handle.join();
+
+        // Check for errors.
+        if let Some(e) = Arc::try_unwrap(error).unwrap().into_inner().unwrap() {
+            return Err(e);
+        }
+
+        Ok(all_parsed)
     }
 
     /// Parse files using the batch callback with a rayon thread pool.
