@@ -102,3 +102,30 @@ def embed_callback(
         return asyncio.run(_embed())
     except RuntimeError:
         return asyncio.run(_embed())
+
+
+def _parse_one_file(args: tuple[str, bool]) -> tuple[str, list[dict]]:
+    """Parse a single file — module-level so ProcessPoolExecutor can pickle it."""
+    file_path, detect_embedded_sql = args
+    return parse_file_callback(file_path, detect_embedded_sql=detect_embedded_sql)
+
+
+def parse_batch_callback(
+    file_paths: list[str],
+    detect_embedded_sql: bool = True,
+) -> list[tuple[str, list[dict]]]:
+    """Adapter: batch-parse files in parallel (called from Rust parse threads).
+
+    Each file is parsed in its own subprocess via ProcessPoolExecutor for
+    true CPU parallelism (tree-sitter holds the GIL, so threads don't help).
+
+    Returns:
+        List of (language, chunks) tuples — same order as file_paths.
+    """
+    from concurrent.futures import ProcessPoolExecutor
+
+    # Use at most N workers — cap to avoid resource exhaustion on large batches
+    max_workers = min(len(file_paths), 16)
+    args_list = [(p, detect_embedded_sql) for p in file_paths]
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        return list(pool.map(_parse_one_file, args_list))

@@ -149,7 +149,7 @@ mod tests {
             mtime,
         }];
 
-        let diff = compute_diff(&db, &[f1.clone()], tmp.path(), 0.01);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01);
         assert!(diff.changed.is_empty(), "unchanged file should be skipped");
     }
 
@@ -164,7 +164,7 @@ mod tests {
             mtime: old_mtime,
         }];
 
-        let diff = compute_diff(&db, &[f1.clone()], tmp.path(), 0.01);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01);
         assert_eq!(
             diff.changed_count(),
             1,
@@ -188,7 +188,7 @@ mod tests {
             },
         ];
 
-        let diff = compute_diff(&db, &[f1.clone()], tmp.path(), 0.01);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01);
         assert_eq!(diff.changed_count(), 0); // a.py unchanged
         assert_eq!(diff.removed_count(), 1);
         assert!(diff.removed.contains(&"gone.py".to_string()));

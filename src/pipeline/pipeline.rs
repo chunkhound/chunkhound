@@ -33,7 +33,8 @@ impl IndexingPipeline {
     /// Called from Python via `asyncio.to_thread(pipeline.run, ...)`.
     ///
     /// Pipeline order: parse → embed → write (single transaction).
-    #[pyo3(signature = (files, parse_callback, embed_callback=None, progress_callback=None, incremental=false))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (files, parse_callback, embed_callback=None, progress_callback=None, incremental=false, parse_batch_callback=None))]
     fn run(
         &mut self,
         py: Python<'_>,
@@ -42,6 +43,7 @@ impl IndexingPipeline {
         embed_callback: Option<Py<PyAny>>,
         progress_callback: Option<Py<PyAny>>,
         incremental: bool,
+        parse_batch_callback: Option<Py<PyAny>>,
     ) -> PyResult<PipelineReport> {
         let _ = &progress_callback; // unused — callback reserved for future progress reporting
         let started = Instant::now();
@@ -66,8 +68,19 @@ impl IndexingPipeline {
             delete_paths = Vec::new();
         }
 
-        // Phase 1: single-threaded parse.
-        let mut parsed = self.parse_batch(py, &batch_paths, &parse_callback)?;
+        // Phase 1: parse (single-threaded or parallel).
+        let mut parsed = if self.config.parse_thread_pool_size > 1 {
+            if let Some(ref batch_cb) = parse_batch_callback {
+                let cb = batch_cb.clone_ref(py);
+                let parsed_result =
+                    py.allow_threads(|| self.parse_batch_parallel(&batch_paths, &cb));
+                parsed_result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+            } else {
+                self.parse_batch(py, &batch_paths, &parse_callback)?
+            }
+        } else {
+            self.parse_batch(py, &batch_paths, &parse_callback)?
+        };
 
         // ── Embed (before write) ───────────────────────────────
         if let Some(ref embed_py) = embed_callback {
@@ -79,11 +92,7 @@ impl IndexingPipeline {
                         continue;
                     }
                     for (ci, ch) in pf.chunks.iter().enumerate() {
-                        let text = ch
-                            .embed_text
-                            .as_deref()
-                            .unwrap_or(&ch.code)
-                            .to_string();
+                        let text = ch.embed_text.as_deref().unwrap_or(&ch.code).to_string();
                         embed_targets.push((fi, ci, text));
                     }
                 }
@@ -94,12 +103,10 @@ impl IndexingPipeline {
                     let model = self.config.embedding_model.clone();
 
                     for batch in embed_targets.chunks(batch_size) {
-                        let texts: Vec<String> =
-                            batch.iter().map(|(_, _, t)| t.clone()).collect();
+                        let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
 
                         let embed_cb = embed_py.bind(py);
-                        let vectors: Vec<Vec<f64>> =
-                            embed_cb.call1((texts,))?.extract()?;
+                        let vectors: Vec<Vec<f64>> = embed_cb.call1((texts,))?.extract()?;
 
                         if vectors.is_empty() {
                             continue;
@@ -109,8 +116,7 @@ impl IndexingPipeline {
                         for (i, (fi, ci, _)) in batch.iter().enumerate() {
                             if let Some(vec) = vectors.get(i) {
                                 let chunk = &mut parsed[*fi].chunks[*ci];
-                                chunk.embedding =
-                                    Some(vec.iter().map(|x| *x as f32).collect());
+                                chunk.embedding = Some(vec.iter().map(|x| *x as f32).collect());
                                 chunk.provider = Some(provider.clone());
                                 chunk.model = Some(model.clone());
                             }
@@ -341,7 +347,147 @@ impl IndexingPipeline {
         Ok(result)
     }
 
-    /// Parse a batch of files using the Python callback.
+    /// Parse files using the batch callback with a rayon thread pool.
+    ///
+    /// Each batch calls Python's ``parse_batch_callback`` which uses
+    /// ``ProcessPoolExecutor`` internally.  While a batch is waiting for
+    /// subprocess results, CPython releases the GIL, allowing other rayon
+    /// threads to dispatch their own batches — true CPU parallelism.
+    ///
+    /// **Caller must release the GIL** before entering this method (via
+    /// ``py.allow_threads()``).  Each rayon thread re-acquires the GIL
+    /// independently via ``Python::with_gil()``.
+    fn parse_batch_parallel(
+        &self,
+        files: &[PathBuf],
+        callback: &Py<PyAny>,
+    ) -> Result<Vec<super::types::ParsedFile>, String> {
+        use rayon::prelude::*;
+        use std::sync::Mutex;
+
+        let batch_size = self.config.parse_batch_size.max(1);
+        let detect_sql = self.config.detect_embedded_sql;
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.config.parse_thread_pool_size.max(1))
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let error: Mutex<Option<String>> = Mutex::new(None);
+
+        let batch_results: Vec<Vec<super::types::ParsedFile>> = pool.install(|| {
+            files
+                .par_chunks(batch_size)
+                .filter_map(|batch| {
+                    if error.lock().unwrap().is_some() {
+                        return None;
+                    }
+
+                    let paths: Vec<String> = batch
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect();
+
+                    match Python::with_gil(|gil_py| {
+                        Self::parse_one_batch(gil_py, callback, &paths, batch, detect_sql)
+                    }) {
+                        Ok(parsed) => Some(parsed),
+                        Err(e) => {
+                            let mut err = error.lock().unwrap();
+                            if err.is_none() {
+                                *err = Some(e);
+                            }
+                            None
+                        }
+                    }
+                })
+                .collect()
+        });
+
+        if let Some(e) = error.into_inner().unwrap() {
+            return Err(e);
+        }
+
+        Ok(batch_results.into_iter().flatten().collect())
+    }
+
+    /// Call the Python batch callback and extract ParsedFile results.
+    fn parse_one_batch(
+        py: Python<'_>,
+        cb: &Py<PyAny>,
+        paths: &[String],
+        batch: &[PathBuf],
+        detect_embedded_sql: bool,
+    ) -> Result<Vec<super::types::ParsedFile>, String> {
+        let cb = cb.bind(py);
+        let py_paths = PyList::new_bound(py, paths);
+        let ret = cb
+            .call1((py_paths, detect_embedded_sql))
+            .map_err(|e| e.to_string())?;
+
+        let tuple_list: &Bound<'_, PyList> = ret.downcast::<PyList>().map_err(|e| e.to_string())?;
+
+        let mut parsed = Vec::with_capacity(batch.len());
+
+        for (i, item) in tuple_list.iter().enumerate() {
+            let path = &batch[i];
+
+            let lang: String = item
+                .get_item(0)
+                .ok()
+                .and_then(|v| v.extract::<String>().ok())
+                .unwrap_or_default();
+
+            let chunks_py = match item
+                .get_item(1)
+                .ok()
+                .and_then(|v| v.downcast_into::<PyList>().ok())
+            {
+                Some(l) => l,
+                None => {
+                    parsed.push(super::types::ParsedFile {
+                        path: path.clone(),
+                        language: None,
+                        file_size: 0,
+                        mtime: 0.0,
+                        content_hash: String::new(),
+                        chunks: Vec::new(),
+                        error: Some("invalid chunk list".into()),
+                    });
+                    continue;
+                }
+            };
+
+            let chunks = Self::extract_chunks(py, &chunks_py);
+            let meta = std::fs::metadata(path).map(|m| (m.len(), m.modified()));
+
+            let (file_size, mtime) = match meta {
+                Ok((s, mt)) => {
+                    let mtime_secs = mt
+                        .unwrap_or(std::time::UNIX_EPOCH)
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0);
+                    (s, mtime_secs)
+                }
+                Err(_) => (0, 0.0),
+            };
+
+            parsed.push(super::types::ParsedFile {
+                path: path.clone(),
+                language: if lang.is_empty() { None } else { Some(lang) },
+                file_size,
+                mtime,
+                content_hash: String::new(),
+                chunks,
+                error: None,
+            });
+        }
+
+        Ok(parsed)
+    }
+
+    /// Parse files using the single-file callback (serial).
     fn parse_batch(
         &self,
         py: Python<'_>,
