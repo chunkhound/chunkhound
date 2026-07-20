@@ -77,8 +77,12 @@ async def index_with_python(
         fixture_dir, no_embeddings=skip_embeddings
     )
 
-    # Collect chunk tuples from the database
+    # Collect chunk tuples from the database.
+    # IMPORTANT: shut down the coordinator's DB connection before querying.
+    # On Windows, DuckDB opens database files in exclusive mode — a second
+    # duckdb.connect() would fail while DuckDBProvider holds the file.
     chunk_tuples = _collect_chunk_tuples(coordinator)
+    coordinator._db.disconnect()
     embedding_tuples = _collect_embedding_tuples(db_dir)
 
     return IndexResult(
@@ -126,7 +130,11 @@ def _collect_chunk_tuples(coordinator) -> list[tuple[str, str, str, str, int, in
 def _collect_embedding_tuples(
     db_dir: Path,
 ) -> list[tuple[str, str, str, str, str, int, tuple[float, ...]]]:
-    """Query the DB for all embeddings and return canonical comparison tuples."""
+    """Query the DB for all embeddings and return canonical comparison tuples.
+
+    The caller is responsible for ensuring the DB file is not held by
+    another connection (e.g., call coordinator._db.disconnect() first).
+    """
     import duckdb
 
     db_file = db_dir / "chunks.db"

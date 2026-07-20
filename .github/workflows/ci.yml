@@ -153,6 +153,26 @@ jobs:
         run: |
           uv pip install maturin
           uv run maturin develop
+          # On macOS and Windows, the DuckDB shared library is not findable
+          # at runtime by default.  Copy it next to the native extension so
+          # the dynamic linker can resolve it.
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            DUCKDB_LIB=$(find target -name 'libduckdb.dylib' -print -quit 2>/dev/null || true)
+            if [[ -n "$DUCKDB_LIB" ]]; then
+              cp "$DUCKDB_LIB" chunkhound_native/
+              echo "Copied $DUCKDB_LIB → chunkhound_native/"
+            else
+              echo "WARNING: libduckdb.dylib not found in target/ — macOS contract tests will fail"
+            fi
+          elif [[ "$RUNNER_OS" == "Windows" ]]; then
+            DUCKDB_DLL=$(find target -name 'duckdb.dll' -print -quit 2>/dev/null || true)
+            if [[ -n "$DUCKDB_DLL" ]]; then
+              cp "$DUCKDB_DLL" chunkhound_native/
+              echo "Copied $DUCKDB_DLL → chunkhound_native/"
+            else
+              echo "WARNING: duckdb.dll not found in target/ — Windows contract tests will fail"
+            fi
+          fi
 
       - name: Test collection check
         run: uv run pytest tests/ --collect-only -q --tb=no
@@ -162,6 +182,9 @@ jobs:
         continue-on-error: true
         env:
           CHUNKHOUND_USE_EXISTING_SITE_DIST: "1"
+          # macOS: libduckdb.dylib is copied next to the .so in the build step.
+          # DYLD_LIBRARY_PATH makes it resolvable at runtime.
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/chunkhound_native
         # Two retry layers serving different failure modes:
         # - nick-fields/retry: restarts the whole pytest process on CI-level failures
         #   (e.g. OOM, runner hiccup).
