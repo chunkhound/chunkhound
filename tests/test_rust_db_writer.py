@@ -548,41 +548,27 @@ class TestHnswBoundary:
 # ---------------------------------------------------------------------------
 
 class TestFeatureFlag:
-    def test_rust_disabled_via_env(self, monkeypatch, tmp_path):
-        """CHUNKHOUND_USE_RUST=0 must make RustWriterBridge.available() return False.
-
-        _get_use_rust() is evaluated at instantiation time, so monkeypatching the
-        env var before constructing the bridge is sufficient — no module reload needed.
-        """
+    def test_rust_disabled_via_env(self, monkeypatch):
+        """CHUNKHOUND_USE_RUST=0 must make _get_use_rust() return False."""
         monkeypatch.setenv("CHUNKHOUND_USE_RUST", "0")
 
-        from chunkhound.providers.database.pipeline_bridge import RustWriterBridge
+        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
 
-        b = RustWriterBridge(
-            {"db_path": str(tmp_path / "t.duckdb"), "compaction_batch_threshold": 50}
-        )
-        assert b.available() is False
+        assert _get_use_rust() is False
 
-    def test_rust_enabled_by_default_when_native_present(self, monkeypatch, tmp_path):
-        """With native extension installed and no override, bridge must be available."""
+    def test_rust_enabled_by_default_when_native_present(self, monkeypatch):
+        """Without override, _get_use_rust() mirrors native extension availability."""
         monkeypatch.delenv("CHUNKHOUND_USE_RUST", raising=False)
 
-        from chunkhound.providers.database.pipeline_bridge import RustWriterBridge
+        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
 
-        b = RustWriterBridge(
-            {"db_path": str(tmp_path / "t.duckdb"), "compaction_batch_threshold": 50}
-        )
-        # available() iff native extension is importable AND CHUNKHOUND_USE_RUST != "0"
         try:
             import chunkhound_native  # noqa: F401
             native_present = True
         except ImportError:
             native_present = False
 
-        assert b.available() == native_present
-
-        if b.available():
-            b.finalize()
+        assert _get_use_rust() == native_present
 
 
 # ---------------------------------------------------------------------------

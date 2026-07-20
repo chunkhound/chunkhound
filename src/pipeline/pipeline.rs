@@ -226,6 +226,9 @@ impl IndexingPipeline {
                 let mut backend: Box<dyn DbBackend> = create_backend(db_config);
                 backend.open()?;
                 let res = backend.write_batch(&batch)?;
+                if backend.needs_compaction()? {
+                    backend.run_compaction()?;
+                }
                 backend.close()?;
                 Ok::<_, crate::error::DbError>(res)
             })

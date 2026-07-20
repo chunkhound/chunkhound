@@ -41,7 +41,13 @@ async def index_with_python(
 
     When *embedding_provider* is given, it is set on the coordinator before
     processing (useful for deterministic mock providers).
+
+    Sets ``CHUNKHOUND_USE_RUST=0`` so the coordinator always takes the
+    Python path, even when the native extension is installed.
     """
+    import os
+
+    os.environ["CHUNKHOUND_USE_RUST"] = "0"
 
     # Build a minimal Config — point the DB at *db_dir* and disable embeddings.
     config = Config(

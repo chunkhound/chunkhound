@@ -261,6 +261,7 @@ class IndexingCoordinator(BaseService):
         # Store raw path - will resolve at usage time for consistent symlink handling
         self._base_directory: Path = base_directory
         self._root_identity_validated = False
+        self._skip_compaction = False
 
     def _get_relative_path(self, file_path: Path) -> Path:
         """Get relative path, preserving symlink logical paths.
@@ -1468,54 +1469,108 @@ class IndexingCoordinator(BaseService):
             agg_skipped_timeout: list[str] = []
             agg_skipped_paths: list[tuple[str, str]] = []
 
-            store_progress_counters = {
-                "chunks": 0,
-                "files": 0,
-                "stored": 0,
-                "skipped": 0,
-                "errors": 0,
-            }
-
-            async def _on_batch_store(batch: list[ParsedFileResult]) -> None:
-                nonlocal \
-                    agg_total_files, \
-                    agg_total_chunks, \
-                    agg_errors, \
-                    agg_skipped, \
-                    agg_skipped_timeout, \
-                    agg_skipped_paths
-                # Update skip counters from parse results
-                for r in batch:
-                    if r.status == "skipped":
-                        agg_skipped += 1
-                        if (r.error or "").lower() == "timeout":
-                            agg_skipped_timeout.append(str(r.file_path))
-
-                # Store this batch immediately
-                stats_part = await self._store_parsed_results(
-                    batch, store_task, cumulative_counters=store_progress_counters
+            # ── Rust path (CHUNKHOUND_USE_RUST=1) ─────────────────
+            _use_rust = False
+            try:
+                from chunkhound.providers.database.pipeline_bridge import (
+                    _get_use_rust,
                 )
 
-                agg_total_files += stats_part.get("total_files", 0)
-                agg_total_chunks += stats_part.get("total_chunks", 0)
-                agg_errors.extend(stats_part.get("errors", []))
-                agg_skipped_paths.extend(stats_part.get("skipped_paths", []))
+                _use_rust = _get_use_rust()
+            except ImportError:
+                pass
 
-            # Parse files (streaming progress as batches complete and store concurrently)
-            # Pass files_to_process directly - preserves hash for each file
-            # Results flow to storage via on_batch=_on_batch_store; return value unused.
-            await self._process_files_in_batches(
-                files_to_process,
-                config_file_size_threshold_kb,
-                parse_task,
-                on_batch=_on_batch_store,
-            )
+            if _use_rust:
+                # Coordinator already did discovery + cleanup + change detection.
+                # The Rust pipeline handles parse → embed → write in one call.
+                from chunkhound.pipeline_bridge import run_rust_pipeline
 
-            # Mark parse task complete
-            if parse_task is not None and self.progress:
-                task = self.progress.tasks[parse_task]
-                if task.total:
-                    self.progress.update(parse_task, completed=task.total)
+                db_path = Path(str(self._db.db_path)).parent
+                skip_embeddings = (
+                    self.config.embeddings_disabled
+                    if self.config and hasattr(self.config, "embeddings_disabled")
+                    else False
+                )
+
+                rust_stats = await run_rust_pipeline(
+                    files_to_process,
+                    db_path=db_path,
+                    project_root=directory,
+                    force_reindex=force_reindex,
+                    skip_embeddings=skip_embeddings,
+                    config=self.config,
+                )
+
+                agg_total_files = int(rust_stats.get("total_files", 0))
+                agg_total_chunks = int(rust_stats.get("total_chunks", 0))
+                agg_errors = list(rust_stats.get("errors", []))
+                # Skipped/timeout tracking isn't reported by the pipeline yet —
+                # the coordinator's change detection already filtered unchanged files.
+                agg_skipped = 0
+                agg_skipped_timeout = []
+                agg_skipped_paths = []
+
+                # Skip coordinator-side compaction — the Rust pipeline runs its
+                # own compaction via DbBackend::run_compaction() internally.
+                self._skip_compaction = True
+
+                # Mark progress tasks complete
+                if parse_task is not None and self.progress:
+                    task = self.progress.tasks[parse_task]
+                    if task.total:
+                        self.progress.update(parse_task, completed=task.total)
+
+            else:
+                # ── Python path (existing) ─────────────────────────
+
+                store_progress_counters = {
+                    "chunks": 0,
+                    "files": 0,
+                    "stored": 0,
+                    "skipped": 0,
+                    "errors": 0,
+                }
+
+                async def _on_batch_store(batch: list[ParsedFileResult]) -> None:
+                    nonlocal \
+                        agg_total_files, \
+                        agg_total_chunks, \
+                        agg_errors, \
+                        agg_skipped, \
+                        agg_skipped_timeout, \
+                        agg_skipped_paths
+                    # Update skip counters from parse results
+                    for r in batch:
+                        if r.status == "skipped":
+                            agg_skipped += 1
+                            if (r.error or "").lower() == "timeout":
+                                agg_skipped_timeout.append(str(r.file_path))
+
+                    # Store this batch immediately
+                    stats_part = await self._store_parsed_results(
+                        batch, store_task, cumulative_counters=store_progress_counters
+                    )
+
+                    agg_total_files += stats_part.get("total_files", 0)
+                    agg_total_chunks += stats_part.get("total_chunks", 0)
+                    agg_errors.extend(stats_part.get("errors", []))
+                    agg_skipped_paths.extend(stats_part.get("skipped_paths", []))
+
+                # Parse files (streaming progress as batches complete and store concurrently)
+                # Pass files_to_process directly - preserves hash for each file
+                # Results flow to storage via on_batch=_on_batch_store; return value unused.
+                await self._process_files_in_batches(
+                    files_to_process,
+                    config_file_size_threshold_kb,
+                    parse_task,
+                    on_batch=_on_batch_store,
+                )
+
+                # Mark parse task complete
+                if parse_task is not None and self.progress:
+                    task = self.progress.tasks[parse_task]
+                    if task.total:
+                        self.progress.update(parse_task, completed=task.total)
 
             # Record startup profile if enabled (before heavy parse+store dominates totals)
             if _t0 is not None:
@@ -1727,6 +1782,9 @@ class IndexingCoordinator(BaseService):
         Returns:
             Dict with status, size_before, size_after, reduction_pct.
         """
+        if self._skip_compaction:
+            return {"status": "skipped", "reason": "Rust pipeline owns compaction"}
+
         db_path = str(self._db.db_path)
         if db_path == ":memory:":
             size_before = 0
