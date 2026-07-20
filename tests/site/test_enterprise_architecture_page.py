@@ -34,20 +34,20 @@ def test_enterprise_architecture_states_current_boundary_and_decision() -> None:
     text = _visible_text(_document())
 
     for phrase in (
-        "Local-first today.",
-        "Which direction next?",
-        "The server path is not shipped today",
-        "local indexing",
-        "local stdio MCP",
+        "ChunkHound is local-only by design",
+        "The product is local-first",
+        "local-first at the workload boundary",
+        "not a ChunkHound server",
+        "Our thesis: fix the DB itself, and the server isn't needed",
+        "The cure is a better DB.",
         "Focus on local-first",
-        "Add a mixed local-first/server architecture",
-        "The default conclusion is local-first.",
+        "local indexing",
     ):
         assert phrase in text
 
-    assert "central indexing" in text
-    assert "central service boundary" in text
     assert "External embedding, reranking, or LLM providers" in text
+    assert "central query service" in text
+    assert "central server" in text
 
 
 def test_enterprise_architecture_comparison_is_incremental_and_balanced() -> None:
