@@ -19,6 +19,10 @@ def is_loopback_host(host: str) -> bool:
     literal — not just the exact strings "127.0.0.1"/"::1" — so e.g.
     "127.0.0.2" or the expanded "0:0:0:0:0:0:0:1" IPv6 form are also
     recognized as loopback rather than tripping the non-loopback-host check.
+
+    Any other hostname (e.g. "my-internal-server.local") is treated as
+    non-loopback and always requires auth — hostnames are not resolved
+    and checked against 127.0.0.0/8.
     """
     if host.strip().lower() == "localhost":
         return True

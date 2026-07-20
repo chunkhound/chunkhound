@@ -13,7 +13,7 @@ import httpx
 
 from .jsonrpc_envelope import (
     JsonRpcTimeoutError,
-    SubprocessJsonRpcError,
+    McpClientError,
     build_notification,
     build_request,
     unwrap_result,
@@ -28,7 +28,7 @@ def _parse_sse_data(text: str) -> dict[str, Any]:
         stripped = line.strip()
         if stripped.startswith("data:"):
             return json.loads(stripped[len("data:") :].strip())
-    raise SubprocessJsonRpcError(f"No SSE data line found in response body: {text!r}")
+    raise McpClientError(f"No SSE data line found in response body: {text!r}")
 
 
 class HttpMcpClient:
@@ -73,7 +73,7 @@ class HttpMcpClient:
         response = await self._post(payload, timeout=timeout)
 
         if response.status_code != 200:
-            raise SubprocessJsonRpcError(
+            raise McpClientError(
                 f"HTTP {response.status_code} from {method}: {response.text}"
             )
 
@@ -100,7 +100,7 @@ class HttpMcpClient:
         Requires a prior ``initialize()`` call to have captured a session ID.
         """
         if self._session_id is None:
-            raise SubprocessJsonRpcError(
+            raise McpClientError(
                 "terminate_session() called before a session ID was captured "
                 "(call initialize() first)"
             )
