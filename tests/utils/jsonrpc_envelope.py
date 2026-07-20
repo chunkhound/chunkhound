@@ -13,25 +13,34 @@ from __future__ import annotations
 from typing import Any
 
 
-class SubprocessJsonRpcError(Exception):
-    """Base exception for JSON-RPC test-client communication errors."""
+class McpClientError(Exception):
+    """Base exception for JSON-RPC test-client communication errors.
+
+    Covers both the stdio subprocess client and the HTTP client — the name
+    used to be ``SubprocessJsonRpcError``, which read oddly once this class
+    started being raised for HTTP-only failures (401s, missing SSE frames).
+    """
 
     pass
 
 
-class SubprocessCrashError(SubprocessJsonRpcError):
+# Backwards-compatible alias — several callers still import this name.
+SubprocessJsonRpcError = McpClientError
+
+
+class SubprocessCrashError(McpClientError):
     """Raised when the subprocess terminates unexpectedly."""
 
     pass
 
 
-class JsonRpcTimeoutError(SubprocessJsonRpcError):
+class JsonRpcTimeoutError(McpClientError):
     """Raised when a JSON-RPC request times out."""
 
     pass
 
 
-class JsonRpcResponseError(SubprocessJsonRpcError):
+class JsonRpcResponseError(McpClientError):
     """Raised when a JSON-RPC response contains an error."""
 
     def __init__(self, code: int, message: str, data: dict[str, Any] | None = None):

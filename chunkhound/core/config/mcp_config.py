@@ -163,4 +163,12 @@ class MCPConfig(BaseModel):
 
     def __repr__(self) -> str:
         """String representation of MCP configuration."""
-        return f"MCPConfig(transport={self.transport})"
+        parts = [f"transport={self.transport!r}"]
+        if self.transport == "http":
+            parts += [
+                f"host={self.host!r}",
+                f"port={self.port}",
+                f"auth_token={'<set>' if self.auth_token else None}",
+                f"cors={self.cors}",
+            ]
+        return f"MCPConfig({', '.join(parts)})"

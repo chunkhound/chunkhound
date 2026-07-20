@@ -22,6 +22,7 @@ from typing import Any, cast
 from .jsonrpc_envelope import (
     JsonRpcResponseError,
     JsonRpcTimeoutError,
+    McpClientError,
     SubprocessCrashError,
     SubprocessJsonRpcError,
     build_notification,
@@ -33,7 +34,10 @@ logger = logging.getLogger(__name__)
 
 # Re-exported for backwards compatibility — these used to be defined here;
 # callers still import them from this module (see tests/utils/__init__.py).
+# ``SubprocessJsonRpcError`` is an alias for ``McpClientError`` (see
+# jsonrpc_envelope.py) kept so existing imports of the old name keep working.
 __all__ = [
+    "McpClientError",
     "SubprocessJsonRpcError",
     "SubprocessCrashError",
     "JsonRpcTimeoutError",

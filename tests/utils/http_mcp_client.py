@@ -77,7 +77,11 @@ class HttpMcpClient:
                 f"HTTP {response.status_code} from {method}: {response.text}"
             )
 
-        body = _parse_sse_data(response.text)
+        content_type = response.headers.get("content-type", "")
+        if "text/event-stream" in content_type:
+            body = _parse_sse_data(response.text)
+        else:
+            body = response.json()
         return unwrap_result(body, method)
 
     async def send_notification(

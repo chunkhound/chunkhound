@@ -44,6 +44,7 @@ def _get_free_port() -> int:
     across restarts, which tests don't need.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
 
@@ -612,8 +613,11 @@ sys.exit(asyncio.run(test()))
                 # The now-terminated session ID must be rejected, not silently
                 # resumed — proves DELETE actually tore down server-side state
                 # rather than being a no-op the client can't observe.
-                with pytest.raises(SubprocessJsonRpcError):
+                with pytest.raises(SubprocessJsonRpcError) as exc_info:
                     await client.send_request("tools/list", timeout=5.0)
+                assert "404" in str(exc_info.value), (
+                    f"Expected 404 for terminated session, got: {exc_info.value}"
+                )
             finally:
                 await client.close()
                 await self._terminate(proc)
