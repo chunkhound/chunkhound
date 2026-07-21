@@ -33,6 +33,62 @@ def _daemon_startup_breadcrumb(args: argparse.Namespace, message: str) -> None:
         pass
 
 
+def _install_logging_to_loguru_bridge(*, verbose: bool = False) -> None:
+    """Forward Python stdlib ``logging`` records into ``loguru``.
+
+    ``pyo3-log`` sends Rust ``log::info!`` / ``log::warn!`` into Python
+    ``logging`` at the corresponding level.  Since ChunkHound uses
+    ``loguru`` and not the stdlib logging module, those messages would
+    otherwise be silently discarded.
+
+    Installed once from ``setup_logging``, which runs after ``loguru``
+    but before any Rust pipeline work.
+    """
+    import logging as _logging
+
+    class _Bridge(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            # Rust pipeline messages come through the ``chunkhound_native``
+            # logger.  Loguru is at WARNING by default, so forward these
+            # as WARNING so they are visible without ``--verbose``.
+            level = (
+                "WARNING"
+                if record.name.startswith("chunkhound_native")
+                else record.levelname
+            )
+            try:
+                level = logger.level(level).name
+            except ValueError:
+                level = record.levelno
+
+            frame = _logging.currentframe()
+            depth = 2
+            while (
+                frame is not None
+                and frame.f_code.co_filename == _logging.__file__
+            ):
+                frame = frame.f_back
+                depth += 1
+
+            logger.opt(depth=depth, exception=record.exc_info).log(
+                level, record.getMessage()
+            )
+
+    _bridge = _Bridge()
+    _bridge.setLevel(_logging.DEBUG if verbose else _logging.INFO)
+    # Remove the default StreamHandler that basicConfig installed — we
+    # forward everything through loguru instead.
+    _root = _logging.getLogger()
+    for h in list(_root.handlers):
+        _root.removeHandler(h)
+    _root.addHandler(_bridge)
+    # Lower the root-logger threshold so our handler sees INFO messages.
+    # ``basicConfig(level=ERROR)`` was already called above; this is
+    # deliberately run AFTER for correct ordering.
+    if _root.level > _bridge.level:
+        _root.setLevel(_bridge.level)
+
+
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging for the CLI.
 
@@ -63,6 +119,12 @@ def setup_logging(verbose: bool = False) -> None:
         )
     # Also set stdlib logging level to avoid mixed loggers being noisy
     _pylogging.basicConfig(level=_pylogging.DEBUG if verbose else _pylogging.ERROR)
+
+    # ── Bridge Python stdlib logging → loguru ──────────────────────
+    # pyo3-log sends Rust log::info! / log::warn! into Python logging.
+    # Without this bridge those messages are silently discarded because
+    # ChunkHound uses loguru, not the stdlib logging module.
+    _install_logging_to_loguru_bridge(verbose=verbose)
 
 
 def create_parser() -> argparse.ArgumentParser:
