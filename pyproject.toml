@@ -39,7 +39,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 dependencies = [
-    "duckdb==1.4.4",
+    "duckdb==1.5.4",
     "openai>=1.0.0",
     "jsonschema>=4.0.0",
     "packaging>=21.0",
