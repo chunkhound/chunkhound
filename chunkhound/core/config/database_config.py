@@ -83,6 +83,22 @@ class DatabaseConfig(BaseModel):
         "Does not disable the fixed compaction boundaries in chunkhound index.",
     )
 
+    # Serial executor operation timeout (execute_sync waits only)
+    execute_timeout_seconds: float | None = Field(
+        default=None,
+        gt=0.0,
+        description=(
+            "Timeout for synchronous serial DB executor waits (seconds). "
+            "Applies to execute_sync / _execute_in_db_thread_sync only; "
+            "async dispatch (execute_async) remains unbounded. "
+            "None = built-in defaults (30s normal, 660s compaction). "
+            "When set, replaces both defaults for every sync operation "
+            "including compaction. "
+            "Env: CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS or legacy "
+            "CHUNKHOUND_DB_EXECUTE_TIMEOUT. CLI: --db-execute-timeout."
+        ),
+    )
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""
@@ -189,6 +205,16 @@ class DatabaseConfig(BaseModel):
             help="LanceDB: min fragment count before optimize (0=always, "
             "default 100; thr=50 can over-optimize large trees)",
         )
+        parser.add_argument(
+            "--db-execute-timeout",
+            type=float,
+            help=(
+                "Timeout for synchronous serial DB executor waits in seconds. "
+                "When unset: 30s normal, 660s compaction. When set: applies "
+                "to every sync operation including compaction (replaces both "
+                "defaults). Does not apply to async executor dispatch."
+            ),
+        )
 
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
@@ -225,6 +251,16 @@ class DatabaseConfig(BaseModel):
                 config["fragmentation_threshold_pct"] = float(threshold_pct)
             except ValueError:
                 pass
+
+        # Executor timeout: canonical name first, then legacy flat alias
+        if execute_timeout := (
+            os.getenv("CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS")
+            or os.getenv("CHUNKHOUND_DB_EXECUTE_TIMEOUT")
+        ):
+            try:
+                config["execute_timeout_seconds"] = float(execute_timeout)
+            except ValueError:
+                pass
         return config
 
     @classmethod
@@ -250,6 +286,11 @@ class DatabaseConfig(BaseModel):
             overrides["lancedb_optimize_fragment_threshold"] = int(
                 args.lancedb_optimize_fragment_threshold
             )
+        if (
+            hasattr(args, "db_execute_timeout")
+            and args.db_execute_timeout is not None
+        ):
+            overrides["execute_timeout_seconds"] = float(args.db_execute_timeout)
         return overrides
 
     def __repr__(self) -> str:
@@ -259,4 +300,6 @@ class DatabaseConfig(BaseModel):
             parts.append(f"max_disk_usage_mb={self.max_disk_usage_mb}")
         if self.fragmentation_threshold_pct is not None:
             parts.append(f"fragmentation_threshold_pct={self.fragmentation_threshold_pct}")
+        if self.execute_timeout_seconds is not None:
+            parts.append(f"execute_timeout_seconds={self.execute_timeout_seconds}")
         return f"DatabaseConfig({', '.join(parts)})"

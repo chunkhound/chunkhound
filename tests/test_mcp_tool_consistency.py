@@ -1376,7 +1376,7 @@ async def test_stdio_tool_call_uses_error_content_when_success_precedes_error() 
 
     handler = server.server.request_handlers[CallToolRequest]
     with patch(
-        "chunkhound.mcp_server.stdio.handle_tool_call",
+        "chunkhound.mcp_server.base.handle_tool_call",
         new=AsyncMock(return_value=mixed_contents),
     ):
         response = await handler(

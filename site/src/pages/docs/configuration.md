@@ -199,6 +199,7 @@ Fast analytical queries and efficient storage.
 |---|---|---|---|
 | `max_disk_usage_mb` | `number` | `null` | Max DB size in MB before indexing stops (CLI flag uses GB) |
 | `fragmentation_threshold_pct` | `number` | `30` | Background/auto-compaction trigger: file-size overhead above the provider's estimated live DB size (%). 30 = compact when the DB is ~30% larger than live data. 0 = always, null = never. This does not disable the fixed `chunkhound index` compaction boundaries. CLI: `--fragmentation-threshold-pct`. |
+| `execute_timeout_seconds` | `number` | `null` | Timeout for **synchronous** serial DB executor waits (`execute_sync` / `_execute_in_db_thread_sync`) in seconds. `null` = built-in defaults (30s normal ops, 660s compaction). When set, replaces both defaults for every sync operation including compaction, HNSW rebuild, and queries. Does **not** apply to async dispatch (`execute_async`), which remains unbounded. CLI: `--db-execute-timeout`. Env: `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` (or legacy `CHUNKHOUND_DB_EXECUTE_TIMEOUT`). |
 | `lancedb_index_type` | `string` | `null` | LanceDB vector index type: `auto`, `ivf_hnsw_sq`, or `ivf_rq` |
 | `lancedb_optimize_fragment_threshold` | `number` | `100` | Fragment count to trigger LanceDB compaction |
 
@@ -397,6 +398,11 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DATABASE__PROVIDER` | Database backend (`duckdb` or `lancedb`) |
 | `CHUNKHOUND_DATABASE__PATH` | Database storage path |
 | `CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB` | Max database size in GB |
+| `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` | Sync serial DB executor timeout in seconds (overrides 30s/660s defaults when set; async dispatch unbounded) |
+| `CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT` | Auto-compaction fragmentation threshold (%) |
+| `CHUNKHOUND_DATABASE__READ_ONLY` | Open DB read-only (`true`/`1`/`yes`) |
+| `CHUNKHOUND_DATABASE__LANCEDB_INDEX_TYPE` | LanceDB vector index type |
+| `CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD` | LanceDB fragment count to trigger optimize |
 | `CHUNKHOUND_LLM_PROVIDER` | LLM provider for research |
 | `CHUNKHOUND_LLM_MODEL` | LLM model shorthand that sets both utility and synthesis roles |
 | `CHUNKHOUND_LLM_UTILITY_MODEL` | LLM model for utility tasks (fast, lower cost) |
@@ -453,7 +459,7 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_OVERLAY` | Apply CH root .gitignore as global overlay across repos (default: false) |
 | `CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_NONREPO` | Use CH root .gitignore only for non-repo paths (default: true) |
 | `CHUNKHOUND_INDEXING__REALTIME_BACKEND` | Filesystem monitoring backend: `watchman`, `watchdog`, or `polling` |
-| `CHUNKHOUND_DB_EXECUTE_TIMEOUT` | Database executor timeout |
+| `CHUNKHOUND_DB_EXECUTE_TIMEOUT` | Legacy alias for `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` |
 | `CHUNKHOUND_YAML_ENGINE` | YAML parser engine (`rapid` or `tree`) |
 | `CHUNKHOUND_CONFIG_FILE` | Path to config file (alternative to `--config`) |
 | `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Web search subprocess timeout in seconds (default: 600) |

@@ -6,7 +6,6 @@ Requires single-threaded execution for database operations.
 import asyncio
 import concurrent.futures
 import contextvars
-import os
 import random
 import threading
 import time
@@ -114,8 +113,16 @@ class SerialDatabaseExecutor:
     concurrent access from multiple threads.
     """
 
-    def __init__(self) -> None:
-        """Initialize serial executor with single-threaded pool."""
+    def __init__(self, execute_timeout_seconds: float | None = None) -> None:
+        """Initialize serial executor with single-threaded pool.
+
+        Args:
+            execute_timeout_seconds: Optional timeout for sync
+                ``execute_sync`` waits only (async dispatch is unbounded).
+                When None, uses built-in defaults (30s normal, 660s
+                compaction). When set, applies to every sync operation
+                including compaction.
+        """
         # Create single-threaded executor for all database operations
         # This ensures complete serialization and prevents concurrent access issues
         self._db_executor = ThreadPoolExecutor(
@@ -125,6 +132,21 @@ class SerialDatabaseExecutor:
         # Shared visibility for callers outside the executor thread so they
         # fail fast instead of queueing behind a long compaction.
         self._compaction_in_progress = threading.Event()
+        self._execute_timeout_seconds = execute_timeout_seconds
+
+    def resolve_timeout(self, operation_name: str) -> float:
+        """Resolve the wait timeout for a named ``execute_sync`` operation.
+
+        Used only by ``execute_sync`` (async dispatch has no timeout).
+        When ``execute_timeout_seconds`` is configured, that value is used for
+        every sync operation (including compaction). Otherwise compaction ops
+        get the extended default and all other ops get 30s.
+        """
+        if self._execute_timeout_seconds is not None:
+            return self._execute_timeout_seconds
+        if operation_name.startswith("compact"):
+            return _COMPACTION_OPERATION_TIMEOUT_SECONDS
+        return 30.0
 
     def set_compaction_in_progress(self, active: bool) -> None:
         """Publish compaction state to callers before they enqueue work."""
@@ -189,19 +211,9 @@ class SerialDatabaseExecutor:
             op_func = getattr(provider, f"_executor_{operation_name}")
             return op_func(conn, state, *args, **kwargs)
 
-        # Run in executor synchronously with timeout (env override)
+        # Run in executor synchronously with configured timeout
         future = self._db_executor.submit(executor_operation)
-        default_timeout = (
-            _COMPACTION_OPERATION_TIMEOUT_SECONDS
-            if operation_name.startswith("compact")
-            else 30.0
-        )
-        try:
-            timeout_s = float(
-                os.getenv("CHUNKHOUND_DB_EXECUTE_TIMEOUT", str(default_timeout))
-            )
-        except Exception:
-            timeout_s = default_timeout
+        timeout_s = self.resolve_timeout(operation_name)
         try:
             result = future.result(timeout=timeout_s)
         except concurrent.futures.TimeoutError:

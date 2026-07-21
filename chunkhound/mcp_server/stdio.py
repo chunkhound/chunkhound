@@ -23,32 +23,13 @@ warnings.filterwarnings(
 )
 from collections.abc import AsyncIterator  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
-from typing import TYPE_CHECKING, Any  # noqa: E402
-
-# Try to import the official MCP SDK; if unavailable, we'll fall back to a
-# minimal stdio JSON-RPC loop sufficient for tests that only exercise the
-# initialize handshake.
-_MCP_AVAILABLE = True
-try:  # runtime path
-    import mcp.server.stdio  # type: ignore  # noqa: E402
-    import mcp.types as types  # type: ignore  # noqa: E402
-    from mcp.server import Server  # type: ignore  # noqa: E402
-    from mcp.server.models import InitializationOptions  # type: ignore  # noqa: E402
-except ImportError:  # pragma: no cover - optional dependency path
-    _MCP_AVAILABLE = False
-
-if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps at import
-    import mcp.server.stdio  # noqa: F401
-    import mcp.types as types  # noqa: F401
-    from mcp.server import Server  # noqa: F401
-    from mcp.server.models import InitializationOptions  # noqa: F401
+from typing import Any  # noqa: E402
 
 from chunkhound.core.config.config import Config  # noqa: E402
 from chunkhound.utils.windows_constants import IS_WINDOWS  # noqa: E402
 from chunkhound.version import __version__  # noqa: E402
 
-from .base import MCPServerBase  # noqa: E402
-from .common import first_error_tool_content, handle_tool_call  # noqa: E402
+from .base import _MCP_AVAILABLE, MCPServerBase  # noqa: E402
 
 # CRITICAL: Disable Python logging at import to prevent JSON-RPC corruption.
 # Loguru is silenced separately in main() — see _silence_loguru below.
@@ -138,85 +119,9 @@ class StdioMCPServer(MCPServerBase):
             # Silent by design in MCP mode
             pass
 
-        # Create MCP server instance (lazy import if SDK is present)
-        if not _MCP_AVAILABLE:
-            # Defer server creation; fallback path implemented in run()
-            self.server = None  # type: ignore
-        else:
-            from mcp.server import Server
-
-            self.server: Server = Server("ChunkHound Code Search")
-
-        # Event to signal initialization completion
-        self._initialization_complete = asyncio.Event()
-
-        # Register tools with the server
-        self._register_tools()
-
     def _register_tools(self) -> None:
         """Register tool handlers with the stdio server."""
-
-        # The MCP SDK's call_tool decorator expects a SINGLE handler function
-        # with signature (tool_name: str, arguments: dict) that handles ALL tools
-
-        if not _MCP_AVAILABLE:
-            return  # no-op when SDK not available
-
-        @self.server.call_tool()  # type: ignore[misc]
-        async def handle_all_tools(
-            tool_name: str, arguments: dict[str, Any]
-        ) -> list[types.TextContent]:
-            """Universal tool handler that routes to the unified handler."""
-            text_contents = await handle_tool_call(
-                tool_name=tool_name,
-                arguments=arguments,
-                services=self.services,
-                embedding_manager=self.embedding_manager,
-                initialization_complete=self._initialization_complete,
-                debug_mode=self.debug_mode,
-                scan_progress=self._scan_progress,
-                llm_manager=self.llm_manager,
-                config=self.config,
-                ensure_services=self.ensure_tool_services,
-            )
-            error_content = first_error_tool_content(text_contents)
-            if error_content is not None:
-                raise RuntimeError(error_content.text)
-            return text_contents
-
-        self._register_list_tools()
-
-    def build_available_tools(self) -> list[types.Tool]:
-        """Build list of tools available based on current configuration.
-
-        Returns:
-            List of MCP Tool objects with filtered schemas.
-        """
-        return [
-            types.Tool(
-                name=d["name"],
-                description=d["description"],
-                inputSchema=d["inputSchema"],
-            )
-            for d in self._build_filtered_tool_dicts()
-        ]
-
-    def _register_list_tools(self) -> None:
-        """Register list_tools handler."""
-
-        @self.server.list_tools()  # type: ignore[misc]
-        async def list_tools() -> list[types.Tool]:
-            """List available tools."""
-            # Wait for initialization
-            try:
-                await asyncio.wait_for(
-                    self._initialization_complete.wait(), timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                # Return basic tools even if not fully initialized
-                pass
-
-            return self.build_available_tools()
+        self._register_common_tool_handlers()
 
     @asynccontextmanager
     async def server_lifespan(self) -> AsyncIterator[dict]:
