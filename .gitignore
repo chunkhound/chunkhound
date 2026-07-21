@@ -335,3 +335,9 @@ site/public/og-image-light.png
 plan.txt
 AGENT_REVIEW.md
 HUMAN_REVIEW.md
+
+# Docker deployment secrets/generated files (see .env.docker.example,
+# scripts/generate-compose.sh) — never commit real deployment config.
+.env.docker
+docker-compose.yml
+docker/nginx/mcp_upstream.conf
