@@ -86,6 +86,7 @@ impl IndexingPipeline {
 
         emit_progress(py, &progress_callback, "parse", 0, total_files);
 
+        let mut total_embeds: u64 = 0;
         let parsed: Vec<super::types::ParsedFile> = if self.config.pipeline_parallel
             && self.config.parse_thread_pool_size > 1
         {
@@ -159,7 +160,7 @@ impl IndexingPipeline {
                     }
                 }
 
-                let total_embeds = embed_targets.len() as u64;
+                total_embeds = embed_targets.len() as u64;
                 emit_progress(py, &progress_callback, "embed", 0, total_embeds);
 
                 if !embed_targets.is_empty() {
@@ -227,7 +228,7 @@ impl IndexingPipeline {
             parsed
         };
 
-        emit_progress(py, &progress_callback, "embed", total_files, total_files);
+        emit_progress(py, &progress_callback, "embed", total_embeds, total_embeds);
 
         // Build DbWriterBatch from parsed results.
         let mut file_records = Vec::with_capacity(parsed.len());

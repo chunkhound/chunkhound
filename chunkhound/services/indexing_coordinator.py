@@ -1236,6 +1236,17 @@ class IndexingCoordinator(BaseService):
                 allow_claim_if_missing=True,
             )
             self._root_identity_validated = True
+
+        # Detect Rust pipeline early so we can skip DB-queried phases below.
+        _use_rust = False
+        try:
+            from chunkhound.providers.database.pipeline_bridge import (
+                _get_use_rust,
+            )
+            _use_rust = _get_use_rust()
+        except ImportError:
+            pass
+
         try:
             import time as _t
 
@@ -1248,25 +1259,28 @@ class IndexingCoordinator(BaseService):
             if not files:
                 return {"status": "no_files", "files_processed": 0, "total_chunks": 0}
 
-            # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files
+            # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files.
+            # Skip when Rust pipeline is active — Python DuckDB cannot read Rust-written DBs.
             cleaned_files = 0
-            do_cleanup = True
-            if self.config and getattr(self.config, "indexing", None) is not None:
-                do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
-            if do_cleanup:
-                _t2 = _t.perf_counter() if _t0 is not None else None
-                cleaned_files = self._cleanup_orphaned_files(
-                    directory, files, patterns, exclude_patterns
-                )
-                _t3 = _t.perf_counter() if _t0 is not None else None
-            else:
-                logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
+            if not _use_rust:
+                do_cleanup = True
+                if self.config and getattr(self.config, "indexing", None) is not None:
+                    do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
+                if do_cleanup:
+                    _t2 = _t.perf_counter() if _t0 is not None else None
+                    cleaned_files = self._cleanup_orphaned_files(
+                        directory, files, patterns, exclude_patterns
+                    )
+                    _t3 = _t.perf_counter() if _t0 is not None else None
+                else:
+                    logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
 
             logger.debug(
                 f"Directory consistency: {len(files)} files discovered, {cleaned_files} orphaned files cleaned"
             )
 
-            # Phase 2.5: Change detection (skip unchanged files unless force_reindex)
+            # Phase 2.5: Change detection (skip unchanged files unless force_reindex).
+            # Detect force_reindex early for both paths.
             force_reindex = False
             try:
                 if self.config and getattr(self.config, "indexing", None):
@@ -1278,7 +1292,11 @@ class IndexingCoordinator(BaseService):
 
             files_to_process: list[Path] | list[tuple[Path, str | None]] = list(files)
             skipped_unchanged = 0
-            if not force_reindex:
+            if _use_rust:
+                # Rust pipeline: convert plain paths to (path, None) tuples
+                # matching run_rust_pipeline's expected signature.
+                files_to_process = [(p, None) for p in files_to_process]
+            elif not force_reindex:
                 _t4 = _t.perf_counter() if _t0 is not None else None
                 change_task: TaskID | None = None
                 if self.progress:
@@ -1470,18 +1488,8 @@ class IndexingCoordinator(BaseService):
             agg_skipped_paths: list[tuple[str, str]] = []
 
             # ── Rust path (CHUNKHOUND_USE_RUST=1) ─────────────────
-            _use_rust = False
-            try:
-                from chunkhound.providers.database.pipeline_bridge import (
-                    _get_use_rust,
-                )
-
-                _use_rust = _get_use_rust()
-            except ImportError:
-                pass
-
+            # Detected at top of process_directory to gate cleanup + change detection.
             if _use_rust:
-                # Coordinator already did discovery + cleanup + change detection.
                 # The Rust pipeline handles parse → embed → write in one call.
                 from chunkhound.pipeline_bridge import run_rust_pipeline
 
@@ -1524,10 +1532,20 @@ class IndexingCoordinator(BaseService):
                                     info=f"{current}/{total} embedded",
                                 )
                         elif phase == "write":
-                            _pr.update(
-                                _st,
-                                info=f"writing to database...",
-                            )
+                            # Write is atomic (single batch + compaction); fill the bar
+                            # immediately so it doesn't appear stuck at 0.
+                            t = _pr.tasks[_st]
+                            if t.total:
+                                _pr.update(
+                                    _st,
+                                    completed=t.total,
+                                    info=f"writing to database...",
+                                )
+                            else:
+                                _pr.update(
+                                    _st,
+                                    info=f"writing to database...",
+                                )
                         elif phase == "done":
                             # Complete all tasks
                             t = _pr.tasks[_pt]
@@ -1818,8 +1836,12 @@ class IndexingCoordinator(BaseService):
         """Get database statistics.
 
         Returns:
-            Dictionary with file, chunk, and embedding counts
+            Dictionary with file, chunk, and embedding counts.
+            When the provider is not connected (e.g. Rust pipeline path),
+            returns zeroed stats.
         """
+        if not self._db.is_connected:
+            return {"files": 0, "chunks": 0, "embeddings": 0}
         return await self._db.get_stats_async()
 
     async def compact_database_with_metrics(self) -> dict[str, Any]:

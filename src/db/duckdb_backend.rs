@@ -144,6 +144,18 @@ impl DuckDbHnswBackend {
         }
     }
 
+    /// Ensure VSS is loaded, lazily — only on first write with embeddings.
+    fn ensure_vss(&mut self) -> Result<bool, DbError> {
+        if self.has_vss {
+            return Ok(true);
+        }
+        let conn = self.conn_or_err()?;
+        let ok = Self::try_load_vss(conn);
+        self.has_vss = ok;
+        self.hnsw_cache = None; // invalidate — VSS just loaded
+        Ok(ok)
+    }
+
     fn ensure_embedding_table_dims(conn: &Connection, dims: u32) -> Result<(), DbError> {
         let table = format!("embeddings_{dims}");
         // Legacy compat: the 1536-dimension chunk_id index was originally named
@@ -776,6 +788,9 @@ impl DuckDbHnswBackend {
 
         // Create a fresh DB file and IMPORT the Parquet export.
         let import_conn = Connection::open(&compact_path)?;
+        // VSS extension must be loaded BEFORE IMPORT (which may bind HNSW
+        // indexes from the exported schema) and BEFORE recreate_hnsw_indexes.
+        Self::try_load_vss(&import_conn);
         let import_sql = format!("IMPORT DATABASE '{}'", export_dir.display());
         log::info!("compaction: {}", import_sql);
         let import_result = import_conn.execute_batch(&import_sql);
@@ -819,13 +834,17 @@ impl DuckDbHnswBackend {
     fn reopen(&mut self) -> Result<(), DbError> {
         self.known_dims.clear();
         let conn = Connection::open(&self.config.db_path)?;
-        self.has_vss = Self::try_load_vss(&conn);
+        // Defer VSS loading — see open() comment.
         Self::setup_schema(&conn)?;
         let existing = Self::discover_embedding_tables(&conn)?;
         self.known_dims
             .extend(existing.into_iter().map(|(_, dims)| dims));
         self.conn = Some(conn);
-        self.ensure_all_hnsw_indexes()?;
+        // Load VSS lazily — only if embedding tables actually exist.
+        if !self.known_dims.is_empty() {
+            self.ensure_vss()?;
+            self.ensure_all_hnsw_indexes()?;
+        }
         Ok(())
     }
 
@@ -1042,6 +1061,9 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         self.known_dims.clear();
         let conn = Connection::open(&self.config.db_path)?;
+        // VSS must be loaded on open — the DB on disk may already have
+        // VSS catalog entries from a previous session, and DuckDB won't
+        // deserialize them without VSS loaded.
         self.has_vss = Self::try_load_vss(&conn);
         Self::setup_schema(&conn)?;
         // Prime known_dims from tables that already exist so the first batch
@@ -1123,6 +1145,11 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         // Step 1: Count embeddings to decide HNSW lifecycle.
         let total_emb = Self::count_total_embeddings(batch);
+
+        // Lazy VSS load — only when embeddings are actually present.
+        if total_emb > 0 {
+            self.ensure_vss()?;
+        }
 
         // Step 2: Discover + DROP HNSW indexes BEFORE BEGIN (Invariant 14).
         let hnsw_indexes = {
