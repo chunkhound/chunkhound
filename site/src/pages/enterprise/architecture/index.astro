@@ -677,33 +677,13 @@ const description =
         color: var(--text-tertiary);
         font-size: var(--text-xs);
     }
-    .decision-list {
-        display: grid;
-        gap: var(--space-4);
-        margin-top: var(--space-6);
-    }
-    .decision-list p {
-        padding: var(--space-4) var(--space-5);
-        border-left: var(--border-w-accent) solid var(--primary);
-        border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg)
-            var(--radius-sm);
-        background: var(--bg-muted);
-    }
-    .decision-list strong,
-    .decision-list code {
-        color: var(--text-primary);
-    }
-    .decision-list code {
-        font-size: var(--text-xs);
-    }
     .validation-callout {
         margin-top: var(--space-6);
         padding: var(--space-6);
         border-radius: var(--radius-xl);
         background: var(--primary-bg);
     }
-    .validation-callout h3,
-    .validation-callout li {
+    .validation-callout h3 {
         color: var(--on-primary-bg);
     }
     .validation-callout ul {
@@ -712,67 +692,14 @@ const description =
         margin-top: var(--space-3);
         padding-left: var(--space-5);
     }
-    .status-section {
-        padding: var(--space-6) 0 0;
-    }
-    .status-card {
-        display: grid;
-        grid-template-columns: 180px 1fr;
-        gap: var(--space-5);
-        padding: var(--space-5);
-        border-left: var(--border-w-accent) solid var(--primary);
-        border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg)
-            var(--radius-sm);
-        background: var(--bg-surface);
-    }
-    .status-card h2 {
-        margin-top: 0;
-        margin-bottom: var(--space-2);
-        font-size: var(--text-lg);
-    }
-    .status-card p:not(.status-label),
-    .path-card p,
-    .path-card li,
-    .decision-list p,
     .validation-callout li {
         color: var(--text-secondary);
         font-size: var(--text-sm);
         line-height: var(--lh-sm);
     }
-    .path-card {
-        padding: var(--space-6);
-        border: var(--border-w-default) solid var(--border-color);
-        border-radius: var(--radius-xl);
-        background: var(--bg-page);
-    }
-    .card-kicker {
-        margin-bottom: var(--space-3);
-        color: var(--primary);
-    }
-    .path-card > p:not(.card-kicker) {
-        margin-top: var(--space-3);
-    }
-    .path-card ul,
-    .validation-callout ul {
-        display: grid;
-        gap: var(--space-2);
-        margin-top: var(--space-3);
-        padding-left: var(--space-5);
-    }
-    .path-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: var(--space-5);
-        margin-top: var(--space-7);
-    }
     @media (max-width: 768px) {
-        .status-card,
-        .path-grid,
         .index-maintenance-grid {
             grid-template-columns: 1fr;
-        }
-        .status-label {
-            margin-bottom: 0;
         }
     }
 </style>
