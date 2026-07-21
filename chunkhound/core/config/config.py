@@ -25,7 +25,7 @@ from .database_config import DatabaseConfig
 from .embedding_config import EmbeddingConfig
 from .indexing_config import IndexingConfig
 from .llm_config import LLMConfig
-from .mcp_config import MCPConfig
+from .mcp_config import MCPConfig, is_loopback_host
 from .research_config import ResearchConfig
 
 
@@ -468,6 +468,22 @@ class Config(BaseModel):
         elif command == "search":
             if self.embedding and not self.embedding.is_provider_configured():
                 errors.append("Embedding provider not properly configured")
+
+        if command == "mcp" and self.mcp.transport == "http":
+            if not is_loopback_host(self.mcp.host) and not self.mcp.auth_token:
+                errors.append(
+                    "mcp.host is non-loopback but no auth_token is set. Binding "
+                    "the HTTP transport to a non-localhost address without "
+                    "--auth-token is refused. Set --auth-token, or omit --host "
+                    "to bind to 127.0.0.1 (default)."
+                )
+            if self.mcp.cors and not self.mcp.auth_token:
+                errors.append(
+                    "mcp.cors is enabled but no auth_token is set. Enabling CORS "
+                    "without --auth-token lets any website open in the same "
+                    "browser read from the HTTP transport, even on a loopback "
+                    "host. Set --auth-token, or omit --cors."
+                )
 
         if self.database.read_only:
             # _quickresearch always uses a :memory: DB (see quickresearch.py),
