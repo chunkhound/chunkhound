@@ -143,6 +143,7 @@ async def run_rust_pipeline(
     force_reindex: bool = False,
     skip_embeddings: bool = False,
     config: Any = None,
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
     """Run the Rust indexing pipeline and return coordinator-compatible stats.
 
@@ -157,6 +158,8 @@ async def run_rust_pipeline(
         force_reindex: Skip incremental diff — re-index every file.
         skip_embeddings: Skip embedding generation (e.g. --no-embeddings).
         config: Coordinator config object (for extracting indexing/embedding settings).
+        progress_callback: Optional callable(phase: str, current: int, total: int)
+            for streaming progress updates to the coordinator's Rich bars.
 
     Returns:
         Coordinator-compatible stats dict:
@@ -229,7 +232,7 @@ async def run_rust_pipeline(
         files=file_paths,
         parse_callback=parse_file_callback,
         embed_callback=embed_callback if not skip_embeddings else None,
-        progress_callback=None,
+        progress_callback=progress_callback,
         incremental=not force_reindex,
         parse_batch_callback=parse_batch_callback,
     )

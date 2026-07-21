@@ -1496,6 +1496,57 @@ class IndexingCoordinator(BaseService):
                     else False
                 )
 
+                # ── Progress callback for Rust pipeline ─────────────────
+                # Maps Rust phases → Rich progress bars.
+                if _use_rust and self.progress:
+                    from rich.progress import TaskID
+                    _pt: TaskID = parse_task  # type: ignore[assignment]
+                    _st: TaskID = store_task  # type: ignore[assignment]
+                    _pr = self.progress
+
+                    # Create embed+write phases under "Handling files" task
+                    _embed_task: TaskID | None = None
+                    _total_files_for_progress = len(files_to_process)
+
+                    def _progress_cb(phase: str, current: int, total: int) -> None:
+                        nonlocal _embed_task
+                        if phase == "parse":
+                            _pr.update(_pt, completed=current, info=f"{current}/{total} parsed")
+                        elif phase == "embed":
+                            if _embed_task is None and total > 0:
+                                _embed_task = _pr.add_task(
+                                    "  └─ Embedding", total=total, speed="", info=""
+                                )
+                            if _embed_task is not None:
+                                _pr.update(
+                                    _embed_task,
+                                    completed=current,
+                                    info=f"{current}/{total} embedded",
+                                )
+                        elif phase == "write":
+                            _pr.update(
+                                _st,
+                                info=f"writing to database...",
+                            )
+                        elif phase == "done":
+                            # Complete all tasks
+                            t = _pr.tasks[_pt]
+                            if t.total:
+                                _pr.update(_pt, completed=t.total)
+                            if _embed_task is not None:
+                                t = _pr.tasks[_embed_task]
+                                if t.total:
+                                    _pr.update(_embed_task, completed=t.total)
+                            t = _pr.tasks[_st]
+                            if t.total:
+                                _pr.update(
+                                    _st,
+                                    completed=t.total,
+                                    info=f"{_total_files_for_progress} files written",
+                                )
+                else:
+                    _progress_cb = None
+
                 rust_stats = await run_rust_pipeline(
                     files_to_process,
                     db_path=db_path,
@@ -1503,6 +1554,7 @@ class IndexingCoordinator(BaseService):
                     force_reindex=force_reindex,
                     skip_embeddings=skip_embeddings,
                     config=self.config,
+                    progress_callback=_progress_cb,
                 )
 
                 agg_total_files = int(rust_stats.get("total_files", 0))
@@ -1517,12 +1569,6 @@ class IndexingCoordinator(BaseService):
                 # Skip coordinator-side compaction — the Rust pipeline runs its
                 # own compaction via DbBackend::run_compaction() internally.
                 self._skip_compaction = True
-
-                # Mark progress tasks complete
-                if parse_task is not None and self.progress:
-                    task = self.progress.tasks[parse_task]
-                    if task.total:
-                        self.progress.update(parse_task, completed=task.total)
 
             else:
                 # ── Python path (existing) ─────────────────────────

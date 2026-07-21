@@ -19,6 +19,13 @@ pub(crate) struct IndexingPipeline {
     config: PipelineConfig,
 }
 
+/// Helper: call `progress_callback(phase, current, total)` if provided.
+fn emit_progress(py: Python<'_>, cb: &Option<Py<PyAny>>, phase: &str, current: u64, total: u64) {
+    if let Some(ref cb) = cb {
+        let _ = cb.bind(py).call1((phase, current, total));
+    }
+}
+
 #[pymethods]
 impl IndexingPipeline {
     /// Create a new pipeline from a Python configuration dict.
@@ -33,6 +40,10 @@ impl IndexingPipeline {
     /// Called from Python via `asyncio.to_thread(pipeline.run, ...)`.
     ///
     /// Pipeline order: parse → embed → write (single transaction).
+    ///
+    /// progress_callback receives ``(phase: str, current: int, total: int)``
+    /// at phase transitions.  Phases: ``"parse"``, ``"embed"``, ``"write"``,
+    /// ``"compact"``, ``"done"``.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (files, parse_callback, embed_callback=None, progress_callback=None, incremental=false, parse_batch_callback=None, embed_batch_callback=None))]
     fn run(
@@ -46,7 +57,6 @@ impl IndexingPipeline {
         parse_batch_callback: Option<Py<PyAny>>,
         embed_batch_callback: Option<Py<PyAny>>,
     ) -> PyResult<PipelineReport> {
-        let _ = &progress_callback; // unused — callback reserved for future progress reporting
         let started = Instant::now();
 
         if files.is_empty() {
@@ -72,6 +82,9 @@ impl IndexingPipeline {
         // ── Parse + Embed (with optional pipeline parallelism) ──
         let provider = self.config.embedding_provider.clone();
         let model = self.config.embedding_model.clone();
+        let total_files = batch_paths.len() as u64;
+
+        emit_progress(py, &progress_callback, "parse", 0, total_files);
 
         let parsed: Vec<super::types::ParsedFile> = if self.config.pipeline_parallel
             && self.config.parse_thread_pool_size > 1
@@ -82,6 +95,7 @@ impl IndexingPipeline {
                 let parse_cb = parse_cb.clone_ref(py);
                 let embed_cb = embed_batch_callback.as_ref().map(|cb| cb.clone_ref(py));
                 let seq_embed_cb = embed_callback.as_ref().map(|cb| cb.clone_ref(py));
+                let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
                 let t_parse_embed = Instant::now();
                 let result = py
                     .allow_threads(|| {
@@ -92,6 +106,7 @@ impl IndexingPipeline {
                             seq_embed_cb,
                             &provider,
                             &model,
+                            progress_cb,
                         )
                     })
                     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -110,14 +125,22 @@ impl IndexingPipeline {
             let mut parsed = if self.config.parse_thread_pool_size > 1 {
                 if let Some(ref batch_cb) = parse_batch_callback {
                     let cb = batch_cb.clone_ref(py);
-                    let parsed_result =
-                        py.allow_threads(|| self.parse_batch_parallel(&batch_paths, &cb));
+                    let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
+                    let parsed_result = py.allow_threads(|| {
+                        self.parse_batch_parallel(&batch_paths, &cb, progress_cb, total_files)
+                    });
                     parsed_result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?
                 } else {
-                    self.parse_batch(py, &batch_paths, &parse_callback)?
+                    let result = self.parse_batch(py, &batch_paths, &parse_callback)?;
+                    let n = result.len() as u64;
+                    emit_progress(py, &progress_callback, "parse", n, total_files);
+                    result
                 }
             } else {
-                self.parse_batch(py, &batch_paths, &parse_callback)?
+                let result = self.parse_batch(py, &batch_paths, &parse_callback)?;
+                let n = result.len() as u64;
+                emit_progress(py, &progress_callback, "parse", n, total_files);
+                result
             };
             log::info!("pipeline parse: {:.2}s", t_parse.elapsed().as_secs_f64());
 
@@ -135,6 +158,9 @@ impl IndexingPipeline {
                         embed_targets.push((fi, ci, text));
                     }
                 }
+
+                let total_embeds = embed_targets.len() as u64;
+                emit_progress(py, &progress_callback, "embed", 0, total_embeds);
 
                 if !embed_targets.is_empty() {
                     // ── Parallel embed (embed_batch_callback + rayon) ──
@@ -158,6 +184,8 @@ impl IndexingPipeline {
                     if embed_batch_callback.is_none() || self.config.parse_thread_pool_size <= 1 {
                         if let Some(ref embed_py) = embed_callback {
                             let batch_size = self.config.embed_batch_size.max(1);
+                            let total_chunks = embed_targets.len() as u64;
+                            let mut embedded = 0u64;
 
                             for batch in embed_targets.chunks(batch_size) {
                                 let texts: Vec<String> =
@@ -181,6 +209,15 @@ impl IndexingPipeline {
                                         chunk.model = Some(model.clone());
                                     }
                                 }
+
+                                embedded += batch.len() as u64;
+                                emit_progress(
+                                    py,
+                                    &progress_callback,
+                                    "embed",
+                                    embedded,
+                                    total_chunks,
+                                );
                             }
                         }
                     }
@@ -189,6 +226,8 @@ impl IndexingPipeline {
             log::info!("pipeline embed: {:.2}s", t_embed.elapsed().as_secs_f64());
             parsed
         };
+
+        emit_progress(py, &progress_callback, "embed", total_files, total_files);
 
         // Build DbWriterBatch from parsed results.
         let mut file_records = Vec::with_capacity(parsed.len());
@@ -285,6 +324,7 @@ impl IndexingPipeline {
             }
         }
 
+        emit_progress(py, &progress_callback, "write", 0, 1);
         let t_write = Instant::now();
         let result: BatchResult = py
             .allow_threads(|| {
@@ -304,6 +344,7 @@ impl IndexingPipeline {
         let embeddings_generated = result.embeddings_written;
         let total_secs = started.elapsed().as_secs_f64();
 
+        emit_progress(py, &progress_callback, "done", file_count, file_count);
         log::info!(
             "pipeline total: {total_secs:.2}s (files={file_count}, chunks={chunks_written}, embeds={embeddings_generated})"
         );
@@ -432,6 +473,7 @@ impl IndexingPipeline {
     ///
     /// **Caller must release the GIL** before entering this method.
     /// Each thread re-acquires the GIL independently via ``Python::with_gil()``.
+    #[allow(clippy::too_many_arguments)]
     fn pipeline_parse_and_embed(
         &self,
         files: &[PathBuf],
@@ -440,6 +482,7 @@ impl IndexingPipeline {
         seq_embed_cb: Option<Py<PyAny>>,
         provider: &str,
         model: &str,
+        progress_cb: Option<Py<PyAny>>,
     ) -> Result<Vec<super::types::ParsedFile>, String> {
         use std::sync::mpsc;
         use std::sync::{Arc, Mutex};
@@ -642,6 +685,15 @@ impl IndexingPipeline {
             return Err(e);
         }
 
+        // Emit final progress.
+        let total = files.len() as u64;
+        if let Some(ref cb) = progress_cb {
+            let _ =
+                Python::with_gil(|gil_py| cb.bind(gil_py).call1(("parse", total, total)).is_ok());
+            let _ =
+                Python::with_gil(|gil_py| cb.bind(gil_py).call1(("embed", total, total)).is_ok());
+        }
+
         Ok(all_parsed)
     }
 
@@ -659,6 +711,8 @@ impl IndexingPipeline {
         &self,
         files: &[PathBuf],
         callback: &Py<PyAny>,
+        progress_cb: Option<Py<PyAny>>,
+        total_files: u64,
     ) -> Result<Vec<super::types::ParsedFile>, String> {
         use rayon::prelude::*;
         use std::sync::Mutex;
@@ -706,7 +760,18 @@ impl IndexingPipeline {
             return Err(e);
         }
 
-        Ok(batch_results.into_iter().flatten().collect())
+        let result: Vec<super::types::ParsedFile> = batch_results.into_iter().flatten().collect();
+        let parsed_count = result.len() as u64;
+        if let Some(ref cb) = progress_cb {
+            if Python::with_gil(|gil_py| {
+                cb.bind(gil_py)
+                    .call1(("parse", parsed_count, total_files))
+                    .is_ok()
+            }) {
+                // progress emitted
+            }
+        }
+        Ok(result)
     }
 
     /// Call the Python batch callback and extract ParsedFile results.
