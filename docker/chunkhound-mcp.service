@@ -1,0 +1,44 @@
+# systemd unit for the ChunkHound MCP Docker Compose stack.
+#
+# Copy to /etc/systemd/system/chunkhound-mcp.service on the host VM,
+# then update WorkingDirectory to the actual repo path, and run:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable docker            # Docker daemon starts on boot
+#   sudo systemctl enable chunkhound-mcp    # compose stack starts on boot
+#   sudo systemctl start chunkhound-mcp     # start now without rebooting
+#
+# Combined with `restart: unless-stopped` in docker-compose.yml this gives
+# two layers of protection:
+#   1. systemd starts the stack on every VM boot (including the very first one)
+#   2. Docker restart policy revives individual crashed containers between boots
+#
+# One-time setup on this host, before the first `systemctl start`:
+#   1. cp .env.docker.example .env.docker   (fill in real values)
+#   2. ./scripts/generate-compose.sh --replicas N
+#      This writes docker-compose.yml and docker/nginx/mcp_upstream.conf for N
+#      replicas. Both are gitignored, so this is a one-time-per-host step (or
+#      whenever you change replica count) — the generated files persist on
+#      disk across reboots even though they're not committed.
+#   3. ./scripts/prepare-db-replicas.sh --replicas N /path/to/.chunkhound/db
+
+[Unit]
+Description=ChunkHound MCP Load Balanced Deployment
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# ← Update this to the absolute path of the chunkhound repository on this VM.
+WorkingDirectory=/opt/chunkhound
+# --env-file is required: docker-compose.yml's ${HOST_UID}/${CHUNKHOUND_CONFIG_HOST_PATH}/etc.
+# substitutions are resolved by Compose from this file, not from env_file: .env.docker
+# (that only injects vars into the running container).
+ExecStart=/usr/bin/docker compose --env-file .env.docker up -d --build
+ExecStop=/usr/bin/docker compose --env-file .env.docker down
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
