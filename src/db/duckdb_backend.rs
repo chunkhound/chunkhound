@@ -1290,6 +1290,9 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             return Ok(());
         }
         let conn = self.conn_or_err()?;
+        // DuckDB VSS HNSW builds can be CPU-intensive.  Increase the thread
+        // count and disable any internal timeout so large tables don't fail.
+        let _ = conn.execute_batch("SET threads = 8");
         let tables = Self::discover_embedding_tables(conn)?;
         for (table_name, dims) in &tables {
             let hnsw_name = format!("idx_hnsw_{dims}");
