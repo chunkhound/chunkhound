@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.site.html_helpers import attributes, canonical_href
 from tests.site.png_helpers import png_dimensions
 from tests.site.tsx_runner import run_tsx_raw, sanitized_subprocess_env
 
@@ -140,11 +141,9 @@ def _meta_tag_content(html: str, attr_name: str, attr_value: str) -> str | None:
     Returns the first match if multiple tags share the same identifier.
     """
     for match in re.finditer(r"<meta\s+[^>]*>", html):
-        attributes = dict(
-            re.findall(r'([^\s=/>]+)\s*=\s*"([^"]*)"', match.group(0))
-        )
-        if attributes.get(attr_name) == attr_value:
-            return attributes.get("content")
+        tag_attributes = attributes(match.group(0))
+        if tag_attributes.get(attr_name) == attr_value:
+            return tag_attributes.get("content")
     return None
 
 
@@ -152,16 +151,6 @@ def _title_content(html: str) -> str:
     match = re.search(r"<title>(.*?)</title>", html, flags=re.DOTALL)
     assert match is not None, "Missing <title> tag"
     return match.group(1)
-
-
-def _canonical_href(html: str) -> str | None:
-    for match in re.finditer(r"<link\s+[^>]*>", html):
-        attributes = dict(
-            re.findall(r'([^\s=/>]+)\s*=\s*"([^"]*)"', match.group(0))
-        )
-        if attributes.get("rel") == "canonical":
-            return attributes.get("href")
-    return None
 
 
 def test_site_build_outputs_platform_aware_onboarding() -> None:
@@ -324,7 +313,7 @@ def test_built_site_has_og_meta_tags() -> None:
     )
 
     assert _title_content(homepage) == expected_title
-    assert _canonical_href(homepage) == "https://chunkhound.ai/"
+    assert canonical_href(homepage) == "https://chunkhound.ai/"
     assert _meta_tag_content(homepage, "name", "description") == expected_description
     assert _meta_tag_content(homepage, "property", "og:url") == "https://chunkhound.ai/"
     assert _meta_tag_content(homepage, "property", "og:title") == expected_title

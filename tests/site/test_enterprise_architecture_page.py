@@ -4,6 +4,8 @@ import html as html_module
 import re
 from pathlib import Path
 
+from tests.site.html_helpers import attributes, canonical_href, visible_text
+
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
 ROUTE = DIST / "enterprise" / "architecture" / "index.html"
@@ -14,24 +16,8 @@ def _document() -> str:
     return html_module.unescape(ROUTE.read_text(encoding="utf-8"))
 
 
-def _visible_text(document: str) -> str:
-    return " ".join(re.sub(r"<[^>]+>", " ", document).split())
-
-
-def _attributes(tag: str) -> dict[str, str]:
-    return dict(re.findall(r'([^\s=/>]+)\s*=\s*"([^"]*)"', tag))
-
-
-def _canonical_href(document: str) -> str | None:
-    for match in re.finditer(r"<link\s+[^>]*>", document):
-        attributes = _attributes(match.group(0))
-        if attributes.get("rel") == "canonical":
-            return attributes.get("href")
-    return None
-
-
 def test_enterprise_architecture_states_current_boundary_and_decision() -> None:
-    text = _visible_text(_document())
+    text = visible_text(_document())
 
     for phrase in (
         "ChunkHound is local-only by design",
@@ -53,7 +39,7 @@ def test_enterprise_architecture_states_current_boundary_and_decision() -> None:
 def test_enterprise_architecture_comparison_is_incremental_and_balanced() -> None:
     """Comparison table has correct semantic structure and all 9 dimensions."""
     document = _document()
-    text = _visible_text(document)
+    text = visible_text(document)
 
     for dimension in (
         "Focus and polish",
@@ -91,18 +77,18 @@ def test_enterprise_architecture_diagram_is_semantic_html() -> None:
     figure = re.search(r'<figure\s+[^>]*class="architecture-figure"[^>]*>', document)
 
     assert figure is not None
-    assert _attributes(figure.group(0))["aria-labelledby"] == "architecture-map-title"
+    assert attributes(figure.group(0))["aria-labelledby"] == "architecture-map-title"
     assert "Editor or AI client" in document
     assert "ChunkHound process" in document
     assert "Project database" in document
-    assert "provider dependencies" in _visible_text(document)
-    assert "not a central ChunkHound query service" in _visible_text(document)
+    assert "provider dependencies" in visible_text(document)
+    assert "not a central ChunkHound query service" in visible_text(document)
 
 
 def test_enterprise_metadata_uses_canonical_route() -> None:
     document = _document()
 
-    assert _canonical_href(document) == CANONICAL_URL
+    assert canonical_href(document) == CANONICAL_URL
     assert 'property="og:url"' in document
     assert 'property="og:type"' in document
     assert 'property="og:image:type" content="image/png"' in document
