@@ -22,3 +22,16 @@ def canonical_href(html: str) -> str | None:
 def visible_text(document: str) -> str:
     """Strip HTML tags and collapse whitespace to get visible text."""
     return " ".join(re.sub(r"<[^>]+>", " ", document).split())
+
+
+def meta_tag_content(html: str, attr_name: str, attr_value: str) -> str | None:
+    """Extract content from the first <meta> tag matching attr_name=attr_value.
+
+    Only handles double-quoted attributes (sufficient for Astro HTML output).
+    Returns the first match if multiple tags share the same identifier.
+    """
+    for match in re.finditer(r"<meta\s+[^>]*>", html):
+        tag_attributes = attributes(match.group(0))
+        if tag_attributes.get(attr_name) == attr_value:
+            return tag_attributes.get("content")
+    return None

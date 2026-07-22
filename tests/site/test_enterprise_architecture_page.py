@@ -4,7 +4,7 @@ import html as html_module
 import re
 from pathlib import Path
 
-from tests.site.html_helpers import attributes, canonical_href, visible_text
+from tests.site.html_helpers import attributes, canonical_href, meta_tag_content, visible_text
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
@@ -90,9 +90,11 @@ def test_enterprise_metadata_uses_canonical_route() -> None:
 
     assert canonical_href(document) == CANONICAL_URL
     assert 'property="og:url"' in document
-    assert 'property="og:type"' in document
-    assert 'property="og:image:type" content="image/png"' in document
-    assert 'property="og:image"' in document
+    assert meta_tag_content(document, "property", "og:type") == "article"
+    assert meta_tag_content(document, "property", "og:image:type") == "image/png"
+    og_image = meta_tag_content(document, "property", "og:image")
+    assert og_image is not None, "Missing og:image meta tag"
+    assert og_image.endswith("/og-image-dark.png")
     assert 'name="twitter:image"' in document
 
 

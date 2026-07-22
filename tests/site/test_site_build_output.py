@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.site.html_helpers import attributes, canonical_href
+from tests.site.html_helpers import attributes, canonical_href, meta_tag_content
 from tests.site.png_helpers import png_dimensions
 from tests.site.tsx_runner import run_tsx_raw, sanitized_subprocess_env
 
@@ -132,19 +132,6 @@ def _extract_astro_code_block_after_marker(html: str, marker: str) -> str:
     assert end_index != -1, f"Missing closing </pre> after {marker!r}"
 
     return html[pre_index : end_index + len("</pre>")]
-
-
-def _meta_tag_content(html: str, attr_name: str, attr_value: str) -> str | None:
-    """Extract content from the first <meta> tag matching attr_name=attr_value.
-
-    Only handles double-quoted attributes (sufficient for Astro HTML output).
-    Returns the first match if multiple tags share the same identifier.
-    """
-    for match in re.finditer(r"<meta\s+[^>]*>", html):
-        tag_attributes = attributes(match.group(0))
-        if tag_attributes.get(attr_name) == attr_value:
-            return tag_attributes.get("content")
-    return None
 
 
 def _title_content(html: str) -> str:
@@ -314,21 +301,21 @@ def test_built_site_has_og_meta_tags() -> None:
 
     assert _title_content(homepage) == expected_title
     assert canonical_href(homepage) == "https://chunkhound.ai/"
-    assert _meta_tag_content(homepage, "name", "description") == expected_description
-    assert _meta_tag_content(homepage, "property", "og:url") == "https://chunkhound.ai/"
-    assert _meta_tag_content(homepage, "property", "og:title") == expected_title
+    assert meta_tag_content(homepage, "name", "description") == expected_description
+    assert meta_tag_content(homepage, "property", "og:url") == "https://chunkhound.ai/"
+    assert meta_tag_content(homepage, "property", "og:title") == expected_title
     assert (
-        _meta_tag_content(homepage, "property", "og:description")
+        meta_tag_content(homepage, "property", "og:description")
         == expected_description
     )
-    assert _meta_tag_content(homepage, "name", "twitter:title") == expected_title
+    assert meta_tag_content(homepage, "name", "twitter:title") == expected_title
     assert (
-        _meta_tag_content(homepage, "name", "twitter:description")
+        meta_tag_content(homepage, "name", "twitter:description")
         == expected_description
     )
 
     # Meta tag checks must ignore serializer attribute order.
-    og_image = _meta_tag_content(homepage, "property", "og:image")
+    og_image = meta_tag_content(homepage, "property", "og:image")
     assert og_image is not None, "Missing og:image meta tag"
     assert og_image.startswith("https://"), (
         f"OG image URL should be absolute: {og_image}"
@@ -341,15 +328,15 @@ def test_built_site_has_og_meta_tags() -> None:
         ("og:image:height", "630"),
         ("og:type", "website"),
     ]:
-        content = _meta_tag_content(homepage, "property", prop)
+        content = meta_tag_content(homepage, "property", prop)
         assert content is not None, f"Missing meta tag: {prop}"
         assert content == expected
 
-    tw_image = _meta_tag_content(homepage, "name", "twitter:image")
+    tw_image = meta_tag_content(homepage, "name", "twitter:image")
     assert tw_image is not None, "Missing twitter:image meta tag"
     assert tw_image.endswith("/og-image-dark.png")
 
-    tw_card = _meta_tag_content(homepage, "name", "twitter:card")
+    tw_card = meta_tag_content(homepage, "name", "twitter:card")
     assert tw_card is not None, "Missing twitter:card meta tag"
     assert tw_card == "summary_large_image"
 
