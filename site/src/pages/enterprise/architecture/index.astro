@@ -554,6 +554,11 @@ const description =
         gap: var(--space-4);
         margin-top: var(--space-7);
     }
+    @media (max-width: 480px) {
+        .gap-grid {
+            grid-template-columns: 1fr;
+        }
+    }
     .gap-card {
         display: flex;
         flex-direction: column;
