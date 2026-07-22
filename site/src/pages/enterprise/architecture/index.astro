@@ -140,9 +140,12 @@ const description =
                 <h2 id="roadmap-title">Solving what tempts centralization</h2>
                 <p class="section-lead">
                     Each gap above has a fix in the local-only model. The phases
-                    below show what ships when. After Phase 2 the common reasons
-                    for a server are gone; Phase 3 addresses the remaining edge
-                    cases.
+                    below show what ships when. After Phase 2, a &ldquo;central
+                    server&rdquo; reduces to stateless, load-balanced, HTTP MCP
+                    instances pulling pre-built DB artifacts through the same
+                    distribution pipeline clients use — no live central index,
+                    no distributed vector DB to operate. Phase 3 addresses the
+                    remaining edge cases.
                 </p>
 
                 <div class="phase-list">
@@ -202,23 +205,50 @@ const description =
 
                     <article class="phase-card future">
                         <span class="phase-badge">Phase 2 · Future</span>
-                        <h3>LSM-Vec: concurrent in-place index building</h3>
+                        <h3>
+                            LSM-tree vector index: out-of-place updates, no
+                            rebuilds
+                        </h3>
                         <p>
-                            Plan to integrate <a
-                                href="https://arxiv.org/abs/2505.17152"
-                                >LSM-Vec</a
-                            >, an embedded Rust vector index whose LSM-tree
-                            design supports true in-place efficient updates —
-                            unlike HNSW and IVF which need full rebuilds or
-                            expensive incremental segment management. This lets
-                            index building run concurrently with the ingestion
-                            pipeline instead of blocking at the end, further
-                            optimizing overall indexing time.
+                            Plan to adopt an LSM-tree-based vector index — the
+                            approach described in the
+                            <a href="https://arxiv.org/abs/2505.17152"
+                                >LSM-Vec paper</a
+                            > — whose out-of-place update design eliminates the HNSW
+                            drop/rebuild bookend. Index stays live during writes:
+                            index building runs concurrently with ingestion, and at
+                            the data-structure level queries and updates no longer
+                            exclude each other. Does not address executor-level serialization
+                            (see concurrent executor card below).
                         </p>
                         <p class="phase-gaps">
-                            <strong>Solves:</strong> gap 3 — eliminates the blocking
-                            index build phase. Index stays current incrementally as
-                            chunks arrive.
+                            <strong>Solves:</strong> gap 3 — removes the index-level
+                            serialization (drop/rebuild bookend). Index stays current
+                            incrementally as chunks arrive, and queries can run during
+                            writes for the first time.
+                        </p>
+                    </article>
+
+                    <article class="phase-card future">
+                        <span class="phase-badge">Phase 2 · Future</span>
+                        <h3>
+                            Concurrent executor: parallel tool calls,
+                            multi-worktree
+                        </h3>
+                        <p>
+                            Replace the single-threaded
+                            <code>SerialDatabaseExecutor(max_workers=1)</code>
+                            with a concurrent executor supporting multiple simultaneous
+                            readers. Unlocks parallel MCP tool calls (multiple searches,
+                            context expansions) and multi-worktree support — indexing
+                            one project while querying another, or running concurrent
+                            queries across branches. Complements the LSM-tree index
+                            card above: the index allows queries during writes; the
+                            executor allows multiple queries in parallel.
+                        </p>
+                        <p class="phase-gaps">
+                            <strong>Solves:</strong> gap 3 — removes the tool-level
+                            serialization bottleneck.
                         </p>
                     </article>
 
@@ -304,9 +334,9 @@ const description =
                     Centralizing means either delegating to a distributed vector DB
                     (ChromaDB, LanceDB, Qdrant — with their ops, sharding, replication
                     overhead) or re-solving every bottleneck above in a server context.
-                    The LSM-Vec roadmap is the opposite: solve each bottleneck at
-                    the embedded library level so the local model needs nothing a
-                    developer doesn't already run locally.
+                    This roadmap is the opposite: solve each bottleneck at the embedded
+                    library level so the local model needs nothing a developer doesn't
+                    already run locally.
                 </aside>
                 <aside class="timeline-note" style="margin-top: var(--space-3)">
                     <strong>Already available</strong> — ChunkHound ships a native
@@ -385,7 +415,7 @@ const description =
                             href="https://qdrant.tech/documentation/concepts/storage/"
                             >Qdrant</a
                         >, and <a href="https://arxiv.org/abs/2505.17152"
-                            >LSM-Vec (LSM-tree-based vector index)</a
+                            >LSM-Vec paper (LSM-tree-based vector index)</a
                         >.
                     </span>
                 </aside>
@@ -416,8 +446,8 @@ const description =
                     <h3>Open questions we're still working through</h3>
                     <ul>
                         <li>
-                            Is the Rust pipeline rewrite or LSM-Vec the bigger
-                            lever for indexing speed?
+                            Is the Rust pipeline rewrite or an LSM-tree vector
+                            index the bigger lever for indexing speed?
                         </li>
                         <li>
                             Should the merged DB artifact preserve per-repo
