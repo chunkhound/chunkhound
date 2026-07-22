@@ -76,10 +76,12 @@ const description =
                         <h3>DBs require a source checkout</h3>
                         <p>
                             Today the DB lives inside a project clone.
-                            Non-developers cannot use ChunkHound without
-                            checking out code they do not need, and CI workflows
-                            must carry the entire repository alongside the
-                            index.
+                            Regex search works on the DB alone, but semantic
+                            search, import-resolution, and context-expansion
+                            paths still assume source files alongside the
+                            index. Non-developers get read-only value today,
+                            but full self-contained functionality remains
+                            future work.
                         </p>
                     </article>
                     <article class="gap-card">
@@ -286,9 +288,11 @@ const description =
                             per-repo access boundaries.
                         </p>
                         <p class="phase-gaps">
-                            <strong>Solves:</strong> gap 5. No central query
-                            service, no separate policy system — permissions
-                            inherit from the object store's existing ACLs.
+                            <strong>Partially addresses:</strong> gap 5 — controls
+                            artifact distribution and prevents unauthorized
+                            download combinations. Request-time enforcement
+                            and query audit remain open problems that need
+                            mechanisms beyond distribution ACLs.
                         </p>
                     </article>
                 </div>
