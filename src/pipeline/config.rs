@@ -52,9 +52,9 @@ impl PipelineConfig {
             project_root: get_str_or(dict, "project_root", "")?.into(),
             db_path: get_str_or(dict, "db_path", "")?.into(),
             db_batch_size: get_u64_or(dict, "db_batch_size", 100)? as usize,
-            compaction_batch_threshold: get_u64_or(dict, "compaction_batch_threshold", 10)? as u32,
-            compaction_threshold: get_f64_or(dict, "compaction_threshold", 0.60)?,
-            compaction_min_size_mb: get_u64_or(dict, "compaction_min_size_mb", 10)?,
+            compaction_batch_threshold: get_u64_or(dict, "compaction_batch_threshold", 50)? as u32,
+            compaction_threshold: get_f64_or(dict, "compaction_threshold", 0.30)?,
+            compaction_min_size_mb: get_u64_or(dict, "compaction_min_size_mb", 50)?,
             disk_usage_limit_mb: get_opt_f64(dict, "disk_usage_limit_mb")?,
 
             parse_batch_size: get_u64_or(dict, "parse_batch_size", 200)? as usize,

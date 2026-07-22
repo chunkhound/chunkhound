@@ -425,6 +425,8 @@ impl DuckDbHnswBackend {
             .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<i64>, _>>()
             .map_err(DbError::DuckDb)?;
+        // Drop the temp table so it doesn't leak into EXPORT DATABASE during compaction.
+        conn.execute_batch("DROP TABLE IF EXISTS rust_temp_chunks;")?;
         Ok(ids)
     }
 
@@ -507,6 +509,8 @@ impl DuckDbHnswBackend {
                 [],
             )?;
             total += rows as u64;
+            // Drop the temp table so it doesn't leak into EXPORT DATABASE during compaction.
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS {temp};"))?;
         }
         Ok(total)
     }
@@ -726,103 +730,191 @@ impl DuckDbHnswBackend {
 
     /// Check available disk space on the filesystem containing `dir`.
     /// Returns None when the platform does not support the query.
-    fn available_disk_space(_dir: &Path) -> Option<u64> {
-        // Best-effort: platform-specific implementations can be added.
-        None
-    }
-
-    /// 3-phase EXPORT/IMPORT atomic swap (Section 22.5).
+    /// ATTACH + INSERT SELECT compaction — copies canonical tables into a
+    /// fresh DB file via DuckDB's in-process attach mechanism, avoiding the
+    /// filesystem I/O overhead of EXPORT/IMPORT via Parquet.
     ///
-    /// Phase 1: EXPORT current DB to Parquet while connection is open,
-    ///          then CHECKPOINT + close.
-    /// Phase 2: Write intent files, rename old DB, IMPORT into a fresh DB,
-    ///          rebuild HNSW indexes.
-    /// Phase 3: Atomic rename of compacted DB to active path, cleanup.
-    fn run_export_import_compaction(&mut self) -> Result<(), DbError> {
+    /// Phase 1: CHECKPOINT + close live connection.
+    /// Phase 2: ATTACH old DB as 'src', CREATE tables + sequences, INSERT
+    ///          SELECT data, DETACH, CHECKPOINT.
+    /// Phase 3: Atomic rename of compacted DB to active path, cleanup,
+    ///          reopen (which also ensures HNSW indexes).
+    fn run_attach_copy_compaction(&mut self) -> Result<(), DbError> {
         let db_path = PathBuf::from(&self.config.db_path);
-        let export_dir = PathBuf::from(format!("{}.export_tmp", self.config.db_path));
         let compact_path = PathBuf::from(format!("{}.compact", self.config.db_path));
         let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
         let intent_path = PathBuf::from(format!("{}.swap_intent", self.config.db_path));
 
-        // --- Phase 1: Export while connection is open ----------------------
+        // --- Phase 1: CHECKPOINT + close live connection --------------------
         let conn = self.conn_or_err()?;
 
-        // Snapshot HNSW DDL before closing (needed for rebuild in Phase 2).
-        let hnsw_indexes = Self::discover_hnsw_indexes(conn)?;
-
-        // Preflight disk space: need ~3× DB size for export + compact files.
-        let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-        if let Some(avail) = Self::available_disk_space(&db_path) {
-            if avail < db_size * 3 {
-                return Err(DbError::Other(format!(
-                    "insufficient disk space for compaction: \
-                     need {} bytes, have {} bytes",
-                    db_size * 3,
-                    avail
-                )));
+        // Drop staging temp tables so they don't interfere with the copy.
+        let _ = conn.execute_batch("DROP TABLE IF EXISTS rust_temp_chunks");
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'rust_temp_%'",
+        ) {
+            if let Ok(tables) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                for name in tables.flatten() {
+                    let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\"", name));
+                }
             }
         }
 
-        // Clean up stale artifacts from a prior failed compaction.
-        let _ = std::fs::remove_dir_all(&export_dir);
-        let _ = std::fs::remove_file(&compact_path);
-
-        // EXPORT current database schema + data to Parquet files.
-        let export_sql = format!(
-            "EXPORT DATABASE '{}' (FORMAT PARQUET)",
-            export_dir.display()
-        );
-        log::info!("compaction: {}", export_sql);
-        conn.execute_batch(&export_sql)?;
-
-        // CHECKPOINT and close the live connection.
         conn.execute_batch("CHECKPOINT")?;
         self.conn = None;
 
-        // --- Phase 2: Rename old DB, create compacted DB ------------------
+        // --- Phase 2: Copy data via ATTACH + INSERT SELECT -----------------
         Self::write_intent(&intent_path, "pre-swap")?;
         std::fs::rename(&db_path, &old_path)?;
-
         Self::write_intent(&intent_path, "phase1")?;
 
-        // Create a fresh DB file and IMPORT the Parquet export.
+        // Create fresh DB and attach the old DB as 'src'.
         let import_conn = Connection::open(&compact_path)?;
-        // VSS extension must be loaded BEFORE IMPORT (which may bind HNSW
-        // indexes from the exported schema) and BEFORE recreate_hnsw_indexes.
-        Self::try_load_vss(&import_conn);
-        let import_sql = format!("IMPORT DATABASE '{}'", export_dir.display());
-        log::info!("compaction: {}", import_sql);
-        let import_result = import_conn.execute_batch(&import_sql);
+        let attach_sql = format!(
+            "ATTACH '{}' AS src",
+            old_path.to_string_lossy().replace('\'', "''")
+        );
+        log::info!("compaction: {}", attach_sql);
+        import_conn.execute_batch(&attach_sql)?;
 
-        // Rebuild HNSW indexes on the compacted DB.
-        if !hnsw_indexes.is_empty() {
-            if let Err(e) = Self::recreate_hnsw_indexes(&import_conn, &hnsw_indexes) {
-                log::warn!(
-                    "compaction: HNSW rebuild failed ({}), \
-                     continuing without indexes",
-                    e
-                );
-            }
+        // --- Compute MAX(id) from source for sequence seeding ---
+        let max_file_id: i64 =
+            import_conn.query_row("SELECT COALESCE(MAX(id), 0) FROM src.files", [], |row| {
+                row.get(0)
+            })?;
+        let max_chunk_id: i64 =
+            import_conn.query_row("SELECT COALESCE(MAX(id), 0) FROM src.chunks", [], |row| {
+                row.get(0)
+            })?;
+
+        // Discover embedding tables in the source catalog.
+        let emb_tables: Vec<String> = import_conn
+            .prepare(
+                "SELECT table_name FROM information_schema.tables \
+                 WHERE table_catalog = 'src' \
+                 AND table_name SIMILAR TO 'embeddings_[0-9]+'",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut max_embedding_id: i64 = 0;
+        for tname in &emb_tables {
+            let table_max: i64 = import_conn.query_row(
+                &format!("SELECT COALESCE(MAX(id), 0) FROM src.\"{}\"", tname),
+                [],
+                |row| row.get(0),
+            )?;
+            max_embedding_id = max_embedding_id.max(table_max);
         }
+
+        // --- Create sequences + tables in the fresh DB ---
+        import_conn.execute_batch(&format!(
+            "CREATE SEQUENCE files_id_seq START {}",
+            max_file_id + 1
+        ))?;
+        import_conn.execute_batch(&format!(
+            "CREATE SEQUENCE chunks_id_seq START {}",
+            max_chunk_id + 1
+        ))?;
+        import_conn.execute_batch(&format!(
+            "CREATE SEQUENCE embeddings_id_seq START {}",
+            max_embedding_id + 1
+        ))?;
+
+        // Mirror the DDL from setup_schema().
+        import_conn.execute_batch(
+            "CREATE TABLE files (\
+                id INTEGER PRIMARY KEY DEFAULT nextval('files_id_seq'),\
+                path TEXT UNIQUE NOT NULL,\
+                name TEXT NOT NULL,\
+                extension TEXT,\
+                size INTEGER,\
+                modified_time TIMESTAMP,\
+                content_hash TEXT,\
+                language TEXT,\
+                skip_reason TEXT,\
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\
+            )",
+        )?;
+        import_conn.execute_batch(
+            "CREATE TABLE chunks (\
+                id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),\
+                file_id INTEGER REFERENCES files(id),\
+                chunk_type TEXT NOT NULL,\
+                symbol TEXT,\
+                code TEXT NOT NULL,\
+                start_line INTEGER,\
+                end_line INTEGER,\
+                start_byte INTEGER,\
+                end_byte INTEGER,\
+                language TEXT,\
+                metadata TEXT,\
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\
+            )",
+        )?;
+        import_conn.execute_batch(
+            "CREATE TABLE schema_version (\
+                version INTEGER PRIMARY KEY,\
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\
+                description TEXT\
+            )",
+        )?;
+        import_conn.execute_batch("INSERT INTO schema_version SELECT * FROM src.schema_version")?;
+
+        // --- Copy data: files, chunks ---
+        let col = "id, path, name, extension, size, modified_time, \
+                    content_hash, language, skip_reason, created_at, updated_at";
+        import_conn.execute_batch(&format!(
+            "INSERT INTO files ({col}) SELECT {col} FROM src.files"
+        ))?;
+
+        let col = "id, file_id, chunk_type, symbol, code, start_line, \
+                    end_line, start_byte, end_byte, language, metadata, \
+                    created_at, updated_at";
+        import_conn.execute_batch(&format!(
+            "INSERT INTO chunks ({col}) SELECT {col} FROM src.chunks"
+        ))?;
+
+        // --- Copy embedding tables ---
+        for tname in &emb_tables {
+            let dims: u32 = tname
+                .strip_prefix("embeddings_")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+
+            import_conn.execute_batch(&format!(
+                "CREATE TABLE \"{tname}\" (\
+                    id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),\
+                    chunk_id INTEGER NOT NULL,\
+                    provider TEXT NOT NULL,\
+                    model TEXT NOT NULL,\
+                    embedding FLOAT[{dims}],\
+                    dims INTEGER NOT NULL DEFAULT {dims},\
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\
+                )"
+            ))?;
+            import_conn.execute_batch(&format!(
+                "INSERT INTO \"{tname}\" SELECT * FROM src.\"{tname}\""
+            ))?;
+        }
+
+        // DETACH and CHECKPOINT.
+        import_conn.execute_batch("DETACH src")?;
         import_conn.execute_batch("CHECKPOINT")?;
-        drop(import_conn); // Close before rename.
+        drop(import_conn);
 
-        // Check import result AFTER closing the connection.
-        import_result?;
-
-        // Clean up export temp directory.
-        let _ = std::fs::remove_dir_all(&export_dir);
-
-        // --- Phase 3: Atomic rename to active path ------------------------
+        // --- Phase 3: Atomic rename to active path --------------------------
         Self::write_intent(&intent_path, "phase2")?;
         std::fs::rename(&compact_path, &db_path)?;
 
-        // Clean up intent file and old DB.
+        // Clean up.
         let _ = std::fs::remove_file(&intent_path);
         let _ = std::fs::remove_file(&old_path);
 
-        // --- Reopen connection to compacted DB ----------------------------
+        // Reopen — also handles HNSW index creation via ensure_all_hnsw_indexes().
         self.reopen()?;
         self.write_count = 0;
         self.hnsw_cache = None;
@@ -834,17 +926,18 @@ impl DuckDbHnswBackend {
     fn reopen(&mut self) -> Result<(), DbError> {
         self.known_dims.clear();
         let conn = Connection::open(&self.config.db_path)?;
-        // Defer VSS loading — see open() comment.
+        // VSS must be loaded unconditionally on reopen — compaction may have
+        // imported HNSW index definitions from EXPORT/IMPORT, and DuckDB won't
+        // serialize them during CHECKPOINT without VSS loaded.  The `has_vss`
+        // flag is stale after the connection was closed and reopened.
+        self.has_vss = Self::try_load_vss(&conn);
         Self::setup_schema(&conn)?;
         let existing = Self::discover_embedding_tables(&conn)?;
         self.known_dims
             .extend(existing.into_iter().map(|(_, dims)| dims));
         self.conn = Some(conn);
-        // Load VSS lazily — only if embedding tables actually exist.
-        if !self.known_dims.is_empty() {
-            self.ensure_vss()?;
-            self.ensure_all_hnsw_indexes()?;
-        }
+        // Recreate HNSW indexes on existing embedding tables.
+        self.ensure_all_hnsw_indexes()?;
         Ok(())
     }
 
@@ -1284,7 +1377,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // 3-phase atomic EXPORT/IMPORT compaction (Phase 0).
         // Falls back to CHECKPOINT-only if EXPORT/IMPORT is unavailable
         // (e.g. DuckDB build without Parquet support).
-        if let Err(e) = self.run_export_import_compaction() {
+        if let Err(e) = self.run_attach_copy_compaction() {
             log::warn!(
                 "compaction: EXPORT/IMPORT failed ({}), falling back to CHECKPOINT",
                 e

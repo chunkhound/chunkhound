@@ -42,8 +42,9 @@ impl IndexingPipeline {
     /// Pipeline order: parse → embed → write (single transaction).
     ///
     /// progress_callback receives ``(phase: str, current: int, total: int)``
-    /// at phase transitions.  Phases: ``"parse"``, ``"embed"``, ``"write"``,
-    /// ``"compact"``, ``"done"``.
+    /// at phase transitions.  Phases: ``"parse"``, ``"embed"``,
+    /// ``"write-prepare"``, ``"write-data"``, ``"write-index"``,
+    /// ``"write-compact"``, ``"write-done"``, ``"done"``.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (files, parse_callback, embed_callback=None, progress_callback=None, incremental=false, parse_batch_callback=None, embed_batch_callback=None))]
     fn run(
@@ -325,20 +326,63 @@ impl IndexingPipeline {
             }
         }
 
-        emit_progress(py, &progress_callback, "write", 0, 1);
+        emit_progress(py, &progress_callback, "write-prepare", 0, 1);
         let t_write = Instant::now();
-        let result: BatchResult = py
-            .allow_threads(|| {
-                let mut backend: Box<dyn DbBackend> = create_backend(db_config);
+
+        // Phase 1: Open + prepare (delete paths, ensure tables, drop HNSW).
+        let batch_ref = &batch;
+        let mut backend: Box<dyn DbBackend> = py
+            .allow_threads(move || {
+                let mut backend = create_backend(db_config);
                 backend.open()?;
-                let res = backend.write_batch(&batch)?;
-                if backend.needs_compaction()? {
-                    backend.run_compaction()?;
-                }
-                backend.close()?;
-                Ok::<_, crate::error::DbError>(res)
+                backend.prepare_write(batch_ref)?;
+                Ok::<_, crate::error::DbError>(backend)
             })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        // Phase 2: Write data (files, chunks, embeddings inside txn).
+        emit_progress(py, &progress_callback, "write-data", 0, 1);
+        let (mut backend, write_result) = py.allow_threads(move || {
+            let result = backend.write_batch_incremental(batch_ref);
+            (backend, result)
+        });
+        let result: BatchResult =
+            write_result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        // Phase 3: Rebuild HNSW indexes (the expensive CPU-intensive step).
+        // Called unconditionally — write_batch_incremental errors are propagated
+        // above, and finish_write restores HNSW indexes (Invariant 14).
+        emit_progress(py, &progress_callback, "write-index", 0, 1);
+        let (backend, finish_result) = py.allow_threads(move || {
+            let result = backend.finish_write();
+            (backend, result)
+        });
+        finish_result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        // Phase 4: Compaction (if needed).
+        let (mut backend, needs_result) = py.allow_threads(move || {
+            let needs = backend.needs_compaction();
+            (backend, needs)
+        });
+        let needs_compaction =
+            needs_result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        if needs_compaction {
+            emit_progress(py, &progress_callback, "write-compact", 0, 1);
+            let (mut backend, compact_result) = py.allow_threads(move || {
+                let result = backend.run_compaction();
+                (backend, result)
+            });
+            compact_result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            backend
+                .close()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        } else {
+            backend
+                .close()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        }
+
+        emit_progress(py, &progress_callback, "write-done", 1, 1);
         log::info!("pipeline write: {:.2}s", t_write.elapsed().as_secs_f64());
 
         let chunks_written = result.chunks_written;
