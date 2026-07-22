@@ -19,7 +19,8 @@ const description =
                 <p class="eyebrow">Enterprise roadmap</p>
                 <h1>
                     The pressure to centralize is a symptom.<br /><span
-                        >The cure is a better DB.</span>
+                        >The cure is a better DB.</span
+                    >
                 </h1>
                 <p class="hero-lead">
                     ChunkHound is local-only by design. The database is where
@@ -48,9 +49,10 @@ const description =
                     current. External embedding, reranking, or LLM providers are
                     optional dependencies—not a ChunkHound server. A server or
                     CI job can also copy a pre-indexed DB, run the local process
-                    against it using the native HTTP MCP transport
-                    (<code>--transport http</code>), and then stop; that remains
-                    local-first at the workload boundary.
+                    against it using the native HTTP MCP transport (<code
+                        >--transport http</code
+                    >), and then stop; that remains local-first at the workload
+                    boundary.
                 </p>
                 <CurrentArchitectureDiagram />
             </div>
@@ -75,13 +77,12 @@ const description =
                         <span class="gap-number">1</span>
                         <h3>DBs require a source checkout</h3>
                         <p>
-                            Today the DB lives inside a project clone.
-                            Regex search works on the DB alone, but semantic
-                            search, import-resolution, and context-expansion
-                            paths still assume source files alongside the
-                            index. Non-developers get read-only value today,
-                            but full self-contained functionality remains
-                            future work.
+                            Today the DB lives inside a project clone. Regex
+                            search works on the DB alone, but semantic search,
+                            import-resolution, and context-expansion paths still
+                            assume source files alongside the index.
+                            Non-developers get read-only value today, but full
+                            self-contained functionality remains future work.
                         </p>
                     </article>
                     <article class="gap-card">
@@ -204,7 +205,7 @@ const description =
                         <h3>LSM-Vec: concurrent in-place index building</h3>
                         <p>
                             Plan to integrate <a
-                                href="https://github.com/el-yawd/lsm-vec"
+                                href="https://arxiv.org/abs/2505.17152"
                                 >LSM-Vec</a
                             >, an embedded Rust vector index whose LSM-tree
                             design supports true in-place efficient updates —
@@ -244,17 +245,16 @@ const description =
                             Split and merge DBs to index individual repos
                             independently, then combine into one unified
                             artifact for distribution. Shopware's use case:
-                            index each microservice repo separately, merge
-                            into a single searchable DB. This also enables
+                            index each microservice repo separately, merge into
+                            a single searchable DB. This also enables
                             horizontally scalable indexing — a centralized CI
                             can index repos in parallel across machines, then
                             merge into one artifact.
                         </p>
                         <p class="phase-gaps">
-                            <strong>Solves:</strong> gaps 1 and 4 — no source
-                            checkout needed on consuming side; enables
-                            automated CI distribution pipelines without a
-                            central server.
+                            <strong>Solves:</strong> gaps 1 and 4 — no source checkout
+                            needed on consuming side; enables automated CI distribution
+                            pipelines without a central server.
                         </p>
                     </article>
 
@@ -276,7 +276,9 @@ const description =
 
                     <article class="phase-card future">
                         <span class="phase-badge">Phase 3 · Future</span>
-                        <h3>Permission-aware merge and distribution pipeline</h3>
+                        <h3>
+                            Permission-aware merge and distribution pipeline
+                        </h3>
                         <p>
                             Permissions are handled at the object store level.
                             The store integrates with the org's identity
@@ -289,10 +291,10 @@ const description =
                         </p>
                         <p class="phase-gaps">
                             <strong>Partially addresses:</strong> gap 5 — controls
-                            artifact distribution and prevents unauthorized
-                            download combinations. Request-time enforcement
-                            and query audit remain open problems that need
-                            mechanisms beyond distribution ACLs.
+                            artifact distribution and prevents unauthorized download
+                            combinations. Request-time enforcement and query audit
+                            remain open problems that need mechanisms beyond distribution
+                            ACLs.
                         </p>
                     </article>
                 </div>
@@ -307,9 +309,10 @@ const description =
                     developer doesn't already run locally.
                 </aside>
                 <aside class="timeline-note" style="margin-top: var(--space-3)">
-                    <strong>Already available</strong> — ChunkHound ships a native HTTP MCP
-                    transport (<code>--transport http</code>). Same binary, no external proxy.
-                    Full server trade-offs documented in the comparison table below.
+                    <strong>Already available</strong> — ChunkHound ships a native
+                    HTTP MCP transport (<code>--transport http</code>). Same
+                    binary, no external proxy. Full server trade-offs documented
+                    in the comparison table below.
                 </aside>
             </div>
         </section>
@@ -363,8 +366,8 @@ const description =
                 </div>
                 <aside class="index-scale-note">
                     <strong>Scale asymmetry:</strong> local-first targets at most
-                    roughly 10M vectors per client. A 256-dimensional envelope
-                    is about 30–40 GB per client, with further compression still needed.
+                    roughly 10M vectors per client. A 256-dimensional envelope is
+                    about 30–40 GB per client, with further compression still needed.
                     The ~100M-vector figure describes a centralized aggregate across
                     multiple branches—not one local copy. The server must store the
                     branch permutations or execute dynamic cross-DB joins, in addition
@@ -381,7 +384,7 @@ const description =
                         <a
                             href="https://qdrant.tech/documentation/concepts/storage/"
                             >Qdrant</a
-                        >, and <a href="https://github.com/el-yawd/lsm-vec"
+                        >, and <a href="https://arxiv.org/abs/2505.17152"
                             >LSM-Vec (LSM-tree-based vector index)</a
                         >.
                     </span>
@@ -426,9 +429,9 @@ const description =
                             enough to skip shipping without the vector index?
                         </li>
                         <li>
-                            Does the object store permission model scale to
-                            orgs with thousands of repos and fine-grained
-                            team access?
+                            Does the object store permission model scale to orgs
+                            with thousands of repos and fine-grained team
+                            access?
                         </li>
                     </ul>
                     <p>
