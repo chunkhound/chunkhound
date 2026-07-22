@@ -48,9 +48,9 @@ const description =
                     current. External embedding, reranking, or LLM providers are
                     optional dependencies—not a ChunkHound server. A server or
                     CI job can also copy a pre-indexed DB, run the local process
-                    against it, expose it through an external HTTP MCP proxy,
-                    and then stop; that remains local-first at the workload
-                    boundary.
+                    against it using the native HTTP MCP transport
+                    (<code>--transport http</code>), and then stop; that remains
+                    local-first at the workload boundary.
                 </p>
                 <CurrentArchitectureDiagram />
             </div>
@@ -303,11 +303,9 @@ const description =
                     developer doesn't already run locally.
                 </aside>
                 <aside class="timeline-note" style="margin-top: var(--space-3)">
-                    <strong>Need something before the roadmap delivers?</strong>
-                    Wrap the local process in a lightweight HTTP MCP proxy with transport-layer
-                    authorization. Same local binary behind a network boundary, same
-                    maintenance surface. Full server trade-offs documented in the
-                    comparison table below.
+                    <strong>Already available</strong> — ChunkHound ships a native HTTP MCP
+                    transport (<code>--transport http</code>). Same binary, no external proxy.
+                    Full server trade-offs documented in the comparison table below.
                 </aside>
             </div>
         </section>
