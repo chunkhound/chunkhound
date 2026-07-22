@@ -183,7 +183,7 @@ const description =
                                 >PR #375</a
                             >
                             (Phase 0 Rust DB writer) already proves the direction:
-                            cumulative 4.4x speedup on 4000 files by replacing Python
+                            cumulative 2.1× speedup on 4,000 files by replacing Python
                             per-file DB writes with native Rust batch operations,
                             direct PyO3 extraction (no JSON serialization), and an
                             HNSW bookend protocol (drop once before writes, rebuild
@@ -359,7 +359,7 @@ const description =
                 </div>
                 <aside class="index-scale-note">
                     <strong>Scale asymmetry:</strong> local-first targets at most
-                    roughly 10M vectors per client. The current 256-dimensional envelope
+                    roughly 10M vectors per client. A 256-dimensional envelope
                     is about 30–40 GB per client, with further compression still needed.
                     The ~100M-vector figure describes a centralized aggregate across
                     multiple branches—not one local copy. The server must store the
