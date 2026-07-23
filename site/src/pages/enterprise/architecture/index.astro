@@ -401,9 +401,10 @@ const description =
                 </div>
                 <aside class="index-scale-note">
                     <strong>Scale asymmetry:</strong> local-first targets at most
-                    roughly 10M vectors per client. A 256-dimensional envelope is
-                    about 30–40 GB per client, with further compression still needed.
-                    The ~100M-vector figure describes a centralized aggregate across
+                    roughly 10M vectors per client. At 256 dimensions, raw
+                    float32 vectors alone require about 10.24 GB; total artifact
+                    size also depends on the vector index, metadata, and
+                    compression. The ~100M-vector figure describes a centralized aggregate across
                     multiple branches—not one local copy. The server must store the
                     branch permutations or execute dynamic cross-DB joins, in addition
                     to index, metadata, replica, backup, and rebuild costs.
