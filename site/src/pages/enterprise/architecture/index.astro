@@ -291,8 +291,12 @@ const description =
                             baselines without the vector index and let clients
                             build vector index locally; shard the DB by paths or
                             semantic units with partial updates building on
-                            join/split. Combined with auto-distribution (CI
-                            publishes once, clients pull incrementally).
+                            join/split. Combined with auto-distribution via
+                            generic HTTP endpoints—any custom server works, a
+                            simple object store is easiest. CI publishes once;
+                            clients pull updates via ETag. A future HTTP MCP
+                            deployment can use the same artifact pipeline after
+                            its session and deployment requirements are addressed.
                         </p>
                         <p class="phase-gaps">
                             <strong>Solves:</strong> gaps 2 and 4.
