@@ -1581,25 +1581,12 @@ class IndexingCoordinator(BaseService):
                                 _pr.reset(_compact_task, start=True)
                                 _pr.update(_compact_task, completed=1, info="done")
                         elif phase == "write-prepare":
-                            # Close Python DuckDB now — all parse/embed pools have
-                            # exited (ProcessPoolExecutor children are gone), and
-                            # the Rust pipeline is about to open its own DuckDB
-                            # connection which would conflict with any live Python
-                            # writer.
-                            #
-                            # Must use the provider's full disconnect() here, not
-                            # just closing _connection_manager.connection: the
-                            # SerialExecutor holds its OWN separate thread-local
-                            # DuckDB connection (created lazily on its worker
-                            # thread for schema setup / discovery queries), which
-                            # a bare connection_manager close leaves dangling.
-                            # That second live connection was corrupting the DB
-                            # file when Rust opened its own connection alongside
-                            # it in the same process.
-                            if self._db is not None and self._db.is_connected:
-                                self._db.disconnect()
-                            # Prepare is sub-second (create tables); roll it
-                            # into the write-data bar as an opening tick.
+                            # Python's DuckDB connection is already closed by
+                            # now (disconnected before run_rust_pipeline() was
+                            # even called, above) — this is purely a progress
+                            # bar update. Prepare is sub-second (create
+                            # tables); roll it into the write-data bar as an
+                            # opening tick.
                             _pr.reset(_data_task, start=True)
                             _pr.update(_data_task, info="preparing...")
                         elif phase == "write-data":
@@ -1637,15 +1624,28 @@ class IndexingCoordinator(BaseService):
                     _progress_cb = None
 
                 # Close Python-side DuckDB BEFORE the Rust pipeline starts.
-                # The Rust pipeline opens its own DuckDB connection for writing,
-                # and DuckDB enforces a single-writer lock.  A live Python
-                # connection (opened during discovery/init) would conflict.
                 #
-                # Must NOT close here — parse_batch_callback uses
-                # ProcessPoolExecutor with fork'd children that inherit
-                # DuckDB shared libraries.  Close at write-prepare instead
-                # (after all parse/embed phases have destroyed their pools),
-                # via the "write-prepare" progress callback above.
+                # pipeline.run() opens its own independent DuckDB connection
+                # as its very first step — compute_diff_blocking() (the
+                # incremental-diff query) runs before parsing even begins.
+                # A live Python connection at that point conflicts with
+                # Rust's connection (DuckDB enforces a single writer),
+                # producing lock errors or, worse, silent on-disk corruption
+                # that only surfaces later as a deserialization error when
+                # some other process reopens the DB.
+                #
+                # Safe to close here: the parse_batch_callback's
+                # ProcessPoolExecutor (whose fork'd children inherit
+                # whatever DuckDB state is live at fork time) isn't created
+                # until Rust's parse phase, which starts only after this
+                # call returns — so no forked child ever inherits a live
+                # connection. Must use the provider's full disconnect(),
+                # not just closing _connection_manager.connection: the
+                # SerialExecutor holds its own separate thread-local DuckDB
+                # connection (created lazily on its worker thread), which a
+                # bare connection_manager close would leave dangling.
+                if self._db is not None and self._db.is_connected:
+                    self._db.disconnect()
 
                 rust_stats = await run_rust_pipeline(
                     files_to_process,
