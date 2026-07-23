@@ -1586,9 +1586,18 @@ class IndexingCoordinator(BaseService):
                             # the Rust pipeline is about to open its own DuckDB
                             # connection which would conflict with any live Python
                             # writer.
-                            if _cm_ref is not None and _cm_ref.connection is not None:
-                                _cm_ref.connection.close()
-                                _cm_ref.connection = None
+                            #
+                            # Must use the provider's full disconnect() here, not
+                            # just closing _connection_manager.connection: the
+                            # SerialExecutor holds its OWN separate thread-local
+                            # DuckDB connection (created lazily on its worker
+                            # thread for schema setup / discovery queries), which
+                            # a bare connection_manager close leaves dangling.
+                            # That second live connection was corrupting the DB
+                            # file when Rust opened its own connection alongside
+                            # it in the same process.
+                            if self._db is not None and self._db.is_connected:
+                                self._db.disconnect()
                             # Prepare is sub-second (create tables); roll it
                             # into the write-data bar as an opening tick.
                             _pr.reset(_data_task, start=True)
@@ -1635,10 +1644,8 @@ class IndexingCoordinator(BaseService):
                 # Must NOT close here — parse_batch_callback uses
                 # ProcessPoolExecutor with fork'd children that inherit
                 # DuckDB shared libraries.  Close at write-prepare instead
-                # (after all parse/embed phases have destroyed their pools).
-                _cm_ref = None
-                if hasattr(self._db, "_connection_manager"):
-                    _cm_ref = self._db._connection_manager
+                # (after all parse/embed phases have destroyed their pools),
+                # via the "write-prepare" progress callback above.
 
                 rust_stats = await run_rust_pipeline(
                     files_to_process,
