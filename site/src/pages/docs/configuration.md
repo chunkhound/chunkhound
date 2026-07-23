@@ -271,12 +271,12 @@ These apply when the active provider (or a role provider) is `anthropic`. Each o
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `anthropic_thinking_enabled` | `boolean` | `false` | Enable extended thinking. |
-| `anthropic_thinking_mode` | `string` | `null` | `auto` (default when unset), `off`, `manual`, or `adaptive`. `auto` selects adaptive on Opus 4.6+/Sonnet 4.6 and manual on older models. |
+| `anthropic_thinking_mode` | `string` | `null` | `auto` (default when unset), `off`, `manual`, or `adaptive`. `auto` selects adaptive on Fable 5, Mythos, Opus 4.6+, and Sonnet 4.6, and manual on older models. `off` does not stop Fable 5 / Mythos 5 from thinking server-side. |
 | `anthropic_thinking_budget_tokens` | `number` | `10000` | Manual-mode thinking budget (min 1024). Ignored in adaptive mode (Opus 4.6+). |
-| `anthropic_thinking_display` | `string` | `null` | Adaptive-mode thinking text: `summarized` or `omitted`. Opus 4.7/4.8 omit by default. |
+| `anthropic_thinking_display` | `string` | `null` | Adaptive-mode thinking text: `summarized` or `omitted`. Fable 5, Mythos, and Opus 4.7/4.8 omit by default. |
 | `anthropic_interleaved_thinking` | `boolean` | `false` | Manual-mode interleaved thinking between tool calls. Auto-enabled in adaptive mode. |
-| `anthropic_effort` | `string` | `null` | Token-usage effort: `low`, `medium`, `high`, `xhigh`, `max`. `xhigh` is Opus 4.7/4.8 only; `max` is Opus 4.6+. Unsupported levels are dropped with a warning. |
-| `anthropic_task_budget_tokens` | `number` | `null` | Advisory agentic-loop token budget (beta). Opus 4.7/4.8 only; minimum 20000. |
+| `anthropic_effort` | `string` | `null` | Token-usage effort: `low`, `medium`, `high`, `xhigh`, `max`. `xhigh` is Fable 5, Mythos 5, and Opus 4.7/4.8; `max` is Opus 4.6+. Unsupported levels are dropped with a warning. |
+| `anthropic_task_budget_tokens` | `number` | `null` | Advisory agentic-loop token budget (beta). Fable 5, Mythos 5, and Opus 4.7/4.8; minimum 20000. |
 | `anthropic_prompt_caching` | `boolean` | `false` | Send `cache_control` so the Messages API can cache prompt prefixes. |
 | `anthropic_cache_ttl` | `string` | `null` | Prompt-cache TTL such as `1h`. `null` uses the API default of 5 minutes. |
 | `anthropic_context_management_enabled` | `boolean` | `false` | Automatic clearing of tool results and thinking blocks (beta). |
