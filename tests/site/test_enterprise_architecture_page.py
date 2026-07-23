@@ -33,6 +33,9 @@ def test_enterprise_architecture_states_current_boundary_and_decision() -> None:
     assert "External embedding, reranking, or LLM providers" in text
     assert "central query service" in text
     assert "central server" in text
+    assert "Phase 3 completes artifact distribution." in text
+    assert "current HTTP MCP transport maintains sessions" in text
+    assert "before it can be treated as stateless" in text
 
 
 def test_enterprise_architecture_comparison_is_incremental_and_balanced() -> None:

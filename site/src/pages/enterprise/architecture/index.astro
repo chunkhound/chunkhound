@@ -135,12 +135,12 @@ const description =
                 <h2 id="roadmap-title">Solving what tempts centralization</h2>
                 <p class="section-lead">
                     Each gap above has a fix in the local-only model. The phases
-                    below show what ships when. After Phase 2, a &ldquo;central
-                    server&rdquo; reduces to stateless, load-balanced, HTTP MCP
-                    instances pulling pre-built DB artifacts through the same
-                    distribution pipeline clients use — no live central index,
-                    no distributed vector DB to operate. Phase 3 addresses the
-                    remaining edge cases.
+                    below show what ships when. Phase 3 completes artifact
+                    distribution. After that, a future HTTP MCP deployment can
+                    pull pre-built DB artifacts through the same pipeline clients
+                    use, without a live central index or distributed vector DB.
+                    Reaching a stateless, load-balanced deployment also requires
+                    dedicated MCP session and deployment work.
                 </p>
 
                 <div class="phase-list">
@@ -371,9 +371,15 @@ const description =
                             object storage. Thin manager checks for fresh
                             versions, verifies, activates. The roadmap's LSM-Vec
                             backend keeps vectors on disk and graph edges in an
-                            LSM-tree, avoiding all-in-memory HNSW rebuilds. A
-                            server or CI job can copy, query, proxy MCP, and
-                            exit.
+                            LSM-tree, avoiding all-in-memory HNSW rebuilds. After
+                            Phase 3 distribution, a future HTTP MCP deployment
+                            could pull the right DB artifacts from the org's
+                            endpoint or object store. The current HTTP MCP
+                            transport maintains sessions, so a load-balanced
+                            deployment needs explicit session handling and
+                            deployment work before it can be treated as stateless.
+                            The local-first architecture still avoids a live
+                            central index and distributed vector DB.
                         </p>
                     </article>
                     <article>
