@@ -169,6 +169,7 @@ impl IndexingPipeline {
                     if let Some(ref batch_cb) = embed_batch_callback {
                         if self.config.parse_thread_pool_size > 1 {
                             let cb = batch_cb.clone_ref(py);
+                            let prog_ref = progress_callback.as_ref().map(|p| p.clone_ref(py));
                             py.allow_threads(|| {
                                 self.embed_batch_parallel(
                                     &mut parsed,
@@ -176,6 +177,7 @@ impl IndexingPipeline {
                                     &cb,
                                     &provider,
                                     &model,
+                                    prog_ref,
                                 )
                             })
                             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -684,6 +686,7 @@ impl IndexingPipeline {
                                     batch_cb,
                                     &provider,
                                     &model,
+                                    None,
                                 )?;
                             } else if let Some(ref seq_cb) = seq_embed_cb {
                                 // Sequential fallback: call per-batch embed callback.
@@ -910,31 +913,42 @@ impl IndexingPipeline {
         callback: &Py<PyAny>,
         provider: &str,
         model: &str,
+        progress_callback: Option<Py<PyAny>>,
     ) -> Result<(), String> {
         use rayon::prelude::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Mutex;
 
         let batch_size = self.config.embed_batch_size.max(1);
+        let total = targets.len() as u64;
+        let completed = AtomicU64::new(0);
+
+        // Respect embed_thread_pool_size if set, else cap to half of CPUs
+        // to avoid overwhelming the embedding API with concurrent requests.
+        let embed_threads = if self.config.embed_thread_pool_size > 0 {
+            self.config.embed_thread_pool_size
+        } else {
+            let cpu = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+            (cpu / 2).clamp(1, 4)
+        };
 
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(self.config.parse_thread_pool_size.max(1))
+            .num_threads(embed_threads)
             .build()
             .map_err(|e| e.to_string())?;
 
-        let error: Mutex<Option<String>> = Mutex::new(None);
         let all_results: Mutex<Vec<(usize, usize, Vec<f32>)>> = Mutex::new(Vec::new());
 
         pool.install(|| {
             targets.par_chunks(batch_size).for_each(|batch| {
-                if error.lock().unwrap().is_some() {
-                    return;
-                }
-
                 let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
                 let indices: Vec<(usize, usize)> =
                     batch.iter().map(|(fi, ci, _)| (*fi, *ci)).collect();
+                let batch_len = batch.len() as u64;
 
-                match Python::with_gil(|gil_py| {
+                let _success = match Python::with_gil(|gil_py| {
                     let cb = callback.bind(gil_py);
                     let ret = cb.call1((texts,))?;
                     let vectors: Vec<Vec<f64>> = ret.extract()?;
@@ -952,20 +966,25 @@ impl IndexingPipeline {
                             }
                         }
                         all_results.lock().unwrap().extend(batch_results);
+                        true
                     }
                     Err(e) => {
-                        let mut err = error.lock().unwrap();
-                        if err.is_none() {
-                            *err = Some(e.to_string());
-                        }
+                        log::warn!("embed batch failed ({} chunks), continuing: {e}", batch_len);
+                        false
                     }
+                };
+
+                // Always advance progress — even on failure, like Python's
+                // asyncio.gather(return_exceptions=True) path does.
+                let done = completed.fetch_add(batch_len, Ordering::Relaxed) + batch_len;
+                if let Some(ref prog) = progress_callback {
+                    Python::with_gil(|gil_py| {
+                        let cb = prog.bind(gil_py);
+                        let _ = cb.call1(("embed", done, total));
+                    });
                 }
             });
         });
-
-        if let Some(e) = error.into_inner().unwrap() {
-            return Err(e);
-        }
 
         // Apply embeddings to parsed chunks (single-threaded, after all batches).
         // Mutating pure-Rust Vec<f32> fields — no GIL required.

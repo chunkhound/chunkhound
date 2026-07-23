@@ -11,8 +11,12 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from chunkhound.core.detection import Language
 
+import threading
+
 from chunkhound.core.types.common import FileId
 from chunkhound.parsers.parser_factory import create_parser_for_language
+
+_embed_local = threading.local()
 
 
 def parse_file_callback(
@@ -80,26 +84,64 @@ def embed_callback(
     All embedding config is baked into the service via global config —
     api_key, base_url, ssl_verify, output_dims, etc.
     """
-    from chunkhound.registry import get_registry
+    return _embed_batch(texts)
 
-    service = get_registry().create_embedding_service()
-    # Direct sync embed — the Rust embed thread calls this.
-    # Use the provider's embed method directly.
-    emb_provider = service._embedding_provider
-    if emb_provider is None:
-        raise RuntimeError("No embedding provider configured")
 
-    # The embedding service wraps the provider; use it directly
+def embed_batch_callback(texts: list[str]) -> list[list[float]]:
+    """Parallel batch embed (called from Rust rayon threads with GIL held).
+
+    Signature matches what ``embed_batch_parallel`` expects:
+    ``callback.call1((texts,)) → List[List[float]]``.
+
+    Used when ``parse_thread_pool_size > 1`` — each rayon thread
+    processes one batch at a time, so the provider sees N concurrent
+    API requests.
+    """
+    return _embed_batch(texts)
+
+
+def _embed_batch(texts: list[str]) -> list[list[float]]:
+    """Shared embed helper — run the async provider.embed() synchronously.
+
+    Uses thread-local provider instances so each rayon thread gets its own
+    httpx AsyncClient.  Without this, the singleton provider's client is
+    shared across threads with different asyncio event loops, causing
+    hangs when ``max_concurrent_batches >= 4``.
+    """
     import asyncio
+
+    # Thread-local provider: one fresh provider per rayon thread.
+    # Each thread runs asyncio.run() repeatedly — the per-thread provider's
+    # httpx client stays associated with the thread and handles sequential
+    # event-loop lifecycles correctly.
+    if not hasattr(_embed_local, 'provider'):
+        from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+        from chunkhound.registry import get_registry
+
+        config = get_registry()._config
+        if config is None or config.embedding is None:
+            raise RuntimeError("No embedding configuration available")
+        _embed_local.provider = EmbeddingProviderFactory.create_provider(
+            config.embedding
+        )
+
+    emb_provider = _embed_local.provider
 
     async def _embed():
         return await emb_provider.embed(texts)
 
+    # Rayon threads are NOT the main thread and have no event loop — use
+    # asyncio.run() directly.  The main thread (in asyncio.to_thread context)
+    # may have a running event loop, in which case asyncio.run() raises
+    # RuntimeError and we fall back to a single-use thread.
+    if threading.current_thread() is not threading.main_thread():
+        return asyncio.run(_embed())
+
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # We're inside an event loop — create a task
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(asyncio.run, _embed())
                 return future.result()
@@ -197,6 +239,10 @@ async def run_rust_pipeline(
         getattr(embedding_cfg, "model", "") or ""
     )
 
+    embed_batch_size = int(getattr(embedding_cfg, "batch_size", 200) or 200)
+    max_concurrent = int(
+        getattr(embedding_cfg, "max_concurrent_batches", None) or 1
+    )
     parse_thread_pool_size = (os.cpu_count() or 4)
 
     config_dict = {
@@ -208,7 +254,8 @@ async def run_rust_pipeline(
         "compaction_min_size_mb": 50,
         "parse_batch_size": 200,
         "parse_thread_pool_size": parse_thread_pool_size,
-        "embed_batch_size": 200,
+        "embed_thread_pool_size": max_concurrent,
+        "embed_batch_size": embed_batch_size,
         "force_reindex": force_reindex,
         "mtime_epsilon_seconds": mtime_eps,
         "skip_cleanup": True,  # coordinator handles cleanup separately
@@ -235,6 +282,7 @@ async def run_rust_pipeline(
         progress_callback=progress_callback,
         incremental=not force_reindex,
         parse_batch_callback=parse_batch_callback,
+        embed_batch_callback=embed_batch_callback if not skip_embeddings else None,
     )
 
     # Map PipelineReport → coordinator stats dict

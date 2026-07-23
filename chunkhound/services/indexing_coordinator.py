@@ -1483,6 +1483,7 @@ class IndexingCoordinator(BaseService):
             # Aggregators for streamed storage
             agg_total_files = 0
             agg_total_chunks = 0
+            agg_embeddings = 0
             agg_errors: list[dict[str, Any]] = []
             agg_skipped = 0
             agg_skipped_timeout: list[str] = []
@@ -1514,9 +1515,14 @@ class IndexingCoordinator(BaseService):
                 if _use_rust and self.progress:
                     from rich.progress import TaskID
                     _pt: TaskID = parse_task  # type: ignore[assignment]
-                    _st: TaskID = store_task  # type: ignore[assignment]
                     _pr = self.progress
-                    _total_files_for_progress = len(files_to_process)
+
+                    # Hide the coordinator's store_task ("Handling files") —
+                    # the Rust write sub-phase bars render fine-grained progress
+                    # themselves.  Keep parse_task for the parse phase.
+                    if store_task is not None:
+                        _pr.remove_task(store_task)
+                        store_task = None
 
                     # Pre-create embed task (total set to 1 placeholder; the
                     # first embed callback will reset it to the real count).
@@ -1528,32 +1534,31 @@ class IndexingCoordinator(BaseService):
                         )
                     _embed_start = 0.0
 
-                    # Pre-create all write sub-phase bars so they are
-                    # immediately visible to Rich's Live display.
+                    # Pre-create all write sub-phase bars (no need for a
+                    # separate "prepare" bar — prepare is sub-second).
                     # start=False — clocks are restarted via reset(start=True)
                     # when each phase actually begins.
-                    _prep_task: TaskID = _pr.add_task(
-                        "  └─ Preparing database", total=1, speed="", info="", start=False
-                    )
                     _data_task: TaskID = _pr.add_task(
                         "  └─ Writing data", total=1, speed="", info="", start=False
                     )
                     _index_task: TaskID = _pr.add_task(
-                        "  └─ Building search indexes", total=1, speed="", info="", start=False
+                        "  └─ Building indexes", total=1, speed="", info="", start=False
                     )
                     _compact_task: TaskID = _pr.add_task(
-                        "  └─ Compacting database", total=1, speed="", info="", start=False
+                        "  └─ Compacting", total=1, speed="", info="", start=False
                     )
 
                     def _progress_cb(phase: str, current: int, total: int) -> None:
                         nonlocal _embed_start
                         if phase == "parse":
-                            _pr.update(_pt, completed=current, info=f"{current}/{total} parsed")
+                            _pr.update(_pt, completed=current,
+                                       info=f"{current}/{total} parsed")
                         elif phase == "embed":
                             if _embed_task is not None:
                                 if total > 0 and current == 0:
-                                    # First embed callback: set real total and start clock.
-                                    _pr.reset(_embed_task, total=total)
+                                    # First embed callback: set real total.
+                                    _pr.reset(_embed_task, total=total,
+                                              start=True)
                                     _embed_start = time.time()
                                 if current > 0:
                                     elapsed = time.time() - _embed_start
@@ -1565,53 +1570,50 @@ class IndexingCoordinator(BaseService):
                                         info=f"{current}/{total} embedded",
                                     )
                         elif phase == "write":
-                            # Backward compat: old Rust extensions.
-                            _pr.update(_st, info="writing to database...")
-                            _pr.reset(_prep_task, start=True)
-                            _pr.update(_prep_task, completed=1, info="done")
+                            # Backward compat: old Rust extensions emit one
+                            # "write" callback with no sub-phase breakdown.
                             _pr.reset(_data_task, start=True)
                             _pr.update(_data_task, completed=1, info="done")
-                            _pr.reset(_index_task, start=True)
-                            _pr.update(_index_task, completed=1, info="done")
-                            _pr.reset(_compact_task, start=True)
-                            _pr.update(_compact_task, completed=1, info="done")
+                            if _index_task is not None:
+                                _pr.reset(_index_task, start=True)
+                                _pr.update(_index_task, completed=1, info="done")
+                            if _compact_task is not None:
+                                _pr.reset(_compact_task, start=True)
+                                _pr.update(_compact_task, completed=1, info="done")
                         elif phase == "write-prepare":
-                            # Start the prepare bar; next phase wraps it up.
-                            _pr.update(_st, info="preparing database...")
-                            _pr.reset(_prep_task, start=True)
-                            _pr.update(_prep_task, info="preparing...")
-                        elif phase == "write-data":
-                            # Wrap up prepare, start data write.
-                            _pr.update(_prep_task, completed=1, info="done")
-                            _pr.update(_st, info="writing data...")
-                            _pr.reset(_data_task, start=True)
-                            _pr.update(_data_task, info="writing...")
-                        elif phase == "write-index":
-                            # Wrap up data write, start HNSW index build.
-                            _pr.update(_data_task, completed=1, info="done")
-                            _pr.update(_st, info="building search indexes...")
-                            _pr.reset(_index_task, start=True)
-                            _pr.update(_index_task, info="building...")
-                        elif phase == "write-compact":
-                            # Close Python DuckDB before the Rust pipeline
-                            # renames the DB file — avoids conflicting lock.
+                            # Close Python DuckDB now — all parse/embed pools have
+                            # exited (ProcessPoolExecutor children are gone), and
+                            # the Rust pipeline is about to open its own DuckDB
+                            # connection which would conflict with any live Python
+                            # writer.
                             if _cm_ref is not None and _cm_ref.connection is not None:
                                 _cm_ref.connection.close()
                                 _cm_ref.connection = None
-                            # Wrap up index build, start compaction.
+                            # Prepare is sub-second (create tables); roll it
+                            # into the write-data bar as an opening tick.
+                            _pr.reset(_data_task, start=True)
+                            _pr.update(_data_task, info="preparing...")
+                        elif phase == "write-data":
+                            # Wrap up prepare (if still showing) and start
+                            # the real data write.
+                            _pr.update(_data_task, info="writing...")
+                        elif phase == "write-index":
+                            # Data write done; start HNSW index build.
+                            _pr.update(_data_task, completed=1, info="done")
+                            _pr.reset(_index_task, start=True)
+                            _pr.update(_index_task, info="building...")
+                        elif phase == "write-compact":
+                            # HNSW index build done; start compaction.
                             _pr.update(_index_task, completed=1, info="done")
-                            _pr.update(_st, info="compacting database...")
                             _pr.reset(_compact_task, start=True)
                             _pr.update(_compact_task, info="compacting...")
                         elif phase == "write-done":
-                            # Wrap up the currently-active bar.
-                            # If compaction happened, _index_task is already done.
-                            # If not, _index_task needs filling.
+                            # Final wrap-up of whatever bars are still active.
+                            _pr.update(_data_task, completed=1, info="done")
                             _pr.update(_index_task, completed=1, info="done")
                             _pr.update(_compact_task, completed=1, info="done")
                         elif phase == "done":
-                            # Complete all remaining tasks.
-                            _pr.update(_prep_task, completed=1, info="done")
+                            # Ensure all bars at 100%.
                             _pr.update(_data_task, completed=1, info="done")
                             _pr.update(_index_task, completed=1, info="done")
                             _pr.update(_compact_task, completed=1, info="done")
@@ -1622,23 +1624,18 @@ class IndexingCoordinator(BaseService):
                                 t = _pr.tasks[_embed_task]
                                 if t.total:
                                     _pr.update(_embed_task, completed=t.total)
-                            t = _pr.tasks[_st]
-                            if t.total:
-                                _pr.update(
-                                    _st,
-                                    completed=t.total,
-                                    info=f"{_total_files_for_progress} files written",
-                                )
                 else:
                     _progress_cb = None
 
-                # Close Python-side DuckDB connections before the Rust pipeline
-                # runs compaction (ATTACH + INSERT SELECT).  The Rust pipeline
-                # renames the DB file and reopens it — any live Python DuckDB
-                # connection would hold a conflicting file lock.  Must happen
-                # right before compaction, not before the entire pipeline, or
-                # ProcessPoolExecutor workers crash (DuckDB close may unload
-                # shared libraries that fork'd children inherit).
+                # Close Python-side DuckDB BEFORE the Rust pipeline starts.
+                # The Rust pipeline opens its own DuckDB connection for writing,
+                # and DuckDB enforces a single-writer lock.  A live Python
+                # connection (opened during discovery/init) would conflict.
+                #
+                # Must NOT close here — parse_batch_callback uses
+                # ProcessPoolExecutor with fork'd children that inherit
+                # DuckDB shared libraries.  Close at write-prepare instead
+                # (after all parse/embed phases have destroyed their pools).
                 _cm_ref = None
                 if hasattr(self._db, "_connection_manager"):
                     _cm_ref = self._db._connection_manager
@@ -1655,6 +1652,7 @@ class IndexingCoordinator(BaseService):
 
                 agg_total_files = int(rust_stats.get("total_files", 0))
                 agg_total_chunks = int(rust_stats.get("total_chunks", 0))
+                agg_embeddings = int(rust_stats.get("embeddings_generated", 0))
                 agg_errors = list(rust_stats.get("errors", []))
                 # Skipped/timeout tracking isn't reported by the pipeline yet —
                 # the coordinator's change detection already filtered unchanged files.
@@ -1758,6 +1756,7 @@ class IndexingCoordinator(BaseService):
                 "total_files": agg_total_files,
                 "total_chunks": agg_total_chunks,
                 "errors": agg_errors,
+                "embeddings_generated": agg_embeddings,
             }
 
             # Track skipped files (including timeouts)
@@ -1814,6 +1813,7 @@ class IndexingCoordinator(BaseService):
                 "status": "success",
                 "files_processed": total_files,
                 "total_chunks": total_chunks,
+                "embeddings_generated": stats.get("embeddings_generated", 0),
                 "skipped": skipped_total + skipped_unchanged,
                 "skipped_due_to_timeout": skipped_due_to_timeout,
                 "skipped_unchanged": skipped_unchanged,

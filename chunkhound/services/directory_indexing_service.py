@@ -229,6 +229,7 @@ class DirectoryIndexingService:
         stats.files_skipped = result.get("skipped", 0)
         stats.files_errors = result.get("errors", 0)
         stats.chunks_created = result.get("total_chunks", 0)
+        stats.embeddings_generated = result.get("embeddings_generated", 0)
         stats.skipped_due_to_timeout = result.get("skipped_due_to_timeout", [])
         stats.skipped_unchanged = result.get("skipped_unchanged", 0)
         stats.skipped_filtered = result.get("skipped_filtered", 0)
