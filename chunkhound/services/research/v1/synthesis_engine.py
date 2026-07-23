@@ -31,6 +31,7 @@ from chunkhound.services.research.shared.evidence_ledger import (
 from chunkhound.services.research.shared.models import (
     SINGLE_PASS_TIMEOUT_SECONDS,
     TARGET_OUTPUT_TOKENS,
+    ResearchContext,
     build_output_guidance,
 )
 
@@ -116,10 +117,9 @@ class SynthesisEngine:
 
     async def _single_pass_synthesis(
         self,
-        root_query: str,
         chunks: list[dict[str, Any]],
         files: dict[str, str],
-        context: Any,
+        context: ResearchContext,
         synthesis_budgets: dict[str, int],
         constants_context: str = "",
         facts_context: str = "",
@@ -136,10 +136,9 @@ class SynthesisEngine:
             - Footer size scales with number of files/chunks analyzed
 
         Args:
-            root_query: Original research query
             chunks: All chunks from BFS traversal (will be filtered to match budgeted files)
             files: Budgeted file contents (subset within token limits)
-            context: Research context
+            context: Research context (root_query, optional previous_query)
             synthesis_budgets: Dynamic budgets based on repository size
             constants_context: Constants ledger context for LLM prompts
             facts_context: Facts ledger context for LLM prompts
@@ -250,7 +249,10 @@ class SynthesisEngine:
         system = prompts.SYNTHESIS_SYSTEM_BUILDER(output_guidance)
 
         # Combine root_query with constants and facts context
-        query_with_context = root_query + constants_section + facts_section
+        follow_up_section = prompts.build_follow_up_section(context.previous_query)
+        query_with_context = (
+            context.root_query + constants_section + facts_section + follow_up_section
+        )
 
         prompt = prompts.SYNTHESIS_USER.format(
             root_query=query_with_context,
@@ -312,8 +314,8 @@ class SynthesisEngine:
     async def _map_synthesis_on_cluster(
         self,
         cluster: ClusterGroup,
-        root_query: str,
         chunks: list[dict[str, Any]],
+        context: ResearchContext,
         synthesis_budgets: dict[str, int],
         total_input_tokens: int,
         constants_context: str = "",
@@ -323,8 +325,8 @@ class SynthesisEngine:
 
         Args:
             cluster: Cluster group with files to synthesize
-            root_query: Original research query
             chunks: All chunks (will be filtered to cluster files)
+            context: Research context (root_query, optional previous_query)
             synthesis_budgets: Dynamic budgets based on repository size
             total_input_tokens: Sum of all cluster tokens (for proportional budget allocation)
             constants_context: Constants ledger context for LLM prompts
@@ -430,7 +432,9 @@ Focus on:
 Be thorough but concise - your analysis will be combined with other clusters.
 {build_output_guidance(cluster_target)}"""
 
-        prompt = f"""Query: {root_query}
+        map_hint = prompts.build_follow_up_hint(context.previous_query)
+
+        prompt = f"""Query: {context.root_query}{map_hint}
 {constants_section}{facts_section}
 {reference_table}
 
@@ -479,10 +483,10 @@ Provide a comprehensive analysis focusing on the query."""
 
     async def _reduce_synthesis(
         self,
-        root_query: str,
         cluster_results: list[dict[str, Any]],
         all_chunks: list[dict[str, Any]],
         all_files: dict[str, str],
+        context: ResearchContext,
         synthesis_budgets: dict[str, int],
         constants_context: str = "",
         facts_context: str = "",
@@ -500,10 +504,10 @@ Provide a comprehensive analysis focusing on the query."""
             - The LLM is told both values to help it prioritize content
 
         Args:
-            root_query: Original research query
             cluster_results: Results from map step (cluster summaries)
             all_chunks: All chunks from clusters (will be filtered to match synthesized files)
             all_files: All files that were synthesized across clusters
+            context: Research context (root_query, optional previous_query)
             synthesis_budgets: Dynamic budgets based on repository size
             constants_context: Constants ledger context for LLM prompts
             facts_context: Facts ledger context for LLM prompts
@@ -600,7 +604,9 @@ Your task:
 
 {build_output_guidance(TARGET_OUTPUT_TOKENS)}"""
 
-        prompt = f"""Query: {root_query}
+        follow_up_section = prompts.build_follow_up_section(context.previous_query)
+
+        prompt = f"""Query: {context.root_query}{follow_up_section}
 {constants_section}{facts_section}
 {reference_table}
 

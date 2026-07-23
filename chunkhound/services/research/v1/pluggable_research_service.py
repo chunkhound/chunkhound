@@ -120,7 +120,9 @@ class PluggableResearchService(ProgressEmitterMixin):
             return self._config.num_expanded_queries
         return NUM_LLM_EXPANDED_QUERIES
 
-    async def deep_research(self, query: str) -> dict[str, Any]:
+    async def deep_research(
+        self, query: str, previous_query: str | None = None
+    ) -> dict[str, Any]:
         """Perform deep research on a query.
 
         Uses fixed BFS depth (max_depth=1) with dynamic synthesis budgets that scale
@@ -129,6 +131,10 @@ class PluggableResearchService(ProgressEmitterMixin):
 
         Args:
             query: Research question to investigate
+            previous_query: Follow-up chain hook. When set, the synthesis
+                stage frames map/reduce/single-pass outputs in the prior
+                topic's context. Does not affect which code is searched,
+                retrieved, or reranked. Empty / None means un-chained.
 
         Returns:
             Dictionary with answer and metadata
@@ -155,7 +161,7 @@ class PluggableResearchService(ProgressEmitterMixin):
         )
 
         # Phase 1: Initial search
-        context = ResearchContext(root_query=query)
+        context = ResearchContext(root_query=query, previous_query=previous_query)
         await self._emit_event(
             "depth_start",
             "Phase 1: Initial search",
@@ -308,7 +314,6 @@ class PluggableResearchService(ProgressEmitterMixin):
             logger.info("Single cluster detected - using single-pass synthesis")
             facts_context = evidence_ledger.get_facts_reduce_prompt_context()
             answer = await self._synthesis_engine._single_pass_synthesis(
-                root_query=query,
                 chunks=prioritized_chunks,
                 files=budgeted_files,
                 context=context,
@@ -350,8 +355,8 @@ class PluggableResearchService(ProgressEmitterMixin):
                     )
                     return await self._synthesis_engine._map_synthesis_on_cluster(
                         cluster,
-                        query,
                         prioritized_chunks,
+                        context,
                         synthesis_budgets,
                         total_input_tokens,
                         constants_context=constants_context,
@@ -375,10 +380,10 @@ class PluggableResearchService(ProgressEmitterMixin):
             reduce_facts_context = evidence_ledger.get_facts_reduce_prompt_context()
 
             answer = await self._synthesis_engine._reduce_synthesis(
-                query,
                 cluster_results,
                 prioritized_chunks,
                 budgeted_files,
+                context,
                 synthesis_budgets,
                 constants_context=constants_context,
                 facts_context=reduce_facts_context,

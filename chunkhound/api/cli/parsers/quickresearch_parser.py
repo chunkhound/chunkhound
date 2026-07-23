@@ -49,6 +49,15 @@ def add_quickresearch_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
+    # `_quickresearch` is hidden, so this flag has no help text — user-visible
+    # `--previous-query` lives on `chunkhound websearch` and `chunkhound research`.
+    # Populated here only by the websearch subprocess when chaining.
+    p.add_argument(
+        "--previous-query",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+
     add_common_arguments(p)
     add_config_arguments(p, ["embedding", "llm", "research"])
 

@@ -82,7 +82,7 @@ async def _stub_fetch_and_save_noop(
     return None
 
 
-def _stub_build_argv(query, tmpdir, config, parent_pid):
+def _stub_build_argv(query, tmpdir, config, parent_pid, previous_query=None):
     # Argv content is irrelevant — subprocess is patched out.
     return ["/bin/true"]
 
@@ -482,6 +482,112 @@ async def test_answer_rewrites_filenames_to_source_urls(monkeypatch, patched):
     assert "https://b.invalid/" in result
     assert "a.invalid_.md" not in result
     assert "b.invalid_.pdf" not in result
+
+
+@pytest.mark.asyncio
+async def test_websearch_mcp_empty_previous_query_treated_as_none(
+    monkeypatch, patched
+):
+    """MCP `previous_query=""` collapses to None → no --previous-query in argv."""
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    captured: dict[str, object] = {}
+
+    def capturing_build(query, tmpdir, config, parent_pid, previous_query=None):
+        captured["previous_query"] = previous_query
+        return ["/bin/true"]
+
+    monkeypatch.setattr(ws_mod, "build_quickresearch_argv_core", capturing_build)
+
+    fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    await tools_mod.websearch_impl(
+        embedding_manager=None,
+        llm_manager=None,
+        config=None,
+        query="q",
+        previous_query="",
+    )
+
+    assert captured["previous_query"] is None
+
+
+@pytest.mark.asyncio
+async def test_websearch_mcp_subprocess_gets_raw_query(monkeypatch, patched):
+    """MCP subprocess positional is the RAW query, not ``queries[0]``.
+
+    Deep research would silently degrade if handed a lossy narrowing, with
+    no signal to the user.
+    """
+    from chunkhound.utils import websearch_expansion as we_mod
+
+    async def canned_expand(query, llm_manager, previous_query=None):
+        return ["v1", "v2", "v3"]
+
+    # `websearch_impl` lazy-imports `expand_web_queries` inside the function,
+    # so patch on the source module — patching `tools_mod` would not hit the
+    # local binding created by the `from ... import` statement.
+    monkeypatch.setattr(we_mod, "expand_web_queries", canned_expand)
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    captured: dict[str, object] = {}
+
+    def capturing_build(query, tmpdir, config, parent_pid, previous_query=None):
+        captured["query"] = query
+        return ["/bin/true"]
+
+    monkeypatch.setattr(ws_mod, "build_quickresearch_argv_core", capturing_build)
+
+    fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    await tools_mod.websearch_impl(
+        embedding_manager=None,
+        llm_manager=None,
+        config=None,
+        query="raw user input",
+    )
+
+    assert captured["query"] == "raw user input"
+
+
+@pytest.mark.asyncio
+async def test_websearch_mcp_previous_query_reaches_subprocess(
+    monkeypatch, patched
+):
+    """MCP `previous_query="prior"` forwards to `build_quickresearch_argv_core`."""
+    monkeypatch.setattr(ws_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _stub_fetch_and_save_noop)
+
+    captured: dict[str, object] = {}
+
+    def capturing_build(query, tmpdir, config, parent_pid, previous_query=None):
+        captured["previous_query"] = previous_query
+        return ["/bin/true"]
+
+    monkeypatch.setattr(ws_mod, "build_quickresearch_argv_core", capturing_build)
+
+    fake_proc = _FakeProc(stdout=b"ANSWER", returncode=0)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", _make_fake_exec(fake_proc)
+    )
+
+    await tools_mod.websearch_impl(
+        embedding_manager=None,
+        llm_manager=None,
+        config=None,
+        query="q",
+        previous_query="prior topic",
+    )
+
+    assert captured["previous_query"] == "prior topic"
 
 
 @pytest.mark.asyncio
