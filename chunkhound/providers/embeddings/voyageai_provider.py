@@ -254,6 +254,9 @@ class VoyageAIEmbeddingProvider:
             rerank_format: Reranking API format when using rerank_url.
                 'cohere' for Cohere-compatible APIs (requires rerank_model),
                 'tei' for HuggingFace TEI (model set at deployment),
+                'voyage' for native VoyageAI-compatible endpoints such as
+                MongoDB Atlas (uses 'top_k' request param and a 'data'
+                response; requires rerank_model),
                 'auto' to detect from response (default).
             max_concurrent_batches: Maximum number of concurrent embed() calls.
                 Defaults to 1 for custom endpoints (e.g. Azure ML) to avoid
@@ -1064,12 +1067,22 @@ class VoyageAIEmbeddingProvider:
     def _build_rerank_payload(
         self, query: str, documents: list[str], top_k: int | None
     ) -> dict:
-        """Build rerank request payload for TEI or Cohere format."""
+        """Build rerank request payload for TEI, Cohere, or Voyage-native format."""
         fmt = self._rerank_format
         if fmt == "tei":
             return {"query": query, "texts": documents}
-        elif fmt == "cohere":
+        elif fmt == "voyage":
+            # Native VoyageAI-compatible endpoints (e.g. MongoDB Atlas
+            # ai.mongodb.com) expect "top_k" — they reject Cohere's "top_n" —
+            # and return the ranking under "data" (see _parse_rerank_response).
             payload: dict = {"query": query, "documents": documents}
+            if self._rerank_model:
+                payload["model"] = self._rerank_model
+            if top_k is not None:
+                payload["top_k"] = top_k
+            return payload
+        elif fmt == "cohere":
+            payload = {"query": query, "documents": documents}
             if self._rerank_model:
                 payload["model"] = self._rerank_model
             if top_k is not None:
@@ -1090,7 +1103,12 @@ class VoyageAIEmbeddingProvider:
     def _parse_rerank_response(
         self, data: dict, num_documents: int
     ) -> list[RerankResult]:
-        """Parse reranker HTTP response (Cohere or TEI format) into RerankResult list."""
+        """Parse a reranker HTTP response into RerankResult items."""
+        # Native VoyageAI-compatible endpoints (e.g. MongoDB Atlas) return the
+        # ranking under "data" rather than Cohere/TEI's "results"; the item shape
+        # (index + relevance_score/score) is identical, so treat it as an alias.
+        if "results" not in data and "data" in data:
+            data = {"results": data["data"]}
         if "results" not in data:
             raise ValueError(
                 f"Invalid rerank response: missing 'results' field. Got: {list(data.keys())}"

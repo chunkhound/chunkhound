@@ -26,7 +26,7 @@ from ._utils import _parse_env_bool
 
 # Error message constants for consistent messaging across config and provider
 RERANK_MODEL_REQUIRED_COHERE = (
-    "rerank_model is required when using rerank_format='cohere'. "
+    "rerank_model is required when using rerank_format='cohere' or 'voyage'. "
     "Either provide rerank_model or use rerank_format='tei'."
 )
 RERANK_BASE_URL_REQUIRED = (
@@ -70,7 +70,7 @@ def validate_rerank_configuration(
 
     Args:
         provider: Embedding provider name
-        rerank_format: Reranking API format ('cohere', 'tei', or 'auto')
+        rerank_format: Reranking API format ('cohere', 'tei', 'voyage', or 'auto')
         rerank_model: Model name for reranking (optional for TEI)
         rerank_url: Rerank endpoint URL
         base_url: Base URL for API (required for relative rerank_url)
@@ -82,8 +82,8 @@ def validate_rerank_configuration(
     if provider == "voyageai" and not rerank_url:
         return
 
-    # For Cohere format, rerank_model is required
-    if rerank_format == "cohere" and not rerank_model:
+    # Cohere and Voyage-native formats both require an explicit rerank_model
+    if rerank_format in ("cohere", "voyage") and not rerank_model:
         raise ValueError(RERANK_MODEL_REQUIRED_COHERE)
 
     # If using reranking (model set or TEI format with URL), validate URL config
@@ -184,12 +184,14 @@ class EmbeddingConfig(BaseSettings):
         ),
     )
 
-    rerank_format: Literal["cohere", "tei", "auto"] = Field(
+    rerank_format: Literal["cohere", "tei", "voyage", "auto"] = Field(
         default="auto",
         description=(
             "Reranking API format. 'cohere' for Cohere-compatible "
             "APIs (requires model in request), 'tei' for Hugging "
-            "Face TEI (model set at deployment), 'auto' for "
+            "Face TEI (model set at deployment), 'voyage' for native "
+            "VoyageAI-compatible endpoints such as MongoDB Atlas "
+            "(uses 'top_k' and returns a 'data' array), 'auto' for "
             "automatic format detection from response."
         ),
     )
