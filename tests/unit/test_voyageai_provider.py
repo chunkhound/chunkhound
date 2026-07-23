@@ -315,6 +315,26 @@ class TestBuildRerankPayload:
         assert "documents" not in payload
         assert "model" not in payload
 
+    def test_voyage_format_with_model_and_top_k(self):
+        """Voyage-native format sends top_k (not Cohere's top_n) plus the model."""
+        p = self._provider("voyage", model="rerank-2.5")
+        payload = p._build_rerank_payload("q", ["d1", "d2"], top_k=1)
+        assert payload == {
+            "query": "q",
+            "documents": ["d1", "d2"],
+            "model": "rerank-2.5",
+            "top_k": 1,
+        }
+        assert "top_n" not in payload
+
+    def test_voyage_format_with_model_no_top_k(self):
+        """Voyage-native format omits top_k when it is not requested."""
+        p = self._provider("voyage", model="rerank-2.5")
+        payload = p._build_rerank_payload("q", ["d1"], top_k=None)
+        assert payload == {"query": "q", "documents": ["d1"], "model": "rerank-2.5"}
+        assert "top_k" not in payload
+        assert "top_n" not in payload
+
 
 # ===========================================================================
 # 5. _parse_rerank_response (sync method)
@@ -425,6 +445,29 @@ class TestParseRerankResponse:
         assert len(results) == 1
         assert results[0].index == 0
         assert results[0].score == pytest.approx(0.9)
+
+    def test_voyage_data_field_treated_as_results(self, p):
+        """Voyage-native endpoints return the ranking under 'data', not 'results'."""
+        data = {
+            "data": [
+                {"index": 0, "relevance_score": 0.9},
+                {"index": 1, "relevance_score": 0.4},
+            ]
+        }
+        results = p._parse_rerank_response(data, num_documents=2)
+        assert len(results) == 2
+        assert results[0].index == 0
+        assert results[0].score == pytest.approx(0.9)
+
+    def test_results_key_takes_precedence_over_data(self, p):
+        """When both keys are present, canonical 'results' wins over 'data'."""
+        data = {
+            "results": [{"index": 0, "score": 0.9}],
+            "data": [{"index": 1, "score": 0.1}],
+        }
+        results = p._parse_rerank_response(data, num_documents=2)
+        assert len(results) == 1
+        assert results[0].index == 0
 
 
 # ===========================================================================
