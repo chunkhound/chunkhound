@@ -1125,3 +1125,26 @@ def test_supports_structured_outputs_not_passed_to_other_providers() -> None:
         )
 
     monkeypatch.undo()
+
+
+def test_llm_config_antigravity_providers():
+    # Test SDK provider initialization and defaults
+    cfg_sdk = LLMConfig(
+        provider="antigravity-sdk",
+        api_key="test-key",
+    )
+    util_sdk, synth_sdk = cfg_sdk.get_provider_configs()
+    assert util_sdk["provider"] == "antigravity-sdk"
+    assert util_sdk["model"] == "gemini-3.5-flash"
+    assert synth_sdk["provider"] == "antigravity-sdk"
+    assert synth_sdk["model"] == "gemini-3.1-pro"
+
+    # Test CLI provider initialization (no API key required) and defaults
+    cfg_cli = LLMConfig(
+        provider="antigravity-cli",
+    )
+    util_cli, synth_cli = cfg_cli.get_provider_configs()
+    assert util_cli["provider"] == "antigravity-cli"
+    assert util_cli["model"] == "gemini-3.5-flash"
+    assert synth_cli["provider"] == "antigravity-cli"
+    assert synth_cli["model"] == "gemini-3.1-pro"

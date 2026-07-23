@@ -247,6 +247,17 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | Gemini | `gemini` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Google Gemini API. Migration: `CHUNKHOUND_GEMINI_MODEL` was removed in v4.x — rename to `CHUNKHOUND_LLM_MODEL`. |
 | Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `grok-4.3`) | Must be set explicitly (configurator defaults to `grok-4.3`) | xAI API. Registry providers require explicit `model`. |
 | DeepSeek | `deepseek` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | DeepSeek API. Registry providers require explicit `model`. |
+| Antigravity SDK | `antigravity-sdk` | `CHUNKHOUND_LLM_API_KEY` | `gemini-3.5-flash` | `gemini-3.1-pro` | Uses official Google Antigravity SDK |
+| Antigravity CLI | `antigravity-cli` | -- | `gemini-3.5-flash` | `gemini-3.1-pro` | Uses local agy / antigravity CLI command |
+
+> [!NOTE]
+> The `google-antigravity` SDK dependency is optional to keep base installations lightweight and compatible.
+> If you configure `provider: "antigravity-sdk"`, install the optional extra into the **same environment ChunkHound runs from**:
+> - Source checkout (uv): `uv sync --extra antigravity` (or `uv pip install -e ".[antigravity]"`)
+> - Pip venv: `pip install "chunkhound[antigravity]"`
+> - Global tool: `uv tool install "chunkhound[antigravity]"`
+>
+> **Platform support:** `google-antigravity` is published as platform-specific wheels with no source distribution, so which OS/architectures it installs on depends on the wheels the SDK version you resolve happens to ship. If `pip install "chunkhound[antigravity]"` (or `uv sync --extra antigravity`) reports no compatible wheel for your platform, use the `antigravity-cli` provider instead — it needs only the external `agy`/`antigravity` CLI, no Python extra. See the [`google-antigravity` page on PyPI](https://pypi.org/project/google-antigravity/#files) for the current wheel list.
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 

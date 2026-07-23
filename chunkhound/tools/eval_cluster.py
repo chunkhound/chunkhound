@@ -193,7 +193,9 @@ async def _cluster_and_evaluate(
 
     try:
         utility_config, synthesis_config = config.llm.get_provider_configs()
-        llm_manager = LLMManager(utility_config, synthesis_config)
+        llm_manager = LLMManager(
+            utility_config, synthesis_config, target_dir=config.target_dir
+        )
         llm_provider = llm_manager.get_synthesis_provider()
     except Exception as exc:  # pragma: no cover - defensive
         logger.error(f"Failed to initialize LLM provider: {exc}")

@@ -96,3 +96,64 @@ def test_create_provider_passes_base_url_to_anthropic_provider():
     )
 
     assert captured["base_url"] == "http://localhost:11434/v1"
+
+
+def test_llm_manager_registry_antigravity_providers():
+    assert "antigravity-sdk" in LLMManager._providers
+    assert "antigravity-cli" in LLMManager._providers
+
+    manager = object.__new__(LLMManager)
+    manager._target_dir = "/fake/workspace"
+
+    # Mocking classes to capture arguments
+    captured_sdk = {}
+    captured_cli = {}
+
+    class FakeSDKProvider:
+        def __init__(self, **kwargs):
+            captured_sdk.update(kwargs)
+
+    class FakeCLIProvider:
+        def __init__(self, **kwargs):
+            captured_cli.update(kwargs)
+
+    manager._providers = {
+        **LLMManager._providers,
+        "antigravity-sdk": FakeSDKProvider,
+        "antigravity-cli": FakeCLIProvider,
+    }
+
+    # Verify SDK creation parameters
+    manager._create_provider(  # type: ignore[attr-defined]
+        {
+            "provider": "antigravity-sdk",
+            "model": "gemini-3.5-flash",
+            "api_key": "sk-test-key",
+            "timeout": 45,
+            "max_retries": 2,
+        }
+    )
+    assert captured_sdk["model"] == "gemini-3.5-flash"
+    assert captured_sdk["api_key"] == "sk-test-key"
+    assert captured_sdk["timeout"] == 45
+    assert captured_sdk["max_retries"] == 2
+    assert captured_sdk["target_dir"] == "/fake/workspace"
+
+    # Verify CLI creation parameters (no key needed)
+    manager._create_provider(  # type: ignore[attr-defined]
+        {
+            "provider": "antigravity-cli",
+            "model": "gemini-3.1-pro",
+            "timeout": 60,
+        }
+    )
+    assert captured_cli["model"] == "gemini-3.1-pro"
+    assert captured_cli["timeout"] == 60
+
+
+def test_llm_manager_registry_antigravity_sdk_missing_dependency(monkeypatch):
+    from chunkhound.providers.llm import antigravity_llm_provider
+    monkeypatch.setattr(antigravity_llm_provider, "SDK_AVAILABLE", False)
+    
+    with pytest.raises(RuntimeError, match="chunkhound\\[antigravity\\]"):
+        antigravity_llm_provider.AntigravityLLMProvider()

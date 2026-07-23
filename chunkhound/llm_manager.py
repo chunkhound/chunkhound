@@ -1,5 +1,6 @@
 """LLM Manager with factory pattern for ChunkHound deep research."""
 
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -22,6 +23,8 @@ from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
 from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
 from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
+from chunkhound.providers.llm.antigravity_llm_provider import AntigravityLLMProvider
+from chunkhound.providers.llm.antigravity_cli_provider import AntigravityCLIProvider
 
 
 class LLMManager:
@@ -40,19 +43,26 @@ class LLMManager:
         "codex-cli": CodexCLIProvider,
         "gemini": GeminiLLMProvider,
         "opencode-cli": OpenCodeCLIProvider,
+        "antigravity-sdk": AntigravityLLMProvider,
+        "antigravity-cli": AntigravityCLIProvider,
     }
 
     def __init__(
-        self, utility_config: dict[str, Any], synthesis_config: dict[str, Any]
+        self,
+        utility_config: dict[str, Any],
+        synthesis_config: dict[str, Any],
+        target_dir: Path | str | None = None,
     ):
         """Initialize LLM manager with dual providers.
 
         Args:
             utility_config: Configuration for utility operations provider
             synthesis_config: Configuration for synthesis operations provider
+            target_dir: Optional target workspace directory path
         """
         self._utility_config = utility_config
         self._synthesis_config = synthesis_config
+        self._target_dir = target_dir
         self._utility_provider: LLMProvider | None = None
         self._synthesis_provider: LLMProvider | None = None
 
@@ -124,6 +134,8 @@ class LLMManager:
             }
             if model_name:
                 provider_kwargs["model"] = model_name
+            if getattr(self, "_target_dir", None) and provider_name == "antigravity-sdk":
+                provider_kwargs["target_dir"] = self._target_dir
 
             # Only providers that support custom endpoints should receive base_url.
             if provider_name in BASE_URL_CAPABLE_LLM_PROVIDERS:

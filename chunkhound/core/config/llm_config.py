@@ -39,6 +39,7 @@ NO_KEY_PROVIDERS: tuple[str, ...] = (
     "claude-code-cli",
     "codex-cli",
     "opencode-cli",
+    "antigravity-cli",
 )
 
 LLMProviderLiteral = Literal[
@@ -51,6 +52,8 @@ LLMProviderLiteral = Literal[
     "anthropic",
     "grok",
     "opencode-cli",
+    "antigravity-sdk",
+    "antigravity-cli",
 ]
 
 _PROVIDER_CHOICES: list[str] = list(get_args(LLMProviderLiteral))
@@ -88,7 +91,10 @@ CLI_PROVIDER_CHOICES = (
     "gemini",
     "grok",
     "opencode-cli",
+    "antigravity-sdk",
+    "antigravity-cli",
 )
+
 
 
 def _parse_llm_provider_arg(value: str) -> str:
@@ -830,6 +836,8 @@ class LLMConfig(BaseSettings):
             # OpenCode CLI: No universal default — model depends on user config.
             # User must set model in provider/model format.
             return ("", "")
+        elif provider in ("antigravity-sdk", "antigravity-cli"):
+            return ("gemini-3.5-flash", "gemini-3.1-pro")
         else:
             # Type-level exhaustiveness check — mypy will flag if a new
             # LLMProviderLiteral variant is added without a matching branch.
@@ -979,7 +987,7 @@ class LLMConfig(BaseSettings):
         The current config model has a single top-level base_url shared by
         OpenAI-compatible roles. Non-OpenAI-compatible providers ignore it.
         """
-        if provider in {"claude-code-cli", "codex-cli", "opencode-cli"}:
+        if provider in {"claude-code-cli", "codex-cli", "opencode-cli", "antigravity-cli"}:
             return False
         if provider in OPENAI_COMPATIBLE_LLM_PROVIDERS:
             return is_official_openai_endpoint(self._base_url_for_provider(provider))
