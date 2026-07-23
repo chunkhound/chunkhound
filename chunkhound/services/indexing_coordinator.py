@@ -1533,6 +1533,8 @@ class IndexingCoordinator(BaseService):
                             "  └─ Embedding", total=1, speed="", info="", start=False
                         )
                     _embed_start = 0.0
+                    _embed_reset_done = False
+                    _data_task_total = 1
 
                     # Pre-create all write sub-phase bars (no need for a
                     # separate "prepare" bar — prepare is sub-second).
@@ -1549,26 +1551,35 @@ class IndexingCoordinator(BaseService):
                     )
 
                     def _progress_cb(phase: str, current: int, total: int) -> None:
-                        nonlocal _embed_start
+                        nonlocal _embed_start, _embed_reset_done, _data_task_total
                         if phase == "parse":
                             _pr.update(_pt, completed=current,
                                        info=f"{current}/{total} parsed")
                         elif phase == "embed":
                             if _embed_task is not None:
-                                if total > 0 and current == 0:
-                                    # First embed callback: set real total.
-                                    _pr.reset(_embed_task, total=total,
+                                # First-call-based reset (not current==0-based):
+                                # the streaming pipeline reports a live,
+                                # per-batch-refined total, so its first call
+                                # may already have current > 0.
+                                if not _embed_reset_done:
+                                    _pr.reset(_embed_task, total=max(total, 1),
                                               start=True)
                                     _embed_start = time.time()
-                                if current > 0:
-                                    elapsed = time.time() - _embed_start
-                                    speed = current / elapsed if elapsed > 0 else 0
-                                    _pr.update(
-                                        _embed_task,
-                                        completed=current,
-                                        speed=f"{speed:.1f} chunks/s",
-                                        info=f"{current}/{total} embedded",
-                                    )
+                                    _embed_reset_done = True
+                                elapsed = time.time() - _embed_start
+                                # Require a minimum sample window before
+                                # trusting the division — a near-zero
+                                # elapsed (e.g. right at the reset above)
+                                # against an already-nonzero current would
+                                # otherwise produce a nonsensical speed.
+                                speed = current / elapsed if elapsed > 0.05 else 0
+                                _pr.update(
+                                    _embed_task,
+                                    completed=current,
+                                    total=max(total, 1),
+                                    speed=f"{speed:.1f} chunks/s",
+                                    info=f"{current}/{total} embedded",
+                                )
                         elif phase == "write":
                             # Backward compat: old Rust extensions emit one
                             # "write" callback with no sub-phase breakdown.
@@ -1587,15 +1598,28 @@ class IndexingCoordinator(BaseService):
                             # bar update. Prepare is sub-second (create
                             # tables); roll it into the write-data bar as an
                             # opening tick.
-                            _pr.reset(_data_task, start=True)
+                            _data_task_total = max(total, 1)
+                            _pr.reset(_data_task, total=_data_task_total, start=True)
                             _pr.update(_data_task, info="preparing...")
                         elif phase == "write-data":
-                            # Wrap up prepare (if still showing) and start
-                            # the real data write.
-                            _pr.update(_data_task, info="writing...")
+                            # Batch-keyed in the streaming pipeline (total >
+                            # 1 — the exact, upfront-known batch count);
+                            # single-shot in the sequential path (total == 1).
+                            if total > 1:
+                                _pr.update(
+                                    _data_task,
+                                    completed=current,
+                                    info=f"{current}/{total} batches written",
+                                )
+                            else:
+                                _pr.update(_data_task, info="writing...")
                         elif phase == "write-index":
                             # Data write done; start HNSW index build.
-                            _pr.update(_data_task, completed=1, info="done")
+                            _pr.update(
+                                _data_task,
+                                completed=_data_task_total,
+                                info="done",
+                            )
                             _pr.reset(_index_task, start=True)
                             _pr.update(_index_task, info="building...")
                         elif phase == "write-compact":
@@ -1605,21 +1629,33 @@ class IndexingCoordinator(BaseService):
                             _pr.update(_compact_task, info="compacting...")
                         elif phase == "write-done":
                             # Final wrap-up of whatever bars are still active.
-                            _pr.update(_data_task, completed=1, info="done")
+                            _pr.update(
+                                _data_task,
+                                completed=_data_task_total,
+                                info="done",
+                            )
                             _pr.update(_index_task, completed=1, info="done")
                             _pr.update(_compact_task, completed=1, info="done")
                         elif phase == "done":
-                            # Ensure all bars at 100%.
-                            _pr.update(_data_task, completed=1, info="done")
+                            # Ensure the write bars are at 100%. The parse and
+                            # embed bars don't need re-finalizing here — both
+                            # phases always receive an exact final
+                            # (total, total) call of their own before "done"
+                            # fires, in both the sequential and streaming
+                            # pipeline paths. (A previous version of this
+                            # handler re-synced them via `_pr.tasks[task_id]`,
+                            # which is a list indexed by position, not a
+                            # mapping keyed by TaskID — since `store_task` is
+                            # removed above, that indexing silently read the
+                            # wrong task's `.total` for any task created after
+                            # the removal.)
+                            _pr.update(
+                                _data_task,
+                                completed=_data_task_total,
+                                info="done",
+                            )
                             _pr.update(_index_task, completed=1, info="done")
                             _pr.update(_compact_task, completed=1, info="done")
-                            t = _pr.tasks[_pt]
-                            if t.total:
-                                _pr.update(_pt, completed=t.total)
-                            if _embed_task is not None:
-                                t = _pr.tasks[_embed_task]
-                                if t.total:
-                                    _pr.update(_embed_task, completed=t.total)
                 else:
                     _progress_cb = None
 

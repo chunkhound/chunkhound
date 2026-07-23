@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::config::PipelineConfig;
@@ -24,6 +24,23 @@ fn emit_progress(py: Python<'_>, cb: &Option<Py<PyAny>>, phase: &str, current: u
     if let Some(ref cb) = cb {
         let _ = cb.bind(py).call1((phase, current, total));
     }
+}
+
+/// Helper: call `progress_callback(phase, current, total)` from a
+/// non-parse/embed worker thread, acquiring the GIL for the duration
+/// of the call.
+fn emit_progress_gil(cb: &Option<Py<PyAny>>, phase: &str, current: u64, total: u64) {
+    if let Some(ref cb) = cb {
+        Python::with_gil(|py| {
+            let _ = cb.bind(py).call1((phase, current, total));
+        });
+    }
+}
+
+/// Result of the store thread in the 3-stage streaming pipeline.
+struct StoreOutcome {
+    chunks_written: u64,
+    embeddings_written: u64,
 }
 
 #[pymethods]
@@ -80,28 +97,57 @@ impl IndexingPipeline {
             delete_paths = Vec::new();
         }
 
-        // ── Parse + Embed (with optional pipeline parallelism) ──
+        // ── Resolve directory→db file path (shared by both write paths) ──
+        let db_file: PathBuf = if self.config.db_path.as_os_str().is_empty()
+            || self.config.db_path.as_os_str() == ":memory:"
+        {
+            PathBuf::from(":memory:")
+        } else {
+            self.config.db_path.join("chunks.db")
+        };
+
+        let db_config = DbConfig {
+            db_path: db_file.to_string_lossy().into_owned(),
+            compaction_batch_threshold: self.config.compaction_batch_threshold,
+            compaction_threshold: self.config.compaction_threshold,
+            compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
+        };
+
+        // Ensure parent directory exists (DuckDB doesn't auto-create it).
+        if let Some(parent) = db_file.parent() {
+            if !parent.as_os_str().is_empty() && parent != PathBuf::from(":memory:").as_path() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to create db directory {}: {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
+            }
+        }
+
+        // ── Parse + Embed (+ Store, when 3-stage pipeline parallelism applies) ──
         let provider = self.config.embedding_provider.clone();
         let model = self.config.embedding_model.clone();
         let total_files = batch_paths.len() as u64;
 
         emit_progress(py, &progress_callback, "parse", 0, total_files);
 
-        let mut total_embeds: u64 = 0;
-        let parsed: Vec<super::types::ParsedFile> = if self.config.pipeline_parallel
-            && self.config.parse_thread_pool_size > 1
-        {
-            if let Some(parse_cb) = &parse_batch_callback {
-                // Pipeline-parallel: parse and embed overlap via channels.
-                // Clone Python references before releasing the GIL.
-                let parse_cb = parse_cb.clone_ref(py);
+        if self.config.pipeline_parallel && self.config.parse_thread_pool_size > 1 {
+            if let Some(ref parse_batch_cb) = parse_batch_callback {
+                // ── 3-stage streaming pipeline: parse ∥ embed ∥ store ──
+                // Clone Python references before releasing the GIL —
+                // Py<T>::clone() panics without the GIL held, and this
+                // whole call runs inside py.allow_threads() below.
+                let parse_cb = parse_batch_cb.clone_ref(py);
                 let embed_cb = embed_batch_callback.as_ref().map(|cb| cb.clone_ref(py));
                 let seq_embed_cb = embed_callback.as_ref().map(|cb| cb.clone_ref(py));
                 let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
-                let t_parse_embed = Instant::now();
-                let result = py
+                let store_progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
+                let t_run = Instant::now();
+                let outcome = py
                     .allow_threads(|| {
-                        self.pipeline_parse_and_embed(
+                        self.pipeline_parse_embed_store(
                             &batch_paths,
                             parse_cb,
                             embed_cb,
@@ -109,19 +155,42 @@ impl IndexingPipeline {
                             &provider,
                             &model,
                             progress_cb,
+                            store_progress_cb,
+                            delete_paths,
+                            db_config,
                         )
                     })
                     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
                 log::info!(
-                    "pipeline parse+embed: {:.2}s",
-                    t_parse_embed.elapsed().as_secs_f64()
+                    "pipeline parse+embed+store: {:.2}s",
+                    t_run.elapsed().as_secs_f64()
                 );
-                result
-            } else {
-                // Should not reach here — pipeline_parallel requires batch callback.
-                self.parse_batch(py, &batch_paths, &parse_callback)?
+
+                let total_secs = started.elapsed().as_secs_f64();
+                emit_progress(py, &progress_callback, "done", file_count, file_count);
+                log::info!(
+                    "pipeline total: {total_secs:.2}s (files={file_count}, chunks={}, embeds={})",
+                    outcome.chunks_written,
+                    outcome.embeddings_written
+                );
+
+                return Ok(PipelineReport {
+                    files_processed: file_count,
+                    files_skipped: 0,
+                    chunks_written: outcome.chunks_written,
+                    embeddings_generated: outcome.embeddings_written,
+                    elapsed_secs: total_secs,
+                    errors: Vec::new(),
+                    peak_rss_mb: None,
+                });
             }
-        } else {
+            // Should not reach here — pipeline_parallel requires a batch
+            // callback. Falls through to the sequential path below.
+        }
+
+        // ── Sequential parse+embed, single-shot write (fallback path) ──
+        let mut total_embeds: u64 = 0;
+        let parsed: Vec<super::types::ParsedFile> = {
             // ── Sequential parse ──────────────────────────
             let t_parse = Instant::now();
             let mut parsed = if self.config.parse_thread_pool_size > 1 {
@@ -234,99 +303,7 @@ impl IndexingPipeline {
         emit_progress(py, &progress_callback, "embed", total_embeds, total_embeds);
 
         // Build DbWriterBatch from parsed results.
-        let mut file_records = Vec::with_capacity(parsed.len());
-
-        for pf in &parsed {
-            if pf.error.is_some() {
-                continue;
-            }
-            if pf.chunks.is_empty() && pf.language.is_none() {
-                continue;
-            }
-
-            // Build FileRecord with its chunks
-
-            let chunks: Vec<ChunkRecord> = pf
-                .chunks
-                .iter()
-                .map(|ch| ChunkRecord {
-                    chunk_type: ch.chunk_type.clone(),
-                    symbol: ch.symbol.clone(),
-                    code: ch.code.clone(),
-                    start_line: ch.start_line,
-                    end_line: ch.end_line,
-                    start_byte: ch.start_byte,
-                    end_byte: ch.end_byte,
-                    language: ch.language.clone(),
-                    metadata: ch.metadata.clone(),
-                    embedding: ch.embedding.clone(),
-                    provider: ch.provider.clone(),
-                    model: ch.model.clone(),
-                })
-                .collect();
-
-            let path_str = pf.path.to_string_lossy().into_owned();
-
-            // Store relative path (like Python _get_relative_path).
-            let rel_path = if self.config.project_root.as_os_str().is_empty() {
-                path_str
-            } else if let Ok(rel) = pf.path.strip_prefix(&self.config.project_root) {
-                rel.to_string_lossy().into_owned()
-            } else {
-                pf.path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path_str.clone())
-            };
-
-            file_records.push(FileRecord {
-                existing_file_id: None,
-                path: rel_path,
-                mtime: Some(pf.mtime),
-                size_bytes: Some(pf.file_size as i64),
-                content_hash: if pf.content_hash.is_empty() {
-                    None
-                } else {
-                    Some(pf.content_hash.clone())
-                },
-                language: pf.language.clone(),
-                chunks,
-            });
-        }
-
-        let batch = DbWriterBatch {
-            files: file_records,
-            delete_paths,
-        };
-
-        // Resolve directory→db file path.
-        let db_file: PathBuf = if self.config.db_path.as_os_str().is_empty()
-            || self.config.db_path.as_os_str() == ":memory:"
-        {
-            PathBuf::from(":memory:")
-        } else {
-            self.config.db_path.join("chunks.db")
-        };
-
-        let db_config = DbConfig {
-            db_path: db_file.to_string_lossy().into_owned(),
-            compaction_batch_threshold: self.config.compaction_batch_threshold,
-            compaction_threshold: self.config.compaction_threshold,
-            compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
-        };
-
-        // Ensure parent directory exists (DuckDB doesn't auto-create it).
-        if let Some(parent) = db_file.parent() {
-            if !parent.as_os_str().is_empty() && parent != PathBuf::from(":memory:").as_path() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to create db directory {}: {}",
-                        parent.display(),
-                        e
-                    ))
-                })?;
-            }
-        }
+        let batch = Self::build_db_batch(&parsed, &self.config.project_root, delete_paths);
 
         emit_progress(py, &progress_callback, "write-prepare", 0, 1);
         let t_write = Instant::now();
@@ -509,19 +486,30 @@ impl IndexingPipeline {
         Ok(result)
     }
 
-    // ── Pipeline-parallel parse+embed (Phase 8) ───────────────────
+    // ── Pipeline-parallel parse+embed+store (Phase 8/9) ───────────
 
-    /// Overlap parse and embed via a producer-consumer channel.
+    /// Run the full 3-stage streaming pipeline: parse ∥ embed ∥ store.
     ///
     /// A parse thread batches files, parses them via the batch callback,
     /// and sends results through a channel.  The calling thread receives
-    /// parsed batches and embeds them while the parse thread works on the
-    /// next batch.  Returns all ParsedFiles with embeddings populated.
+    /// parsed batches, embeds them, converts each embedded batch into a
+    /// `DbWriterBatch`, and forwards it over a *bounded* channel to a
+    /// dedicated store thread — so while the store thread writes batch N
+    /// to DuckDB (and, on the final batch, rebuilds HNSW indexes and
+    /// compacts), the calling thread is already parsing/embedding batch
+    /// N+1. The bound (2) provides backpressure: embedded batches hold
+    /// float vectors, which are memory-heavy.
+    ///
+    /// The store thread owns the single DB connection for the whole run,
+    /// using the same HNSW "bulk mode" bracket
+    /// (`drop_all_hnsw_indexes()` → N incremental writes →
+    /// `ensure_all_hnsw_indexes()`) that the Python path already uses for
+    /// bulk indexing, so no new DB-layer mechanism is required.
     ///
     /// **Caller must release the GIL** before entering this method.
     /// Each thread re-acquires the GIL independently via ``Python::with_gil()``.
     #[allow(clippy::too_many_arguments)]
-    fn pipeline_parse_and_embed(
+    fn pipeline_parse_embed_store(
         &self,
         files: &[PathBuf],
         parse_cb: Py<PyAny>,
@@ -530,7 +518,10 @@ impl IndexingPipeline {
         provider: &str,
         model: &str,
         progress_cb: Option<Py<PyAny>>,
-    ) -> Result<Vec<super::types::ParsedFile>, String> {
+        store_progress_cb: Option<Py<PyAny>>,
+        delete_paths: Vec<String>,
+        db_config: DbConfig,
+    ) -> Result<StoreOutcome, String> {
         use std::sync::mpsc;
         use std::sync::{Arc, Mutex};
 
@@ -539,6 +530,7 @@ impl IndexingPipeline {
         let parse_thread_pool_size = self.config.parse_thread_pool_size;
         let embed_batch_size = self.config.embed_batch_size.max(1);
         let skip_embeddings = self.config.skip_embeddings;
+        let project_root = self.config.project_root.clone();
         let provider = provider.to_string();
         let model = model.to_string();
 
@@ -549,8 +541,13 @@ impl IndexingPipeline {
             .map(|(i, chunk)| (i, chunk.to_vec()))
             .collect();
         let batch_count = batches.len();
+        let batch_count_u64 = batch_count as u64;
+        let total_files = files.len() as u64;
 
         let (parse_tx, parse_rx) = mpsc::channel::<(usize, Vec<super::types::ParsedFile>)>();
+        // Bounded: caps in-flight embedded-but-not-yet-written batches at 2,
+        // the backpressure the design calls for between embed and store.
+        let (store_tx, store_rx) = mpsc::sync_channel::<DbWriterBatch>(2);
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         // ── Parse thread ──────────────────────────────────────
@@ -562,6 +559,7 @@ impl IndexingPipeline {
                         break;
                     }
 
+                    let t_batch = Instant::now();
                     let paths: Vec<String> = batch
                         .iter()
                         .map(|p| p.to_string_lossy().into_owned())
@@ -647,6 +645,11 @@ impl IndexingPipeline {
                         }
                     };
 
+                    log::debug!(
+                        "[parse] batch {batch_idx} done in {:.3}s",
+                        t_batch.elapsed().as_secs_f64()
+                    );
+
                     if parse_tx.send((batch_idx, parsed)).is_err() {
                         // Receiver dropped (main thread error) — stop.
                         break;
@@ -655,14 +658,102 @@ impl IndexingPipeline {
             })
         };
 
-        // ── Main thread: receive + embed ─────────────────────
-        let mut all_parsed: Vec<super::types::ParsedFile> = Vec::new();
+        // ── Store thread ───────────────────────────────────────
+        // Owns the single DB connection for the whole run. Uses the same
+        // HNSW bulk-mode bracket the Python path already relies on for bulk
+        // indexing: drop all HNSW indexes once, write each streamed batch
+        // incrementally (prepare_write's own HNSW-drop step is a no-op
+        // while bulk mode is on), then rebuild indexes and compact once at
+        // the very end.
+        let store_handle: std::thread::JoinHandle<Result<StoreOutcome, String>> = {
+            std::thread::spawn(move || {
+                let mut backend: Box<dyn DbBackend> = create_backend(db_config);
+                backend.open().map_err(|e| e.to_string())?;
+                backend.drop_all_hnsw_indexes().map_err(|e| e.to_string())?;
+                emit_progress_gil(&store_progress_cb, "write-prepare", 0, batch_count_u64);
+
+                let mut chunks_written = 0u64;
+                let mut embeddings_written = 0u64;
+                let mut batch_no = 0usize;
+
+                let write_result: Result<(), String> = (|| {
+                    while let Ok(batch) = store_rx.recv() {
+                        let t_batch = Instant::now();
+                        backend.prepare_write(&batch).map_err(|e| e.to_string())?;
+                        let result = backend
+                            .write_batch_incremental(&batch)
+                            .map_err(|e| e.to_string())?;
+                        chunks_written += result.chunks_written;
+                        embeddings_written += result.embeddings_written;
+                        batch_no += 1;
+                        emit_progress_gil(
+                            &store_progress_cb,
+                            "write-data",
+                            batch_no as u64,
+                            batch_count_u64,
+                        );
+                        log::debug!(
+                            "[store] batch {batch_no} done in {:.3}s",
+                            t_batch.elapsed().as_secs_f64()
+                        );
+                    }
+                    Ok(())
+                })();
+
+                if let Err(e) = write_result {
+                    // Best-effort: restore HNSW indexes over whatever was
+                    // already committed before surfacing the error
+                    // (mirrors the single-shot path's Invariant 14 restore).
+                    let _ = backend.close();
+                    return Err(e);
+                }
+
+                emit_progress_gil(&store_progress_cb, "write-index", 0, 1);
+                backend
+                    .ensure_all_hnsw_indexes()
+                    .map_err(|e| e.to_string())?;
+
+                let needs_compaction = backend.needs_compaction().map_err(|e| e.to_string())?;
+                if needs_compaction {
+                    emit_progress_gil(&store_progress_cb, "write-compact", 0, 1);
+                    backend.run_compaction().map_err(|e| e.to_string())?;
+                }
+
+                backend.close().map_err(|e| e.to_string())?;
+                emit_progress_gil(&store_progress_cb, "write-done", 1, 1);
+
+                Ok(StoreOutcome {
+                    chunks_written,
+                    embeddings_written,
+                })
+            })
+        };
+
+        // ── Main thread: receive parsed batches, embed, forward to store ──
         let mut received = 0usize;
+        let mut pending_delete_paths = Some(delete_paths);
+        let mut received_files: u64 = 0;
+        let mut seen_chunks: u64 = 0;
+        let mut embedded_chunks: u64 = 0;
+
+        // Anchor the embed-rate clock before any batch is processed — the
+        // Python side starts its speed-tracking timer on the first "embed"
+        // call it receives, so an early (0, 0) call here (mirroring the
+        // "parse" phase's own early call above) ensures that timer starts
+        // before batch 0's embedding work, not after it. Without this, the
+        // first real per-batch call already carries batch 0's full chunk
+        // count with ~0 elapsed time behind it, producing a nonsensical
+        // "chunks/s" figure.
+        if !skip_embeddings {
+            emit_progress_gil(&progress_cb, "embed", 0, 0);
+        }
 
         while received < batch_count {
             match parse_rx.recv() {
-                Ok((_batch_idx, mut parsed_files)) => {
+                Ok((batch_idx, mut parsed_files)) => {
                     received += 1;
+                    let t_batch = Instant::now();
+                    received_files += parsed_files.len() as u64;
 
                     if !skip_embeddings && !parsed_files.is_empty() {
                         // Embed this batch's chunks.
@@ -676,10 +767,17 @@ impl IndexingPipeline {
                                 embed_targets.push((fi, ci, text));
                             }
                         }
+                        seen_chunks += embed_targets.len() as u64;
 
                         if !embed_targets.is_empty() {
                             if let Some(ref batch_cb) = embed_cb {
-                                // Parallel embed dispatch.
+                                // Parallel embed dispatch. `None` here is
+                                // deliberate: embed_batch_parallel's internal
+                                // progress callback reports a total scoped to
+                                // just this batch's chunk count, which isn't
+                                // useful for a cross-batch running estimate —
+                                // progress is instead computed and emitted
+                                // once per batch below, using running totals.
                                 self.embed_batch_parallel(
                                     &mut parsed_files,
                                     &embed_targets,
@@ -688,6 +786,7 @@ impl IndexingPipeline {
                                     &model,
                                     None,
                                 )?;
+                                embedded_chunks += embed_targets.len() as u64;
                             } else if let Some(ref seq_cb) = seq_embed_cb {
                                 // Sequential fallback: call per-batch embed callback.
                                 Python::with_gil(|gil_py| -> Result<(), String> {
@@ -712,11 +811,45 @@ impl IndexingPipeline {
                                     }
                                     Ok(())
                                 })?;
+                                embedded_chunks += embed_targets.len() as u64;
                             }
                         }
                     }
 
-                    all_parsed.extend(parsed_files);
+                    emit_progress_gil(&progress_cb, "parse", received_files, total_files);
+
+                    if !skip_embeddings {
+                        // Exact chunk total isn't known upfront in a
+                        // pipelined/streaming design — estimate it from the
+                        // chunk density observed so far, refined every batch.
+                        // Converges to the exact count as received_files
+                        // approaches total_files (exact on the final batch).
+                        let estimated_total = if received_files > 0 {
+                            ((seen_chunks as f64 / received_files as f64) * total_files as f64)
+                                .round() as u64
+                        } else {
+                            seen_chunks
+                        }
+                        .max(embedded_chunks);
+                        emit_progress_gil(&progress_cb, "embed", embedded_chunks, estimated_total);
+                    }
+
+                    log::debug!(
+                        "[embed] batch {batch_idx} done in {:.3}s",
+                        t_batch.elapsed().as_secs_f64()
+                    );
+
+                    // Attach the original delete_paths (from the incremental
+                    // diff) to the first streamed batch only — deleting is
+                    // idempotent, but there is no need to repeat it per batch.
+                    let batch_delete_paths = pending_delete_paths.take().unwrap_or_default();
+                    let db_batch =
+                        Self::build_db_batch(&parsed_files, &project_root, batch_delete_paths);
+                    if store_tx.send(db_batch).is_err() {
+                        // Store thread exited early (DB error) — stop feeding
+                        // it; the real error surfaces via store_handle.join().
+                        break;
+                    }
                 }
                 Err(_) => {
                     // Channel closed — parse thread panicked or errored.
@@ -725,24 +858,108 @@ impl IndexingPipeline {
             }
         }
 
-        // Wait for parse thread to exit.
+        // Close the store channel so the store thread's receive loop ends,
+        // then wait for both worker threads to exit.
+        drop(store_tx);
         let _ = parse_handle.join();
 
-        // Check for errors.
+        // A parse-thread error takes priority — the store thread will still
+        // have run to completion (or its own error) over whatever batches
+        // were already sent, so join it to avoid leaking the DB connection,
+        // but report the parse error since it explains the incomplete run.
         if let Some(e) = Arc::try_unwrap(error).unwrap().into_inner().unwrap() {
+            let _ = store_handle.join();
             return Err(e);
         }
 
-        // Emit final progress.
-        let total = files.len() as u64;
-        if let Some(ref cb) = progress_cb {
-            let _ =
-                Python::with_gil(|gil_py| cb.bind(gil_py).call1(("parse", total, total)).is_ok());
-            let _ =
-                Python::with_gil(|gil_py| cb.bind(gil_py).call1(("embed", total, total)).is_ok());
+        // Emit final parse/embed progress — both stages are fully done by
+        // the time every batch has been received and embedded here, even
+        // though the store thread may still be writing the last batch(es).
+        // These land the bars on their exact final counts (the per-batch
+        // embed estimate above should already match, but this is a cheap,
+        // guaranteed-exact landing rather than relying on that convergence).
+        emit_progress_gil(&progress_cb, "parse", total_files, total_files);
+        if !skip_embeddings {
+            emit_progress_gil(&progress_cb, "embed", embedded_chunks, embedded_chunks);
         }
 
-        Ok(all_parsed)
+        match store_handle.join() {
+            Ok(result) => result,
+            Err(_) => Err("pipeline store thread panicked".to_string()),
+        }
+    }
+
+    /// Convert parsed files into a `DbWriterBatch`, resolving each file's
+    /// relative path against `project_root` (mirrors Python's
+    /// `_get_relative_path`). Shared by the single-shot write path and the
+    /// 3-stage streaming path, which calls this once per batch.
+    fn build_db_batch(
+        parsed: &[super::types::ParsedFile],
+        project_root: &Path,
+        delete_paths: Vec<String>,
+    ) -> DbWriterBatch {
+        let mut file_records = Vec::with_capacity(parsed.len());
+
+        for pf in parsed {
+            if pf.error.is_some() {
+                continue;
+            }
+            if pf.chunks.is_empty() && pf.language.is_none() {
+                continue;
+            }
+
+            let chunks: Vec<ChunkRecord> = pf
+                .chunks
+                .iter()
+                .map(|ch| ChunkRecord {
+                    chunk_type: ch.chunk_type.clone(),
+                    symbol: ch.symbol.clone(),
+                    code: ch.code.clone(),
+                    start_line: ch.start_line,
+                    end_line: ch.end_line,
+                    start_byte: ch.start_byte,
+                    end_byte: ch.end_byte,
+                    language: ch.language.clone(),
+                    metadata: ch.metadata.clone(),
+                    embedding: ch.embedding.clone(),
+                    provider: ch.provider.clone(),
+                    model: ch.model.clone(),
+                })
+                .collect();
+
+            let path_str = pf.path.to_string_lossy().into_owned();
+
+            // Store relative path (like Python _get_relative_path).
+            let rel_path = if project_root.as_os_str().is_empty() {
+                path_str
+            } else if let Ok(rel) = pf.path.strip_prefix(project_root) {
+                rel.to_string_lossy().into_owned()
+            } else {
+                pf.path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path_str.clone())
+            };
+
+            file_records.push(FileRecord {
+                existing_file_id: None,
+                path: rel_path,
+                mtime: Some(pf.mtime),
+                size_bytes: Some(pf.file_size as i64),
+                content_hash: if pf.content_hash.is_empty() {
+                    None
+                } else {
+                    Some(pf.content_hash.clone())
+                },
+                language: pf.language.clone(),
+                chunks,
+            });
+        }
+
+        DbWriterBatch {
+            files: file_records,
+            delete_paths,
+        }
     }
 
     /// Parse files using the batch callback with a rayon thread pool.

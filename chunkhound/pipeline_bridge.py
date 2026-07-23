@@ -254,6 +254,7 @@ async def run_rust_pipeline(
         "compaction_min_size_mb": 50,
         "parse_batch_size": 200,
         "parse_thread_pool_size": parse_thread_pool_size,
+        "pipeline_parallel": True,
         "embed_thread_pool_size": max_concurrent,
         "embed_batch_size": embed_batch_size,
         "force_reindex": force_reindex,
