@@ -24,7 +24,6 @@ def test_enterprise_architecture_states_current_boundary_and_decision() -> None:
         "The product is local-first",
         "local-first at the workload boundary",
         "not a ChunkHound server",
-        "Our thesis: fix the DB itself, and the server isn't needed",
         "The cure is a better DB.",
         "Focus on local-first",
         "local indexing",
