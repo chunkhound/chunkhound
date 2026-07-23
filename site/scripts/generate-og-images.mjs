@@ -18,7 +18,10 @@ const publicDir = process.env.CHUNKHOUND_PUBLIC_DIR
   ? resolve(process.env.CHUNKHOUND_PUBLIC_DIR)
   : join(__dirname, "..", "public");
 
-const svgFiles = ["og-image-dark.svg", "og-image-light.svg"];
+const svgFiles = [
+  "og-image-dark.svg",
+  "og-image-light.svg",
+];
 
 for (const svgFile of svgFiles) {
   const svgPath = join(publicDir, svgFile);
