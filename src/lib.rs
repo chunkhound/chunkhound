@@ -137,6 +137,7 @@ fn chunkhound_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         m.add_class::<pipeline::IndexingPipeline>()?;
         m.add_class::<pipeline::PipelineReport>()?;
+        m.add_class::<pipeline::ParseCallConfig>()?;
     }
 
     Ok(())

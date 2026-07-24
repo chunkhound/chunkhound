@@ -161,6 +161,21 @@ impl IndexingPipeline {
 
         emit_progress(py, &progress_callback, "parse", 0, total_files);
 
+        // Built once per run (invariant across every batch) and handed to
+        // every parse_batch_callback() call — see ParseCallConfig's doc
+        // comment for why this is a single typed object rather than a
+        // growing list of positional arguments.
+        let parse_config: Py<super::parse_call_config::ParseCallConfig> = Py::new(
+            py,
+            super::parse_call_config::ParseCallConfig {
+                detect_embedded_sql: self.config.detect_embedded_sql,
+                per_file_timeout_secs: self.config.per_file_timeout_secs,
+                per_file_timeout_min_size_kb: self.config.per_file_timeout_min_size_kb,
+                config_file_size_threshold_kb: self.config.config_file_size_threshold_kb,
+                parse_thread_pool_size: self.config.parse_thread_pool_size,
+            },
+        )?;
+
         // Clone Python references before releasing the GIL — Py<T>::clone()
         // panics without the GIL held, and this whole call runs inside
         // py.allow_threads() below.
@@ -174,6 +189,7 @@ impl IndexingPipeline {
                 self.pipeline_parse_embed_store(
                     &batch_paths,
                     parse_cb,
+                    parse_config,
                     embed_cb,
                     &provider,
                     &model,
@@ -349,6 +365,7 @@ impl IndexingPipeline {
         &self,
         files: &[PathBuf],
         parse_cb: Py<PyAny>,
+        parse_config: Py<super::parse_call_config::ParseCallConfig>,
         embed_cb: Option<Py<PyAny>>,
         provider: &str,
         model: &str,
@@ -362,7 +379,6 @@ impl IndexingPipeline {
         use std::sync::{Arc, Mutex};
 
         let batch_size = self.config.parse_batch_size.max(1);
-        let detect_sql = self.config.detect_embedded_sql;
         let embed_thread_pool_size = self.config.embed_thread_pool_size;
         let embed_batch_size = self.config.embed_batch_size.max(1);
         let skip_embeddings = self.config.skip_embeddings;
@@ -424,9 +440,9 @@ impl IndexingPipeline {
                         Self::parse_one_batch(
                             gil_py,
                             &parse_cb,
+                            &parse_config,
                             &paths,
                             &batch,
-                            detect_sql,
                             &new_hashes,
                         )
                     }) {
@@ -824,15 +840,15 @@ impl IndexingPipeline {
     fn parse_one_batch(
         py: Python<'_>,
         cb: &Py<PyAny>,
+        parse_config: &Py<super::parse_call_config::ParseCallConfig>,
         paths: &[String],
         batch: &[PathBuf],
-        detect_embedded_sql: bool,
         new_hashes: &std::collections::HashMap<PathBuf, String>,
     ) -> Result<Vec<super::types::ParsedFile>, String> {
         let cb = cb.bind(py);
         let py_paths = PyList::new_bound(py, paths);
         let ret = cb
-            .call1((py_paths, detect_embedded_sql))
+            .call1((py_paths, parse_config.bind(py)))
             .map_err(|e| e.to_string())?;
 
         let tuple_list: &Bound<'_, PyList> = ret.downcast::<PyList>().map_err(|e| e.to_string())?;

@@ -107,14 +107,14 @@ class TestParseErrorPerFile:
         bad_file = tmp_path / "broken.py"
         bad_file.write_text("def broken():\n    return 3\n")
 
-        def batch_callback(file_paths, detect_embedded_sql=True):
+        def batch_callback(file_paths, parse_config):
             results = []
             for p in file_paths:
                 if p == str(bad_file):
                     results.append(("", [], "simulated parser crash"))
                 else:
                     lang, chunks = parse_file_callback(
-                        p, detect_embedded_sql=detect_embedded_sql
+                        p, detect_embedded_sql=parse_config.detect_embedded_sql
                     )
                     results.append((lang, chunks, None))
             return results
@@ -158,14 +158,18 @@ class TestParseErrorPerFile:
         bad_file = tmp_path / "broken.py"
         bad_file.write_text("def broken():\n    return 1\n")
 
-        def _raising_parse_file_callback(file_path, detect_embedded_sql=True):
+        def _raising_parse_file_callback(
+            file_path, detect_embedded_sql=True, config_file_size_threshold_kb=20
+        ):
             raise RuntimeError("simulated parser crash")
 
         monkeypatch.setattr(
             pipeline_bridge, "parse_file_callback", _raising_parse_file_callback
         )
 
-        lang, chunks, error = pipeline_bridge._parse_one_file((str(bad_file), True))
+        lang, chunks, error = pipeline_bridge._parse_one_file(
+            (str(bad_file), pipeline_bridge._DEFAULT_PARSE_CONFIG)
+        )
 
         assert chunks == []
         assert error is not None

@@ -9,6 +9,7 @@ import atexit
 import os
 import threading
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -27,47 +28,66 @@ _parse_pool_lock = threading.Lock()
 def _default_parse_pool_workers() -> int:
     """Single source of truth for the parse pool's default worker count.
 
-    Used both for _parse_pool_max_workers' own default (below) and by
-    run_rust_pipeline() when it calls configure_parse_pool() — keeping both
-    call sites pointed at one formula instead of two copies that could
-    silently drift apart.
+    Used both by _ParsePoolConfig's own default (below) and by
+    run_rust_pipeline() when it builds the "parse_thread_pool_size" entry
+    Rust reads — keeping both call sites pointed at one formula instead of
+    two copies that could silently drift apart.
     """
     return min(os.cpu_count() or 4, 16)
 
 
-# Worker count for _get_parse_pool(), set once by run_rust_pipeline() before
-# the pipeline starts calling parse_batch_callback(). Rust's config dict also
-# carries a "parse_thread_pool_size" entry, but Rust never reads it back —
-# parse_batch_callback() has a fixed call signature (Rust always calls it as
-# cb.call1((paths, detect_embedded_sql)), matched by test-local stand-ins
-# too), so there's no way to hand the value to _get_parse_pool() through that
-# call. This module-level default is the actual source of truth for callers
-# that never invoke configure_parse_pool() (e.g. tests driving the pipeline
-# directly).
-_parse_pool_max_workers: int = _default_parse_pool_workers()
+@dataclass(frozen=True)
+class _ParsePoolConfig:
+    """Plain, picklable mirror of chunkhound_native.ParseCallConfig.
 
+    ProcessPoolExecutor.map() pickles every argument to send it to a worker
+    process, and a Rust #[pyclass] instance (what parse_batch_callback()
+    actually receives) has no pickle support — so parse_batch_callback()
+    copies the fields it needs out of whatever parse_config it's given
+    (real or absent) into one of these before it ever reaches _get_parse_pool()
+    or _parse_one_file(). Also doubles as the default used when
+    parse_batch_callback()/_parse_one_file() are called directly (tests, or
+    any caller that bypasses the Rust pipeline) without a parse_config.
 
-def configure_parse_pool(max_workers: int) -> None:
-    """Set the worker count _get_parse_pool() will use on its next creation.
-
-    Must be called before the pool is first created (i.e. before any
-    parse_batch_callback() call) — sizing is fixed at first use, same as
-    _get_parse_pool() itself. Called by run_rust_pipeline() with the same
-    value it sends to Rust as "parse_thread_pool_size", so the two stay in
-    sync even though Rust itself never acts on that config field.
+    per_file_timeout_secs defaults to 0.0 (disabled) here rather than
+    matching Rust's own default, so direct/test callers don't unexpectedly
+    start paying subprocess-spawn overhead for large fixture files.
     """
-    global _parse_pool_max_workers
-    _parse_pool_max_workers = max(1, max_workers)
+
+    detect_embedded_sql: bool = True
+    per_file_timeout_secs: float = 0.0
+    per_file_timeout_min_size_kb: int = 128
+    config_file_size_threshold_kb: int = 20
+    parse_thread_pool_size: int = field(default_factory=_default_parse_pool_workers)
+
+    @classmethod
+    def from_any(cls, parse_config: Any) -> "_ParsePoolConfig":
+        """Build a picklable config from whatever parse_batch_callback()
+        received — the real Rust ParseCallConfig, a duck-typed stand-in
+        (e.g. in tests), or None."""
+        if parse_config is None:
+            return _DEFAULT_PARSE_CONFIG
+        return cls(
+            detect_embedded_sql=parse_config.detect_embedded_sql,
+            per_file_timeout_secs=parse_config.per_file_timeout_secs,
+            per_file_timeout_min_size_kb=parse_config.per_file_timeout_min_size_kb,
+            config_file_size_threshold_kb=parse_config.config_file_size_threshold_kb,
+            parse_thread_pool_size=parse_config.parse_thread_pool_size,
+        )
 
 
-def _get_parse_pool() -> ProcessPoolExecutor:
+_DEFAULT_PARSE_CONFIG = _ParsePoolConfig()
+
+
+def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
     """Lazily create the module-level parse worker pool, once per process.
 
     Reused across every parse_batch_callback() call — i.e. across every
     parse batch within one IndexingPipeline.run(), and across every run in
     this process — instead of being spawned and torn down per batch. Sizing
-    is fixed at first use (from _parse_pool_max_workers — see
-    configure_parse_pool()), independent of any single batch's file count.
+    is fixed at first use, from whichever call happens to win the creation
+    race below — later calls' max_workers values are ignored once the pool
+    already exists, same as before this took an explicit parameter.
 
     A lock guards creation because multiple concurrent IndexingPipeline.run()
     calls (e.g. two simultaneous indexing operations in one long-lived MCP
@@ -78,7 +98,7 @@ def _get_parse_pool() -> ProcessPoolExecutor:
     if _parse_pool is None:
         with _parse_pool_lock:
             if _parse_pool is None:
-                pool = ProcessPoolExecutor(max_workers=_parse_pool_max_workers)
+                pool = ProcessPoolExecutor(max_workers=max(1, max_workers))
                 atexit.register(pool.shutdown, cancel_futures=True)
                 _parse_pool = pool
     return _parse_pool
@@ -87,15 +107,22 @@ def _get_parse_pool() -> ProcessPoolExecutor:
 def parse_file_callback(
     file_path: str,
     detect_embedded_sql: bool = True,
+    config_file_size_threshold_kb: int = 20,
 ) -> tuple[str, list[dict]]:
     """Adapter: path → (language, chunks).
 
-    Called from the Rust parse thread for each file. Handles:
+    Called from the Rust parse thread for each file (directly for small/
+    typical files, or via _parse_with_timeout()'s child process for large
+    ones — see _parse_one_file()). Handles:
     - Language detection (40+ mappings in Python)
     - Tree-sitter parsing
     - Config file size threshold
     - Embedded SQL detection
-    - Per-file timeout (applied by the caller via multiprocessing)
+
+    Args:
+        config_file_size_threshold_kb: Structured config files (JSON, YAML,
+            etc.) larger than this are skipped entirely. <= 0 disables the
+            gate (matches chunkhound.services.batch_processor's convention).
 
     Returns:
         (language_value: str, chunks: list[dict])
@@ -122,8 +149,10 @@ def parse_file_callback(
     if lang.is_structured_config_language:
         try:
             size_kb = Path(file_path).stat().st_size / 1024
-            # Default threshold 20 KB
-            if size_kb > 20:
+            if (
+                config_file_size_threshold_kb > 0
+                and size_kb > config_file_size_threshold_kb
+            ):
                 return ("", [])
         except OSError:
             return ("", [])
@@ -145,7 +174,7 @@ def embed_batch_callback(texts: list[str]) -> list[list[float]]:
     Signature matches what ``embed_batch_parallel`` expects:
     ``callback.call1((texts,)) → List[List[float]]``.
 
-    Used when ``parse_thread_pool_size > 1`` — each rayon thread
+    Used when ``embed_thread_pool_size > 1`` — each rayon thread
     processes one batch at a time, so the provider sees N concurrent
     API requests.
     """
@@ -211,17 +240,122 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
         return asyncio.run(_embed())
 
 
-def _parse_one_file(args: tuple[str, bool]) -> tuple[str, list[dict], str | None]:
+def _parse_file_worker_for_timeout(
+    file_path: str,
+    detect_embedded_sql: bool,
+    config_file_size_threshold_kb: int,
+    conn: Any,
+) -> None:
+    """Child-process entry point for _parse_with_timeout().
+
+    Runs in a dedicated spawned process so the parent can enforce a strict
+    wall-clock timeout by terminating this process outright — a hung
+    ProcessPoolExecutor task can't be selectively cancelled in place, only
+    the process running it can be killed. Mirrors
+    chunkhound.services.batch_processor._parse_file_worker's approach,
+    adapted to call parse_file_callback() (which already does language
+    detection + the binary guard + the config-file size gate) instead of
+    parsing directly.
+    """
+    try:
+        lang, chunks = parse_file_callback(
+            file_path,
+            detect_embedded_sql=detect_embedded_sql,
+            config_file_size_threshold_kb=config_file_size_threshold_kb,
+        )
+        conn.send(("ok", (lang, chunks)))
+    except Exception as e:
+        try:
+            conn.send(("error", str(e)))
+        except Exception:
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _parse_with_timeout(
+    file_path: str, cfg: "_ParsePoolConfig"
+) -> tuple[str, list[dict], str | None]:
+    """Parse one file in a dedicated child process with a wall-clock timeout.
+
+    Only used for files at or above cfg.per_file_timeout_min_size_kb (see
+    _parse_one_file) — the extra process-spawn cost isn't worth paying for
+    every small file, only the large ones that could plausibly hang a
+    parser (e.g. pathological minified/generated files).
+    """
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+    p = ctx.Process(
+        target=_parse_file_worker_for_timeout,
+        args=(
+            file_path,
+            cfg.detect_embedded_sql,
+            cfg.config_file_size_threshold_kb,
+            child_conn,
+        ),
+        daemon=True,
+    )
+    p.start()
+    try:
+        child_conn.close()
+    except Exception:
+        pass
+
+    try:
+        if parent_conn.poll(cfg.per_file_timeout_secs):
+            status, payload = parent_conn.recv()
+            p.join(timeout=0.5)
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=0.5)
+            if status == "ok":
+                lang, chunks = payload
+                return (lang, chunks, None)
+            return ("", [], str(payload))
+        # Timed out — terminate the child process cleanly.
+        p.terminate()
+        p.join(timeout=0.5)
+        return ("", [], f"parse timed out after {cfg.per_file_timeout_secs}s")
+    finally:
+        try:
+            parent_conn.close()
+        except Exception:
+            pass
+
+
+def _parse_one_file(
+    args: tuple[str, "_ParsePoolConfig"],
+) -> tuple[str, list[dict], str | None]:
     """Parse a single file — module-level so ProcessPoolExecutor can pickle it.
 
     Catches any exception so one bad file can't abort the whole batch —
     ProcessPoolExecutor.map() would otherwise re-raise it for the whole
     parse_batch_callback() call, aborting the entire pipeline run.
+
+    Files at or above cfg.per_file_timeout_min_size_kb are parsed via
+    _parse_with_timeout() instead of the direct fast path, so a hung parse
+    on one large file can be killed rather than stalling this pool worker
+    (and every batch queued behind it) indefinitely.
     """
-    file_path, detect_embedded_sql = args
+    file_path, cfg = args
     try:
+        if cfg.per_file_timeout_secs > 0:
+            try:
+                size_kb = os.path.getsize(file_path) / 1024
+            except OSError as e:
+                return ("", [], str(e))
+            if size_kb >= cfg.per_file_timeout_min_size_kb:
+                return _parse_with_timeout(file_path, cfg)
+
         lang, chunks = parse_file_callback(
-            file_path, detect_embedded_sql=detect_embedded_sql
+            file_path,
+            detect_embedded_sql=cfg.detect_embedded_sql,
+            config_file_size_threshold_kb=cfg.config_file_size_threshold_kb,
         )
         return (lang, chunks, None)
     except Exception as e:
@@ -233,7 +367,7 @@ def _parse_one_file(args: tuple[str, bool]) -> tuple[str, list[dict], str | None
 
 def parse_batch_callback(
     file_paths: list[str],
-    detect_embedded_sql: bool = True,
+    parse_config: Any = None,
 ) -> list[tuple[str, list[dict], str | None]]:
     """Adapter: batch-parse files in parallel (called from Rust parse thread).
 
@@ -245,13 +379,21 @@ def parse_batch_callback(
     created once and reused for every call, both within one
     IndexingPipeline.run() and across multiple runs in this process.
 
+    Args:
+        parse_config: The chunkhound_native.ParseCallConfig Rust constructs
+            once per IndexingPipeline.run() and passes to every call for
+            that run. Direct callers that omit it (tests bypassing Rust) get
+            _DEFAULT_PARSE_CONFIG instead.
+
     Returns:
         List of (language, chunks, error) tuples — same order as file_paths.
         `error` is `None` on success, or a message string if that file's
-        parse raised.
+        parse raised or timed out.
     """
-    args_list = [(p, detect_embedded_sql) for p in file_paths]
-    return list(_get_parse_pool().map(_parse_one_file, args_list))
+    cfg = _ParsePoolConfig.from_any(parse_config)
+    args_list = [(p, cfg) for p in file_paths]
+    pool = _get_parse_pool(cfg.parse_thread_pool_size)
+    return list(pool.map(_parse_one_file, args_list))
 
 
 def _detect_embed_concurrency(embedding_cfg: Any) -> int:
@@ -343,12 +485,7 @@ async def run_rust_pipeline(
     if max_concurrent <= 0 and not skip_embeddings:
         max_concurrent = _detect_embed_concurrency(embedding_cfg)
     max_concurrent = max_concurrent or 1
-    # Uses the same formula as _get_parse_pool()'s own default (see
-    # _default_parse_pool_workers()) — see configure_parse_pool()'s docstring
-    # for why this has to be set explicitly here rather than left for
-    # _get_parse_pool() to compute lazily on first use.
     parse_thread_pool_size = _default_parse_pool_workers()
-    configure_parse_pool(parse_thread_pool_size)
 
     config_dict = {
         "project_root": str(project_root.resolve()),
