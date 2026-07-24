@@ -5,18 +5,47 @@ existing Python parsing and embedding infrastructure to the contract expected
 by Rust.
 """
 
+import atexit
+import os
+import threading
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from chunkhound.core.detection import Language
 
-import threading
-
 from chunkhound.core.types.common import FileId
 from chunkhound.parsers.parser_factory import create_parser_for_language
 
 _embed_local = threading.local()
+
+_parse_pool: ProcessPoolExecutor | None = None
+_parse_pool_lock = threading.Lock()
+
+
+def _get_parse_pool() -> ProcessPoolExecutor:
+    """Lazily create the module-level parse worker pool, once per process.
+
+    Reused across every parse_batch_callback() call — i.e. across every
+    parse batch within one IndexingPipeline.run(), and across every run in
+    this process — instead of being spawned and torn down per batch. Sizing
+    is fixed at first use, independent of any single batch's file count.
+
+    A lock guards creation because multiple concurrent IndexingPipeline.run()
+    calls (e.g. two simultaneous indexing operations in one long-lived MCP
+    process) each spawn their own dedicated parse thread, so a first-use race
+    across threads is a real scenario here, not a hypothetical one.
+    """
+    global _parse_pool
+    if _parse_pool is None:
+        with _parse_pool_lock:
+            if _parse_pool is None:
+                max_workers = min(os.cpu_count() or 4, 16)
+                pool = ProcessPoolExecutor(max_workers=max_workers)
+                atexit.register(pool.shutdown, cancel_futures=True)
+                _parse_pool = pool
+    return _parse_pool
 
 
 def parse_file_callback(
@@ -170,23 +199,23 @@ def parse_batch_callback(
     file_paths: list[str],
     detect_embedded_sql: bool = True,
 ) -> list[tuple[str, list[dict], str | None]]:
-    """Adapter: batch-parse files in parallel (called from Rust parse threads).
+    """Adapter: batch-parse files in parallel (called from Rust parse thread).
 
-    Each file is parsed in its own subprocess via ProcessPoolExecutor for
-    true CPU parallelism (tree-sitter holds the GIL, so threads don't help).
+    Callback contract is batch-shaped, not per-file: Rust's parse thread
+    hands over one whole batch per call (one call per parse_batch_size chunk
+    of files) and this function fans it out across subprocesses for true CPU
+    parallelism (tree-sitter holds the GIL, so Python threads wouldn't help).
+    The worker pool (see _get_parse_pool()) is a process-wide singleton —
+    created once and reused for every call, both within one
+    IndexingPipeline.run() and across multiple runs in this process.
 
     Returns:
         List of (language, chunks, error) tuples — same order as file_paths.
         `error` is `None` on success, or a message string if that file's
         parse raised.
     """
-    from concurrent.futures import ProcessPoolExecutor
-
-    # Use at most N workers — cap to avoid resource exhaustion on large batches
-    max_workers = min(len(file_paths), 16)
     args_list = [(p, detect_embedded_sql) for p in file_paths]
-    with ProcessPoolExecutor(max_workers=max_workers) as pool:
-        return list(pool.map(_parse_one_file, args_list))
+    return list(_get_parse_pool().map(_parse_one_file, args_list))
 
 
 def _detect_embed_concurrency(embedding_cfg: Any) -> int:

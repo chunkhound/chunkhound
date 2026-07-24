@@ -1687,9 +1687,13 @@ class IndexingCoordinator(BaseService):
                 #
                 # Safe to close here: the parse_batch_callback's
                 # ProcessPoolExecutor (whose fork'd children inherit
-                # whatever DuckDB state is live at fork time) isn't created
-                # until Rust's parse phase, which starts only after this
-                # call returns — so no forked child ever inherits a live
+                # whatever DuckDB state is live at fork time) is a lazy,
+                # process-wide singleton (see pipeline_bridge._get_parse_pool)
+                # — it's created only once, on the first call from Rust's
+                # parse phase, which starts only after this call returns on
+                # this very first run. Every later run reuses the
+                # already-created workers, so no new fork ever happens after
+                # this point — there's nothing later to inherit a live
                 # connection. Must use the provider's full disconnect(),
                 # not just closing _connection_manager.connection: the
                 # SerialExecutor holds its own separate thread-local DuckDB
