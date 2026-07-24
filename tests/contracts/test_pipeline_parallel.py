@@ -1,13 +1,12 @@
-"""Phase 8: Pipeline parallelism — overlapping parse, embed, and write stages.
+"""Phase 8: Pipeline parallelism — overlapping parse, embed, and store stages.
 
-When ``pipeline_parallel=True`` and ``parse_thread_pool_size > 1``, the
-Rust pipeline runs parse + embed + write in a producer-consumer chain
-connected by channels.  Parse threads produce parsed chunks, embed threads
-consume and embed them, and the main thread writes embedded batches to
-DuckDB using per-batch transactions.
+The Rust pipeline runs parse ∥ embed ∥ store as three persistent OS threads
+connected by bounded channels: a parse thread produces parsed batches, a
+dedicated embed thread consumes and embeds them, and a dedicated store
+thread writes embedded batches to DuckDB using per-batch transactions.
 
-The contract: output must be byte-identical to the sequential pipeline
-(pipeline_parallel=False).
+The contract: output must be byte-identical to the Python reference
+pipeline (``index_with_python``).
 """
 
 import duckdb
@@ -18,11 +17,13 @@ from pathlib import Path
 from tests.contracts.pipeline_harness import (
     IndexResult,
     assert_identical,
+    index_with_python,
 )
 from tests.contracts.mock_embed import (
     embed_texts,
     MOCK_PROVIDER,
     MOCK_MODEL,
+    MockEmbeddingProvider,
 )
 
 
@@ -34,13 +35,10 @@ async def _index_with_rust(
     db_dir: Path,
     *,
     skip_embeddings: bool = False,
-    parse_thread_pool_size: int = 0,
-    parse_batch_callback=None,
-    embed_batch_callback=None,
-    pipeline_parallel: bool = False,
+    parse_thread_pool_size: int = 4,
     incremental: bool = False,
 ) -> IndexResult:
-    """Index *fixture_dir* using the Rust pipeline with configurable parallelism."""
+    """Index *fixture_dir* using the Rust streaming pipeline."""
     try:
         from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
     except ImportError:
@@ -70,7 +68,6 @@ async def _index_with_rust(
         "config_file_size_threshold_kb": 20,
         "embedding_provider": MOCK_PROVIDER,
         "embedding_model": MOCK_MODEL,
-        "pipeline_parallel": pipeline_parallel,
     }
 
     pipeline = IndexingPipeline(config_dict)
@@ -78,15 +75,13 @@ async def _index_with_rust(
     files = sorted(fixture_dir.resolve().glob("*"))
     file_paths = [str(f) for f in files if f.is_file()]
 
-    from chunkhound.pipeline_bridge import parse_file_callback
+    from chunkhound.pipeline_bridge import parse_batch_callback
 
     report = pipeline.run(
         files=file_paths,
-        parse_callback=parse_file_callback,
-        embed_callback=embed_texts,
-        progress_callback=None,
         parse_batch_callback=parse_batch_callback,
-        embed_batch_callback=embed_batch_callback,
+        embed_batch_callback=embed_texts if not skip_embeddings else None,
+        progress_callback=None,
         incremental=incremental,
     )
 
@@ -150,53 +145,31 @@ def _collect_embedding_tuples(
 
 
 class TestPipelineParallel:
-    """Pipeline-parallel mode must produce byte-identical output to sequential."""
+    """The 3-stage streaming pipeline must produce output identical to Python."""
 
     @pytest.mark.asyncio
     async def test_pipeline_parallel_identical_output(self):
-        """RED: pipeline_parallel=True produces identical chunks + embeddings.
+        """Streaming pipeline (parse ∥ embed ∥ store) output matches Python."""
+        with tempfile.TemporaryDirectory() as tmp_py, tempfile.TemporaryDirectory() as tmp_rs:
+            db_py = Path(tmp_py) / "db"
+            db_py.mkdir(parents=True, exist_ok=True)
+            db_rs = Path(tmp_rs) / "db"
+            db_rs.mkdir(parents=True, exist_ok=True)
 
-        When the pipeline runs in parallel mode (parse → channel → embed →
-        channel → write), the final DB must contain the exact same chunks and
-        embeddings as the sequential pipeline.
-        """
-        with tempfile.TemporaryDirectory() as tmp_seq, tempfile.TemporaryDirectory() as tmp_par:
-            db_seq = Path(tmp_seq) / "db"
-            db_seq.mkdir(parents=True, exist_ok=True)
-            db_par = Path(tmp_par) / "db"
-            db_par.mkdir(parents=True, exist_ok=True)
-
-            # Sequential baseline
-            sequential = await _index_with_rust(
-                FIXTURE_DIR,
-                db_seq,
-                skip_embeddings=False,
-                parse_thread_pool_size=0,
-                pipeline_parallel=False,
+            result_py = await index_with_python(
+                FIXTURE_DIR, db_py, skip_embeddings=False,
+                embedding_provider=MockEmbeddingProvider(),
             )
 
-            # Parallel pipeline (parse+embed+write overlapped)
-            from chunkhound.pipeline_bridge import parse_batch_callback
+            result_rs = await _index_with_rust(FIXTURE_DIR, db_rs, skip_embeddings=False)
 
-            parallel = await _index_with_rust(
-                FIXTURE_DIR,
-                db_par,
-                skip_embeddings=False,
-                parse_thread_pool_size=4,
-                parse_batch_callback=parse_batch_callback,
-                embed_batch_callback=embed_texts,
-                pipeline_parallel=True,
-            )
-
-            assert_identical(sequential, parallel)
+            assert_identical(result_py, result_rs)
 
     @pytest.mark.asyncio
     async def test_pipeline_parallel_incremental(self):
-        """RED: pipeline_parallel=True works with incremental updates.
-
-        After an initial index, modifying a file and re-indexing with
-        pipeline_parallel=True must detect the change and produce the
-        correct chunk count (26 for the fixture after one file edit).
+        """Incremental re-indexing through the streaming pipeline detects
+        changes and produces the correct chunk set (matching a Python full
+        re-index), while processing fewer files than a full re-index.
         """
         import shutil
 
@@ -207,14 +180,8 @@ class TestPipelineParallel:
             db_dir = Path(tmp) / "db"
             db_dir.mkdir(parents=True, exist_ok=True)
 
-            # Initial index (sequential, to establish baseline).
-            initial = await _index_with_rust(
-                work_dir,
-                db_dir,
-                skip_embeddings=False,
-                parse_thread_pool_size=0,
-                pipeline_parallel=False,
-            )
+            # Initial index.
+            initial = await _index_with_rust(work_dir, db_dir, skip_embeddings=False)
 
             # Sanity: 5 files, 25 chunks for the standard fixture.
             assert initial.chunks_written == 25, (
@@ -230,34 +197,18 @@ class TestPipelineParallel:
                 + "\n\ndef incremental_test_func():\n    return 'added in phase 8'\n"
             )
 
-            # Incremental re-index with pipeline_parallel=True.
-            from chunkhound.pipeline_bridge import parse_batch_callback
-
+            # Incremental re-index (same DB as the initial index).
             incremental = await _index_with_rust(
-                work_dir,
-                db_dir,
-                skip_embeddings=False,
-                parse_thread_pool_size=4,
-                parse_batch_callback=parse_batch_callback,
-                embed_batch_callback=embed_texts,
-                pipeline_parallel=True,
-                incremental=True,
+                work_dir, db_dir, skip_embeddings=False, incremental=True
             )
 
             # After editing one file, the incremental DB must contain all chunks
-            # from the full re-index.  The chunks_written field counts only newly
-            # written chunks (the changed file).  Verify via DB content.
-            #
-            # Do a full sequential re-index on a fresh DB for comparison.
+            # from a full re-index. The chunks_written field counts only newly
+            # written chunks (the changed file), so verify via DB content
+            # against a full re-index on a fresh DB.
             db_full = Path(tmp) / "db_full"
             db_full.mkdir(parents=True, exist_ok=True)
-            full_result = await _index_with_rust(
-                work_dir,
-                db_full,
-                skip_embeddings=False,
-                parse_thread_pool_size=0,
-                pipeline_parallel=False,
-            )
+            full_result = await _index_with_rust(work_dir, db_full, skip_embeddings=False)
 
             full_chunks = set(full_result.chunk_tuples)
             inc_chunks = set(incremental.chunk_tuples)

@@ -82,7 +82,7 @@ def _index_with_rust(
         "compaction_batch_threshold": 10,
         "compaction_min_size_mb": 10,
         "parse_batch_size": 200,
-        "parse_thread_pool_size": 0,
+        "parse_thread_pool_size": 4,
         "embed_batch_size": 200,
         "force_reindex": False,
         "mtime_epsilon_seconds": 0.01,
@@ -101,12 +101,12 @@ def _index_with_rust(
     files = sorted(fixture_dir.resolve().glob("*"))
     file_paths = [str(f) for f in files if f.is_file()]
 
-    from chunkhound.pipeline_bridge import parse_file_callback
+    from chunkhound.pipeline_bridge import parse_batch_callback
 
     report = pipeline.run(
         files=file_paths,
-        parse_callback=parse_file_callback,
-        embed_callback=embed_texts if not skip_embeddings else None,
+        parse_batch_callback=parse_batch_callback,
+        embed_batch_callback=embed_texts if not skip_embeddings else None,
         progress_callback=None,
         incremental=incremental,
     )

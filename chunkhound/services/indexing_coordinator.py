@@ -1614,7 +1614,8 @@ class IndexingCoordinator(BaseService):
                             else:
                                 _pr.update(_data_task, info="writing...")
                         elif phase == "write-index":
-                            # Data write done; start HNSW index build.
+                            # Data write done; compaction wasn't needed —
+                            # build the HNSW index directly.
                             _pr.update(
                                 _data_task,
                                 completed=_data_task_total,
@@ -1623,10 +1624,24 @@ class IndexingCoordinator(BaseService):
                             _pr.reset(_index_task, start=True)
                             _pr.update(_index_task, info="building...")
                         elif phase == "write-compact":
-                            # HNSW index build done; start compaction.
-                            _pr.update(_index_task, completed=1, info="done")
+                            # Data write done; compaction is needed.
+                            # Compaction rebuilds the HNSW index as part of
+                            # its own EXPORT/IMPORT rewrite, so "write-index"
+                            # never fires in this path — marking the index
+                            # bar "done" here (before compaction has actually
+                            # run) would be premature. It's left at its
+                            # initial not-started state; "write-done"/"done"
+                            # mark it complete alongside everything else once
+                            # compaction (and the reindex within it) finishes.
+                            _pr.update(
+                                _data_task,
+                                completed=_data_task_total,
+                                info="done",
+                            )
                             _pr.reset(_compact_task, start=True)
-                            _pr.update(_compact_task, info="compacting...")
+                            _pr.update(
+                                _compact_task, info="compacting (includes index rebuild)..."
+                            )
                         elif phase == "write-done":
                             # Final wrap-up of whatever bars are still active.
                             _pr.update(

@@ -74,19 +74,6 @@ def parse_file_callback(
     return (lang.value, [c.to_dict() for c in chunks])
 
 
-def embed_callback(
-    texts: list[str],
-    provider: str,
-    model: str,
-) -> list[list[float]]:
-    """Adapter: batch embed (called from Rust embed thread).
-
-    All embedding config is baked into the service via global config —
-    api_key, base_url, ssl_verify, output_dims, etc.
-    """
-    return _embed_batch(texts)
-
-
 def embed_batch_callback(texts: list[str]) -> list[list[float]]:
     """Parallel batch embed (called from Rust rayon threads with GIL held).
 
@@ -103,17 +90,24 @@ def embed_batch_callback(texts: list[str]) -> list[list[float]]:
 def _embed_batch(texts: list[str]) -> list[list[float]]:
     """Shared embed helper — run the async provider.embed() synchronously.
 
-    Uses thread-local provider instances so each rayon thread gets its own
-    httpx AsyncClient.  Without this, the singleton provider's client is
-    shared across threads with different asyncio event loops, causing
-    hangs when ``max_concurrent_batches >= 4``.
+    Uses a thread-local provider AND a thread-local event loop, both created
+    once per thread and reused for the thread's lifetime.
+
+    The Rust embed thread's rayon pool is built once per pipeline run and
+    reused across every streamed batch, so its worker OS threads are
+    long-lived — the same thread makes many calls to this function over the
+    life of a run. httpx's AsyncClient binds internal locks/transports to
+    whichever event loop is running when it's first used; calling
+    ``asyncio.run()`` here would create and tear down a *new* loop on every
+    call while still reusing the same cached client, and running that
+    client under a succession of different loops hangs (the client's locks
+    stay attached to the loop they were created under, which is already
+    closed). Reusing one loop per thread via ``run_until_complete`` keeps
+    the client bound to a single, stable loop for as long as the thread
+    lives.
     """
     import asyncio
 
-    # Thread-local provider: one fresh provider per rayon thread.
-    # Each thread runs asyncio.run() repeatedly — the per-thread provider's
-    # httpx client stays associated with the thread and handles sequential
-    # event-loop lifecycles correctly.
     if not hasattr(_embed_local, 'provider'):
         from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
         from chunkhound.registry import get_registry
@@ -130,12 +124,14 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
     async def _embed():
         return await emb_provider.embed(texts)
 
-    # Rayon threads are NOT the main thread and have no event loop — use
-    # asyncio.run() directly.  The main thread (in asyncio.to_thread context)
-    # may have a running event loop, in which case asyncio.run() raises
-    # RuntimeError and we fall back to a single-use thread.
+    # Rayon threads are NOT the main thread and have no event loop of their
+    # own — give each thread a persistent loop, created once and reused for
+    # every call made from that thread.
     if threading.current_thread() is not threading.main_thread():
-        return asyncio.run(_embed())
+        if not hasattr(_embed_local, 'loop'):
+            _embed_local.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(_embed_local.loop)
+        return _embed_local.loop.run_until_complete(_embed())
 
     try:
         loop = asyncio.get_event_loop()
@@ -175,6 +171,29 @@ def parse_batch_callback(
     args_list = [(p, detect_embedded_sql) for p in file_paths]
     with ProcessPoolExecutor(max_workers=max_workers) as pool:
         return list(pool.map(_parse_one_file, args_list))
+
+
+def _detect_embed_concurrency(embedding_cfg: Any) -> int:
+    """Auto-detect embed concurrency from the provider, matching
+    ``EmbeddingService.__init__``'s behavior for the legacy Python path —
+    without this, the Rust pipeline's embed thread pool silently defaults
+    to a single thread (serial embedding) whenever ``max_concurrent_batches``
+    isn't explicitly set in config.
+    """
+    from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+
+    if embedding_cfg is None:
+        return 8
+
+    try:
+        provider = EmbeddingProviderFactory.create_provider(embedding_cfg)
+    except (ValueError, ImportError):
+        return 8
+
+    get_concurrency = getattr(provider, "get_recommended_concurrency", None)
+    if get_concurrency is None:
+        return 8
+    return int(get_concurrency())
 
 
 async def run_rust_pipeline(
@@ -240,9 +259,10 @@ async def run_rust_pipeline(
     )
 
     embed_batch_size = int(getattr(embedding_cfg, "batch_size", 200) or 200)
-    max_concurrent = int(
-        getattr(embedding_cfg, "max_concurrent_batches", None) or 1
-    )
+    max_concurrent = int(getattr(embedding_cfg, "max_concurrent_batches", 0) or 0)
+    if max_concurrent <= 0 and not skip_embeddings:
+        max_concurrent = _detect_embed_concurrency(embedding_cfg)
+    max_concurrent = max_concurrent or 1
     parse_thread_pool_size = (os.cpu_count() or 4)
 
     config_dict = {
@@ -254,7 +274,6 @@ async def run_rust_pipeline(
         "compaction_min_size_mb": 50,
         "parse_batch_size": 200,
         "parse_thread_pool_size": parse_thread_pool_size,
-        "pipeline_parallel": True,
         "embed_thread_pool_size": max_concurrent,
         "embed_batch_size": embed_batch_size,
         "force_reindex": force_reindex,
@@ -278,12 +297,10 @@ async def run_rust_pipeline(
     report = await asyncio.to_thread(
         pipeline.run,
         files=file_paths,
-        parse_callback=parse_file_callback,
-        embed_callback=embed_callback if not skip_embeddings else None,
-        progress_callback=progress_callback,
-        incremental=not force_reindex,
         parse_batch_callback=parse_batch_callback,
         embed_batch_callback=embed_batch_callback if not skip_embeddings else None,
+        progress_callback=progress_callback,
+        incremental=not force_reindex,
     )
 
     # Map PipelineReport → coordinator stats dict
