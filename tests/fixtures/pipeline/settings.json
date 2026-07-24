@@ -1,0 +1,9 @@
+{
+    "name": "pipeline-test",
+    "version": "1.0.0",
+    "settings": {
+        "timeout_seconds": 30,
+        "retries": 3,
+        "features": ["parsing", "chunking", "diffing"]
+    }
+}

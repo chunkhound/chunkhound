@@ -13,6 +13,21 @@ from chunkhound.services.indexing_coordinator import run_batch_compaction_bounda
 from chunkhound.utils.file_patterns import normalize_include_patterns
 
 
+def _rust_pipeline_active() -> bool:
+    """Check whether the Rust pipeline is enabled.
+
+    Returns True when CHUNKHOUND_USE_RUST=1 AND the native extension is
+    importable.  Used to gate Python-side HNSW steps that the Rust
+    pipeline already handles internally.
+    """
+    import os
+    try:
+        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
+        return _get_use_rust()
+    except ImportError:
+        return False
+
+
 @dataclass
 class IndexingStats:
     """Statistics from directory processing."""
@@ -106,7 +121,8 @@ class DirectoryIndexingService:
                 await self._run_batch_compaction(stats)
 
             # Embedding generation (extracted from run.py:85-88, 287-312)
-            if not no_embeddings:
+            # Rust pipeline embeds before write — skip redundant embed pass.
+            if not no_embeddings and not _rust_pipeline_active():
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 stats.embeddings_generated = embed_result.get("generated", 0)
@@ -141,12 +157,18 @@ class DirectoryIndexingService:
 
     async def _drop_hnsw_indexes(self) -> None:
         """Drop HNSW indexes before bulk indexing."""
+        # Rust pipeline handles HNSW internally — skip Python-side HNSW ops.
+        if _rust_pipeline_active():
+            return
         db = getattr(self.indexing_coordinator, "_db", None)
         if db is not None and hasattr(db, "drop_all_hnsw_indexes"):
             db.drop_all_hnsw_indexes()
 
     async def _ensure_hnsw_indexes(self) -> None:
         """Rebuild HNSW indexes after bulk indexing completes."""
+        # Rust pipeline handles HNSW internally — skip Python-side HNSW ops.
+        if _rust_pipeline_active():
+            return
         db = getattr(self.indexing_coordinator, "_db", None)
         if db is not None and hasattr(db, "ensure_all_hnsw_indexes"):
             db.ensure_all_hnsw_indexes()
@@ -207,6 +229,7 @@ class DirectoryIndexingService:
         stats.files_skipped = result.get("skipped", 0)
         stats.files_errors = result.get("errors", 0)
         stats.chunks_created = result.get("total_chunks", 0)
+        stats.embeddings_generated = result.get("embeddings_generated", 0)
         stats.skipped_due_to_timeout = result.get("skipped_due_to_timeout", [])
         stats.skipped_unchanged = result.get("skipped_unchanged", 0)
         stats.skipped_filtered = result.get("skipped_filtered", 0)

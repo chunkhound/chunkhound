@@ -621,6 +621,25 @@ class _NoRichProgressManager:
                 task.completed += int(step)
                 return None
 
+            def remove_task(self, task_id: int) -> None:  # noqa: ANN001
+                self.tasks.pop(task_id, None)
+
+            def reset(  # noqa: ANN001
+                self,
+                task_id: int,
+                *,
+                start: bool = True,
+                total: int | None = None,
+                **kwargs: Any,
+            ) -> None:
+                task = self.tasks.get(task_id)
+                if not task:
+                    return
+                task.completed = int(kwargs.get("completed", 0))
+                if total is not None:
+                    task.total = int(total)
+                # `start` has no effect — the shim has no clock/timer to start.
+
         return _Shim()
 
 

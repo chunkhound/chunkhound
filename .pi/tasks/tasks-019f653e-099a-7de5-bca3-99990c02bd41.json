@@ -1,0 +1,48 @@
+{
+  "nextId": 4,
+  "tasks": [
+    {
+      "id": "1",
+      "subject": "Implement two-signal fragmentation detection in needs_compaction()",
+      "description": "Replace write_count >= threshold with free_ratio + row_waste_ratio analysis from DuckDB pragma_database_size() and pragma_storage_info(). Add compaction_threshold and compaction_min_size_mb to DbConfig. Update db_writer.rs to pass new config.",
+      "status": "in_progress",
+      "activeForm": "Implementing two-signal fragmentation detection",
+      "metadata": {},
+      "blocks": [
+        "3"
+      ],
+      "blockedBy": [],
+      "createdAt": 1784115726264,
+      "updatedAt": 1784115739947
+    },
+    {
+      "id": "2",
+      "subject": "Implement 3-phase atomic EXPORT/IMPORT compaction protocol",
+      "description": "Replace CHECKPOINT stub in run_compaction() with: preflight disk check, snapshot HNSW DDL, CHECKPOINT + close, write intent file (fsyncd), rename DB to .old, EXPORT DATABASE to Parquet, IMPORT DATABASE, rebuild HNSW, CHECKPOINT, rename new DB to active, remove intent + .old. Reopen connection afterward.",
+      "status": "pending",
+      "activeForm": "Implementing 3-phase compaction protocol",
+      "metadata": {},
+      "blocks": [
+        "3"
+      ],
+      "blockedBy": [],
+      "createdAt": 1784115731061,
+      "updatedAt": 1784115739945
+    },
+    {
+      "id": "3",
+      "subject": "Add Rust unit tests (contract tests) for DbBackend",
+      "description": "Add #[cfg(test)] module with contract tests: open/close idempotent, write_batch sequential IDs, upsert-on-conflict, delete cascades to embeddings, idempotent ensure_embedding_table, needs_compaction false on fresh DB, delete_files removes record. Add rlib to crate-type and tempfile dev-dependency.",
+      "status": "pending",
+      "activeForm": "Adding Rust contract tests",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [
+        "1",
+        "2"
+      ],
+      "createdAt": 1784115735579,
+      "updatedAt": 1784115739945
+    }
+  ]
+}

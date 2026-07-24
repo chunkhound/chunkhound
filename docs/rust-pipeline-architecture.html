@@ -1,0 +1,1754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ChunkHound — Unified Rust PyO3 Indexing Pipeline Architecture</title>
+<style>
+  :root {
+    --bg: #0f172a; --surface: #1e293b; --surface2: #334155;
+    --text: #e2e8f0; --text2: #94a3b8; --accent: #22d3ee;
+    --accent2: #0891b2; --green: #4ade80; --amber: #fbbf24;
+    --red: #f87171; --purple: #a78bfa;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    line-height: 1.65; max-width: 1040px; margin: 0 auto;
+    padding: 40px 24px;
+  }
+  h1 { font-size: 2.2rem; font-weight: 700; margin-bottom: 8px; }
+  h1 .dot { color: var(--accent); }
+  h2 {
+    font-size: 1.5rem; font-weight: 600; color: var(--accent);
+    margin: 48px 0 16px; padding-bottom: 8px;
+    border-bottom: 2px solid var(--surface2);
+  }
+  h3 { font-size: 1.15rem; font-weight: 600; margin: 28px 0 10px; color: var(--text); }
+  p, li { font-size: 0.95rem; color: var(--text2); margin-bottom: 12px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 24px; margin-bottom: 16px; }
+  li { margin-bottom: 6px; }
+  .subtitle { font-size: 1.05rem; color: var(--text2); margin-bottom: 32px; }
+
+  .card {
+    background: var(--surface); border-radius: var(--radius);
+    padding: 20px; margin-bottom: 16px; border: 1px solid var(--surface2);
+  }
+  .card h3 { margin-top: 0; }
+
+  .diagram {
+    background: var(--surface); border-radius: var(--radius);
+    padding: 24px; margin: 20px 0; border: 1px solid var(--surface2);
+    overflow-x: auto; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.82rem; line-height: 1.5; white-space: pre;
+    color: var(--text);
+  }
+
+  .flow {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    margin: 16px 0; justify-content: center;
+  }
+  .flow-box {
+    background: var(--surface2); border-radius: var(--radius);
+    padding: 14px 18px; text-align: center; min-width: 120px;
+    border: 2px solid transparent; transition: border-color 0.2s;
+  }
+  .flow-box.rust { border-color: var(--amber); }
+  .flow-box.python { border-color: var(--purple); }
+  .flow-box.both { border-style: dashed; border-color: var(--accent); }
+  .flow-box .label { font-weight: 600; font-size: 0.9rem; color: var(--text); }
+  .flow-box .sub { font-size: 0.78rem; color: var(--text2); margin-top: 4px; }
+  .flow-box .lang { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; margin-top: 6px; }
+  .flow-box.rust .lang { color: var(--amber); }
+  .flow-box.python .lang { color: var(--purple); }
+  .flow-box.both .lang { color: var(--accent); }
+  .flow-arrow { font-size: 1.5rem; color: var(--text2); }
+
+  .phase { display: inline-block; padding: 2px 10px; border-radius: 12px;
+    font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.08em; margin-right: 8px;
+  }
+  .phase.p0 { background: rgba(74,222,128,0.2); color: var(--green); }
+  .phase.p1 { background: rgba(34,211,238,0.2); color: var(--accent); }
+  .phase.p2 { background: rgba(251,191,36,0.2); color: var(--amber); }
+
+  code {
+    background: var(--surface2); padding: 2px 6px; border-radius: 4px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.85em;
+  }
+  pre {
+    background: #0f172a; border-radius: var(--radius); padding: 16px;
+    border: 1px solid var(--surface2); overflow-x: auto;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.82rem; line-height: 1.5; margin: 12px 0;
+  }
+  pre code { background: none; padding: 0; }
+
+  table {
+    width: 100%; border-collapse: collapse; margin: 16px 0;
+    font-size: 0.88rem;
+  }
+  th { background: var(--surface2); text-align: left; padding: 10px 14px;
+    font-weight: 600; color: var(--text); }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--surface2); color: var(--text2); }
+  tr:hover td { background: rgba(34,211,238,0.04); }
+
+  .note {
+    background: rgba(34,211,238,0.08); border-left: 3px solid var(--accent);
+    border-radius: 0 var(--radius) var(--radius) 0; padding: 12px 16px;
+    margin: 16px 0; font-size: 0.9rem;
+  }
+  .note strong { color: var(--accent); }
+
+  .toc { background: var(--surface); border-radius: var(--radius); padding: 20px 24px; margin-bottom: 32px; }
+  .toc h3 { margin-top: 0; margin-bottom: 12px; }
+  .toc ol { margin-bottom: 0; }
+
+  .legend { display: flex; gap: 20px; margin: 12px 0 24px; font-size: 0.82rem; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+  .legend-dot.rust { background: var(--amber); }
+  .legend-dot.python { background: var(--purple); }
+  .legend-dot.both { background: repeating-linear-gradient(45deg, var(--amber) 0, var(--amber) 3px, var(--purple) 3px, var(--purple) 6px); }
+
+  @media (max-width: 640px) {
+    body { padding: 20px 12px; }
+    h1 { font-size: 1.6rem; }
+    .flow { gap: 8px; }
+    .flow-box { min-width: 90px; padding: 10px 12px; }
+  }
+</style>
+</head>
+<body>
+
+<h1>ChunkHound <span class="dot">&#9679;</span></h1>
+<p class="subtitle">Unified Rust PyO3 Indexing Pipeline — High-Level Architecture<br>
+Based on the <a href="https://github.com/chunkhound/chunkhound/wiki/Unified-Rust-PyO3-Indexing-Pipeline-Design">Unified Rust PyO3 Indexing Pipeline Design</a> wiki</p>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <ol>
+    <li><a href="#current-state">Current State (Phase 0 Complete)</a></li>
+    <li><a href="#design-principles">Design Principles</a></li>
+    <li><a href="#arch-overview">Architectural Overview</a></li>
+    <li><a href="#rust-impl">Rust Implementation — Main Flow</a></li>
+    <li><a href="#python-blocks">Python Building Blocks</a></li>
+    <li><a href="#cross-layer">Cross-Layer Contracts</a></li>
+    <li><a href="#logging">Logging</a></li>
+    <li><a href="#flow">End-to-End Flow</a></li>
+    <li><a href="#files">File Map</a></li>
+    <li><a href="#decisions">Key Design Decisions</a></li>
+    <li><a href="#next-steps">Implementation Sequence</a></li>
+    <li><a href="#testing">Testing Strategy</a></li>
+    <li><a href="#benchmarking">Performance Benchmarks</a></li>
+  </ol>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot rust"></div> Rust (PyO3 native)</div>
+  <div class="legend-item"><div class="legend-dot python"></div> Python</div>
+  <div class="legend-item"><div class="legend-dot both"></div> Cross-layer (callback from Rust)</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="current-state">1. Current State <span class="phase p0">Phase 0 Complete</span></h2>
+
+<div class="card">
+  <h3>What Phase 0 delivered (already in <code>chunkhound_native</code>)</h3>
+  <table>
+    <tr><th>Component</th><th>File</th><th>What it does</th></tr>
+    <tr>
+      <td><code>scan_files</code></td>
+      <td><code>src/lib.rs</code></td>
+      <td>Parallel file discovery via <code>ignore</code> crate (ripgrep's walker). Respects <code>.gitignore</code>, extension filters, custom exclude patterns. Returns <code>Vec&lt;String&gt;</code> of matching paths.</td>
+    </tr>
+    <tr>
+      <td><code>RustDbWriter</code></td>
+      <td><code>src/db_writer.rs</code></td>
+      <td>High-performance DuckDB batch writer. Extracts <code>PyDict</code> → Rust structs directly (no JSON round-trip). Manages file upsert, chunk insert, embedding insert with 100-row batching. 3-phase EXPORT/IMPORT compaction. HNSW index lifecycle (drop-before-insert, recreate-after-commit).</td>
+    </tr>
+    <tr>
+      <td><code>DbBackend</code> trait</td>
+      <td><code>src/db/mod.rs</code></td>
+      <td>Trait-based backend abstraction: <code>open</code>, <code>close</code>, <code>write_batch</code>, <code>needs_compaction</code>, <code>run_compaction</code>, HNSW management. Currently only <code>DuckDbHnswBackend</code> impl.</td>
+    </tr>
+    <tr>
+      <td>Two-signal compaction</td>
+      <td><code>src/db/duckdb_backend.rs</code></td>
+      <td><code>free_ratio</code> (pragma_database_size) + <code>row_waste_ratio</code> (pragma_storage_info vs COUNT(*)). Triggers 3-phase EXPORT/IMPORT swap when waste exceeds thresholds.</td>
+    </tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>What remains in Python after Phase 0</h3>
+  <table>
+    <tr><th>Component</th><th>Where</th><th>Why still Python</th></tr>
+    <tr>
+      <td>Parse pipeline</td>
+      <td><code>services/batch_processor.py</code></td>
+      <td><code>process_file_batch</code> runs in ProcessPoolExecutor: file read → language detect → parser select → tree-sitter parse → chunk. 40+ language mappings use Python tree-sitter bindings.</td>
+    </tr>
+    <tr>
+      <td>Store orchestration</td>
+      <td><code>services/indexing_coordinator.py</code></td>
+      <td>Per-file transaction loop, smart chunk diffing (preserve existing embeddings), skip detection, disk usage checks. Calls RustDbWriter or LanceDB provider.</td>
+    </tr>
+    <tr>
+      <td>Embedding generation</td>
+      <td><code>services/indexing_coordinator.py</code></td>
+      <td>Batched HTTP calls to OpenAI/VoyageAI APIs. Rate limiting, retries, auth via <code>httpx</code>/SDK.</td>
+    </tr>
+    <tr>
+      <td>Main iteration loop</td>
+      <td><code>services/directory_indexing_service.py</code></td>
+      <td>File discovery → parse+store batches (all files) → compaction → embed batches (separate pass) → compaction → HNSW rebuild. Python asyncio loop with rich progress.</td>
+    </tr>
+    <tr>
+      <td>Progress / CLI</td>
+      <td><code>services/directory_indexing_service.py</code> + CLI</td>
+      <td>Rich progress bars, config loading, CLI argument parsing (click).</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="design-principles">2. Design Principles</h2>
+
+<div class="card">
+  <ol>
+    <li><strong>Streaming pipeline — embed then store.</strong> The main loop is a 3-thread pipeline: parse → embed → store. Each batch flows through dedicated threads for CPU (parse), network (embed), and disk (store). All three threads run concurrently on different batches — bounded channels provide natural backpressure.</li>
+    <li><strong>One DB write per chunk.</strong> Because embedding runs before storage, chunks and their embedding vectors are inserted together in a single DuckDB transaction. No separate embedding storage pass. No <code>embed_cache</code> to manage.</li>
+    <li><strong>Parsers and embedding providers stay in Python.</strong> These are complex subsystems that use external SDKs (tree-sitter, openai, httpx) and evolve independently. Rust treats them as opaque callbacks with typed contracts.</li>
+    <li><strong>GIL is not a bottleneck.</strong> Parse threads hold the GIL for ~100µs per file. Embed thread holds the GIL only during argument marshalling — <code>httpx</code> releases it during HTTP calls. Store thread never touches the GIL. All three threads make concurrent progress.</li>
+    <li><strong>No json.dumps round-trip.</strong> Data crosses the Rust/Python boundary as typed structs via PyO3 extraction — the same zero-copy pattern RustDbWriter already uses.</li>
+    <li><strong>Backward compatible.</strong> The Python <code>IndexingCoordinator</code> and <code>DirectoryIndexingService</code> remain available. The Rust pipeline is an alternative entry point, configurable via a toggle.</li>
+    <li><strong>Progressive migration.</strong> Each phase can be toggled independently via feature flags or config. Fall back to the Python path on error. Build → test → benchmark each phase before proceeding.</li>
+  </ol>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="arch-overview">3. Architectural Overview</h2>
+
+<div class="diagram">
+┌─────────────────────────────────────────────────────────────────┐
+│                     PYTHON LAYER                                 │
+│  CLI (click) → Config → PipelineService → pipeline.run(callbacks)│
+├─────────────────────────────────────────────────────────────────┤
+│                   RUST NATIVE EXTENSION                          │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │              IndexingPipeline  (PyO3 class)               │   │
+│  │                                                           │   │
+│  │  run(files, config, parse_cb, embed_cb, progress_cb)   │   │
+│  │                                                           │   │
+│  │  ═══ Phase A: Setup ═══════════════════════════════════  │   │
+│  │  drop_hnsw_indexes()     ──(no GIL)──▶ RustDbWriter      │   │
+│  │  load_db_snapshot() → HashMap&lt;String, DbFileState&gt;         │   │
+│  │  (files already discovered by Python, passed as arg)      │   │
+│  │                                                           │   │
+│  │  ═══ Phase B: Streaming Pipeline ═══════════════════════ │   │
+│  │                                                           │   │
+│  │  ┌─────────┐  channel(2)  ┌─────────┐  channel(2) ┌────┐ │   │
+│  │  │ PARSE   │─────────────▶│ EMBED   │────────────▶│STORE│  │   │
+│  │  │ (rayon) │              │ (HTTP)  │            │(DB) │  │   │
+│  │  │ Thread  │              │ Thread  │            │Thread│  │   │
+│  │  │  1      │              │   2     │            │  3  │  │   │
+│  │  └─────────┘              └─────────┘            └────┘ │   │
+│  │                                                           │   │
+│  │  Parse:  files→parse_cb→diff→push DiffResult    │   │
+│  │  Embed:  pop DiffResult→embed_cb→push EmbeddedBatch      │   │
+│  │  Store:  pop EmbeddedBatch→write files+chunks+embeddings  │   │
+│  │          → delete_orphans→compact→rebuild HNSW           │   │
+│  │                                                           │   │
+│  │  return PipelineReport                                    │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ┌──────────────┐   ┌──────────────────┐   ┌──────────────┐   │
+│  │  Differ      │   │   RustDbWriter    │   │ PipelineState│   │
+│  │   (new)      │   │    (existing)     │   │    (new)     │   │
+│  └──────────────┘   └──────────────────┘   └──────────────┘   │
+│                                                                  │
+│  ┌──────────────────┐                                          │
+│  │   Reporter (new) │                                          │
+│  └──────────────────┘                                          │
+└─────────────────────────────────────────────────────────────────┘
+          │                       │
+          ▼                       ▼
+    ┌──────────┐          ┌──────────────┐
+    │ Filesystem│          │   DuckDB     │
+    │ (Python  │          │  (.chunkhound│
+    │  discov.)│          │   /chunks.db)│
+    └──────────┘          └──────────────┘
+</div>
+
+<p style="color: var(--text2); font-size: 0.88rem; margin-top: 12px;">
+  <strong>Reused from Phase 0:</strong> RustDbWriter (DuckDB batch writing, compaction, HNSW).<br>
+  <strong>New:</strong> IndexingPipeline (orchestrator + 3-thread streaming), Differ (content-hash diff, DB snapshot), PipelineState (counters, error tracking), Reporter (PipelineReport PyO3 class).<br>
+  <strong>Stays in Python:</strong> File discovery (all flags, backends, chignore, simulate), Parsers (tree-sitter), Embedding providers (HTTP APIs), CLI / config / progress display.
+</p>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="rust-impl">4. Rust Implementation — Main Flow</h2>
+
+<h3>4.1 <code>IndexingPipeline</code> — The Orchestrator <span class="phase p1">New</span></h3>
+
+<div class="card">
+  <p>The main PyO3 class. Python calls <code>.run()</code> from <code>asyncio.to_thread</code>. Internally, <code>run()</code> spawns three threads connected by bounded channels.
+
+  <div class="note">
+    <strong>Thread safety requirement:</strong> The parse thread uses <code>rayon::par_iter</code> and the embed thread uses <code>thread::spawn</code> — both call Python callbacks from non-main threads. The <code>.so</code> must call <code>pyo3::prepare_freethreaded_python()</code> in the module init function (<code>#[pymodule_init]</code>). This is a new requirement — the existing codebase does not call it yet.
+  </div> The entire module is gated behind <code>#[cfg(feature = "rust-pipeline")]</code> — the <code>.so</code> only includes this code when the feature is enabled.</p>
+
+<pre><code>/// src/pipeline/mod.rs — entire module is feature-gated
+#[cfg(feature = "rust-pipeline")]
+mod pipeline;
+
+/// src/pipeline/pipeline.rs
+#[cfg(feature = "rust-pipeline")]
+#[pyclass]
+pub struct IndexingPipeline {
+    config: PipelineConfig,
+    state: PipelineState,
+}
+
+#[pymethods]
+impl IndexingPipeline {
+    #[new]
+    fn new(config: &Bound&lt;PyDict&gt;) -> PyResult&lt;Self&gt;;
+
+    /// Run the full indexing pipeline synchronously.
+    /// Call from Python via `asyncio.to_thread(pipeline.run, ...)`.
+    fn run(
+        &mut self,
+        py: Python&lt;'_&gt;,
+        files: Vec&lt;String&gt;,                      // discovered by Python, passed to Rust
+        parse_callback: Py&lt;PyAny&gt;,              // (path, detect_sql) → (language, list[dict])
+        embed_callback: Option&lt;Py&lt;PyAny&gt;&gt;,       // (texts, provider, model) → list[list[float]]
+        progress_callback: Option&lt;Py&lt;PyAny&gt;&gt;,     // (phase, cur, total, info) → bool
+    ) -> PyResult&lt;PipelineReport&gt;;
+}</code></pre>
+
+  <div class="note">
+    <strong>Note:</strong> <code>embed_cache</code> is gone. Texts flow from parse → embed thread through an <code>mpsc::sync_channel</code>. Nothing accumulates across batches except the DB snapshot (a <code>HashMap</code> that shrinks as files are matched).
+  </div>
+</div>
+
+<h3>4.2 Key Internal Types</h3>
+
+<div class="card">
+<pre><code>/// src/pipeline/config.rs — Extracted from Python dict at construction time.
+///
+/// Discovery is NOT handled by Rust — Python runs its full discovery engine
+/// (gitignore backends, chignore, exclude_mode, discovery_backend, simulate/dry-run)
+/// and passes the filtered file list to <code>run(files: Vec&lt;String&gt;)</code>.
+///
+/// Rust-side flags (parallelism, storage, change detection) live here.
+/// Python-side flags (embedding config, parser tuning) flow through callbacks.
+#[derive(Debug, Clone)]
+pub struct PipelineConfig {
+    // ── Storage ──
+    pub db_path: PathBuf,
+    pub db_batch_size: usize,                // chunks per DB insert (default: 100)
+    pub compaction_batch_threshold: u32,
+    pub compaction_threshold: f64,           // fragmentation_threshold_pct
+    pub compaction_min_size_mb: u64,
+    pub disk_usage_limit_mb: Option&lt;f64&gt;,
+
+    // ── Pipeline parallelism ──
+    pub parse_batch_size: usize,             // files per parse batch (default: 200)
+    pub parse_thread_pool_size: usize,       // rayon thread pool (default: num_cpus)
+    pub embed_batch_size: usize,             // texts per embed API call (passed to callback)
+
+    // ── Change detection ──
+    pub force_reindex: bool,                 // skip snapshot diff, re-parse everything
+    pub mtime_epsilon_seconds: f64,          // mtime comparison tolerance (default: 0.01)
+
+    // ── Orphan cleanup ──
+    pub skip_cleanup: bool,                  // --no-cleanup flag
+
+    // ── Feature toggles ──
+    pub skip_embeddings: bool,               // --no-embeddings / CHUNKHOUND_NO_EMBEDDINGS
+
+    // ── Passed through to parse callback (Rust doesn't interpret) ──
+    pub per_file_timeout_secs: f64,          // default: 3.0
+    pub per_file_timeout_min_size_kb: u32,   // default: 128
+    pub detect_embedded_sql: bool,           // default: true
+    pub config_file_size_threshold_kb: u32,  // default: 20
+
+    // ── Passed through to embed callback (Rust doesn't inspect) ──
+    pub embedding_provider: String,          // "openai", "voyageai", etc.
+    pub embedding_model: String,             // "text-embedding-3-small", etc.
+}
+</code></pre>
+</div>
+
+<h3>4.2a Flag and Env-Var Routing</h3>
+
+<p>The Rust pipeline must support ~60 flags and environment variables from the existing Python indexing pipeline. Routing strategy:</p>
+
+<table class="config-table">
+  <tr><th>Category</th><th>Count</th><th>Location</th><th>How Rust accesses it</th></tr>
+
+  <tr>
+    <td><strong>File discovery</strong><br>
+    <small>All ~18 discovery flags: include_patterns, exclude_patterns, exclude_mode, ignore_gitignore, chignore_file, index_unknown_files, max_file_size_mb, parallel_discovery, discovery_backend, gitignore_backend, workspace_gitignore_*, simulate/dry-run flags</small></td>
+    <td>~22</td>
+    <td><strong>Python only</strong></td>
+    <td>Python runs its full discovery engine, then passes the filtered file list to <code>run(files: Vec&lt;String&gt;)</code>. This preserves all existing discovery behavior (gitignore backends, chignore, simulate mode, git ls-files integration) with no duplication.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Storage</strong><br>
+    <small>db_path, db_batch_size, compaction_*, disk_usage_limit_mb, fragmentation_threshold_pct</small></td>
+    <td>~8</td>
+    <td><code>PipelineConfig</code></td>
+    <td>Store thread and Phase C finalization use these directly.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Parallelism</strong><br>
+    <small>parse_batch_size, parse_thread_pool_size, embed_batch_size</small></td>
+    <td>3</td>
+    <td><code>PipelineConfig</code></td>
+    <td>Rust controls thread pools and channel capacities. <code>embed_batch_size</code> is passed to the embed callback as a hint.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Change detection</strong><br>
+    <small>force_reindex, mtime_epsilon_seconds</small></td>
+    <td>2</td>
+    <td><code>PipelineConfig</code></td>
+    <td>Differ uses these for snapshot comparison.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Orphan cleanup</strong><br>
+    <small>skip_cleanup</small></td>
+    <td>1</td>
+    <td><code>PipelineConfig</code></td>
+    <td>Phase C checks this before deleting orphans.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Feature toggle</strong><br>
+    <small>skip_embeddings</small></td>
+    <td>1</td>
+    <td><code>PipelineConfig</code></td>
+    <td>Embed thread checks this — passes batches through with no HTTP calls.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Parsing tuning</strong><br>
+    <small>per_file_timeout_seconds, per_file_timeout_min_size_kb, detect_embedded_sql, config_file_size_threshold_kb</small></td>
+    <td>4</td>
+    <td><code>PipelineConfig</code><br>(pass-through)</td>
+    <td>Stored in Rust, passed to parse callback: <code>callback(path, detect_embedded_sql)</code>. The Python adapter applies timeout, file-size filter, and embedded SQL detection internally.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Embedding config</strong><br>
+    <small>provider, model, api_key, base_url, ssl_verify, output_dims, client_side_truncation, batch_size, timeout, max_retries, max_concurrent_batches, rerank_model, Azure config</small></td>
+    <td>~14</td>
+    <td><strong>Python callback only</strong></td>
+    <td>Rust never sees these. Python loads <code>EmbeddingConfig</code> and builds the embed callback with all config baked in via closure. Only <code>provider</code>+<code>model</code> pass through Rust for progress reporting.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Chunking</strong><br>
+    <small>chunk_overlap, min_chunk_size</small></td>
+    <td>2</td>
+    <td><strong>Python callback only</strong></td>
+    <td>Configures tree-sitter parsers. Baked into the parser factory via closure — Rust never sees them.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Realtime / daemon</strong><br>
+    <small>realtime_backend, watchman config</small></td>
+    <td>~6</td>
+    <td><strong>Out of scope</strong></td>
+    <td>Rust pipeline is batch-only in Phase 1. Realtime/watch mode stays Python.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Global / logging</strong><br>
+    <small>--debug, --verbose, CHUNKHOUND_DEBUG, CHUNKHOUND_DEBUG_FILE, CHUNKHOUND_NO_RICH, CHUNKHOUND_MCP_MODE, CHUNKHOUND_NO_PROMPTS</small></td>
+    <td>~8</td>
+    <td><strong>Python only</strong></td>
+    <td>Affects logging and output formatting. No impact on the Rust pipeline.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Simulate / dry-run</strong><br>
+    <small>--simulate, --json, --show-sizes, --sort, --debug-ignores, --check-ignores, --profile-startup, --perf-diagnostics, --perf-output</small></td>
+    <td>~9</td>
+    <td><strong>Python only</strong></td>
+    <td>Read-only diagnostics. If active, Python never calls <code>IndexingPipeline::run()</code>.</td>
+  </tr>
+
+  <tr>
+    <td><strong>Discovery backends</strong><br>
+    <small>discovery_backend (auto/python/git/git_only), gitignore_backend (python/libgit2), workspace_gitignore_overlay, workspace_gitignore_nonrepo</small></td>
+    <td>~4</td>
+    <td><strong>Python only</strong></td>
+    <td>These control <em>how</em> Python discovers files. Rust never sees them — it receives the final file list.</td>
+  </tr>
+</table>
+
+<div class="note">
+  <strong>Design principle:</strong> Rust owns the pipeline <em>execution</em> (parse → embed → store → compact). Python owns <em>discovery</em> and <em>domain logic</em> (parsing, embedding). The Rust pipeline receives a pre-discovered file list — no discovery flags enter Rust. Parse-tuning flags pass through to callbacks unchanged.
+</div>
+
+<div class="card">
+<pre><code>/// src/pipeline/types.rs — Internal pipeline types (never exposed to Python)
+pub struct ParsedFile {
+    pub path: PathBuf,
+    pub language: Option&lt;String&gt;,          // None if unrecognized
+    pub file_size: u64,
+    pub mtime: f64,
+    pub content_hash: String,
+    pub chunks: Vec&lt;NewChunk&gt;,
+    pub error: Option&lt;String&gt;,
+}
+
+pub struct NewChunk {
+    // ── filled by parse thread (from Python callback) ──
+    pub chunk_type: String,
+    pub symbol: Option&lt;String&gt;,
+    pub code: String,
+    pub start_line: Option&lt;i64&gt;,
+    pub end_line: Option&lt;i64&gt;,
+    pub start_byte: Option&lt;i64&gt;,
+    pub end_byte: Option&lt;i64&gt;,
+    pub language: Option&lt;String&gt;,
+    pub metadata: Option&lt;String&gt;,
+    pub embed_text: Option&lt;String&gt;,        // formatted by Python: "# path (lang)\ncode"
+
+    // ── filled by embed thread ──
+    pub embedding: Option&lt;Vec&lt;f32&gt;&gt;,
+    pub provider: Option&lt;String&gt;,
+    pub model: Option&lt;String&gt;,
+}
+
+/// Produced by the parse thread, consumed by the embed thread.
+pub struct DiffResult {
+    // ── file metadata (for store thread to upsert files table) ──
+    pub file_id: i64,                     // 0 if new file (store thread queries by path)
+    pub path: String,                     // relative path (DB key)
+    pub name: String,                     // filename only (NOT NULL in DB)
+    pub extension: Option&lt;String&gt;,         // file extension
+    pub language: Option&lt;String&gt;,
+    pub file_size: u64,
+    pub mtime: f64,
+    pub content_hash: String,
+    pub is_new_file: bool,
+
+    // ── chunks (embed_text + embedding fields filled downstream) ──
+    pub chunks_to_insert: Vec&lt;NewChunk&gt;,
+}
+
+/// Produced by the embed thread, consumed by the store thread.
+/// Embeddings are already populated on NewChunk.embedding — no separate vectors list.
+pub struct EmbeddedBatch {
+    pub diffs: Vec&lt;DiffResult&gt;,           // NewChunk.embedding is Some for embeddable chunks
+}
+
+/// One bulk SELECT at startup — zero per-file DB queries during diff.
+pub struct DbFileState {
+    pub file_id: i64,
+    pub size_bytes: Option&lt;i64&gt;,           // matches FileRecord.size_bytes
+    pub mtime: Option&lt;f64&gt;,                // matches FileRecord.mtime
+    pub content_hash: Option&lt;String&gt;,
+}
+
+// Snapshot loaded ONCE in Phase A:
+//   SELECT path, id, size, modified_time, content_hash FROM files
+//   → HashMap&lt;String, DbFileState&gt;
+// diff_and_remove() removes matched entries; leftovers → orphans to delete
+//
+// Note: DbFileState has no chunk IDs.
+</div>
+
+<h3>4.2b PipelineReport + Helpers</h3>
+
+<div class=card>
+<pre><code>/// src/pipeline/report.rs — Exposed to Python via PyO3
+#[pyclass]
+pub struct PipelineReport {
+    #[pyo3(get)]
+    pub files_processed: u64,
+    #[pyo3(get)]
+    pub files_skipped: u64,
+    #[pyo3(get)]
+    pub chunks_written: u64,
+    #[pyo3(get)]
+    pub embeddings_generated: u64,
+    #[pyo3(get)]
+    pub elapsed_secs: f64,
+    #[pyo3(get)]
+    pub errors: Vec&lt;String&gt;,
+    #[pyo3(get)]
+    pub peak_rss_mb: Option&lt;f64&gt;,     // from RSS sidecar thread
+}
+
+/// src/pipeline/pipeline.rs — extracts ParsedFile from Python callback tuple
+fn extract_parsed_result(
+    py: Python,
+    path: &Path,
+    lang: &str,
+    chunks_py: &PyAny,
+) -> ParsedFile {
+    // chunks_py is list[dict] — extract each chunk dict into NewChunk
+    let chunks: Vec&lt;NewChunk&gt; = chunks_py
+        .iter()
+        .unwrap()
+        .map(|item| {
+            let cd = item.unwrap();
+            NewChunk {
+                chunk_type:   extract_req(cd, chunk_type),
+                symbol:       extract_opt(cd, symbol),
+                code:         extract_req(cd, code),
+                start_line:   extract_opt(cd, start_line),
+                end_line:     extract_opt(cd, end_line),
+                start_byte:   extract_opt(cd, start_byte),
+                end_byte:     extract_opt(cd, end_byte),
+                language:     extract_opt(cd, language),
+                metadata:     extract_opt(cd, metadata),
+                embed_text:   extract_opt(cd, embed_text),
+                embedding:    None,  // filled by embed thread
+                provider:     None,
+                model:        None,
+            }
+        })
+        .collect();
+    // Also extract content_hash from callback result if available,
+    // or compute from file contents + fs::metadata for mtime/size
+    todo!()
+}</code></pre>
+</div>
+
+<h3>4.3 Main Loop — Three-Thread Streaming</h3>
+
+<div class="card">
+<pre><code>use std::sync::mpsc;
+use std::thread;
+
+fn run(&mut self, py, files,
+       parse_cb, embed_cb, progress_cb) -> PipelineReport {
+
+    let started = Instant::now();
+
+    // ═══ Phase A: Setup ════════════════════════════════════
+    let db_path = self.config.db_path.clone();
+    py.allow_threads(|| {
+        let db = RustDbWriter::open(&db_path)?;
+        db.drop_hnsw_indexes()?;
+    });
+    let mut snapshot = py.allow_threads(|| load_db_snapshot(&db_path))?;
+
+    // Files discovered by Python — passed as argument to run()
+    let total_files = self.files.len();
+    let mut files_iter = self.files.into_iter().peekable();
+
+    // ═══ Channels ══════════════════════════════════════════
+    // Bounded capacity 2: backpressure prevents memory blow-up.
+    let (parse_tx, parse_rx) = mpsc::sync_channel::&lt;Vec&lt;DiffResult&gt;&gt;(2);
+    let (store_tx, store_rx) = mpsc::sync_channel::&lt;EmbeddedBatch&gt;(2);
+
+    // ═══ Embed thread — attaches vectors directly to chunks ═══
+    let embed_config = self.config.clone();
+    let embed_cb = embed_cb.clone();
+    let embed_handle = thread::spawn(move || {
+        for mut diffs in parse_rx {
+            // Collect texts from chunks that need embedding
+            let texts: Vec<&str> = diffs.iter()
+                .flat_map(|d| d.chunks_to_insert.iter())
+                .filter(|c| c.embed_text.is_some())
+                .map(|c| c.embed_text.as_ref().unwrap().as_str())
+                .collect();
+
+            if !texts.is_empty() && !embed_config.skip_embeddings && embed_cb.is_some() {
+                // Call Python embed_callback — catch errors, store chunks without vectors
+                let vectors_result = Python::with_gil(|py| {
+                    let cb = embed_cb.as_ref().unwrap().bind(py);
+                    cb.call1((
+                        texts,
+                        embed_config.embedding_provider.as_str(),
+                        embed_config.embedding_model.as_str(),
+                    ))
+                    .and_then(|r| r.extract::<Vec<Vec<f32>>>(py))
+                });
+
+                if let Ok(vectors) = vectors_result {
+                    // Validate: provider must return one vector per text
+                    if vectors.len() != texts.len() {
+                        // Mismatch — skip embedding, store chunks bare
+                        // (no panic — pipeline continues)
+                    } else {
+                        // Attach vectors back to chunks (same iteration order)
+                    let mut vi = 0;
+                    for diff in diffs.iter_mut() {
+                        for chunk in diff.chunks_to_insert.iter_mut() {
+                            if chunk.embed_text.is_some() {
+                                chunk.embedding = Some(vectors[vi].clone());
+                                chunk.provider = Some(embed_config.embedding_provider.clone());
+                                chunk.model = Some(embed_config.embedding_model.clone());
+                                vi += 1;
+                            }
+                        }
+                    }
+                }
+                // On error: chunks stay with embedding=None — stored bare, user can re-embed
+            }
+            // Send populated chunks to store thread
+            store_tx.send(EmbeddedBatch { diffs }).unwrap();
+        }
+    });
+
+    // ═══ Store thread — builds DbWriterBatch, calls existing backend ═══
+    let store_config = self.config.clone();
+    let store_handle = thread::spawn(move || {
+        let mut db = RustDbWriter::open(&store_config.db_path)
+            .expect("store thread: failed to open DB");
+        let mut total_stored = 0u64;
+        for batch in store_rx {
+            // Build a DbWriterBatch from DiffResults — reuses existing
+            // DuckDbHnswBackend::write_batch() with temp tables, FK workarounds,
+            // 100-row batching, and embeddings_N table sharding.
+            let writer_batch = build_writer_batch(&batch.diffs);
+            total_stored += db.write_batch(writer_batch)
+                .expect("store thread: batch write failed");
+        }
+        // Explicit close to CHECKPOINT before Phase C opens another connection
+        db.close().expect("store thread: close failed");
+        total_stored
+    });
+
+    // ═══ Parse thread (main thread) ═══════════════════════
+    while files_iter.peek().is_some() {
+        let batch_paths: Vec<PathBuf> = files_iter
+            .by_ref()
+            .take(self.config.parse_batch_size)
+            .map(PathBuf::from)
+            .collect();
+        let parsed = self.parse_batch(py, &batch_paths, &parse_cb);
+
+        // Separate errored files from successful ones
+        let (ok_files, err_files): (Vec<_>, Vec<_>) =
+            parsed.into_iter().partition(|f| f.error.is_none());
+        self.state.errors.extend(
+            err_files.iter().filter_map(|f| f.error.clone())
+        );
+
+        if !ok_files.is_empty() {
+            let diffs = self.diff_and_remove(&ok_files, &mut snapshot)?;
+            self.state.record_parsed(&ok_files);
+            self.emit_progress(py, &progress_cb, total_files)?;
+
+            // Release GIL before blocking send (embed thread is GIL-free)
+            py.allow_threads(|| parse_tx.send(diffs).expect("parse_tx: embed thread dropped"));
+        }
+    }
+    drop(parse_tx);  // signals embed thread to finish
+
+    // ═══ Drain ════════════════════════════════════════════
+    embed_handle.join().expect("embed thread panicked");
+    let chunks_written = store_handle.join().expect("store thread panicked");
+
+    // Phase C: Finalize
+    py.allow_threads(|| {
+        let db = RustDbWriter::open(&db_path)?;
+        db.delete_orphaned_files(&snapshot)?;
+        db.run_compaction()?;
+        db.rebuild_hnsw_indexes()?;
+        db.close()?;
+    });
+
+    self.state.chunks_written = chunks_written;
+    Ok(self.state.into_report(started.elapsed()))
+}</code></pre>
+
+<div class="note">
+  <strong>Key simplification:</strong> embed-before-store eliminates <code>embed_cache</code>, <code>store_embeddings()</code>, the two-phase ID tracking, and the separate embedding storage pass. The store thread does one <code>INSERT</code> per chunk (chunk + embedding together). The embed thread attaches vectors directly to <code>NewChunk</code> fields — no fragile parallel-vector mapping. When <code>skip_embeddings</code> is true (or <code>embed_callback</code> is None), the embed thread passes batches straight through with no HTTP calls.
+</div>
+</div>
+
+<h3>4.4 Thread-by-Thread Detail</h3>
+
+<div class="card">
+  <h4>Thread 1 — Parse (CPU-bound, rayon parallel)</h4>
+  <table>
+    <tr><th>Step</th><th>GIL?</th><th>Resource</th></tr>
+    <tr><td>parse_batch()</td><td>~100µs per file</td><td>Rayon threads → Python callback (detects language internally, runs tree-sitter)</td></tr>
+    <tr><td>diff_and_remove()</td><td>No</td><td>In-memory snapshot comparison (mtime+size → content hash fallback)</td></tr>
+    <tr><td>push to channel</td><td>No (py.allow_threads)</td><td>Blocks if channel full → natural backpressure; GIL released during wait</td></tr>
+  </table>
+
+  <h4>Thread 2 — Embed (Network-bound)</h4>
+  <table>
+    <tr><th>Step</th><th>GIL?</th><th>Resource</th></tr>
+    <tr><td>pop from parse channel</td><td>No</td><td>Blocks if parse hasn't produced yet</td></tr>
+    <tr><td>Collect embed_text from chunks that need it</td><td>No</td><td>Iterate NewChunk.embed_text</td></tr>
+    <tr><td>embed_callback()</td><td>Yes (brief)</td><td>httpx releases GIL during HTTP call</td></tr>
+    <tr><td>Attach vectors back to chunks</td><td>No</td><td>Set NewChunk.embedding/provider/model on each chunk</td></tr>
+    <tr><td>push EmbeddedBatch to store channel</td><td>No</td><td>Blocks if store thread is busy → backpressure</td></tr>
+  </table>
+
+  <h4>Thread 3 — Store (Disk-bound)</h4>
+  <table>
+    <tr><th>Step</th><th>GIL?</th><th>Resource</th></tr>
+    <tr><td>pop EmbeddedBatch from channel</td><td>No</td><td>Blocks if embed hasn't produced yet</td></tr>
+    <tr><td>DELETE old chunks per modified file</td><td>No</td><td>DuckDB — <code>DELETE FROM chunks WHERE file_id = ?</code></td></tr>
+    <tr><td>UPSERT files</td><td>No</td><td>DuckDB — uses DiffResult file metadata</td></tr>
+    <tr><td>INSERT chunks + embeddings</td><td>No</td><td>One transaction: chunk row + embedding vector (from NewChunk.embedding)</td></tr>
+  </table>
+
+<pre><code>/// Build a DbWriterBatch from DiffResults — delegates to existing
+/// DuckDbHnswBackend::write_batch() with temp tables and embeddings_N sharding.
+fn build_writer_batch(diffs: &[DiffResult]) -> DbWriterBatch {
+    let mut batch = DbWriterBatch::new();
+
+    for diff in diffs {
+        // File record (for upsert_file in backend)
+        batch.files.push(FileRecord {
+            id: if diff.is_new_file { None } else { Some(diff.file_id) },
+            path: diff.path.clone(),
+            name: diff.name.clone(),
+            extension: diff.extension.clone(),
+            size_bytes: Some(diff.file_size as i64),
+            mtime: Some(diff.mtime),
+            content_hash: Some(diff.content_hash.clone()),
+            language: diff.language.clone(),
+        });
+
+        // Chunks to delete for modified files
+        if !diff.is_new_file {
+            batch.chunk_ids_to_delete.push(diff.file_id);  // DELETE BY file_id
+        }
+
+        // Chunks + embeddings to insert
+        for chunk in &diff.chunks_to_insert {
+            batch.chunks.push(ChunkRecord {
+                id: None,  // auto-incremented by DB
+                file_id: 0, // resolved by backend after file upsert
+                chunk_type: chunk.chunk_type.clone(),
+                symbol: chunk.symbol.clone(),
+                code: chunk.code.clone(),
+                start_line: chunk.start_line,
+                end_line: chunk.end_line,
+                start_byte: chunk.start_byte,
+                end_byte: chunk.end_byte,
+                language: chunk.language.clone(),
+                metadata: chunk.metadata.clone(),
+                embedding: chunk.embedding.clone(),
+                provider: chunk.provider.clone(),
+                model: chunk.model.clone(),
+            });
+        }
+    }
+
+    batch
+}</code></pre>
+
+<div class="note">
+  <strong>Why reuse the existing backend:</strong> <code>DuckDbHnswBackend::write_batch()</code> already handles temp-table staging, FK pre-deletion, <code>embeddings_{dims}</code> table sharding, 100-row batching, and HNSW lifecycle. Building a <code>DbWriterBatch</code> from <code>DiffResult</code>s and delegating avoids reinventing SQL, embedding JSON marshalling, and connection management.
+</div>
+
+<div class="note">
+  <strong>Implementation note — pseudocode vs actual types:</strong> The pseudocode in this document illustrates logical flow. The implementation must match the existing codebase types:
+  <ul>
+    <li><code>FileRecord</code> uses <code>existing_file_id: Option&lt;i64&gt;</code> (not <code>id</code>). <code>name</code>/<code>extension</code> are derived from <code>path</code> internally by <code>upsert_file()</code>.</li>
+    <li><code>DbWriterBatch</code> nests chunks as <code>FileRecord.chunks: Vec&lt;ChunkRecord&gt;</code>. Per-file deletion needs a new <code>delete_file_ids: Vec&lt;i64&gt;</code> field.</li>
+    <li><code>RustDbWriter</code> is a PyO3 class — its methods require <code>Python&lt;'_&gt;</code>. Store thread must use <code>Python::with_gil(|py| ...)</code>. Pipeline should call <code>DbBackend::write_batch()</code> directly (bypassing the Python dict wrapper).</li>
+    <li><code>pyo3::prepare_freethreaded_python()</code> must be called in module init for the embed thread.</li>
+    <li>Parse callback returns <code>PyAny</code> — use <code>.extract::&lt;(String, &PyList)&gt;()</code>. Method names: <code>drop_all_hnsw_indexes()</code>, <code>ensure_all_hnsw_indexes()</code>. <code>write_batch()</code> returns <code>BatchResult</code>.</li>
+  </ul>
+  These details are resolved during implementation by reading the existing source. The architecture describes <em>design</em> — the pseudocode illustrates intent.
+</div>
+</div>
+
+<h3>4.5 Parse Concurrency — Rayon Within Each Batch</h3>
+
+<div class="card">
+  <p>Parsing is CPU-bound (tree-sitter C library). Within each batch, files are parsed in parallel via rayon. This sits inside Thread 1 — the parse thread uses rayon internally.</p>
+
+<pre><code>fn parse_batch(
+    &self, py: Python,
+    files: &[PathBuf],
+    callback: &Py&lt;PyAny&gt;,
+) -> Vec&lt;ParsedFile&gt; {  // errors captured in ParsedFile.error
+
+    py.allow_threads(|| {
+        files.par_iter()
+            .map(|path| {
+                Python::with_gil(|py| {
+                    let cb = callback.bind(py);
+                    // Callback returns (language: str, chunks: list[dict])
+                    // Language detection is done in Python (40+ mappings)
+                    let result = cb.call1((
+                        path.to_string_lossy().as_ref(),
+                        self.config.detect_embedded_sql,
+                    ));
+                    match result {
+                        Ok((lang_py, chunks_py)) => {
+                            let lang: String = lang_py.extract(py).unwrap_or_default();
+                            extract_parsed_result(py, path, &lang, chunks_py)
+                        },
+                        Err(e) => ParsedFile {
+                            path: path.clone(),
+                            language: None,
+                            file_size: 0, mtime: 0.0, content_hash: String::new(),
+                            chunks: Vec::new(),
+                            error: Some(e.to_string()),
+                        },
+                    }
+                })
+            })
+            .collect()
+    })
+}</code></pre>
+
+  <div class="note">
+    <strong>Why threads, not processes:</strong> tree-sitter's C library releases the GIL internally during parsing. Each rayon thread holds the GIL for ~100µs per file (the thin Python adapter). No fork overhead, no pickling, shared tree-sitter grammars. Same <code>create_parser_for_language + parser.parse_file()</code> — just called from a shared process.
+  </div>
+</div>
+
+<h3>4.6 Garbage Collection</h3>
+
+<div class="card">
+  <p>Deletions happen in Thread 3 (Store) per-batch, and once after all batches for orphaned files:</p>
+
+  <table>
+    <tr><th>Case</th><th>Detected by</th><th>What happens</th></tr>
+    <tr>
+      <td><strong>Modified file</strong></td>
+      <td><code>diff_and_remove()</code>: content hash changed → diff produced with new chunks</td>
+      <td>Store thread: <code>DELETE FROM chunks WHERE file_id = ?</code> (all old chunks, even unchanged ones — they get re-inserted). Then INSERT new chunks with attached embeddings.</td>
+    </tr>
+    <tr>
+      <td><strong>Deleted file</strong></td>
+      <td>After parse thread finishes, remaining snapshot entries were never matched</td>
+      <td>Finalize: <code>DELETE FROM files WHERE id IN (...)</code> — chunks + embeddings cascade</td>
+    </tr>
+    <tr>
+      <td><strong>Unchanged file</strong></td>
+      <td>mtime+size unchanged, content hash matches → removed from snapshot, no diff produced</td>
+      <td>Nothing — skipped entirely</td>
+    </tr>
+  </table>
+</div>
+
+<h3>4.7 Reindexing Flow</h3>
+
+<div class="card">
+  <p>Reindexing is just calling <code>run()</code> again on an already-indexed directory. The snapshot+diff mechanism handles it — unchanged files are completely skipped.</p>
+</div>
+
+<div class="diagram">
+  Reindexing a directory with existing DB:
+
+  ═══ Phase A: Load DB snapshot ═══════════════════════
+
+  SELECT path, id, size, modified_time, content_hash
+  FROM files → HashMap&lt;String, DbFileState&gt;
+
+  ┌────────────────────────────────────────────────────┐
+  │  DB has:     main.rs   (id=1, hash=abc)           │
+  │              lib.rs    (id=2, hash=def)           │
+  │              old.rs    (id=3, hash=ghi)  ──┐      │
+  └─────────────────────────────────────────────│──────┘
+                                                │
+  ═══ Phase B: Parse + Diff (per file on disk) ═│══════
+                                                │
+  Files on disk:                                │
+                                                │
+  main.rs ── parse → mtime+size unchanged       │
+             hash still "abc" → SKIPPED         │
+             removed from snapshot ✓            │
+                                                │
+  lib.rs  ── parse → mtime changed              │
+             hash now "xyz" ≠ "def" → MODIFIED  │
+             DiffResult { file_id=2,            │
+               is_new_file=false,               │
+               chunks_to_insert=[...] }         │
+             → flows through channels           │
+             → store: DELETE old chunks,        │
+               INSERT new chunks + embeddings   │
+                                                │
+  new.rs  ── parse → not in snapshot → NEW      │
+             DiffResult { file_id=0,            │
+               is_new_file=true,                │
+               chunks_to_insert=[...] }         │
+             → store: INSERT file + chunks      │
+                                                │
+  ═══ After all files processed ════════════════│══
+                                                │
+  Snapshot remaining:                           │
+      old.rs (id=3) ← never matched ────────────┘
+      → orphaned_file_ids = [3]
+      → DELETE FROM files WHERE id=3
+        (cascades: DELETE chunks, DELETE embeddings)
+
+  ═══ Phase D: Finalize ═══════════════════════════════
+      compact → rebuild HNSW → close
+
+  Result: 1 file skipped, 1 file updated, 1 file added, 1 file deleted.
+</div>
+
+<div class="note">
+  <strong>Key property:</strong> unchanged files never enter the channels, never touch the DB, and don't consume parse/embed/store time beyond the initial snapshot lookup. For a repo where 90% of files are unchanged, reindexing processes only the 10% that changed.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="python-blocks">5. Python Building Blocks</h2>
+
+<div class="card">
+  <h3>5.1 Parser Callback Contract</h3>
+  <table>
+    <tr><th>Aspect</th><th>Spec</th></tr>
+    <tr><td>Signature</td><td><code>(file_path: str, detect_embedded_sql: bool) → (str, list[dict])</code></td></tr>
+    <tr><td>Returns</td><td>Tuple: <code>(language: str, chunks: list[dict])</code>. Language detection happens inside the callback (40+ language mappings stay in Python). Chunks dicts have: <code>chunk_type</code>, <code>symbol</code>, <code>code</code>, <code>start_line</code>, <code>end_line</code>, <code>start_byte</code>, <code>end_byte</code>, <code>language</code>, <code>metadata</code>, <strong><code>embed_text</code></strong></td></tr>
+    <tr><td>Language</td><td>Returns <code>""</code> for unrecognized files (no chunks). Rust treats empty-string language like None.</td></tr>
+    <tr><td>Errors</td><td>Raises <code>Exception</code>. Rust catches it, records the file as errored, continues.</td></tr>
+    <tr><td>Size control</td><td>Skips config files (JSON/YAML/TOML) above threshold. Handles embedded SQL detection.</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>5.2 Embedding Callback Contract</h3>
+  <table>
+    <tr><th>Aspect</th><th>Spec</th></tr>
+    <tr><td>Signature</td><td><code>(texts: list[str], provider: str, model: str) → list[list[float]]</code></td></tr>
+    <tr><td>Returns</td><td>List of float vectors, one per input text, in the same order</td></tr>
+    <tr><td>Errors</td><td>Raises <code>Exception</code>. Rust skips embedding for that batch, records the error.</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>5.3 Progress Callback Contract</h3>
+  <table>
+    <tr><th>Aspect</th><th>Spec</th></tr>
+    <tr><td>Signature</td><td><code>(phase: str, current: int, total: int, info: dict) → bool</code></td></tr>
+    <tr><td>Returns</td><td><code>True</code> to continue, <code>False</code> to abort</td></tr>
+    <tr><td>Phases</td><td><code>"discovering"</code>, <code>"parsing"</code>, <code>"embedding"</code>, <code>"storing"</code>, <code>"compacting"</code></td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>5.4 Pipeline Bridge Module (<code>chunkhound/pipeline_bridge.py</code>)</h3>
+  <p>Thin adapter wrapping existing parser and embedding code:</p>
+<pre><code># chunkhound/pipeline_bridge.py
+
+from pathlib import Path
+from chunkhound.parsers.parser_factory import create_parser_for_language
+from chunkhound.core.types.common import Language, FileId
+
+def parse_file_callback(
+    file_path: str,
+    detect_embedded_sql: bool = True,
+) -> tuple[str, list[dict]]:
+    """Adapter: path → (language, chunks).
+
+    All parse-tuning flags are handled internally via global config:
+    - per_file_timeout_seconds / per_file_timeout_min_size_kb
+    - config_file_size_threshold_kb (skip oversized config files)
+    - max_file_size_mb (skip files over the limit)
+    - index_unknown_files (return empty for unrecognized extensions)
+
+    Rust passes only detect_embedded_sql — everything else is baked in.
+    """
+    from chunkhound.registry import get_registry
+    from chunkhound.services.batch_processor import detect_language
+
+    # Skip files exceeding max_file_size_mb
+    config = get_registry().indexing_config
+    if Path(file_path).stat().st_size > config.max_file_size_mb * 1024 * 1024:
+        return ("", [])
+    lang = detect_language(file_path)
+    if lang is None:
+        return ("", [])
+    parser = create_parser_for_language(lang,
+                detect_embedded_sql=detect_embedded_sql)
+    if parser is None:
+        return (lang.value, [])
+    file_id = FileId(0)  # Rust assigns the real ID
+    chunks = parser.parse_file(Path(file_path), file_id)
+    return (lang.value, [c.to_dict() for c in chunks])
+
+
+def embed_callback(
+    texts: list[str],
+    provider: str,
+    model: str,
+) -> list[list[float]]:
+    """Adapter: batch embed (called from Rust embed thread).
+
+    All embedding config is baked into the service via global config —
+    api_key, base_url, ssl_verify, output_dims, client_side_truncation,
+    batch_size, timeout, max_retries, max_concurrent_batches, Azure config.
+    """
+    from chunkhound.registry import get_registry
+    service = get_registry().embedding_service
+    return service.generate_embeddings(texts, provider, model)</code></pre>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="cross-layer">6. Cross-Layer Contracts</h2>
+
+<div class="diagram">
+                Python → Rust (PyO3 instantiation + call)
+                ═══════════════════════════════════════════
+  from chunkhound_native import IndexingPipeline
+
+  pipeline = IndexingPipeline(config_dict)
+  report = pipeline.run(
+      files=discovered_files,  # Python runs full discovery engine first
+      parse_callback=pipeline_bridge.parse_file_callback,
+      embed_callback=pipeline_bridge.embed_callback,
+      progress_callback=lambda p, c, t, i: print(f"{p}: {c}/{t}"),
+  )
+  print(f"{report.files_processed} files, {report.chunks_written} chunks")
+
+
+                Rust → Python (GIL acquire + callback)
+                ═══════════════════════════════════════════
+  parse_callback(file_path, detect_sql) → (language, list[dict])
+  embed_callback(texts, provider, model) → list[list[float]]
+  progress_callback(phase, current, total, info_dict) → bool
+</div>
+
+<div class="note">
+  <strong>GIL strategy summary:</strong><br>
+  • <strong>File discovery:</strong> Python-only — runs before the pipeline, passes file list to Rust<br>
+  • <strong>Parsing + language detection (per file):</strong> GIL acquired ~100µs for Python wrapper; tree-sitter C releases GIL<br>
+  • <strong>Embedding (per batch):</strong> GIL acquired for argument marshalling; <code>httpx</code> releases GIL during HTTP<br>
+  • <strong>DB writes, compaction, HNSW:</strong> No GIL — wrapped in <code>py.allow_threads()</code><br>
+  • <strong>Progress reporting:</strong> GIL acquired briefly per batch (parse thread only)
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="logging">7. Logging</h2>
+
+<p>Three channels, three purposes. Each preserves the existing Python logging behavior.</p>
+
+<h3>7.1 <code>pyo3-log</code> — Rust → Python logging bridge</h3>
+
+<div class="card">
+<pre><code># Cargo.toml
+[dependencies]
+pyo3-log = "0.10"
+
+// src/lib.rs — module init (called once when Python imports the .so)
+#[pymodule_init]
+fn init_module(_py: Python, m: &Bound&lt;'_&gt;, PyModule) -&gt; PyResult&lt;()&gt; {
+    pyo3_log::init();                     // routes all log::*! → Python logging
+    pyo3::prepare_freethreaded_python();  // required for embed thread callbacks
+    Ok(())
+}</code></pre>
+</div>
+
+<p>After init, every Rust <code>log::info!()</code>, <code>log::warn!()</code>, <code>log::error!()</code> call routes to Python's <code>logging</code> module — respects all existing configuration:</p>
+
+<table>
+  <tr><th>Python config</th><th>Effect on Rust logs</th></tr>
+  <tr><td><code>CHUNKHOUND_DEBUG=1</code></td><td><code>log::debug!()</code> messages become visible</td></tr>
+  <tr><td><code>CHUNKHOUND_DEBUG_FILE=/tmp/ch.log</code></td><td>Rust logs appear in the debug file alongside Python logs</td></tr>
+  <tr><td><code>--debug</code> / <code>--verbose</code></td><td>Standard Python log level controls apply to Rust messages too</td></tr>
+  <tr><td>Existing formatters, handlers, filters</td><td>All inherited — Rust logs are indistinguishable from Python logs</td></tr>
+  <tr><td><code>CHUNKHOUND_NO_RICH</code></td><td>Plain-text output (no rich formatting)</td></tr>
+  <tr><td><code>CHUNKHOUND_MCP_MODE</code></td><td>Logging goes through MCP protocol, not stdout</td></tr>
+</table>
+
+<div class="note">
+  <strong>Thread safety:</strong> <code>pyo3-log</code> acquires the GIL per log call. In the store thread (running in <code>py.allow_threads</code>), a log call briefly re-acquires the GIL — negligible since logging is not on the hot path. The parse thread already holds the GIL. The embed thread acquires the GIL for its callback anyway.
+</div>
+
+<h3>7.2 Progress callback — structured status</h3>
+
+<p>Already defined in the callback contract (§5). Python renders via <code>rich</code> progress bars — unchanged from current behavior:</p>
+
+<pre><code>progress_callback("parsing",    current, total, {"files/s": 142})
+progress_callback("embedding",  current, total, {"vectors": 1200})
+progress_callback("storing",    current, total, {})
+progress_callback("compacting", 0, 0, {})</code></pre>
+
+<h3>7.3 <code>PipelineReport.errors</code> — user-facing error summary</h3>
+
+<p>Parse failures, embed API errors, and file-level issues collected as <code>Vec&lt;String&gt;</code>. Returned at the end. Python logs or displays in the summary (matching current error reporting behavior):</p>
+
+<pre><code>report = pipeline.run(files=files, ...)
+for error in report.errors:
+    logger.warning(f"Pipeline error: {error}")</code></pre>
+
+<h3>7.4 What Rust logs where</h3>
+
+<table>
+  <tr><th>Location</th><th>Level</th><th>Example message</th></tr>
+  <tr><td>Pipeline start / end</td><td><code>INFO</code></td><td>"Starting pipeline: 1423 files, parse_pool=8"</td></tr>
+  <tr><td>Phase transitions</td><td><code>INFO</code></td><td>"Phase A complete: snapshot loaded (1240 entries)"</td></tr>
+  <tr><td>Batch boundaries</td><td><code>DEBUG</code></td><td>"Parsing batch 12/18 (200 files)"</td></tr>
+  <tr><td>Per-file parse errors</td><td><code>WARN</code></td><td>"Parse error: src/broken.py (SyntaxError: ...)"</td></tr>
+  <tr><td>Embed API failures</td><td><code>WARN</code></td><td>"Embed API error: timeout after 30s, 120 chunks stored without vectors"</td></tr>
+  <tr><td>DB operations</td><td><code>DEBUG</code></td><td>"Wrote batch: 47 files, 892 chunks, 850 embeddings"</td></tr>
+  <tr><td>Compaction / HNSW rebuild</td><td><code>INFO</code></td><td>"Compaction: 15% overhead reduced to 2%"</td></tr>
+  <tr><td>Orphan cleanup</td><td><code>INFO</code></td><td>"Removed 3 orphaned files (23 chunks)"</td></tr>
+  <tr><td>RSS sidecar</td><td><code>DEBUG</code></td><td>"RSS: 342 MB (peak: 412 MB)"</td></tr>
+</table>
+
+<h3>7.5 What NOT to do</h3>
+
+<ul>
+  <li><strong>Don't use <code>env_logger</code>:</strong> writes to stderr independently, bypassing Python's log routing and <code>CHUNKHOUND_DEBUG_FILE</code>.</li>
+  <li><strong>Don't route debug messages through the progress callback:</strong> too chatty, wrong abstraction — use <code>log::debug!()</code>.</li>
+  <li><strong>Don't use <code>print!()</code> / <code>eprintln!()</code>:</strong> no log level control, no MCP mode support, no file routing.</li>
+  <li><strong>Don't use <code>log::error!()</code> for parse failures:</strong> errors go in <code>PipelineReport.errors</code> — <code>log::warn!()</code> is for operational warnings that shouldn't alarm users.</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="flow">8. End-to-End Flow</h2>
+
+<div class="flow">
+  <div class="flow-box both">
+    <div class="label">Parse</div>
+    <div class="sub">Python callback<br>rayon parallel</div>
+    <div class="lang">Python / GIL</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box both">
+    <div class="label">Embed</div>
+    <div class="sub">Python callback<br>HTTP API batch</div>
+    <div class="lang">Python / GIL</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box rust">
+    <div class="label">Store</div>
+    <div class="sub">RustDbWriter<br>chunks+embeddings</div>
+    <div class="lang">Rust / no GIL</div>
+  </div>
+</div>
+
+<p style="text-align:center; color: var(--text2); margin-top:16px;">
+  Three threads run concurrently: parse → embed → store. Each processes a different batch.<br>
+  Phase A (setup) runs once. Phase C (orphan cleanup + compact + HNSW) runs after all batches drain.
+</p>
+
+<div class="diagram">
+   Time →   [parse 0][parse 1][parse 2][parse 3]...
+                 [embed 0][embed 1][embed 2]...
+                      [store 0][store 1][store 2]...
+
+   Wall time ≈ max(parse_time, embed_time, store_time) ≈ parse_time
+   (parse dominates for typical repos; embed + store are fully hidden)
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="files">9. File Map</h2>
+
+<h3>New Rust source files</h3>
+
+<div class="card">
+  <table>
+    <tr><th>File</th><th>Est. Lines</th><th>Purpose</th></tr>
+    <tr><td><code>src/pipeline/mod.rs</code></td><td>~15</td><td>Module root; re-exports <code>IndexingPipeline</code>, <code>PipelineReport</code></td></tr>
+    <tr><td><code>src/pipeline/config.rs</code></td><td>~120</td><td><code>PipelineConfig</code> struct + PyDict extraction helpers</td></tr>
+    <tr><td><code>src/pipeline/pipeline.rs</code></td><td>~400</td><td><code>IndexingPipeline</code> PyO3 class: <code>new()</code>, <code>run()</code> (3-thread streaming), <code>parse_batch()</code>, channel wiring, progress reporting</td></tr>
+    <tr><td><code>src/pipeline/discovery.rs</code></td><td>—</td><td><strong>Removed.</strong> Discovery stays in Python. The Rust pipeline receives files via <code>run(files: Vec&lt;String&gt;)</code>.</td></tr>
+    <tr><td><code>src/pipeline/types.rs</code></td><td>~100</td><td><code>ParsedFile</code>, <code>NewChunk</code>, <code>DiffResult</code>, <code>EmbeddedBatch</code> — internal pipeline types</td></tr>
+    <tr><td><code>src/pipeline/differ.rs</code></td><td>~130</td><td><code>load_db_snapshot()</code> (one bulk SELECT), <code>diff_and_remove()</code> (in-memory compare, removes matched files → leftovers are orphans)</td></tr>
+    <tr><td><code>src/pipeline/report.rs</code></td><td>~60</td><td><code>PipelineReport</code> PyO3 class with readonly properties</td></tr>
+    <tr><td><code>src/pipeline/state.rs</code></td><td>~80</td><td><code>PipelineState</code>: counters (files processed/errored/skipped, chunks written), error accumulator</td></tr>
+  </table>
+</div>
+
+<h3>New Python files</h3>
+
+<div class="card">
+  <table>
+    <tr><th>File</th><th>Est. Lines</th><th>Purpose</th></tr>
+    <tr><td><code>chunkhound/pipeline_bridge.py</code></td><td>~100</td><td>Callback adapters: <code>parse_file_callback()</code>, <code>embed_callback()</code></td></tr>
+    <tr><td><code>chunkhound/services/pipeline_service.py</code></td><td>~80</td><td><code>PipelineService</code> — same interface as <code>DirectoryIndexingService</code>. Calls <code>run()</code> in <code>asyncio.to_thread</code>.</td></tr>
+  </table>
+</div>
+
+<h3>Modified existing files</h3>
+
+<div class="card">
+  <table>
+    <tr><th>File</th><th>Change</th></tr>
+    <tr><td><code>src/lib.rs</code></td><td>Add <code>#[cfg(feature = "rust-pipeline")] mod pipeline;</code>. Register <code>IndexingPipeline</code>, <code>PipelineReport</code> only when feature is enabled. The existing <code>scan_files</code> and <code>RustDbWriter</code> are always compiled — only the new pipeline orchestrator is gated.</td></tr>
+    <tr><td><code>src/db_writer.rs</code></td><td>Add <code>chunk_ids_to_delete: Vec&lt;i64&gt;</code> variant to <code>DbWriterBatch</code> for per-file deletion (currently supports chunk-level deletion only).</td></tr>
+    <tr><td><code>Cargo.toml</code></td><td>Add <code>rayon = "1"</code>. Add <code>[features] rust-pipeline = ["rayon"]</code>. Add <code>default = ["rust-pipeline"]</code> so the feature is opt-out, not opt-in. Disabling it shrinks the <code>.so</code> for users who only need <code>scan_files</code> + <code>RustDbWriter</code>.</td></tr>
+    <tr><td><code>chunkhound_native/__init__.py</code></td><td>Conditionally export <code>IndexingPipeline</code>, <code>PipelineReport</code> — only if the <code>.so</code> was compiled with the <code>rust-pipeline</code> feature. Check via <code>hasattr(native, "IndexingPipeline")</code>.</td></tr>
+    <tr><td><code>chunkhound/services/directory_indexing_service.py</code></td><td>Opt-in: checks <code>os.environ.get("CHUNKHOUND_USE_RUST")</code> + <code>hasattr(chunkhound_native, "IndexingPipeline")</code>. Both must be true to use the Rust pipeline. Graceful fallback to Python path.</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="decisions">10. Key Design Decisions</h2>
+
+<div class="card">
+  <table>
+    <tr>
+      <td style="white-space:nowrap"><strong>Why embed<br>before store?</strong></td>
+      <td>One DB write per chunk (chunk + embedding together). No <code>embed_cache</code>, no two-phase ID tracking, no separate embedding storage pass. Embeddings are attached directly to <code>NewChunk.embedding</code> by the embed thread — no fragile parallel-vector mapping. The embed thread is a no-op pass-through for <code>--skip-embeddings</code>.</td>
+    </tr>
+    <tr>
+      <td style="white-space:nowrap"><strong>Three threads<br>not just two?</strong></td>
+      <td>Parse (CPU), embed (network), and store (disk) use different resources. Running all three concurrently on different batches hides the full embed and store time behind parse. Two threads (parse+store together, embed separately) would serialize parse and store — but store is only ~30ms per batch vs parse's ~600ms, so that marginal gain is small. Three threads cost very little additional complexity (two channels instead of one) and give the cleanest separation of concerns.</td>
+    </tr>
+    <tr>
+      <td style="white-space:nowrap"><strong>Why channels<br>with capacity 2?</strong></td>
+      <td>Capacity 2 allows the parse thread to get ahead by one batch while the embed thread is busy. This smooths out variance — if one embed call is unusually slow, parse can still work on the next batch. Capacity > 2 just accumulates memory without improving throughput (the bottleneck is parse, not the channel).</td>
+    </tr>
+    <tr>
+      <td style="white-space:nowrap"><strong>Why keep parsers<br>in Python?</strong></td>
+      <td>40+ language mappings, each with tree-sitter query files, chunk-type classifiers, and language-specific heuristics. Porting to Rust would be ~20k lines with zero performance gain — tree-sitter's C library does the heavy work. The Python parsers work from Rust callbacks as-is.</td>
+    </tr>
+    <tr>
+      <td style="white-space:nowrap"><strong>Per-file deletion<br>vs chunk-level diff?</strong></td>
+      <td><code>DbFileState</code> has no chunk IDs (adding them would bloat the snapshot). For modified files: <code>DELETE FROM chunks WHERE file_id = ?</code> and re-insert all chunks. Tradeoff: even unchanged chunks in a modified file get re-embedded. This is correct (file changed → its embeddings should be fresh) and cheap. Chunk-level diffing (preserving old embeddings for truly unchanged chunks) can be added later via a second snapshot query.</td>
+    </tr>
+    <tr>
+      <td style="white-space:nowrap"><strong>Why keep embeddings<br>in Python?</strong></td>
+      <td>IO-bound HTTP calls. <code>httpx</code>/<code>openai</code> SDKs handle auth, rate limiting, retries. Moving to Rust saves no wall-clock time but adds maintenance burden for provider-specific logic.</td>
+    </tr>
+    <tr>
+      <td style="white-space:nowrap"><strong>Rayon threads vs<br>ProcessPoolExecutor?</strong></td>
+      <td>Rayon threads share memory, avoid fork overhead (~5–10ms per worker), and don't need pickling. Tree-sitter's C library releases the GIL during parsing — threads are nearly as parallel as processes.</td>
+    </tr>
+    <tr>
+      <td style="white-space:nowrap"><strong>Error handling?</strong></td>
+      <td>Failed parse → file marked as errored, pipeline continues. Failed embed → batch skipped (chunks stored without embeddings, user can re-embed). Store failure → pipeline aborts. Orphan channel closes propagate errors naturally: if parse panics, embed thread's <code>recv()</code> returns <code>RecvError</code> and it shuts down cleanly.</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="next-steps">11. Implementation Sequence — Test-Driven</h2>
+
+<p>
+  Every phase starts by writing the contract test, confirming it <strong style="color: var(--red)">FAILS</strong>,
+  then implementing the minimum Rust + Python to make it <strong style="color: var(--green)">PASS</strong>.
+  The 9 correctness-gate tests from <a href="#testing">§12</a> are distributed across phases so each
+  phase has exactly one exit criterion: the new tests pass, and all prior tests still pass.
+</p>
+
+<div class="diagram">
+  Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5
+  (fixture)   (parse     (embed)    (streaming  (errors +    (integrate
+              + store)              + incr.)    edge cases)   + rollout)
+
+  Test written:     1        2           3           4            9 tests
+  Tests passing:    0        1           3           4            9 total ✓
+</div>
+
+<!-- ═══ Phase 0 ═══════════════════════════════════════════ -->
+<div class="card">
+  <h3><span class="phase p0">Phase 0</span> — Test Fixture + Harness</h3>
+
+  <div class="note" style="margin-bottom: 16px;">
+    <strong>No Rust code yet.</strong> Build the comparison infrastructure that every
+    subsequent phase depends on. The harness indexes the same fixture with both
+    the Python and Rust pipelines and asserts byte-identical output.
+  </div>
+
+  <table>
+    <tr><th style="width: 80px;">Step</th><th>What</th></tr>
+    <tr>
+      <td><span class="phase p0">TEST</span></td>
+      <td>
+        <code>test_harness_python_self_consistent</code> — index the fixture twice
+        with the Python pipeline, assert identical chunks and file counts. Proves the
+        comparison harness is correct before Rust exists.
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p0">BUILD</span></td>
+      <td>
+        Create <code>tests/fixtures/pipeline/</code> with ~5 files covering all
+        chunk types (Python functions, Rust structs + methods, JSON config,
+        Markdown, empty file). Create <code>tests/contracts/__init__.py</code> +
+        <code>pipeline_harness.py</code> with <code>IndexResult</code> dataclass,
+        <code>index_with_python()</code>, and <code>assert_identical()</code> helper.
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p0">EXIT</span></td>
+      <td><code>test_harness_python_self_consistent</code> passes (Python-vs-Python identity). All infrastructure in place.</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ═══ Phase 1 ═══════════════════════════════════════════ -->
+<div class="card">
+  <h3><span class="phase p1">Phase 1</span> — Parse + Store (no embeddings)</h3>
+
+  <div class="note" style="margin-bottom: 16px;">
+    <strong>First Rust code.</strong> Scaffold the PyO3 class, implement the single-threaded
+    parse→diff→store pipeline. Embeddings are skipped — only chunk identity matters.
+  </div>
+
+  <table>
+    <tr><th style="width: 80px;">Step</th><th>What</th></tr>
+    <tr>
+      <td><span class="phase p1">TEST</span></td>
+      <td>
+        <code>test_identical_chunks</code> (with <code>skip_embeddings=True</code>).
+        Index the fixture directory with both pipelines. Assert identical
+        <code>(file_path, chunk_type, symbol, code, start_line, end_line)</code>
+        tuples. Also asserts <code>PipelineReport.files_processed</code> and
+        <code>.chunks_written</code> match.
+        <br><em>Expected failure:</em> <code>AttributeError</code> → <code>chunks_written=0</code> → chunk mismatch.
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p1">IMPLEMENT</span></td>
+      <td>
+        <strong>Rust (<code>src/pipeline/</code>):</strong>
+        <ul>
+          <li><code>mod.rs</code> — module root, gated with <code>#[cfg(feature = "rust-pipeline")]</code></li>
+          <li><code>config.rs</code> — <code>PipelineConfig</code> extracted from Python dict</li>
+          <li><code>types.rs</code> — <code>ParsedFile</code>, <code>NewChunk</code>, <code>DiffResult</code>, <code>DbFileState</code></li>
+          <li><code>report.rs</code> — <code>PipelineReport</code> PyO3 class</li>
+          <li><code>state.rs</code> — <code>PipelineState</code> counters</li>
+          <li><code>differ.rs</code> — <code>load_db_snapshot()</code> (bulk SELECT) + <code>diff_and_remove()</code></li>
+          <li><code>pipeline.rs</code> — <code>IndexingPipeline</code> PyO3 class with <code>parse_batch()</code> + single-threaded loop: parse → diff → <code>DbWriterBatch</code> → store</li>
+        </ul>
+        <strong>Python:</strong>
+        <ul>
+          <li><code>chunkhound/pipeline_bridge.py</code> — <code>parse_file_callback()</code> adapter</li>
+          <li><code>tests/contracts/test_identical_chunks.py</code></li>
+        </ul>
+        <strong>Build:</strong> Add <code>rayon</code> to <code>Cargo.toml</code>, add <code>[features] rust-pipeline</code>,
+        register <code>IndexingPipeline</code> + <code>PipelineReport</code> in <code>lib.rs</code>.
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p1">EXIT</span></td>
+      <td><code>test_identical_chunks</code> passes. Chunks from both pipelines are byte-identical.</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ═══ Phase 2 ═══════════════════════════════════════════ -->
+<div class="card">
+  <h3><span class="phase p1">Phase 2</span> — Embeddings (still single-threaded)</h3>
+
+  <div class="note" style="margin-bottom: 16px;">
+    <strong>Add vectors.</strong> Wire the embed callback into the single-threaded loop.
+    Chunks and their embedding vectors are stored together in one DB write.
+    Streaming comes later — correctness first.
+  </div>
+
+  <table>
+    <tr><th style="width: 80px;">Step</th><th>What</th></tr>
+    <tr>
+      <td><span class="phase p1">TEST</span></td>
+      <td>
+        <strong>Two tests, written together:</strong><br>
+        <code>test_identical_embeddings</code> — fresh index with embeddings enabled.
+        Both pipelines produce identical vector arrays per chunk (within float tolerance).
+        Only runs on first-time indexes (embedding APIs are non-deterministic).<br>
+        <code>test_identical_chunks</code> — re-run with embeddings enabled (not
+        <code>skip_embeddings</code>). Same chunk assertions as Phase 1, plus
+        <code>PipelineReport.embeddings_generated</code> matches.
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p1">IMPLEMENT</span></td>
+      <td>
+        <strong>Rust (<code>pipeline.rs</code>):</strong> After parse_batch → diff, call
+        <code>embed_callback(texts, provider, model)</code>. Attach returned vectors to
+        <code>NewChunk.embedding</code>, <code>.provider</code>, <code>.model</code>.
+        Store thread writes chunks + embeddings together via <code>DbWriterBatch</code>.
+        <br>
+        <strong>Python (<code>pipeline_bridge.py</code>):</strong> Add <code>embed_callback()</code> adapter.
+        <br>
+        <strong>Tests:</strong> <code>tests/contracts/test_identical_embeddings.py</code>
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p1">EXIT</span></td>
+      <td>Both <code>test_identical_embeddings</code> and <code>test_identical_chunks</code> (with embeddings) pass. Phase 1 test still passes (no regressions).</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ═══ Phase 3 ═══════════════════════════════════════════ -->
+<div class="card">
+  <h3><span class="phase p1">Phase 3</span> — 3-Thread Streaming + Incremental Updates</h3>
+
+  <div class="note" style="margin-bottom: 16px;">
+    <strong>Go concurrent.</strong> Wire the three-thread streaming pipeline with bounded channels.
+    Validate that streaming output is byte-identical to the single-threaded path (and to Python).
+    Test incremental re-indexing (modify, add, delete files).
+  </div>
+
+  <table>
+    <tr><th style="width: 80px;">Step</th><th>What</th></tr>
+    <tr>
+      <td><span class="phase p1">TEST</span></td>
+      <td>
+        <code>test_incremental_updates</code> — parameterized test covering three mutations:
+        <strong>modify</strong> one file, <strong>add</strong> one file, <strong>delete</strong> one file.
+        After each mutation, re-index with both pipelines and verify identical diffs:
+        chunk counts match, unchanged files skipped, old chunks cleaned up, new chunks inserted.
+        Catches ID allocation, orphan detection, and per-file deletion.
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p1">IMPLEMENT</span></td>
+      <td>
+        <strong>Rust (<code>pipeline.rs</code>):</strong>
+        <ul>
+          <li>Two <code>mpsc::sync_channel(2)</code> connecting parse → embed → store threads</li>
+          <li>Embed thread: pop <code>DiffResult</code>, collect embed_text, call embed_callback, attach vectors, push <code>EmbeddedBatch</code></li>
+          <li>Store thread: pop <code>EmbeddedBatch</code>, build <code>DbWriterBatch</code>, call backend</li>
+          <li>Finalize: <code>delete_orphaned_files()</code>, <code>run_compaction()</code>, <code>rebuild_hnsw_indexes()</code></li>
+        </ul>
+        <strong>Module init:</strong> Call <code>pyo3::prepare_freethreaded_python()</code> in <code>#[pymodule_init]</code>.
+        <br>
+        <strong>Tests:</strong> <code>tests/contracts/test_incremental_updates.py</code>
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p1">EXIT</span></td>
+      <td><code>test_incremental_updates</code> passes. All Phase 1–2 tests still pass (regression gate). Streaming output is byte-identical to Python on every scenario.</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ═══ Phase 4 ═══════════════════════════════════════════ -->
+<div class="card">
+  <h3><span class="phase p2">Phase 4</span> — Edge Cases + Error Recovery</h3>
+
+  <div class="note" style="margin-bottom: 16px;">
+    <strong>Harden.</strong> Pipeline handles failures gracefully without crashing.
+    Progress callback works. Skip-embeddings and empty-directory paths are covered.
+  </div>
+
+  <table>
+    <tr><th style="width: 80px;">Step</th><th>What</th></tr>
+    <tr>
+      <td><span class="phase p2">TEST</span></td>
+      <td>
+        <strong>Five tests, written together:</strong><br>
+        <code>test_empty_directory</code> — 0 files, 0 chunks, orphans cleaned up.<br>
+        <code>test_progress_callback</code> — fires with incrementing counters; returning
+        <code>False</code> aborts pipeline early with consistent partial DB state.<br>
+        <code>test_skip_embeddings</code> — <code>skip_embeddings=true</code> and
+        <code>embed_callback=None</code> both work, embeddings table empty.<br>
+        <code>test_parse_error_per_file</code> — one syntactically invalid file;
+        error recorded in <code>PipelineReport.errors</code>, remaining files processed normally.<br>
+        <code>test_embed_api_failure</code> — embed callback raises; chunks stored
+        without embeddings (<code>embedding=NULL</code>), pipeline continues.
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p2">IMPLEMENT</span></td>
+      <td>
+        <strong>Rust (<code>pipeline.rs</code>):</strong>
+        <ul>
+          <li>Error handling: catch parse callback exceptions per file, catch embed callback exceptions per batch</li>
+          <li>Progress callback: call from parse thread per batch with phase/current/total/info</li>
+          <li>Abort-on-false: check progress callback return value, drain channels, roll back in-flight work</li>
+          <li>Channel close propagation: if any thread panics, others shut down cleanly</li>
+          <li>Skip path: when <code>skip_embeddings=true</code> or <code>embed_callback=None</code>, embed thread passes batches through unchanged</li>
+        </ul>
+        <strong>Tests:</strong> <code>tests/contracts/test_empty_directory.py</code>,
+        <code>test_progress_callback.py</code>, <code>test_skip_embeddings.py</code>,
+        <code>test_parse_error_per_file.py</code>, <code>test_embed_api_failure.py</code>
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p2">EXIT</span></td>
+      <td>All 9 contract tests pass. All Phase 1–3 tests still pass (regression gate).</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ═══ Phase 5 ═══════════════════════════════════════════ -->
+<div class="card">
+  <h3><span class="phase p2">Phase 5</span> — CLI Integration + Gradual Rollout</h3>
+
+  <div class="note" style="margin-bottom: 16px;">
+    <strong>Wire it up.</strong> The pipeline is correct — now make it usable from the CLI
+    behind a feature flag. Validate that the full test suite passes with Rust enabled.
+  </div>
+
+  <table>
+    <tr><th style="width: 80px;">Step</th><th>What</th></tr>
+    <tr>
+      <td><span class="phase p2">TEST</span></td>
+      <td>
+        <code>test_cli_integration</code> — <code>CHUNKHOUND_USE_RUST=1 uv run chunkhound index /path</code>
+        uses Rust pipeline and produces output identical to Python path.<br>
+        <code>test_graceful_fallback</code> — <code>CHUNKHOUND_USE_RUST=1</code> but compiled
+        without <code>rust-pipeline</code> feature → falls back to Python silently.
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p2">IMPLEMENT</span></td>
+      <td>
+        <strong>Python:</strong>
+        <ul>
+          <li><code>chunkhound/services/pipeline_service.py</code> — same interface as
+          <code>DirectoryIndexingService</code>, calls <code>IndexingPipeline.run()</code>
+          via <code>asyncio.to_thread</code></li>
+          <li>Toggle logic in <code>directory_indexing_service.py</code>: check
+          <code>CHUNKHOUND_USE_RUST=1</code> AND <code>hasattr(chunkhound_native, "IndexingPipeline")</code>.
+          Both must be true to use Rust pipeline. Graceful fallback to Python otherwise.</li>
+          <li><code>chunkhound_native/__init__.py</code> — conditionally export
+          <code>IndexingPipeline</code> + <code>PipelineReport</code></li>
+        </ul>
+        <strong>Default:</strong> Compiled in (<code>default = ["rust-pipeline"]</code> in
+        <code>Cargo.toml</code>) but inactive at runtime (<code>CHUNKHOUND_USE_RUST</code> not set).
+      </td>
+    </tr>
+    <tr>
+      <td><span class="phase p2">EXIT</span></td>
+      <td>
+        <code>uv run pytest tests/ -v</code> passes with <code>CHUNKHOUND_USE_RUST=1</code>.
+        Existing <code>test_smoke.py</code> and full test suite pass with both backends.
+        Ready for gradual rollout: Python default → <code>CHUNKHOUND_USE_RUST=1</code>
+        opt-in → benchmark (≥2× target, see <a href="#benchmarking">§13</a>) → Rust default
+        after 2-week bake-in with zero regressions.
+      </td>
+    </tr>
+  </table>
+</div>
+
+<div class="note" style="margin-top: 24px;">
+  <strong>TDD workflow per phase:</strong>
+  <ol style="margin-bottom: 0;">
+    <li>Write the new test(s) → run → confirm <strong style="color: var(--red)">FAIL</strong></li>
+    <li>Implement the Rust + Python → run → confirm <strong style="color: var(--green)">PASS</strong></li>
+    <li><code>uv run pytest tests/ -v</code> — full suite, no regressions</li>
+    <li><code>cargo fmt && cargo clippy --all-targets -- -D warnings</code> — Rust hygiene</li>
+    <li>Commit. Each phase is 2–4 commits; each commit makes one test transition.</li>
+  </ol>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2 id="testing">12. Testing Strategy</h2>
+
+<div class="card">
+  <h3>12.1 Contract Tests — Primary Correctness Gate</h3>
+  <p>These 9 tests are the <strong>only</strong> correctness gate — if they pass, the pipeline is correct. No internal unit tests needed. Each test is introduced in a specific phase of the <a href="#next-steps">TDD implementation sequence (§11)</a>: write the test first, confirm it fails, then implement the code to make it pass.</p>
+  <table>
+    <tr><th>Test</th><th>What it verifies</th></tr>
+    <tr>
+      <td><code>test_identical_chunks</code></td>
+      <td>Index a directory with both pipelines. Compare <code>(file_path, chunk_type, symbol, code, start_line, end_line)</code> tuples — must be identical. Catches parse errors, diff bugs, store miswrites, and skip-unchanged edge cases. Also asserts <code>PipelineReport</code> fields (<code>files_processed</code>, <code>chunks_written</code>, <code>errors</code>) match.</td>
+    </tr>
+    <tr>
+      <td><code>test_identical_embeddings</code></td>
+      <td>Same DBs, compare embedding vectors per chunk (within float tolerance). Only runs on a clean first-time index (no modified files) — embedding APIs are non-deterministic; comparing vectors after incremental updates would be flaky. Catches embed thread ordering errors and vector-to-chunk mispairing.</td>
+    </tr>
+    <tr>
+      <td><code>test_incremental_updates</code></td>
+      <td>Parameterized test covering three mutations: <strong>modify</strong> one file, <strong>add</strong> one file, <strong>delete</strong> one file. After each mutation, re-index with both pipelines and verify identical diffs: chunk counts match, unchanged files skipped, old chunks cleaned up, new chunks inserted. Catches ID allocation, orphan detection, and per-file deletion.</td>
+    </tr>
+    <tr>
+      <td><code>test_skip_embeddings</code></td>
+      <td>Index with <code>skip_embeddings=true</code>. Verify chunks are in DB, <code>embeddings</code> table is empty, report <code>embeddings_generated=0</code>. Same when <code>embed_callback=None</code> — pipeline must not panic, chunks stored normally.</td>
+    </tr>
+    <tr>
+      <td><code>test_progress_callback</code></td>
+      <td>Progress callback fires with incrementing counters. Callback returning <code>False</code> aborts pipeline early; verify partial DB state is consistent (completed batches stored, in-flight batch rolled back).</td>
+    </tr>
+    <tr>
+      <td><code>test_empty_directory</code></td>
+      <td>Index an empty directory. Report: 0 files, 0 chunks. If DB had prior data, all files/chunks/embeddings cleaned up (orphaned).</td>
+    </tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>12.2 Error Handling Scenarios</h3>
+  <p>These test the recovery paths — what happens when external systems fail mid-pipeline:</p>
+  <table>
+    <tr><th>Scenario</th><th>Test</th><th>Expected behavior</th></tr>
+    <tr>
+      <td>Parse callback raises on one file</td>
+      <td><code>test_parse_error_per_file</code></td>
+      <td>File in <code>PipelineReport.errors</code>. Batch continues. Remaining files parsed normally.</td>
+    </tr>
+    <tr>
+      <td>Embed API fails (HTTP 429 / 401)</td>
+      <td><code>test_embed_api_failure</code></td>
+      <td>Embed callback raises. Pipeline catches error, stores chunks without embeddings (<code>embedding=NULL</code>). Pipeline continues to next batch. No panic, no hang.</td>
+    </tr>
+    <tr>
+      <td>DB write fails (disk full)</td>
+      <td><code>test_db_write_failure</code></td>
+      <td>Store thread's current transaction rolls back. Previously committed batches preserved. Pipeline reports partial results.</td>
+    </tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>12.3 Smoke Gate</h3>
+  <p>Before commit and before PR, the contract tests must pass with the Rust pipeline enabled:</p>
+  <table>
+    <tr><th>Command</th><th>Gate</th></tr>
+    <tr><td><code>CHUNKHOUND_USE_RUST=1 uv run pytest tests/ -k "test_identical or test_incremental or test_skip or test_progress or test_empty or test_parse_error or test_embed_api or test_db_write" -v</code></td><td>Mandatory before commits. Exercises the Rust pipeline end-to-end.</td></tr>
+    <tr><td><code>uv run pytest tests/ -v</code></td><td>Mandatory before pushing to a PR. Full test suite.</td></tr>
+  </table>
+  <div class="note">
+    <strong>Note:</strong> The existing <code>tests/test_smoke.py</code> suite tests imports, CLI, and server startup — it does not exercise the indexing pipeline. Running it with <code>CHUNKHOUND_USE_RUST=1</code> passes trivially and provides no pipeline confidence. The contract tests above ARE the smoke gate for the Rust pipeline.
+  </div>
+</div>
+
+<hr style="border-color: var(--surface2); margin: 40px 0;">
+
+<h2 id="benchmarking">13. Performance Benchmarks</h2>
+
+<div class="card">
+  <p>Benchmarking is a separate gate, not a test. It compares the Rust pipeline against the Python path on real-world-scale codebases.</p>
+
+  <h4>Harness</h4>
+  <pre><code># Uses a real codebase (or auto-generates a synthetic one)
+uv run python scripts/bench_pipeline.py --repo /path/to/repo [--runs 5]</code></pre>
+  <p>The script indexes the same directory with both pipelines, measuring wall-clock time, peak RSS, and output DB size. <strong>Order alternates across runs</strong> (Python→Rust→Rust→Python→...) to cancel page-cache bias; only medians are reported. Before reporting timings, the script validates that both runs produced identical file/chunk/embedding counts — a mismatch aborts.</p>
+
+  <h4>Scenarios</h4>
+  <table>
+    <tr><th>Scenario</th><th>Repo size</th><th>What it measures</th></tr>
+    <tr><td>Small cold start</td><td>~500 files, empty DB</td><td>Baseline overhead: parse + embed + store from scratch.</td></tr>
+    <tr><td>Large cold start</td><td>~10K files, empty DB</td><td>Stress test: rayon saturation, channel throughput, DuckDB bulk insert speed.</td></tr>
+    <tr><td>Warm re-index</td><td>~10K files, nothing changed</td><td>Snapshot-only path: all files skipped. Measures thread setup/teardown overhead vs Python.</td></tr>
+    <tr><td>Incremental update</td><td>~10K files, 1 file modified</td><td>Diff + single-file re-index cost. Dominated by parse + embed of one file.</td></tr>
+  </table>
+
+  <h4>Metrics</h4>
+  <table>
+    <tr><th>Metric</th><th>How measured</th><th>Target</th></tr>
+    <tr><td>Wall-clock time</td><td><code>PipelineReport.elapsed_secs</code> (produced by <code>state.into_report(started.elapsed())</code>)</td><td>≥ 2× faster than Python on large cold start</td></tr>
+    <tr><td>Peak RSS</td><td>Sampled from <code>/proc/self/status</code> every 100ms by a sidecar thread spawned inside the Rust pipeline (reported via PipelineReport). Not sampled from the Python harness process — that would include the interpreter.</td><td>Bounded regardless of repo size; ≤ 2 GB on large cold start</td></tr>
+    <tr><td>DB file size</td><td><code>fs::metadata("chunks.db").len()</code> after index + compaction</td><td>Within 5% of Python path</td></tr>
+  </table>
+
+  <h4>Interpreting results</h4>
+  <table>
+    <tr><th>Observation</th><th>Likely cause</th></tr>
+    <tr><td>Rust not hitting 2× on large cold start</td><td>Embed API latency dominates (not CPU-bound). Batching more texts per API call may help.</td></tr>
+    <tr><td>RSS grows over time on large cold start</td><td>Channel capacity too high or embed slower than parse. Reduce channel capacity or add memory-pressure checks.</td></tr>
+    <tr><td>Warm re-index slower than expected</td><td>Snapshot query is slow or thread spawn overhead dominates. Check <code>load_db_snapshot</code> query plan.</td></tr>
+    <tr><td>DB file larger than Python path</td><td>Per-file deletion (<code>DELETE FROM chunks WHERE file_id=?</code>) may leave free pages. Run compaction and re-measure.</td></tr>
+  </table>
+</div>
+
+<hr style="border-color: var(--surface2); margin: 40px 0;">
+
+<p style="text-align: center; color: var(--text2); font-size: 0.85rem;">
+  ChunkHound — Built 100% by AI agents.<br>
+  <a href="https://github.com/chunkhound/chunkhound">github.com/chunkhound/chunkhound</a>
+</p>
+
+</body>
+</html>

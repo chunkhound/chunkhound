@@ -1,12 +1,13 @@
 #![forbid(unsafe_code)]
-// PyO3 0.22's #[pyfunction] macro emits a PyErr→PyErr .into() in its generated wrapper code,
-// which clippy's useless_conversion lint flags. The allow must be crate-level because the lint
-// fires in the proc-macro expansion, not in the function's textual body. Fixed upstream in PyO3 0.23+.
 #![allow(clippy::useless_conversion)]
 mod db;
 mod db_writer;
 mod error;
 mod types;
+
+#[cfg(feature = "rust-pipeline")]
+#[allow(dead_code)]
+mod pipeline;
 
 use ignore::gitignore::GitignoreBuilder;
 use ignore::{WalkBuilder, WalkState};
@@ -50,11 +51,6 @@ fn scan_files(
         } else {
             let mut b = GitignoreBuilder::new(&root);
             for p in &pats {
-                // Patterns are fully normalized to gitignore syntax by Python's
-                // _fnmatch_to_gitignore before being passed here. Directory subtree
-                // patterns keep their "/**" suffix; bare extension/name patterns
-                // (e.g. "*.pyc") have "**/" stripped — gitignore bare patterns
-                // without a "/" already match at any depth, so no re-addition needed.
                 let _ = b.add_line(None, p);
             }
             b.build().ok()
@@ -67,8 +63,8 @@ fn scan_files(
         WalkBuilder::new(&root)
             .git_ignore(true)
             .git_global(false)
-            .git_exclude(false) // .git/info/exclude not modeled by Python path
-            .ignore(false) // .ignore files not modeled by Python path
+            .git_exclude(false)
+            .ignore(false)
             .hidden(false)
             .build_parallel()
             .run(|| {
@@ -131,7 +127,17 @@ fn scan_files(
 
 #[pymodule]
 fn chunkhound_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Initialize pyo3-log (Rust logs → Python logging)
+    pyo3_log::init();
+
     m.add_function(wrap_pyfunction!(scan_files, m)?)?;
     m.add_class::<db_writer::RustDbWriter>()?;
+
+    #[cfg(feature = "rust-pipeline")]
+    {
+        m.add_class::<pipeline::IndexingPipeline>()?;
+        m.add_class::<pipeline::PipelineReport>()?;
+    }
+
     Ok(())
 }
