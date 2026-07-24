@@ -41,6 +41,9 @@ fn emit_progress_gil(cb: &Option<Py<PyAny>>, phase: &str, current: u64, total: u
 struct StoreOutcome {
     chunks_written: u64,
     embeddings_written: u64,
+    /// Per-file parse errors collected from the parse thread — merged in
+    /// after all three threads join (see `pipeline_parse_embed_store`).
+    parse_errors: Vec<String>,
 }
 
 #[pymethods]
@@ -189,7 +192,7 @@ impl IndexingPipeline {
             chunks_written: outcome.chunks_written,
             embeddings_generated: outcome.embeddings_written,
             elapsed_secs: total_secs,
-            errors: Vec::new(),
+            errors: outcome.parse_errors,
             peak_rss_mb: None,
         })
     }
@@ -374,10 +377,15 @@ impl IndexingPipeline {
         let (parse_tx, parse_rx) = mpsc::sync_channel::<(usize, Vec<super::types::ParsedFile>)>(2);
         let (store_tx, store_rx) = mpsc::sync_channel::<DbWriterBatch>(2);
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        // Per-file parse errors (e.g. one file's parse callback raised) —
+        // these don't abort the run, unlike `error` above, which is for
+        // whole-batch-callback failures.
+        let parse_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
         // ── Parse thread ──────────────────────────────────────
         let parse_handle = {
             let error = Arc::clone(&error);
+            let parse_errors = Arc::clone(&parse_errors);
             std::thread::spawn(move || {
                 let mut parsed_files_count: u64 = 0;
                 for (batch_idx, batch) in batches {
@@ -403,6 +411,15 @@ impl IndexingPipeline {
                             break;
                         }
                     };
+
+                    {
+                        let mut errs = parse_errors.lock().unwrap();
+                        for pf in &parsed {
+                            if let Some(e) = &pf.error {
+                                errs.push(format!("{}: {}", pf.path.display(), e));
+                            }
+                        }
+                    }
 
                     log::debug!(
                         "[parse] batch {batch_idx} done in {:.3}s",
@@ -507,6 +524,10 @@ impl IndexingPipeline {
                 Ok(StoreOutcome {
                     chunks_written,
                     embeddings_written,
+                    // Filled in by the caller after all three threads join —
+                    // the store thread has no access to the parse thread's
+                    // shared `parse_errors` accumulator.
+                    parse_errors: Vec::new(),
                 })
             })
         };
@@ -667,6 +688,9 @@ impl IndexingPipeline {
         if let Some(e) = Arc::try_unwrap(error).unwrap().into_inner().unwrap() {
             return Err(e);
         }
+        // Per-file parse errors don't abort the run (unlike `error` above) —
+        // collected here so they can be merged into the final report below.
+        let file_parse_errors = Arc::try_unwrap(parse_errors).unwrap().into_inner().unwrap();
 
         let embedded_chunks = match embed_join {
             Ok(Ok(n)) => n,
@@ -686,7 +710,11 @@ impl IndexingPipeline {
         }
 
         match store_join {
-            Ok(result) => result,
+            Ok(Ok(mut result)) => {
+                result.parse_errors = file_parse_errors;
+                Ok(result)
+            }
+            Ok(Err(e)) => Err(e),
             Err(_) => Err("pipeline store thread panicked".to_string()),
         }
     }
@@ -790,6 +818,30 @@ impl IndexingPipeline {
                 .ok()
                 .and_then(|v| v.extract::<String>().ok())
                 .unwrap_or_default();
+
+            // Optional 3rd tuple element: per-file error message from the
+            // Python callback (e.g. `_parse_one_file` caught an exception
+            // for this file). A `None` Python value, or a callback that only
+            // returns 2-tuples, both fall through to `None` here — extracting
+            // `String` from `None` fails, same lenient pattern as the other
+            // per-item helpers below.
+            let py_error: Option<String> = item
+                .get_item(2)
+                .ok()
+                .and_then(|v| v.extract::<String>().ok());
+
+            if let Some(err) = py_error {
+                parsed.push(super::types::ParsedFile {
+                    path: path.clone(),
+                    language: None,
+                    file_size: 0,
+                    mtime: 0.0,
+                    content_hash: String::new(),
+                    chunks: Vec::new(),
+                    error: Some(err),
+                });
+                continue;
+            }
 
             let chunks_py = match item
                 .get_item(1)

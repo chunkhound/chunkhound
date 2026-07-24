@@ -146,23 +146,39 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
         return asyncio.run(_embed())
 
 
-def _parse_one_file(args: tuple[str, bool]) -> tuple[str, list[dict]]:
-    """Parse a single file — module-level so ProcessPoolExecutor can pickle it."""
+def _parse_one_file(args: tuple[str, bool]) -> tuple[str, list[dict], str | None]:
+    """Parse a single file — module-level so ProcessPoolExecutor can pickle it.
+
+    Catches any exception so one bad file can't abort the whole batch —
+    ProcessPoolExecutor.map() would otherwise re-raise it for the whole
+    parse_batch_callback() call, aborting the entire pipeline run.
+    """
     file_path, detect_embedded_sql = args
-    return parse_file_callback(file_path, detect_embedded_sql=detect_embedded_sql)
+    try:
+        lang, chunks = parse_file_callback(
+            file_path, detect_embedded_sql=detect_embedded_sql
+        )
+        return (lang, chunks, None)
+    except Exception as e:
+        # No file_path prefix here — the Rust caller already knows which
+        # path this tuple corresponds to and prepends it when aggregating
+        # into PipelineReport.errors.
+        return ("", [], str(e))
 
 
 def parse_batch_callback(
     file_paths: list[str],
     detect_embedded_sql: bool = True,
-) -> list[tuple[str, list[dict]]]:
+) -> list[tuple[str, list[dict], str | None]]:
     """Adapter: batch-parse files in parallel (called from Rust parse threads).
 
     Each file is parsed in its own subprocess via ProcessPoolExecutor for
     true CPU parallelism (tree-sitter holds the GIL, so threads don't help).
 
     Returns:
-        List of (language, chunks) tuples — same order as file_paths.
+        List of (language, chunks, error) tuples — same order as file_paths.
+        `error` is `None` on success, or a message string if that file's
+        parse raised.
     """
     from concurrent.futures import ProcessPoolExecutor
 
