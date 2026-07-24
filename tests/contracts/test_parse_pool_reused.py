@@ -111,13 +111,14 @@ class TestParsePoolReused:
         _get_parse_pool() lookups — proves actual OS-level reuse, not just
         object identity.
 
-        Forces max_workers=1 (via os.cpu_count()) so both submissions must
-        land on the same single worker, making pid equality deterministic.
+        Forces max_workers=1 (via configure_parse_pool()) so both submissions
+        must land on the same single worker, making pid equality
+        deterministic.
         """
         import chunkhound.pipeline_bridge as pipeline_bridge
 
         monkeypatch.setattr(pipeline_bridge, "_parse_pool", None)
-        monkeypatch.setattr(pipeline_bridge.os, "cpu_count", lambda: 1)
+        monkeypatch.setattr(pipeline_bridge, "_parse_pool_max_workers", 1)
 
         pool1 = pipeline_bridge._get_parse_pool()
         pid_a = pool1.submit(_get_pid_probe, None).result()

@@ -24,13 +24,50 @@ _parse_pool: ProcessPoolExecutor | None = None
 _parse_pool_lock = threading.Lock()
 
 
+def _default_parse_pool_workers() -> int:
+    """Single source of truth for the parse pool's default worker count.
+
+    Used both for _parse_pool_max_workers' own default (below) and by
+    run_rust_pipeline() when it calls configure_parse_pool() — keeping both
+    call sites pointed at one formula instead of two copies that could
+    silently drift apart.
+    """
+    return min(os.cpu_count() or 4, 16)
+
+
+# Worker count for _get_parse_pool(), set once by run_rust_pipeline() before
+# the pipeline starts calling parse_batch_callback(). Rust's config dict also
+# carries a "parse_thread_pool_size" entry, but Rust never reads it back —
+# parse_batch_callback() has a fixed call signature (Rust always calls it as
+# cb.call1((paths, detect_embedded_sql)), matched by test-local stand-ins
+# too), so there's no way to hand the value to _get_parse_pool() through that
+# call. This module-level default is the actual source of truth for callers
+# that never invoke configure_parse_pool() (e.g. tests driving the pipeline
+# directly).
+_parse_pool_max_workers: int = _default_parse_pool_workers()
+
+
+def configure_parse_pool(max_workers: int) -> None:
+    """Set the worker count _get_parse_pool() will use on its next creation.
+
+    Must be called before the pool is first created (i.e. before any
+    parse_batch_callback() call) — sizing is fixed at first use, same as
+    _get_parse_pool() itself. Called by run_rust_pipeline() with the same
+    value it sends to Rust as "parse_thread_pool_size", so the two stay in
+    sync even though Rust itself never acts on that config field.
+    """
+    global _parse_pool_max_workers
+    _parse_pool_max_workers = max(1, max_workers)
+
+
 def _get_parse_pool() -> ProcessPoolExecutor:
     """Lazily create the module-level parse worker pool, once per process.
 
     Reused across every parse_batch_callback() call — i.e. across every
     parse batch within one IndexingPipeline.run(), and across every run in
     this process — instead of being spawned and torn down per batch. Sizing
-    is fixed at first use, independent of any single batch's file count.
+    is fixed at first use (from _parse_pool_max_workers — see
+    configure_parse_pool()), independent of any single batch's file count.
 
     A lock guards creation because multiple concurrent IndexingPipeline.run()
     calls (e.g. two simultaneous indexing operations in one long-lived MCP
@@ -41,8 +78,7 @@ def _get_parse_pool() -> ProcessPoolExecutor:
     if _parse_pool is None:
         with _parse_pool_lock:
             if _parse_pool is None:
-                max_workers = min(os.cpu_count() or 4, 16)
-                pool = ProcessPoolExecutor(max_workers=max_workers)
+                pool = ProcessPoolExecutor(max_workers=_parse_pool_max_workers)
                 atexit.register(pool.shutdown, cancel_futures=True)
                 _parse_pool = pool
     return _parse_pool
@@ -273,7 +309,6 @@ async def run_rust_pipeline(
            "elapsed_secs": float, "errors": list[dict]}``
     """
     import asyncio
-    import os
 
     from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
@@ -308,7 +343,12 @@ async def run_rust_pipeline(
     if max_concurrent <= 0 and not skip_embeddings:
         max_concurrent = _detect_embed_concurrency(embedding_cfg)
     max_concurrent = max_concurrent or 1
-    parse_thread_pool_size = (os.cpu_count() or 4)
+    # Uses the same formula as _get_parse_pool()'s own default (see
+    # _default_parse_pool_workers()) — see configure_parse_pool()'s docstring
+    # for why this has to be set explicitly here rather than left for
+    # _get_parse_pool() to compute lazily on first use.
+    parse_thread_pool_size = _default_parse_pool_workers()
+    configure_parse_pool(parse_thread_pool_size)
 
     config_dict = {
         "project_root": str(project_root.resolve()),
