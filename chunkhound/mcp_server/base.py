@@ -6,7 +6,7 @@ This module provides a base class that handles:
 - Lifecycle management (startup/shutdown)
 - Common error handling patterns
 
-Architecture Note: MCP server (stdio-only) inherits from this base
+Architecture Note: every transport (stdio, HTTP) inherits from this base
 to ensure consistent initialization while respecting protocol-specific constraints.
 """
 
@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
@@ -34,7 +34,6 @@ from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as EmbeddingProviderProtocol,
 )
 from chunkhound.llm_manager import LLMManager
-
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
 )
@@ -42,9 +41,31 @@ from chunkhound.services.directory_indexing_service import DirectoryIndexingServ
 from chunkhound.services.realtime import RealtimeStartupStatusTracker
 from chunkhound.services.realtime.service import RealtimeIndexingService
 from chunkhound.utils.logging_guard import log_if_not_mcp
+from chunkhound.version import __version__
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
 )
+
+# Try to import the official MCP SDK; both transports (stdio and HTTP) share
+# this availability flag. Deferred/optional so importing this module never
+# hard-fails in environments without the SDK installed.
+_MCP_AVAILABLE = True
+try:  # runtime path
+    import mcp.types as types  # type: ignore  # noqa: F401
+    from mcp.server import Server  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency path
+    _MCP_AVAILABLE = False
+
+if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps on import
+    import mcp.types as types  # noqa: F401
+    from mcp.server import Server  # noqa: F401
+
+# Imported at module level (not deferred) so tests can patch
+# ``chunkhound.mcp_server.base.handle_tool_call`` and have every transport's
+# already-registered call_tool handler observe the patched behavior — the
+# handler closure below resolves this name from these module globals on
+# every call, not from a value captured once at registration time.
+from .common import first_error_tool_content, handle_tool_call  # noqa: E402
 
 _DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
 
@@ -53,7 +74,7 @@ class MCPServerBase(ABC):
     """Base class for MCP server implementations.
 
     Provides common initialization, configuration validation, and lifecycle
-    management for stdio MCP server.
+    management shared by every transport (stdio, HTTP).
 
     Subclasses must implement:
     - _register_tools(): Register protocol-specific tool handlers
@@ -81,6 +102,14 @@ class MCPServerBase(ABC):
         self.embedding_manager: EmbeddingManager | None = None
         self.llm_manager: LLMManager | None = None
         self.realtime_indexing: RealtimeIndexingService | None = None
+
+        # Underlying MCP protocol server. Constructed lazily in
+        # _register_common_tool_handlers() by subclasses that actually
+        # dispatch tools through the SDK (stdio/HTTP); left None for
+        # subclasses whose _register_tools() is a no-op (e.g. the daemon,
+        # which dispatches tools via its own JSON-RPC IPC loop instead).
+        self._initialization_complete = asyncio.Event()
+        self.server: Server | None = None
 
         # Initialization state
         self._initialized = False
@@ -119,6 +148,9 @@ class MCPServerBase(ABC):
 
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
         os.environ["CHUNKHOUND_MCP_MODE"] = "1"
+
+        # Register tools with the underlying MCP server
+        self._register_tools()
 
     def debug_log(self, message: str, *, always: bool = False) -> None:
         """Log to the MCP debug file without risking JSON-RPC corruption."""
@@ -1299,9 +1331,8 @@ class MCPServerBase(ABC):
         filtered_count = len(TOOL_REGISTRY) - len(tools)
         if filtered_count > 0:
             has_llm = self.llm_manager is not None
-            has_emb = (
-                self.embedding_manager is not None
-                and bool(self.embedding_manager.list_providers())
+            has_emb = self.embedding_manager is not None and bool(
+                self.embedding_manager.list_providers()
             )
             has_reranker = has_reranker_support(self.embedding_manager)
             if debug_log := getattr(self, "debug_log", None):
@@ -1313,6 +1344,78 @@ class MCPServerBase(ABC):
                 )
 
         return tools
+
+    def _register_common_tool_handlers(self) -> None:
+        """Register call_tool/list_tools handlers shared by every transport.
+
+        Transport subclasses call this from their ``_register_tools()``
+        implementation so tool dispatch never drifts between stdio and HTTP.
+        """
+        if not _MCP_AVAILABLE:
+            return  # no-op when SDK not available
+
+        self.server = Server("ChunkHound Code Search", version=__version__)
+
+        # The MCP SDK's call_tool decorator expects a SINGLE handler function
+        # with signature (tool_name: str, arguments: dict) that handles ALL tools
+        @self.server.call_tool()  # type: ignore[misc]
+        async def handle_all_tools(
+            tool_name: str, arguments: dict[str, Any]
+        ) -> list[types.TextContent]:
+            """Universal tool handler that routes to the unified handler."""
+            text_contents = await handle_tool_call(
+                tool_name=tool_name,
+                arguments=arguments,
+                services=self.services,
+                embedding_manager=self.embedding_manager,
+                initialization_complete=self._initialization_complete,
+                debug_mode=self.debug_mode,
+                scan_progress=self._scan_progress,
+                llm_manager=self.llm_manager,
+                config=self.config,
+                ensure_services=self.ensure_tool_services,
+            )
+            error_content = first_error_tool_content(text_contents)
+            if error_content is not None:
+                raise RuntimeError(error_content.text)
+            return text_contents
+
+        self._register_list_tools()
+
+    def _register_list_tools(self) -> None:
+        """Register the list_tools handler shared by every transport."""
+        # Only called from _register_common_tool_handlers(), which constructs
+        # self.server immediately before calling this.
+        assert self.server is not None
+
+        @self.server.list_tools()  # type: ignore[misc]
+        async def list_tools() -> list[types.Tool]:
+            """List available tools."""
+            # Wait for initialization
+            try:
+                await asyncio.wait_for(
+                    self._initialization_complete.wait(), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                # Return basic tools even if not fully initialized
+                pass
+
+            return self.build_available_tools()
+
+    def build_available_tools(self) -> list[types.Tool]:
+        """Build list of tools available based on current configuration.
+
+        Returns:
+            List of MCP Tool objects with filtered schemas.
+        """
+        return [
+            types.Tool(
+                name=d["name"],
+                description=d["description"],
+                inputSchema=d["inputSchema"],
+            )
+            for d in self._build_filtered_tool_dicts()
+        ]
 
     @abstractmethod
     def _register_tools(self) -> None:
