@@ -1424,6 +1424,12 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         if !tables.is_empty() {
             conn.execute_batch("CHECKPOINT")?;
         }
+        // Restore a conservative thread count — this connection may still be
+        // used for a concurrent write loop (the streaming pipeline's store
+        // thread writes/checkpoints while the embed thread's rayon pool is
+        // active), which must not compete with DuckDB's own internal
+        // parallelism for this machine's cores.
+        let _ = conn.execute_batch("SET threads = 1");
         Ok(())
     }
 }
