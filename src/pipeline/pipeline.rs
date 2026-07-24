@@ -103,15 +103,26 @@ impl IndexingPipeline {
 
         // ── Incremental diff (Phase 3) ─────────────────────────
         let delete_paths: Vec<String>;
+        // Content hashes computed during the diff for files that must be
+        // reprocessed (see `differ::compute_diff`) — reused by the parse
+        // stage instead of re-hashing, and files confirmed unchanged by hash
+        // despite a differing mtime never reach `batch_paths` at all.
+        let new_hashes: std::collections::HashMap<PathBuf, String>;
+        let mut files_skipped_by_hash = 0u64;
         if incremental {
             let diff = self.compute_diff_blocking(&batch_paths)?;
             // Only process changed files
             batch_paths = diff.changed;
             delete_paths = diff.removed;
+            new_hashes = diff.new_hashes;
+            files_skipped_by_hash = diff.skipped_by_hash;
             // Update file_count to reflect what will actually be processed
             file_count = batch_paths.len() as u64;
         } else {
+            // force_reindex bypasses hash-based skipping entirely, matching
+            // its "reprocess everything" contract.
             delete_paths = Vec::new();
+            new_hashes = std::collections::HashMap::new();
         }
 
         // ── Resolve directory→db file path (shared by both write paths) ──
@@ -170,6 +181,7 @@ impl IndexingPipeline {
                     store_progress_cb,
                     delete_paths,
                     db_config,
+                    new_hashes,
                 )
             })
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -188,7 +200,7 @@ impl IndexingPipeline {
 
         Ok(PipelineReport {
             files_processed: file_count,
-            files_skipped: 0,
+            files_skipped: files_skipped_by_hash,
             chunks_written: outcome.chunks_written,
             embeddings_generated: outcome.embeddings_written,
             elapsed_secs: total_secs,
@@ -210,6 +222,7 @@ impl IndexingPipeline {
                 changed: files.to_vec(),
                 removed: Vec::new(),
                 files_scanned: files.len(),
+                ..Default::default()
             });
         } else {
             self.config.db_path.join("chunks.db")
@@ -220,6 +233,7 @@ impl IndexingPipeline {
                 changed: files.to_vec(),
                 removed: Vec::new(),
                 files_scanned: files.len(),
+                ..Default::default()
             });
         }
 
@@ -227,14 +241,19 @@ impl IndexingPipeline {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let mut stmt = conn
-            .prepare("SELECT path, EXTRACT(EPOCH FROM modified_time) FROM files")
+            .prepare("SELECT path, EXTRACT(EPOCH FROM modified_time), content_hash FROM files")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let db_entries: Vec<DbFileEntry> = stmt
             .query_map([], |row| {
                 let path: String = row.get(0)?;
                 let mtime: f64 = row.get(1)?;
-                Ok(DbFileEntry { path, mtime })
+                let content_hash: Option<String> = row.get(2)?;
+                Ok(DbFileEntry {
+                    path,
+                    mtime,
+                    content_hash,
+                })
             })
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
             .filter_map(|r| r.ok())
@@ -286,6 +305,7 @@ impl IndexingPipeline {
             .map(|e| DbFileEntry {
                 path: e.path.clone(),
                 mtime: e.mtime - tz_offset,
+                content_hash: e.content_hash.clone(),
             })
             .collect();
 
@@ -336,6 +356,7 @@ impl IndexingPipeline {
         store_progress_cb: Option<Py<PyAny>>,
         delete_paths: Vec<String>,
         db_config: DbConfig,
+        new_hashes: std::collections::HashMap<PathBuf, String>,
     ) -> Result<StoreOutcome, String> {
         use std::sync::mpsc;
         use std::sync::{Arc, Mutex};
@@ -400,7 +421,14 @@ impl IndexingPipeline {
                         .collect();
 
                     let parsed = match Python::with_gil(|gil_py| {
-                        Self::parse_one_batch(gil_py, &parse_cb, &paths, &batch, detect_sql)
+                        Self::parse_one_batch(
+                            gil_py,
+                            &parse_cb,
+                            &paths,
+                            &batch,
+                            detect_sql,
+                            &new_hashes,
+                        )
                     }) {
                         Ok(parsed) => parsed,
                         Err(e) => {
@@ -799,6 +827,7 @@ impl IndexingPipeline {
         paths: &[String],
         batch: &[PathBuf],
         detect_embedded_sql: bool,
+        new_hashes: &std::collections::HashMap<PathBuf, String>,
     ) -> Result<Vec<super::types::ParsedFile>, String> {
         let cb = cb.bind(py);
         let py_paths = PyList::new_bound(py, paths);
@@ -883,7 +912,10 @@ impl IndexingPipeline {
                 language: if lang.is_empty() { None } else { Some(lang) },
                 file_size,
                 mtime,
-                content_hash: String::new(),
+                // Computed by the diff phase (`differ::compute_diff`), which
+                // already read this file's bytes once to decide it needed
+                // reprocessing — reused here instead of hashing again.
+                content_hash: new_hashes.get(path).cloned().unwrap_or_default(),
                 chunks,
                 error: None,
             });

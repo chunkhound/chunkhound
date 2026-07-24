@@ -7,6 +7,8 @@ pipeline) to assert byte-identical chunk output.
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import duckdb
+
 from chunkhound.core.config.config import Config
 from chunkhound.registry import configure_registry, create_indexing_coordinator
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
@@ -28,6 +30,28 @@ class IndexResult:
         default_factory=list
     )
     errors: list[str] = field(default_factory=list)
+
+
+def disconnect_registry_db() -> None:
+    """Force-disconnect the registry's DuckDB provider to clear per-process cache.
+
+    DuckDB maintains a process-level cache of opened databases. When the Python
+    indexing pipeline opens a DuckDB database, subsequent duckdb.connect() calls
+    to the same path (even from Rust via py.allow_threads in the same process)
+    reuse the cached state, returning stale data.
+
+    Disconnecting the provider and unregistering it forces duckdb to release
+    the cached state, so the next connection gets fresh data from disk.
+    """
+    try:
+        from chunkhound.registry import get_registry
+        registry = get_registry()
+        db = registry.get_provider("database")
+        if db is not None and hasattr(db, "disconnect"):
+            db.disconnect()
+        registry._providers.pop("database", None)
+    except Exception:
+        pass  # best-effort — test should still pass even if cleanup fails
 
 
 async def index_with_python(
@@ -181,6 +205,108 @@ def _collect_embedding_tuples(
             )
     conn.close()
     return tuples
+
+
+def collect_chunk_tuples_from_duckdb(
+    db_dir: Path,
+) -> list[tuple[str, str, str, str, int, int]]:
+    """Query a DB directory directly for canonical comparison tuples.
+
+    Unlike ``_collect_chunk_tuples``, which reads through a coordinator's live
+    connection, this opens ``chunks.db`` directly — used after the Rust
+    pipeline writes to the DB, when there is no Python coordinator connection
+    to read through.
+    """
+    db_file = db_dir / "chunks.db"
+    conn = duckdb.connect(str(db_file))
+    rows = conn.execute(
+        """
+        SELECT f.path, c.chunk_type, c.symbol, c.code, c.start_line, c.end_line
+        FROM chunks c JOIN files f ON f.id = c.file_id
+        ORDER BY f.path, c.start_line, c.symbol
+        """
+    ).fetchall()
+    conn.close()
+    return [
+        (
+            str(r[0]),
+            str(r[1]),
+            str(r[2] or ""),
+            str(r[3] or ""),
+            int(r[4] or 0),
+            int(r[5] or 0),
+        )
+        for r in rows
+    ]
+
+
+def index_with_rust(
+    fixture_dir: Path,
+    db_dir: Path,
+    *,
+    skip_embeddings: bool = False,
+    incremental: bool = False,
+) -> IndexResult:
+    """Index *fixture_dir* using the Rust pipeline."""
+    from tests.contracts.mock_embed import MOCK_MODEL, MOCK_PROVIDER, embed_texts
+
+    try:
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
+    except ImportError:
+        raise NotImplementedError(
+            "Rust IndexingPipeline is not yet available in chunkhound_native."
+        ) from None
+
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    config_dict = {
+        "project_root": str(fixture_dir.resolve()),
+        "db_path": str(db_dir.resolve()),
+        "db_batch_size": 100,
+        "compaction_threshold": 0.60,
+        "compaction_batch_threshold": 10,
+        "compaction_min_size_mb": 10,
+        "parse_batch_size": 200,
+        "parse_thread_pool_size": 4,
+        "embed_batch_size": 200,
+        "force_reindex": False,
+        "mtime_epsilon_seconds": 0.01,
+        "skip_cleanup": False,
+        "skip_embeddings": skip_embeddings,
+        "per_file_timeout_secs": 3.0,
+        "per_file_timeout_min_size_kb": 128,
+        "detect_embedded_sql": True,
+        "config_file_size_threshold_kb": 20,
+        "embedding_provider": MOCK_PROVIDER,
+        "embedding_model": MOCK_MODEL,
+    }
+
+    pipeline = IndexingPipeline(config_dict)
+
+    files = sorted(fixture_dir.resolve().glob("*"))
+    file_paths = [str(f) for f in files if f.is_file()]
+
+    from chunkhound.pipeline_bridge import parse_batch_callback
+
+    report = pipeline.run(
+        files=file_paths,
+        parse_batch_callback=parse_batch_callback,
+        embed_batch_callback=embed_texts if not skip_embeddings else None,
+        progress_callback=None,
+        incremental=incremental,
+    )
+
+    chunk_tuples = collect_chunk_tuples_from_duckdb(db_dir)
+    embedding_tuples = _collect_embedding_tuples(db_dir)
+
+    return IndexResult(
+        files_processed=report.files_processed,
+        chunks_written=report.chunks_written,
+        embeddings_generated=report.embeddings_generated,
+        chunk_tuples=chunk_tuples,
+        embedding_tuples=embedding_tuples,
+        errors=list(report.errors) if report.errors else [],
+    )
 
 
 def assert_identical(result_a: IndexResult, result_b: IndexResult) -> None:
