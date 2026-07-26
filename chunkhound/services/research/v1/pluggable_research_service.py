@@ -265,6 +265,12 @@ class PluggableResearchService(ProgressEmitterMixin):
         ) = await self._synthesis_engine._manage_token_budget_for_synthesis(
             aggregated["chunks"], aggregated["files"], query, synthesis_budgets
         )
+        file_languages = {
+            file_path: language
+            for chunk in prioritized_chunks
+            if (file_path := chunk.get("file_path")) in budgeted_files
+            and isinstance(language := chunk.get("language"), str)
+        }
 
         # Emit synthesizing event
         await self._emit_event(
@@ -288,6 +294,7 @@ class PluggableResearchService(ProgressEmitterMixin):
             root_query=query,
             llm_provider=self._llm_manager.get_utility_provider(),
             embedding_provider=self._embedding_manager.get_provider(),
+            file_languages=file_languages,
         )
         cluster_groups = extraction_result.cluster_groups
         cluster_metadata = extraction_result.cluster_metadata
@@ -313,6 +320,7 @@ class PluggableResearchService(ProgressEmitterMixin):
                 files=budgeted_files,
                 context=context,
                 synthesis_budgets=synthesis_budgets,
+                file_languages=file_languages,
                 constants_context=constants_context,
                 facts_context=facts_context,
             )
