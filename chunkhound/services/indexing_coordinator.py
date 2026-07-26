@@ -98,6 +98,22 @@ def _progress_info(stored: int, skipped: int, errs: int, chunks: int) -> str:
     return f"stored {stored} | skipped {skipped} | err {errs} | {chunks} chunks"
 
 
+def _update_speed_field(progress: Progress, task_id: TaskID, unit: str) -> None:
+    """Compute and set a task's ``speed`` field from its own completed/elapsed.
+
+    Looks the task up by TaskID directly (``progress._tasks``) rather than via
+    the public ``progress.tasks`` list — that list is insertion-ordered and
+    desyncs from TaskID once any earlier task is removed (as ``store_task`` is
+    on the Rust pipeline path), which would silently target the wrong task.
+    """
+    task_obj = progress._tasks.get(task_id)
+    if task_obj is None:
+        return
+    if task_obj.elapsed and task_obj.elapsed > 0 and task_obj.completed:
+        rate = task_obj.completed / task_obj.elapsed * 60
+        progress.update(task_id, speed=f"{rate:.1f} {unit}")
+
+
 class _StatResult:
     """Lightweight stat-like object used in _store_parsed_results."""
 
@@ -827,6 +843,7 @@ class IndexingCoordinator(BaseService):
                     inc = len(batch_result)
                     completed_files += inc
                     self.progress.advance(parse_task, inc)
+                    _update_speed_field(self.progress, parse_task, "files/min")
                     self.progress.update(parse_task, info=f"{completed_files} parsed")
                 # Stream results to storage if callback provided
                 if on_batch is not None:
@@ -1022,6 +1039,7 @@ class IndexingCoordinator(BaseService):
                 )
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
+                    _update_speed_field(self.progress, file_task, "writes/min")
                     if cumulative_counters is not None:
                         cumulative_counters["errors"] = (
                             cumulative_counters.get("errors", 0) + 1
@@ -1065,6 +1083,7 @@ class IndexingCoordinator(BaseService):
                     )
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
+                    _update_speed_field(self.progress, file_task, "writes/min")
                     if cumulative_counters is not None:
                         cumulative_counters["skipped"] = (
                             cumulative_counters.get("skipped", 0) + 1
@@ -1156,6 +1175,7 @@ class IndexingCoordinator(BaseService):
                 # Update progress
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
+                    _update_speed_field(self.progress, file_task, "writes/min")
                     if cumulative_counters is not None:
                         cumulative_counters["stored"] = (
                             cumulative_counters.get("stored", 0) + 1
@@ -1175,6 +1195,7 @@ class IndexingCoordinator(BaseService):
                 stats["errors"].append({"file": str(result.file_path), "error": str(e)})
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
+                    _update_speed_field(self.progress, file_task, "writes/min")
                     if cumulative_counters is not None:
                         cumulative_counters["errors"] = (
                             cumulative_counters.get("errors", 0) + 1
@@ -1578,6 +1599,7 @@ class IndexingCoordinator(BaseService):
                     _data_task_total = 1
                     _diff_start = 0.0
                     _diff_reset_done = False
+                    _parse_reset_done = False
 
                     # Pre-create all write sub-phase bars (no need for a
                     # separate "prepare" bar — prepare is sub-second).
@@ -1600,7 +1622,8 @@ class IndexingCoordinator(BaseService):
                             _data_task_total, \
                             _diff_start, \
                             _diff_reset_done, \
-                            _diff_elapsed
+                            _diff_elapsed, \
+                            _parse_reset_done
                         if phase == "diff":
                             if _diff_task is not None:
                                 # First-call-based reset, mirroring the embed
@@ -1621,8 +1644,16 @@ class IndexingCoordinator(BaseService):
                                     _diff_elapsed = time.time() - _diff_start
                                     _pr.update(_diff_task, info="done")
                         elif phase == "parse":
+                            # First-call-based reset: _pt's clock started
+                            # ticking at add_task() time, before the diff
+                            # phase even ran, so its raw elapsed would
+                            # understate the parse-phase rate.
+                            if not _parse_reset_done:
+                                _pr.reset(_pt, total=max(total, 1), start=True)
+                                _parse_reset_done = True
                             _pr.update(_pt, completed=current,
                                        info=f"{current}/{total} parsed")
+                            _update_speed_field(_pr, _pt, "files/min")
                         elif phase == "embed":
                             if _embed_task is not None:
                                 # First-call-based reset (not current==0-based):
@@ -1679,6 +1710,7 @@ class IndexingCoordinator(BaseService):
                                     completed=current,
                                     info=f"{current}/{total} batches written",
                                 )
+                                _update_speed_field(_pr, _data_task, "writes/min")
                             else:
                                 _pr.update(_data_task, info="writing...")
                         elif phase == "write-index":
