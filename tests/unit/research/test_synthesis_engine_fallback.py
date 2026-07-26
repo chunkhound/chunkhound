@@ -6,7 +6,7 @@ import pytest
 
 from chunkhound.interfaces.embedding_provider import RerankResult
 from chunkhound.llm_manager import LLMManager
-from chunkhound.services.clustering_service import ClusterGroup
+from chunkhound.services.clustering_service import ClusterGroup, ClusteringService
 from chunkhound.services.research import SynthesisEngine
 from chunkhound.services.research.shared.citation_manager import CitationManager
 from chunkhound.services.research.v1.pluggable_research_service import (
@@ -174,43 +174,63 @@ async def test_map_synthesis_uses_output_budget_for_cluster_allocation(
     assert "Target output: ~6,000 tokens" in call["system"]
 
 
+_WIDGET_SOURCE = "@implementation Widget\n@end"
+_WIDGET_FILE = {"Sources/Widget.m": _WIDGET_SOURCE}
+_WIDGET_FILES = {**_WIDGET_FILE, "Sources/Helper.py": "def helper(): pass"}
+_WIDGET_CHUNKS = [
+    {
+        "file_path": "Sources/Widget.m",
+        "content": _WIDGET_SOURCE,
+        "start_line": 1,
+        "end_line": 2,
+    }
+]
+_WIDGET_LANGUAGE = {"Sources/Widget.m": "objc"}
+_WIDGET_LANGUAGES = {**_WIDGET_LANGUAGE, "Sources/Helper.py": "python"}
+
+
 def _source_header(file_path: str, language: str, content: str) -> str:
     return f"### [{language}] {file_path}\n{'=' * 80}\n{content}\n{'=' * 80}"
 
 
+async def _cluster_widget_source():
+    clusterer = ClusteringService(FakeEmbeddingProvider(), FakeLLMProvider())
+    clusters, _ = await clusterer.cluster_files_hdbscan_bounded(
+        _WIDGET_FILES,
+        min_tokens_per_cluster=1,
+        max_tokens_per_cluster=50_000,
+        file_languages=_WIDGET_LANGUAGES,
+    )
+    return next(
+        cluster for cluster in clusters if "Sources/Widget.m" in cluster.file_paths
+    )
+
+
 @pytest.mark.asyncio
-async def test_map_synthesis_preserves_cluster_language_in_source_headers(
+async def test_map_synthesis_uses_indexed_language_over_extension_fallback(
     capturing_llm_manager,
 ):
     llm_manager, fake_provider = capturing_llm_manager
     engine = SynthesisEngine(
         llm_manager, object(), _FakeParent(FakeEmbeddingProvider())
     )
-    source = "@implementation Widget\n@end"
-    cluster = ClusterGroup(
-        cluster_id=0,
-        file_paths=["Sources/Widget.m"],
-        files_content={"Sources/Widget.m": source},
-        total_tokens=20_000,
-        file_languages={"Sources/Widget.m": "objc"},
-    )
-    chunks = [
-        {
-            "file_path": "Sources/Widget.m",
-            "content": source,
-            "start_line": 1,
-            "end_line": 2,
-        }
-    ]
+    cluster = await _cluster_widget_source()
 
     await engine._map_synthesis_on_cluster(
-        cluster, "widget", chunks, {"output_tokens": 30_000}, 100_000
+        cluster,
+        "widget",
+        _WIDGET_CHUNKS,
+        {"output_tokens": 30_000},
+        100_000,
     )
 
+    assert len(fake_provider.calls) == 1
     prompt = fake_provider.calls[0]["prompt"]
     assert (
-        _source_header("Sources/Widget.m", "objc", f"# Lines 1-2\n{source}") in prompt
+        _source_header("Sources/Widget.m", "objc", f"# Lines 1-2\n{_WIDGET_SOURCE}")
+        in prompt
     )
+    assert "### [matlab] Sources/Widget.m" not in prompt
 
 
 @pytest.mark.asyncio
@@ -274,33 +294,38 @@ async def test_research_flow_preserves_indexed_language_in_embeddings_and_prompt
 
 
 @pytest.mark.asyncio
-async def test_single_pass_synthesis_falls_back_to_extension_language(
+@pytest.mark.parametrize(
+    ("file_languages", "expected_language"),
+    [
+        pytest.param(None, "matlab", id="extension-fallback"),
+        pytest.param(_WIDGET_LANGUAGE, "objc", id="indexed-language"),
+    ],
+)
+async def test_single_pass_synthesis_resolves_source_language(
     capturing_llm_manager,
+    file_languages,
+    expected_language,
 ):
     llm_manager, fake_provider = capturing_llm_manager
     engine = SynthesisEngine(
         llm_manager, object(), _FakeParent(FakeEmbeddingProvider())
     )
-    source = "@implementation Widget\n@end"
-    files = {"Sources/Widget.m": source}
-    chunks = [
-        {
-            "file_path": "Sources/Widget.m",
-            "content": source,
-            "start_line": 1,
-            "end_line": 2,
-        }
-    ]
-
     await engine._single_pass_synthesis(
         "widget",
-        chunks,
-        files,
+        _WIDGET_CHUNKS,
+        _WIDGET_FILE,
         None,
         {"input_tokens": 50_000, "output_tokens": 5_000},
+        file_languages=file_languages,
     )
 
+    assert len(fake_provider.calls) == 1
     prompt = fake_provider.calls[0]["prompt"]
     assert (
-        _source_header("Sources/Widget.m", "matlab", f"# Lines 1-2\n{source}") in prompt
+        _source_header(
+            "Sources/Widget.m", expected_language, f"# Lines 1-2\n{_WIDGET_SOURCE}"
+        )
+        in prompt
     )
+    if file_languages:
+        assert "### [matlab] Sources/Widget.m" not in prompt
