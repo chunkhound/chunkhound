@@ -41,6 +41,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         "verbose": False,
         "debug": False,
         "config": None,
+        "previous_query": None,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -75,7 +76,7 @@ def patched(monkeypatch):
         created.append(p)
         return p
 
-    def fake_argv(args, tmpdir, config):
+    def fake_argv(args, tmpdir, config, query, previous_query):
         return ["/bin/true"]
 
     monkeypatch.setattr(ws_mod, "_build_quickresearch_argv", fake_argv)
@@ -293,8 +294,133 @@ def test_build_quickresearch_argv_unit_boolean_optional(tmp_path) -> None:
     from chunkhound.core.config.config import Config
 
     args = _make_args(llm_ssl_verify=False, ssl_verify=True)
-    cmd = ws_mod._build_quickresearch_argv(args, tmp_path, Config())
+    cmd = ws_mod._build_quickresearch_argv(
+        args, tmp_path, Config(), query="q", previous_query=None
+    )
     assert "--no-llm-ssl-verify" in cmd
     assert "--ssl-verify" in cmd
     assert "--llm-ssl-verify" not in cmd
     assert "True" not in cmd and "False" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# `--previous-query` chain plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_build_quickresearch_argv_previous_query_appended(tmp_path) -> None:
+    """`previous_query` becomes ``--previous-query <val>`` in subprocess argv."""
+    from chunkhound.core.config.config import Config
+
+    args = _make_args()
+    cmd = ws_mod._build_quickresearch_argv(
+        args, tmp_path, Config(),
+        query="normalized q",
+        previous_query="prior topic",
+    )
+    assert "--previous-query" in cmd
+    assert cmd[cmd.index("--previous-query") + 1] == "prior topic"
+
+
+def test_build_quickresearch_argv_omits_previous_query_when_none(tmp_path) -> None:
+    from chunkhound.core.config.config import Config
+
+    args = _make_args()
+    cmd = ws_mod._build_quickresearch_argv(
+        args, tmp_path, Config(), query="q", previous_query=None
+    )
+    assert "--previous-query" not in cmd
+
+
+def test_build_quickresearch_argv_query_param_becomes_positional(tmp_path) -> None:
+    """Whatever is passed as ``query`` becomes the ``_quickresearch`` positional.
+
+    In practice both CLI and MCP pass the RAW user input here — feeding a
+    lossy narrowing (e.g. ``queries[0]`` from the expansion) would silently
+    degrade deep research with no signal.
+    """
+    from chunkhound.core.config.config import Config
+
+    args = _make_args(query="raw user input")
+    cmd = ws_mod._build_quickresearch_argv(
+        args, tmp_path, Config(),
+        query="whatever the caller passes",
+        previous_query=None,
+    )
+    idx = cmd.index("_quickresearch")
+    assert cmd[idx + 1] == "whatever the caller passes"
+
+
+@pytest.mark.asyncio
+async def test_websearch_cli_previous_query_reaches_expansion(
+    monkeypatch, patched
+) -> None:
+    """CLI --previous-query flows into ``expand_web_queries``."""
+    captured: dict[str, object] = {}
+
+    async def capturing_expand(query, llm_manager, previous_query=None):
+        captured["query"] = query
+        captured["previous_query"] = previous_query
+        return [query]
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", capturing_expand)
+    monkeypatch.setattr(ws_core_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _noop_fetch_and_save)
+    monkeypatch.setattr(
+        ws_mod.subprocess, "run",
+        lambda cmd, **kw: type("R", (), {"returncode": 0, "stdout": ""})(),
+    )
+
+    await ws_mod.websearch_command(
+        _make_args(previous_query="prior"), config=None
+    )
+
+    assert captured["previous_query"] == "prior"
+
+
+@pytest.mark.asyncio
+async def test_websearch_cli_empty_previous_query_treated_as_none(
+    monkeypatch, patched
+) -> None:
+    """Empty ``--previous-query ''`` coerces to None at the surface boundary."""
+    captured: dict[str, object] = {}
+
+    async def capturing_expand(query, llm_manager, previous_query=None):
+        captured["previous_query"] = previous_query
+        return [query]
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", capturing_expand)
+    monkeypatch.setattr(ws_core_mod, "search", _stub_search(_default_results()))
+    monkeypatch.setattr(ws_mod, "fetch_and_save", _noop_fetch_and_save)
+    monkeypatch.setattr(
+        ws_mod.subprocess, "run",
+        lambda cmd, **kw: type("R", (), {"returncode": 0, "stdout": ""})(),
+    )
+
+    await ws_mod.websearch_command(_make_args(previous_query=""), config=None)
+
+    assert captured["previous_query"] is None
+
+
+@pytest.mark.asyncio
+async def test_websearch_cli_subprocess_gets_raw_query(
+    patched_capturing, monkeypatch
+) -> None:
+    """`_quickresearch` positional is the RAW query, not ``queries[0]``.
+
+    A lossy narrowing (e.g. dropping keywords) would silently narrow the
+    downstream deep-research prompt with no signal.
+    """
+    async def canned_expand(query, llm_manager, previous_query=None):
+        return ["v1", "v2", "v3"]
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", canned_expand)
+
+    from chunkhound.core.config.config import Config
+    await ws_mod.websearch_command(
+        _make_args(query="raw user input"), config=Config()
+    )
+
+    cmd = patched_capturing["captured"]["cmd"]
+    idx = cmd.index("_quickresearch")
+    assert cmd[idx + 1] == "raw user input"

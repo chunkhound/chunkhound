@@ -79,6 +79,7 @@ async def test_quickresearch_ignores_user_include_exclude_filters(
         # Match our own ppid so the startup orphan check passes and the
         # watchdog thread stays quiet for the duration of the test.
         parent_pid=os.getppid(),
+        previous_query=None,
     )
 
     await qr_mod.quickresearch_command(args, config)
