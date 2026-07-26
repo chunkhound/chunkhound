@@ -19,7 +19,9 @@ if TYPE_CHECKING:
 from chunkhound.core.types.common import FileId
 from chunkhound.parsers.parser_factory import create_parser_for_language
 
-_embed_local = threading.local()
+_embed_providers: dict[int, Any] = {}
+_embed_loops: dict[int, Any] = {}
+_embed_cache_lock = threading.Lock()
 
 _parse_pool: ProcessPoolExecutor | None = None
 _parse_pool_lock = threading.Lock()
@@ -184,8 +186,21 @@ def embed_batch_callback(texts: list[str]) -> list[list[float]]:
 def _embed_batch(texts: list[str]) -> list[list[float]]:
     """Shared embed helper — run the async provider.embed() synchronously.
 
-    Uses a thread-local provider AND a thread-local event loop, both created
-    once per thread and reused for the thread's lifetime.
+    Uses a provider AND an event loop cached per OS thread (keyed by
+    ``threading.get_ident()``), both created once per thread and reused for
+    the thread's lifetime.
+
+    NOTE: this used to use ``threading.local()``, which turned out not to
+    persist across separate ``Python::with_gil()`` calls from the same
+    Rust-native rayon thread — each call got a fresh ``threading.local()``
+    namespace (visible as CPython auto-naming the attaching thread
+    "Dummy-N" every time), silently defeating the cache and creating a new
+    provider + event loop on *every single batch* instead of once per
+    thread. Keying an explicit module-level dict by the raw OS thread id
+    (which — unlike the ``threading.local()`` namespace — really is stable
+    across calls) fixes this; see git history for the diagnostic that
+    confirmed only ``embed_thread_pool_size`` distinct thread ids exist but
+    hundreds of provider/loop instances were being created.
 
     The Rust embed thread's rayon pool is built once per pipeline run and
     reused across every streamed batch, so its worker OS threads are
@@ -202,18 +217,19 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
     """
     import asyncio
 
-    if not hasattr(_embed_local, 'provider'):
+    tid = threading.get_ident()
+    if tid not in _embed_providers:
         from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
         from chunkhound.registry import get_registry
 
         config = get_registry()._config
         if config is None or config.embedding is None:
             raise RuntimeError("No embedding configuration available")
-        _embed_local.provider = EmbeddingProviderFactory.create_provider(
-            config.embedding
-        )
+        provider = EmbeddingProviderFactory.create_provider(config.embedding)
+        with _embed_cache_lock:
+            _embed_providers.setdefault(tid, provider)
 
-    emb_provider = _embed_local.provider
+    emb_provider = _embed_providers[tid]
 
     async def _embed():
         return await emb_provider.embed(texts)
@@ -222,10 +238,13 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
     # own — give each thread a persistent loop, created once and reused for
     # every call made from that thread.
     if threading.current_thread() is not threading.main_thread():
-        if not hasattr(_embed_local, 'loop'):
-            _embed_local.loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(_embed_local.loop)
-        return _embed_local.loop.run_until_complete(_embed())
+        if tid not in _embed_loops:
+            loop = asyncio.new_event_loop()
+            with _embed_cache_lock:
+                _embed_loops.setdefault(tid, loop)
+        loop = _embed_loops[tid]
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_embed())
 
     try:
         loop = asyncio.get_event_loop()
@@ -531,6 +550,7 @@ async def run_rust_pipeline(
         "total_chunks": report.chunks_written,
         "embeddings_generated": report.embeddings_generated,
         "elapsed_secs": report.elapsed_secs,
+        "files_skipped_unchanged": report.files_skipped,
         "errors": [
             {"file": None, "error": err}
             for err in (list(report.errors) if report.errors else [])

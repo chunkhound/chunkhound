@@ -31,6 +31,12 @@ pub(crate) struct DbFileEntry {
     pub(crate) content_hash: Option<String>,
 }
 
+/// How often (in files scanned) to invoke `on_tick` — bounds the number of
+/// PyO3 call-into-Python round-trips for large repos; Rich's own terminal
+/// refresh is already throttled separately (10Hz), this throttle is purely
+/// about callback overhead.
+const DIFF_TICK_INTERVAL: usize = 200;
+
 /// Compute the diff between the files provided and the DB state.
 ///
 /// Returns the set of files that need re-processing, plus the set
@@ -40,11 +46,13 @@ pub(crate) struct DbFileEntry {
 /// `SELECT path, modified_time, content_hash FROM files`.
 /// `files_on_disk` are the absolute paths provided by the caller (scanner).
 /// `mtime_epsilon` controls how close two timestamps must be to be considered equal.
+/// `on_tick`, if provided, is called periodically with `(files_scanned, total)`.
 pub(crate) fn compute_diff(
     db_file_entries: &[DbFileEntry],
     files_on_disk: &[PathBuf],
     project_root: &Path,
     mtime_epsilon: f64,
+    mut on_tick: Option<&mut dyn FnMut(usize, usize)>,
 ) -> DiffResult {
     // Build a lookup: DB path → mtime
     let db_map: HashMap<&str, f64> = db_file_entries
@@ -69,6 +77,12 @@ pub(crate) fn compute_diff(
 
     for abs_path in files_on_disk {
         files_scanned += 1;
+
+        if let Some(tick) = on_tick.as_deref_mut() {
+            if files_scanned % DIFF_TICK_INTERVAL == 0 {
+                tick(files_scanned, files_on_disk.len());
+            }
+        }
 
         // Compute relative path (matching Python's _get_relative_path)
         let rel = match abs_path.strip_prefix(project_root) {
@@ -198,7 +212,7 @@ mod tests {
         let f2 = create_file(&tmp, "b.rs");
 
         let files = vec![f1.clone(), f2.clone()];
-        let diff = compute_diff(&[], &files, tmp.path(), 0.01);
+        let diff = compute_diff(&[], &files, tmp.path(), 0.01, None);
 
         assert_eq!(diff.changed_count(), 2);
         assert_eq!(diff.removed_count(), 0);
@@ -216,7 +230,7 @@ mod tests {
             content_hash: None,
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None);
         assert!(diff.changed.is_empty(), "unchanged file should be skipped");
     }
 
@@ -232,7 +246,7 @@ mod tests {
             content_hash: None,
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None);
         assert_eq!(
             diff.changed_count(),
             1,
@@ -258,7 +272,7 @@ mod tests {
             },
         ];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None);
         assert_eq!(diff.changed_count(), 0); // a.py unchanged
         assert_eq!(diff.removed_count(), 1);
         assert!(diff.removed.contains(&"gone.py".to_string()));
@@ -300,7 +314,7 @@ mod tests {
             content_hash: Some(hash),
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None);
         assert_eq!(
             diff.changed_count(),
             0,
@@ -320,7 +334,7 @@ mod tests {
             content_hash: Some("deadbeefdeadbeef".into()),
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None);
         assert_eq!(
             diff.changed_count(),
             1,

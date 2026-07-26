@@ -159,7 +159,19 @@ class DirectoryIndexingService:
             return
         db = getattr(self.indexing_coordinator, "_db", None)
         if db is not None and hasattr(db, "drop_all_hnsw_indexes"):
+            task = (
+                self.progress.add_task(
+                    "  └─ Dropping HNSW indexes", total=None, speed="", info=""
+                )
+                if self.progress
+                else None
+            )
+            t0 = time.time()
             db.drop_all_hnsw_indexes()
+            elapsed_ms = (time.time() - t0) * 1000
+            if task is not None:
+                self.progress.update(task, total=1, completed=1, info="done")
+            logger.info(f"Dropped HNSW indexes in {elapsed_ms:.0f}ms")
 
     async def _ensure_hnsw_indexes(self) -> None:
         """Rebuild HNSW indexes after bulk indexing completes."""
@@ -168,7 +180,19 @@ class DirectoryIndexingService:
             return
         db = getattr(self.indexing_coordinator, "_db", None)
         if db is not None and hasattr(db, "ensure_all_hnsw_indexes"):
+            task = (
+                self.progress.add_task(
+                    "  └─ Rebuilding HNSW indexes", total=None, speed="", info=""
+                )
+                if self.progress
+                else None
+            )
+            t0 = time.time()
             db.ensure_all_hnsw_indexes()
+            elapsed_ms = (time.time() - t0) * 1000
+            if task is not None:
+                self.progress.update(task, total=1, completed=1, info="done")
+            logger.info(f"Rebuilt HNSW indexes in {elapsed_ms:.0f}ms")
 
     def _resolve_file_patterns(self) -> tuple[list[str], list[str]]:
         """Extracted from run.py:152-175 - file pattern resolution logic."""

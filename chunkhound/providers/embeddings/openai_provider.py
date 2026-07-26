@@ -135,6 +135,13 @@ QWEN_MODEL_CONFIG: dict[str, dict[str, int]] = {
 }
 
 
+_qwen_detection_logged: set[str] = set()
+"""Model names already announced via 'Detected Qwen ... model' — the Rust
+pipeline's embed thread pool creates one provider instance per worker
+thread (see pipeline_bridge.py:_embed_batch), so without this guard the
+same detection message repeats once per thread instead of once per run."""
+
+
 def _validate_qwen_model_config() -> None:
     """Validate QWEN_MODEL_CONFIG structure at module load time.
 
@@ -407,7 +414,8 @@ class OpenAIEmbeddingProvider:
         # Check if embedding model is a Qwen model
         if "qwen" in model_lower or model in QWEN_MODEL_CONFIG:
             qwen_config = QWEN_MODEL_CONFIG.get(model)
-            if qwen_config:
+            if qwen_config and model not in _qwen_detection_logged:
+                _qwen_detection_logged.add(model)
                 logger.info(f"Detected Qwen embedding model: {model}")
 
         # Check if rerank model is a Qwen model
@@ -416,7 +424,8 @@ class OpenAIEmbeddingProvider:
             "qwen" in rerank_model_lower or rerank_model in QWEN_MODEL_CONFIG
         ):
             qwen_rerank_config = QWEN_MODEL_CONFIG.get(rerank_model)
-            if qwen_rerank_config:
+            if qwen_rerank_config and rerank_model not in _qwen_detection_logged:
+                _qwen_detection_logged.add(rerank_model)
                 logger.info(f"Detected Qwen reranker model: {rerank_model}")
 
         # Apply Qwen batch size limits if detected
@@ -473,13 +482,24 @@ class OpenAIEmbeddingProvider:
         if self._base_url:
             client_kwargs["base_url"] = self._base_url
             if not self._ssl_verify:
-                client_kwargs["http_client"] = httpx.AsyncClient(
-                    timeout=httpx.Timeout(timeout=self._timeout),
-                    verify=False,
-                )
                 logger.debug(
                     f"SSL verification disabled for embedding endpoint: {self._base_url}"
                 )
+
+        # Bound the connection pool explicitly rather than relying on
+        # httpx's defaults (max_connections=100, max_keepalive_connections=20).
+        # embed_batch() issues requests sequentially per provider instance
+        # (see _embed_batch_internal — no asyncio.gather), so a handful of
+        # connections is always enough; the real risk this guards against
+        # is FD exhaustion from *multiple* provider instances (e.g. one per
+        # Rust embed thread, see pipeline_bridge.py:_embed_batch) each
+        # holding onto up to max_keepalive_connections idle sockets for
+        # their lifetime with no explicit close() call.
+        client_kwargs["http_client"] = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout=self._timeout),
+            verify=self._ssl_verify,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+        )
 
         # IMPORTANT: Create the client in async context to avoid TaskGroup errors on Ubuntu
         # This ensures the event loop is running when the client initializes its httpx instance

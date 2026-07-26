@@ -1252,11 +1252,44 @@ class IndexingCoordinator(BaseService):
         try:
             import time as _t
 
-            _t0 = _t.perf_counter() if getattr(self, "profile_startup", False) else None
+            _t0 = _t.perf_counter()
             _t2 = _t3 = _t4 = _t5 = None
+
+            discovery_task: TaskID | None = None
+            if self.progress:
+                discovery_task = self.progress.add_task(
+                    "  └─ Discovering files", total=None, speed="", info=""
+                )
+
+            _diff_task: TaskID | None = None
+            if _use_rust and self.progress:
+                _diff_task = self.progress.add_task(
+                    "  └─ Checking for changes",
+                    total=1,
+                    speed="",
+                    info="",
+                    start=False,
+                )
+
             # Phase 1: Discovery - Discover files in directory (now parallelized)
-            files = await self._discover_files(directory, patterns, exclude_patterns)
-            _t1 = _t.perf_counter() if _t0 is not None else None
+            files = await self._discover_files(
+                directory,
+                patterns,
+                exclude_patterns,
+                discovery_task_id=discovery_task,
+            )
+            _t1 = _t.perf_counter()
+            if discovery_task is not None and self.progress:
+                self.progress.update(
+                    discovery_task,
+                    total=len(files),
+                    completed=len(files),
+                    info=f"{len(files)} files",
+                )
+            logger.info(
+                f"Discovery: {len(files)} files in {(_t1 - _t0) * 1000:.0f}ms "
+                f"(backend={getattr(self, '_resolved_discovery_backend', 'n/a')})"
+            )
 
             if not files:
                 return {"status": "no_files", "files_processed": 0, "total_chunks": 0}
@@ -1460,6 +1493,10 @@ class IndexingCoordinator(BaseService):
                         self.progress.update(change_task, completed=task.total)
                 files_to_process = files_to_process_with_hashes
                 _t5 = _t.perf_counter() if _t0 is not None else None
+                logger.info(
+                    f"Change scan: {len(files_to_process)}/{len(files)} to process "
+                    f"in {(_t5 - _t4) * 1000:.0f}ms ({skipped_unchanged} unchanged)"
+                )
                 if debug_skip:
                     logger.warning(
                         f"Skip-check summary: ok={reasons['ok']} not_found={reasons['not_found']} "
@@ -1489,6 +1526,7 @@ class IndexingCoordinator(BaseService):
             agg_skipped = 0
             agg_skipped_timeout: list[str] = []
             agg_skipped_paths: list[tuple[str, str]] = []
+            _diff_elapsed = 0.0
 
             # ── Rust path (CHUNKHOUND_USE_RUST=1) ─────────────────
             # Detected at top of process_directory to gate cleanup + change detection.
@@ -1499,6 +1537,9 @@ class IndexingCoordinator(BaseService):
                 # Test DB fakes may not have db_path — fall through to Python.
                 if not hasattr(self._db, "db_path"):
                     _use_rust = False
+                    if self.progress and _diff_task is not None:
+                        self.progress.remove_task(_diff_task)
+                        _diff_task = None
                 else:
                     db_path = Path(str(self._db.db_path)).parent
                 skip_embeddings = (
@@ -1514,7 +1555,6 @@ class IndexingCoordinator(BaseService):
                 # add_task() inside a PyO3 callback are not reliably
                 # rendered by Live until a major refresh.
                 if _use_rust and self.progress:
-                    from rich.progress import TaskID
                     _pt: TaskID = parse_task  # type: ignore[assignment]
                     _pr = self.progress
 
@@ -1536,6 +1576,8 @@ class IndexingCoordinator(BaseService):
                     _embed_start = 0.0
                     _embed_reset_done = False
                     _data_task_total = 1
+                    _diff_start = 0.0
+                    _diff_reset_done = False
 
                     # Pre-create all write sub-phase bars (no need for a
                     # separate "prepare" bar — prepare is sub-second).
@@ -1552,8 +1594,33 @@ class IndexingCoordinator(BaseService):
                     )
 
                     def _progress_cb(phase: str, current: int, total: int) -> None:
-                        nonlocal _embed_start, _embed_reset_done, _data_task_total
-                        if phase == "parse":
+                        nonlocal \
+                            _embed_start, \
+                            _embed_reset_done, \
+                            _data_task_total, \
+                            _diff_start, \
+                            _diff_reset_done, \
+                            _diff_elapsed
+                        if phase == "diff":
+                            if _diff_task is not None:
+                                # First-call-based reset, mirroring the embed
+                                # phase above: current may already be > 0 on
+                                # the first callback.
+                                if not _diff_reset_done:
+                                    _pr.reset(_diff_task, total=max(total, 1),
+                                              start=True)
+                                    _diff_start = time.time()
+                                    _diff_reset_done = True
+                                _pr.update(
+                                    _diff_task,
+                                    completed=current,
+                                    total=max(total, 1),
+                                    info=f"{current}/{total} checked",
+                                )
+                                if current >= total:
+                                    _diff_elapsed = time.time() - _diff_start
+                                    _pr.update(_diff_task, info="done")
+                        elif phase == "parse":
                             _pr.update(_pt, completed=current,
                                        info=f"{current}/{total} parsed")
                         elif phase == "embed":
@@ -1722,6 +1789,12 @@ class IndexingCoordinator(BaseService):
                 agg_skipped = 0
                 agg_skipped_timeout = []
                 agg_skipped_paths = []
+
+                _unchanged_by_hash = int(rust_stats.get("files_skipped_unchanged", 0))
+                logger.info(
+                    f"Diff: {agg_total_files}/{len(files)} changed in "
+                    f"{_diff_elapsed * 1000:.0f}ms ({_unchanged_by_hash} unchanged-by-hash)"
+                )
 
                 # Skip coordinator-side compaction — the Rust pipeline runs its
                 # own compaction via DbBackend::run_compaction() internally.
@@ -2288,6 +2361,7 @@ class IndexingCoordinator(BaseService):
         patterns: list[str],
         exclude_patterns: list[str],
         use_inode_ordering: bool = False,
+        discovery_task_id: TaskID | None = None,
     ) -> list[Path] | None:
         """Parallel directory discovery using multi-core traversal.
 
@@ -2427,6 +2501,20 @@ class IndexingCoordinator(BaseService):
             f"{num_workers} workers (max: {max_workers})"
         )
 
+        # Now that parallel mode is confirmed, switch the discovery task from
+        # an indeterminate spinner to a determinate per-subtree count. The
+        # +1 accounts for the root-directory-itself scan below — folded into
+        # the same denominator as the bar's total so the info text's count
+        # never disagrees with the bar (see the root-scan tick further down).
+        _discovery_units = len(top_level_items) + 1
+        if discovery_task_id is not None and self.progress is not None:
+            self.progress.update(
+                discovery_task_id,
+                total=_discovery_units,
+                completed=0,
+                info=f"0/{_discovery_units} subtrees",
+            )
+
         # Process subtrees in parallel
         _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
@@ -2484,8 +2572,19 @@ class IndexingCoordinator(BaseService):
                 )
                 futures.append(fut)
 
-            # Wait for all subtrees to complete
-            subtree_results = await asyncio.gather(*futures)
+            # Wait for all subtrees to complete, ticking progress as each one
+            # finishes. Completion order doesn't matter here — the
+            # aggregation below re-sorts/merges results regardless of the
+            # order they arrive in.
+            subtree_results = []
+            for _fut in asyncio.as_completed(futures):
+                subtree_results.append(await _fut)
+                if discovery_task_id is not None and self.progress is not None:
+                    self.progress.update(
+                        discovery_task_id,
+                        advance=1,
+                        info=f"{len(subtree_results)}/{_discovery_units} subtrees",
+                    )
 
         # Aggregate and log worker errors
         all_errors = []
@@ -2533,6 +2632,12 @@ class IndexingCoordinator(BaseService):
             None,
             local_engine,
         )
+        if discovery_task_id is not None and self.progress is not None:
+            self.progress.update(
+                discovery_task_id,
+                advance=1,
+                info=f"{_discovery_units}/{_discovery_units} subtrees",
+            )
 
         # Merge sorted worker results efficiently using heap-based merge
         # Workers already sort their results, so we merge k sorted lists
@@ -2565,6 +2670,7 @@ class IndexingCoordinator(BaseService):
         exclude_patterns: list[str] | None,
         parallel_discovery: bool | None = None,
         use_inode_ordering: bool = False,
+        discovery_task_id: TaskID | None = None,
     ) -> list[Path]:
         """Discover files in directory matching patterns with efficient exclude filtering.
 
@@ -2840,7 +2946,11 @@ class IndexingCoordinator(BaseService):
         if parallel_discovery:
             try:
                 discovered_files = await self._discover_files_parallel(
-                    directory, patterns, exclude_patterns, use_inode_ordering
+                    directory,
+                    patterns,
+                    exclude_patterns,
+                    use_inode_ordering,
+                    discovery_task_id=discovery_task_id,
                 )
                 # Check if parallel succeeded (returns files) or signaled fallback (returns None)
                 if discovered_files is not None:

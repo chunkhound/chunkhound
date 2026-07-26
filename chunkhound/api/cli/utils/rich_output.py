@@ -458,7 +458,7 @@ class ProgressManager:
 
     def __enter__(self) -> "ProgressManager":
         logger.remove()
-        self._temp_handler_id = logger.add(sys.stderr, level="WARNING")
+        self._temp_handler_id = logger.add(sys.stderr, level="INFO")
         self._live = Live(self.progress, console=self.console, refresh_per_second=10)
         self._live.start()
         return self

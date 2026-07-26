@@ -88,6 +88,14 @@ def _install_logging_to_loguru_bridge(*, verbose: bool = False) -> None:
     if _root.level > _bridge.level:
         _root.setLevel(_bridge.level)
 
+    if not verbose:
+        # Third-party HTTP libraries log one INFO line per request/response
+        # (e.g. httpx's "HTTP Request: POST ..."). At INFO the bridge would
+        # otherwise forward every embedding-provider call, flooding output
+        # during indexing. Keep them at WARNING; --verbose still shows them.
+        for _noisy_logger in ("httpx", "httpcore"):
+            _logging.getLogger(_noisy_logger).setLevel(_logging.WARNING)
+
 
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging for the CLI.

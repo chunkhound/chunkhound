@@ -63,7 +63,7 @@ impl IndexingPipeline {
     /// channels (see `pipeline_parse_embed_store`).
     ///
     /// progress_callback receives ``(phase: str, current: int, total: int)``
-    /// at phase transitions.  Phases: ``"parse"``, ``"embed"``,
+    /// at phase transitions.  Phases: ``"diff"``, ``"parse"``, ``"embed"``,
     /// ``"write-prepare"``, ``"write-data"``, ``"write-index"``,
     /// ``"write-compact"``, ``"write-done"``, ``"done"``. Only one of
     /// ``"write-index"``/``"write-compact"`` fires per run — compaction
@@ -110,7 +110,7 @@ impl IndexingPipeline {
         let new_hashes: std::collections::HashMap<PathBuf, String>;
         let mut files_skipped_by_hash = 0u64;
         if incremental {
-            let diff = self.compute_diff_blocking(&batch_paths)?;
+            let diff = self.compute_diff_blocking(py, &progress_callback, &batch_paths)?;
             // Only process changed files
             batch_paths = diff.changed;
             delete_paths = diff.removed;
@@ -230,10 +230,26 @@ impl IndexingPipeline {
 
 impl IndexingPipeline {
     /// Read the DB state and compute which files changed.
-    fn compute_diff_blocking(&self, files: &[PathBuf]) -> PyResult<DiffResult> {
+    ///
+    /// Runs synchronously on the same thread/GIL guard as `run()` (called
+    /// before `py.allow_threads(...)` there), so `progress_callback` can be
+    /// invoked directly via `emit_progress` — no `clone_ref`/`with_gil`
+    /// needed. If this is ever moved onto a separate thread, it will need
+    /// the same `clone_ref` + `Python::with_gil` treatment as the
+    /// parse/embed/store callbacks below.
+    fn compute_diff_blocking(
+        &self,
+        py: Python<'_>,
+        progress_callback: &Option<Py<PyAny>>,
+        files: &[PathBuf],
+    ) -> PyResult<DiffResult> {
+        let total_files = files.len() as u64;
+        emit_progress(py, progress_callback, "diff", 0, total_files);
+
         let db_file = if self.config.db_path.as_os_str().is_empty()
             || self.config.db_path.as_os_str() == ":memory:"
         {
+            emit_progress(py, progress_callback, "diff", total_files, total_files);
             return Ok(DiffResult {
                 changed: files.to_vec(),
                 removed: Vec::new(),
@@ -245,6 +261,7 @@ impl IndexingPipeline {
         };
 
         if !db_file.exists() {
+            emit_progress(py, progress_callback, "diff", total_files, total_files);
             return Ok(DiffResult {
                 changed: files.to_vec(),
                 removed: Vec::new(),
@@ -330,7 +347,15 @@ impl IndexingPipeline {
             files,
             &self.config.project_root,
             self.config.mtime_epsilon_seconds,
+            Some(&mut |current, total| {
+                emit_progress(py, progress_callback, "diff", current as u64, total as u64);
+            }),
         );
+
+        // Unconditional final tick: small diffs (< DIFF_TICK_INTERVAL files)
+        // may never hit the in-loop modulo, so the bar wouldn't otherwise
+        // reach 100%.
+        emit_progress(py, progress_callback, "diff", total_files, total_files);
 
         Ok(result)
     }
@@ -499,7 +524,16 @@ impl IndexingPipeline {
             std::thread::spawn(move || {
                 let mut backend: Box<dyn DbBackend> = create_backend(db_config);
                 backend.open().map_err(|e| e.to_string())?;
+                // Dropping HNSW indexes is a catalog-only DDL operation (no
+                // data scan), so it's always sub-10ms in practice — not
+                // worth a dedicated progress bar (it would flash past
+                // unnoticed). Log it instead for the rare case it's slow.
+                let t_hnsw_drop = Instant::now();
                 backend.drop_all_hnsw_indexes().map_err(|e| e.to_string())?;
+                log::info!(
+                    "[hnsw-drop] done in {:.3}s",
+                    t_hnsw_drop.elapsed().as_secs_f64()
+                );
                 emit_progress_gil(&store_progress_cb, "write-prepare", 0, batch_count_u64);
 
                 let mut chunks_written = 0u64;
