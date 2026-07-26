@@ -57,6 +57,7 @@ async def extract_facts_with_clustering(
     max_concurrency: int = 4,
     min_tokens_per_cluster: int = MIN_TOKENS_PER_CLUSTER,
     max_tokens_per_cluster: int = MAX_TOKENS_PER_CLUSTER,
+    file_languages: dict[str, str] | None = None,
 ) -> ClusteredExtractionResult:
     """Extract facts from files using HDBSCAN bounded clustering.
 
@@ -76,6 +77,8 @@ async def extract_facts_with_clustering(
         max_concurrency: Maximum parallel LLM calls
         min_tokens_per_cluster: Minimum tokens per cluster (HDBSCAN bound)
         max_tokens_per_cluster: Maximum tokens per cluster (HDBSCAN bound)
+        file_languages: Indexed language by file path. Overrides extension inference
+            in clustering embeddings and is retained by returned cluster groups.
 
     Returns:
         ClusteredExtractionResult with:
@@ -100,6 +103,7 @@ async def extract_facts_with_clustering(
         files,
         min_tokens_per_cluster=min_tokens_per_cluster,
         max_tokens_per_cluster=max_tokens_per_cluster,
+        file_languages=file_languages,
     )
 
     logger.info(
