@@ -122,12 +122,10 @@ dependencies = [
     # Response.charset workaround). Bumping requires re-validating the
     # response-event race ordering and the async-handler dispatch path.
     "zendriver==0.15.3",
+    "chunkhound-native>=5.2.0",
 ]
 
 [project.optional-dependencies]
-native = [
-    "chunkhound-native>=5.2.0",
-]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",

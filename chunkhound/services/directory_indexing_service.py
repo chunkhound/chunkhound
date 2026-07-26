@@ -14,18 +14,15 @@ from chunkhound.utils.file_patterns import normalize_include_patterns
 
 
 def _rust_pipeline_active() -> bool:
-    """Check whether the Rust pipeline is enabled.
+    """Check whether the Rust parse→embed→write pipeline is enabled.
 
-    Returns True when CHUNKHOUND_USE_RUST=1 AND the native extension is
-    importable.  Used to gate Python-side HNSW steps that the Rust
-    pipeline already handles internally.
+    Delegates to pipeline_bridge._get_use_rust(), which defaults to False
+    (opt-in only); CHUNKHOUND_USE_RUST=1 enables it. Used to gate
+    Python-side HNSW steps that the Rust pipeline already handles
+    internally.
     """
-    import os
-    try:
-        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
-        return _get_use_rust()
-    except ImportError:
-        return False
+    from chunkhound.providers.database.pipeline_bridge import _get_use_rust
+    return _get_use_rust()
 
 
 @dataclass

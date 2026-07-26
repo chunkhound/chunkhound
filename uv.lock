@@ -466,6 +466,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "anthropic" },
+    { name = "chunkhound-native" },
     { name = "duckdb" },
     { name = "google-genai" },
     { name = "httpx" },
@@ -544,9 +545,6 @@ dev = [
     { name = "pytest-timeout" },
     { name = "ruff" },
 ]
-native = [
-    { name = "chunkhound-native" },
-]
 test = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -575,7 +573,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.12.15" },
     { name = "anthropic", specifier = ">=0.96.0,<1.0.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
-    { name = "chunkhound-native", marker = "extra == 'native'", specifier = ">=5.2.0" },
+    { name = "chunkhound-native", specifier = ">=5.2.0" },
     { name = "duckdb", specifier = "==1.5.4" },
     { name = "google-genai", specifier = ">=1.51.0" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -650,7 +648,7 @@ requires-dist = [
     { name = "zendriver", specifier = "==0.15.3" },
     { name = "zstandard", specifier = ">=0.23.0" },
 ]
-provides-extras = ["dev", "native", "test"]
+provides-extras = ["dev", "test"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -166,7 +166,6 @@ def test_max_files_forces_python_path(tmp_path, monkeypatch):
         (tmp_path / f"f{i}.py").write_text("x = 1")
 
     monkeypatch.setattr(fp, "_USE_RUST", True)
-    monkeypatch.setattr(fp, "_RUST_AVAILABLE", True)
 
     files, _ = fp.walk_directory_tree(
         tmp_path, tmp_path, ["**/*.py"], [], {}, max_files=2

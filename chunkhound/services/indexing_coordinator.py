@@ -1239,14 +1239,15 @@ class IndexingCoordinator(BaseService):
             self._root_identity_validated = True
 
         # Detect Rust pipeline early so we can skip DB-queried phases below.
-        _use_rust = False
-        try:
-            from chunkhound.providers.database.pipeline_bridge import (
-                _get_use_rust,
-            )
-            _use_rust = _get_use_rust()
-        except ImportError:
-            pass
+        import chunkhound.utils.file_patterns as _file_patterns
+        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
+
+        _use_rust = _get_use_rust()
+        logger.info(
+            "Indexing backend: discovery={} pipeline={}",
+            "rust" if _file_patterns._USE_RUST else "python",
+            "rust" if _use_rust else "python",
+        )
 
         try:
             import time as _t

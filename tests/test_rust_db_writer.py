@@ -548,6 +548,22 @@ class TestHnswBoundary:
 # ---------------------------------------------------------------------------
 
 class TestFeatureFlag:
+    def test_rust_disabled_by_default(self, monkeypatch):
+        """Without override, _get_use_rust() returns False (opt-in only).
+
+        The Rust parse→embed→write pipeline has known gaps (see
+        pipeline_bridge module docstring), so it stays opt-in even though
+        chunkhound-native is now a required dependency.
+        """
+        monkeypatch.delenv("CHUNKHOUND_USE_RUST", raising=False)
+
+        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
+
+        assert _get_use_rust() is False
+
+        monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
+        assert _get_use_rust() is True
+
     def test_rust_disabled_via_env(self, monkeypatch):
         """CHUNKHOUND_USE_RUST=0 must make _get_use_rust() return False."""
         monkeypatch.setenv("CHUNKHOUND_USE_RUST", "0")
@@ -555,20 +571,6 @@ class TestFeatureFlag:
         from chunkhound.providers.database.pipeline_bridge import _get_use_rust
 
         assert _get_use_rust() is False
-
-    def test_rust_enabled_by_default_when_native_present(self, monkeypatch):
-        """Without override, _get_use_rust() returns False (opt-in only)."""
-        monkeypatch.delenv("CHUNKHOUND_USE_RUST", raising=False)
-
-        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
-
-        # Default is always False regardless of native extension presence.
-        # Users must explicitly set CHUNKHOUND_USE_RUST=1 to enable the Rust path.
-        assert _get_use_rust() is False
-
-        # Setting CHUNKHOUND_USE_RUST=1 enables it.
-        monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
-        assert _get_use_rust() is True
 
 
 # ---------------------------------------------------------------------------
