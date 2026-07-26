@@ -352,9 +352,11 @@ class PluggableResearchService(ProgressEmitterMixin):
                 async with semaphore:
                     # Get cluster-specific facts context
                     cluster_files = set(cluster.file_paths)
-                    cluster_facts_context = evidence_ledger.get_facts_map_prompt_context(
-                        cluster_files,
-                        cluster_id=cluster.cluster_id,
+                    cluster_facts_context = (
+                        evidence_ledger.get_facts_map_prompt_context(
+                            cluster_files,
+                            cluster_id=cluster.cluster_id,
+                        )
                     )
                     return await self._synthesis_engine._map_synthesis_on_cluster(
                         cluster,
@@ -683,10 +685,8 @@ class PluggableResearchService(ProgressEmitterMixin):
                         end_line = chunk.get("end_line", 1)
 
                         # Use smart boundary detection to expand to complete functions/classes
-                        expanded_start, expanded_end = (
-                            expand_to_natural_boundaries(
-                                lines, start_line, end_line, chunk, file_path
-                            )
+                        expanded_start, expanded_end = expand_to_natural_boundaries(
+                            lines, start_line, end_line, chunk, file_path
                         )
 
                         # Skip chunks with invalid boundary expansion
