@@ -176,6 +176,8 @@ jobs:
           fi
 
       - name: Test collection check
+        env:
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/chunkhound_native
         run: uv run pytest tests/ --collect-only -q --tb=no
 
       - name: Run tests
