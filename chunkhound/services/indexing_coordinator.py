@@ -1336,20 +1336,23 @@ class IndexingCoordinator(BaseService):
                 return {"status": "no_files", "files_processed": 0, "total_chunks": 0}
 
             # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files.
-            # Skip when Rust pipeline is active — Python DuckDB cannot read Rust-written DBs.
+            # Runs regardless of which pipeline (Python or Rust) processes this
+            # directory: it executes here, before either path touches the DB
+            # connection further (Rust's own connection + disconnect happen much
+            # later, right before run_rust_pipeline() is dispatched), so self._db
+            # is always a live, normal Python connection at this point.
             cleaned_files = 0
-            if not _use_rust:
-                do_cleanup = True
-                if self.config and getattr(self.config, "indexing", None) is not None:
-                    do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
-                if do_cleanup:
-                    _t2 = _t.perf_counter() if _t0 is not None else None
-                    cleaned_files = self._cleanup_orphaned_files(
-                        directory, files, patterns, exclude_patterns
-                    )
-                    _t3 = _t.perf_counter() if _t0 is not None else None
-                else:
-                    logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
+            do_cleanup = True
+            if self.config and getattr(self.config, "indexing", None) is not None:
+                do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
+            if do_cleanup:
+                _t2 = _t.perf_counter() if _t0 is not None else None
+                cleaned_files = self._cleanup_orphaned_files(
+                    directory, files, patterns, exclude_patterns
+                )
+                _t3 = _t.perf_counter() if _t0 is not None else None
+            else:
+                logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
 
             logger.debug(
                 f"Directory consistency: {len(files)} files discovered, {cleaned_files} orphaned files cleaned"

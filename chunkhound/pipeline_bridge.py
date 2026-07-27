@@ -519,7 +519,11 @@ async def run_rust_pipeline(
         "embed_batch_size": embed_batch_size,
         "force_reindex": force_reindex,
         "mtime_epsilon_seconds": mtime_eps,
-        "skip_cleanup": True,  # coordinator handles cleanup separately
+        # This field is currently unread on the Rust side (parsed into
+        # PipelineConfig, never consulted) — the coordinator's own
+        # _cleanup_orphaned_files() call, made unconditionally before this
+        # pipeline runs, is what actually reconciles orphaned/excluded files.
+        "skip_cleanup": True,
         "skip_embeddings": skip_embeddings,
         "per_file_timeout_secs": per_file_timeout,
         "per_file_timeout_min_size_kb": per_file_timeout_min,
