@@ -364,6 +364,18 @@ jobs:
             fi
           fi
 
+      - name: Add chunkhound_native to PATH (Windows DuckDB DLL resolution)
+        if: runner.os == 'Windows' && hashFiles('Cargo.toml') != ''
+        shell: bash
+        run: |
+          # duckdb.dll was copied into chunkhound_native/ by the maturin develop step.
+          # Adding it to PATH makes it findable when chunkhound_native.pyd is loaded from
+          # a fresh venv (e.g. the installed-wheel e2e test), where the .pyd lives in
+          # site-packages/chunkhound_native/ without a co-located duckdb.dll.
+          # _clean_room_env() in the e2e script passes PATH through, so the MCP server
+          # subprocess inherits this — same intent as DYLD_LIBRARY_PATH on macOS.
+          echo "${{ github.workspace }}/chunkhound_native" >> "$GITHUB_PATH"
+
       - name: Prepare Linux mount-aware Watchman fixture
         if: matrix.os == 'ubuntu-latest'
         shell: bash
