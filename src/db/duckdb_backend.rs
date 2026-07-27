@@ -1126,6 +1126,10 @@ impl DuckDbHnswBackend {
 
 impl crate::db::DbBackend for DuckDbHnswBackend {
     fn open(&mut self) -> Result<(), DbError> {
+        // Idempotent: already open on Windows (exclusive file lock) would error on re-open.
+        if self.conn.is_some() {
+            return Ok(());
+        }
         // Crash recovery: check for swap_intent file (Invariant 17)
         let db_path = PathBuf::from(&self.config.db_path);
         let intent_path = PathBuf::from(format!("{}.swap_intent", self.config.db_path));

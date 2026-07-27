@@ -98,6 +98,16 @@ def _progress_info(stored: int, skipped: int, errs: int, chunks: int) -> str:
     return f"stored {stored} | skipped {skipped} | err {errs} | {chunks} chunks"
 
 
+def _format_bytes(n: int) -> str:
+    """Format a byte count as a human-readable string (e.g. '9.8GB')."""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}TB"
+
+
 def _update_speed_field(progress: Progress, task_id: TaskID, unit: str) -> None:
     """Compute and set a task's ``speed`` field from its own completed/elapsed.
 
@@ -1637,6 +1647,12 @@ class IndexingCoordinator(BaseService):
                     _compact_task: TaskID = _pr.add_task(
                         "  └─ Compacting", total=1, speed="", info="", start=False
                     )
+                    # Captured now (before self._db.disconnect() below) so the
+                    # compaction phase handlers can stat the file for a
+                    # before/after size comparison without touching self._db.
+                    _compact_db_file = str(self._db.db_path)
+                    _compact_size_before: int | None = None
+                    _compact_info: str | None = None
 
                     def _progress_cb(phase: str, current: int, total: int) -> None:
                         nonlocal \
@@ -1646,7 +1662,9 @@ class IndexingCoordinator(BaseService):
                             _diff_start, \
                             _diff_reset_done, \
                             _diff_elapsed, \
-                            _parse_reset_done
+                            _parse_reset_done, \
+                            _compact_size_before, \
+                            _compact_info
                         if phase == "diff":
                             if _diff_task is not None:
                                 # First-call-based reset, mirroring the embed
@@ -1765,6 +1783,12 @@ class IndexingCoordinator(BaseService):
                             _pr.update(
                                 _compact_task, info="compacting (includes index rebuild)..."
                             )
+                            try:
+                                _compact_size_before = os.path.getsize(
+                                    _compact_db_file
+                                )
+                            except OSError:
+                                _compact_size_before = None
                         elif phase == "write-done":
                             # Final wrap-up of whatever bars are still active.
                             _pr.update(
@@ -1773,7 +1797,28 @@ class IndexingCoordinator(BaseService):
                                 info="done",
                             )
                             _pr.update(_index_task, completed=1, info="done")
-                            _pr.update(_compact_task, completed=1, info="done")
+                            if _compact_size_before is not None:
+                                try:
+                                    _compact_size_after = os.path.getsize(
+                                        _compact_db_file
+                                    )
+                                    pct = (
+                                        (_compact_size_before - _compact_size_after)
+                                        / _compact_size_before
+                                        * 100
+                                        if _compact_size_before
+                                        else 0.0
+                                    )
+                                    _compact_info = (
+                                        f"{_format_bytes(_compact_size_before)} → "
+                                        f"{_format_bytes(_compact_size_after)} "
+                                        f"({pct:.0f}% smaller)"
+                                    )
+                                except OSError:
+                                    _compact_info = "done"
+                            else:
+                                _compact_info = "done"
+                            _pr.update(_compact_task, completed=1, info=_compact_info)
                         elif phase == "done":
                             # Ensure the write bars are at 100%. The parse and
                             # embed bars don't need re-finalizing here — both
@@ -1793,7 +1838,11 @@ class IndexingCoordinator(BaseService):
                                 info="done",
                             )
                             _pr.update(_index_task, completed=1, info="done")
-                            _pr.update(_compact_task, completed=1, info="done")
+                            _pr.update(
+                                _compact_task,
+                                completed=1,
+                                info=_compact_info if _compact_info else "done",
+                            )
                 else:
                     _progress_cb = None
 
