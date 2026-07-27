@@ -319,6 +319,49 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Install Rust stable toolchain
+        if: hashFiles('Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        if: hashFiles('Cargo.toml') != ''
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Cache DuckDB precompiled library
+        if: hashFiles('Cargo.toml') != ''
+        uses: actions/cache@v4
+        with:
+          path: target/duckdb-download/
+          key: ${{ runner.os }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-duckdb-
+
+      - name: Build Rust extension (maturin develop)
+        if: hashFiles('Cargo.toml') != ''
+        shell: bash
+        env:
+          DUCKDB_DOWNLOAD_LIB: "1"
+        run: |
+          uv pip install maturin
+          uv run maturin develop
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            DUCKDB_LIB=$(find target -name 'libduckdb.dylib' -print -quit 2>/dev/null || true)
+            if [[ -n "$DUCKDB_LIB" ]]; then
+              cp "$DUCKDB_LIB" chunkhound_native/
+            fi
+          elif [[ "$RUNNER_OS" == "Windows" ]]; then
+            DUCKDB_DLL=$(find target -name 'duckdb.dll' -print -quit 2>/dev/null || true)
+            if [[ -n "$DUCKDB_DLL" ]]; then
+              cp "$DUCKDB_DLL" chunkhound_native/
+            fi
+          fi
+
       - name: Prepare Linux mount-aware Watchman fixture
         if: matrix.os == 'ubuntu-latest'
         shell: bash
