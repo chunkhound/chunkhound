@@ -12,7 +12,7 @@ from chunkhound.services.research.v1.pluggable_research_service import (
     PluggableResearchService,
 )
 from tests.fixtures.fake_providers import FakeEmbeddingProvider, FakeLLMProvider
-from tests.unit.research.conftest import FakeParent
+from tests.unit.research.conftest import FakeEmbeddingManager, FakeParent
 
 
 class _OutOfBoundsEmbeddingProvider(FakeEmbeddingProvider):
