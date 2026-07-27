@@ -590,6 +590,9 @@ class _NoRichProgressManager:
 
                 self._Task = _Task
                 self.tasks: dict[int, _Task] = {}
+                # Alias so callers using Rich's private `_tasks` mapping (as
+                # opposed to the public `tasks` list) work against the shim too.
+                self._tasks = self.tasks
 
             def add_task(  # noqa: ANN001
                 self, description: str, total: int | None = None, **_: Any

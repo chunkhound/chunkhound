@@ -479,8 +479,13 @@ class OpenAIEmbeddingProvider:
             "timeout": self._timeout,
         }
 
+        # ssl_verify only applies to custom/self-hosted endpoints — the
+        # official OpenAI endpoint always gets real TLS verification even if
+        # the caller set ssl_verify=False for some other (e.g. rerank) URL.
+        verify_tls: bool = True
         if self._base_url:
             client_kwargs["base_url"] = self._base_url
+            verify_tls = self._ssl_verify
             if not self._ssl_verify:
                 logger.debug(
                     f"SSL verification disabled for embedding endpoint: {self._base_url}"
@@ -497,7 +502,7 @@ class OpenAIEmbeddingProvider:
         # their lifetime with no explicit close() call.
         client_kwargs["http_client"] = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout=self._timeout),
-            verify=self._ssl_verify,
+            verify=verify_tls,
             limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
         )
 

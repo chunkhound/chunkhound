@@ -339,6 +339,7 @@ async def test_openai_provider_ignores_ssl_verify_without_base_url(
     """ssl_verify must not affect the default endpoint path when base_url is unset."""
 
     captured: dict[str, object] = {}
+    httpx_calls: dict[str, object] = {}
 
     class _FakeAsyncOpenAI:
         def __init__(self, **kwargs):
@@ -347,17 +348,30 @@ async def test_openai_provider_ignores_ssl_verify_without_base_url(
         async def close(self) -> None:
             return None
 
+    class _FakeHTTPClient:
+        async def aclose(self) -> None:
+            return None
+
+    def _fake_async_client(**kwargs):
+        httpx_calls.update(kwargs)
+        return _FakeHTTPClient()
+
     monkeypatch.setattr(openai_provider_module, "OPENAI_AVAILABLE", True)
     monkeypatch.setattr(
         openai_provider_module,
         "openai",
         SimpleNamespace(AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI),
     )
+    monkeypatch.setattr(openai_provider_module.httpx, "AsyncClient", _fake_async_client)
 
     provider = OpenAIEmbeddingProvider(api_key="sk-test", ssl_verify=False)
     await provider._ensure_client()
 
-    assert "http_client" not in captured
+    # http_client is always present now (it bounds the connection pool to
+    # guard against FD exhaustion), but its TLS verification must stay on —
+    # ssl_verify is only meant to apply to custom/self-hosted base_urls.
+    assert "http_client" in captured
+    assert httpx_calls["verify"] is True
 
 
 @pytest.mark.asyncio

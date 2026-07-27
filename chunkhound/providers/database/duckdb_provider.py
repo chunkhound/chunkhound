@@ -908,12 +908,24 @@ class DuckDBProvider(SerialDatabaseProvider):
             conn, table_name
         )
 
-        def _apply_contract() -> None:
-            if duplicate_row_ids:
-                self._executor_delete_embeddings_by_row_ids(
+        if duplicate_row_ids:
+            # Deleting the duplicates and creating the UNIQUE index must NOT
+            # share a transaction: DuckDB's index builder still counts a row
+            # deleted earlier in the same still-open transaction as a live
+            # duplicate, which trips "Data contains duplicates" even though
+            # the delete already ran. Commit the dedupe in its own guarded
+            # mutation before the index-creation mutation begins.
+            manage_dedupe_transaction = not state.get("transaction_active", False)
+            self._executor_run_embedding_table_hnsw_guarded_mutation(
+                conn,
+                state,
+                table_name,
+                f"dedupe_embedding_upsert_contract({table_name})",
+                lambda: self._executor_delete_embeddings_by_row_ids(
                     conn, table_name, duplicate_row_ids
-                )
-            self._executor_create_embedding_unique_index(conn, table_name, dims)
+                ),
+                transactional=manage_dedupe_transaction,
+            )
 
         manage_transaction = not state.get("transaction_active", False)
         self._executor_run_embedding_table_hnsw_guarded_mutation(
@@ -921,7 +933,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             state,
             table_name,
             f"ensure_embedding_upsert_contract({table_name})",
-            _apply_contract,
+            lambda: self._executor_create_embedding_unique_index(
+                conn, table_name, dims
+            ),
             transactional=manage_transaction,
         )
 
