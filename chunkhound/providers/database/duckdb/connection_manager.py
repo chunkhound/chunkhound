@@ -284,9 +284,14 @@ class DuckDBConnectionManager:
             logger.debug("WAL file validation passed")
         except Exception as e:
             # If the database is already open by another connection, ATTACH raises
-            # "Unique file handle conflict" — that means the file is healthy and in
-            # active use, so validation is not needed.
-            if "already attached" in str(e) or "Unique file handle conflict" in str(e):
+            # "Unique file handle conflict" or, in newer DuckDB versions, "Could not
+            # set lock on file ... Conflicting lock is held" — either means the file
+            # is healthy and in active use, so validation is not needed.
+            if (
+                "already attached" in str(e)
+                or "Unique file handle conflict" in str(e)
+                or "Conflicting lock is held" in str(e)
+            ):
                 logger.debug("WAL file validation skipped (database already open)")
                 return
             logger.warning(f"WAL validation failed ({e}), cleaning up WAL file")
