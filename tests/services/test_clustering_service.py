@@ -25,7 +25,9 @@ class TestKMeansClustering:
 
     @pytest.fixture
     def clustering_service(
-        self, fake_llm_provider: FakeLLMProvider, fake_embedding_provider: FakeEmbeddingProvider
+        self,
+        fake_llm_provider: FakeLLMProvider,
+        fake_embedding_provider: FakeEmbeddingProvider,
     ) -> ClusteringService:
         """Create clustering service with fake providers."""
         return ClusteringService(
@@ -174,7 +176,9 @@ class TestKMeansClustering:
 
         # Average should be reasonable
         expected_avg = metadata["total_tokens"] / len(clusters)
-        assert abs(metadata["avg_tokens_per_cluster"] - expected_avg) <= 1  # Allow rounding error
+        assert (
+            abs(metadata["avg_tokens_per_cluster"] - expected_avg) <= 1
+        )  # Allow rounding error
 
     @pytest.mark.asyncio
     async def test_budget_tracking_with_multiple_clusters(
@@ -253,7 +257,9 @@ class TestHDBSCANClustering:
 
     @pytest.fixture
     def clustering_service(
-        self, fake_llm_provider: FakeLLMProvider, fake_embedding_provider: FakeEmbeddingProvider
+        self,
+        fake_llm_provider: FakeLLMProvider,
+        fake_embedding_provider: FakeEmbeddingProvider,
     ) -> ClusteringService:
         """Create clustering service with fake providers."""
         return ClusteringService(
@@ -415,7 +421,9 @@ class TestClusterFilesHDBSCANBounded:
 
     @pytest.fixture
     def clustering_service(
-        self, fake_llm_provider: FakeLLMProvider, fake_embedding_provider: FakeEmbeddingProvider
+        self,
+        fake_llm_provider: FakeLLMProvider,
+        fake_embedding_provider: FakeEmbeddingProvider,
     ) -> ClusteringService:
         """Create clustering service with fake providers."""
         return ClusteringService(
@@ -455,7 +463,11 @@ class TestClusterFilesHDBSCANBounded:
         files = {}
         for i in range(6):
             # Each file has distinctly different content for k-means to separate
-            unique_content = f"unique_module_{i}_" + ("a" * i * 1000) + self._make_content_with_tokens(19_900)
+            unique_content = (
+                f"unique_module_{i}_"
+                + ("a" * i * 1000)
+                + self._make_content_with_tokens(19_900)
+            )
             files[f"large{i}.py"] = unique_content
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan_bounded(
@@ -502,7 +514,9 @@ class TestClusterFilesHDBSCANBounded:
         files = {}
         for i in range(6):
             # Each file has unique content to create distinct embeddings
-            unique_content = f"unique_module_{i}_" + self._make_content_with_tokens(4_990)
+            unique_content = f"unique_module_{i}_" + self._make_content_with_tokens(
+                4_990
+            )
             files[f"small_{i}.py"] = unique_content
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan_bounded(
@@ -538,9 +552,7 @@ class TestClusterFilesHDBSCANBounded:
         """Test that clusters already within bounds are not modified."""
         # Create files with ~25k tokens each (within 15k-50k bounds)
         medium_content = self._make_content_with_tokens(25_000)
-        files = {
-            f"medium{i}.py": medium_content for i in range(2)
-        }
+        files = {f"medium{i}.py": medium_content for i in range(2)}
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan_bounded(
             files,
@@ -618,7 +630,7 @@ class TestClusterFilesHDBSCANBounded:
         """Test that returned metadata accurately reflects operations performed."""
         # Create mix of file sizes to trigger both splits and merges
         large_content = self._make_content_with_tokens(60_000)  # Will need split
-        small_content = self._make_content_with_tokens(5_000)   # Will need merge
+        small_content = self._make_content_with_tokens(5_000)  # Will need merge
 
         files = {
             "large.py": large_content,
@@ -679,9 +691,9 @@ class TestClusterFilesHDBSCANBounded:
         """Test that all input files appear in output after splits and merges."""
         # Mix of sizes to trigger various operations
         files = {
-            "huge.py": self._make_content_with_tokens(80_000),   # Split needed
-            "medium.py": self._make_content_with_tokens(30_000), # OK
-            "small.py": self._make_content_with_tokens(5_000),   # Merge needed
+            "huge.py": self._make_content_with_tokens(80_000),  # Split needed
+            "medium.py": self._make_content_with_tokens(30_000),  # OK
+            "small.py": self._make_content_with_tokens(5_000),  # Merge needed
         }
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan_bounded(
@@ -821,8 +833,12 @@ class TestClusterFilesHDBSCANBounded:
         # Use unique content so k-means can distinguish them
         files = {
             "tiny.py": self._make_unique_content_with_tokens(2_000, seed="tiny"),
-            "nearmax1.py": self._make_unique_content_with_tokens(49_000, seed="nearmax1"),
-            "nearmax2.py": self._make_unique_content_with_tokens(49_000, seed="nearmax2"),
+            "nearmax1.py": self._make_unique_content_with_tokens(
+                49_000, seed="nearmax1"
+            ),
+            "nearmax2.py": self._make_unique_content_with_tokens(
+                49_000, seed="nearmax2"
+            ),
         }
 
         clusters, metadata = await clustering_service.cluster_files_hdbscan_bounded(
@@ -841,3 +857,81 @@ class TestClusterFilesHDBSCANBounded:
         assert "num_unmergeable" in metadata
         # The tiny cluster cannot merge anywhere (would exceed 50k)
         assert metadata["num_unmergeable"] >= 1
+
+
+class CapturingEmbeddingProvider(FakeEmbeddingProvider):
+    """Capture the provider payload sent by clustering."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.captured_texts: list[str] = []
+
+    async def embed_batch(self, texts, batch_size=None):
+        self.captured_texts.extend(texts)
+        return await super().embed_batch(texts, batch_size)
+
+
+class TestLanguageMetadataInEmbeddings:
+    """Clustering must send each file's indexed language with its source."""
+
+    @pytest.fixture
+    def fake_llm_provider(self) -> FakeLLMProvider:
+        return FakeLLMProvider(model="fake-gpt")
+
+    @pytest.fixture
+    def capturing_provider(self) -> CapturingEmbeddingProvider:
+        return CapturingEmbeddingProvider(model="fake-embed")
+
+    @pytest.fixture
+    def clustering_service(
+        self,
+        fake_llm_provider: FakeLLMProvider,
+        capturing_provider: CapturingEmbeddingProvider,
+    ) -> ClusteringService:
+        return ClusteringService(capturing_provider, fake_llm_provider)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method_name", "kwargs"),
+        [
+            ("cluster_files", {"n_clusters": 2}),
+            ("cluster_files_hdbscan", {}),
+            ("cluster_files_hdbscan_bounded", {}),
+        ],
+    )
+    async def test_embedding_payload_preserves_indexed_language(
+        self,
+        clustering_service: ClusteringService,
+        capturing_provider: CapturingEmbeddingProvider,
+        method_name: str,
+        kwargs: dict[str, int],
+    ) -> None:
+        files = {
+            "Sources/Widget.m": "@implementation Widget\n@end",
+            "docs/guide.md": "# Guide",
+        }
+        file_languages = {"Sources/Widget.m": "objc", "docs/guide.md": "markdown"}
+
+        await getattr(clustering_service, method_name)(
+            files, file_languages=file_languages, **kwargs
+        )
+
+        assert capturing_provider.captured_texts == [
+            "# Sources/Widget.m (objc)\n@implementation Widget\n@end",
+            "# docs/guide.md (markdown)\n# Guide",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_embedding_payload_falls_back_to_extension_language(
+        self,
+        clustering_service: ClusteringService,
+        capturing_provider: CapturingEmbeddingProvider,
+    ) -> None:
+        files = {"Sources/Widget.m": "@implementation Widget\n@end", "notes.txt": "x"}
+
+        await clustering_service.cluster_files(files, n_clusters=2)
+
+        assert capturing_provider.captured_texts == [
+            "# Sources/Widget.m (matlab)\n@implementation Widget\n@end",
+            "# notes.txt (text)\nx",
+        ]

@@ -5,12 +5,14 @@ for budget-based clustering (subsequent passes) to group files into
 token-bounded clusters for parallel synthesis operations.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from loguru import logger
 from sklearn.cluster import HDBSCAN, KMeans  # type: ignore[import-untyped]
 
+from chunkhound.core.types.common import Language
+from chunkhound.core.utils import format_chunk_for_embedding
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 from chunkhound.interfaces.llm_provider import LLMProvider
 
@@ -23,6 +25,7 @@ class ClusterGroup:
     file_paths: list[str]
     files_content: dict[str, str]  # file_path -> content
     total_tokens: int
+    file_languages: dict[str, str] = field(default_factory=dict)
 
 
 class ClusteringService:
@@ -42,14 +45,56 @@ class ClusteringService:
         self._embedding_provider = embedding_provider
         self._llm_provider = llm_provider
 
+    def _prepare_files_for_embedding(
+        self,
+        files: dict[str, str],
+        file_paths: list[str],
+        file_languages: dict[str, str],
+    ) -> list[str]:
+        """Prefix file content with its indexed language for embedding."""
+        return [
+            format_chunk_for_embedding(
+                code=files[file_path],
+                file_path=file_path,
+                language=file_languages.get(file_path)
+                or Language.from_file_extension(file_path).value,
+            )
+            for file_path in file_paths
+        ]
+
+    @staticmethod
+    def _create_cluster_group(
+        cluster_id: int,
+        file_paths: list[str],
+        files: dict[str, str],
+        total_tokens: int,
+        file_languages: dict[str, str],
+    ) -> ClusterGroup:
+        return ClusterGroup(
+            cluster_id=cluster_id,
+            file_paths=file_paths,
+            files_content={file_path: files[file_path] for file_path in file_paths},
+            total_tokens=total_tokens,
+            file_languages={
+                file_path: file_languages[file_path]
+                for file_path in file_paths
+                if file_path in file_languages
+            },
+        )
+
     async def cluster_files(
-        self, files: dict[str, str], n_clusters: int
+        self,
+        files: dict[str, str],
+        n_clusters: int,
+        file_languages: dict[str, str] | None = None,
     ) -> tuple[list[ClusterGroup], dict[str, int]]:
         """Cluster files into exactly n_clusters using k-means.
 
         Args:
             files: Dictionary mapping file_path -> file_content
             n_clusters: Exact number of clusters to produce
+            file_languages: Indexed language by file path. Overrides extension inference
+                in embedding headers and is retained by returned cluster groups.
 
         Returns:
             Tuple of (cluster_groups, metadata) where metadata contains:
@@ -63,6 +108,7 @@ class ClusteringService:
         """
         if not files:
             raise ValueError("Cannot cluster empty files dictionary")
+        file_languages = file_languages or {}
         if n_clusters < 1:
             raise ValueError("n_clusters must be at least 1")
 
@@ -82,11 +128,12 @@ class ClusteringService:
         # Special case: single cluster requested or single file
         if n_clusters == 1 or len(files) == 1:
             logger.info("Single cluster - will produce single output")
-            cluster_group = ClusterGroup(
+            cluster_group = self._create_cluster_group(
                 cluster_id=0,
-                file_paths=list(files.keys()),
-                files_content=files,
+                file_paths=list(files),
+                files=files,
                 total_tokens=total_tokens,
+                file_languages=file_languages,
             )
             metadata = {
                 "num_clusters": 1,
@@ -96,9 +143,11 @@ class ClusteringService:
             }
             return [cluster_group], metadata
 
-        # Generate embeddings for each file
-        file_paths = list(files.keys())
-        file_contents = [files[fp] for fp in file_paths]
+        # Generate embeddings for each file with language and path metadata.
+        file_paths = list(files)
+        file_contents = self._prepare_files_for_embedding(
+            files, file_paths, file_languages
+        )
 
         logger.debug(f"Generating embeddings for {len(file_contents)} files")
         embeddings = await self._embedding_provider.embed_batch(file_contents)
@@ -115,19 +164,19 @@ class ClusteringService:
             cluster_to_files.setdefault(int(cluster_id), []).append(file_path)
 
         cluster_groups: list[ClusterGroup] = []
-        for cluster_id in sorted(cluster_to_files.keys()):
+        for cluster_id in sorted(cluster_to_files):
             cluster_file_paths = cluster_to_files[cluster_id]
-            cluster_files_content = {fp: files[fp] for fp in cluster_file_paths}
             cluster_tokens = sum(
-                self._llm_provider.estimate_tokens(content)
-                for content in cluster_files_content.values()
+                self._llm_provider.estimate_tokens(files[file_path])
+                for file_path in cluster_file_paths
             )
 
-            cluster_group = ClusterGroup(
+            cluster_group = self._create_cluster_group(
                 cluster_id=cluster_id,
                 file_paths=cluster_file_paths,
-                files_content=cluster_files_content,
+                files=files,
                 total_tokens=cluster_tokens,
+                file_languages=file_languages,
             )
             cluster_groups.append(cluster_group)
 
@@ -155,6 +204,7 @@ class ClusteringService:
         self,
         files: dict[str, str],
         min_cluster_size: int = 2,
+        file_languages: dict[str, str] | None = None,
     ) -> tuple[list[ClusterGroup], dict[str, int]]:
         """Cluster files using HDBSCAN for natural semantic grouping.
 
@@ -165,6 +215,8 @@ class ClusteringService:
         Args:
             files: Dictionary mapping file_path -> file_content
             min_cluster_size: Minimum size for HDBSCAN clusters (default: 2)
+            file_languages: Indexed language by file path. Overrides extension inference
+                in embedding headers and is retained by returned cluster groups.
 
         Returns:
             Tuple of (cluster_groups, metadata) where metadata contains:
@@ -180,6 +232,7 @@ class ClusteringService:
         """
         if not files:
             raise ValueError("Cannot cluster empty files dictionary")
+        file_languages = file_languages or {}
 
         # Calculate total tokens
         total_tokens = sum(
@@ -191,11 +244,12 @@ class ClusteringService:
         # Special case: single file
         if len(files) == 1:
             logger.info("Single file - will produce single cluster")
-            cluster_group = ClusterGroup(
+            cluster_group = self._create_cluster_group(
                 cluster_id=0,
-                file_paths=list(files.keys()),
-                files_content=files,
+                file_paths=list(files),
+                files=files,
                 total_tokens=total_tokens,
+                file_languages=file_languages,
             )
             metadata = {
                 "num_clusters": 1,
@@ -207,9 +261,11 @@ class ClusteringService:
             }
             return [cluster_group], metadata
 
-        # Generate embeddings for each file
-        file_paths = list(files.keys())
-        file_contents = [files[fp] for fp in file_paths]
+        # Generate embeddings for each file with language and path metadata.
+        file_paths = list(files)
+        file_contents = self._prepare_files_for_embedding(
+            files, file_paths, file_languages
+        )
 
         logger.debug(f"Generating embeddings for {len(file_contents)} files")
         embeddings = await self._embedding_provider.embed_batch(file_contents)
@@ -251,19 +307,19 @@ class ClusteringService:
             cluster_to_files.setdefault(int(cluster_id), []).append(file_path)
 
         cluster_groups: list[ClusterGroup] = []
-        for cluster_id in sorted(cluster_to_files.keys()):
+        for cluster_id in sorted(cluster_to_files):
             cluster_file_paths = cluster_to_files[cluster_id]
-            cluster_files_content = {fp: files[fp] for fp in cluster_file_paths}
             cluster_tokens = sum(
-                self._llm_provider.estimate_tokens(content)
-                for content in cluster_files_content.values()
+                self._llm_provider.estimate_tokens(files[file_path])
+                for file_path in cluster_file_paths
             )
 
-            cluster_group = ClusterGroup(
+            cluster_group = self._create_cluster_group(
                 cluster_id=cluster_id,
                 file_paths=cluster_file_paths,
-                files_content=cluster_files_content,
+                files=files,
                 total_tokens=cluster_tokens,
+                file_languages=file_languages,
             )
             cluster_groups.append(cluster_group)
 
@@ -346,6 +402,7 @@ class ClusteringService:
         min_cluster_size: int = 2,
         min_tokens_per_cluster: int = 15_000,
         max_tokens_per_cluster: int = 50_000,
+        file_languages: dict[str, str] | None = None,
     ) -> tuple[list[ClusterGroup], dict[str, int]]:
         """Cluster files using HDBSCAN with token bounds enforcement.
 
@@ -358,6 +415,8 @@ class ClusteringService:
             min_cluster_size: Minimum size for HDBSCAN clusters (default: 2)
             min_tokens_per_cluster: Minimum tokens per cluster (default: 15,000)
             max_tokens_per_cluster: Maximum tokens per cluster (default: 50,000)
+            file_languages: Indexed language by file path. Overrides extension inference
+                in embedding headers and is retained by returned cluster groups.
 
         Returns:
             Tuple of (cluster_groups, metadata) where metadata contains:
@@ -380,6 +439,7 @@ class ClusteringService:
         """
         if not files:
             raise ValueError("Cannot cluster empty files dictionary")
+        file_languages = file_languages or {}
 
         # Calculate total tokens and per-file tokens
         file_tokens: dict[str, int] = {
@@ -396,11 +456,12 @@ class ClusteringService:
         # Special case: single file
         if len(files) == 1:
             logger.info("Single file - will produce single cluster")
-            cluster_group = ClusterGroup(
+            cluster_group = self._create_cluster_group(
                 cluster_id=0,
-                file_paths=list(files.keys()),
-                files_content=files,
+                file_paths=list(files),
+                files=files,
                 total_tokens=total_tokens,
+                file_languages=file_languages,
             )
             metadata = {
                 "num_clusters": 1,
@@ -414,9 +475,11 @@ class ClusteringService:
             }
             return [cluster_group], metadata
 
-        # Generate embeddings for each file (once, reused for all operations)
-        file_paths = list(files.keys())
-        file_contents = [files[fp] for fp in file_paths]
+        # Generate embeddings once for all clustering operations.
+        file_paths = list(files)
+        file_contents = self._prepare_files_for_embedding(
+            files, file_paths, file_languages
+        )
 
         logger.debug(f"Generating embeddings for {len(file_contents)} files")
         embeddings = await self._embedding_provider.embed_batch(file_contents)
@@ -641,16 +704,18 @@ class ClusteringService:
 
         # Phase 3: Renumber clusters sequentially
         final_cluster_groups: list[ClusterGroup] = []
-        for new_id, old_id in enumerate(sorted(cluster_to_files.keys())):
+        for new_id, old_id in enumerate(sorted(cluster_to_files)):
             cluster_file_paths = cluster_to_files[old_id]
-            cluster_files_content = {fp: files[fp] for fp in cluster_file_paths}
-            cluster_tokens = sum(file_tokens[fp] for fp in cluster_file_paths)
+            cluster_tokens = sum(
+                file_tokens[file_path] for file_path in cluster_file_paths
+            )
 
-            cluster_group = ClusterGroup(
+            cluster_group = self._create_cluster_group(
                 cluster_id=new_id,
                 file_paths=cluster_file_paths,
-                files_content=cluster_files_content,
+                files=files,
                 total_tokens=cluster_tokens,
+                file_languages=file_languages,
             )
             final_cluster_groups.append(cluster_group)
 

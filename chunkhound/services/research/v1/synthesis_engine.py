@@ -20,6 +20,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.types.common import Language
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services import prompts
@@ -75,6 +76,14 @@ class SynthesisEngine:
         self._db_services = database_services
         self._parent = parent_service
 
+    @staticmethod
+    def _format_source_section(
+        file_path: str, file_content: str, language: str | None
+    ) -> str:
+        """Format a source section with indexed language when available."""
+        language = language or Language.from_file_extension(file_path).value
+        return f"### [{language}] {file_path}\n{'=' * 80}\n{file_content}\n{'=' * 80}"
+
     async def _manage_token_budget_for_synthesis(
         self,
         chunks: list[dict[str, Any]],
@@ -121,6 +130,7 @@ class SynthesisEngine:
         files: dict[str, str],
         context: ResearchContext,
         synthesis_budgets: dict[str, int],
+        file_languages: dict[str, str] | None = None,
         constants_context: str = "",
         facts_context: str = "",
     ) -> str:
@@ -140,6 +150,8 @@ class SynthesisEngine:
             files: Budgeted file contents (subset within token limits)
             context: Research context (root_query, optional previous_query)
             synthesis_budgets: Dynamic budgets based on repository size
+            file_languages: Indexed language by file path. Overrides extension inference
+                in source headers.
             constants_context: Constants ledger context for LLM prompts
             facts_context: Facts ledger context for LLM prompts
 
@@ -217,7 +229,9 @@ class SynthesisEngine:
                 file_content = content
 
             source_sections.append(
-                f"### {file_path}\n{'=' * 80}\n{file_content}\n{'=' * 80}"
+                self._format_source_section(
+                    file_path, file_content, (file_languages or {}).get(file_path)
+                )
             )
 
         source_context = "\n\n".join(source_sections)
@@ -381,7 +395,9 @@ class SynthesisEngine:
                 file_content = content
 
             source_sections.append(
-                f"### {file_path}\n{'=' * 80}\n{file_content}\n{'=' * 80}"
+                self._format_source_section(
+                    file_path, file_content, cluster.file_languages.get(file_path)
+                )
             )
 
         source_context = "\n\n".join(source_sections)

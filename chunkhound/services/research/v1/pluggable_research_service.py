@@ -271,6 +271,12 @@ class PluggableResearchService(ProgressEmitterMixin):
         ) = await self._synthesis_engine._manage_token_budget_for_synthesis(
             aggregated["chunks"], aggregated["files"], query, synthesis_budgets
         )
+        file_languages = {
+            file_path: language
+            for chunk in prioritized_chunks
+            if (file_path := chunk.get("file_path")) in budgeted_files
+            and isinstance(language := chunk.get("language"), str)
+        }
 
         # Emit synthesizing event
         await self._emit_event(
@@ -294,6 +300,7 @@ class PluggableResearchService(ProgressEmitterMixin):
             root_query=query,
             llm_provider=self._llm_manager.get_utility_provider(),
             embedding_provider=self._embedding_manager.get_provider(),
+            file_languages=file_languages,
         )
         cluster_groups = extraction_result.cluster_groups
         cluster_metadata = extraction_result.cluster_metadata
@@ -318,6 +325,7 @@ class PluggableResearchService(ProgressEmitterMixin):
                 files=budgeted_files,
                 context=context,
                 synthesis_budgets=synthesis_budgets,
+                file_languages=file_languages,
                 constants_context=constants_context,
                 facts_context=facts_context,
             )
@@ -349,9 +357,11 @@ class PluggableResearchService(ProgressEmitterMixin):
                 async with semaphore:
                     # Get cluster-specific facts context
                     cluster_files = set(cluster.file_paths)
-                    cluster_facts_context = evidence_ledger.get_facts_map_prompt_context(
-                        cluster_files,
-                        cluster_id=cluster.cluster_id,
+                    cluster_facts_context = (
+                        evidence_ledger.get_facts_map_prompt_context(
+                            cluster_files,
+                            cluster_id=cluster.cluster_id,
+                        )
                     )
                     return await self._synthesis_engine._map_synthesis_on_cluster(
                         cluster,
@@ -680,10 +690,8 @@ class PluggableResearchService(ProgressEmitterMixin):
                         end_line = chunk.get("end_line", 1)
 
                         # Use smart boundary detection to expand to complete functions/classes
-                        expanded_start, expanded_end = (
-                            expand_to_natural_boundaries(
-                                lines, start_line, end_line, chunk, file_path
-                            )
+                        expanded_start, expanded_end = expand_to_natural_boundaries(
+                            lines, start_line, end_line, chunk, file_path
                         )
 
                         # Skip chunks with invalid boundary expansion
