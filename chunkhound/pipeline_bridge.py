@@ -477,6 +477,7 @@ async def run_rust_pipeline(
     # ── Config mapping ──────────────────────────────────────
     indexing_cfg = getattr(config, "indexing", None) if config else None
     embedding_cfg = getattr(config, "embedding", None) if config else None
+    database_cfg = getattr(config, "database", None) if config else None
 
     per_file_timeout = float(
         getattr(indexing_cfg, "per_file_timeout_seconds", 3.0) or 3.0
@@ -492,6 +493,14 @@ async def run_rust_pipeline(
         getattr(indexing_cfg, "config_file_size_threshold_kb", 20) or 20
     )
     db_batch_size = int(getattr(indexing_cfg, "db_batch_size", 100) or 100)
+
+    # fragmentation_threshold_pct is a percentage (30.0 = 30%); Rust's
+    # compaction_threshold expects a ratio (0.30) — same setting the Python
+    # indexing path already honors via --fragmentation-threshold-pct.
+    fragmentation_pct = float(
+        getattr(database_cfg, "fragmentation_threshold_pct", 30.0) or 30.0
+    )
+    compaction_threshold = fragmentation_pct / 100.0
 
     embedding_provider = str(
         getattr(embedding_cfg, "provider", "") or ""
@@ -511,7 +520,7 @@ async def run_rust_pipeline(
         "project_root": str(project_root.resolve()),
         "db_path": str(db_path.resolve()),
         "db_batch_size": db_batch_size,
-        "compaction_threshold": 0.30,
+        "compaction_threshold": compaction_threshold,
         "compaction_batch_threshold": 50,
         "compaction_min_size_mb": 50,
         "parse_batch_size": 200,
