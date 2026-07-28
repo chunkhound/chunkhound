@@ -23,6 +23,10 @@ pub struct DuckDbHnswBackend {
     pending_hnsw_indexes: Vec<HnswIndexInfo>,
     // Pipeline-parallel state: new dimension tables that need HNSW indexes.
     pending_new_dims: Vec<u32>,
+    // Metrics (e.g. "cosine", "l2sq") for each dims value, captured by
+    // drop_all_hnsw_indexes() before bulk-mode drop so that ensure_all_hnsw_indexes()
+    // can recreate indexes with the original metric instead of hardcoding cosine.
+    saved_hnsw_metrics: HashMap<u32, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +70,7 @@ impl DuckDbHnswBackend {
             known_dims: HashSet::new(),
             pending_hnsw_indexes: Vec::new(),
             pending_new_dims: Vec::new(),
+            saved_hnsw_metrics: HashMap::new(),
         }
     }
 
@@ -1412,10 +1417,23 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     fn drop_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
         let conn = self.conn_or_err()?;
         let indexes = Self::discover_hnsw_indexes(conn)?;
+        // Build metrics map from discovered indexes before dropping them.  Done as
+        // a local so we can drop all conn borrows before assigning to self.
+        let new_metrics: HashMap<u32, String> = indexes
+            .iter()
+            .filter_map(|idx| {
+                idx.table_name
+                    .strip_prefix("embeddings_")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .map(|dims| (dims, idx.metric.clone()))
+            })
+            .collect();
         for idx in &indexes {
             let safe_name = idx.index_name.replace('"', "\"\"");
             conn.execute(&format!("DROP INDEX IF EXISTS \"{safe_name}\""), [])?;
         }
+        // conn borrow ends above; safe to mutate self fields now.
+        self.saved_hnsw_metrics = new_metrics;
         self.hnsw_bulk_mode = true;
         self.hnsw_cache = None;
         Ok(())
@@ -1428,17 +1446,32 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         if !self.has_vss {
             return Ok(());
         }
+        // Resolve (dims, metric) pairs before borrowing conn — avoids simultaneous
+        // immutable borrows of self.known_dims / self.saved_hnsw_metrics alongside
+        // the &self borrow held by conn_or_err().
+        let dims_metrics: Vec<(u32, String)> = self
+            .known_dims
+            .iter()
+            .map(|&dims| {
+                let metric = self
+                    .saved_hnsw_metrics
+                    .get(&dims)
+                    .cloned()
+                    .unwrap_or_else(|| "cosine".to_string());
+                (dims, metric)
+            })
+            .collect();
         let conn = self.conn_or_err()?;
         // DuckDB VSS HNSW builds can be CPU-intensive.  Increase the thread
         // count and disable any internal timeout so large tables don't fail.
         let _ = conn.execute_batch("SET threads = 8");
-        for &dims in &self.known_dims {
+        for (dims, metric) in &dims_metrics {
             let hnsw_name = format!("idx_hnsw_{dims}");
             conn.execute_batch(&format!(
-                "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"embeddings_{dims}\" USING HNSW (embedding) WITH (metric = 'cosine')"
+                "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"embeddings_{dims}\" USING HNSW (embedding) WITH (metric = '{metric}')"
             ))?;
         }
-        if !self.known_dims.is_empty() {
+        if !dims_metrics.is_empty() {
             conn.execute_batch("CHECKPOINT")?;
         }
         // Restore a conservative thread count — this connection may still be
@@ -1484,6 +1517,55 @@ mod hnsw_metric_tests {
         assert_eq!(
             after_recreate[0].metric, "l2sq",
             "recreate_hnsw_indexes must preserve the original non-cosine metric"
+        );
+    }
+
+    #[test]
+    fn ensure_all_hnsw_indexes_preserves_non_cosine_metric() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
+        let config = DbConfig {
+            db_path: db_path.clone(),
+            compaction_batch_threshold: 1000,
+            compaction_threshold: 0.3,
+            compaction_min_size_bytes: 52_428_800,
+        };
+        let mut backend = DuckDbHnswBackend::new(config);
+        backend.open().expect("open");
+
+        if !backend.has_vss {
+            eprintln!("VSS extension unavailable, skipping ensure_all_hnsw_indexes metric test");
+            return;
+        }
+
+        // Create an embedding table and a non-cosine HNSW index.
+        {
+            let conn = backend.conn_or_err().expect("conn");
+            DuckDbHnswBackend::ensure_embedding_table_dims(conn, 3).expect("create embeddings_3");
+            conn.execute_batch(
+                "CREATE INDEX idx_hnsw_3 ON embeddings_3 USING HNSW (embedding) WITH (metric = 'l2sq')",
+            )
+            .expect("create l2sq HNSW index");
+        }
+        backend.known_dims.insert(3);
+
+        // Simulate what the pipeline does: drop_all_hnsw_indexes (saves metrics) then
+        // ensure_all_hnsw_indexes (rebuilds using saved metrics).
+        backend.drop_all_hnsw_indexes().expect("drop");
+        assert_eq!(
+            backend.saved_hnsw_metrics.get(&3).map(|s| s.as_str()),
+            Some("l2sq"),
+            "drop_all_hnsw_indexes must save the original metric"
+        );
+
+        backend.ensure_all_hnsw_indexes().expect("ensure");
+
+        let conn = backend.conn_or_err().expect("conn");
+        let after = DuckDbHnswBackend::discover_hnsw_indexes(conn).expect("discover after ensure");
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].metric, "l2sq",
+            "ensure_all_hnsw_indexes must preserve the original non-cosine metric"
         );
     }
 }
