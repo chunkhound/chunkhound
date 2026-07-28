@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Fofriw%2Fchunkhound.svg)](https://mcptoplist.com/server/glama%2Fofriw%2Fchunkhound)
+
 <p align="center">
     <a href="https://chunkhound.ai">
     <picture>
