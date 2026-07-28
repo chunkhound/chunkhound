@@ -1810,10 +1810,11 @@ class IndexingCoordinator(BaseService):
                                         if _compact_size_before
                                         else 0.0
                                     )
+                                    direction = "smaller" if pct >= 0 else "larger"
                                     _compact_info = (
                                         f"{_format_bytes(_compact_size_before)} → "
                                         f"{_format_bytes(_compact_size_after)} "
-                                        f"({pct:.0f}% smaller)"
+                                        f"({abs(pct):.0f}% {direction})"
                                     )
                                 except OSError:
                                     _compact_info = "done"
