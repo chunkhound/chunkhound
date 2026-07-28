@@ -119,9 +119,12 @@ impl IndexingPipeline {
             // Update file_count to reflect what will actually be processed
             file_count = batch_paths.len() as u64;
         } else {
-            // force_reindex bypasses hash-based skipping entirely, matching
-            // its "reprocess everything" contract.
-            delete_paths = Vec::new();
+            // force_reindex re-indexes every file, but must still detect and
+            // remove orphaned DB rows (files deleted from disk since the last
+            // run). Run the diff solely for diff.removed — diff.changed is
+            // discarded because all files are re-indexed regardless.
+            let diff = self.compute_diff_blocking(py, &progress_callback, &batch_paths)?;
+            delete_paths = diff.removed;
             new_hashes = std::collections::HashMap::new();
         }
 

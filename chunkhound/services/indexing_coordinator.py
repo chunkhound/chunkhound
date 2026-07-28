@@ -1294,6 +1294,10 @@ class IndexingCoordinator(BaseService):
                     type(self._db).__name__,
                 )
                 _use_rust = False
+            elif not hasattr(self._db, "db_path"):
+                # Test DB fakes may not expose db_path — fall through to Python
+                # before the cleanup gate fires so orphan cleanup isn't skipped.
+                _use_rust = False
         logger.info(
             "Indexing backend: discovery={} pipeline={}",
             "rust" if _file_patterns._USE_RUST else "python",
@@ -1355,14 +1359,16 @@ class IndexingCoordinator(BaseService):
             do_cleanup = True
             if self.config and getattr(self.config, "indexing", None) is not None:
                 do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
-            if do_cleanup:
+            if do_cleanup and not _use_rust:
                 _t2 = _t.perf_counter() if _t0 is not None else None
                 cleaned_files = self._cleanup_orphaned_files(
                     directory, files, patterns, exclude_patterns
                 )
                 _t3 = _t.perf_counter() if _t0 is not None else None
             else:
-                logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
+                if not do_cleanup:
+                    logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
+                # else: Rust pipeline owns orphan cleanup via its own diff
 
             logger.debug(
                 f"Directory consistency: {len(files)} files discovered, {cleaned_files} orphaned files cleaned"
@@ -1588,14 +1594,7 @@ class IndexingCoordinator(BaseService):
                 # The Rust pipeline handles parse → embed → write in one call.
                 from chunkhound.pipeline_bridge import run_rust_pipeline
 
-                # Test DB fakes may not have db_path — fall through to Python.
-                if not hasattr(self._db, "db_path"):
-                    _use_rust = False
-                    if self.progress and _diff_task is not None:
-                        self.progress.remove_task(_diff_task)
-                        _diff_task = None
-                else:
-                    db_path = Path(str(self._db.db_path)).parent
+                db_path = Path(str(self._db.db_path)).parent
                 skip_embeddings = (
                     self.config.embeddings_disabled
                     if self.config and hasattr(self.config, "embeddings_disabled")
