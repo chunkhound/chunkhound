@@ -356,8 +356,7 @@ impl DuckDbHnswBackend {
                 end_byte INTEGER,
                 language TEXT,
                 metadata TEXT
-            );
-            DELETE FROM rust_temp_chunks;",
+            );",
         )?;
 
         // Batch 100 rows per INSERT to cut SQL round-trips ~100× vs one-row-at-a-time.
@@ -479,8 +478,7 @@ impl DuckDbHnswBackend {
                     model TEXT,
                     embedding TEXT,
                     dims INTEGER
-                );
-                DELETE FROM {temp};"
+                );"
             ))?;
 
             // Batch 100 rows per INSERT to cut SQL round-trips ~100×.
@@ -1074,9 +1072,9 @@ impl DuckDbHnswBackend {
             .unwrap_or(0);
 
         let live_embeddings: i64 = {
-            let tables = Self::discover_embedding_tables(conn).unwrap_or_default();
             let mut total = 0i64;
-            for (table_name, _) in &tables {
+            for &dims in &self.known_dims {
+                let table_name = format!("embeddings_{dims}");
                 if let Ok(cnt) =
                     conn.query_row(&format!("SELECT COUNT(*) FROM \"{table_name}\""), [], |r| {
                         r.get::<_, i64>(0)
@@ -1102,9 +1100,9 @@ impl DuckDbHnswBackend {
             .unwrap_or(0);
 
         let stored_embeddings: i64 = {
-            let tables = Self::discover_embedding_tables(conn).unwrap_or_default();
             let mut total = 0i64;
-            for (table_name, _) in &tables {
+            for &dims in &self.known_dims {
+                let table_name = format!("embeddings_{dims}");
                 let safe = table_name.replace('"', "\"\"");
                 if let Ok(cnt) = conn.query_row(
                     &format!(
