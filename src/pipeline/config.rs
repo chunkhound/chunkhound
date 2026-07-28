@@ -28,6 +28,9 @@ pub(crate) struct PipelineConfig {
     pub force_reindex: bool,
     pub mtime_epsilon_seconds: f64,
 
+    // Orphan cleanup (mirrors config.indexing.cleanup on the Python side)
+    pub do_cleanup: bool,
+
     // Feature toggles
     pub skip_embeddings: bool,
 
@@ -61,6 +64,7 @@ impl PipelineConfig {
 
             force_reindex: get_bool_or(dict, "force_reindex", false)?,
             mtime_epsilon_seconds: get_f64_or(dict, "mtime_epsilon_seconds", 0.01)?,
+            do_cleanup: get_bool_or(dict, "do_cleanup", true)?,
             skip_embeddings: get_bool_or(dict, "skip_embeddings", false)?,
 
             per_file_timeout_secs: get_f64_or(dict, "per_file_timeout_secs", 3.0)?,

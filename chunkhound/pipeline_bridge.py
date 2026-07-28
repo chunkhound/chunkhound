@@ -445,6 +445,7 @@ async def run_rust_pipeline(
     project_root: Path,
     force_reindex: bool = False,
     skip_embeddings: bool = False,
+    do_cleanup: bool = True,
     config: Any = None,
     progress_callback: Any = None,
 ) -> dict[str, Any]:
@@ -519,6 +520,7 @@ async def run_rust_pipeline(
         "embed_batch_size": embed_batch_size,
         "force_reindex": force_reindex,
         "mtime_epsilon_seconds": mtime_eps,
+        "do_cleanup": do_cleanup,
         "skip_embeddings": skip_embeddings,
         "per_file_timeout_secs": per_file_timeout,
         "per_file_timeout_min_size_kb": per_file_timeout_min,

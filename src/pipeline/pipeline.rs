@@ -113,7 +113,12 @@ impl IndexingPipeline {
             let diff = self.compute_diff_blocking(py, &progress_callback, &batch_paths)?;
             // Only process changed files
             batch_paths = diff.changed;
-            delete_paths = diff.removed;
+            // Respect do_cleanup flag: skip orphan deletion when cleanup is disabled.
+            delete_paths = if self.config.do_cleanup {
+                diff.removed
+            } else {
+                Vec::new()
+            };
             new_hashes = diff.new_hashes;
             files_skipped_by_hash = diff.skipped_by_hash;
             // Update file_count to reflect what will actually be processed
@@ -121,10 +126,13 @@ impl IndexingPipeline {
         } else {
             // force_reindex re-indexes every file, but must still detect and
             // remove orphaned DB rows (files deleted from disk since the last
-            // run). Run the diff solely for diff.removed — diff.changed is
-            // discarded because all files are re-indexed regardless.
-            let diff = self.compute_diff_blocking(py, &progress_callback, &batch_paths)?;
-            delete_paths = diff.removed;
+            // run) — unless cleanup is disabled by config.
+            if self.config.do_cleanup {
+                let diff = self.compute_diff_blocking(py, &progress_callback, &batch_paths)?;
+                delete_paths = diff.removed;
+            } else {
+                delete_paths = Vec::new();
+            }
             new_hashes = std::collections::HashMap::new();
         }
 

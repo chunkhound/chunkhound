@@ -1347,6 +1347,8 @@ class IndexingCoordinator(BaseService):
             )
 
             if not files:
+                if _diff_task is not None and self.progress:
+                    self.progress.remove_task(_diff_task)
                 return {"status": "no_files", "files_processed": 0, "total_chunks": 0}
 
             # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files.
@@ -1879,6 +1881,7 @@ class IndexingCoordinator(BaseService):
                     project_root=directory,
                     force_reindex=force_reindex,
                     skip_embeddings=skip_embeddings,
+                    do_cleanup=do_cleanup,
                     config=self.config,
                     progress_callback=_progress_cb,
                 )
