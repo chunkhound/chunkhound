@@ -29,7 +29,7 @@ pub struct DuckDbHnswBackend {
 struct HnswIndexInfo {
     index_name: String,
     table_name: String,
-    create_sql: Option<String>,
+    metric: String,
 }
 
 struct BatchInner {
@@ -214,13 +214,31 @@ impl DuckDbHnswBackend {
                     || name.starts_with("hnsw_")
                     || name.starts_with("idx_hnsw_")
             })
-            .map(|(name, table, sql)| HnswIndexInfo {
-                index_name: name,
-                table_name: table,
-                create_sql: sql,
+            .map(|(name, table, _sql)| {
+                let metric = Self::extract_hnsw_metric(conn, &name);
+                HnswIndexInfo {
+                    index_name: name,
+                    table_name: table,
+                    metric,
+                }
             })
             .collect();
         Ok(indexes)
+    }
+
+    /// Return the live HNSW similarity metric from `pragma_hnsw_index_info()`.
+    ///
+    /// DuckDB strips the `WITH (metric = '...')` clause from `duckdb_indexes().sql`,
+    /// so the CREATE INDEX DDL alone cannot tell us the metric a dropped index used.
+    /// Mirrors `_extract_hnsw_metric` in `duckdb_provider.py` — must be called while
+    /// the index still exists (i.e. before it is dropped for a rebuild).
+    fn extract_hnsw_metric(conn: &Connection, index_name: &str) -> String {
+        conn.query_row(
+            "SELECT metric FROM pragma_hnsw_index_info() WHERE index_name = ? LIMIT 1",
+            [index_name],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "cosine".to_string())
     }
 
     fn drop_hnsw_indexes(conn: &Connection, indexes: &[HnswIndexInfo]) -> Result<(), DbError> {
@@ -233,21 +251,12 @@ impl DuckDbHnswBackend {
 
     fn recreate_hnsw_indexes(conn: &Connection, indexes: &[HnswIndexInfo]) -> Result<(), DbError> {
         for idx in indexes {
-            if let Some(create_sql) = &idx.create_sql {
-                // Ensure idempotent
-                let sql = if create_sql.contains("IF NOT EXISTS") {
-                    create_sql.clone()
-                } else {
-                    create_sql.replacen("CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1)
-                };
-                conn.execute_batch(&sql)?;
-            } else {
-                let safe_idx = idx.index_name.replace('"', "\"\"");
-                let safe_tbl = idx.table_name.replace('"', "\"\"");
-                conn.execute_batch(&format!(
-                    "CREATE INDEX IF NOT EXISTS \"{safe_idx}\" ON \"{safe_tbl}\" USING HNSW (embedding) WITH (metric = 'cosine')"
-                ))?;
-            }
+            let safe_idx = idx.index_name.replace('"', "\"\"");
+            let safe_tbl = idx.table_name.replace('"', "\"\"");
+            conn.execute_batch(&format!(
+                "CREATE INDEX IF NOT EXISTS \"{safe_idx}\" ON \"{safe_tbl}\" USING HNSW (embedding) WITH (metric = '{}')",
+                idx.metric
+            ))?;
         }
         Ok(())
     }
@@ -1435,5 +1444,42 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // parallelism for this machine's cores.
         let _ = conn.execute_batch("SET threads = 1");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hnsw_metric_tests {
+    use super::*;
+
+    #[test]
+    fn recreate_hnsw_indexes_preserves_non_cosine_metric() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        if !DuckDbHnswBackend::try_load_vss(&conn) {
+            eprintln!("VSS extension unavailable, skipping HNSW metric test");
+            return;
+        }
+
+        DuckDbHnswBackend::setup_schema(&conn).expect("setup schema");
+        DuckDbHnswBackend::ensure_embedding_table_dims(&conn, 3).expect("create embeddings_3");
+        conn.execute_batch(
+            "CREATE INDEX idx_hnsw_3 ON embeddings_3 USING HNSW (embedding) \
+             WITH (metric = 'l2sq')",
+        )
+        .expect("create l2sq HNSW index");
+
+        let discovered = DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover");
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].metric, "l2sq");
+
+        DuckDbHnswBackend::drop_hnsw_indexes(&conn, &discovered).expect("drop");
+        DuckDbHnswBackend::recreate_hnsw_indexes(&conn, &discovered).expect("recreate");
+
+        let after_recreate =
+            DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover after recreate");
+        assert_eq!(after_recreate.len(), 1);
+        assert_eq!(
+            after_recreate[0].metric, "l2sq",
+            "recreate_hnsw_indexes must preserve the original non-cosine metric"
+        );
     }
 }
