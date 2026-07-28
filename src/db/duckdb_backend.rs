@@ -529,15 +529,18 @@ impl DuckDbHnswBackend {
     // is rejected inside an explicit transaction even after child rows are deleted.
     // The pre-deletes inside write_batch_inner work because upsert_file uses an explicit
     // SELECT + UPDATE/INSERT rather than ON CONFLICT DO UPDATE syntax.
-    fn delete_paths(conn: &Connection, paths: &[String]) -> Result<(), DbError> {
+    fn delete_paths(
+        conn: &Connection,
+        paths: &[String],
+        known_dims: &HashSet<u32>,
+    ) -> Result<(), DbError> {
         if paths.is_empty() {
             return Ok(());
         }
-        // TODO(Phase 1): cache emb_tables on DuckDbHnswBackend (alongside hnsw_cache) so
-        // this catalog scan is not repeated for every batch.  See pre_delete_for_upsert for the
-        // matching TODO and the invalidation note (cache must grow when a new embeddings_N table
-        // appears).  When caching is implemented, both TODOs should be resolved together.
-        let emb_tables = Self::discover_embedding_tables(conn)?;
+        let emb_tables: Vec<(String, u32)> = known_dims
+            .iter()
+            .map(|&dims| (format!("embeddings_{dims}"), dims))
+            .collect();
 
         // Phase 1: atomically delete embeddings + chunks together.
         // embeddings_N tables have no FK to chunks — delete embeddings first
@@ -642,7 +645,11 @@ impl DuckDbHnswBackend {
     //     those files are absent from the DB and will not be re-populated unless the caller
     //     explicitly re-requests them.  This is an inherent limitation of the two-phase
     //     commit approach — the caller must be prepared to re-submit deletes after a crash.
-    fn pre_delete_for_upsert(conn: &Connection, batch: &DbWriterBatch) -> Result<(), DbError> {
+    fn pre_delete_for_upsert(
+        conn: &Connection,
+        batch: &DbWriterBatch,
+        known_dims: &HashSet<u32>,
+    ) -> Result<(), DbError> {
         let by_id: Vec<i64> = batch
             .files
             .iter()
@@ -659,11 +666,10 @@ impl DuckDbHnswBackend {
             return Ok(());
         }
 
-        // TODO(Phase 1): cache emb_tables on DuckDbHnswBackend (alongside hnsw_cache) instead
-        // of re-querying the catalog on every batch. Hoisting is non-trivial because the set can
-        // grow mid-session when a new embedding dimension appears for the first time — the cache
-        // must be invalidated whenever a new embeddings_N table is created.
-        let emb_tables = Self::discover_embedding_tables(conn)?;
+        let emb_tables: Vec<(String, u32)> = known_dims
+            .iter()
+            .map(|&dims| (format!("embeddings_{dims}"), dims))
+            .collect();
         conn.execute_batch("BEGIN")?;
         let result = (|| -> Result<(), DbError> {
             if !by_id.is_empty() {
@@ -1226,13 +1232,13 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // Step 0a: Handle delete_paths OUTSIDE transaction.
         if !batch.delete_paths.is_empty() {
             let conn = self.conn_or_err()?;
-            Self::delete_paths(conn, &batch.delete_paths)?;
+            Self::delete_paths(conn, &batch.delete_paths, &self.known_dims)?;
         }
 
         // Step 0b: Pre-delete chunks/embeddings for files being upserted, OUTSIDE transaction.
         {
             let conn = self.conn_or_err()?;
-            Self::pre_delete_for_upsert(conn, batch)?;
+            Self::pre_delete_for_upsert(conn, batch, &self.known_dims)?;
         }
 
         // Step 0c: Ensure embedding tables outside txn (Invariant 13).
@@ -1426,15 +1432,13 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // DuckDB VSS HNSW builds can be CPU-intensive.  Increase the thread
         // count and disable any internal timeout so large tables don't fail.
         let _ = conn.execute_batch("SET threads = 8");
-        let tables = Self::discover_embedding_tables(conn)?;
-        for (table_name, dims) in &tables {
+        for &dims in &self.known_dims {
             let hnsw_name = format!("idx_hnsw_{dims}");
-            let safe_tbl = table_name.replace('"', "\"\"");
             conn.execute_batch(&format!(
-                "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"{safe_tbl}\" USING HNSW (embedding) WITH (metric = 'cosine')"
+                "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"embeddings_{dims}\" USING HNSW (embedding) WITH (metric = 'cosine')"
             ))?;
         }
-        if !tables.is_empty() {
+        if !self.known_dims.is_empty() {
             conn.execute_batch("CHECKPOINT")?;
         }
         // Restore a conservative thread count — this connection may still be
