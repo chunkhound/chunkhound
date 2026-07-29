@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use duckdb::Connection;
 
@@ -1334,16 +1335,24 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             }
         };
 
-        // COMMIT + CHECKPOINT.
+        // COMMIT. DuckDB runs its automatic WAL checkpoint synchronously on
+        // COMMIT once the WAL exceeds checkpoint_threshold, so this timing
+        // isolates checkpoint cost from the inserts above — the key signal for
+        // diagnosing whether write-stage slowdown is checkpoint-driven.
         {
             let conn = self
                 .conn
                 .as_ref()
                 .expect("conn is Some: open() succeeded and BEGIN passed");
+            let t_commit = Instant::now();
             if let Err(e) = conn.execute_batch("COMMIT") {
                 let _ = conn.execute_batch("ROLLBACK");
                 return Err(DbError::DuckDb(e));
             }
+            log::debug!(
+                "[store]   commit+checkpoint {:.1}ms",
+                t_commit.elapsed().as_secs_f64() * 1e3
+            );
         }
 
         Ok(BatchResult {

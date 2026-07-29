@@ -557,6 +557,10 @@ impl IndexingPipeline {
         // once at the very end — never both, see the comment below.
         let store_handle: std::thread::JoinHandle<Result<StoreOutcome, String>> = {
             std::thread::spawn(move || {
+                // Captured before `db_config` is moved into the backend —
+                // used only to stat the DB and WAL files for per-batch size
+                // tracing below.
+                let db_path = db_config.db_path.clone();
                 let mut backend: Box<dyn DbBackend> = create_backend(db_config);
                 backend.open().map_err(|e| e.to_string())?;
                 // Dropping HNSW indexes is a catalog-only DDL operation (no
@@ -578,10 +582,22 @@ impl IndexingPipeline {
                 let write_result: Result<(), String> = (|| {
                     while let Ok(batch) = store_rx.recv() {
                         let t_batch = Instant::now();
+
+                        // Split the two write phases so a slowdown can be
+                        // attributed to prepare (DDL/deletes) vs the insert +
+                        // COMMIT path. write_batch_incremental additionally
+                        // logs its own COMMIT time, so insert cost ≈
+                        // write_ms − commit_ms.
+                        let t_prep = Instant::now();
                         backend.prepare_write(&batch).map_err(|e| e.to_string())?;
+                        let prep_ms = t_prep.elapsed().as_secs_f64() * 1e3;
+
+                        let t_write = Instant::now();
                         let result = backend
                             .write_batch_incremental(&batch)
                             .map_err(|e| e.to_string())?;
+                        let write_ms = t_write.elapsed().as_secs_f64() * 1e3;
+
                         chunks_written += result.chunks_written;
                         embeddings_written += result.embeddings_written;
                         batch_no += 1;
@@ -591,9 +607,23 @@ impl IndexingPipeline {
                             batch_no as u64,
                             batch_count_u64,
                         );
+
+                        // DB and WAL sizes distinguish DB-size-driven
+                        // degradation from this batch's payload. DuckDB names
+                        // the write-ahead log "<db>.wal".
+                        let db_mib =
+                            std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0) / (1 << 20);
+                        let wal_mib = std::fs::metadata(format!("{db_path}.wal"))
+                            .map(|m| m.len())
+                            .unwrap_or(0)
+                            / (1 << 20);
                         log::debug!(
-                            "[store] batch {batch_no} done in {:.3}s",
-                            t_batch.elapsed().as_secs_f64()
+                            "[store] batch {batch_no} done in {:.3}s \
+                             (prep={prep_ms:.1}ms write={write_ms:.1}ms \
+                             chunks={} embeds={} db={db_mib}MiB wal={wal_mib}MiB)",
+                            t_batch.elapsed().as_secs_f64(),
+                            result.chunks_written,
+                            result.embeddings_written,
                         );
                     }
                     Ok(())

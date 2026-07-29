@@ -88,13 +88,15 @@ def _install_logging_to_loguru_bridge(*, verbose: bool = False) -> None:
     if _root.level > _bridge.level:
         _root.setLevel(_bridge.level)
 
-    if not verbose:
-        # Third-party HTTP libraries log one INFO line per request/response
-        # (e.g. httpx's "HTTP Request: POST ..."). At INFO the bridge would
-        # otherwise forward every embedding-provider call, flooding output
-        # during indexing. Keep them at WARNING; --verbose still shows them.
-        for _noisy_logger in ("httpx", "httpcore"):
-            _logging.getLogger(_noisy_logger).setLevel(_logging.WARNING)
+    # Third-party HTTP libraries emit per-request trace spam: httpx's
+    # "HTTP Request: POST ..." at INFO, and httpcore._trace /
+    # openai._base_client (full request bodies) at DEBUG. Under --verbose the
+    # DEBUG stream floods the log and drowns ChunkHound's own output — most
+    # notably the Rust pipeline's per-batch timing lines. Silence them
+    # unconditionally; our own loggers (chunkhound.* and the Rust
+    # chunkhound_native.* timers) still emit at DEBUG when --verbose is set.
+    for _noisy_logger in ("httpx", "httpcore", "openai"):
+        _logging.getLogger(_noisy_logger).setLevel(_logging.WARNING)
 
 
 def setup_logging(verbose: bool = False) -> None:
