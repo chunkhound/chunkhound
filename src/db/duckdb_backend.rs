@@ -298,10 +298,20 @@ impl DuckDbHnswBackend {
             .and_then(|e| e.to_str())
             .map(|s| s.to_string());
 
-        // DuckDB rejects ON CONFLICT DO UPDATE inside an explicit transaction when
-        // a FK child table (chunks) has rows referencing the conflicting parent row,
-        // even if those children were deleted earlier in the same transaction.
-        // Work around by doing an explicit SELECT then UPDATE-or-INSERT.
+        // Fast path: the diff phase already knows this file's DB id (incremental re-index).
+        // Skip the SELECT and go straight to UPDATE.
+        if let Some(id) = file.existing_file_id {
+            conn.execute(
+                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, updated_at = now() WHERE id = ?",
+                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, id],
+            )?;
+            return Ok(id);
+        }
+
+        // Slow path (new files or non-incremental runs): DuckDB rejects ON CONFLICT DO UPDATE
+        // inside an explicit transaction when a FK child table (chunks) has rows referencing
+        // the conflicting parent row, even if those children were deleted earlier in the same
+        // transaction. Work around by doing an explicit SELECT then UPDATE-or-INSERT.
         let existing_id: Option<i64> = conn
             .query_row("SELECT id FROM files WHERE path = ?", [&file.path], |r| {
                 r.get(0)
@@ -1515,6 +1525,65 @@ mod hnsw_metric_tests {
         assert_eq!(
             after_recreate[0].metric, "l2sq",
             "recreate_hnsw_indexes must preserve the original non-cosine metric"
+        );
+    }
+
+    #[test]
+    fn test_upsert_file_with_known_id_skips_insert() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
+        let config = DbConfig {
+            db_path,
+            compaction_batch_threshold: 1000,
+            compaction_threshold: 0.3,
+            compaction_min_size_bytes: 52_428_800,
+        };
+        let mut backend = DuckDbHnswBackend::new(config);
+        backend.open().expect("open");
+
+        let batch1 = crate::types::DbWriterBatch {
+            files: vec![crate::types::FileRecord {
+                existing_file_id: None,
+                path: "a.py".into(),
+                mtime: Some(1.0),
+                size_bytes: Some(100),
+                content_hash: Some("abc".into()),
+                language: Some("python".into()),
+                chunks: vec![],
+            }],
+            delete_paths: vec![],
+        };
+        let result1 = backend.write_batch(&batch1).expect("first write");
+        let original_id = result1.file_ids[0];
+
+        // Second write: same path, different mtime, but now we know the file's DB id.
+        let batch2 = crate::types::DbWriterBatch {
+            files: vec![crate::types::FileRecord {
+                existing_file_id: Some(original_id),
+                path: "a.py".into(),
+                mtime: Some(2.0),
+                size_bytes: Some(200),
+                content_hash: Some("def".into()),
+                language: Some("python".into()),
+                chunks: vec![],
+            }],
+            delete_paths: vec![],
+        };
+        let result2 = backend.write_batch(&batch2).expect("second write");
+
+        assert_eq!(
+            result2.file_ids[0], original_id,
+            "upsert with known id must return the same id (UPDATE path, not INSERT)"
+        );
+
+        // Verify no phantom row was inserted.
+        let conn = backend.conn_or_err().expect("conn");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "files table must have exactly one row after two writes to the same path"
         );
     }
 

@@ -108,6 +108,7 @@ impl IndexingPipeline {
         // stage instead of re-hashing, and files confirmed unchanged by hash
         // despite a differing mtime never reach `batch_paths` at all.
         let new_hashes: std::collections::HashMap<PathBuf, String>;
+        let existing_ids: std::collections::HashMap<PathBuf, i64>;
         let mut files_skipped_by_hash = 0u64;
         if incremental {
             let diff = self.compute_diff_blocking(py, &progress_callback, &batch_paths)?;
@@ -120,6 +121,7 @@ impl IndexingPipeline {
                 Vec::new()
             };
             new_hashes = diff.new_hashes;
+            existing_ids = diff.existing_ids;
             files_skipped_by_hash = diff.skipped_by_hash;
             // Update file_count to reflect what will actually be processed
             file_count = batch_paths.len() as u64;
@@ -134,6 +136,7 @@ impl IndexingPipeline {
                 delete_paths = Vec::new();
             }
             new_hashes = std::collections::HashMap::new();
+            existing_ids = std::collections::HashMap::new();
         }
 
         // ── Resolve directory→db file path (shared by both write paths) ──
@@ -209,6 +212,7 @@ impl IndexingPipeline {
                     delete_paths,
                     db_config,
                     new_hashes,
+                    existing_ids,
                 )
             })
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -285,15 +289,17 @@ impl IndexingPipeline {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let mut stmt = conn
-            .prepare("SELECT path, EXTRACT(EPOCH FROM modified_time), content_hash FROM files")
+            .prepare("SELECT id, path, EXTRACT(EPOCH FROM modified_time), content_hash FROM files")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let db_entries: Vec<DbFileEntry> = stmt
             .query_map([], |row| {
-                let path: String = row.get(0)?;
-                let mtime: f64 = row.get(1)?;
-                let content_hash: Option<String> = row.get(2)?;
+                let id: i64 = row.get(0)?;
+                let path: String = row.get(1)?;
+                let mtime: f64 = row.get(2)?;
+                let content_hash: Option<String> = row.get(3)?;
                 Ok(DbFileEntry {
+                    id,
                     path,
                     mtime,
                     content_hash,
@@ -347,6 +353,7 @@ impl IndexingPipeline {
         let normalized: Vec<DbFileEntry> = db_entries
             .iter()
             .map(|e| DbFileEntry {
+                id: e.id,
                 path: e.path.clone(),
                 mtime: e.mtime - tz_offset,
                 content_hash: e.content_hash.clone(),
@@ -410,6 +417,7 @@ impl IndexingPipeline {
         delete_paths: Vec<String>,
         db_config: DbConfig,
         new_hashes: std::collections::HashMap<PathBuf, String>,
+        existing_ids: std::collections::HashMap<PathBuf, i64>,
     ) -> Result<StoreOutcome, String> {
         use std::sync::mpsc;
         use std::sync::{Arc, Mutex};
@@ -733,8 +741,12 @@ impl IndexingPipeline {
                     // diff) to the first streamed batch only — deleting is
                     // idempotent, but there is no need to repeat it per batch.
                     let batch_delete_paths = pending_delete_paths.take().unwrap_or_default();
-                    let db_batch =
-                        Self::build_db_batch(&parsed_files, &project_root, batch_delete_paths);
+                    let db_batch = Self::build_db_batch(
+                        &parsed_files,
+                        &project_root,
+                        batch_delete_paths,
+                        &existing_ids,
+                    );
                     if store_tx.send(db_batch).is_err() {
                         // Store thread exited early (DB error) — stop feeding
                         // it; the real error surfaces via store_handle.join().
@@ -816,6 +828,7 @@ impl IndexingPipeline {
         parsed: &[super::types::ParsedFile],
         project_root: &Path,
         delete_paths: Vec<String>,
+        existing_ids: &std::collections::HashMap<PathBuf, i64>,
     ) -> DbWriterBatch {
         let mut file_records = Vec::with_capacity(parsed.len());
 
@@ -861,7 +874,7 @@ impl IndexingPipeline {
             };
 
             file_records.push(FileRecord {
-                existing_file_id: None,
+                existing_file_id: existing_ids.get(&pf.path).copied(),
                 path: rel_path,
                 mtime: Some(pf.mtime),
                 size_bytes: Some(pf.file_size as i64),

@@ -21,11 +21,16 @@ pub(crate) struct DiffResult {
     /// (keyed by the same absolute path used there), so the parse stage
     /// doesn't need to re-hash a file the diff phase already read.
     pub new_hashes: HashMap<PathBuf, String>,
+    /// DB row id for each file in `changed` that already existed in the DB
+    /// (keyed by absolute path). New files (first index) are absent here.
+    /// Lets the write phase skip the per-file SELECT in upsert_file.
+    pub existing_ids: HashMap<PathBuf, i64>,
 }
 
 /// Snapshot of a single file from the DB.
 #[derive(Debug, Clone)]
 pub(crate) struct DbFileEntry {
+    pub(crate) id: i64,
     pub(crate) path: String,
     pub(crate) mtime: f64, // Unix timestamp
     pub(crate) content_hash: Option<String>,
@@ -66,6 +71,13 @@ pub(crate) fn compute_diff(
         .filter_map(|e| e.content_hash.as_deref().map(|h| (e.path.as_str(), h)))
         .collect();
 
+    // Build a lookup: DB path → DB row id, so changed files that already existed
+    // in the DB carry their id into the write phase and skip the per-file SELECT.
+    let db_ids: HashMap<&str, i64> = db_file_entries
+        .iter()
+        .map(|e| (e.path.as_str(), e.id))
+        .collect();
+
     // Build a set of DB paths for removal detection
     let db_paths: HashSet<String> = db_file_entries.iter().map(|e| e.path.clone()).collect();
 
@@ -74,6 +86,7 @@ pub(crate) fn compute_diff(
     let mut files_scanned = 0;
     let mut skipped_by_hash = 0u64;
     let mut new_hashes: HashMap<PathBuf, String> = HashMap::new();
+    let mut existing_ids: HashMap<PathBuf, i64> = HashMap::new();
 
     for abs_path in files_on_disk {
         files_scanned += 1;
@@ -119,11 +132,17 @@ pub(crate) fn compute_diff(
                             }
                             Some(new_hash) => {
                                 new_hashes.insert(abs_path.clone(), new_hash);
+                                if let Some(&id) = db_ids.get(rel.as_str()) {
+                                    existing_ids.insert(abs_path.clone(), id);
+                                }
                                 changed.push(abs_path.clone());
                             }
                             None => {
                                 // Couldn't read/hash — fall back to the safe
                                 // default of reprocessing.
+                                if let Some(&id) = db_ids.get(rel.as_str()) {
+                                    existing_ids.insert(abs_path.clone(), id);
+                                }
                                 changed.push(abs_path.clone());
                             }
                         },
@@ -134,6 +153,9 @@ pub(crate) fn compute_diff(
                             if let Some(new_hash) = hash_file_contents(abs_path) {
                                 new_hashes.insert(abs_path.clone(), new_hash);
                             }
+                            if let Some(&id) = db_ids.get(rel.as_str()) {
+                                existing_ids.insert(abs_path.clone(), id);
+                            }
                             changed.push(abs_path.clone());
                         }
                     }
@@ -141,6 +163,9 @@ pub(crate) fn compute_diff(
                 // else: mtime matches → skip
             } else {
                 // Can't stat the file → process it anyway (safety)
+                if let Some(&id) = db_ids.get(rel.as_str()) {
+                    existing_ids.insert(abs_path.clone(), id);
+                }
                 changed.push(abs_path.clone());
             }
         } else {
@@ -165,6 +190,7 @@ pub(crate) fn compute_diff(
         files_scanned,
         skipped_by_hash,
         new_hashes,
+        existing_ids,
     }
 }
 
@@ -225,6 +251,7 @@ mod tests {
         let mtime = file_mtime(&f1).unwrap();
 
         let db = vec![DbFileEntry {
+            id: 1,
             path: "a.py".into(),
             mtime,
             content_hash: None,
@@ -241,6 +268,7 @@ mod tests {
         let old_mtime = 0.0; // epoch — clearly different
 
         let db = vec![DbFileEntry {
+            id: 42,
             path: "a.py".into(),
             mtime: old_mtime,
             content_hash: None,
@@ -252,6 +280,11 @@ mod tests {
             1,
             "changed mtime should trigger re-process"
         );
+        assert_eq!(
+            diff.existing_ids.get(&f1).copied(),
+            Some(42),
+            "existing_ids must carry the DB id for a changed file that was already in the DB"
+        );
     }
 
     #[test]
@@ -261,11 +294,13 @@ mod tests {
 
         let db = vec![
             DbFileEntry {
+                id: 1,
                 path: "a.py".into(),
                 mtime: file_mtime(&f1).unwrap(),
                 content_hash: None,
             },
             DbFileEntry {
+                id: 2,
                 path: "gone.py".into(), // this file doesn't exist on disk
                 mtime: 1.0,
                 content_hash: None,
@@ -309,6 +344,7 @@ mod tests {
         let hash = hash_file_contents(&f1).unwrap();
 
         let db = vec![DbFileEntry {
+            id: 1,
             path: "a.py".into(),
             mtime: 0.0, // clearly different from the file's real mtime
             content_hash: Some(hash),
@@ -329,6 +365,7 @@ mod tests {
         let f1 = create_file(&tmp, "a.py");
 
         let db = vec![DbFileEntry {
+            id: 1,
             path: "a.py".into(),
             mtime: 0.0,
             content_hash: Some("deadbeefdeadbeef".into()),
@@ -342,6 +379,21 @@ mod tests {
         );
         assert_eq!(diff.skipped_by_hash, 0);
         assert!(diff.new_hashes.contains_key(&f1));
+    }
+
+    #[test]
+    fn test_compute_diff_no_id_for_new_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f1 = create_file(&tmp, "new.py");
+
+        // Empty DB — the file has never been indexed.
+        let diff = compute_diff(&[], std::slice::from_ref(&f1), tmp.path(), 0.01, None);
+
+        assert_eq!(diff.changed_count(), 1);
+        assert!(
+            diff.existing_ids.is_empty(),
+            "new files (not in DB) must not appear in existing_ids"
+        );
     }
 
     fn create_file(dir: &tempfile::TempDir, name: &str) -> PathBuf {

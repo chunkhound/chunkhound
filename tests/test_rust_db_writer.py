@@ -202,12 +202,13 @@ class TestUpsert:
         result1 = w.write_batch(_batch(files=[_file("a.py", chunks=[_chunk("def v1(): pass")])]))
         fid = result1["file_ids"][0]
 
-        # Second write with existing_file_id → old chunks deleted first
-        w.write_batch(_batch(files=[_file("a.py", chunks=[_chunk("def v2(): pass"), _chunk("def v3(): pass")], existing_file_id=fid)]))
+        # Second write with existing_file_id → old chunks deleted first, same file row updated
+        result2 = w.write_batch(_batch(files=[_file("a.py", chunks=[_chunk("def v2(): pass"), _chunk("def v3(): pass")], existing_file_id=fid)]))
         w.close()
 
         assert _count(db, "files") == 1
         assert _count(db, "chunks") == 2
+        assert result2["file_ids"][0] == fid, "same DB row must be updated (not a new INSERT)"
 
 
 # ---------------------------------------------------------------------------
