@@ -575,55 +575,73 @@ impl IndexingPipeline {
                 );
                 emit_progress_gil(&store_progress_cb, "write-prepare", 0, batch_count_u64);
 
+                // Commit every N batches instead of every batch to reduce
+                // the number of DuckDB WAL auto-checkpoint opportunities.
+                // prepare_write() still runs per-batch in auto-commit mode
+                // (preserving FK-constraint and nested-BEGIN invariants).
+                const STORE_COMMIT_INTERVAL: usize = 10;
+
                 let mut chunks_written = 0u64;
                 let mut embeddings_written = 0u64;
                 let mut batch_no = 0usize;
 
                 let write_result: Result<(), String> = (|| {
-                    while let Ok(batch) = store_rx.recv() {
-                        let t_batch = Instant::now();
+                    let mut window: Vec<crate::types::DbWriterBatch> =
+                        Vec::with_capacity(STORE_COMMIT_INTERVAL);
 
-                        // Split the two write phases so a slowdown can be
-                        // attributed to prepare (DDL/deletes) vs the insert +
-                        // COMMIT path. write_batch_incremental additionally
-                        // logs its own COMMIT time, so insert cost ≈
-                        // write_ms − commit_ms.
-                        let t_prep = Instant::now();
-                        backend.prepare_write(&batch).map_err(|e| e.to_string())?;
-                        let prep_ms = t_prep.elapsed().as_secs_f64() * 1e3;
+                    loop {
+                        // Fill window: prepare_write per batch (auto-commit),
+                        // block on recv until window full or channel closes.
+                        window.clear();
+                        for _ in 0..STORE_COMMIT_INTERVAL {
+                            match store_rx.recv() {
+                                Ok(batch) => {
+                                    let t_prep = Instant::now();
+                                    backend.prepare_write(&batch).map_err(|e| e.to_string())?;
+                                    let prep_ms = t_prep.elapsed().as_secs_f64() * 1e3;
+                                    log::debug!(
+                                        "[store] prep batch {} in {prep_ms:.1}ms",
+                                        window.len() + 1,
+                                    );
+                                    window.push(batch);
+                                }
+                                Err(_) => break, // channel closed
+                            }
+                        }
+                        if window.is_empty() {
+                            break;
+                        }
 
+                        // Write the whole window in one transaction.
                         let t_write = Instant::now();
-                        let result = backend
-                            .write_batch_incremental(&batch)
+                        let results = backend
+                            .write_batches_in_one_txn(&window)
                             .map_err(|e| e.to_string())?;
                         let write_ms = t_write.elapsed().as_secs_f64() * 1e3;
 
-                        chunks_written += result.chunks_written;
-                        embeddings_written += result.embeddings_written;
-                        batch_no += 1;
-                        emit_progress_gil(
-                            &store_progress_cb,
-                            "write-data",
-                            batch_no as u64,
-                            batch_count_u64,
-                        );
-
-                        // DB and WAL sizes distinguish DB-size-driven
-                        // degradation from this batch's payload. DuckDB names
-                        // the write-ahead log "<db>.wal".
                         let db_mib =
                             std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0) / (1 << 20);
                         let wal_mib = std::fs::metadata(format!("{db_path}.wal"))
                             .map(|m| m.len())
                             .unwrap_or(0)
                             / (1 << 20);
+
+                        let window_start = batch_no + 1;
+                        for result in &results {
+                            chunks_written += result.chunks_written;
+                            embeddings_written += result.embeddings_written;
+                            batch_no += 1;
+                            emit_progress_gil(
+                                &store_progress_cb,
+                                "write-data",
+                                batch_no as u64,
+                                batch_count_u64,
+                            );
+                        }
                         log::debug!(
-                            "[store] batch {batch_no} done in {:.3}s \
-                             (prep={prep_ms:.1}ms write={write_ms:.1}ms \
-                             chunks={} embeds={} db={db_mib}MiB wal={wal_mib}MiB)",
-                            t_batch.elapsed().as_secs_f64(),
-                            result.chunks_written,
-                            result.embeddings_written,
+                            "[store] window {window_start}-{batch_no} done in {write_ms:.3}s \
+                             (chunks={chunks_written} embeds={embeddings_written} \
+                             db={db_mib}MiB wal={wal_mib}MiB)",
                         );
                     }
                     Ok(())

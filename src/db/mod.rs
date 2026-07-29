@@ -29,6 +29,23 @@ pub trait DbBackend: Send {
         Ok(())
     }
 
+    /// Write multiple pre-prepared batches in a single transaction.
+    ///
+    /// `prepare_write` must have been called for each batch already (in
+    /// auto-commit mode, as usual).  The default implementation calls
+    /// `write_batch_incremental` for each batch, preserving per-batch commit
+    /// behaviour.  Override to reduce checkpoint frequency by committing N
+    /// batches at once.
+    fn write_batches_in_one_txn(
+        &mut self,
+        batches: &[DbWriterBatch],
+    ) -> Result<Vec<BatchResult>, DbError> {
+        batches
+            .iter()
+            .map(|b| self.write_batch_incremental(b))
+            .collect()
+    }
+
     fn needs_compaction(&self) -> Result<bool, DbError>;
     fn run_compaction(&mut self) -> Result<(), DbError>;
     fn drop_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
