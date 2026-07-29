@@ -1379,8 +1379,13 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             for &dims in &new_dims {
                 let hnsw_name = format!("idx_hnsw_{dims}");
                 let table = format!("embeddings_{dims}");
+                let metric = self
+                    .saved_hnsw_metrics
+                    .get(&dims)
+                    .map(|s| s.as_str())
+                    .unwrap_or("cosine");
                 conn.execute_batch(&format!(
-                    "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"{table}\" USING HNSW (embedding) WITH (metric = 'cosine')"
+                    "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"{table}\" USING HNSW (embedding) WITH (metric = '{metric}')"
                 ))?;
             }
         }
@@ -1581,6 +1586,88 @@ mod hnsw_metric_tests {
         assert_eq!(
             count, 1,
             "files table must have exactly one row after two writes to the same path"
+        );
+    }
+
+    #[test]
+    fn test_finish_write_new_dims_uses_saved_hnsw_metric() {
+        // Verify the pending_new_dims path in finish_write respects saved_hnsw_metrics.
+        // Scenario: a prior session created an l2sq HNSW that was dropped via
+        // drop_all_hnsw_indexes() (bulk mode). finish_write must recreate it with l2sq,
+        // not the hardcoded 'cosine'.
+        // RED with current code; GREEN after saved_hnsw_metrics lookup is added.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
+        let config = DbConfig {
+            db_path: db_path.clone(),
+            compaction_batch_threshold: 1000,
+            compaction_threshold: 0.3,
+            compaction_min_size_bytes: 52_428_800,
+        };
+        let mut backend = DuckDbHnswBackend::new(config);
+        backend.open().expect("open");
+
+        if !backend.has_vss {
+            eprintln!("VSS extension unavailable, skipping");
+            return;
+        }
+
+        // Simulate a prior session: create embeddings_4 table with l2sq HNSW.
+        {
+            let conn = backend.conn_or_err().expect("conn");
+            DuckDbHnswBackend::ensure_embedding_table_dims(conn, 4).expect("create embeddings_4");
+            conn.execute_batch(
+                "CREATE INDEX idx_hnsw_4 ON embeddings_4 \
+                 USING HNSW (embedding) WITH (metric = 'l2sq')",
+            )
+            .expect("create l2sq HNSW");
+        }
+        // Do NOT add 4 to known_dims — it must appear as new-to-session in prepare_write.
+
+        // Enter bulk mode: drops all HNSW and saves their metrics into saved_hnsw_metrics.
+        backend.drop_all_hnsw_indexes().expect("drop");
+        assert_eq!(
+            backend.saved_hnsw_metrics.get(&4).map(|s| s.as_str()),
+            Some("l2sq"),
+            "drop_all_hnsw_indexes must have saved the l2sq metric"
+        );
+
+        // Write a batch with one dim-4 embedding.
+        // In bulk mode prepare_write skips per-batch HNSW lifecycle.
+        // finish_write's pending_new_dims loop fires because dim 4 is new to known_dims.
+        let batch = crate::types::DbWriterBatch {
+            files: vec![crate::types::FileRecord {
+                existing_file_id: None,
+                path: "test.py".into(),
+                mtime: Some(1.0),
+                size_bytes: Some(100),
+                content_hash: Some("abc".into()),
+                language: Some("python".into()),
+                chunks: vec![crate::types::ChunkRecord {
+                    chunk_type: "function".into(),
+                    symbol: Some("f".into()),
+                    code: "def f(): pass".into(),
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    start_byte: None,
+                    end_byte: None,
+                    language: Some("python".into()),
+                    metadata: None,
+                    embedding: Some(vec![1.0f32, 0.0, 0.0, 0.0]),
+                    provider: Some("test".into()),
+                    model: Some("test".into()),
+                }],
+            }],
+            delete_paths: vec![],
+        };
+        backend.write_batch(&batch).expect("write");
+
+        // finish_write must use saved_hnsw_metrics["l2sq"], not hardcoded "cosine".
+        let conn = backend.conn_or_err().expect("conn");
+        let metric = DuckDbHnswBackend::extract_hnsw_metric(conn, "idx_hnsw_4");
+        assert_eq!(
+            metric, "l2sq",
+            "finish_write must use saved_hnsw_metrics for pending_new_dims, not hardcoded cosine"
         );
     }
 
