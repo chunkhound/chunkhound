@@ -30,38 +30,8 @@ pub(crate) struct NewChunk {
     pub metadata: Option<String>,
     pub embed_text: Option<String>,
 
-    // Filled by the embed thread in Phase 2+
+    // Filled by the embed thread
     pub embedding: Option<Vec<f32>>,
     pub provider: Option<String>,
     pub model: Option<String>,
-}
-
-/// Produced by the parse thread, consumed by the embed thread.
-#[derive(Debug, Clone)]
-pub(crate) struct DiffResult {
-    pub file_id: i64,
-    pub path: String,
-    pub name: String,
-    pub extension: Option<String>,
-    pub language: Option<String>,
-    pub file_size: u64,
-    pub mtime: f64,
-    pub content_hash: String,
-    pub is_new_file: bool,
-    pub chunks_to_insert: Vec<NewChunk>,
-}
-
-/// Produced by the embed thread, consumed by the store thread.
-#[derive(Debug, Clone)]
-pub(crate) struct EmbeddedBatch {
-    pub diffs: Vec<DiffResult>,
-}
-
-/// A single row from the `files` table, loaded once at startup.
-#[derive(Debug, Clone)]
-pub(crate) struct DbFileState {
-    pub file_id: i64,
-    pub size_bytes: Option<i64>,
-    pub mtime: Option<f64>,
-    pub content_hash: Option<String>,
 }

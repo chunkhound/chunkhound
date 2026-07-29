@@ -60,7 +60,7 @@ async def _index_with_rust_forced_compaction(
         "embed_batch_size": 200,
         "force_reindex": False,
         "mtime_epsilon_seconds": 0.01,
-        "skip_cleanup": False,
+        "do_cleanup": True,
         "skip_embeddings": False,
         "per_file_timeout_secs": 3.0,
         "per_file_timeout_min_size_kb": 128,
