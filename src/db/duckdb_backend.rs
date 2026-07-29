@@ -1351,9 +1351,6 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                 let _ = conn.execute_batch("ROLLBACK");
                 return Err(DbError::DuckDb(e));
             }
-            // CHECKPOINT flushes WAL → main DB file so subsequent connections
-            // (e.g. Python DuckDB) see the data.
-            conn.execute_batch("CHECKPOINT")?;
         }
 
         Ok(BatchResult {
