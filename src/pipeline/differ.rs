@@ -25,6 +25,10 @@ pub(crate) struct DiffResult {
     /// (keyed by absolute path). New files (first index) are absent here.
     /// Lets the write phase skip the per-file SELECT in upsert_file.
     pub existing_ids: HashMap<PathBuf, i64>,
+    /// (size_bytes, mtime) for every file in `changed`, keyed by absolute path.
+    /// Populated by the diff phase so the parse stage can skip re-stat-ing
+    /// files whose metadata was already read here.
+    pub disk_stats: HashMap<PathBuf, (u64, f64)>,
 }
 
 /// Snapshot of a single file from the DB.
@@ -48,15 +52,19 @@ const DIFF_TICK_INTERVAL: usize = 200;
 /// of DB paths that should be deleted.
 ///
 /// `db_file_entries` is the result of querying
-/// `SELECT path, modified_time, content_hash FROM files`.
+/// `SELECT id, path, modified_time, content_hash FROM files`.
 /// `files_on_disk` are the absolute paths provided by the caller (scanner).
 /// `mtime_epsilon` controls how close two timestamps must be to be considered equal.
+/// `precomputed_stats`, if provided, is a map of absolute path → (size_bytes, mtime)
+/// produced by a prior stat pass (e.g. the TZ-offset pass in `compute_diff_blocking`).
+/// When present, `compute_diff` reuses those values instead of calling `stat` again.
 /// `on_tick`, if provided, is called periodically with `(files_scanned, total)`.
 pub(crate) fn compute_diff(
     db_file_entries: &[DbFileEntry],
     files_on_disk: &[PathBuf],
     project_root: &Path,
     mtime_epsilon: f64,
+    precomputed_stats: Option<&HashMap<PathBuf, (u64, f64)>>,
     mut on_tick: Option<&mut dyn FnMut(usize, usize)>,
 ) -> DiffResult {
     // Build a lookup: DB path → mtime
@@ -87,6 +95,7 @@ pub(crate) fn compute_diff(
     let mut skipped_by_hash = 0u64;
     let mut new_hashes: HashMap<PathBuf, String> = HashMap::new();
     let mut existing_ids: HashMap<PathBuf, i64> = HashMap::new();
+    let mut disk_stats: HashMap<PathBuf, (u64, f64)> = HashMap::new();
 
     for abs_path in files_on_disk {
         files_scanned += 1;
@@ -97,20 +106,50 @@ pub(crate) fn compute_diff(
             }
         }
 
+        // Resolve disk stats once per file — reuse precomputed_stats when available
+        // (eliminates a second stat pass over the repo), falling back to metadata()
+        // when called from tests or non-incremental paths that have no precomputed map.
+        let (current_size, current_mtime_raw) = precomputed_stats
+            .and_then(|pre| pre.get(abs_path).copied())
+            .unwrap_or_else(|| {
+                let meta = std::fs::metadata(abs_path).ok();
+                let mtime = meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                (meta.map_or(0, |m| m.len()), mtime)
+            });
+        // Mirror the old file_mtime() contract: None means stat failed (size == 0 and
+        // mtime == 0.0 from the fallback above); Some wraps the actual timestamp.
+        let current_mtime: Option<f64> = if current_mtime_raw > 0.0 || current_size > 0 {
+            Some(current_mtime_raw)
+        } else {
+            // Both are zero → could be a genuine epoch file, but more likely stat failed.
+            // Preserve the original safety behaviour: try a fresh metadata call to confirm.
+            std::fs::metadata(abs_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    t.duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0)
+                })
+        };
+
         // Compute relative path (matching Python's _get_relative_path)
         let rel = match abs_path.strip_prefix(project_root) {
             Ok(p) => p.to_string_lossy().replace('\\', "/"),
             Err(_) => {
                 // Can't relativize — process it anyway
+                disk_stats.insert(abs_path.clone(), (current_size, current_mtime_raw));
                 changed.push(abs_path.clone());
                 continue;
             }
         };
 
         disk_paths.insert(rel.clone());
-
-        // Check mtime
-        let current_mtime = file_mtime(abs_path);
 
         if let Some(&db_mtime) = db_map.get(rel.as_str()) {
             // File exists in DB — check if mtime changed
@@ -135,6 +174,8 @@ pub(crate) fn compute_diff(
                                 if let Some(&id) = db_ids.get(rel.as_str()) {
                                     existing_ids.insert(abs_path.clone(), id);
                                 }
+                                disk_stats
+                                    .insert(abs_path.clone(), (current_size, current_mtime_raw));
                                 changed.push(abs_path.clone());
                             }
                             None => {
@@ -143,6 +184,8 @@ pub(crate) fn compute_diff(
                                 if let Some(&id) = db_ids.get(rel.as_str()) {
                                     existing_ids.insert(abs_path.clone(), id);
                                 }
+                                disk_stats
+                                    .insert(abs_path.clone(), (current_size, current_mtime_raw));
                                 changed.push(abs_path.clone());
                             }
                         },
@@ -156,16 +199,19 @@ pub(crate) fn compute_diff(
                             if let Some(&id) = db_ids.get(rel.as_str()) {
                                 existing_ids.insert(abs_path.clone(), id);
                             }
+                            disk_stats.insert(abs_path.clone(), (current_size, current_mtime_raw));
                             changed.push(abs_path.clone());
                         }
                     }
                 }
-                // else: mtime matches → skip
+                // else: mtime matches → file unchanged, skip (not in disk_stats)
             } else {
                 // Can't stat the file → process it anyway (safety)
                 if let Some(&id) = db_ids.get(rel.as_str()) {
                     existing_ids.insert(abs_path.clone(), id);
                 }
+                // disk_stats entry has (0, 0.0) — parse_one_batch fallback handles it
+                disk_stats.insert(abs_path.clone(), (0, 0.0));
                 changed.push(abs_path.clone());
             }
         } else {
@@ -174,6 +220,7 @@ pub(crate) fn compute_diff(
             if let Some(new_hash) = hash_file_contents(abs_path) {
                 new_hashes.insert(abs_path.clone(), new_hash);
             }
+            disk_stats.insert(abs_path.clone(), (current_size, current_mtime_raw));
             changed.push(abs_path.clone());
         }
     }
@@ -191,6 +238,7 @@ pub(crate) fn compute_diff(
         skipped_by_hash,
         new_hashes,
         existing_ids,
+        disk_stats,
     }
 }
 
@@ -238,7 +286,7 @@ mod tests {
         let f2 = create_file(&tmp, "b.rs");
 
         let files = vec![f1.clone(), f2.clone()];
-        let diff = compute_diff(&[], &files, tmp.path(), 0.01, None);
+        let diff = compute_diff(&[], &files, tmp.path(), 0.01, None, None);
 
         assert_eq!(diff.changed_count(), 2);
         assert_eq!(diff.removed_count(), 0);
@@ -257,7 +305,7 @@ mod tests {
             content_hash: None,
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
         assert!(diff.changed.is_empty(), "unchanged file should be skipped");
     }
 
@@ -274,7 +322,7 @@ mod tests {
             content_hash: None,
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
         assert_eq!(
             diff.changed_count(),
             1,
@@ -284,6 +332,94 @@ mod tests {
             diff.existing_ids.get(&f1).copied(),
             Some(42),
             "existing_ids must carry the DB id for a changed file that was already in the DB"
+        );
+        let (size, _mtime) = diff
+            .disk_stats
+            .get(&f1)
+            .copied()
+            .expect("disk_stats must contain a changed file");
+        assert!(
+            size > 0,
+            "file size in disk_stats must be non-zero for a real file"
+        );
+    }
+
+    #[test]
+    fn test_disk_stats_populated_for_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f1 = create_file(&tmp, "new.py");
+
+        // Empty DB — file has never been indexed.
+        let diff = compute_diff(&[], std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        assert_eq!(diff.changed_count(), 1);
+        let (size, mtime) = diff
+            .disk_stats
+            .get(&f1)
+            .copied()
+            .expect("new file must appear in disk_stats so parse_one_batch can skip re-stat");
+        assert!(size > 0, "size must be non-zero for a real file");
+        assert!(mtime > 0.0, "mtime must be non-zero for a real file");
+    }
+
+    #[test]
+    fn test_disk_stats_absent_for_unchanged_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f1 = create_file(&tmp, "a.py");
+        let mtime = file_mtime(&f1).unwrap();
+
+        let db = vec![DbFileEntry {
+            id: 1,
+            path: "a.py".into(),
+            mtime,
+            content_hash: None,
+        }];
+
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        assert!(diff.changed.is_empty(), "unchanged file should be skipped");
+        assert!(
+            diff.disk_stats.is_empty(),
+            "unchanged files must not appear in disk_stats — they never reach parse_one_batch"
+        );
+    }
+
+    #[test]
+    fn test_precomputed_stats_values_appear_in_disk_stats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f1 = create_file(&tmp, "a.py");
+
+        // DB has epoch mtime → file appears changed regardless of disk mtime.
+        let db = vec![DbFileEntry {
+            id: 1,
+            path: "a.py".into(),
+            mtime: 0.0,
+            content_hash: None,
+        }];
+
+        // Pass sentinel values via precomputed_stats — these must flow through
+        // into disk_stats unchanged, proving that no second stat call is made.
+        let mut pre = HashMap::new();
+        pre.insert(f1.clone(), (99_999u64, 42.0f64));
+        let diff = compute_diff(
+            &db,
+            std::slice::from_ref(&f1),
+            tmp.path(),
+            0.01,
+            Some(&pre),
+            None,
+        );
+        assert_eq!(diff.changed_count(), 1);
+        let (size, mtime) = diff
+            .disk_stats
+            .get(&f1)
+            .copied()
+            .expect("changed file must appear in disk_stats");
+        assert_eq!(
+            size, 99_999,
+            "size must be the sentinel from precomputed_stats"
+        );
+        assert_eq!(
+            mtime, 42.0,
+            "mtime must be the sentinel from precomputed_stats"
         );
     }
 
@@ -307,7 +443,7 @@ mod tests {
             },
         ];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
         assert_eq!(diff.changed_count(), 0); // a.py unchanged
         assert_eq!(diff.removed_count(), 1);
         assert!(diff.removed.contains(&"gone.py".to_string()));
@@ -350,7 +486,7 @@ mod tests {
             content_hash: Some(hash),
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
         assert_eq!(
             diff.changed_count(),
             0,
@@ -371,7 +507,7 @@ mod tests {
             content_hash: Some("deadbeefdeadbeef".into()),
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None);
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
         assert_eq!(
             diff.changed_count(),
             1,
@@ -387,7 +523,7 @@ mod tests {
         let f1 = create_file(&tmp, "new.py");
 
         // Empty DB — the file has never been indexed.
-        let diff = compute_diff(&[], std::slice::from_ref(&f1), tmp.path(), 0.01, None);
+        let diff = compute_diff(&[], std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
 
         assert_eq!(diff.changed_count(), 1);
         assert!(

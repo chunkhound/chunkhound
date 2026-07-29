@@ -109,6 +109,9 @@ impl IndexingPipeline {
         // despite a differing mtime never reach `batch_paths` at all.
         let new_hashes: std::collections::HashMap<PathBuf, String>;
         let existing_ids: std::collections::HashMap<PathBuf, i64>;
+        // (size_bytes, mtime) per changed file — produced once by the diff phase
+        // and reused by parse_one_batch to avoid a third stat pass per file.
+        let disk_stats: std::collections::HashMap<PathBuf, (u64, f64)>;
         let mut files_skipped_by_hash = 0u64;
         if incremental {
             let diff = self.compute_diff_blocking(py, &progress_callback, &batch_paths)?;
@@ -122,6 +125,7 @@ impl IndexingPipeline {
             };
             new_hashes = diff.new_hashes;
             existing_ids = diff.existing_ids;
+            disk_stats = diff.disk_stats;
             files_skipped_by_hash = diff.skipped_by_hash;
             // Update file_count to reflect what will actually be processed
             file_count = batch_paths.len() as u64;
@@ -137,6 +141,8 @@ impl IndexingPipeline {
             }
             new_hashes = std::collections::HashMap::new();
             existing_ids = std::collections::HashMap::new();
+            // Non-incremental path: parse_one_batch falls back to stat() per file.
+            disk_stats = std::collections::HashMap::new();
         }
 
         // ── Resolve directory→db file path (shared by both write paths) ──
@@ -213,6 +219,7 @@ impl IndexingPipeline {
                     db_config,
                     new_hashes,
                     existing_ids,
+                    disk_stats,
                 )
             })
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -312,33 +319,39 @@ impl IndexingPipeline {
         // DuckDB stores to_timestamp(epoch) using local time, so EXTRACT(EPOCH)
         // returns a value shifted by the timezone offset.  Compute the median
         // offset (db_mtime - disk_mtime) and normalize.
-        let disk_mtimes: Vec<Option<f64>> = files
+        //
+        // We read both mtime AND size in this single pass so that compute_diff
+        // (which needs mtime for change detection) and parse_one_batch (which
+        // needs mtime + size for ParsedFile) can both reuse these values
+        // instead of calling stat() again — collapsing three stat passes into one.
+        let precomputed_stats: std::collections::HashMap<std::path::PathBuf, (u64, f64)> = files
             .iter()
-            .map(|p| {
-                std::fs::metadata(p)
+            .filter_map(|p| {
+                let meta = std::fs::metadata(p).ok()?;
+                let mtime = meta
+                    .modified()
                     .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs_f64())
-                            .unwrap_or(0.0)
-                    })
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                Some((p.clone(), (meta.len(), mtime)))
             })
             .collect();
 
         let mut offsets: Vec<f64> = Vec::new();
         for e in &db_entries {
-            // Find matching disk mtime by relative path
-            for (fp, dm_opt) in files.iter().zip(disk_mtimes.iter()) {
-                if let Some(dm) = dm_opt {
-                    let rel = fp
-                        .strip_prefix(&self.config.project_root)
-                        .ok()
-                        .map(|r| r.to_string_lossy().replace('\\', "/"));
-                    if rel.as_deref() == Some(&e.path) {
+            // Find the matching on-disk file by relative path and read its mtime
+            // from the precomputed map (no extra stat call needed).
+            for fp in files.iter() {
+                let rel = fp
+                    .strip_prefix(&self.config.project_root)
+                    .ok()
+                    .map(|r| r.to_string_lossy().replace('\\', "/"));
+                if rel.as_deref() == Some(e.path.as_str()) {
+                    if let Some(&(_, dm)) = precomputed_stats.get(fp) {
                         offsets.push(e.mtime - dm);
-                        break;
                     }
+                    break;
                 }
             }
         }
@@ -365,6 +378,7 @@ impl IndexingPipeline {
             files,
             &self.config.project_root,
             self.config.mtime_epsilon_seconds,
+            Some(&precomputed_stats),
             Some(&mut |current, total| {
                 emit_progress(py, progress_callback, "diff", current as u64, total as u64);
             }),
@@ -418,6 +432,7 @@ impl IndexingPipeline {
         db_config: DbConfig,
         new_hashes: std::collections::HashMap<PathBuf, String>,
         existing_ids: std::collections::HashMap<PathBuf, i64>,
+        disk_stats: std::collections::HashMap<PathBuf, (u64, f64)>,
     ) -> Result<StoreOutcome, String> {
         use std::sync::mpsc;
         use std::sync::{Arc, Mutex};
@@ -488,6 +503,7 @@ impl IndexingPipeline {
                             &paths,
                             &batch,
                             &new_hashes,
+                            &disk_stats,
                         )
                     }) {
                         Ok(parsed) => parsed,
@@ -902,6 +918,7 @@ impl IndexingPipeline {
         paths: &[String],
         batch: &[PathBuf],
         new_hashes: &std::collections::HashMap<PathBuf, String>,
+        disk_stats: &std::collections::HashMap<PathBuf, (u64, f64)>,
     ) -> Result<Vec<super::types::ParsedFile>, String> {
         let cb = cb.bind(py);
         let py_paths = PyList::new_bound(py, paths);
@@ -967,19 +984,21 @@ impl IndexingPipeline {
             };
 
             let chunks = Self::extract_chunks(py, &chunks_py);
-            let meta = std::fs::metadata(path).map(|m| (m.len(), m.modified()));
 
-            let (file_size, mtime) = match meta {
-                Ok((s, mt)) => {
-                    let mtime_secs = mt
-                        .unwrap_or(std::time::UNIX_EPOCH)
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs_f64())
-                        .unwrap_or(0.0);
-                    (s, mtime_secs)
-                }
-                Err(_) => (0, 0.0),
-            };
+            // Reuse the size + mtime already read by the diff phase — avoids
+            // a third stat() pass per changed file. Falls back to a fresh
+            // metadata() call for non-incremental runs (where disk_stats is
+            // empty) or any file that wasn't in the precomputed map.
+            let (file_size, mtime) = disk_stats.get(path).copied().unwrap_or_else(|| {
+                let meta = std::fs::metadata(path).ok();
+                let mtime = meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                (meta.map_or(0, |m| m.len()), mtime)
+            });
 
             parsed.push(super::types::ParsedFile {
                 path: path.clone(),
