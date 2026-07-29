@@ -514,7 +514,8 @@ async def run_rust_pipeline(
     if max_concurrent <= 0 and not skip_embeddings:
         max_concurrent = _detect_embed_concurrency(embedding_cfg)
     max_concurrent = max_concurrent or 1
-    parse_thread_pool_size = _default_parse_pool_workers()
+    _parse_concurrent = int(getattr(indexing_cfg, "max_concurrent", 0) or 0)
+    parse_thread_pool_size = _parse_concurrent if _parse_concurrent > 0 else _default_parse_pool_workers()
 
     config_dict = {
         "project_root": str(project_root.resolve()),
