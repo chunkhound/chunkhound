@@ -1186,6 +1186,10 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         self.known_dims.clear();
         let conn = Connection::open(&self.config.db_path)?;
+        // Raise the WAL auto-checkpoint threshold to 1 GB so DuckDB does not
+        // flush the WAL after every few batches (default is ~16 MB).  One
+        // explicit CHECKPOINT in close() is sufficient for our write pattern.
+        conn.execute_batch("SET checkpoint_threshold='1GiB'")?;
         // VSS must be loaded on open — the DB on disk may already have
         // VSS catalog entries from a previous session, and DuckDB won't
         // deserialize them without VSS loaded.
