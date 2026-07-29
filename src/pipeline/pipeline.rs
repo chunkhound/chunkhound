@@ -604,6 +604,14 @@ impl IndexingPipeline {
                                         window.len() + 1,
                                     );
                                     window.push(batch);
+                                    // Emit progress after each prepare_write so the
+                                    // writes/min rate stays live during accumulation.
+                                    emit_progress_gil(
+                                        &store_progress_cb,
+                                        "write-data",
+                                        (batch_no + window.len()) as u64,
+                                        batch_count_u64,
+                                    );
                                 }
                                 Err(_) => break, // channel closed
                             }
@@ -631,13 +639,14 @@ impl IndexingPipeline {
                             chunks_written += result.chunks_written;
                             embeddings_written += result.embeddings_written;
                             batch_no += 1;
-                            emit_progress_gil(
-                                &store_progress_cb,
-                                "write-data",
-                                batch_no as u64,
-                                batch_count_u64,
-                            );
                         }
+                        // Emit final progress for this window now that batch_no is accurate.
+                        emit_progress_gil(
+                            &store_progress_cb,
+                            "write-data",
+                            batch_no as u64,
+                            batch_count_u64,
+                        );
                         log::debug!(
                             "[store] window {window_start}-{batch_no} done in {write_ms:.3}s \
                              (chunks={chunks_written} embeds={embeddings_written} \

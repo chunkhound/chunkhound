@@ -351,32 +351,21 @@ impl DuckDbHnswBackend {
             return Ok(vec![]);
         }
 
-        conn.execute_batch(
-            "CREATE TEMPORARY TABLE IF NOT EXISTS rust_temp_chunks (
-                file_id INTEGER,
-                chunk_type TEXT,
-                symbol TEXT,
-                code TEXT,
-                start_line INTEGER,
-                end_line INTEGER,
-                start_byte INTEGER,
-                end_byte INTEGER,
-                language TEXT,
-                metadata TEXT
-            );",
-        )?;
-
-        // Batch 100 rows per INSERT to cut SQL round-trips ~100× vs one-row-at-a-time.
-        // Mirrors the same pattern used in insert_embeddings_txn.
+        // Insert directly into chunks with RETURNING id, batched to cut round-trips.
+        // Avoids CREATE/DROP TEMPORARY TABLE DDL so this function is safe to call
+        // inside an open transaction (DDL would cause implicit commits in some
+        // DuckDB versions).
         const CHUNK_INSERT_BATCH: usize = 100;
+        let mut ids: Vec<i64> = Vec::with_capacity(chunks.len());
+
         for chunk_slice in chunks.chunks(CHUNK_INSERT_BATCH) {
             let row_ph = std::iter::repeat_n("(?,?,?,?,?,?,?,?,?,?)", chunk_slice.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "INSERT INTO rust_temp_chunks \
+                "INSERT INTO chunks \
                  (file_id, chunk_type, symbol, code, start_line, end_line, \
-                  start_byte, end_byte, language, metadata) VALUES {row_ph}"
+                  start_byte, end_byte, language, metadata) VALUES {row_ph} RETURNING id"
             );
             let mut params: Vec<duckdb::types::Value> = Vec::with_capacity(chunk_slice.len() * 10);
             for chunk in chunk_slice {
@@ -428,25 +417,14 @@ impl DuckDbHnswBackend {
                         }),
                 );
             }
-            conn.execute(&sql, duckdb::params_from_iter(params))?;
+            let mut stmt = conn.prepare(&sql)?;
+            let batch_ids: Vec<i64> = stmt
+                .query_map(duckdb::params_from_iter(params), |row| row.get(0))?
+                .collect::<Result<Vec<i64>, _>>()
+                .map_err(DbError::DuckDb)?;
+            ids.extend(batch_ids);
         }
 
-        let mut stmt = conn.prepare(
-            "INSERT INTO chunks
-             (file_id, chunk_type, symbol, code, start_line, end_line,
-              start_byte, end_byte, language, metadata)
-             SELECT file_id, chunk_type, symbol, code, start_line, end_line,
-                    start_byte, end_byte, language, metadata
-             FROM rust_temp_chunks
-             RETURNING id",
-        )?;
-
-        let ids: Vec<i64> = stmt
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<Vec<i64>, _>>()
-            .map_err(DbError::DuckDb)?;
-        // Drop the temp table so it doesn't leak into EXPORT DATABASE during compaction.
-        conn.execute_batch("DROP TABLE IF EXISTS rust_temp_chunks;")?;
         Ok(ids)
     }
 
@@ -473,29 +451,25 @@ impl DuckDbHnswBackend {
             }
         }
 
+        // Insert directly into embeddings_N, batched to cut round-trips.
+        // Avoids CREATE/DROP TEMPORARY TABLE DDL so this function is safe to call
+        // inside an open transaction (DDL would cause implicit commits in some
+        // DuckDB versions).
+        const EMBED_INSERT_BATCH: usize = 100;
         let mut total = 0u64;
         for (dims, items) in &by_dims {
             let table = format!("embeddings_{dims}");
-            let temp = format!("rust_temp_emb_{dims}");
 
-            conn.execute_batch(&format!(
-                "CREATE TEMPORARY TABLE IF NOT EXISTS {temp} (
-                    chunk_id INTEGER,
-                    provider TEXT,
-                    model TEXT,
-                    embedding TEXT,
-                    dims INTEGER
-                );"
-            ))?;
-
-            // Batch 100 rows per INSERT to cut SQL round-trips ~100×.
-            const EMBED_INSERT_BATCH: usize = 100;
             for chunk_slice in items.chunks(EMBED_INSERT_BATCH) {
-                let row_ph = std::iter::repeat_n("(?,?,?,?,?)", chunk_slice.len())
+                let row_ph = std::iter::repeat_n("(?,?,?,?::FLOAT[{dims}],?)", chunk_slice.len())
                     .collect::<Vec<_>>()
-                    .join(",");
+                    .join(",")
+                    .replace("{dims}", &dims.to_string());
                 let sql = format!(
-                    "INSERT INTO {temp} (chunk_id, provider, model, embedding, dims) VALUES {row_ph}"
+                    "INSERT INTO \"{table}\" (chunk_id, provider, model, embedding, dims) \
+                     VALUES {row_ph} \
+                     ON CONFLICT (chunk_id, provider, model) DO UPDATE \
+                     SET embedding = EXCLUDED.embedding, dims = EXCLUDED.dims"
                 );
                 let mut params: Vec<duckdb::types::Value> =
                     Vec::with_capacity(chunk_slice.len() * 5);
@@ -514,22 +488,9 @@ impl DuckDbHnswBackend {
                     params.push(duckdb::types::Value::Text(emb_json));
                     params.push(duckdb::types::Value::BigInt(*dims as i64));
                 }
-                conn.execute(&sql, duckdb::params_from_iter(params))?;
+                let rows = conn.execute(&sql, duckdb::params_from_iter(params))?;
+                total += rows as u64;
             }
-
-            let rows = conn.execute(
-                &format!(
-                    "INSERT INTO \"{table}\" (chunk_id, provider, model, embedding, dims)
-                     SELECT chunk_id, provider, model, embedding::FLOAT[{dims}], dims
-                     FROM {temp}
-                     ON CONFLICT (chunk_id, provider, model) DO UPDATE
-                     SET embedding = EXCLUDED.embedding, dims = EXCLUDED.dims"
-                ),
-                [],
-            )?;
-            total += rows as u64;
-            // Drop the temp table so it doesn't leak into EXPORT DATABASE during compaction.
-            conn.execute_batch(&format!("DROP TABLE IF EXISTS {temp};"))?;
         }
         Ok(total)
     }
