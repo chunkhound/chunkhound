@@ -266,24 +266,20 @@ impl DuckDbHnswBackend {
         Ok(())
     }
 
-    fn count_total_embeddings(batch: &DbWriterBatch) -> usize {
-        batch
-            .files
-            .iter()
-            .flat_map(|f| &f.chunks)
-            .filter(|c| c.embedding.as_ref().map(|e| !e.is_empty()).unwrap_or(false))
-            .count()
-    }
-
-    fn collect_unique_dims(batch: &DbWriterBatch) -> HashSet<u32> {
-        batch
-            .files
-            .iter()
-            .flat_map(|f| &f.chunks)
-            .filter_map(|c| c.embedding.as_ref())
-            .filter(|e| !e.is_empty())
-            .map(|e| e.len() as u32)
-            .collect()
+    fn collect_dims_and_count(batch: &DbWriterBatch) -> (HashSet<u32>, usize) {
+        let mut dims = HashSet::new();
+        let mut count = 0usize;
+        for file in &batch.files {
+            for chunk in &file.chunks {
+                if let Some(e) = &chunk.embedding {
+                    if !e.is_empty() {
+                        dims.insert(e.len() as u32);
+                        count += 1;
+                    }
+                }
+            }
+        }
+        (dims, count)
     }
 
     fn upsert_file(conn: &Connection, file: &FileRecord) -> Result<i64, DbError> {
@@ -1255,7 +1251,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         }
 
         // Step 0c: Ensure embedding tables outside txn (Invariant 13).
-        let unique_dims = Self::collect_unique_dims(batch);
+        let (unique_dims, total_emb) = Self::collect_dims_and_count(batch);
         let new_dims: Vec<u32> = unique_dims.difference(&self.known_dims).copied().collect();
         {
             let conn = self.conn_or_err()?;
@@ -1267,9 +1263,6 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         if !new_dims.is_empty() {
             self.hnsw_cache = None;
         }
-
-        // Step 1: Count embeddings to decide HNSW lifecycle.
-        let total_emb = Self::count_total_embeddings(batch);
 
         // Lazy VSS load — only when embeddings are actually present.
         if total_emb > 0 {
