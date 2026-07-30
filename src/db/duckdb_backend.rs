@@ -1155,9 +1155,9 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // Env-tunable so the ceiling can be adjusted per-run without rebuilding.
         let checkpoint_threshold = std::env::var("CHUNKHOUND_DUCKDB_CHECKPOINT_THRESHOLD")
             .unwrap_or_else(|_| "8GB".to_string());
-        if let Err(e) =
-            conn.execute_batch(&format!("SET checkpoint_threshold='{checkpoint_threshold}'"))
-        {
+        if let Err(e) = conn.execute_batch(&format!(
+            "SET checkpoint_threshold='{checkpoint_threshold}'"
+        )) {
             log::warn!("failed to set checkpoint_threshold='{checkpoint_threshold}': {e}");
         }
         // VSS must be loaded on open — the DB on disk may already have

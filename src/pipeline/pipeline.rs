@@ -466,12 +466,15 @@ impl IndexingPipeline {
         let batch_count_u64 = batch_count as u64;
         let total_files = files.len() as u64;
 
-        // Bounded at every hop (capacity 2): backpressure keeps any one
-        // stage from running arbitrarily far ahead of the next — parsed
-        // batches hold source text, embedded batches additionally hold
-        // float vectors, and both are memory-heavy.
+        // Bounded backpressure keeps any one stage from running arbitrarily
+        // far ahead of the next — parsed batches hold source text, embedded
+        // batches additionally hold float vectors, and both are memory-heavy.
+        // The embed->store hop is deeper (8): instrumentation showed embed and
+        // store were mutually starving (~600-800s each) through a 2-slot buffer,
+        // so a deeper buffer lets embed run ahead during store's write bursts
+        // and absorbs embed's large per-batch time variance (2s-28s).
         let (parse_tx, parse_rx) = mpsc::sync_channel::<(usize, Vec<super::types::ParsedFile>)>(2);
-        let (store_tx, store_rx) = mpsc::sync_channel::<DbWriterBatch>(2);
+        let (store_tx, store_rx) = mpsc::sync_channel::<DbWriterBatch>(8);
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         // Per-file parse errors (e.g. one file's parse callback raised) —
         // these don't abort the run, unlike `error` above, which is for
@@ -575,11 +578,15 @@ impl IndexingPipeline {
                 );
                 emit_progress_gil(&store_progress_cb, "write-prepare", 0, batch_count_u64);
 
-                // Commit every N batches instead of every batch to reduce
-                // the number of DuckDB WAL auto-checkpoint opportunities.
-                // prepare_write() still runs per-batch in auto-commit mode
-                // (preserving FK-constraint and nested-BEGIN invariants).
-                const STORE_COMMIT_INTERVAL: usize = 10;
+                // Write each batch as soon as it arrives (no window). The
+                // 10-batch window was left over from a reverted multi-batch
+                // transaction; it now only serves to make the store thread
+                // block collecting a full window before writing, which
+                // instrumentation showed cost ~793s of store idle time and
+                // ping-ponged with the embed stage. Per-batch commits (the
+                // default write path) are unchanged. checkpoint_threshold —
+                // not commit frequency — now governs WAL checkpoint cost.
+                const STORE_COMMIT_INTERVAL: usize = 1;
 
                 let mut chunks_written = 0u64;
                 let mut embeddings_written = 0u64;
