@@ -61,20 +61,22 @@ class _ParsePoolConfig:
     per_file_timeout_min_size_kb: int = 128
     config_file_size_threshold_kb: int = 20
     parse_thread_pool_size: int = field(default_factory=_default_parse_pool_workers)
+    index_unknown_files: bool = False
 
     @classmethod
-    def from_any(cls, parse_config: Any) -> "_ParsePoolConfig":
+    def from_any(cls, parse_config: Any, *, index_unknown_files: bool = False) -> "_ParsePoolConfig":
         """Build a picklable config from whatever parse_batch_callback()
         received — the real Rust ParseCallConfig, a duck-typed stand-in
         (e.g. in tests), or None."""
         if parse_config is None:
-            return _DEFAULT_PARSE_CONFIG
+            return _DEFAULT_PARSE_CONFIG if not index_unknown_files else cls(index_unknown_files=True)
         return cls(
             detect_embedded_sql=parse_config.detect_embedded_sql,
             per_file_timeout_secs=parse_config.per_file_timeout_secs,
             per_file_timeout_min_size_kb=parse_config.per_file_timeout_min_size_kb,
             config_file_size_threshold_kb=parse_config.config_file_size_threshold_kb,
             parse_thread_pool_size=parse_config.parse_thread_pool_size,
+            index_unknown_files=index_unknown_files,
         )
 
 
@@ -110,6 +112,7 @@ def parse_file_callback(
     file_path: str,
     detect_embedded_sql: bool = True,
     config_file_size_threshold_kb: int = 20,
+    index_unknown_files: bool = False,
 ) -> tuple[str, list[dict]]:
     """Adapter: path → (language, chunks).
 
@@ -136,7 +139,9 @@ def parse_file_callback(
     lang = detect_language(Path(file_path))
 
     if lang is None or lang == Language.UNKNOWN:
-        return ("", [])
+        if not index_unknown_files:
+            return ("", [])
+        lang = Language.TEXT
 
     # Binary guard — skip files with null bytes
     try:
@@ -264,6 +269,7 @@ def _parse_file_worker_for_timeout(
     detect_embedded_sql: bool,
     config_file_size_threshold_kb: int,
     conn: Any,
+    index_unknown_files: bool = False,
 ) -> None:
     """Child-process entry point for _parse_with_timeout().
 
@@ -281,6 +287,7 @@ def _parse_file_worker_for_timeout(
             file_path,
             detect_embedded_sql=detect_embedded_sql,
             config_file_size_threshold_kb=config_file_size_threshold_kb,
+            index_unknown_files=index_unknown_files,
         )
         conn.send(("ok", (lang, chunks)))
     except Exception as e:
@@ -316,6 +323,7 @@ def _parse_with_timeout(
             cfg.detect_embedded_sql,
             cfg.config_file_size_threshold_kb,
             child_conn,
+            cfg.index_unknown_files,
         ),
         daemon=True,
     )
@@ -375,6 +383,7 @@ def _parse_one_file(
             file_path,
             detect_embedded_sql=cfg.detect_embedded_sql,
             config_file_size_threshold_kb=cfg.config_file_size_threshold_kb,
+            index_unknown_files=cfg.index_unknown_files,
         )
         return (lang, chunks, None)
     except Exception as e:
@@ -516,6 +525,8 @@ async def run_rust_pipeline(
     max_concurrent = max_concurrent or 1
     _parse_concurrent = int(getattr(indexing_cfg, "max_concurrent", 0) or 0)
     parse_thread_pool_size = _parse_concurrent if _parse_concurrent > 0 else _default_parse_pool_workers()
+    _index_unknown = bool(getattr(indexing_cfg, "index_unknown_files", False))
+    disk_usage_limit_mb = getattr(database_cfg, "max_disk_usage_mb", None)
 
     config_dict = {
         "project_root": str(project_root.resolve()),
@@ -538,7 +549,14 @@ async def run_rust_pipeline(
         "config_file_size_threshold_kb": config_file_threshold,
         "embedding_provider": embedding_provider,
         "embedding_model": embedding_model,
+        "disk_usage_limit_mb": disk_usage_limit_mb,
     }
+
+    def _parse_batch_callback(file_paths_batch: list[str], parse_config: Any = None) -> list[tuple[str, list[dict], str | None]]:
+        cfg = _ParsePoolConfig.from_any(parse_config, index_unknown_files=_index_unknown)
+        args_list = [(p, cfg) for p in file_paths_batch]
+        pool = _get_parse_pool(cfg.parse_thread_pool_size)
+        return list(pool.map(_parse_one_file, args_list))
 
     pipeline = IndexingPipeline(config_dict)
 
@@ -549,7 +567,7 @@ async def run_rust_pipeline(
     report = await asyncio.to_thread(
         pipeline.run,
         files=file_paths,
-        parse_batch_callback=parse_batch_callback,
+        parse_batch_callback=_parse_batch_callback,
         embed_batch_callback=embed_batch_callback if not skip_embeddings else None,
         progress_callback=progress_callback,
         incremental=not force_reindex,
