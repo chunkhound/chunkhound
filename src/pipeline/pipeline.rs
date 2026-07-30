@@ -37,6 +37,25 @@ fn emit_progress_gil(cb: &Option<Py<PyAny>>, phase: &str, current: u64, total: u
     }
 }
 
+/// Like `emit_progress_gil` but passes a 4th `chunks` value (cumulative chunks
+/// written so far). Used by the write-data phase so the Python progress bar can
+/// display true throughput as chunks/s instead of cumulative batches/min. The
+/// Python callback takes `chunks` as an optional trailing arg, so 3-arg callers
+/// are unaffected.
+fn emit_progress_gil_chunks(
+    cb: &Option<Py<PyAny>>,
+    phase: &str,
+    current: u64,
+    total: u64,
+    chunks: u64,
+) {
+    if let Some(ref cb) = cb {
+        Python::with_gil(|py| {
+            let _ = cb.bind(py).call1((phase, current, total, chunks));
+        });
+    }
+}
+
 /// Result of the store thread in the 3-stage streaming pipeline.
 struct StoreOutcome {
     chunks_written: u64,
@@ -618,12 +637,15 @@ impl IndexingPipeline {
                                     );
                                     window.push(batch);
                                     // Emit progress after each prepare_write so the
-                                    // writes/min rate stays live during accumulation.
-                                    emit_progress_gil(
+                                    // chunks/s rate stays live during accumulation.
+                                    // chunks_written is the cumulative total through
+                                    // the previous window (this batch not yet written).
+                                    emit_progress_gil_chunks(
                                         &store_progress_cb,
                                         "write-data",
                                         (batch_no + window.len()) as u64,
                                         batch_count_u64,
+                                        chunks_written,
                                     );
                                 }
                                 Err(_) => break, // channel closed
@@ -653,12 +675,14 @@ impl IndexingPipeline {
                             embeddings_written += result.embeddings_written;
                             batch_no += 1;
                         }
-                        // Emit final progress for this window now that batch_no is accurate.
-                        emit_progress_gil(
+                        // Emit final progress for this window now that batch_no and
+                        // chunks_written are accurate.
+                        emit_progress_gil_chunks(
                             &store_progress_cb,
                             "write-data",
                             batch_no as u64,
                             batch_count_u64,
+                            chunks_written,
                         );
                         log::debug!(
                             "[store] window {window_start}-{batch_no} done in {write_s:.3}s \

@@ -1631,6 +1631,10 @@ class IndexingCoordinator(BaseService):
                     _embed_start = 0.0
                     _embed_reset_done = False
                     _data_task_total = 1
+                    # Timer for the write-data bar's chunks/s speed (set on the
+                    # first write-data callback, so elapsed measures actual writing).
+                    _data_start = 0.0
+                    _data_reset_done = False
                     _diff_start = 0.0
                     _diff_reset_done = False
                     _parse_reset_done = False
@@ -1655,11 +1659,18 @@ class IndexingCoordinator(BaseService):
                     _compact_size_before: int | None = None
                     _compact_info: str | None = None
 
-                    def _progress_cb(phase: str, current: int, total: int) -> None:
+                    def _progress_cb(
+                        phase: str, current: int, total: int, chunks: int = 0
+                    ) -> None:
+                        # `chunks` is the cumulative chunk count, sent only by the
+                        # write-data phase (4-arg call); other phases use 3 args and
+                        # leave it at 0.
                         nonlocal \
                             _embed_start, \
                             _embed_reset_done, \
                             _data_task_total, \
+                            _data_start, \
+                            _data_reset_done, \
                             _diff_start, \
                             _diff_reset_done, \
                             _diff_elapsed, \
@@ -1747,12 +1758,22 @@ class IndexingCoordinator(BaseService):
                             # 1 — the exact, upfront-known batch count);
                             # single-shot in the sequential path (total == 1).
                             if total > 1:
+                                # Speed = true throughput in chunks/s (not
+                                # cumulative batches/min, which decays from the hot
+                                # start and sags as files get heavier). Mirrors the
+                                # embed bar. `chunks` is cumulative; timer starts on
+                                # the first write-data callback.
+                                if not _data_reset_done:
+                                    _data_start = time.time()
+                                    _data_reset_done = True
+                                _elapsed = time.time() - _data_start
+                                _cps = chunks / _elapsed if _elapsed > 0.05 else 0
                                 _pr.update(
                                     _data_task,
                                     completed=current,
+                                    speed=f"{_cps:.1f} chunks/s",
                                     info=f"{current}/{total} batches written",
                                 )
-                                _update_speed_field(_pr, _data_task, "writes/min")
                             else:
                                 _pr.update(_data_task, info="writing...")
                         elif phase == "write-index":
