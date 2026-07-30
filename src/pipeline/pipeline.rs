@@ -591,6 +591,9 @@ impl IndexingPipeline {
                 let mut chunks_written = 0u64;
                 let mut embeddings_written = 0u64;
                 let mut batch_no = 0usize;
+                // Pipeline diagnostic: cumulative time the store thread spends
+                // BLOCKED in recv() waiting for the embed stage to produce.
+                let mut store_wait_s = 0f64;
 
                 let write_result: Result<(), String> = (|| {
                     let mut window: Vec<crate::types::DbWriterBatch> =
@@ -601,7 +604,10 @@ impl IndexingPipeline {
                         // block on recv until window full or channel closes.
                         window.clear();
                         for _ in 0..STORE_COMMIT_INTERVAL {
-                            match store_rx.recv() {
+                            let t_recv = Instant::now();
+                            let recv = store_rx.recv();
+                            store_wait_s += t_recv.elapsed().as_secs_f64();
+                            match recv {
                                 Ok(batch) => {
                                     let t_prep = Instant::now();
                                     backend.prepare_write(&batch).map_err(|e| e.to_string())?;
@@ -662,6 +668,7 @@ impl IndexingPipeline {
                     }
                     Ok(())
                 })();
+                log::debug!("[pipe] store blocked: embed-recv {store_wait_s:.1}s");
 
                 if let Err(e) = write_result {
                     // Best-effort: restore HNSW indexes over whatever was
@@ -738,7 +745,20 @@ impl IndexingPipeline {
                     emit_progress_gil(&progress_cb_embed, "embed", 0, 0);
                 }
 
-                while let Ok((batch_idx, mut parsed_files)) = parse_rx.recv() {
+                // Pipeline diagnostic: cumulative time the embed thread spends
+                // BLOCKED on its channels — recv (upstream parse empty) and send
+                // (downstream store full). Together with the store thread's
+                // recv-wait this reveals which stage actually gates the pipeline.
+                let mut embed_wait_parse = 0f64;
+                let mut embed_wait_store = 0f64;
+                loop {
+                    let t_recv = Instant::now();
+                    let recv = parse_rx.recv();
+                    embed_wait_parse += t_recv.elapsed().as_secs_f64();
+                    let (batch_idx, mut parsed_files) = match recv {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
                     if error.lock().unwrap().is_some() {
                         break;
                     }
@@ -827,12 +847,19 @@ impl IndexingPipeline {
                         batch_delete_paths,
                         &existing_ids,
                     );
-                    if store_tx.send(db_batch).is_err() {
+                    let t_send = Instant::now();
+                    let sent = store_tx.send(db_batch);
+                    embed_wait_store += t_send.elapsed().as_secs_f64();
+                    if sent.is_err() {
                         // Store thread exited early (DB error) — stop feeding
                         // it; the real error surfaces via store_handle.join().
                         break;
                     }
                 }
+                log::debug!(
+                    "[pipe] embed blocked: parse-recv {embed_wait_parse:.1}s  \
+                     store-send {embed_wait_store:.1}s"
+                );
 
                 // No batch ever flowed through to carry `delete_paths` — this
                 // happens when there are zero files to parse (e.g. re-indexing
