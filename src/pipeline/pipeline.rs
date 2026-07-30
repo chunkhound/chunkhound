@@ -625,7 +625,7 @@ impl IndexingPipeline {
                         let results = backend
                             .write_batches_in_one_txn(&window)
                             .map_err(|e| e.to_string())?;
-                        let write_ms = t_write.elapsed().as_secs_f64() * 1e3;
+                        let write_s = t_write.elapsed().as_secs_f64();
 
                         let db_mib =
                             std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0) / (1 << 20);
@@ -648,7 +648,7 @@ impl IndexingPipeline {
                             batch_count_u64,
                         );
                         log::debug!(
-                            "[store] window {window_start}-{batch_no} done in {write_ms:.3}s \
+                            "[store] window {window_start}-{batch_no} done in {write_s:.3}s \
                              (chunks={chunks_written} embeds={embeddings_written} \
                              db={db_mib}MiB wal={wal_mib}MiB)",
                         );

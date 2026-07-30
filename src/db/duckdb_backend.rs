@@ -1144,6 +1144,22 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         self.known_dims.clear();
         let conn = Connection::open(&self.config.db_path)?;
+        // Defer WAL auto-checkpoints. DuckDB checkpoints synchronously on
+        // COMMIT once the WAL exceeds checkpoint_threshold, and each checkpoint
+        // does work proportional to the whole DB file (measured ~30ms/MiB) —
+        // NOT to the small WAL delta being flushed. At the default (~16MB) this
+        // fires every ~2 batches and grows unbounded as the DB grows, which is
+        // what dominates and monotonically degrades the store stage. Raising
+        // the threshold collapses hundreds of ever-growing checkpoints into a
+        // handful; close() issues the final CHECKPOINT to flush deferred WAL.
+        // Env-tunable so the ceiling can be adjusted per-run without rebuilding.
+        let checkpoint_threshold = std::env::var("CHUNKHOUND_DUCKDB_CHECKPOINT_THRESHOLD")
+            .unwrap_or_else(|_| "8GB".to_string());
+        if let Err(e) =
+            conn.execute_batch(&format!("SET checkpoint_threshold='{checkpoint_threshold}'"))
+        {
+            log::warn!("failed to set checkpoint_threshold='{checkpoint_threshold}': {e}");
+        }
         // VSS must be loaded on open — the DB on disk may already have
         // VSS catalog entries from a previous session, and DuckDB won't
         // deserialize them without VSS loaded.
