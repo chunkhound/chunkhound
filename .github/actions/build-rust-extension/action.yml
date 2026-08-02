@@ -1,0 +1,66 @@
+name: 'Build Rust extension'
+description: >
+  Install Rust toolchain, cache build artifacts, and build chunkhound_native
+  via maturin develop.  Also removes the PyPI-installed chunkhound-native so
+  the locally-built extension (placed in chunkhound_native/ by maturin) is
+  importable without being shadowed by the published package in site-packages.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust stable toolchain
+      if: hashFiles('Cargo.toml') != ''
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Rust build artifacts
+      if: hashFiles('Cargo.toml') != ''
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+
+    - name: Cache DuckDB precompiled library
+      if: hashFiles('Cargo.toml') != ''
+      uses: actions/cache@v4
+      with:
+        path: target/duckdb-download/
+        key: ${{ runner.os }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-duckdb-
+
+    - name: Build Rust extension (maturin develop)
+      if: hashFiles('Cargo.toml') != ''
+      shell: bash
+      env:
+        DUCKDB_DOWNLOAD_LIB: "1"
+      run: |
+        uv pip install maturin
+        # maturin develop installs the Rust crate as a different Python
+        # distribution name ("chunkhound") than the PyPI package that uv
+        # sync installs ("chunkhound-native").  Without this uninstall the
+        # old site-packages entry shadows the freshly-built .so on import.
+        uv pip uninstall chunkhound-native --yes || true
+        uv run maturin develop
+        # On macOS and Windows, the DuckDB shared library is not findable
+        # at runtime by default.  Copy it next to the native extension so
+        # the dynamic linker can resolve it.
+        if [[ "$RUNNER_OS" == "macOS" ]]; then
+          DUCKDB_LIB=$(find target -name 'libduckdb.dylib' -print -quit 2>/dev/null || true)
+          if [[ -n "$DUCKDB_LIB" ]]; then
+            cp "$DUCKDB_LIB" chunkhound_native/
+            echo "Copied $DUCKDB_LIB → chunkhound_native/"
+          else
+            echo "WARNING: libduckdb.dylib not found in target/ — macOS contract tests will fail"
+          fi
+        elif [[ "$RUNNER_OS" == "Windows" ]]; then
+          DUCKDB_DLL=$(find target -name 'duckdb.dll' -print -quit 2>/dev/null || true)
+          if [[ -n "$DUCKDB_DLL" ]]; then
+            cp "$DUCKDB_DLL" chunkhound_native/
+            echo "Copied $DUCKDB_DLL → chunkhound_native/"
+          else
+            echo "WARNING: duckdb.dll not found in target/ — Windows contract tests will fail"
+          fi
+        fi
