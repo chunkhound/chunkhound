@@ -38,12 +38,15 @@ runs:
         DUCKDB_DOWNLOAD_LIB: "1"
       run: |
         uv pip install maturin
-        # maturin develop installs the Rust crate as a different Python
-        # distribution name ("chunkhound") than the PyPI package that uv
-        # sync installs ("chunkhound-native").  Without this uninstall the
-        # old site-packages entry shadows the freshly-built .so on import.
-        uv pip uninstall chunkhound-native --yes || true
         uv run maturin develop
+        # maturin develop installs the Rust crate under the distribution name
+        # "chunkhound", but also pulls in "chunkhound-native" from PyPI as a
+        # transitive dep (it's listed in pyproject.toml dependencies).  That
+        # PyPI package lands in site-packages and shadows the freshly-built
+        # .so in chunkhound_native/.  Uninstalling it here, after maturin has
+        # already copied the .so, leaves the editable-install path as the only
+        # source for `import chunkhound_native`.
+        uv pip uninstall chunkhound-native --yes || true
         # On macOS and Windows, the DuckDB shared library is not findable
         # at runtime by default.  Copy it next to the native extension so
         # the dynamic linker can resolve it.
