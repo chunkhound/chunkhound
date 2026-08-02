@@ -1638,6 +1638,10 @@ class IndexingCoordinator(BaseService):
                     _diff_start = 0.0
                     _diff_reset_done = False
                     _parse_reset_done = False
+                    # True only when the initial "parse" callback has total > 0.
+                    # Rust always fires parse(0, total) at startup even for empty
+                    # runs, so _parse_reset_done alone can't distinguish 0-file runs.
+                    _any_files_to_parse = False
 
                     # Pre-create all write sub-phase bars (no need for a
                     # separate "prepare" bar — prepare is sub-second).
@@ -1675,6 +1679,7 @@ class IndexingCoordinator(BaseService):
                             _diff_reset_done, \
                             _diff_elapsed, \
                             _parse_reset_done, \
+                            _any_files_to_parse, \
                             _compact_size_before, \
                             _compact_info
                         if phase == "diff":
@@ -1704,6 +1709,11 @@ class IndexingCoordinator(BaseService):
                             if not _parse_reset_done:
                                 _pr.reset(_pt, total=max(total, 1), start=True)
                                 _parse_reset_done = True
+                                # Rust fires parse(0, total) unconditionally at
+                                # startup; only set _any_files_to_parse when
+                                # there are actual files to process.
+                                if total > 0:
+                                    _any_files_to_parse = True
                             _pr.update(_pt, completed=current,
                                        info=f"{current}/{total} parsed")
                             _update_speed_field(_pr, _pt, "files/min")
@@ -1805,12 +1815,17 @@ class IndexingCoordinator(BaseService):
                             _pr.update(
                                 _compact_task, info="compacting (includes index rebuild)..."
                             )
-                            try:
-                                _compact_size_before = os.path.getsize(
-                                    _compact_db_file
-                                )
-                            except OSError:
-                                _compact_size_before = None
+                            # Only measure compaction size when files were actually
+                            # parsed; otherwise "write-done" falls to the else-branch
+                            # and shows "done" without misleading size numbers.
+                            if _any_files_to_parse:
+                                try:
+                                    _compact_size_before = os.path.getsize(
+                                        _compact_db_file
+                                    )
+                                except OSError:
+                                    _compact_size_before = None
+                            # else: _compact_size_before stays None
                         elif phase == "write-done":
                             # Final wrap-up of whatever bars are still active.
                             _pr.update(
@@ -1923,6 +1938,10 @@ class IndexingCoordinator(BaseService):
                     f"Diff: {agg_total_files}/{len(files)} changed in "
                     f"{_diff_elapsed * 1000:.0f}ms ({_unchanged_by_hash} unchanged-by-hash)"
                 )
+                # Total skipped = discovered files minus those actually processed.
+                # skipped_by_hash only covers mtime-changed-but-hash-matched files;
+                # the majority (mtime-matched) are not counted in any Rust stat.
+                skipped_unchanged = len(files) - agg_total_files
 
                 # Skip coordinator-side compaction — the Rust pipeline runs its
                 # own compaction via DbBackend::run_compaction() internally.
@@ -2078,6 +2097,7 @@ class IndexingCoordinator(BaseService):
                 "files_processed": total_files,
                 "total_chunks": total_chunks,
                 "embeddings_generated": stats.get("embeddings_generated", 0),
+                "errors": len(agg_errors),
                 "skipped": skipped_total + skipped_unchanged,
                 "skipped_due_to_timeout": skipped_due_to_timeout,
                 "skipped_unchanged": skipped_unchanged,

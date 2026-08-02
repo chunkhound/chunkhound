@@ -489,7 +489,7 @@ async def run_rust_pipeline(
     database_cfg = getattr(config, "database", None) if config else None
 
     per_file_timeout = float(
-        getattr(indexing_cfg, "per_file_timeout_seconds", 3.0) or 3.0
+        getattr(indexing_cfg, "per_file_timeout_seconds", 0.0) or 0.0
     )
     per_file_timeout_min = int(
         getattr(indexing_cfg, "per_file_timeout_min_size_kb", 128) or 128
