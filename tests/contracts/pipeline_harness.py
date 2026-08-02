@@ -66,8 +66,8 @@ async def index_with_python(
     When *embedding_provider* is given, it is set on the coordinator before
     processing (useful for deterministic mock providers).
 
-    Sets ``CHUNKHOUND_USE_RUST=0`` so the coordinator always takes the
-    Python path, even when the native extension is installed.
+    Sets ``CHUNKHOUND_USE_RUST=0`` to explicitly force the Python path
+    (the Rust pipeline is on by default; this override is intentional).
     """
     import os
 
