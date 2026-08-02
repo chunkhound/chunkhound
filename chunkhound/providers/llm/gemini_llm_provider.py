@@ -8,7 +8,13 @@ from loguru import logger
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils import estimate_tokens_llm
-from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
+from chunkhound.interfaces.llm_provider import (
+    LLMProvider,
+    LLMResponse,
+    OutputLimitCapability,
+    OutputLimitIntent,
+    OutputLimitMetadata,
+)
 
 try:
     from google import genai
@@ -46,10 +52,12 @@ class GeminiLLMProvider(LLMProvider):
         Args:
             api_key: Google AI API key (get from https://aistudio.google.com/apikey)
             model: Model name to use (passed through to SDK without interpretation)
-            thinking_level: Thinking depth for Gemini 3+ series ("low", "medium", "high").
-                When set, forwarded as ``thinking_level`` to the SDK.
+            thinking_level: Thinking depth for Gemini 3+ series
+                ("low", "medium", "high"). When set, forwarded as
+                ``thinking_level`` to the SDK.
             thinking_budget: Fixed thinking token budget for Gemini 2.5+ series.
-                When set, forwarded as ``ThinkingConfig(thinking_budget=...)`` to the SDK.
+                When set, forwarded as
+                ``ThinkingConfig(thinking_budget=...)`` to the SDK.
             timeout: Request timeout in seconds (Gemini reasoning can be slow)
             max_retries: Number of retry attempts for failed requests
         """
@@ -87,6 +95,11 @@ class GeminiLLMProvider(LLMProvider):
         self._completion_tokens = 0
 
     @property
+    def output_limit_metadata(self) -> OutputLimitMetadata:
+        """Gemini supports provider-managed output by omitting the cap field."""
+        return OutputLimitMetadata(omission=OutputLimitCapability.SUPPORTED)
+
+    @property
     def name(self) -> str:
         """Provider name."""
         return "gemini"
@@ -103,7 +116,7 @@ class GeminiLLMProvider(LLMProvider):
 
     def _build_generation_config(
         self,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | None = 4096,
         json_schema: dict[str, Any] | None = None,
         system_instruction: str | None = None,
     ) -> types.GenerateContentConfig:
@@ -118,9 +131,10 @@ class GeminiLLMProvider(LLMProvider):
             GenerateContentConfig object
         """
         config_kwargs: dict[str, Any] = {
-            "max_output_tokens": max_completion_tokens,
             "temperature": 1.0,  # Gemini 3 optimized for default 1.0
         }
+        if max_completion_tokens is not None:
+            config_kwargs["max_output_tokens"] = max_completion_tokens
 
         # Add system instruction if provided
         if system_instruction:
@@ -190,7 +204,7 @@ class GeminiLLMProvider(LLMProvider):
         self,
         prompt: str,
         system: str | None = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | OutputLimitIntent = 4096,
         timeout: int | None = None,
     ) -> LLMResponse:
         """Generate a completion for the given prompt.
@@ -205,9 +219,13 @@ class GeminiLLMProvider(LLMProvider):
         Returns:
             LLMResponse with content and metadata
         """
+        resolved_max_tokens = self.resolve_synthesis_output_limit(
+            max_completion_tokens
+        ).max_tokens
+
         # Build config with system instruction if provided
         config = self._build_generation_config(
-            max_completion_tokens=max_completion_tokens,
+            max_completion_tokens=resolved_max_tokens,
             system_instruction=system,
         )
 
@@ -236,10 +254,15 @@ class GeminiLLMProvider(LLMProvider):
 
             # Validate finish reason — these must beat empty-content errors
             if finish_reason in ("MAX_TOKENS", "FINISHREASON_MAX_TOKENS"):
+                budget_detail = (
+                    "The provider-managed output budget was exhausted."
+                    if resolved_max_tokens is None
+                    else f"The output budget was set to {resolved_max_tokens:,} tokens."
+                )
                 raise RuntimeError(
-                    f"Gemini response truncated - token limit exceeded. "
-                    f"The output budget was set to {max_completion_tokens:,} tokens. "
-                    f"Try breaking your query into smaller, more focused questions."
+                    "Gemini response truncated - token limit exceeded. "
+                    f"{budget_detail} Try breaking your query into smaller, more "
+                    "focused questions."
                 )
 
             if finish_reason in (
@@ -298,7 +321,7 @@ class GeminiLLMProvider(LLMProvider):
         prompt: str,
         json_schema: dict[str, Any],
         system: str | None = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | OutputLimitIntent = 4096,
         timeout: int | None = None,
     ) -> dict[str, Any]:
         """Generate a structured JSON completion conforming to the given schema.
@@ -316,9 +339,13 @@ class GeminiLLMProvider(LLMProvider):
         Returns:
             Parsed JSON object conforming to schema
         """
+        resolved_max_tokens = self.resolve_synthesis_output_limit(
+            max_completion_tokens
+        ).max_tokens
+
         # Build config with system instruction and schema
         config = self._build_generation_config(
-            max_completion_tokens=max_completion_tokens,
+            max_completion_tokens=resolved_max_tokens,
             json_schema=json_schema,
             system_instruction=system,
         )
@@ -350,7 +377,8 @@ class GeminiLLMProvider(LLMProvider):
             if finish_reason in ("MAX_TOKENS", "FINISHREASON_MAX_TOKENS"):
                 raise RuntimeError(
                     "Gemini structured completion truncated - token limit exceeded. "
-                    "This indicates insufficient max_completion_tokens for the structured output. "
+                    "This indicates insufficient max_completion_tokens for the "
+                    "structured output. "
                     "Consider increasing the token limit or reducing input context."
                 )
 

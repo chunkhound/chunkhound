@@ -8,10 +8,24 @@ variables, config files, CLI arguments).
 
 import argparse
 import os
-from typing import Any, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 
-from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import (
+    Field,
+    SecretStr,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SecretsSettingsSource,
+    SettingsConfigDict,
+)
 from typing_extensions import assert_never
 
 from chunkhound.core.config.claude_model_resolution import (
@@ -33,6 +47,81 @@ REASONING_EFFORT_PROVIDERS: tuple[str, ...] = (
 OPENAI_REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
 GROK_REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
 GEMINI_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+
+
+def _decode_output_limit_source_value(field_name: str, value: Any) -> Any:
+    """Decode strict output-limit values at string-based settings boundaries."""
+    if field_name == "output_limits_enabled" and isinstance(value, str):
+        parsed = _parse_env_bool(value)
+        if parsed is None:
+            raise ValueError(
+                "CHUNKHOUND_LLM_OUTPUT_LIMITS_ENABLED must be a boolean "
+                "(1/0, true/false, yes/no, or on/off)"
+            )
+        return parsed
+    if field_name == "output_limit_fallback" and isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise ValueError(
+                "CHUNKHOUND_LLM_OUTPUT_LIMIT_FALLBACK must be a decimal integer"
+            ) from exc
+    return value
+
+
+class _LLMEnvSettingsSource(EnvSettingsSource):
+    """Decode strict output-limit values from environment variables."""
+
+    def prepare_field_value(
+        self,
+        field_name: str,
+        field: Any,
+        value: Any,
+        value_is_complex: bool,
+    ) -> Any:
+        decoded = _decode_output_limit_source_value(field_name, value)
+        if decoded is not value:
+            return decoded
+        return super().prepare_field_value(
+            field_name, field, value, value_is_complex
+        )
+
+
+class _LLMDotEnvSettingsSource(DotEnvSettingsSource):
+    """Decode strict output-limit values from dotenv files."""
+
+    def prepare_field_value(
+        self,
+        field_name: str,
+        field: Any,
+        value: Any,
+        value_is_complex: bool,
+    ) -> Any:
+        decoded = _decode_output_limit_source_value(field_name, value)
+        if decoded is not value:
+            return decoded
+        return super().prepare_field_value(
+            field_name, field, value, value_is_complex
+        )
+
+
+class _LLMSecretsSettingsSource(SecretsSettingsSource):
+    """Decode strict output-limit values from file secrets."""
+
+    def prepare_field_value(
+        self,
+        field_name: str,
+        field: Any,
+        value: Any,
+        value_is_complex: bool,
+    ) -> Any:
+        decoded = _decode_output_limit_source_value(field_name, value)
+        if decoded is not value:
+            return decoded
+        return super().prepare_field_value(
+            field_name, field, value, value_is_complex
+        )
+
 
 NO_KEY_PROVIDERS: tuple[str, ...] = (
     "ollama",
@@ -130,6 +219,32 @@ class LLMConfig(BaseSettings):
         validate_default=True,
         extra="ignore",  # Ignore unknown fields for forward compatibility
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Parse environment strings while keeping constructor values strict."""
+        return (
+            init_settings,
+            _LLMEnvSettingsSource(settings_cls),
+            _LLMDotEnvSettingsSource(
+                settings_cls,
+                env_file=getattr(dotenv_settings, "env_file", None),
+                env_file_encoding=getattr(
+                    dotenv_settings, "env_file_encoding", None
+                ),
+            ),
+            _LLMSecretsSettingsSource(
+                settings_cls,
+                secrets_dir=getattr(file_secret_settings, "secrets_dir", None),
+            ),
+        )
 
     # Provider Selection
     provider: LLMProviderLiteral = Field(
@@ -419,6 +534,20 @@ class LLMConfig(BaseSettings):
             "Override structured output support detection. Set to false for "
             "providers whose API does not support OpenAI's native json_schema "
             "response_format (e.g. DeepSeek)"
+        ),
+    )
+    output_limits_enabled: StrictBool = Field(
+        default=False,
+        description=(
+            "Use exact legacy synthesis output limits instead of provider-managed "
+            "output limits"
+        ),
+    )
+    output_limit_fallback: Annotated[StrictInt, Field(gt=0)] = Field(
+        default=64_000,
+        description=(
+            "Output-token limit used for provider-managed synthesis when the "
+            "selected provider cannot authoritatively omit or declare a limit"
         ),
     )
 
@@ -784,6 +913,12 @@ class LLMConfig(BaseSettings):
                 self.supports_structured_outputs
             )
 
+        # Output-limit policy belongs exclusively to final research synthesis.
+        # Utility and secondary roles must retain their explicit caller caps.
+        if role == "synthesis":
+            role_config["output_limits_enabled"] = self.output_limits_enabled
+            role_config["output_limit_fallback"] = self.output_limit_fallback
+
         return role_config
 
     def get_provider_configs(self) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1146,6 +1281,23 @@ class LLMConfig(BaseSettings):
                 "response_format (e.g., DeepSeek)."
             ),
         )
+        parser.add_argument(
+            "--llm-output-limits-enabled",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help=(
+                "Use exact legacy research synthesis output limits; disabled by "
+                "default so providers manage synthesis output limits"
+            ),
+        )
+        parser.add_argument(
+            "--llm-output-limit-fallback",
+            type=int,
+            help=(
+                "Positive output-token fallback for synthesis providers that cannot "
+                "authoritatively omit or declare a limit (default: 64000)"
+            ),
+        )
 
         parser.add_argument(
             "--llm-map-hyde-provider",
@@ -1296,6 +1448,18 @@ class LLMConfig(BaseSettings):
             config["utility_model"] = utility_model
         if synthesis_model := os.getenv("CHUNKHOUND_LLM_SYNTHESIS_MODEL"):
             config["synthesis_model"] = synthesis_model
+
+        output_limits_raw = os.getenv("CHUNKHOUND_LLM_OUTPUT_LIMITS_ENABLED")
+        if output_limits_raw is not None:
+            config["output_limits_enabled"] = _decode_output_limit_source_value(
+                "output_limits_enabled", output_limits_raw
+            )
+        fallback_raw = os.getenv("CHUNKHOUND_LLM_OUTPUT_LIMIT_FALLBACK")
+        if fallback_raw is not None:
+            config["output_limit_fallback"] = _decode_output_limit_source_value(
+                "output_limit_fallback", fallback_raw
+            )
+
         if codex_effort := os.getenv("CHUNKHOUND_LLM_CODEX_REASONING_EFFORT"):
             config["codex_reasoning_effort"] = codex_effort.strip().lower()
         if codex_effort_util := os.getenv(
@@ -1423,6 +1587,13 @@ class LLMConfig(BaseSettings):
         sso = getattr(args, "llm_supports_structured_outputs", None)
         if sso is not None:
             overrides["supports_structured_outputs"] = sso
+
+        output_limits_enabled = getattr(args, "llm_output_limits_enabled", None)
+        if output_limits_enabled is not None:
+            overrides["output_limits_enabled"] = output_limits_enabled
+        output_limit_fallback = getattr(args, "llm_output_limit_fallback", None)
+        if output_limit_fallback is not None:
+            overrides["output_limit_fallback"] = output_limit_fallback
 
         if (
             hasattr(args, "llm_codex_reasoning_effort")

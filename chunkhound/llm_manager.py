@@ -14,7 +14,7 @@ from chunkhound.core.config.llm_config import (
 from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
 from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
-from chunkhound.interfaces.llm_provider import LLMProvider
+from chunkhound.interfaces.llm_provider import LLMProvider, OutputLimitCapability
 from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
@@ -234,6 +234,11 @@ class LLMManager:
             "max_retries": config.get("max_retries", 3),
             "max_tokens_param_name": spec.max_tokens_param_name,
             "synthesis_concurrency": spec.synthesis_concurrency,
+            "output_limit_omission": (
+                spec.output_limit_omission
+                if base_url is None
+                else OutputLimitCapability.UNKNOWN
+            ),
         }
 
         # Structured outputs: config override > spec default > class default
@@ -269,8 +274,16 @@ class LLMManager:
         )
 
     def _initialize_synthesis_provider(self) -> None:
-        """Initialize the synthesis LLM provider."""
+        """Initialize the synthesis LLM provider and attach its output policy."""
         self._synthesis_provider = self._create_provider(self._synthesis_config)
+        self._synthesis_provider.configure_synthesis_output_limit_policy(
+            output_limits_enabled=self._synthesis_config.get(
+                "output_limits_enabled", False
+            ),
+            fallback_tokens=self._synthesis_config.get(
+                "output_limit_fallback", 64_000
+            ),
+        )
         logger.info(
             f"Initialized synthesis LLM provider: "
             f"{self._synthesis_config.get('provider')} "

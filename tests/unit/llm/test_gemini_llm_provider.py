@@ -7,14 +7,17 @@ parsing. Model names are test-only placeholders — no real model required.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-
 from google.genai import types
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
-from chunkhound.interfaces.llm_provider import LLMResponse
+from chunkhound.interfaces.llm_provider import (
+    PROVIDER_MANAGED_OUTPUT,
+    LLMResponse,
+    OutputLimitCapability,
+)
 from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
 
 # ---------------------------------------------------------------------------
@@ -25,9 +28,7 @@ from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
 @pytest.fixture
 def mock_genai_client():
     """Patch genai.Client so no real SDK constructor or HTTP calls are made."""
-    with patch(
-        "chunkhound.providers.llm.gemini_llm_provider.genai.Client"
-    ) as mock:
+    with patch("chunkhound.providers.llm.gemini_llm_provider.genai.Client") as mock:
         yield mock
 
 
@@ -48,9 +49,13 @@ def _make_resp(
     """Build a mock SDK response resembling a real generate_content result."""
     response = MagicMock(spec=["text", "usage_metadata", "candidates"])
     response.text = text
-    usage = MagicMock(spec=[
-        "prompt_token_count", "candidates_token_count", "total_token_count",
-    ])
+    usage = MagicMock(
+        spec=[
+            "prompt_token_count",
+            "candidates_token_count",
+            "total_token_count",
+        ]
+    )
     usage.prompt_token_count = prompt_tokens
     usage.candidates_token_count = completion_tokens
     usage.total_token_count = prompt_tokens + completion_tokens
@@ -168,6 +173,47 @@ class TestComplete:
     """Contracts for the complete() method."""
 
     @pytest.mark.asyncio
+    async def test_provider_managed_omits_cap_field(self, mock_genai_client):
+        """Gemini omission support leaves max_output_tokens entirely unset."""
+        provider = GeminiLLMProvider(api_key="test-key", model="test-model")
+        provider.configure_synthesis_output_limit_policy(
+            output_limits_enabled=False,
+            fallback_tokens=77_000,
+        )
+        aclient = _make_aclient(mock_genai_client)
+        aclient.models.generate_content.return_value = _make_resp("ok")
+
+        await provider.complete("hello", max_completion_tokens=PROVIDER_MANAGED_OUTPUT)
+
+        config = aclient.models.generate_content.call_args.kwargs["config"]
+        assert (
+            provider.output_limit_metadata.omission is OutputLimitCapability.SUPPORTED
+        )
+        assert "max_output_tokens" not in config.model_dump(exclude_unset=True)
+
+    @pytest.mark.asyncio
+    async def test_provider_managed_truncation_diagnostic_is_safe(
+        self, mock_genai_client
+    ):
+        """Managed-limit truncation must not format or expose the intent enum."""
+        provider = GeminiLLMProvider(api_key="test-key", model="test-model")
+        provider.configure_synthesis_output_limit_policy(
+            output_limits_enabled=False,
+            fallback_tokens=77_000,
+        )
+        aclient = _make_aclient(mock_genai_client)
+        aclient.models.generate_content.return_value = _make_resp(
+            "", finish_reason=types.FinishReason.MAX_TOKENS
+        )
+
+        with pytest.raises(RuntimeError, match="provider-managed") as exc:
+            await provider.complete(
+                "hello", max_completion_tokens=PROVIDER_MANAGED_OUTPUT
+            )
+
+        assert "OutputLimitIntent" not in str(exc.value)
+
+    @pytest.mark.asyncio
     async def test_returns_llmresponse_with_content(self, mock_genai_client):
         """Core contract: complete() returns LLMResponse with valid text."""
         provider = GeminiLLMProvider(api_key="test-key", model="test-model")
@@ -229,6 +275,7 @@ class TestComplete:
         api_err.code = 429
         api_err.message = "Rate limit exceeded"
         from google.genai import errors as genai_errors
+
         aclient.models.generate_content.side_effect = genai_errors.APIError(
             code=429, response_json={"error": {"message": "Rate limit exceeded"}}
         )
@@ -240,9 +287,7 @@ class TestComplete:
         assert "rate limit" in msg.lower()
 
     @pytest.mark.asyncio
-    async def test_internal_runtime_error_not_double_wrapped(
-        self, mock_genai_client
-    ):
+    async def test_internal_runtime_error_not_double_wrapped(self, mock_genai_client):
         """RuntimeError raised internally must pass through unwrapped."""
         provider = GeminiLLMProvider(api_key="test-key", model="test-model")
         aclient = _make_aclient(mock_genai_client)
@@ -265,13 +310,37 @@ class TestCompleteStructured:
     """Contracts for the complete_structured() method."""
 
     @pytest.mark.asyncio
+    async def test_provider_managed_omits_cap_and_preserves_schema(
+        self, mock_genai_client
+    ):
+        """Structured Gemini requests omit only the cap, not schema controls."""
+        provider = GeminiLLMProvider(api_key="test-key", model="test-model")
+        provider.configure_synthesis_output_limit_policy(
+            output_limits_enabled=False,
+            fallback_tokens=77_000,
+        )
+        aclient = _make_aclient(mock_genai_client)
+        aclient.models.generate_content.return_value = _make_resp('{"answer":"42"}')
+        schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+        result = await provider.complete_structured(
+            "hello",
+            schema,
+            max_completion_tokens=PROVIDER_MANAGED_OUTPUT,
+        )
+
+        config = aclient.models.generate_content.call_args.kwargs["config"]
+        wire_config = config.model_dump(exclude_unset=True)
+        assert result == {"answer": "42"}
+        assert "max_output_tokens" not in wire_config
+        assert wire_config["response_json_schema"] == schema
+
+    @pytest.mark.asyncio
     async def test_returns_parsed_dict(self, mock_genai_client):
         """Structured completion must return a parsed JSON dict."""
         provider = GeminiLLMProvider(api_key="test-key", model="test-model")
         aclient = _make_aclient(mock_genai_client)
-        aclient.models.generate_content.return_value = _make_resp(
-            '{"answer": "42"}'
-        )
+        aclient.models.generate_content.return_value = _make_resp('{"answer": "42"}')
 
         schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
         result = await provider.complete_structured("hello", schema)
@@ -303,18 +372,14 @@ class TestCompleteStructured:
             await provider.complete_structured("hello", schema)
 
     @pytest.mark.asyncio
-    async def test_internal_runtime_error_not_double_wrapped(
-        self, mock_genai_client
-    ):
+    async def test_internal_runtime_error_not_double_wrapped(self, mock_genai_client):
         """RuntimeError from structured code path must not be double-wrapped."""
         provider = GeminiLLMProvider(api_key="test-key", model="test-model")
         aclient = _make_aclient(mock_genai_client)
         aclient.models.generate_content.return_value = _make_resp("")
 
         with pytest.raises(RuntimeError) as exc:
-            await provider.complete_structured(
-                "test", json_schema={"type": "object"}
-            )
+            await provider.complete_structured("test", json_schema={"type": "object"})
 
         msg = str(exc.value)
         assert "empty response" in msg
@@ -330,13 +395,11 @@ class TestCompleteStructured:
         )
 
         with pytest.raises(RuntimeError, match="blocked"):
-            await provider.complete_structured(
-                "test", json_schema={"type": "object"}
-            )
+            await provider.complete_structured("test", json_schema={"type": "object"})
 
     @pytest.mark.asyncio
     async def test_truncation_error_raised(self, mock_genai_client):
-        """MAX_TOKENS finish reason in structured completion must raise truncation error."""
+        """MAX_TOKENS structured completion must raise a truncation error."""
         provider = GeminiLLMProvider(api_key="test-key", model="test-model")
         aclient = _make_aclient(mock_genai_client)
         aclient.models.generate_content.return_value = _make_resp(
@@ -344,9 +407,7 @@ class TestCompleteStructured:
         )
 
         with pytest.raises(RuntimeError, match="truncat"):
-            await provider.complete_structured(
-                "test", json_schema={"type": "object"}
-            )
+            await provider.complete_structured("test", json_schema={"type": "object"})
 
 
 # ---------------------------------------------------------------------------

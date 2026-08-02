@@ -13,13 +13,23 @@ This file tests two things:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from chunkhound.interfaces.llm_provider import (
+    PROVIDER_MANAGED_OUTPUT,
+    OutputLimitCapability,
+)
 from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
+from tests.fixtures.openai_compatible_server import (
+    ChatCompletionScript,
+    OpenAICompatibleTestServer,
+)
 
 # =============================================================================
 # Spec data — kept in sync with production routing.
@@ -67,12 +77,12 @@ SPECS = [
             "expected_class": OpenAILLMProvider,
             "expected_missing_model_error": (
                 "Custom OpenAI-compatible LLM endpoints require an explicit model. "
-                "Set `llm.model` (or the per-role model override) when using `llm.base_url`."
+                "Set `llm.model` (or the per-role model override) when using "
+                "`llm.base_url`."
             ),
         },
         id="openai",
     ),
-
 ]
 
 
@@ -104,6 +114,7 @@ def mock_openai():
 # Factory contract  —  does LLMManager._create_provider produce a correctly
 # configured OpenAICompatibleProvider for each spec?
 # =============================================================================
+
 
 class TestFactoryPipeline:
     """Config dict → registry lookup → provider instance with correct fields."""
@@ -212,6 +223,7 @@ class TestFactoryPipeline:
 # Behavioral contract  —  core provider behavior exercised once (not per spec),
 # since all OpenAI-compatible providers share the same class.
 # =============================================================================
+
 
 class TestCompletionContract:
     """Core completion behavior shared by every OpenAI-compatible provider."""
@@ -351,11 +363,150 @@ class TestCompletionContract:
         assert stats["prompt_tokens"] == 0
         assert stats["completion_tokens"] == 0
 
+    @pytest.mark.asyncio
+    async def test_provider_managed_uses_conservative_numeric_fallback(
+        self, mock_openai
+    ):
+        """Unknown compatible APIs receive a numeric fallback, never an enum/None."""
+        mock_openai.return_value = self._make_resp()
+        provider = _provider()
+        provider.configure_synthesis_output_limit_policy(
+            output_limits_enabled=False,
+            fallback_tokens=73_001,
+        )
+
+        await provider.complete("hi", max_completion_tokens=PROVIDER_MANAGED_OUTPUT)
+
+        assert provider.output_limit_metadata.omission is OutputLimitCapability.UNKNOWN
+        assert mock_openai.call_args.kwargs["max_completion_tokens"] == 73_001
+
+
+# =============================================================================
+# Real wire contract — loopback HTTP validates the OpenAI SDK serialization and
+# response parsing path without external credentials or paid API calls.
+# =============================================================================
+
+
+class TestChatCompletionsWireContract:
+    """Characterize finish-reason and usage behavior over the real SDK wire."""
+
+    @pytest.mark.asyncio
+    async def test_stop_returns_content_and_records_request(self):
+        marker = "wire-stop-unique-marker"
+        script = ChatCompletionScript(
+            name="stop",
+            marker=marker,
+            stage="provider-completion",
+            content="complete answer",
+            finish_reason="stop",
+            prompt_tokens=13,
+            completion_tokens=5,
+        )
+        with OpenAICompatibleTestServer([script]) as server:
+            async with _wire_provider(server) as provider:
+                response = await provider.complete(marker, max_completion_tokens=211)
+
+                assert response.content == "complete answer"
+                assert response.finish_reason == "stop"
+                assert response.tokens_used == 18
+                assert len(server.requests) == 1
+                request = server.requests[0]
+                assert request["matched_script"] == "stop"
+                assert request["stage"] == "provider-completion"
+                assert request["model"] == "loopback-test-model"
+                assert request["max_completion_tokens"] == 211
+                assert request["max_tokens"] is None
+                assert marker in request["flattened_messages"]
+                assert len(request["prompt_hash"]) == 64
+                assert request["finish_reason"] == "stop"
+                assert request["usage"]["completion_tokens"] == 5
+                server.assert_all_scripts_consumed()
+
+    @pytest.mark.asyncio
+    async def test_length_with_partial_content_raises_truncation(self):
+        marker = "wire-length-partial-unique-marker"
+        script = ChatCompletionScript(
+            name="length-partial",
+            marker=marker,
+            content="partial but unusable answer",
+            finish_reason="length",
+            prompt_tokens=17,
+            completion_tokens=23,
+        )
+        with OpenAICompatibleTestServer([script]) as server:
+            async with _wire_provider(server) as provider:
+                with pytest.raises(
+                    RuntimeError, match="token limit exceeded"
+                ) as exc_info:
+                    await provider.complete(marker, max_completion_tokens=89)
+
+                assert "prompt=17" in str(exc_info.value)
+                assert "completion=23" in str(exc_info.value)
+                assert server.requests[0]["finish_reason"] == "length"
+                server.assert_all_scripts_consumed()
+
+    @pytest.mark.asyncio
+    async def test_length_with_empty_content_still_raises_truncation(self):
+        marker = "wire-length-empty-unique-marker"
+        script = ChatCompletionScript(
+            name="length-empty",
+            marker=marker,
+            content="",
+            finish_reason="length",
+            prompt_tokens=19,
+            completion_tokens=0,
+        )
+        with OpenAICompatibleTestServer([script]) as server:
+            async with _wire_provider(server) as provider:
+                with pytest.raises(
+                    RuntimeError, match="token limit exceeded"
+                ) as exc_info:
+                    await provider.complete(marker, max_completion_tokens=97)
+
+                assert "empty response" not in str(exc_info.value)
+                assert server.requests[0]["usage"]["completion_tokens"] == 0
+                server.assert_all_scripts_consumed()
+
+    @pytest.mark.asyncio
+    async def test_usage_completion_tokens_are_not_requested_allowance(self):
+        marker = "wire-usage-vs-allowance-unique-marker"
+        requested_allowance = 503
+        reported_completion_tokens = 7
+        script = ChatCompletionScript(
+            name="usage-differs",
+            marker=marker,
+            content="short answer",
+            prompt_tokens=29,
+            completion_tokens=reported_completion_tokens,
+        )
+        with OpenAICompatibleTestServer([script]) as server:
+            async with _wire_provider(
+                server, max_tokens_param_name="max_tokens"
+            ) as provider:
+                response = await provider.complete(
+                    marker,
+                    max_completion_tokens=requested_allowance,
+                )
+
+                request = server.requests[0]
+                assert request["max_tokens"] == requested_allowance
+                assert request["max_completion_tokens"] is None
+                assert (
+                    request["usage"]["completion_tokens"] == reported_completion_tokens
+                )
+                assert response.tokens_used == 29 + reported_completion_tokens
+                assert (
+                    provider.get_usage_stats()["completion_tokens"]
+                    == reported_completion_tokens
+                )
+                server.assert_all_scripts_consumed()
+
 
 # =============================================================================
 # Structured-output contract  —  behavioral difference between providers with
 # supports_structured_outputs=True vs False (parametrized over both paths).
 # =============================================================================
+
 
 class TestStructuredOutputContract:
     """Two code paths depending on the supports_structured_outputs flag."""
@@ -406,7 +557,9 @@ class TestStructuredOutputContract:
 
         provider = _provider(supports_structured_outputs=False)
         await provider.complete_structured(
-            "?", json_schema=self.SCHEMA, system="You are helpful.",
+            "?",
+            json_schema=self.SCHEMA,
+            system="You are helpful.",
         )
 
         call = mock_openai.call_args[1]
@@ -415,9 +568,29 @@ class TestStructuredOutputContract:
         assert '"answer"' in content
 
     @pytest.mark.asyncio
-    async def test_native_json_schema_with_reasoning_effort(
+    async def test_provider_managed_structured_keeps_schema_and_numeric_fallback(
         self, mock_openai
     ):
+        """Fallback resolution must not disturb the structured-output payload."""
+        mock_openai.return_value = self._make_resp()
+        provider = _provider(supports_structured_outputs=True)
+        provider.configure_synthesis_output_limit_policy(
+            output_limits_enabled=False,
+            fallback_tokens=73_002,
+        )
+
+        await provider.complete_structured(
+            "?",
+            json_schema=self.SCHEMA,
+            max_completion_tokens=PROVIDER_MANAGED_OUTPUT,
+        )
+
+        call = mock_openai.call_args.kwargs
+        assert call["max_completion_tokens"] == 73_002
+        assert call["response_format"]["json_schema"]["schema"] == self.SCHEMA
+
+    @pytest.mark.asyncio
+    async def test_native_json_schema_with_reasoning_effort(self, mock_openai):
         """sso=True includes both response_format and reasoning_effort."""
         mock_openai.return_value = self._make_resp()
 
@@ -436,6 +609,7 @@ class TestStructuredOutputContract:
 # Helpers
 # =============================================================================
 
+
 def _bare_manager() -> LLMManager:
     """Return an LLMManager instance without running __init__ side effects."""
     manager = object.__new__(LLMManager)
@@ -451,3 +625,24 @@ def _provider(**overrides: object) -> OpenAICompatibleProvider:
         **overrides,
     }
     return OpenAICompatibleProvider(**kwargs)
+
+
+@asynccontextmanager
+async def _wire_provider(
+    server: OpenAICompatibleTestServer,
+    **overrides: object,
+) -> AsyncIterator[OpenAICompatibleProvider]:
+    """Yield a no-retry loopback provider and deterministically close its client."""
+    base_url = server.base_url
+    server.assert_loopback_url(base_url)
+    provider = _provider(
+        api_key="sk-local-fixture-not-a-real-credential",
+        model="loopback-test-model",
+        base_url=base_url,
+        max_retries=0,
+        **overrides,
+    )
+    try:
+        yield provider
+    finally:
+        await provider._client.close()

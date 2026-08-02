@@ -17,7 +17,15 @@ import urllib.error
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TypedDict, Union, cast, get_args, get_origin
+from typing import (
+    Any,
+    Literal,
+    TypedDict,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+)
 
 try:
     from typing import NotRequired  # type: ignore[attr-defined]
@@ -238,13 +246,12 @@ def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
         ):
             continue
 
-        # Get type hint
-        type_hint = (
+        annotation: Any = (
             param.annotation if param.annotation != inspect.Parameter.empty else Any
         )
 
         # Convert to JSON Schema type
-        schema = _python_type_to_json_schema_type(type_hint)
+        schema = _python_type_to_json_schema_type(annotation)
 
         # Add description if available from docstring
         if param_name in param_descriptions:
@@ -501,6 +508,9 @@ GIT HISTORY RESEARCH:
 - vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
 
+FOLLOW-UP CHAIN:
+- previous_query: Prior query for follow-up framing. When set, the synthesizer frames the answer in the prior topic's context. This changes only the answer's phrasing; it does not alter which code is searched or retrieved.
+
 One call replaces 5-10 manual searches. Call it liberally — understanding first, coding second."""
 
 DAEMON_STATUS_DESCRIPTION = """Report daemon startup, scan, and realtime
@@ -513,7 +523,10 @@ USE FOR:
 
 OUTPUT: {status, query_ready, scan_progress}"""
 
-WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, build a transient in-memory index over the fetched pages, and run deep research to produce a cited answer. Use when the question requires external documentation, library references, or up-to-date web content — not for searching the local codebase (use `code_research` for that). High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
+WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, build a transient in-memory index over the fetched pages, and run deep research to produce a cited answer. \
+Use when the question requires external documentation, library references, or up-to-date web content — not for searching the local codebase (use `code_research` for that). \
+For follow-up questions, pass the prior query as previous_query — the expander then targets new dimensions instead of re-exploring the same ground, and the synthesizer interprets the current question in the prior topic's context. \
+High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
 
 
 # =============================================================================
@@ -760,6 +773,7 @@ async def deep_research_impl(
     commit_hash: str | None = None,
     last_n_commits: int | None = None,
     vector_source: str = "diff",
+    previous_query: str | None = None,
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -775,6 +789,7 @@ async def deep_research_impl(
         commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
         last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
         vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
+        previous_query: Prior query for follow-up framing (optional). When set, the synthesis stage frames the answer in the prior topic's context. Does not affect which code is searched or retrieved.
 
     Returns:
         Dict with answer and metadata
@@ -815,6 +830,9 @@ async def deep_research_impl(
     # Create default config from environment if not provided
     if config is None:
         config = Config.from_environment()
+    # Empty-string → None coercion at the surface boundary, so every downstream
+    # consumer sees the two-valued "real string or None" contract.
+    previous_query = previous_query or None
 
     # Create code research service using factory (v1 or v2 based on config)
     # This ensures followup suggestions automatically update if tool is renamed
@@ -828,7 +846,7 @@ async def deep_research_impl(
         path_filter=path,
     )
 
-    result = await research_service.deep_research(query)
+    result = await research_service.deep_research(query, previous_query=previous_query)
     if truncation_warning:
         answer = result.get("answer", "")
         result["answer"] = f"> **Note:** {truncation_warning}\n\n{answer}"
@@ -848,6 +866,7 @@ async def websearch_impl(
     config: Config | None,
     query: str,
     limit: int = 30,
+    previous_query: str | None = None,
 ) -> str:
     """Search the web, fetch results, and run deep research over them.
 
@@ -864,6 +883,7 @@ async def websearch_impl(
         config: Application configuration; falls back to environment. Its
             source file (if any) is forwarded to the subprocess as --config.
         query: Natural-language or keyword query for DuckDuckGo.
+        previous_query: Previous query to build context and chain knowledge (optional).
         limit: Number of results to fetch. Clamped to [1, 100]. Default 30.
 
     Returns:
@@ -883,10 +903,13 @@ async def websearch_impl(
 
     if config is None:
         config = Config.from_environment()
+    # Empty-string → None coercion at the surface boundary, so every
+    # downstream consumer sees the two-valued "real string or None" contract.
+    previous_query = previous_query or None
 
     limit = clamp_limit(limit)
 
-    queries = await expand_web_queries(query, llm_manager)
+    queries = await expand_web_queries(query, llm_manager, previous_query=previous_query)
     try:
         results = await search_multi(queries, limit, None)
     except urllib.error.URLError as e:
@@ -907,8 +930,13 @@ async def websearch_impl(
             mapping=mapping,
         )
 
+        # Positional query is the RAW user input — feeding a lossy narrowing
+        # (e.g. queries[0]) to deep research would silently degrade the
+        # answer with no signal.
         cmd = build_quickresearch_argv_core(
-            query, tmpdir, config, parent_pid=os.getpid()
+            query, tmpdir, config,
+            parent_pid=os.getpid(),
+            previous_query=previous_query,
         )
         # Scrub CHUNKHOUND_MCP_MODE so the child's RichOutputFormatter.error()
         # is not silenced — we rely on its stderr output to populate the
