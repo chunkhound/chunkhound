@@ -151,6 +151,20 @@ class SerialDatabaseProvider(ABC):
             # Shutdown executor with Windows-specific handling
             self._executor.shutdown(wait=True)
 
+    def release_for_rust_pipeline(self) -> None:
+        """Close the DuckDB connection without shutting down the executor.
+
+        Called before handing write ownership to the Rust pipeline.  Unlike
+        disconnect(), this keeps the ThreadPoolExecutor alive so connect()
+        can reopen the connection once the Rust pipeline has finished.
+        """
+        try:
+            self._execute_in_db_thread_sync("disconnect", False)
+        except Exception as e:
+            logger.error(f"Error releasing connection for Rust pipeline: {e}")
+        finally:
+            self._executor.clear_thread_local()
+
     def _execute_in_db_thread_sync(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation synchronously in DB thread."""
         return self._executor.execute_sync(self, operation_name, *args, **kwargs)

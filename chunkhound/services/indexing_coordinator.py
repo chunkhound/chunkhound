@@ -1910,7 +1910,7 @@ class IndexingCoordinator(BaseService):
                 # connection (created lazily on its worker thread), which a
                 # bare connection_manager close would leave dangling.
                 if self._db is not None and self._db.is_connected:
-                    self._db.disconnect()
+                    self._db.release_for_rust_pipeline()
 
                 rust_stats = await run_rust_pipeline(
                     files_to_process,
@@ -1922,6 +1922,13 @@ class IndexingCoordinator(BaseService):
                     config=self.config,
                     progress_callback=_progress_cb,
                 )
+
+                # Reopen the Python-side DuckDB connection now that the Rust
+                # pipeline has finished and released its write lock.
+                # release_for_rust_pipeline() kept the executor alive; connect()
+                # creates a fresh thread-local connection inside that executor.
+                if self._db is not None:
+                    self._db.connect()
 
                 agg_total_files = int(rust_stats.get("total_files", 0))
                 agg_total_chunks = int(rust_stats.get("total_chunks", 0))
