@@ -139,15 +139,23 @@ impl DuckDbHnswBackend {
     }
 
     fn try_load_vss(conn: &Connection) -> bool {
-        match conn.execute_batch(
-            "INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true;",
-        ) {
-            Ok(()) => true,
-            Err(e) => {
-                log::warn!("VSS extension unavailable (vector search disabled): {e}");
-                false
-            }
+        // INSTALL may fail in air-gapped environments or when the extension is already present
+        // at a different version — that is non-fatal.  Mirror Python's connection_manager.py
+        // which uses separate execute() calls so that LOAD is always attempted regardless of
+        // INSTALL's outcome.
+        let _ = conn.execute_batch("INSTALL vss");
+        if let Err(e) = conn.execute_batch("LOAD vss") {
+            log::warn!("VSS extension unavailable (vector search disabled): {e}");
+            return false;
         }
+        if let Err(e) = conn.execute_batch("SET hnsw_enable_experimental_persistence = true") {
+            log::warn!(
+                "HNSW persistence unavailable \
+                 (hnsw_enable_experimental_persistence not supported by this DuckDB build): {e}"
+            );
+            return false;
+        }
+        true
     }
 
     /// Ensure VSS is loaded, lazily — only on first write with embeddings.
@@ -1435,13 +1443,18 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         if !self.has_vss {
             return Ok(());
         }
-        // Resolve (dims, metric) pairs before borrowing conn — avoids simultaneous
-        // immutable borrows of self.known_dims / self.saved_hnsw_metrics alongside
-        // the &self borrow held by conn_or_err().
-        let dims_metrics: Vec<(u32, String)> = self
-            .known_dims
-            .iter()
-            .map(|&dims| {
+        // Query the DB directly for embedding tables — mirrors Python's
+        // _executor_ensure_all_hnsw_indexes which does not rely on in-memory tracked state.
+        // This is more robust than known_dims when the connection is reopened after
+        // compaction or when edge cases cause the in-memory set to diverge from DB state.
+        // Scope the first conn borrow so it's dropped before we access self.saved_hnsw_metrics.
+        let existing = {
+            let conn = self.conn_or_err()?;
+            Self::discover_embedding_tables(conn)?
+        };
+        let dims_metrics: Vec<(u32, String)> = existing
+            .into_iter()
+            .map(|(_, dims)| {
                 let metric = self
                     .saved_hnsw_metrics
                     .get(&dims)
