@@ -159,7 +159,8 @@ class TestParseErrorPerFile:
         bad_file.write_text("def broken():\n    return 1\n")
 
         def _raising_parse_file_callback(
-            file_path, detect_embedded_sql=True, config_file_size_threshold_kb=20
+            file_path, detect_embedded_sql=True, config_file_size_threshold_kb=20,
+            index_unknown_files=False,
         ):
             raise RuntimeError("simulated parser crash")
 

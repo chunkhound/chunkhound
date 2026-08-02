@@ -72,7 +72,7 @@ class TestProgressCallback:
 
         calls: list[tuple[str, int, int]] = []
 
-        def progress_callback(phase: str, current: int, total: int) -> None:
+        def progress_callback(phase: str, current: int, total: int, chunks: int = 0) -> None:
             calls.append((phase, current, total))
 
         pipeline = IndexingPipeline(_rust_config(tmp_path, db_dir))
