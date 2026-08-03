@@ -524,6 +524,30 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Recreate connection after WAL cleanup
             _executor_local.connection = self._create_connection()
 
+    def release_for_rust_pipeline(self) -> None:
+        """Close ALL DuckDB connections without shutting down the executor.
+
+        Overrides SerialDatabaseProvider to also close _connection_manager.connection.
+        If only the executor's thread-local connection is closed, Python's DuckDB
+        C-instance keeps the file open in its buffer pool.  When Rust then writes new
+        data and Python reconnects, duckdb.connect() returns a connection to the same
+        already-open in-memory database (stale cache) instead of reading Rust's
+        freshly-written data from disk.
+        """
+        try:
+            self._execute_in_db_thread_sync("disconnect", False)
+        except Exception as e:
+            logger.error(f"Error releasing connection for Rust pipeline: {e}")
+        finally:
+            self._executor.clear_thread_local()
+            try:
+                # Close the connection manager's connection so Python's DuckDB
+                # fully releases the file before Rust takes ownership.
+                # skip_checkpoint=True: executor already checkpointed above.
+                self._connection_manager.disconnect(skip_checkpoint=True)
+            except Exception as e:
+                logger.error(f"Error closing connection manager for Rust pipeline: {e}")
+
     def disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close database connection with optional checkpointing - delegate to connection manager."""
         try:

@@ -1298,6 +1298,16 @@ class IndexingCoordinator(BaseService):
                 # Test DB fakes may not expose db_path — fall through to Python
                 # before the cleanup gate fires so orphan cleanup isn't skipped.
                 _use_rust = False
+            elif Path(str(self._db.db_path)).name != "chunks.db":
+                # Rust pipeline hardcodes appending "chunks.db" to the directory
+                # it receives, so it can only write to a file named chunks.db.
+                # Fall back to Python for any other DB filename.
+                logger.info(
+                    "Rust pipeline skipped — db_path '{}' is not named chunks.db; "
+                    "using Python path",
+                    self._db.db_path,
+                )
+                _use_rust = False
         logger.info(
             "Indexing backend: discovery={} pipeline={}",
             "rust" if _file_patterns._USE_RUST else "python",
