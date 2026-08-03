@@ -56,12 +56,24 @@ runs:
         fi
         # On macOS and Windows, the DuckDB shared library is not findable
         # at runtime by default.  Copy it next to the native extension so
-        # the dynamic linker can resolve it.
+        # the dynamic linker can resolve it.  It must land next to BOTH
+        # copies of the extension: the source-tree chunkhound_native/ (used
+        # when the package resolves via the editable install) and the
+        # site-packages copy patched in above (what actually gets imported
+        # once the PyPI dist-info is kept intact — see patch step above).
+        # macOS survives on DYLD_LIBRARY_PATH regardless of directory, but
+        # Windows' loader has not honored PATH for extension-module
+        # dependencies since Python 3.8, so duckdb.dll MUST be co-located
+        # with whichever chunkhound_native.pyd Python actually loads.
         if [[ "$RUNNER_OS" == "macOS" ]]; then
           DUCKDB_LIB=$(find target -name 'libduckdb.dylib' -print -quit 2>/dev/null || true)
           if [[ -n "$DUCKDB_LIB" ]]; then
             cp "$DUCKDB_LIB" chunkhound_native/
             echo "Copied $DUCKDB_LIB → chunkhound_native/"
+            if [[ -n "$SITE_CN" ]]; then
+              cp "$DUCKDB_LIB" "$SITE_CN/"
+              echo "Copied $DUCKDB_LIB → $SITE_CN/"
+            fi
           else
             echo "WARNING: libduckdb.dylib not found in target/ — macOS contract tests will fail"
           fi
@@ -70,6 +82,10 @@ runs:
           if [[ -n "$DUCKDB_DLL" ]]; then
             cp "$DUCKDB_DLL" chunkhound_native/
             echo "Copied $DUCKDB_DLL → chunkhound_native/"
+            if [[ -n "$SITE_CN" ]]; then
+              cp "$DUCKDB_DLL" "$SITE_CN/"
+              echo "Copied $DUCKDB_DLL → $SITE_CN/"
+            fi
           else
             echo "WARNING: duckdb.dll not found in target/ — Windows contract tests will fail"
           fi
