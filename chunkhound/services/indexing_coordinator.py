@@ -1600,6 +1600,18 @@ class IndexingCoordinator(BaseService):
             agg_skipped_paths: list[tuple[str, str]] = []
             _diff_elapsed = 0.0
 
+            # Pre-check disk usage limit before either pipeline starts.
+            # _store_parsed_results checks this for the Python path, but the
+            # Rust pipeline bypasses that function — a pre-check here covers both.
+            _pre_disk_error = self._check_disk_usage_limit()
+            if _pre_disk_error:
+                return {
+                    "status": "disk_limit_exceeded",
+                    "current_size_mb": _pre_disk_error.current_size_mb,
+                    "limit_mb": _pre_disk_error.limit_mb,
+                    "error": str(_pre_disk_error),
+                }
+
             # ── Rust path (CHUNKHOUND_USE_RUST=1) ─────────────────
             # Detected at top of process_directory to gate cleanup + change detection.
             if _use_rust:
