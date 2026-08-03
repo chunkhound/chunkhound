@@ -25,7 +25,7 @@ from chunkhound.core.utils.voyageai_utils import is_official_voyageai_endpoint
 from ._utils import _parse_env_bool
 
 # Error message constants for consistent messaging across config and provider
-RERANK_MODEL_REQUIRED_COHERE = (
+RERANK_MODEL_REQUIRED = (
     "rerank_model is required when using rerank_format='cohere' or 'voyage'. "
     "Either provide rerank_model or use rerank_format='tei'."
 )
@@ -84,7 +84,7 @@ def validate_rerank_configuration(
 
     # Cohere and Voyage-native formats both require an explicit rerank_model
     if rerank_format in ("cohere", "voyage") and not rerank_model:
-        raise ValueError(RERANK_MODEL_REQUIRED_COHERE)
+        raise ValueError(RERANK_MODEL_REQUIRED)
 
     # If using reranking (model set or TEI format with URL), validate URL config
     is_using_reranking = rerank_model or (rerank_format == "tei" and rerank_url)
