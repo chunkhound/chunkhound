@@ -59,6 +59,15 @@ class VoyageModelConfig(TypedDict):
     default_dimension: int
 
 
+# Request param that carries the result limit, keyed by rerank format. Native
+# VoyageAI-compatible endpoints (e.g. MongoDB Atlas ai.mongodb.com) expect
+# "top_k" and reject Cohere's "top_n"; they also return the ranking under
+# "data" rather than "results" (see _parse_rerank_response). Formats absent
+# from this map are not Cohere-style: TEI sends no limit at all, and "auto"
+# probes Cohere-style only when a rerank_model is configured.
+_RERANK_LIMIT_PARAM = {"voyage": "top_k", "cohere": "top_n"}
+
+
 # Official VoyageAI model configuration based on API documentation
 VOYAGE_MODEL_CONFIG: dict[str, VoyageModelConfig] = {
     # Models with 120,000 token limit per batch
@@ -1069,36 +1078,21 @@ class VoyageAIEmbeddingProvider:
     ) -> dict:
         """Build rerank request payload for TEI, Cohere, or Voyage-native format."""
         fmt = self._rerank_format
-        if fmt == "tei":
+        limit_param = _RERANK_LIMIT_PARAM.get(fmt)
+
+        # TEI carries no model and names the document list "texts". Auto mode
+        # with no rerank_model has no model to send either, so it starts as TEI.
+        if fmt == "tei" or (limit_param is None and not self._rerank_model):
             return {"query": query, "texts": documents}
-        elif fmt == "voyage":
-            # Native VoyageAI-compatible endpoints (e.g. MongoDB Atlas
-            # ai.mongodb.com) expect "top_k" — they reject Cohere's "top_n" —
-            # and return the ranking under "data" (see _parse_rerank_response).
-            payload: dict = {"query": query, "documents": documents}
-            if self._rerank_model:
-                payload["model"] = self._rerank_model
-            if top_k is not None:
-                payload["top_k"] = top_k
-            return payload
-        elif fmt == "cohere":
-            payload = {"query": query, "documents": documents}
-            if self._rerank_model:
-                payload["model"] = self._rerank_model
-            if top_k is not None:
-                payload["top_n"] = top_k
-            return payload
-        else:  # auto: try Cohere if model provided, else TEI
-            if self._rerank_model:
-                payload = {
-                    "query": query,
-                    "documents": documents,
-                    "model": self._rerank_model,
-                }
-                if top_k is not None:
-                    payload["top_n"] = top_k
-                return payload
-            return {"query": query, "texts": documents}
+
+        # Cohere-style body, shared by 'cohere', 'voyage' and auto-with-model.
+        payload: dict[str, Any] = {"query": query, "documents": documents}
+        if self._rerank_model:
+            payload["model"] = self._rerank_model
+        if top_k is not None:
+            # 'auto' is absent from the map but probes Cohere-style first.
+            payload[limit_param or "top_n"] = top_k
+        return payload
 
     def _parse_rerank_response(
         self, data: dict, num_documents: int

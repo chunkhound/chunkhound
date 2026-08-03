@@ -335,6 +335,23 @@ class TestBuildRerankPayload:
         assert "top_k" not in payload
         assert "top_n" not in payload
 
+    def test_unknown_format_with_model_falls_back_to_cohere_style(self):
+        """An unrecognised format string keeps auto's Cohere-style behaviour."""
+        p = self._provider("Cohere", model="my-reranker")
+        payload = p._build_rerank_payload("q", ["d1"], top_k=2)
+        assert payload == {
+            "query": "q",
+            "documents": ["d1"],
+            "model": "my-reranker",
+            "top_n": 2,
+        }
+
+    def test_unknown_format_without_model_falls_back_to_tei_style(self):
+        """An unrecognised format string with no model still probes TEI-style."""
+        p = self._provider("Cohere")
+        payload = p._build_rerank_payload("q", ["d1"], top_k=2)
+        assert payload == {"query": "q", "texts": ["d1"]}
+
 
 # ===========================================================================
 # 5. _parse_rerank_response (sync method)
