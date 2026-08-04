@@ -1359,7 +1359,12 @@ class IndexingCoordinator(BaseService):
             if not files:
                 if _diff_task is not None and self.progress:
                     self.progress.remove_task(_diff_task)
-                return {"status": "no_files", "files_processed": 0, "total_chunks": 0}
+                return {
+                    "status": "no_files",
+                    "files_processed": 0,
+                    "total_chunks": 0,
+                    "pipeline": "rust" if _use_rust else "python",
+                }
 
             # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files.
             # Runs regardless of which pipeline (Python or Rust) processes this
@@ -1610,6 +1615,7 @@ class IndexingCoordinator(BaseService):
                     "current_size_mb": _pre_disk_error.current_size_mb,
                     "limit_mb": _pre_disk_error.limit_mb,
                     "error": str(_pre_disk_error),
+                    "pipeline": "rust" if _use_rust else "python",
                 }
 
             # ── Rust path (CHUNKHOUND_USE_RUST=1) ─────────────────
@@ -2126,6 +2132,7 @@ class IndexingCoordinator(BaseService):
                         "current_size_mb": error["current_size_mb"],
                         "limit_mb": error["limit_mb"],
                         "error": error["error"],
+                        "pipeline": "rust" if _use_rust else "python",
                     }
 
             return {
@@ -2138,6 +2145,7 @@ class IndexingCoordinator(BaseService):
                 "skipped_due_to_timeout": skipped_due_to_timeout,
                 "skipped_unchanged": skipped_unchanged,
                 "skipped_filtered": skipped_filtered,
+                "pipeline": "rust" if _use_rust else "python",
             }
 
         except Exception as e:
@@ -2152,9 +2160,14 @@ class IndexingCoordinator(BaseService):
                     "current_size_mb": e.current_size_mb,
                     "limit_mb": e.limit_mb,
                     "error": str(e),
+                    "pipeline": "rust" if _use_rust else "python",
                 }
             else:
-                return {"status": "error", "error": str(e)}
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "pipeline": "rust" if _use_rust else "python",
+                }
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
         """Safely extract file ID from either dict or File model."""

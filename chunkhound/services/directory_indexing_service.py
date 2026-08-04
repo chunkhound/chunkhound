@@ -119,7 +119,15 @@ class DirectoryIndexingService:
 
             # Embedding generation (extracted from run.py:85-88, 287-312)
             # Rust pipeline embeds before write — skip redundant embed pass.
-            if not no_embeddings and not _rust_pipeline_active():
+            # Gated on the coordinator's *actual* resolved decision
+            # (process_result["pipeline"]), not the raw feature flag: the
+            # coordinator falls back to Python for non-DuckDB providers
+            # (e.g. LanceDB) and non-standard DB filenames even when the
+            # flag requests Rust, and that fallback still needs this
+            # embed pass — using the raw flag here would silently skip
+            # embedding generation for those projects.
+            used_rust_pipeline = process_result.get("pipeline") == "rust"
+            if not no_embeddings and not used_rust_pipeline:
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 stats.embeddings_generated = embed_result.get("generated", 0)

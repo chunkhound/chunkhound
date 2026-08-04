@@ -916,7 +916,12 @@ impl IndexingPipeline {
         // A parse-thread error takes priority — it explains the incomplete
         // run even though later stages may have run to partial completion
         // (or hit their own errors) on whatever batches were already sent.
-        let _ = parse_join;
+        // A panic (as opposed to a returned Err stashed in `error`) never
+        // sets `error`, so it must be checked explicitly here — otherwise
+        // the run falls through and reports success on an incomplete parse.
+        if parse_join.is_err() {
+            return Err("pipeline parse thread panicked".to_string());
+        }
         if let Some(e) = Arc::try_unwrap(error).unwrap().into_inner().unwrap() {
             return Err(e);
         }
@@ -1042,6 +1047,14 @@ impl IndexingPipeline {
             .map_err(|e| e.to_string())?;
 
         let tuple_list: &Bound<'_, PyList> = ret.downcast::<PyList>().map_err(|e| e.to_string())?;
+
+        if tuple_list.len() != batch.len() {
+            return Err(format!(
+                "parse callback returned {} results for {} paths",
+                tuple_list.len(),
+                batch.len()
+            ));
+        }
 
         let mut parsed = Vec::with_capacity(batch.len());
 
