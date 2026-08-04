@@ -468,9 +468,10 @@ async def run_rust_pipeline(
 ) -> dict[str, Any]:
     """Run the Rust indexing pipeline and return coordinator-compatible stats.
 
-    Called from IndexingCoordinator.process_directory() Phase 3, opt-in via
-    ``CHUNKHOUND_USE_RUST=1`` (default is the Python path).  Offloads the
-    call to ``asyncio.to_thread`` so the event loop stays responsive.
+    Called from IndexingCoordinator.process_directory() Phase 3. The Rust
+    pipeline is the default path; set ``CHUNKHOUND_USE_RUST=0`` to opt out
+    and fall back to the Python path.  Offloads the call to
+    ``asyncio.to_thread`` so the event loop stays responsive.
 
     Args:
         files_to_process: List of (path, content_hash) tuples from change detection.
