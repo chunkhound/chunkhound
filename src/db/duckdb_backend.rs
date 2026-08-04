@@ -1141,7 +1141,22 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                         let _ = std::fs::remove_file(&intent_path);
                     }
                     "phase2" => {
+                        // The final compact_path -> db_path rename may not
+                        // have completed before the crash. If compact_path
+                        // still exists, the rename never happened (or only
+                        // partially did) — finish it before touching the
+                        // pre-compaction backup, otherwise db_path is left
+                        // missing and the next open() below would silently
+                        // create an empty database.
                         let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
+                        let compact_path =
+                            PathBuf::from(format!("{}.compact", self.config.db_path));
+                        if compact_path.exists() {
+                            if db_path.exists() {
+                                let _ = std::fs::remove_file(&db_path);
+                            }
+                            let _ = std::fs::rename(&compact_path, &db_path);
+                        }
                         let _ = std::fs::remove_file(&old_path);
                         let _ = std::fs::remove_file(&intent_path);
                     }

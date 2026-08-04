@@ -1931,26 +1931,33 @@ class IndexingCoordinator(BaseService):
                 # SerialExecutor holds its own separate thread-local DuckDB
                 # connection (created lazily on its worker thread), which a
                 # bare connection_manager close would leave dangling.
+                released_for_rust = False
                 if self._db is not None and self._db.is_connected:
                     self._db.release_for_rust_pipeline()
+                    released_for_rust = True
 
-                rust_stats = await run_rust_pipeline(
-                    files_to_process,
-                    db_path=db_path,
-                    project_root=directory,
-                    force_reindex=force_reindex,
-                    skip_embeddings=skip_embeddings,
-                    do_cleanup=do_cleanup,
-                    config=self.config,
-                    progress_callback=_progress_cb,
-                )
-
-                # Reopen the Python-side DuckDB connection now that the Rust
-                # pipeline has finished and released its write lock.
-                # release_for_rust_pipeline() kept the executor alive; connect()
-                # creates a fresh thread-local connection inside that executor.
-                if self._db is not None:
-                    self._db.connect()
+                try:
+                    rust_stats = await run_rust_pipeline(
+                        files_to_process,
+                        db_path=db_path,
+                        project_root=directory,
+                        force_reindex=force_reindex,
+                        skip_embeddings=skip_embeddings,
+                        do_cleanup=do_cleanup,
+                        config=self.config,
+                        progress_callback=_progress_cb,
+                    )
+                finally:
+                    # Reopen the Python-side DuckDB connection whether or not
+                    # the Rust pipeline succeeded — release_for_rust_pipeline()
+                    # kept the executor alive; connect() creates a fresh
+                    # thread-local connection inside that executor. Without
+                    # this in a finally, a raised exception (embed/DB-write
+                    # failure, Rust panic surfaced as PyErr, etc.) leaves
+                    # self._db permanently disconnected for the rest of the
+                    # process's life.
+                    if released_for_rust and self._db is not None:
+                        self._db.connect()
 
                 agg_total_files = int(rust_stats.get("total_files", 0))
                 agg_total_chunks = int(rust_stats.get("total_chunks", 0))

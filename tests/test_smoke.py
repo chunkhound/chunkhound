@@ -5,9 +5,14 @@ Smoke tests to catch basic import and startup failures.
 These tests are designed to catch crashes that occur during:
 1. Module import time (like type annotation syntax errors)
 2. CLI command initialization
-3. Basic server startup
+3. Parser loading
 
-They run quickly and should be part of every test run.
+They run quickly and should be part of every test run. MCP subprocess
+startup/protocol tests live separately in ``tests/mcp/`` since they are
+inherently slower and more environment-sensitive::
+
+    uv run pytest tests/test_smoke.py -v   # fast, reliable
+    uv run pytest tests/mcp/ -v            # when MCP code changes
 """
 
 import importlib
