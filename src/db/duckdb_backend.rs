@@ -1482,22 +1482,30 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // DuckDB VSS HNSW builds can be CPU-intensive.  Increase the thread
         // count and disable any internal timeout so large tables don't fail.
         let _ = conn.execute_batch("SET threads = 8");
-        for (dims, metric) in &dims_metrics {
-            let hnsw_name = format!("idx_hnsw_{dims}");
-            conn.execute_batch(&format!(
-                "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"embeddings_{dims}\" USING HNSW (embedding) WITH (metric = '{metric}')"
-            ))?;
-        }
-        if !dims_metrics.is_empty() {
-            conn.execute_batch("CHECKPOINT")?;
-        }
+        // Build inside a closure so a failed CREATE INDEX/CHECKPOINT can't
+        // skip the thread-count restore below via an early `?` return —
+        // otherwise this connection would stay pinned at 8 threads and
+        // compete with a concurrently-running embed thread pool.
+        let build_result: Result<(), DbError> = (|| {
+            for (dims, metric) in &dims_metrics {
+                let hnsw_name = format!("idx_hnsw_{dims}");
+                conn.execute_batch(&format!(
+                    "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"embeddings_{dims}\" USING HNSW (embedding) WITH (metric = '{metric}')"
+                ))?;
+            }
+            if !dims_metrics.is_empty() {
+                conn.execute_batch("CHECKPOINT")?;
+            }
+            Ok(())
+        })();
         // Restore a conservative thread count — this connection may still be
         // used for a concurrent write loop (the streaming pipeline's store
         // thread writes/checkpoints while the embed thread's rayon pool is
         // active), which must not compete with DuckDB's own internal
-        // parallelism for this machine's cores.
+        // parallelism for this machine's cores. Unconditional: must run
+        // whether or not the index build above succeeded.
         let _ = conn.execute_batch("SET threads = 1");
-        Ok(())
+        build_result
     }
 }
 

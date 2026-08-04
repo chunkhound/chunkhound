@@ -694,14 +694,6 @@ impl IndexingPipeline {
                 })();
                 log::debug!("[pipe] store blocked: embed-recv {store_wait_s:.1}s");
 
-                if let Err(e) = write_result {
-                    // Best-effort: restore HNSW indexes over whatever was
-                    // already committed before surfacing the error
-                    // (mirrors the single-shot path's Invariant 14 restore).
-                    let _ = backend.close();
-                    return Err(e);
-                }
-
                 // Check compaction need BEFORE building the HNSW index, not
                 // after. `run_compaction()`'s EXPORT/IMPORT rewrite copies
                 // `files`/`chunks`/`embeddings_*` into a fresh database with
@@ -715,15 +707,33 @@ impl IndexingPipeline {
                 // during compaction, then building it again from scratch —
                 // do not restore that call here without also removing the
                 // `run_compaction()` branch's reliance on `reopen()`.
-                let needs_compaction = backend.needs_compaction().map_err(|e| e.to_string())?;
-                if needs_compaction {
-                    emit_progress_gil(&store_progress_cb, "write-compact", 0, 1);
-                    backend.run_compaction().map_err(|e| e.to_string())?;
-                } else {
-                    emit_progress_gil(&store_progress_cb, "write-index", 0, 1);
-                    backend
-                        .ensure_all_hnsw_indexes()
-                        .map_err(|e| e.to_string())?;
+                //
+                // Chained onto `write_result` (rather than a separate `?`
+                // per step) so that a failure at any point — the write loop
+                // itself, or compaction/index-rebuild after it — funnels
+                // through the single best-effort `backend.close()` below
+                // instead of returning early with the connection left open
+                // and HNSW indexes un-restored (Invariant 14).
+                let post_write_result: Result<(), String> = write_result.and_then(|()| {
+                    let needs_compaction = backend.needs_compaction().map_err(|e| e.to_string())?;
+                    if needs_compaction {
+                        emit_progress_gil(&store_progress_cb, "write-compact", 0, 1);
+                        backend.run_compaction().map_err(|e| e.to_string())?;
+                    } else {
+                        emit_progress_gil(&store_progress_cb, "write-index", 0, 1);
+                        backend
+                            .ensure_all_hnsw_indexes()
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                });
+
+                if let Err(e) = post_write_result {
+                    // Best-effort: restore HNSW indexes over whatever was
+                    // already committed before surfacing the error
+                    // (mirrors the single-shot path's Invariant 14 restore).
+                    let _ = backend.close();
+                    return Err(e);
                 }
 
                 backend.close().map_err(|e| e.to_string())?;

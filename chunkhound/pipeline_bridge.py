@@ -569,7 +569,17 @@ async def run_rust_pipeline(
         incremental=not force_reindex,
     )
 
-    # Map PipelineReport → coordinator stats dict
+    # Map PipelineReport → coordinator stats dict.
+    # `report.errors` entries are Rust-formatted as "{path}: {message}"
+    # (see src/pipeline/pipeline.rs's parse_errors accumulator) — split back
+    # into (file, error) so callers like IndexingCoordinator can log the
+    # actual failing path instead of "Failed to process None: ...".
+    def _split_rust_error(err: str) -> dict[str, str | None]:
+        file, sep, message = err.partition(": ")
+        if not sep:
+            return {"file": None, "error": err}
+        return {"file": file, "error": message}
+
     return {
         "total_files": report.files_processed,
         "total_chunks": report.chunks_written,
@@ -577,7 +587,7 @@ async def run_rust_pipeline(
         "elapsed_secs": report.elapsed_secs,
         "files_skipped_unchanged": report.files_skipped,
         "errors": [
-            {"file": None, "error": err}
+            _split_rust_error(err)
             for err in (list(report.errors) if report.errors else [])
         ],
     }

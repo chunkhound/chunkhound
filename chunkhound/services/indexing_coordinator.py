@@ -1618,6 +1618,15 @@ class IndexingCoordinator(BaseService):
                     "pipeline": "rust" if _use_rust else "python",
                 }
 
+            # Skip coordinator-side compaction only for this call's Rust run —
+            # the Rust pipeline runs its own compaction via
+            # DbBackend::run_compaction() internally. Set unconditionally
+            # (not just inside the `if _use_rust` branch below) since
+            # `self` is a cached/reused coordinator: without a reset here, a
+            # later Python-path call on the same instance would inherit a
+            # stale `True` from a prior Rust run and skip compaction forever.
+            self._skip_compaction = _use_rust
+
             # ── Rust path (CHUNKHOUND_USE_RUST=1) ─────────────────
             # Detected at top of process_directory to gate cleanup + change detection.
             if _use_rust:
@@ -1984,10 +1993,6 @@ class IndexingCoordinator(BaseService):
                 # skipped_by_hash only covers mtime-changed-but-hash-matched files;
                 # the majority (mtime-matched) are not counted in any Rust stat.
                 skipped_unchanged = len(files) - agg_total_files
-
-                # Skip coordinator-side compaction — the Rust pipeline runs its
-                # own compaction via DbBackend::run_compaction() internally.
-                self._skip_compaction = True
 
             else:
                 # ── Python path (existing) ─────────────────────────

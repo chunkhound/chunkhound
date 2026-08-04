@@ -146,7 +146,7 @@ class DirectoryIndexingService:
             # Must be last: compaction produces a clean DB file, and HNSW
             # is built once on the clean DB instead of being rewritten on
             # every checkpoint.
-            await self._ensure_hnsw_indexes()
+            await self._ensure_hnsw_indexes(used_rust_pipeline)
 
             stats.processing_time = time.time() - start_time
 
@@ -181,10 +181,19 @@ class DirectoryIndexingService:
                 self.progress.update(task, total=1, completed=1, info="done")
             logger.info(f"Dropped HNSW indexes in {elapsed_ms:.0f}ms")
 
-    async def _ensure_hnsw_indexes(self) -> None:
-        """Rebuild HNSW indexes after bulk indexing completes."""
-        # Rust pipeline handles HNSW internally — skip Python-side HNSW ops.
-        if _rust_pipeline_active():
+    async def _ensure_hnsw_indexes(self, used_rust_pipeline: bool) -> None:
+        """Rebuild HNSW indexes after bulk indexing completes.
+
+        Args:
+            used_rust_pipeline: the coordinator's actual resolved decision
+                for this run (`process_result["pipeline"] == "rust"`), not
+                the raw feature flag. The Rust pipeline handles HNSW
+                internally when it actually ran — but on the fallback path
+                (non-DuckDB provider or non-standard db filename) this must
+                still run, otherwise a newly-created embedding table from
+                that fallback run never gets its HNSW index built.
+        """
+        if used_rust_pipeline:
             return
         db = getattr(self.indexing_coordinator, "_db", None)
         if db is not None and hasattr(db, "ensure_all_hnsw_indexes"):
