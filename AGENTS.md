@@ -142,21 +142,47 @@ rust-test:  make rust-test    # cargo test
 
 # Build the native extension (required before running tests that import chunkhound_native)
 #
-# CI (has internet): DUCKDB_DOWNLOAD_LIB=1 downloads the precompiled shared library from GitHub.
-#   DUCKDB_DOWNLOAD_LIB=1 uv run maturin develop
+# DuckDB is linked dynamically on every platform (Linux/macOS/Windows), and the
+# extension resolves it relative to its own location -- not via an absolute
+# build-machine path or an external environment variable like LD_LIBRARY_PATH.
+# Same recipe everywhere:
 #
-# Local (no internet / air-gapped): reuse the static library compiled by a prior release build.
-#   The .a lives under target/release/build/libduckdb-sys-*/out/libduckdb.a — find it with:
-#     find target/release/build -name "libduckdb.a" | head -1
-#   Then build against it (symlink gives libduckdb-sys the name it expects):
-#     OUT=$(find "$(pwd)/target/release/build" -name "libduckdb.a" -printf "%h\n" | head -1)
-#     ln -sf "$OUT/libduckdb.a" "$OUT/libduckdb_static.a"
-#     DUCKDB_LIB_DIR="$OUT" DUCKDB_STATIC=1 RUSTFLAGS="-C link-arg=-lstdc++" uv run maturin develop --release
+#   1. Download: DUCKDB_DOWNLOAD_LIB=1 fetches the official precompiled shared
+#      library from GitHub (unchanged from before).
+#   2. Link: RUSTFLAGS bakes in a self-relative RPATH at link time --
+#      -Wl,-rpath,$ORIGIN on Linux, -Wl,-rpath,@loader_path on macOS (Windows
+#      has no RPATH concept; see chunkhound_native/__init__.py's
+#      os.add_dll_directory() guard instead).
+#   3. Copy: scripts/copy_duckdb_runtime.py places the downloaded library next
+#      to the compiled extension (source tree + site-packages), since RPATH
+#      only helps if something is actually there to find.
 #
-#   RUSTFLAGS note: -lstdc++ is required when statically linking DuckDB. The static
-#   .a includes C++ exception-handling code (__gxx_personality_v0) that lives in
-#   libstdc++.so. Without this flag the .so builds cleanly but fails at Python import
-#   with "undefined symbol: __gxx_personality_v0".
+#   Linux:
+#     DUCKDB_DOWNLOAD_LIB=1 RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN' uv run maturin develop
+#     uv run python scripts/copy_duckdb_runtime.py
+#
+#   macOS:
+#     DUCKDB_DOWNLOAD_LIB=1 RUSTFLAGS='-C link-arg=-Wl,-rpath,@loader_path' uv run maturin develop
+#     uv run python scripts/copy_duckdb_runtime.py
+#
+#   Windows (no RUSTFLAGS needed):
+#     $env:DUCKDB_DOWNLOAD_LIB = "1"; uv run maturin develop
+#     uv run python scripts/copy_duckdb_runtime.py
+#
+# Published wheels get the same bundling via a wheel-repair step in CI
+# (auditwheel/delocate/delvewheel — see release.yml/release-rc.yml), since
+# those tools only operate on built wheels, not maturin develop's editable
+# installs.
+#
+# Air-gapped / no internet (Linux only, untested since this rewrite): the
+# download step above needs GitHub access. libduckdb-sys still supports
+# linking against a static .a you already have via DUCKDB_LIB_DIR +
+# DUCKDB_STATIC=1 instead of the download+dynamic-link recipe above:
+#   DUCKDB_LIB_DIR=<dir with libduckdb_static.a> DUCKDB_STATIC=1 \
+#     RUSTFLAGS="-C link-arg=-lstdc++" uv run maturin develop --release
+#   (-lstdc++ is required: the static .a's C++ exception-handling code lives
+#   in libstdc++.so; without this flag the .so builds but fails at Python
+#   import with "undefined symbol: __gxx_personality_v0".)
 ```
 
 ## PROJECT_MAINTENANCE

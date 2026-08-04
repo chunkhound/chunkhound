@@ -96,6 +96,8 @@ jobs:
 
       - name: Build native wheel
         shell: bash
+        env:
+          DUCKDB_DOWNLOAD_LIB: "1"
         run: |
           # maturin build has no --set-version flag; it reads the wheel version from
           # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
@@ -122,7 +124,38 @@ jobs:
           # Python package's pyproject.toml for the build; nothing else in this job
           # needs it (the uv commands above already use --no-project).
           mv pyproject.toml pyproject.toml.hidden
-          uvx --python 3.12 maturin build --release --out dist/
+          # maturin's repair step hard-links its staging copy
+          # (target/maturin/lib*.so) to the real cargo output
+          # (target/release/deps/lib*.so) and has patchelf rewrite that
+          # in-place file's RPATH/NEEDED entries for the wheel -- which,
+          # because of the hard link, permanently mutates the cached cargo
+          # artifact itself. Cargo's fingerprint then considers the crate
+          # unchanged and won't relink it, so a second build against the
+          # same warm `target/` cache fails with "Cannot repair wheel,
+          # because required library lib*-<hash>.so could not be located"
+          # -- reproduced directly. This specifically bites a manual re-run
+          # of this job for the *same* tag (Cargo.toml's version patch below
+          # means a genuinely new tag usually gets a fresh fingerprint, but
+          # a rerun of a failed/retried job for one tag does not).
+          # Force a fresh link of just this crate every time; the expensive
+          # dependency compilation (duckdb, arrow, ...) stays cached.
+          cargo clean -p chunkhound_native --release
+          # --auditwheel repair makes maturin bundle DuckDB's shared library
+          # into the wheel and rewrite the extension's link path to resolve
+          # it relative to itself (auditwheel-equivalent on Linux, its own
+          # native re-implementations of delocate/delvewheel on macOS/Windows
+          # -- see maturin >=1.13). Without this flag maturin only *warns*
+          # about the external dependency on macOS/Windows instead of fixing
+          # it (Linux's default is already "repair"; passing it explicitly
+          # everywhere keeps the three platforms' behavior identical).
+          # On Linux, repair shells out to `patchelf`, which is an optional
+          # maturin extra (not a default dependency) -- request it explicitly
+          # or the build fails with "Failed to execute 'patchelf'".
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            uvx --python 3.12 --from 'maturin[patchelf]' maturin build --release --auditwheel repair --out dist/
+          else
+            uvx --python 3.12 maturin build --release --auditwheel repair --out dist/
+          fi
           mv pyproject.toml.hidden pyproject.toml
 
       - name: Smoke test native wheel

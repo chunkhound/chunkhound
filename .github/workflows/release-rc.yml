@@ -117,6 +117,8 @@ jobs:
 
       - name: Build native wheel
         shell: bash
+        env:
+          DUCKDB_DOWNLOAD_LIB: "1"
         run: |
           # maturin build has no --set-version flag; it reads the wheel version from
           # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
@@ -143,8 +145,36 @@ jobs:
           # Python package's pyproject.toml for the build; nothing else in this job
           # needs it (the uv commands above already use --no-project).
           mv pyproject.toml pyproject.toml.hidden
-          uvx --python 3.12 maturin build --release --out dist/
+          # See release.yml's equivalent step: maturin's repair hard-links its
+          # staging copy to the real cargo output and patches that in place,
+          # which permanently mutates the cached build artifact -- a second
+          # build against the same warm target/ cache (bites a manual re-run
+          # of this job for the same tag) fails without this clean.
+          cargo clean -p chunkhound_native --release
+          # See release.yml's equivalent step for the --auditwheel repair rationale.
+          # On Linux, repair shells out to `patchelf`, an optional maturin
+          # extra (not installed by default) -- request it explicitly or the
+          # build fails with "Failed to execute 'patchelf'".
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            uvx --python 3.12 --from 'maturin[patchelf]' maturin build --release --auditwheel repair --out dist/
+          else
+            uvx --python 3.12 maturin build --release --auditwheel repair --out dist/
+          fi
           mv pyproject.toml.hidden pyproject.toml
+
+      - name: Smoke test native wheel
+        shell: bash
+        run: |
+          # See release.yml's equivalent step: this catches a wheel that
+          # built successfully but doesn't actually import (e.g. a
+          # macOS/Windows repair edge case) before it reaches PyPI -- alpha/
+          # beta/rc tags publish straight from this workflow with no other
+          # gate on the native wheel's importability.
+          WHEEL_DIR="$(pwd)/dist"
+          TMP_DIR="$(mktemp -d)"
+          cd "$TMP_DIR"
+          uv run --no-project --python 3.12 --with "$WHEEL_DIR"/chunkhound_native-*.whl \
+            python -c "from chunkhound_native import scan_files; r = scan_files('.', ['py']); assert isinstance(r, list)"
 
       - name: Upload native wheel artifact
         uses: actions/upload-artifact@v4

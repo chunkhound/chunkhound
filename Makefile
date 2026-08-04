@@ -40,7 +40,7 @@ test:
 
 rust-check:
 	cargo fmt --check
-	cargo clippy --all-targets -- -D warnings
+	DUCKDB_DOWNLOAD_LIB=1 cargo clippy --all-targets -- -D warnings
 
 rust-test:
-	cargo test
+	DUCKDB_DOWNLOAD_LIB=1 cargo test

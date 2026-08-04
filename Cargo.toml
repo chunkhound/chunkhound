@@ -14,9 +14,10 @@ pyo3       = { version = "0.22", features = ["extension-module", "abi3-py310"] }
 rayon      = "1"
 ignore     = "0.4"
 # duckdb build mode is controlled by env vars, not Cargo features (duckdb default = []).
-# CI: DUCKDB_DOWNLOAD_LIB=1  — downloads precompiled shared lib from GitHub.
-# Local/air-gapped: DUCKDB_LIB_DIR + DUCKDB_STATIC=1 — reuses the static .a from a prior
-#   release build. See RUST_COMMANDS in AGENTS.md for the full command.
+# DUCKDB_DOWNLOAD_LIB=1 downloads the precompiled shared lib from GitHub; it's
+# linked dynamically and resolved via a self-relative RPATH/DLL search set up
+# by RUSTFLAGS and scripts/copy_duckdb_runtime.py. See RUST_COMMANDS in
+# AGENTS.md for the full per-platform recipe.
 duckdb     = { version = "1" }
 log        = "0.4"
 pyo3-log   = "0.11"
