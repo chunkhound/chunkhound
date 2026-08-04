@@ -10,8 +10,8 @@ build missing an expected symbol.
 """
 
 import importlib
-import shutil
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -40,24 +40,30 @@ def _restore_real_native_module():
     import chunkhound_native  # noqa: F401
 
 
-def test_missing_duckdb_library_raises_clear_error(monkeypatch, tmp_path):
+def test_missing_duckdb_library_raises_clear_error(monkeypatch):
     """Simulates an install where the bundled runtime library never made it
     onto disk, regardless of whatever the dev tree happens to have copied
     there already. Moved fully outside pkg_dir, not just renamed in place --
     the diagnostic globs for "*duckdb*", which a same-directory rename would
-    still match."""
+    still match. Moved into a sibling of pkg_dir (not pytest's tmp_path,
+    which lives under the OS temp dir) so the move stays on the same drive
+    -- on Windows, a plain rename works even on a DLL already loaded into
+    this process, but a cross-drive move falls back to copy+delete, and
+    deleting a loaded DLL is denied."""
     import chunkhound_native as native_pkg
 
     pkg_dir = Path(native_pkg.__file__).resolve().parent
     bundled = list(pkg_dir.glob("*duckdb*"))
-    moved = [(p, tmp_path / p.name) for p in bundled]
-    for src, dst in moved:
-        shutil.move(str(src), str(dst))
-    try:
-        err = _import_with_broken_extension(monkeypatch)
-    finally:
+    with tempfile.TemporaryDirectory(dir=pkg_dir.parent) as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        moved = [(p, tmp_path / p.name) for p in bundled]
         for src, dst in moved:
-            shutil.move(str(dst), str(src))
+            src.rename(dst)
+        try:
+            err = _import_with_broken_extension(monkeypatch)
+        finally:
+            for src, dst in moved:
+                dst.rename(src)
 
     message = str(err)
     assert "bundled DuckDB" in message
