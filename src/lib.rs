@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::useless_conversion)]
 mod db;
-mod db_writer;
 mod error;
 mod types;
 
@@ -131,7 +130,6 @@ fn chunkhound_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pyo3_log::init();
 
     m.add_function(wrap_pyfunction!(scan_files, m)?)?;
-    m.add_class::<db_writer::RustDbWriter>()?;
 
     #[cfg(feature = "rust-pipeline")]
     {

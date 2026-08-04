@@ -61,11 +61,6 @@ except ImportError as e:
 scan_files = _native_module.scan_files
 
 try:
-    from .chunkhound_native import RustDbWriter
-except ImportError:
-    RustDbWriter = None  # native extension not built; callers should guard with `if RustDbWriter`
-
-try:
     from .chunkhound_native import (  # type: ignore[import-untyped]
         IndexingPipeline,
         ParseCallConfig,

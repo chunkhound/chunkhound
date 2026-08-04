@@ -4,7 +4,29 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::PathBuf;
 
-use crate::db_writer::{extract_opt, extract_or};
+/// Extract an optional field from a PyDict — returns None if key is absent or value is Python None.
+fn extract_opt<'py, T: FromPyObject<'py>>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<Option<T>> {
+    match dict.get_item(key)? {
+        None => Ok(None),
+        Some(v) if v.is_none() => Ok(None),
+        Some(v) => Ok(Some(v.extract()?)),
+    }
+}
+
+/// Extract a field from a PyDict, falling back to `default` if the key is absent.
+fn extract_or<'py, T: FromPyObject<'py>>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+    default: T,
+) -> PyResult<T> {
+    match dict.get_item(key)? {
+        Some(v) => v.extract(),
+        None => Ok(default),
+    }
+}
 
 /// Parsing-tuning flags pass through to the parse callback unchanged.
 #[derive(Debug, Clone)]

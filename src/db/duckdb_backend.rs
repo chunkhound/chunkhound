@@ -84,7 +84,7 @@ impl DuckDbHnswBackend {
     // SCHEMA PARITY: This DDL must stay in sync with the Python canonical source at
     // chunkhound/providers/database/duckdb/schema_constants.py (_FILES_TABLE_COLUMNS,
     // _CHUNKS_TABLE_COLUMNS, _SCHEMA_VERSION_TABLE_COLUMNS).  The cross-check test
-    // tests/test_rust_db_writer.py::TestSchemaParity catches column-level drift at CI time.
+    // tests/contracts/test_schema_parity.py::TestSchemaParity catches column-level drift at CI time.
     // When adding or renaming columns, update schema_constants.py FIRST, then mirror here.
     fn setup_schema(conn: &Connection) -> Result<(), DbError> {
         conn.execute_batch(
@@ -1732,6 +1732,362 @@ mod hnsw_metric_tests {
         assert_eq!(
             after[0].metric, "l2sq",
             "ensure_all_hnsw_indexes must preserve the original non-cosine metric"
+        );
+    }
+
+    #[test]
+    fn ensure_all_hnsw_indexes_restores_index_dropped_outside_lifecycle() {
+        // Crash between write_batch's HNSW drop (Step 2) and recreate (Step 5) leaves
+        // embeddings_N tables with data but no HNSW index. open() must detect this via
+        // an unconditional ensure_all_hnsw_indexes() call and restore it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let db_path_str = db_path.to_string_lossy().into_owned();
+
+        let mut backend1 = DuckDbHnswBackend::new(test_support::config(db_path_str.clone()));
+        backend1.open().expect("open");
+        if !backend1.has_vss {
+            eprintln!("VSS extension unavailable, skipping");
+            return;
+        }
+        backend1
+            .write_batch(&test_support::embedding_batch("a", 128, 50))
+            .expect("write");
+        backend1.close().expect("close");
+
+        // Simulate a crash: drop the HNSW index behind the backend's back.
+        {
+            let conn = Connection::open(&db_path).expect("reopen raw");
+            let _ = conn.execute_batch("LOAD vss");
+            conn.execute_batch("DROP INDEX IF EXISTS idx_hnsw_128")
+                .expect("drop index");
+            conn.execute_batch("CHECKPOINT").expect("checkpoint");
+            let remaining = DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover");
+            assert!(
+                remaining.is_empty(),
+                "expected HNSW index to be absent after manual drop"
+            );
+        }
+
+        let mut backend2 = DuckDbHnswBackend::new(test_support::config(db_path_str));
+        backend2.open().expect("open");
+        backend2.close().expect("close");
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let _ = conn.execute_batch("LOAD vss");
+        let restored = DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover");
+        assert!(
+            !restored.is_empty(),
+            "HNSW index not restored after crash recovery"
+        );
+    }
+}
+
+/// Shared test fixtures for the modules below — kept separate from
+/// `hnsw_metric_tests` because it's used by three otherwise-unrelated modules.
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    pub(super) fn config(db_path: String) -> DbConfig {
+        DbConfig {
+            db_path,
+            compaction_batch_threshold: 50,
+            compaction_threshold: 0.30,
+            compaction_min_size_bytes: 52_428_800,
+        }
+    }
+
+    pub(super) fn config_with_threshold(
+        db_path: String,
+        compaction_batch_threshold: u32,
+    ) -> DbConfig {
+        DbConfig {
+            compaction_batch_threshold,
+            ..config(db_path)
+        }
+    }
+
+    fn chunk_record(code: &str, embedding_dims: Option<u32>) -> ChunkRecord {
+        ChunkRecord {
+            chunk_type: "function".into(),
+            symbol: Some("foo".into()),
+            code: code.into(),
+            start_line: Some(1),
+            end_line: Some(2),
+            start_byte: None,
+            end_byte: None,
+            language: Some("python".into()),
+            metadata: None,
+            embedding: embedding_dims.map(|d| vec![0.1f32; d as usize]),
+            provider: embedding_dims.map(|_| "test".to_string()),
+            model: embedding_dims.map(|_| "test-model".to_string()),
+        }
+    }
+
+    pub(super) fn file_record(path: &str, embedding_dims: Option<u32>) -> FileRecord {
+        FileRecord {
+            existing_file_id: None,
+            path: path.into(),
+            mtime: Some(1.0),
+            size_bytes: Some(100),
+            content_hash: Some("abc123".into()),
+            language: Some("python".into()),
+            chunks: vec![chunk_record("def foo(): pass", embedding_dims)],
+        }
+    }
+
+    pub(super) fn single_file_batch(path: &str) -> DbWriterBatch {
+        DbWriterBatch {
+            files: vec![file_record(path, None)],
+            delete_paths: vec![],
+        }
+    }
+
+    /// `count` files, each with one chunk holding a `dims`-wide embedding.
+    /// Paths are prefixed so multiple calls within one test don't collide.
+    pub(super) fn embedding_batch(prefix: &str, dims: u32, count: usize) -> DbWriterBatch {
+        DbWriterBatch {
+            files: (0..count)
+                .map(|i| file_record(&format!("{prefix}{i}.py"), Some(dims)))
+                .collect(),
+            delete_paths: vec![],
+        }
+    }
+}
+
+/// Crash recovery via `.swap_intent` files (Invariant 17) — ported from the
+/// deleted `RustDbWriter` PyO3 wrapper's test suite so these invariants stay
+/// covered without going through PyO3.
+#[cfg(test)]
+mod crash_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn pre_swap_intent_cleared_on_open() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+        std::fs::write(&intent_path, "pre-swap").expect("write intent");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(!intent_path.exists(), "intent file must be removed");
+    }
+
+    #[test]
+    fn phase1_intent_restores_old_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        // Simulate a DB that was backed up but not yet swapped: a valid DB
+        // with one seed file lives at old_path.
+        let mut bootstrap = DuckDbHnswBackend::new(test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        bootstrap.open().expect("open");
+        bootstrap
+            .write_batch(&test_support::single_file_batch("seed.py"))
+            .expect("write");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&intent_path, "phase1").expect("write intent");
+
+        // open() should detect phase1 and rename old -> db_path.
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(!intent_path.exists());
+        assert!(!old_path.exists());
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "seed.py must have been recovered from the .old backup"
+        );
+    }
+
+    #[test]
+    fn phase2_intent_removes_old_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        std::fs::write(&old_path, "stale backup marker").expect("write old");
+        std::fs::write(&intent_path, "phase2").expect("write intent");
+
+        // A normal DB must already exist at db_path for open() to succeed.
+        let mut bootstrap =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        bootstrap.open().expect("open");
+        bootstrap.close().expect("close");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(!intent_path.exists());
+        assert!(!old_path.exists());
+    }
+
+    #[test]
+    fn pre_swap_intent_cleared_on_open_db_extension() {
+        // Regression guard: PathBuf::set_extension() on "chunks.db" would produce
+        // "chunks.duckdb.swap_intent" instead of "chunks.db.swap_intent". The
+        // correct implementation builds the intent path via string concatenation.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("chunks.db");
+        let intent_path = tmp.path().join("chunks.db.swap_intent");
+        std::fs::write(&intent_path, "pre-swap").expect("write intent");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(
+            !intent_path.exists(),
+            "intent file must be removed; wrong path construction would leave it untouched"
+        );
+    }
+}
+
+/// Compaction write-counter (fallback signal when two-signal detection has no
+/// stats yet) — ported from the deleted `RustDbWriter` PyO3 wrapper's test suite.
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+
+    #[test]
+    fn needs_compaction_false_initially() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config_with_threshold(db_path, 3));
+        backend.open().expect("open");
+        assert!(!backend.needs_compaction().expect("needs_compaction"));
+        backend.close().expect("close");
+    }
+
+    #[test]
+    fn needs_compaction_true_at_threshold() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config_with_threshold(db_path, 2));
+        backend.open().expect("open");
+        backend
+            .write_batch(&test_support::single_file_batch("a.py"))
+            .expect("write a");
+        backend
+            .write_batch(&test_support::single_file_batch("b.py"))
+            .expect("write b");
+        assert!(backend.needs_compaction().expect("needs_compaction"));
+        backend.close().expect("close");
+    }
+
+    #[test]
+    fn run_compaction_resets_counter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config_with_threshold(db_path, 1));
+        backend.open().expect("open");
+        backend
+            .write_batch(&test_support::single_file_batch("a.py"))
+            .expect("write");
+        assert!(backend.needs_compaction().expect("needs_compaction"));
+        backend.run_compaction().expect("run_compaction");
+        assert!(!backend.needs_compaction().expect("needs_compaction"));
+        backend.close().expect("close");
+    }
+}
+
+/// HNSW lifecycle threshold boundary (Invariant 14) — ported from the deleted
+/// `RustDbWriter` PyO3 wrapper's test suite.
+#[cfg(test)]
+mod hnsw_threshold_tests {
+    use super::*;
+
+    #[test]
+    fn below_threshold_no_hnsw_lifecycle() {
+        // Batches with < 50 embeddings must not trigger the HNSW drop/recreate lifecycle.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path));
+        backend.open().expect("open");
+        let result = backend
+            .write_batch(&test_support::embedding_batch("f", 128, 49))
+            .expect("write");
+        backend.close().expect("close");
+
+        assert_eq!(result.embeddings_written, 49);
+    }
+
+    #[test]
+    fn at_threshold_triggers_hnsw_lifecycle() {
+        // Batches with >= 50 embeddings must complete successfully through the
+        // HNSW drop/recreate lifecycle.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path));
+        backend.open().expect("open");
+        let result = backend
+            .write_batch(&test_support::embedding_batch("f", 128, 50))
+            .expect("write");
+        backend.close().expect("close");
+
+        assert_eq!(result.embeddings_written, 50);
+    }
+
+    #[test]
+    fn new_dims_mid_session_gets_hnsw() {
+        // A second embedding dimension introduced mid-session must get its own HNSW
+        // index. Regression for the hnsw_cache staleness bug: once the cache is
+        // primed for dims=128, a batch with a new dims=64 must invalidate the cache
+        // and create an HNSW index for embeddings_64.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let db_path_str = db_path.to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path_str));
+        backend.open().expect("open");
+        if !backend.has_vss {
+            eprintln!("VSS extension unavailable, skipping");
+            return;
+        }
+
+        backend
+            .write_batch(&test_support::embedding_batch("a", 128, 50))
+            .expect("write dims=128");
+        backend
+            .write_batch(&test_support::embedding_batch("b", 64, 50))
+            .expect("write dims=64 (new)");
+        backend
+            .write_batch(&test_support::embedding_batch("c", 64, 50))
+            .expect("write dims=64 (existing)");
+        backend.close().expect("close");
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let _ = conn.execute_batch("LOAD vss");
+        let indexes = DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover");
+        let tables_with_hnsw: std::collections::HashSet<_> =
+            indexes.iter().map(|i| i.table_name.clone()).collect();
+        assert!(
+            tables_with_hnsw.contains("embeddings_128"),
+            "HNSW missing for embeddings_128: {indexes:?}"
+        );
+        assert!(
+            tables_with_hnsw.contains("embeddings_64"),
+            "HNSW missing for embeddings_64 (cache staleness regression): {indexes:?}"
         );
     }
 }
