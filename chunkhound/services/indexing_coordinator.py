@@ -208,6 +208,20 @@ async def run_batch_compaction_boundary(
     if status == "success":
         if stats is not None:
             stats.db_compactions += 1
+            stats.compaction_ran = True
+            # This boundary can run twice per directory index (after
+            # chunking, after embeddings) — keep the first before-size and
+            # the latest after-size so the reported ratio spans the whole
+            # run, not just its final boundary.
+            if stats.compaction_size_before is None:
+                stats.compaction_size_before = compaction.get("size_before")
+            stats.compaction_size_after = compaction.get("size_after")
+            before = stats.compaction_size_before
+            after = stats.compaction_size_after
+            if before and after is not None:
+                stats.compaction_reduction_pct = (before - after) / before * 100.0
+            else:
+                stats.compaction_reduction_pct = 0.0
         return
     if status == "skipped":
         return
@@ -1605,6 +1619,18 @@ class IndexingCoordinator(BaseService):
             agg_skipped_paths: list[tuple[str, str]] = []
             _diff_elapsed = 0.0
 
+            # Compaction outcome for this run (Rust path only — the Python
+            # path's compaction happens later, at the DirectoryIndexingService
+            # batch-compaction boundary via run_batch_compaction_boundary(),
+            # which writes directly onto IndexingStats instead of through
+            # this return dict). Only populated when a progress instance is
+            # attached, since only the progress-callback phases below
+            # observe which branch (write-compact vs write-index) Rust took.
+            _compact_ran = False
+            _compact_size_before: int | None = None
+            _compact_size_after: int | None = None
+            _compact_reduction_pct: float | None = None
+
             # Pre-check disk usage limit before either pipeline starts.
             # _store_parsed_results checks this for the Python path, but the
             # Rust pipeline bypasses that function — a pre-check here covers both.
@@ -1675,10 +1701,6 @@ class IndexingCoordinator(BaseService):
                     _diff_start = 0.0
                     _diff_reset_done = False
                     _parse_reset_done = False
-                    # True only when the initial "parse" callback has total > 0.
-                    # Rust always fires parse(0, total) at startup even for empty
-                    # runs, so _parse_reset_done alone can't distinguish 0-file runs.
-                    _any_files_to_parse = False
 
                     # Pre-create all write sub-phase bars (no need for a
                     # separate "prepare" bar — prepare is sub-second).
@@ -1697,7 +1719,6 @@ class IndexingCoordinator(BaseService):
                     # compaction phase handlers can stat the file for a
                     # before/after size comparison without touching self._db.
                     _compact_db_file = str(self._db.db_path)
-                    _compact_size_before: int | None = None
                     _compact_info: str | None = None
 
                     def _progress_cb(
@@ -1716,8 +1737,10 @@ class IndexingCoordinator(BaseService):
                             _diff_reset_done, \
                             _diff_elapsed, \
                             _parse_reset_done, \
-                            _any_files_to_parse, \
+                            _compact_ran, \
                             _compact_size_before, \
+                            _compact_size_after, \
+                            _compact_reduction_pct, \
                             _compact_info
                         if phase == "diff":
                             if _diff_task is not None:
@@ -1746,11 +1769,6 @@ class IndexingCoordinator(BaseService):
                             if not _parse_reset_done:
                                 _pr.reset(_pt, total=max(total, 1), start=True)
                                 _parse_reset_done = True
-                                # Rust fires parse(0, total) unconditionally at
-                                # startup; only set _any_files_to_parse when
-                                # there are actual files to process.
-                                if total > 0:
-                                    _any_files_to_parse = True
                             _pr.update(_pt, completed=current,
                                        info=f"{current}/{total} parsed")
                             _update_speed_field(_pr, _pt, "files/min")
@@ -1825,7 +1843,13 @@ class IndexingCoordinator(BaseService):
                                 _pr.update(_data_task, info="writing...")
                         elif phase == "write-index":
                             # Data write done; compaction wasn't needed —
-                            # build the HNSW index directly.
+                            # build the HNSW index directly. The compact bar
+                            # never runs on this path — resolve it to "not
+                            # needed" right away (reset+finish together) so
+                            # it doesn't sit unstarted and then get stamped
+                            # "done" by write-done/done below, which used to
+                            # render as a started-but-never-ticked zombie bar
+                            # (elapsed stuck at "-:--:--" with a live spinner).
                             _pr.update(
                                 _data_task,
                                 completed=_data_task_total,
@@ -1833,67 +1857,89 @@ class IndexingCoordinator(BaseService):
                             )
                             _pr.reset(_index_task, start=True)
                             _pr.update(_index_task, info="building...")
+                            _pr.reset(_compact_task, start=True)
+                            _pr.update(_compact_task, completed=1, info="not needed")
+                            _compact_info = "not needed"
                         elif phase == "write-compact":
                             # Data write done; compaction is needed.
                             # Compaction rebuilds the HNSW index as part of
                             # its own EXPORT/IMPORT rewrite, so "write-index"
-                            # never fires in this path — marking the index
-                            # bar "done" here (before compaction has actually
-                            # run) would be premature. It's left at its
-                            # initial not-started state; "write-done"/"done"
-                            # mark it complete alongside everything else once
-                            # compaction (and the reindex within it) finishes.
+                            # never fires in this path — the index bar never
+                            # runs on its own here. Resolve it immediately
+                            # (mirrors the write-index branch above) instead
+                            # of leaving it unstarted for write-done/done to
+                            # stamp "done" on top of a zombie bar.
                             _pr.update(
                                 _data_task,
                                 completed=_data_task_total,
                                 info="done",
+                            )
+                            _pr.reset(_index_task, start=True)
+                            _pr.update(
+                                _index_task, completed=1, info="included in compaction"
                             )
                             _pr.reset(_compact_task, start=True)
                             _pr.update(
                                 _compact_task, info="compacting (includes index rebuild)..."
                             )
-                            # Only measure compaction size when files were actually
-                            # parsed; otherwise "write-done" falls to the else-branch
-                            # and shows "done" without misleading size numbers.
-                            if _any_files_to_parse:
-                                try:
-                                    _compact_size_before = os.path.getsize(
-                                        _compact_db_file
-                                    )
-                                except OSError:
-                                    _compact_size_before = None
-                            # else: _compact_size_before stays None
+                            _compact_ran = True
+                            # write-compact firing at all already means the
+                            # Rust backend decided real compaction is needed
+                            # (backend.needs_compaction() == True) — that
+                            # decision doesn't depend on whether any files
+                            # were reparsed this run, so always snapshot the
+                            # pre-compaction size.
+                            try:
+                                _compact_size_before = os.path.getsize(
+                                    _compact_db_file
+                                )
+                            except OSError:
+                                _compact_size_before = None
                         elif phase == "write-done":
-                            # Final wrap-up of whatever bars are still active.
+                            # Final wrap-up. _index_task and _compact_task
+                            # were already resolved above by whichever of
+                            # write-index/write-compact actually fired; only
+                            # the compact bar's final size/ratio text (when
+                            # compaction ran) still needs filling in here,
+                            # once compaction has actually completed.
                             _pr.update(
                                 _data_task,
                                 completed=_data_task_total,
                                 info="done",
                             )
-                            _pr.update(_index_task, completed=1, info="done")
-                            if _compact_size_before is not None:
-                                try:
-                                    _compact_size_after = os.path.getsize(
-                                        _compact_db_file
-                                    )
-                                    pct = (
-                                        (_compact_size_before - _compact_size_after)
-                                        / _compact_size_before
-                                        * 100
-                                        if _compact_size_before
-                                        else 0.0
-                                    )
-                                    direction = "smaller" if pct >= 0 else "larger"
-                                    _compact_info = (
-                                        f"{_format_bytes(_compact_size_before)} → "
-                                        f"{_format_bytes(_compact_size_after)} "
-                                        f"({abs(pct):.0f}% {direction})"
-                                    )
-                                except OSError:
+                            if _compact_ran:
+                                if _compact_size_before is not None:
+                                    try:
+                                        _compact_size_after = os.path.getsize(
+                                            _compact_db_file
+                                        )
+                                        pct = (
+                                            (_compact_size_before - _compact_size_after)
+                                            / _compact_size_before
+                                            * 100
+                                            if _compact_size_before
+                                            else 0.0
+                                        )
+                                        direction = "smaller" if pct >= 0 else "larger"
+                                        _compact_info = (
+                                            f"{_format_bytes(_compact_size_before)} → "
+                                            f"{_format_bytes(_compact_size_after)} "
+                                            f"({abs(pct):.0f}% {direction})"
+                                        )
+                                        _compact_reduction_pct = pct
+                                    except OSError:
+                                        _compact_info = "done"
+                                else:
                                     _compact_info = "done"
+                                _pr.update(
+                                    _compact_task, completed=1, info=_compact_info
+                                )
                             else:
-                                _compact_info = "done"
-                            _pr.update(_compact_task, completed=1, info=_compact_info)
+                                # write-index path: the compact bar was
+                                # already resolved to "not needed" above;
+                                # only the index bar (still running since
+                                # write-index started it) needs finishing.
+                                _pr.update(_index_task, completed=1, info="done")
                         elif phase == "done":
                             # Ensure the write bars are at 100%. The parse and
                             # embed bars don't need re-finalizing here — both
@@ -1906,17 +1952,13 @@ class IndexingCoordinator(BaseService):
                             # mapping keyed by TaskID — since `store_task` is
                             # removed above, that indexing silently read the
                             # wrong task's `.total` for any task created after
-                            # the removal.)
+                            # the removal.) _index_task/_compact_task are
+                            # already resolved by write-index/write-compact/
+                            # write-done above — only re-sync _data_task here.
                             _pr.update(
                                 _data_task,
                                 completed=_data_task_total,
                                 info="done",
-                            )
-                            _pr.update(_index_task, completed=1, info="done")
-                            _pr.update(
-                                _compact_task,
-                                completed=1,
-                                info=_compact_info if _compact_info else "done",
                             )
                 else:
                     _progress_cb = None
@@ -2151,6 +2193,10 @@ class IndexingCoordinator(BaseService):
                 "skipped_unchanged": skipped_unchanged,
                 "skipped_filtered": skipped_filtered,
                 "pipeline": "rust" if _use_rust else "python",
+                "compaction_ran": _compact_ran,
+                "compaction_size_before": _compact_size_before,
+                "compaction_size_after": _compact_size_after,
+                "compaction_reduction_pct": _compact_reduction_pct,
             }
 
         except Exception as e:

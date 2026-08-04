@@ -23,6 +23,16 @@ from rich.table import Table
 from rich.text import Text
 
 
+def _format_bytes(n: int) -> str:
+    """Format a byte count as a human-readable string (e.g. '9.8GB')."""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}TB"
+
+
 class RichOutputFormatter:
     """Modern terminal UI formatter using Rich library."""
 
@@ -373,6 +383,19 @@ class RichOutputFormatter:
 
         summary_table.add_row("Time:", f"[cyan]{processing_time:.2f}s[/cyan]")
 
+        if stats.get("compaction_ran"):
+            size_before = stats.get("compaction_size_before")
+            size_after = stats.get("compaction_size_after")
+            reduction_pct = stats.get("compaction_reduction_pct")
+            if size_before is not None and size_after is not None:
+                direction = "smaller" if (reduction_pct or 0.0) >= 0 else "larger"
+                summary_table.add_row(
+                    "Compaction:",
+                    f"[cyan]{_format_bytes(size_before)}[/cyan] → "
+                    f"[cyan]{_format_bytes(size_after)}[/cyan] "
+                    f"({abs(reduction_pct or 0.0):.0f}% {direction})",
+                )
+
         # Add cleanup stats if any
         if stats.get("cleanup_deleted_files", 0) > 0:
             summary_table.add_row(
@@ -402,6 +425,18 @@ class RichOutputFormatter:
             if "embeddings_generated" in stats:
                 print(f"Embeddings: {stats['embeddings_generated']}", file=stream)
             print(f"Time: {processing_time:.2f}s", file=stream)
+            if stats.get("compaction_ran"):
+                size_before = stats.get("compaction_size_before")
+                size_after = stats.get("compaction_size_after")
+                reduction_pct = stats.get("compaction_reduction_pct")
+                if size_before is not None and size_after is not None:
+                    direction = "smaller" if (reduction_pct or 0.0) >= 0 else "larger"
+                    print(
+                        f"Compaction: {_format_bytes(size_before)} -> "
+                        f"{_format_bytes(size_after)} "
+                        f"({abs(reduction_pct or 0.0):.0f}% {direction})",
+                        file=stream,
+                    )
 
         # If we have a list of files skipped due to timeout, display them
         skipped_timeouts = stats.get("skipped_due_to_timeout", [])

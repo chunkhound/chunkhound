@@ -42,6 +42,10 @@ class IndexingStats:
     skipped_unchanged: int = 0
     skipped_filtered: int = 0
     db_compactions: int = 0
+    compaction_ran: bool = False
+    compaction_size_before: int | None = None
+    compaction_size_after: int | None = None
+    compaction_reduction_pct: float | None = None
 
 
 class DirectoryIndexingService:
@@ -271,6 +275,16 @@ class DirectoryIndexingService:
         stats.skipped_due_to_timeout = result.get("skipped_due_to_timeout", [])
         stats.skipped_unchanged = result.get("skipped_unchanged", 0)
         stats.skipped_filtered = result.get("skipped_filtered", 0)
+
+        # Rust-mode compaction (Python-mode compaction is reported directly
+        # onto `stats` by run_batch_compaction_boundary(), called later in
+        # process_directory() — only overwrite here when Rust's pipeline
+        # actually ran compaction internally).
+        if result.get("compaction_ran"):
+            stats.compaction_ran = True
+            stats.compaction_size_before = result.get("compaction_size_before")
+            stats.compaction_size_after = result.get("compaction_size_after")
+            stats.compaction_reduction_pct = result.get("compaction_reduction_pct")
 
         # Cleanup statistics
         cleanup = result.get("cleanup", {})
