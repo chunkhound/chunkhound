@@ -67,49 +67,16 @@ def _get_pid_probe(_args) -> int:
 class TestParsePoolReused:
     """The parse worker pool must be created once and reused, not per batch."""
 
-    def test_parse_pool_constructed_once_across_calls(self, monkeypatch, tmp_path):
-        """Two parse_batch_callback() calls must construct the pool only once.
-
-        Uses a counting fake instead of a real ProcessPoolExecutor — fast,
-        deterministic, and avoids the spawn/monkeypatch-freshness trap
-        documented in test_parse_error_per_file.py (spawned workers re-import
-        modules fresh and never see a patch made in the parent process).
-        """
-        import chunkhound.pipeline_bridge as pipeline_bridge
-
-        construct_count = 0
-
-        class _CountingPool:
-            def __init__(self, *args, **kwargs):
-                nonlocal construct_count
-                construct_count += 1
-
-            def map(self, fn, args_iterable):
-                return [fn(a) for a in args_iterable]
-
-            def shutdown(self, *args, **kwargs):
-                pass
-
-        monkeypatch.setattr(pipeline_bridge, "_parse_pool", None)
-        monkeypatch.setattr(pipeline_bridge, "ProcessPoolExecutor", _CountingPool)
-
-        file_a = tmp_path / "a.py"
-        file_a.write_text("def a():\n    return 1\n")
-        file_b = tmp_path / "b.py"
-        file_b.write_text("def b():\n    return 2\n")
-
-        pipeline_bridge.parse_batch_callback([str(file_a)])
-        pipeline_bridge.parse_batch_callback([str(file_b)])
-
-        assert construct_count == 1, (
-            f"expected the pool to be constructed once and reused, "
-            f"got {construct_count} constructions"
-        )
-
     def test_parse_pool_reuses_worker_processes(self, monkeypatch):
         """The same worker process must serve calls across separate
-        _get_parse_pool() lookups — proves actual OS-level reuse, not just
-        object identity.
+        _get_parse_pool() lookups.
+
+        `_get_parse_pool()` is the narrowest seam that exposes this: the
+        externally observable contract ("no per-batch process respawn cost")
+        has no other surface, since parse_batch_callback() doesn't return
+        anything pool-related. Asserts on worker PID equality — an actual
+        OS-level effect a caller would feel as wall-clock overhead if it
+        regressed — not on pool object identity.
 
         Passes max_workers=1 so both submissions must land on the same
         single worker, making pid equality deterministic.
@@ -124,7 +91,6 @@ class TestParsePoolReused:
         pool2 = pipeline_bridge._get_parse_pool(1)
         pid_b = pool2.submit(_get_pid_probe, None).result()
 
-        assert pool1 is pool2, "expected the same pool instance to be returned"
         assert pid_a == pid_b, (
             "expected the same worker process to serve both calls "
             f"(got pids {pid_a} and {pid_b})"

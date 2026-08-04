@@ -10,6 +10,7 @@ use super::differ::{DbFileEntry, DiffResult};
 use super::report::PipelineReport;
 
 use crate::db::{create_backend, DbBackend, DbConfig};
+use crate::error::DbError;
 use crate::types::{ChunkRecord, DbWriterBatch, FileRecord};
 
 /// The main PyO3 class — Python calls `.run()` from `asyncio.to_thread`.
@@ -311,12 +312,11 @@ impl IndexingPipeline {
             });
         }
 
-        let conn = duckdb::Connection::open(&db_file)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let conn = duckdb::Connection::open(&db_file).map_err(DbError::from)?;
 
         let mut stmt = conn
             .prepare("SELECT id, path, EXTRACT(EPOCH FROM modified_time), content_hash FROM files")
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(DbError::from)?;
 
         let db_entries: Vec<DbFileEntry> = stmt
             .query_map([], |row| {
@@ -331,7 +331,7 @@ impl IndexingPipeline {
                     content_hash,
                 })
             })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+            .map_err(DbError::from)?
             .filter_map(|r| r.ok())
             .collect();
 

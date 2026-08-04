@@ -545,7 +545,7 @@ class TestHnswBoundary:
 
 
 # ---------------------------------------------------------------------------
-# Feature flag (pipeline_bridge)
+# Feature flag (rust_pipeline_flag)
 # ---------------------------------------------------------------------------
 
 class TestFeatureFlag:
@@ -557,7 +557,7 @@ class TestFeatureFlag:
         """
         monkeypatch.delenv("CHUNKHOUND_USE_RUST", raising=False)
 
-        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
+        from chunkhound.providers.database.rust_pipeline_flag import _get_use_rust
 
         assert _get_use_rust() is True
 
@@ -565,7 +565,7 @@ class TestFeatureFlag:
         """CHUNKHOUND_USE_RUST=0 must make _get_use_rust() return False."""
         monkeypatch.setenv("CHUNKHOUND_USE_RUST", "0")
 
-        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
+        from chunkhound.providers.database.rust_pipeline_flag import _get_use_rust
 
         assert _get_use_rust() is False
 
@@ -573,7 +573,7 @@ class TestFeatureFlag:
         """CHUNKHOUND_USE_RUST=1 must make _get_use_rust() return True."""
         monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
 
-        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
+        from chunkhound.providers.database.rust_pipeline_flag import _get_use_rust
 
         assert _get_use_rust() is True
 

@@ -11,7 +11,7 @@ import threading
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 if TYPE_CHECKING:
     from chunkhound.core.detection import Language
@@ -447,6 +447,14 @@ def _detect_embed_concurrency(embedding_cfg: Any) -> int:
     return int(get_concurrency())
 
 
+_T = TypeVar("_T")
+
+
+def _cfg_or(obj: Any, attr: str, default: _T, cast: Callable[[Any], _T]) -> _T:
+    """Read obj.attr, cast it, falling back to default if missing or falsy."""
+    return cast(getattr(obj, attr, default) or default)
+
+
 async def run_rust_pipeline(
     files_to_process: list[tuple[Path, str | None]],
     *,
@@ -488,42 +496,30 @@ async def run_rust_pipeline(
     embedding_cfg = getattr(config, "embedding", None) if config else None
     database_cfg = getattr(config, "database", None) if config else None
 
-    per_file_timeout = float(
-        getattr(indexing_cfg, "per_file_timeout_seconds", 0.0) or 0.0
-    )
-    per_file_timeout_min = int(
-        getattr(indexing_cfg, "per_file_timeout_min_size_kb", 128) or 128
-    )
-    mtime_eps = float(
-        getattr(indexing_cfg, "mtime_epsilon_seconds", 0.01) or 0.01
-    )
+    per_file_timeout = _cfg_or(indexing_cfg, "per_file_timeout_seconds", 0.0, float)
+    per_file_timeout_min = _cfg_or(indexing_cfg, "per_file_timeout_min_size_kb", 128, int)
+    mtime_eps = _cfg_or(indexing_cfg, "mtime_epsilon_seconds", 0.01, float)
     detect_sql = bool(getattr(indexing_cfg, "detect_embedded_sql", True))
-    config_file_threshold = int(
-        getattr(indexing_cfg, "config_file_size_threshold_kb", 20) or 20
+    config_file_threshold = _cfg_or(
+        indexing_cfg, "config_file_size_threshold_kb", 20, int
     )
-    db_batch_size = int(getattr(indexing_cfg, "db_batch_size", 100) or 100)
+    db_batch_size = _cfg_or(indexing_cfg, "db_batch_size", 100, int)
 
     # fragmentation_threshold_pct is a percentage (30.0 = 30%); Rust's
     # compaction_threshold expects a ratio (0.30) — same setting the Python
     # indexing path already honors via --fragmentation-threshold-pct.
-    fragmentation_pct = float(
-        getattr(database_cfg, "fragmentation_threshold_pct", 30.0) or 30.0
-    )
+    fragmentation_pct = _cfg_or(database_cfg, "fragmentation_threshold_pct", 30.0, float)
     compaction_threshold = fragmentation_pct / 100.0
 
-    embedding_provider = str(
-        getattr(embedding_cfg, "provider", "") or ""
-    )
-    embedding_model = str(
-        getattr(embedding_cfg, "model", "") or ""
-    )
+    embedding_provider = _cfg_or(embedding_cfg, "provider", "", str)
+    embedding_model = _cfg_or(embedding_cfg, "model", "", str)
 
-    embed_batch_size = int(getattr(embedding_cfg, "batch_size", 200) or 200)
-    max_concurrent = int(getattr(embedding_cfg, "max_concurrent_batches", 0) or 0)
+    embed_batch_size = _cfg_or(embedding_cfg, "batch_size", 200, int)
+    max_concurrent = _cfg_or(embedding_cfg, "max_concurrent_batches", 0, int)
     if max_concurrent <= 0 and not skip_embeddings:
         max_concurrent = _detect_embed_concurrency(embedding_cfg)
     max_concurrent = max_concurrent or 1
-    _parse_concurrent = int(getattr(indexing_cfg, "max_concurrent", 0) or 0)
+    _parse_concurrent = _cfg_or(indexing_cfg, "max_concurrent", 0, int)
     parse_thread_pool_size = _parse_concurrent if _parse_concurrent > 0 else _default_parse_pool_workers()
     _index_unknown = bool(getattr(indexing_cfg, "index_unknown_files", False))
     disk_usage_limit_mb = getattr(database_cfg, "max_disk_usage_mb", None)

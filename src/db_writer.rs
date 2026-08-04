@@ -17,7 +17,7 @@ pub struct RustDbWriter {
 }
 
 /// Extract an optional field from a PyDict — returns None if key is absent or value is Python None.
-fn extract_opt<'py, T: FromPyObject<'py>>(
+pub(crate) fn extract_opt<'py, T: FromPyObject<'py>>(
     dict: &Bound<'py, PyDict>,
     key: &str,
 ) -> PyResult<Option<T>> {
@@ -33,6 +33,18 @@ fn extract_req<'py, T: FromPyObject<'py>>(dict: &Bound<'py, PyDict>, key: &str) 
     dict.get_item(key)?
         .ok_or_else(|| PyKeyError::new_err(key.to_string()))?
         .extract()
+}
+
+/// Extract a field from a PyDict, falling back to `default` if the key is absent.
+pub(crate) fn extract_or<'py, T: FromPyObject<'py>>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+    default: T,
+) -> PyResult<T> {
+    match dict.get_item(key)? {
+        Some(v) => v.extract(),
+        None => Ok(default),
+    }
 }
 
 /// Extract a DbWriterBatch directly from a Python dict — no json.dumps / serde_json round-trip.

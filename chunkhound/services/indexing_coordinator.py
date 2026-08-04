@@ -1271,7 +1271,7 @@ class IndexingCoordinator(BaseService):
 
         # Detect Rust pipeline early so we can skip DB-queried phases below.
         import chunkhound.utils.file_patterns as _file_patterns
-        from chunkhound.providers.database.pipeline_bridge import _get_use_rust
+        from chunkhound.providers.database.rust_pipeline_flag import _get_use_rust
 
         _use_rust = _get_use_rust()
         if _use_rust:

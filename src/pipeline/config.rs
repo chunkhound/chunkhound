@@ -4,6 +4,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::PathBuf;
 
+use crate::db_writer::{extract_opt, extract_or};
+
 /// Parsing-tuning flags pass through to the parse callback unchanged.
 #[derive(Debug, Clone)]
 pub(crate) struct PipelineConfig {
@@ -49,76 +51,34 @@ impl PipelineConfig {
     /// Extract configuration from a Python dict.
     pub fn from_py_dict(dict: &Bound<'_, PyDict>) -> PyResult<Self> {
         Ok(Self {
-            project_root: get_str_or(dict, "project_root", "")?.into(),
-            db_path: get_str_or(dict, "db_path", "")?.into(),
-            db_batch_size: get_u64_or(dict, "db_batch_size", 100)? as usize,
-            compaction_batch_threshold: get_u64_or(dict, "compaction_batch_threshold", 50)? as u32,
-            compaction_threshold: get_f64_or(dict, "compaction_threshold", 0.30)?,
-            compaction_min_size_mb: get_u64_or(dict, "compaction_min_size_mb", 50)?,
-            disk_usage_limit_mb: get_opt_f64(dict, "disk_usage_limit_mb")?,
-
-            parse_batch_size: get_u64_or(dict, "parse_batch_size", 200)? as usize,
-            parse_thread_pool_size: get_u64_or(dict, "parse_thread_pool_size", 0)? as usize,
-            embed_thread_pool_size: get_u64_or(dict, "embed_thread_pool_size", 0)? as usize,
-            embed_batch_size: get_u64_or(dict, "embed_batch_size", 200)? as usize,
-
-            force_reindex: get_bool_or(dict, "force_reindex", false)?,
-            mtime_epsilon_seconds: get_f64_or(dict, "mtime_epsilon_seconds", 0.01)?,
-            do_cleanup: get_bool_or(dict, "do_cleanup", true)?,
-            skip_embeddings: get_bool_or(dict, "skip_embeddings", false)?,
-
-            per_file_timeout_secs: get_f64_or(dict, "per_file_timeout_secs", 3.0)?,
-            per_file_timeout_min_size_kb: get_u64_or(dict, "per_file_timeout_min_size_kb", 128)?
+            project_root: extract_or(dict, "project_root", String::new())?.into(),
+            db_path: extract_or(dict, "db_path", String::new())?.into(),
+            db_batch_size: extract_or(dict, "db_batch_size", 100u64)? as usize,
+            compaction_batch_threshold: extract_or(dict, "compaction_batch_threshold", 50u64)?
                 as u32,
-            detect_embedded_sql: get_bool_or(dict, "detect_embedded_sql", true)?,
-            config_file_size_threshold_kb: get_u64_or(dict, "config_file_size_threshold_kb", 20)?
+            compaction_threshold: extract_or(dict, "compaction_threshold", 0.30)?,
+            compaction_min_size_mb: extract_or(dict, "compaction_min_size_mb", 50u64)?,
+            disk_usage_limit_mb: extract_opt(dict, "disk_usage_limit_mb")?,
+
+            parse_batch_size: extract_or(dict, "parse_batch_size", 200u64)? as usize,
+            parse_thread_pool_size: extract_or(dict, "parse_thread_pool_size", 0u64)? as usize,
+            embed_thread_pool_size: extract_or(dict, "embed_thread_pool_size", 0u64)? as usize,
+            embed_batch_size: extract_or(dict, "embed_batch_size", 200u64)? as usize,
+
+            force_reindex: extract_or(dict, "force_reindex", false)?,
+            mtime_epsilon_seconds: extract_or(dict, "mtime_epsilon_seconds", 0.01)?,
+            do_cleanup: extract_or(dict, "do_cleanup", true)?,
+            skip_embeddings: extract_or(dict, "skip_embeddings", false)?,
+
+            per_file_timeout_secs: extract_or(dict, "per_file_timeout_secs", 3.0)?,
+            per_file_timeout_min_size_kb: extract_or(dict, "per_file_timeout_min_size_kb", 128u64)?
+                as u32,
+            detect_embedded_sql: extract_or(dict, "detect_embedded_sql", true)?,
+            config_file_size_threshold_kb: extract_or(dict, "config_file_size_threshold_kb", 20u64)?
                 as u32,
 
-            embedding_provider: get_str_or(dict, "embedding_provider", "")?,
-            embedding_model: get_str_or(dict, "embedding_model", "")?,
+            embedding_provider: extract_or(dict, "embedding_provider", String::new())?,
+            embedding_model: extract_or(dict, "embedding_model", String::new())?,
         })
-    }
-}
-
-// ── Helper extractors ────────────────────────────────────────────
-
-fn get_str_or(dict: &Bound<'_, PyDict>, key: &str, default: &str) -> PyResult<String> {
-    match dict.get_item(key)? {
-        Some(v) => Ok(v.extract::<String>()?),
-        None => Ok(default.to_string()),
-    }
-}
-
-fn get_u64_or(dict: &Bound<'_, PyDict>, key: &str, default: u64) -> PyResult<u64> {
-    match dict.get_item(key)? {
-        Some(v) => Ok(v.extract::<u64>()?),
-        None => Ok(default),
-    }
-}
-
-fn get_f64_or(dict: &Bound<'_, PyDict>, key: &str, default: f64) -> PyResult<f64> {
-    match dict.get_item(key)? {
-        Some(v) => Ok(v.extract::<f64>()?),
-        None => Ok(default),
-    }
-}
-
-fn get_bool_or(dict: &Bound<'_, PyDict>, key: &str, default: bool) -> PyResult<bool> {
-    match dict.get_item(key)? {
-        Some(v) => Ok(v.extract::<bool>()?),
-        None => Ok(default),
-    }
-}
-
-fn get_opt_f64(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<f64>> {
-    match dict.get_item(key)? {
-        Some(v) => {
-            if v.is_none() {
-                Ok(None)
-            } else {
-                Ok(Some(v.extract::<f64>()?))
-            }
-        }
-        None => Ok(None),
     }
 }

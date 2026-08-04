@@ -16,12 +16,12 @@ from chunkhound.utils.file_patterns import normalize_include_patterns
 def _rust_pipeline_active() -> bool:
     """Check whether the Rust parse→embed→write pipeline is enabled.
 
-    Delegates to pipeline_bridge._get_use_rust(), which defaults to True
+    Delegates to rust_pipeline_flag._get_use_rust(), which defaults to True
     (opt-out); CHUNKHOUND_USE_RUST=0 disables it. Used to gate
     Python-side HNSW steps that the Rust pipeline already handles
     internally.
     """
-    from chunkhound.providers.database.pipeline_bridge import _get_use_rust
+    from chunkhound.providers.database.rust_pipeline_flag import _get_use_rust
     return _get_use_rust()
 
 
