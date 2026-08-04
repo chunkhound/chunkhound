@@ -246,16 +246,15 @@ def index_with_rust(
     *,
     skip_embeddings: bool = False,
     incremental: bool = False,
+    parse_thread_pool_size: int = 4,
+    compaction_threshold: float = 0.60,
+    compaction_min_size_mb: int = 10,
+    progress_callback=None,
 ) -> IndexResult:
     """Index *fixture_dir* using the Rust pipeline."""
     from tests.contracts.mock_embed import MOCK_MODEL, MOCK_PROVIDER, embed_texts
 
-    try:
-        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
-    except ImportError:
-        raise NotImplementedError(
-            "Rust IndexingPipeline is not yet available in chunkhound_native."
-        ) from None
+    from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
     db_dir.mkdir(parents=True, exist_ok=True)
 
@@ -263,11 +262,11 @@ def index_with_rust(
         "project_root": str(fixture_dir.resolve()),
         "db_path": str(db_dir.resolve()),
         "db_batch_size": 100,
-        "compaction_threshold": 0.60,
+        "compaction_threshold": compaction_threshold,
         "compaction_batch_threshold": 10,
-        "compaction_min_size_mb": 10,
+        "compaction_min_size_mb": compaction_min_size_mb,
         "parse_batch_size": 200,
-        "parse_thread_pool_size": 4,
+        "parse_thread_pool_size": parse_thread_pool_size,
         "embed_batch_size": 200,
         "force_reindex": False,
         "mtime_epsilon_seconds": 0.01,
@@ -292,7 +291,7 @@ def index_with_rust(
         files=file_paths,
         parse_batch_callback=parse_batch_callback,
         embed_batch_callback=embed_texts if not skip_embeddings else None,
-        progress_callback=None,
+        progress_callback=progress_callback,
         incremental=incremental,
     )
 
