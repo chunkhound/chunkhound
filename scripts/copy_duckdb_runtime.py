@@ -52,6 +52,12 @@ for dest_dir in destinations:
     if not dest_dir.is_dir():
         continue
     dest = dest_dir / source.name
+    # unlink before copying: if `dest` already exists it may be hardlinked
+    # into uv's shared package cache (uv links from cache whenever cache and
+    # target share a filesystem), and shutil.copy2 overwrites file content
+    # in place -- silently corrupting that shared inode for every other venv
+    # sharing the cache instead of just updating this one.
+    dest.unlink(missing_ok=True)
     shutil.copy2(source, dest)
     copied.append(str(dest))
 

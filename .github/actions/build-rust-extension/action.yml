@@ -59,6 +59,16 @@ runs:
         SITE_CN="$(find .venv -path '*/site-packages/chunkhound_native' -type d | head -1)"
         BUILT_SO="$(find chunkhound_native -maxdepth 1 \( -name '*.so' -o -name '*.pyd' \) -print | head -1)"
         if [[ -n "$BUILT_SO" && -n "$SITE_CN" ]]; then
+          # rm before cp (not just `cp -f`/`--remove-destination`, for
+          # portability to platforms/cp variants without that flag): uv
+          # installs packages by hardlinking from its shared cache
+          # ($UV_CACHE_DIR) whenever cache and target share a filesystem, so
+          # overwriting the existing file's content in place would mutate
+          # that shared inode -- silently poisoning uv's cache with this
+          # dev-only build for every other venv/job sharing the cache
+          # (e.g. the fresh venvs scripts/verify_watchman_live_indexing_e2e.py
+          # creates later in this same job to test a clean installed wheel).
+          rm -f "$SITE_CN/$(basename "$BUILT_SO")" "$SITE_CN/__init__.py"
           cp "$BUILT_SO" "$SITE_CN/"
           cp chunkhound_native/__init__.py "$SITE_CN/__init__.py"
           echo "Patched $SITE_CN with locally-built extension ($BUILT_SO)"
