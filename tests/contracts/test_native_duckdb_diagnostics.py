@@ -10,6 +10,7 @@ build missing an expected symbol.
 """
 
 import importlib
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -51,12 +52,12 @@ def test_missing_duckdb_library_raises_clear_error(monkeypatch, tmp_path):
     bundled = list(pkg_dir.glob("*duckdb*"))
     moved = [(p, tmp_path / p.name) for p in bundled]
     for src, dst in moved:
-        src.rename(dst)
+        shutil.move(str(src), str(dst))
     try:
         err = _import_with_broken_extension(monkeypatch)
     finally:
         for src, dst in moved:
-            dst.rename(src)
+            shutil.move(str(dst), str(src))
 
     message = str(err)
     assert "bundled DuckDB" in message

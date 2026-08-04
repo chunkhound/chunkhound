@@ -50,9 +50,10 @@ except ImportError as e:
             "chunkhound-native install is incomplete or corrupted. "
             "Try: pip install --force-reinstall chunkhound-native"
         ) from e
+    _bundled_list = ", ".join(str(p) for p in _bundled)
     raise ImportError(
         "chunkhound_native failed to load even though a bundled DuckDB "
-        f"runtime library was found ({[str(p) for p in _bundled]}). This "
+        f"runtime library was found ({_bundled_list}). This "
         "usually means an architecture mismatch, a corrupted file, or the "
         "file being blocked/quarantined by antivirus or security software."
     ) from e
