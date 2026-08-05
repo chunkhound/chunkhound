@@ -251,6 +251,16 @@ class DatabaseProvider(Protocol):
         ...
 
     # Search Operations
+    @property
+    def semantic_result_window_cap(self) -> int | None:
+        """Return the exclusive upper bound of the semantic result window.
+
+        ``None`` means the provider imposes no window restriction. A provider
+        with a cap rejects windows crossing it; callers must keep
+        ``offset + page_size <= cap``.
+        """
+        return None
+
     def search_semantic(
         self,
         query_embedding: list[float],
@@ -269,8 +279,19 @@ class DatabaseProvider(Protocol):
             model: Embedding model name
             page_size: Number of results per page
             offset: Starting position for pagination
-            threshold: Optional similarity threshold
-            path_filter: Optional relative path to limit search scope (e.g., 'src/', 'tests/')
+            threshold: Similarity floor for semantic search
+                (results have similarity >= threshold)
+            path_filter: Optional relative path to limit search scope
+                (e.g., 'src/', 'tests/')
+
+        Providers may use approximate indexes, so filtered pages can contain
+        fewer results than ``page_size``. Results include parsed chunk metadata.
+        Pagination always includes ``offset``, ``page_size``, and ``has_more``;
+        ``total`` is ``None`` when the provider cannot determine an exact count.
+        Follow ``has_more``/``next_offset`` instead of assuming a total.
+
+        Provider-specific indexing, metric, and window-cap capabilities are
+        documented by each provider.
 
         Returns:
             Tuple of (results, pagination_metadata)
@@ -293,11 +314,11 @@ class DatabaseProvider(Protocol):
             provider: Embedding provider name
             model: Embedding model name
             limit: Maximum number of results to return
-            threshold: Optional similarity threshold
+            threshold: Inclusive similarity floor (results have similarity >= threshold)
             path_filter: Optional relative path to limit search scope
 
         Returns:
-            List of similar chunks with scores and metadata
+            List of similar chunks with scores and parsed chunk metadata
         """
         ...
 
@@ -317,11 +338,11 @@ class DatabaseProvider(Protocol):
             provider: Embedding provider name
             model: Embedding model name
             limit: Maximum number of results to return
-            threshold: Optional similarity threshold
+            threshold: Inclusive similarity floor (results have similarity >= threshold)
             path_filter: Optional relative path to limit search scope
 
         Returns:
-            List of similar chunks with scores and metadata
+            List of similar chunks with scores and parsed chunk metadata
         """
         ...
 

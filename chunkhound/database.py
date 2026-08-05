@@ -249,7 +249,7 @@ class Database:
     # =============================================================================
     # Search Methods - Delegate to SearchService
     # PATTERN: SearchService optimizes queries per provider:
-    # - DuckDB: HNSW index with pre-filtering
+    # - DuckDB: HNSW candidates with post-filter overfetch
     # - LanceDB: IVF index with post-filtering
     # PERFORMANCE: Provider-specific optimizations applied automatically
     # =============================================================================

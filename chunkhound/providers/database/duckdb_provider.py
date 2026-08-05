@@ -12,12 +12,14 @@
 """
 
 import json
+import math
 import os
 import re
 import sys
 import threading
 import time
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -38,6 +40,7 @@ from chunkhound.providers.database.duckdb.embedding_repository import (
     DuckDBEmbeddingRepository,
 )
 from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
+from chunkhound.services.search.semantic_window import validate_semantic_window
 from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
@@ -112,6 +115,28 @@ class DuckDBIndexedRootMismatchError(RuntimeError):
 
 _INDEXED_ROOT_SIDECAR_SUFFIX = ".root.json"
 _INDEXED_ROOT_SIDECAR_VERSION = 1
+# Maximum pagination offset for semantic search. HNSW is approximate and doesn't
+# support efficient large-offset pagination; beyond 1000 results, users should
+# narrow their query or use path filters rather than paginating deeper.
+_MAX_DUCKDB_SEMANTIC_OFFSET = 1000
+# Initial overfetch multiplier for HNSW candidate retrieval. Post-filtering
+# (provider/model/path) can remove 50-70% of candidates, so we start with 3x
+# the needed results to avoid multiple iterations.
+_OVERFETCH_INITIAL_FACTOR = 3
+# Exponential backoff factor when initial overfetch is insufficient. Doubles the
+# candidate window on each iteration until needed results are found or budget exhausted.
+_OVERFETCH_BACKOFF_FACTOR = 2
+# Maximum HNSW candidate budget. Balances recall vs latency for large corpora.
+# Beyond 10000 candidates, diminishing returns on additional overfetch.
+_MAX_HNSW_CANDIDATE_BUDGET = 10000
+
+
+def _configure_vss_connection(conn: Any) -> None:
+    """Load VSS and widen ANN traversal for filtered semantic searches."""
+    conn.execute("INSTALL vss")
+    conn.execute("LOAD vss")
+    conn.execute("SET hnsw_enable_experimental_persistence = true")
+    conn.execute("SET hnsw_ef_search = 256")
 
 
 def _normalize_indexed_root(root: Path | str) -> str:
@@ -227,6 +252,18 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     _SUPPORTED_HNSW_METRICS = frozenset({"cosine", "ip", "l2sq"})
 
+    @staticmethod
+    def _validate_threshold(threshold: float | None) -> None:
+        """Reject thresholds outside the valid cosine similarity range [-1, 1]."""
+        if threshold is None:
+            return
+        if not math.isfinite(threshold):
+            raise ValueError("Threshold must be a finite number")
+        if threshold < -1.0 or threshold > 1.0:
+            raise ValueError(
+                f"Threshold {threshold} is outside the valid cosine similarity range [-1, 1]"
+            )
+
     def __init__(
         self,
         db_path: Path | str,
@@ -294,10 +331,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             read_only=self._connection_manager.is_read_only,
         )
 
-        # Load required extensions
-        conn.execute("INSTALL vss")
-        conn.execute("LOAD vss")
-        conn.execute("SET hnsw_enable_experimental_persistence = true")
+        _configure_vss_connection(conn)
 
         logger.debug(
             f"Created new DuckDB connection in executor thread {threading.get_ident()}"
@@ -307,9 +341,7 @@ class DuckDBProvider(SerialDatabaseProvider):
     def _create_connection_manager_connection(self) -> Any:
         """Create the public health/compatibility connection."""
         conn = duckdb.connect(str(self._connection_manager.db_path))
-        conn.execute("INSTALL vss")
-        conn.execute("LOAD vss")
-        conn.execute("SET hnsw_enable_experimental_persistence = true")
+        _configure_vss_connection(conn)
         return conn
 
     def _get_schema_sql(self) -> list[str] | None:
@@ -926,8 +958,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
 
     def _executor_create_embedding_table_indexes(
-        self, conn: Any, state: dict[str, Any], table_name: str, dims: int,
-        *, create_hnsw: bool = True,
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        table_name: str,
+        dims: int,
+        *,
+        create_hnsw: bool = True,
     ) -> None:
         """Restore the canonical non-table DDL for one embedding table."""
         if create_hnsw:
@@ -1120,9 +1157,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         return current_size / live
 
     @staticmethod
-    def _fragmentation_exceeds_threshold(
-        ratio: float, threshold: float | None
-    ) -> bool:
+    def _fragmentation_exceeds_threshold(ratio: float, threshold: float | None) -> bool:
         """Return True when the fragmentation ratio exceeds the configured threshold."""
         if threshold is None or threshold < 0:
             return False
@@ -1234,7 +1269,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             tgt_conn.execute(f"CREATE SEQUENCE files_id_seq START {max_file_id + 1}")
             tgt_conn.execute(f"CREATE SEQUENCE chunks_id_seq START {max_chunk_id + 1}")
-            tgt_conn.execute(f"CREATE SEQUENCE embeddings_id_seq START {max_embedding_id + 1}")
+            tgt_conn.execute(
+                f"CREATE SEQUENCE embeddings_id_seq START {max_embedding_id + 1}"
+            )
 
             tgt_conn.execute(f"CREATE TABLE files ({_FILES_TABLE_COLUMNS})")
             tgt_conn.execute(f"CREATE TABLE chunks ({_CHUNKS_TABLE_COLUMNS})")
@@ -1321,7 +1358,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                 dims = _embedding_dims_from_table_name(tname)
                 if dims is not None:
                     self._executor_create_embedding_table_indexes(
-                        tgt_conn, state, tname, dims, create_hnsw=False,
+                        tgt_conn,
+                        state,
+                        tname,
+                        dims,
+                        create_hnsw=False,
                     )
 
             tgt_conn.execute("CHECKPOINT")
@@ -1369,9 +1410,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         compacted_size = os.path.getsize(db_path)
         reduction = (
-            (1.0 - compacted_size / original_size) * 100.0
-            if original_size > 0
-            else 0.0
+            (1.0 - compacted_size / original_size) * 100.0 if original_size > 0 else 0.0
         )
         log_if_not_mcp(
             "info",
@@ -1464,9 +1503,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             original_size = self._compact_prepare(
                 conn, state, db_path, backup_path, compacted_path
             )
-            _, had_hnsw = self._compact_copy_data(
-                backup_path, compacted_path, state
-            )
+            _, had_hnsw = self._compact_copy_data(backup_path, compacted_path, state)
             return self._compact_finalize(
                 state,
                 db_path,
@@ -1480,7 +1517,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             log_if_not_mcp("error", f"Compaction failed: {e}")
             try:
                 self._compact_restore(
-                    backup_path, compacted_path, db_path, state,
+                    backup_path,
+                    compacted_path,
+                    db_path,
+                    state,
                     had_hnsw=had_hnsw,
                 )
             except Exception as restore_err:
@@ -1600,9 +1640,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 ).fetchone()
                 cv = cur[0] if cur else None
                 if cv is None:
-                    cv = conn.execute(
-                        "SELECT nextval('embeddings_id_seq')"
-                    ).fetchone()[0]
+                    cv = conn.execute("SELECT nextval('embeddings_id_seq')").fetchone()[
+                        0
+                    ]
                 adv = max_eid - int(cv)
                 if adv > 0:
                     conn.execute(
@@ -2028,6 +2068,15 @@ class DuckDBProvider(SerialDatabaseProvider):
                 f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(standard_index_name)}"
             )
             dropped_indexes.append(standard_index_name)
+
+            # Drop the lazily-created cosine variant (idx_hnsw_{dims}_cosine) that
+            # takes the canonical name when a non-cosine index holds it.
+            cosine_index_name = f"{standard_index_name}_cosine"
+            conn.execute(
+                f"DROP INDEX IF EXISTS "
+                f"{self._quote_duckdb_identifier(cosine_index_name)}"
+            )
+            dropped_indexes.append(cosine_index_name)
 
             logger.info(f"HNSW index drop attempted: {', '.join(dropped_indexes)}")
             return custom_index_name  # Return primary index name for API consistency
@@ -3872,6 +3921,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             return f"%/{escaped}%"
         return f"%/{escaped}"
 
+    @property
+    def semantic_result_window_cap(self) -> int:
+        """Return DuckDB's exclusive semantic result-window endpoint."""
+        return _MAX_DUCKDB_SEMANTIC_OFFSET
+
     def search_semantic(
         self,
         query_embedding: list[float],
@@ -3882,11 +3936,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         threshold: float | None = None,
         path_filter: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Perform semantic vector search using HNSW index with multi-dimension support.
+        """Perform approximate cosine-HNSW semantic search.
 
-        # PERFORMANCE: HNSW index provides ~5ms query time
-        # ACCURACY: Cosine similarity metric
-        # OPTIMIZATION: Dimension-specific tables (1536D, 3072D, etc.)
+        Requires a cosine-compatible HNSW index; cosine is the only metric the
+        search API supports (l2sq and ip are not). The search gathers HNSW
+        candidates before applying provider, model, path, and threshold filters.
+        Pages must remain in the exclusive [0, 1000) window; ``total`` is always
+        ``None`` and exhausted candidate budgets can yield short pages. Database
+        failures are raised rather than masked.
         """
         return self._execute_in_db_thread_sync(
             "search_semantic",
@@ -3898,6 +3955,396 @@ class DuckDBProvider(SerialDatabaseProvider):
             threshold,
             path_filter,
         )
+
+    @staticmethod
+    def _executor_hnsw_metrics(conn: Any, table_name: str) -> dict[str, str]:
+        """Return live HNSW metrics; catalog DDL omits metric configuration."""
+        rows = conn.execute(
+            "SELECT index_name, metric FROM pragma_hnsw_index_info() "
+            "WHERE table_name = ?",
+            [table_name],
+        ).fetchall()
+        return {str(index_name): str(metric).lower() for index_name, metric in rows}
+
+    def _executor_ensure_hnsw_index(
+        self, conn: Any, table_name: str, dims: int
+    ) -> None:
+        """Ensure cosine search has a metric-compatible HNSW index."""
+        metrics = self._executor_hnsw_metrics(conn, table_name)
+        if "cosine" in metrics.values():
+            return
+        # Metric-specific indexes may be intentional; add a cosine variant
+        # rather than destroying a canonical index configured for another metric.
+        canonical_name = _embedding_hnsw_index_name(dims)
+        index_name = (
+            f"{canonical_name}_cosine" if canonical_name in metrics else canonical_name
+        )
+        logger.info(f"Creating cosine HNSW index {index_name} on {table_name}")
+        conn.execute(f"""
+            CREATE INDEX {self._quote_duckdb_identifier(index_name)}
+            ON {self._quote_duckdb_identifier(table_name)}
+            USING HNSW (embedding)
+            WITH (metric = 'cosine')
+        """)
+        if "cosine" not in self._executor_hnsw_metrics(conn, table_name).values():
+            raise RuntimeError(f"Cosine HNSW index creation failed for {table_name}")
+
+    @staticmethod
+    def _hnsw_eligible_candidate_query(table_name: str, dims: int, limit: int) -> str:
+        """Return a single-table query eligible for DuckDB's HNSW scan.
+
+        DuckDB may still choose a sequential scan for large candidate windows.
+        Provider/model filters stay outside this query because VSS applies them
+        after the index scan and can silently starve the candidate set.
+        """
+        return f"""
+            SELECT chunk_id,
+                   provider,
+                   model,
+                   array_cosine_distance(embedding, ?::FLOAT[{dims}]) AS distance
+            FROM {table_name}
+            ORDER BY distance ASC
+            LIMIT ? OFFSET 0
+            """
+
+    @staticmethod
+    def _validate_query_embedding(query_embedding: list[float]) -> None:
+        """Reject non-finite query vectors.
+
+        Cosine distance is undefined for NaN/Inf, and DuckDB surfaces it as an
+        opaque InternalException with a native stack dump instead of an error
+        the caller can act on.
+        """
+        if any(not math.isfinite(value) for value in query_embedding):
+            raise ValueError(
+                "Query embedding contains non-finite values (NaN/Inf); "
+                "cosine distance is undefined"
+            )
+
+    def _executor_fetch_vector_candidates(
+        self,
+        conn: Any,
+        table_name: str,
+        query_embedding: list[float],
+        limit: int,
+    ) -> list[tuple[int, str, str, float]]:
+        """Fetch raw vector candidates with their provider/model identity."""
+        self._validate_query_embedding(query_embedding)
+        query = self._hnsw_eligible_candidate_query(
+            table_name, len(query_embedding), limit
+        )
+        rows = conn.execute(query, [query_embedding, limit]).fetchall()
+        return [
+            (int(chunk_id), str(provider), str(model), float(distance))
+            for chunk_id, provider, model, distance in rows
+        ]
+
+    @staticmethod
+    def _format_vector_result(
+        row: tuple[Any, ...], distance: float, label_key: str
+    ) -> dict[str, Any]:
+        """Format a vector result, including parsed chunk metadata."""
+        return {
+            "chunk_id": row[0],
+            label_key: row[1],
+            "content": row[2],
+            "chunk_type": row[3],
+            "start_line": row[4],
+            "end_line": row[5],
+            "file_path": row[6],
+            "language": row[7],
+            "score" if label_key == "name" else "similarity": 1.0 - distance,
+            "metadata": json.loads(row[8]) if row[8] else {},
+        }
+
+    def _build_vector_filter_query(
+        self,
+        ids: list[int],
+        path_like: str | None,
+        exclude_chunk_id: int | None,
+    ) -> tuple[str, list[Any]]:
+        """Build the join query for post-filtering vector candidates."""
+        placeholders = ", ".join("?" for _ in ids)
+        conditions = [f"c.id IN ({placeholders})"]
+        params: list[Any] = list(ids)
+        if path_like is not None:
+            conditions.append("CONCAT('/', f.path) LIKE ? ESCAPE '\\'")
+            params.append(path_like)
+        if exclude_chunk_id is not None:
+            conditions.append("c.id != ?")
+            params.append(exclude_chunk_id)
+        query = f"""
+            SELECT c.id, c.symbol, c.code, c.chunk_type, c.start_line, c.end_line,
+                   f.path, f.language, c.metadata
+            FROM chunks c
+            JOIN files f ON c.file_id = f.id
+            WHERE {" AND ".join(conditions)}
+        """
+        return query, params
+
+    def _executor_filter_vector_candidates(
+        self,
+        conn: Any,
+        candidates: list[tuple[int, str, str, float]],
+        provider: str,
+        model: str,
+        path_like: str | None,
+        max_distance: float | None,
+        exclude_chunk_id: int | None,
+        label_key: str,
+    ) -> list[dict[str, Any]]:
+        """Join vector candidates and apply provider, model, and API filters."""
+        if not candidates:
+            return []
+        ids = [chunk_id for chunk_id, _, _, _ in candidates]
+        query, params = self._build_vector_filter_query(
+            ids, path_like, exclude_chunk_id
+        )
+        rows_by_id = {
+            int(row[0]): row for row in conn.execute(query, params).fetchall()
+        }
+        return [
+            self._format_vector_result(rows_by_id[chunk_id], distance, label_key)
+            for chunk_id, candidate_provider, candidate_model, distance in candidates
+            if candidate_provider == provider
+            and candidate_model == model
+            and chunk_id in rows_by_id
+            and (max_distance is None or distance <= max_distance)
+        ]
+
+    @staticmethod
+    def _append_unique_vector_results(
+        results: list[dict[str, Any]],
+        seen_ids: set[int],
+        batch: list[dict[str, Any]],
+        needed: int,
+    ) -> None:
+        """Accumulate unique candidates until the requested count is reached."""
+        for row in batch:
+            chunk_id = int(row["chunk_id"])
+            if chunk_id in seen_ids:
+                continue
+            seen_ids.add(chunk_id)
+            results.append(row)
+            if len(results) >= needed:
+                return
+
+    @staticmethod
+    def _vector_overfetch_stop_reason(
+        result_count: int,
+        needed: int,
+        candidate_count: int,
+        limit: int,
+        max_scan: int,
+    ) -> str | None:
+        """Describe why candidate overfetch should stop, if it should."""
+        if result_count >= needed:
+            return "enough_results"
+        if candidate_count < limit:
+            return "raw_short_page"
+        if limit == max_scan:
+            return "candidate_budget_exhausted"
+        return None
+
+    @staticmethod
+    def _overfetch_metrics(
+        *,
+        reason: str,
+        results: int,
+        needed: int,
+        raw_candidates: int,
+        filtered_candidates: int,
+        iterations: int,
+        final_limit: int,
+    ) -> dict[str, Any]:
+        """Structured overfetch telemetry for HNSW candidate widening.
+
+        Counts describe the final candidate window. ``filter_selectivity`` is
+        the share surviving provider/model/path/threshold filtering before the
+        returned result list is truncated to ``needed``.
+        """
+        return {
+            "reason": reason,
+            "results": results,
+            "needed": needed,
+            "raw_candidates": raw_candidates,
+            "filtered_candidates": filtered_candidates,
+            "iterations": iterations,
+            "final_limit": final_limit,
+            "filter_selectivity": (
+                filtered_candidates / raw_candidates if raw_candidates else None
+            ),
+        }
+
+    def _overfetch_vector_results(
+        self,
+        *,
+        needed: int,
+        execute_query: Callable[[int], tuple[list[dict[str, Any]], int]],
+        max_scan: int = _MAX_HNSW_CANDIDATE_BUDGET,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Widen vector candidate retrieval until enough results or exhaustion.
+
+        Returns:
+            Tuple of (results, budget_exhausted) where budget_exhausted is True
+            when the candidate budget was hit before finding enough results.
+        """
+        if needed <= 0:
+            return [], False
+        results: list[dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        limit = min(max(needed * _OVERFETCH_INITIAL_FACTOR, 1), max_scan)
+        iterations = 0
+        while True:
+            iterations += 1
+            batch, candidate_count = execute_query(limit)
+            self._append_unique_vector_results(results, seen_ids, batch, needed)
+            reason = self._vector_overfetch_stop_reason(
+                len(results), needed, candidate_count, limit, max_scan
+            )
+            if reason is not None:
+                budget_exhausted = reason == "candidate_budget_exhausted"
+                logger.bind(
+                    **self._overfetch_metrics(
+                        reason=reason,
+                        results=len(results),
+                        needed=needed,
+                        raw_candidates=candidate_count,
+                        filtered_candidates=len(batch),
+                        iterations=iterations,
+                        final_limit=limit,
+                    )
+                ).debug("Vector candidate overfetch terminated")
+                return results, budget_exhausted
+            limit = min(limit * _OVERFETCH_BACKOFF_FACTOR, max_scan)
+
+    def _vector_path_like(self, path_filter: str | None) -> str | None:
+        """Translate an optional API path filter for vector post-filtering."""
+        normalized_path = self._validate_and_normalize_path_filter(path_filter)
+        return (
+            self._build_path_like_pattern(normalized_path)
+            if normalized_path is not None
+            else None
+        )
+
+    def _executor_fetch_and_filter_vector_candidates(
+        self,
+        conn: Any,
+        table_name: str,
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+        path_like: str | None,
+        max_distance: float | None,
+        exclude_chunk_id: int | None,
+        label_key: str,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Fetch one vector-candidate window and apply API filters."""
+        candidates = self._executor_fetch_vector_candidates(
+            conn, table_name, query_embedding, limit
+        )
+        results = self._executor_filter_vector_candidates(
+            conn,
+            candidates,
+            provider,
+            model,
+            path_like,
+            max_distance,
+            exclude_chunk_id,
+            label_key,
+        )
+        return results, len(candidates)
+
+    def _executor_search_vector_candidates(
+        self,
+        conn: Any,
+        table_name: str,
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+        needed: int,
+        path_like: str | None,
+        max_distance: float | None,
+        label_key: str,
+        exclude_chunk_id: int | None = None,
+        max_scan: int = _MAX_HNSW_CANDIDATE_BUDGET,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Retrieve, filter, and rank vector candidates for every vector API.
+
+        Returns:
+            Tuple of (results, budget_exhausted) where budget_exhausted is True
+            when the candidate budget was hit before finding enough results.
+        """
+        execute_query = partial(
+            self._executor_fetch_and_filter_vector_candidates,
+            conn,
+            table_name,
+            query_embedding,
+            provider,
+            model,
+            path_like,
+            max_distance,
+            exclude_chunk_id,
+            label_key,
+        )
+        results, budget_exhausted = self._overfetch_vector_results(
+            needed=needed, execute_query=execute_query, max_scan=max_scan
+        )
+        sort_key = "score" if label_key == "name" else "similarity"
+        results.sort(
+            key=lambda result: (-float(result[sort_key]), int(result["chunk_id"]))
+        )
+        return results, budget_exhausted
+
+    def _validate_semantic_window(self, offset: int, page_size: int) -> None:
+        """Reject pagination that DuckDB's approximate search cannot honor."""
+        validate_semantic_window(offset, page_size, _MAX_DUCKDB_SEMANTIC_OFFSET)
+
+    @staticmethod
+    def _empty_semantic_pagination(offset: int, page_size: int) -> dict[str, Any]:
+        """Return pagination metadata for an empty semantic result page."""
+        return {
+            "offset": offset,
+            "page_size": page_size,
+            "has_more": False,
+            "next_offset": None,
+            "total": None,
+            "candidate_budget_exhausted": False,
+        }
+
+    def _build_semantic_pagination(
+        self,
+        all_results: list[dict[str, Any]],
+        offset: int,
+        page_size: int,
+        budget_exhausted: bool = False,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Slice results into a page and compute pagination metadata.
+
+        Args:
+            all_results: All filtered results from candidate search
+            offset: Pagination offset
+            page_size: Page size
+            budget_exhausted: True when candidate budget was exhausted, indicating
+                more results may exist beyond what was fetched
+        """
+        page_results = all_results[offset : offset + page_size]
+        next_offset = offset + page_size
+        # Only advertise a next page already materialized by the look-ahead
+        # query. Budget exhaustion is visible separately because it is uncertain.
+        has_more = (
+            len(all_results) > next_offset and next_offset < _MAX_DUCKDB_SEMANTIC_OFFSET
+        )
+        pagination = {
+            "offset": offset,
+            "page_size": page_size,
+            "has_more": has_more,
+            "next_offset": next_offset if has_more else None,
+            "total": None,
+            "candidate_budget_exhausted": budget_exhausted,
+        }
+        return page_results, pagination
 
     def _executor_search_semantic(
         self,
@@ -3911,139 +4358,34 @@ class DuckDBProvider(SerialDatabaseProvider):
         threshold: float | None,
         path_filter: str | None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Executor method for search_semantic - runs in DB thread."""
-        try:
-            # Validate and normalize path filter
-            normalized_path = self._validate_and_normalize_path_filter(path_filter)
-
-            # Detect dimensions from query embedding
-            query_dims = len(query_embedding)
-            table_name = f"embeddings_{query_dims}"
-
-            # Check if table exists for these dimensions
-            if not self._executor_table_exists(conn, state, table_name):
-                logger.warning(
-                    f"No embeddings table found for {query_dims} dimensions ({table_name})"
-                )
-                return [], {
-                    "offset": offset,
-                    "page_size": page_size,
-                    "has_more": False,
-                    "total": 0,
-                }
-
-            # Lazy HNSW rebuild: crash recovery from a failed/mid-crash indexing run.
-            # DuckDB will brute-force scan without an index — correct but slow.
-            if not self._executor_hnsw_index_exists(conn, table_name):
-                hnsw_name = _embedding_hnsw_index_name(query_dims)
-                logger.info(
-                    f"No HNSW index on {table_name}, rebuilding (crash recovery)"
-                )
-                conn.execute(f"""
-                    CREATE INDEX {hnsw_name} ON {table_name}
-                    USING HNSW (embedding)
-                    WITH (metric = 'cosine')
-                """)
-
-            # Build query with dimension-specific table
-            query = f"""
-                SELECT
-                    c.id as chunk_id,
-                    c.symbol,
-                    c.code,
-                    c.chunk_type,
-                    c.start_line,
-                    c.end_line,
-                    f.path as file_path,
-                    f.language,
-                    array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) as similarity,
-                    c.metadata
-                FROM {table_name} e
-                JOIN chunks c ON e.chunk_id = c.id
-                JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ? AND e.model = ?
-            """
-
-            params: list[Any] = [query_embedding, provider, model]
-
-            path_like: str | None = None
-            if normalized_path is not None:
-                path_like = self._build_path_like_pattern(normalized_path)
-
-            if threshold is not None:
-                query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
-                params.append(query_embedding)
-                params.append(threshold)
-
-            if path_like is not None:
-                query += " AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
-                # Prepend / so %/repo_a/% only matches repo_a as a complete directory component.
-                params.append(path_like)
-
-            # Get total count for pagination
-            # Build count query separately to avoid string replacement issues
-            count_query = f"""
-                SELECT COUNT(*)
-                FROM {table_name} e
-                JOIN chunks c ON e.chunk_id = c.id
-                JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ? AND e.model = ?
-            """
-
-            count_params = [provider, model]
-
-            if threshold is not None:
-                count_query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
-                count_params.extend([query_embedding, threshold])
-
-            if path_like is not None:
-                count_query += " AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
-                # Directory-boundary-anchored match, consistent with main query
-                count_params.append(path_like)
-
-            total_count = conn.execute(count_query, count_params).fetchone()[0]
-
-            query += " ORDER BY similarity DESC LIMIT ? OFFSET ?"
-            params.extend([page_size, offset])
-
-            results = conn.execute(query, params).fetchall()
-
-            result_list = [
-                {
-                    "chunk_id": result[0],
-                    "symbol": result[1],
-                    "content": result[2],
-                    "chunk_type": result[3],
-                    "start_line": result[4],
-                    "end_line": result[5],
-                    "file_path": result[6],  # Keep stored format
-                    "language": result[7],
-                    "similarity": result[8],
-                    "metadata": json.loads(result[9]) if result[9] else {},
-                }
-                for result in results
-            ]
-
-            pagination = {
-                "offset": offset,
-                "page_size": page_size,
-                "has_more": offset + page_size < total_count,
-                "next_offset": offset + page_size
-                if offset + page_size < total_count
-                else None,
-                "total": total_count,
-            }
-
-            return result_list, pagination
-
-        except Exception as e:
-            logger.error(f"Failed to perform semantic search: {e}")
-            return [], {
-                "offset": offset,
-                "page_size": page_size,
-                "has_more": False,
-                "total": 0,
-            }
+        """Run a paginated HNSW search without a sequential count query."""
+        self._validate_semantic_window(offset, page_size)
+        self._validate_query_embedding(query_embedding)
+        self._validate_threshold(threshold)
+        dims = len(query_embedding)
+        table_name = f"embeddings_{dims}"
+        if not self._executor_table_exists(conn, state, table_name):
+            logger.warning(f"No embeddings table found for {dims} dimensions")
+            return [], self._empty_semantic_pagination(offset, page_size)
+        self._executor_ensure_hnsw_index(conn, table_name, dims)
+        path_like = self._vector_path_like(path_filter)
+        # Fetch one extra result to detect if more exist beyond current page.
+        # This avoids a separate COUNT query (which would require full table scan).
+        max_distance = None if threshold is None else 1.0 - threshold
+        all_results, budget_exhausted = self._executor_search_vector_candidates(
+            conn,
+            table_name,
+            query_embedding,
+            provider,
+            model,
+            offset + page_size + 1,
+            path_like,
+            max_distance,
+            "symbol",
+        )
+        return self._build_semantic_pagination(
+            all_results, offset, page_size, budget_exhausted
+        )
 
     def search_regex(
         self,
@@ -4186,7 +4528,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             WHERE e.chunk_id IN ({placeholders})
               AND e.provider = ? AND e.model = ?
         """
-        rows = conn.execute(query, [query_embedding, *chunk_ids, provider, model]).fetchall()
+        rows = conn.execute(
+            query, [query_embedding, *chunk_ids, provider, model]
+        ).fetchall()
         return {int(row[0]): float(row[1]) for row in rows}
 
     def find_similar_chunks(
@@ -4198,7 +4542,10 @@ class DuckDBProvider(SerialDatabaseProvider):
         threshold: float | None = None,
         path_filter: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Find chunks similar to the given chunk using its embedding."""
+        """Find chunks similar to the given chunk using its embedding.
+
+        ``threshold`` is an inclusive cosine-similarity floor.
+        """
         return self._execute_in_db_thread_sync(
             "find_similar_chunks",
             chunk_id,
@@ -4208,6 +4555,25 @@ class DuckDBProvider(SerialDatabaseProvider):
             threshold,
             path_filter,
         )
+
+    def _executor_find_chunk_embedding(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunk_id: int,
+        provider: str,
+        model: str,
+    ) -> tuple[str, list[float]] | None:
+        """Find a chunk embedding and its dimension-specific table."""
+        for table_name in self._executor_get_all_embedding_tables(conn, state):
+            row = conn.execute(
+                f"SELECT embedding FROM {table_name} "
+                "WHERE chunk_id = ? AND provider = ? AND model = ? LIMIT 1",
+                [chunk_id, provider, model],
+            ).fetchone()
+            if row is not None:
+                return table_name, list(row[0])
+        return None
 
     def _executor_find_similar_chunks(
         self,
@@ -4220,142 +4586,57 @@ class DuckDBProvider(SerialDatabaseProvider):
         threshold: float | None,
         path_filter: str | None,
     ) -> list[dict[str, Any]]:
-        """Executor method for find_similar_chunks - runs in DB thread."""
-        try:
-            # Validate and normalize path filter for consistent scoping behavior
-            normalized_path = self._validate_and_normalize_path_filter(path_filter)
-
-            # Find which table contains this chunk's embedding (reuse existing pattern)
-            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
-            target_embedding = None
-            dims = None
-            table_name = None
-
-            # logger.debug(f"Looking for embedding: chunk_id={chunk_id}, provider='{provider}', model='{model}'")
-            # logger.debug(f"Available embedding tables: {embedding_tables}")
-
-            for table in embedding_tables:
-                result = conn.execute(
-                    f"""
-                    SELECT embedding
-                    FROM {table}
-                    WHERE chunk_id = ? AND provider = ? AND model = ?
-                    LIMIT 1
-                """,
-                    [chunk_id, provider, model],
-                ).fetchone()
-
-                if result:
-                    target_embedding = result[0]
-                    # Extract dimensions from table name (e.g., "embeddings_1536" -> 1536)
-                    dims_match = re.match(r"embeddings_(\d+)", table)
-                    if dims_match:
-                        dims = int(dims_match.group(1))
-                        table_name = table
-                        # logger.debug(f"Found embedding in table {table} for chunk_id={chunk_id}")
-                        break
-                else:
-                    # Debug what's actually in this table for this chunk
-                    all_for_chunk = conn.execute(
-                        f"""
-                        SELECT provider, model, chunk_id
-                        FROM {table}
-                        WHERE chunk_id = ?
-                    """,
-                        [chunk_id],
-                    ).fetchall()
-                    # if all_for_chunk:
-                    #     logger.debug(f"Table {table} has chunk_id={chunk_id} but with different provider/model: {all_for_chunk}")
-
-            if not target_embedding or dims is None:
-                # Show what providers/models are actually available for this chunk
-                all_providers_models = []
-                for table in embedding_tables:
-                    results = conn.execute(
-                        f"""
-                        SELECT DISTINCT provider, model
-                        FROM {table}
-                        WHERE chunk_id = ?
-                    """,
-                        [chunk_id],
-                    ).fetchall()
-                    all_providers_models.extend(results)
-
-                logger.warning(
-                    f"No embedding found for chunk_id={chunk_id}, provider='{provider}', model='{model}'"
-                )
-                logger.warning(
-                    f"Available provider/model combinations for this chunk: {all_providers_models}"
-                )
-                return []
-
-            embedding_type = f"FLOAT[{dims}]"
-
-            # Use the embedding to find similar chunks
-            similarity_metric = "cosine"  # Default for semantic search
-            threshold_condition = (
-                f"AND distance <= {threshold}" if threshold is not None else ""
+        """Find similar chunks through the shared HNSW search path."""
+        if limit <= 0:
+            raise ValueError("limit must be greater than 0")
+        self._validate_threshold(threshold)
+        found = self._executor_find_chunk_embedding(
+            conn, state, chunk_id, provider, model
+        )
+        if found is None:
+            logger.warning(
+                f"No embedding found for chunk_id={chunk_id} "
+                f"provider={provider!r} model={model!r}"
             )
-
-            # Optional path scoping condition
-            path_condition = ""
-            params: list[Any] = [target_embedding, provider, model, chunk_id]
-            if normalized_path is not None:
-                path_condition = "AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
-                params.append(self._build_path_like_pattern(normalized_path))
-
-            # Query for similar chunks (exclude the original chunk)
-            # Cast the target embedding to match the table's embedding type
-            query = f"""
-                SELECT
-                    c.id as chunk_id,
-                    c.symbol as name,
-                    c.code as content,
-                    c.chunk_type,
-                    c.start_line,
-                    c.end_line,
-                    f.path as file_path,
-                    f.language,
-                    c.metadata,
-                    array_cosine_distance(e.embedding, ?::{embedding_type}) as distance
-                FROM {table_name} e
-                JOIN chunks c ON e.chunk_id = c.id
-                JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ?
-                AND e.model = ?
-                AND c.id != ?
-                {path_condition}
-                {threshold_condition}
-                ORDER BY distance ASC
-                LIMIT ?
-            """
-
-            params.append(limit)
-
-            results = conn.execute(query, params).fetchall()
-
-            # Format results
-            result_list = [
-                {
-                    "chunk_id": result[0],
-                    "name": result[1],
-                    "content": result[2],
-                    "chunk_type": result[3],
-                    "start_line": result[4],
-                    "end_line": result[5],
-                    "file_path": result[6],  # Keep stored format
-                    "language": result[7],
-                    "metadata": json.loads(result[8]) if result[8] else {},
-                    "score": 1.0 - result[9],  # Convert distance to similarity score
-                }
-                for result in results
-            ]
-
-            return result_list
-
-        except Exception as e:
-            logger.error(f"Failed to find similar chunks: {e}")
             return []
+        table_name, target_embedding = found
+        self._executor_ensure_hnsw_index(conn, table_name, len(target_embedding))
+        path_like = self._vector_path_like(path_filter)
+        results, budget_exhausted = self._executor_search_vector_candidates(
+            conn,
+            table_name,
+            target_embedding,
+            provider,
+            model,
+            limit,
+            path_like,
+            None if threshold is None else 1.0 - threshold,
+            "name",
+            exclude_chunk_id=chunk_id,
+        )
+        self._require_complete_vector_limit(
+            "find_similar_chunks", results, limit, budget_exhausted
+        )
+        return results
+
+    @staticmethod
+    def _require_complete_vector_limit(
+        api_name: str,
+        results: list[dict[str, Any]],
+        limit: int,
+        budget_exhausted: bool,
+    ) -> None:
+        """Fail when a list-only API returns zero results under budget exhaustion.
+
+        A short page (0 < len < limit) is a valid outcome when post-filtering
+        discards most candidates; only a zero-result page under exhaustion
+        indicates the search beam could not reach any matching row.
+        """
+        if budget_exhausted and len(results) == 0:
+            raise RuntimeError(
+                f"{api_name} exhausted the HNSW candidate budget without finding "
+                f"any matching results; loosen the threshold or widen the path filter"
+            )
 
     def search_by_embedding(
         self,
@@ -4366,7 +4647,10 @@ class DuckDBProvider(SerialDatabaseProvider):
         threshold: float | None = None,
         path_filter: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Find chunks similar to the given embedding vector."""
+        """Find chunks similar to the given embedding vector.
+
+        ``threshold`` is an inclusive cosine-similarity floor.
+        """
         return cast(
             list[dict[str, Any]],
             self._execute_in_db_thread_sync(
@@ -4391,82 +4675,33 @@ class DuckDBProvider(SerialDatabaseProvider):
         threshold: float | None,
         path_filter: str | None,
     ) -> list[dict[str, Any]]:
-        """Executor method for search_by_embedding - runs in DB thread."""
-        try:
-            # Detect dimensions from query embedding (reuse pattern from search_semantic)
-            query_dims = len(query_embedding)
-            table_name = f"embeddings_{query_dims}"
-            embedding_type = f"FLOAT[{query_dims}]"
-
-            # Check if table exists for these dimensions (reuse existing validation pattern)
-            if not self._executor_table_exists(conn, state, table_name):
-                logger.warning(
-                    f"No embeddings table found for {query_dims} dimensions ({table_name})"
-                )
-                return []
-
-            # Build path filter condition
-            normalized_path = self._validate_and_normalize_path_filter(path_filter)
-            path_condition = ""
-            query_params: list[Any] = [query_embedding, provider, model]
-
-            if normalized_path is not None:
-                path_pattern = self._build_path_like_pattern(normalized_path)
-                path_condition = "AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
-                query_params.append(path_pattern)
-            query_params.append(limit)
-
-            # Build threshold condition
-            threshold_condition = (
-                f"AND distance <= {threshold}" if threshold is not None else ""
-            )
-
-            # Query for similar chunks using the provided embedding
-            query = f"""
-                SELECT 
-                    c.id as chunk_id,
-                    c.symbol as name,
-                    c.code as content,
-                    c.chunk_type,
-                    c.start_line,
-                    c.end_line,
-                    f.path as file_path,
-                    f.language,
-                    array_cosine_distance(e.embedding, ?::{embedding_type}) as distance
-                FROM {table_name} e
-                JOIN chunks c ON e.chunk_id = c.id
-                JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ?
-                AND e.model = ?
-                {path_condition}
-                {threshold_condition}
-                ORDER BY distance ASC
-                LIMIT ?
-            """
-
-            results = conn.execute(query, query_params).fetchall()
-
-            # Format results
-            result_list = [
-                {
-                    "chunk_id": result[0],
-                    "name": result[1],
-                    "content": result[2],
-                    "chunk_type": result[3],
-                    "start_line": result[4],
-                    "end_line": result[5],
-                    "file_path": result[6],  # Keep stored format
-                    "language": result[7],
-                    "score": 1.0 - result[8],  # Convert distance to similarity score
-                }
-                for result in results
-            ]
-
-            return result_list
-
-        except Exception as e:
-            logger.error(f"Failed to search by embedding: {e}")
+        """Search directly by embedding through the shared HNSW path."""
+        if limit <= 0:
+            raise ValueError("limit must be greater than 0")
+        self._validate_query_embedding(query_embedding)
+        self._validate_threshold(threshold)
+        dims = len(query_embedding)
+        table_name = f"embeddings_{dims}"
+        if not self._executor_table_exists(conn, state, table_name):
+            logger.warning(f"No embeddings table found for {dims} dimensions")
             return []
+        self._executor_ensure_hnsw_index(conn, table_name, dims)
+        path_like = self._vector_path_like(path_filter)
+        results, budget_exhausted = self._executor_search_vector_candidates(
+            conn,
+            table_name,
+            query_embedding,
+            provider,
+            model,
+            limit,
+            path_like,
+            None if threshold is None else 1.0 - threshold,
+            "name",
+        )
+        self._require_complete_vector_limit(
+            "search_by_embedding", results, limit, budget_exhausted
+        )
+        return results
 
     def search_text(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """Perform full-text search on code content."""
