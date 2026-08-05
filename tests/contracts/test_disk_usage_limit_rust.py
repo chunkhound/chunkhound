@@ -18,6 +18,12 @@ from tests.contracts.pipeline_harness import index_with_rust
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 
 
+def _write_many_fixture_files(project_dir: Path, count: int) -> None:
+    project_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        (project_dir / f"mod_{i}.py").write_text(f"def fn_{i}():\n    return {i}\n")
+
+
 class TestDiskUsageLimitRust:
     @pytest.mark.asyncio
     async def test_zero_limit_stops_all_writes_without_raising(self):
@@ -90,4 +96,42 @@ class TestDiskUsageLimitRust:
             )
             assert "write-index" in phases_seen, (
                 "the cheap HNSW-only rebuild must still run in compaction's place"
+            )
+
+    @pytest.mark.asyncio
+    async def test_disk_limit_trip_drains_in_flight_batches_without_hanging(self):
+        """A trip must cleanly cancel every batch already queued upstream,
+        not just the trivial single-batch case the other tests above cover.
+
+        The standard 5-file fixture with the default parse_batch_size=200
+        always collapses into exactly one batch, so store's `drop(store_rx)`
+        on trip has nothing queued to cancel -- the cooperative-shutdown
+        cascade (embed's `store_tx.send()` failing, which drops `parse_rx`,
+        which fails parse's `parse_tx.send()`) never actually exercises
+        multiple in-flight batches contending on the bounded channels. Here,
+        many files with parse_batch_size=1 force dozens of concurrent
+        batches; disk_usage_limit_mb=0.0 trips before the store thread's very
+        first receive (backend.open() already leaves a non-empty chunks.db).
+        If the shutdown cascade were broken -- e.g. the drop happening too
+        late, or not at all -- parse/embed would block forever on a full
+        store_tx (capacity 8) with nothing draining it, and this test would
+        hang instead of completing.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp) / "project"
+            _write_many_fixture_files(project_dir, count=50)
+            db_dir = Path(tmp) / "db"
+
+            result = index_with_rust(
+                project_dir,
+                db_dir,
+                skip_embeddings=True,
+                parse_batch_size=1,
+                disk_usage_limit_mb=0.0,
+            )
+
+            assert result.disk_limit_exceeded is True
+            assert result.chunks_written == 0, (
+                "the trip fires before the store thread's first receive, so "
+                "none of the ~50 in-flight batches should land"
             )
