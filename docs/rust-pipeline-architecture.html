@@ -129,6 +129,10 @@
 <p class="subtitle">Unified Rust PyO3 Indexing Pipeline — High-Level Architecture<br>
 Based on the <a href="https://github.com/chunkhound/chunkhound/wiki/Unified-Rust-PyO3-Indexing-Pipeline-Design">Unified Rust PyO3 Indexing Pipeline Design</a> wiki</p>
 
+<div class="note" style="border-left-color: var(--amber);">
+  <strong>Historical design document.</strong> This page captures the original design intent and phased implementation plan drafted before the pipeline was built. Several details evolved during implementation — callback signatures, the file layout, the rollout strategy, and the size of the correctness-test suite all diverged from what's described below. Treat <code>src/pipeline/*.rs</code>, <code>src/pipeline/report.rs</code>, and <code>chunkhound/pipeline_bridge.py</code> as the source of truth for exact contracts; this document is best read as a record of the reasoning behind the architecture, not a spec of the shipped code.
+</div>
+
 <div class="toc">
   <h3>Contents</h3>
   <ol>
@@ -167,9 +171,9 @@ Based on the <a href="https://github.com/chunkhound/chunkhound/wiki/Unified-Rust
       <td>Parallel file discovery via <code>ignore</code> crate (ripgrep's walker). Respects <code>.gitignore</code>, extension filters, custom exclude patterns. Returns <code>Vec&lt;String&gt;</code> of matching paths.</td>
     </tr>
     <tr>
-      <td><code>RustDbWriter</code></td>
+      <td><code>RustDbWriter</code> <em>(since removed)</em></td>
       <td><code>src/db_writer.rs</code></td>
-      <td>High-performance DuckDB batch writer. Extracts <code>PyDict</code> → Rust structs directly (no JSON round-trip). Manages file upsert, chunk insert, embedding insert with 100-row batching. 3-phase EXPORT/IMPORT compaction. HNSW index lifecycle (drop-before-insert, recreate-after-commit).</td>
+      <td>High-performance DuckDB batch writer. Extracts <code>PyDict</code> → Rust structs directly (no JSON round-trip). Manages file upsert, chunk insert, embedding insert with 100-row batching. 3-phase EXPORT/IMPORT compaction. HNSW index lifecycle (drop-before-insert, recreate-after-commit). <strong>Note:</strong> this standalone PyO3 class and <code>src/db_writer.rs</code> were deleted once the streaming pipeline shipped — the pipeline writes through the <code>DbBackend</code> trait (below) directly instead of wrapping a separate writer class. Every <code>RustDbWriter</code> reference elsewhere in this document reflects the Phase-0 design that predates that removal.</td>
     </tr>
     <tr>
       <td><code>DbBackend</code> trait</td>
@@ -288,7 +292,7 @@ Based on the <a href="https://github.com/chunkhound/chunkhound/wiki/Unified-Rust
 
 <p style="color: var(--text2); font-size: 0.88rem; margin-top: 12px;">
   <strong>Reused from Phase 0:</strong> RustDbWriter (DuckDB batch writing, compaction, HNSW).<br>
-  <strong>New:</strong> IndexingPipeline (orchestrator + 3-thread streaming), Differ (content-hash diff, DB snapshot), PipelineState (counters, error tracking), Reporter (PipelineReport PyO3 class).<br>
+  <strong>New:</strong> IndexingPipeline (orchestrator + 3-thread streaming), Differ (content-hash diff, DB snapshot), PipelineReport (PyO3 result class — counters, errors, disk-limit status are fields on the report itself, not a separate state struct).<br>
   <strong>Stays in Python:</strong> File discovery (all flags, backends, chignore, simulate), Parsers (tree-sitter), Embedding providers (HTTP APIs), CLI / config / progress display.
 </p>
 
@@ -302,18 +306,15 @@ Based on the <a href="https://github.com/chunkhound/chunkhound/wiki/Unified-Rust
 
   <div class="note">
     <strong>Thread safety requirement:</strong> The parse thread uses <code>rayon::par_iter</code> and the embed thread uses <code>thread::spawn</code> — both call Python callbacks from non-main threads. The <code>.so</code> must call <code>pyo3::prepare_freethreaded_python()</code> in the module init function (<code>#[pymodule_init]</code>). This is a new requirement — the existing codebase does not call it yet.
-  </div> The entire module is gated behind <code>#[cfg(feature = "rust-pipeline")]</code> — the <code>.so</code> only includes this code when the feature is enabled.</p>
+  </div> As shipped, <code>mod pipeline;</code> and <code>IndexingPipeline</code> are compiled in unconditionally — there is no Cargo feature flag gating this code. (An earlier draft of this plan considered making it optional via a <code>rust-pipeline</code> feature; that was never a real supported build variant and the feature was removed.)</p>
 
-<pre><code>/// src/pipeline/mod.rs — entire module is feature-gated
-#[cfg(feature = "rust-pipeline")]
+<pre><code>/// src/pipeline/mod.rs
 mod pipeline;
 
 /// src/pipeline/pipeline.rs
-#[cfg(feature = "rust-pipeline")]
 #[pyclass]
 pub struct IndexingPipeline {
     config: PipelineConfig,
-    state: PipelineState,
 }
 
 #[pymethods]
@@ -323,13 +324,15 @@ impl IndexingPipeline {
 
     /// Run the full indexing pipeline synchronously.
     /// Call from Python via `asyncio.to_thread(pipeline.run, ...)`.
+    #[pyo3(signature = (files, parse_batch_callback, embed_batch_callback=None, progress_callback=None, incremental=false))]
     fn run(
         &mut self,
         py: Python&lt;'_&gt;,
-        files: Vec&lt;String&gt;,                      // discovered by Python, passed to Rust
-        parse_callback: Py&lt;PyAny&gt;,              // (path, detect_sql) → (language, list[dict])
-        embed_callback: Option&lt;Py&lt;PyAny&gt;&gt;,       // (texts, provider, model) → list[list[float]]
-        progress_callback: Option&lt;Py&lt;PyAny&gt;&gt;,     // (phase, cur, total, info) → bool
+        files: Vec&lt;String&gt;,                              // discovered by Python, passed to Rust
+        parse_batch_callback: Py&lt;PyAny&gt;,                  // (file_paths, parse_config) → list[(language, list[dict], error)]
+        embed_batch_callback: Option&lt;Py&lt;PyAny&gt;&gt;,          // (texts) → list[list[float]]
+        progress_callback: Option&lt;Py&lt;PyAny&gt;&gt;,             // (phase, current, total) — return value ignored, no abort support
+        incremental: bool,                                // true = content-hash diff against DB; false = force reindex
     ) -> PyResult&lt;PipelineReport&gt;;
 }</code></pre>
 
@@ -575,7 +578,7 @@ pub struct DbFileState {
 
 <h3>4.2b PipelineReport + Helpers</h3>
 
-<div class=card>
+<div class="card">
 <pre><code>/// src/pipeline/report.rs — Exposed to Python via PyO3
 #[pyclass]
 pub struct PipelineReport {
@@ -593,6 +596,8 @@ pub struct PipelineReport {
     pub errors: Vec&lt;String&gt;,
     #[pyo3(get)]
     pub peak_rss_mb: Option&lt;f64&gt;,     // from RSS sidecar thread
+    #[pyo3(get)]
+    pub disk_limit: Option&lt;(f64, f64)&gt;,  // Some((current_mb, limit_mb)) if a mid-run disk-usage check tripped
 }
 
 /// src/pipeline/pipeline.rs — extracts ParsedFile from Python callback tuple
@@ -1006,24 +1011,28 @@ fn build_writer_batch(diffs: &[DiffResult]) -> DbWriterBatch {
 <!-- ═══════════════════════════════════════════════════════ -->
 <h2 id="python-blocks">5. Python Building Blocks</h2>
 
+<div class="note">
+  As shipped, both the parse and embed callbacks are <strong>batch-shaped</strong>, not per-file/per-text as originally planned below: Rust's parse and embed threads each hand over one whole batch per call. See <code>chunkhound/pipeline_bridge.py</code>'s <code>parse_batch_callback()</code> and <code>embed_batch_callback()</code> for the real adapters.
+</div>
+
 <div class="card">
-  <h3>5.1 Parser Callback Contract</h3>
+  <h3>5.1 Parser Callback Contract (<code>parse_batch_callback</code>)</h3>
   <table>
     <tr><th>Aspect</th><th>Spec</th></tr>
-    <tr><td>Signature</td><td><code>(file_path: str, detect_embedded_sql: bool) → (str, list[dict])</code></td></tr>
-    <tr><td>Returns</td><td>Tuple: <code>(language: str, chunks: list[dict])</code>. Language detection happens inside the callback (40+ language mappings stay in Python). Chunks dicts have: <code>chunk_type</code>, <code>symbol</code>, <code>code</code>, <code>start_line</code>, <code>end_line</code>, <code>start_byte</code>, <code>end_byte</code>, <code>language</code>, <code>metadata</code>, <strong><code>embed_text</code></strong></td></tr>
+    <tr><td>Signature</td><td><code>(file_paths: list[str], parse_config: ParseCallConfig | None) → list[tuple[str, list[dict], str | None]]</code></td></tr>
+    <tr><td>Returns</td><td>List of <code>(language, chunks, error)</code> tuples, same order as <code>file_paths</code>. Language detection happens inside the callback (40+ language mappings stay in Python). Chunks dicts have: <code>chunk_type</code>, <code>symbol</code>, <code>code</code>, <code>start_line</code>, <code>end_line</code>, <code>start_byte</code>, <code>end_byte</code>, <code>language</code>, <code>metadata</code>, <strong><code>embed_text</code></strong></td></tr>
     <tr><td>Language</td><td>Returns <code>""</code> for unrecognized files (no chunks). Rust treats empty-string language like None.</td></tr>
-    <tr><td>Errors</td><td>Raises <code>Exception</code>. Rust catches it, records the file as errored, continues.</td></tr>
-    <tr><td>Size control</td><td>Skips config files (JSON/YAML/TOML) above threshold. Handles embedded SQL detection.</td></tr>
+    <tr><td>Errors</td><td><code>error</code> is <code>None</code> on success, or a message string if that file's parse raised or timed out — caught per-file inside the batch, not raised to Rust. The batch worker pool is a process-wide singleton, reused across every call and every <code>IndexingPipeline.run()</code>.</td></tr>
+    <tr><td>Size control</td><td>Skips config files (JSON/YAML/TOML) above threshold. Handles embedded SQL detection and per-file timeouts via <code>ParseCallConfig</code>, built once per <code>run()</code> call.</td></tr>
   </table>
 </div>
 
 <div class="card">
-  <h3>5.2 Embedding Callback Contract</h3>
+  <h3>5.2 Embedding Callback Contract (<code>embed_batch_callback</code>)</h3>
   <table>
     <tr><th>Aspect</th><th>Spec</th></tr>
-    <tr><td>Signature</td><td><code>(texts: list[str], provider: str, model: str) → list[list[float]]</code></td></tr>
-    <tr><td>Returns</td><td>List of float vectors, one per input text, in the same order</td></tr>
+    <tr><td>Signature</td><td><code>(texts: list[str]) → list[list[float]]</code></td></tr>
+    <tr><td>Returns</td><td>List of float vectors, one per input text, in the same order. Provider/model/API-key/etc. are not passed per call — baked into the adapter via global config, matching the legacy Python path's construction.</td></tr>
     <tr><td>Errors</td><td>Raises <code>Exception</code>. Rust skips embedding for that batch, records the error.</td></tr>
   </table>
 </div>
@@ -1032,68 +1041,44 @@ fn build_writer_batch(diffs: &[DiffResult]) -> DbWriterBatch {
   <h3>5.3 Progress Callback Contract</h3>
   <table>
     <tr><th>Aspect</th><th>Spec</th></tr>
-    <tr><td>Signature</td><td><code>(phase: str, current: int, total: int, info: dict) → bool</code></td></tr>
-    <tr><td>Returns</td><td><code>True</code> to continue, <code>False</code> to abort</td></tr>
-    <tr><td>Phases</td><td><code>"discovering"</code>, <code>"parsing"</code>, <code>"embedding"</code>, <code>"storing"</code>, <code>"compacting"</code></td></tr>
+    <tr><td>Signature</td><td><code>(phase: str, current: int, total: int[, chunks: int]) → None</code> — return value is ignored; there is no abort-via-<code>False</code> mechanism. The optional 4th <code>chunks</code> arg is passed only during the <code>"write-data"</code> phase so the Python progress bar can show true chunks/s throughput; 3-arg callers are unaffected.</td></tr>
+    <tr><td>Phases</td><td><code>"diff"</code>, <code>"parse"</code>, <code>"embed"</code>, <code>"write-prepare"</code>, <code>"write-data"</code>, <code>"write-index"</code>, <code>"write-compact"</code>, <code>"write-done"</code>, <code>"done"</code>. Only one of <code>"write-index"</code>/<code>"write-compact"</code> fires per run.</td></tr>
   </table>
 </div>
 
 <div class="card">
   <h3>5.4 Pipeline Bridge Module (<code>chunkhound/pipeline_bridge.py</code>)</h3>
-  <p>Thin adapter wrapping existing parser and embedding code:</p>
+  <p>Thin adapter wrapping existing parser and embedding code — simplified/illustrative excerpt; see the real file for the full batch-pooling and config-resolution logic:</p>
 <pre><code># chunkhound/pipeline_bridge.py
 
 from pathlib import Path
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.core.types.common import Language, FileId
 
-def parse_file_callback(
-    file_path: str,
-    detect_embedded_sql: bool = True,
-) -> tuple[str, list[dict]]:
-    """Adapter: path → (language, chunks).
+def parse_batch_callback(
+    file_paths: list[str],
+    parse_config = None,
+) -> list[tuple[str, list[dict], str | None]]:
+    """Adapter: batch-parse files in parallel (called from Rust parse thread).
 
-    All parse-tuning flags are handled internally via global config:
-    - per_file_timeout_seconds / per_file_timeout_min_size_kb
-    - config_file_size_threshold_kb (skip oversized config files)
-    - max_file_size_mb (skip files over the limit)
-    - index_unknown_files (return empty for unrecognized extensions)
-
-    Rust passes only detect_embedded_sql — everything else is baked in.
+    Fans the batch out across a process-wide worker-pool singleton for true
+    CPU parallelism (tree-sitter holds the GIL, so Python threads wouldn't
+    help). All parse-tuning flags — per_file_timeout_seconds,
+    config_file_size_threshold_kb, max_file_size_mb, index_unknown_files —
+    are resolved from parse_config / global config, not passed per file.
     """
-    from chunkhound.registry import get_registry
-    from chunkhound.services.batch_processor import detect_language
-
-    # Skip files exceeding max_file_size_mb
-    config = get_registry().indexing_config
-    if Path(file_path).stat().st_size > config.max_file_size_mb * 1024 * 1024:
-        return ("", [])
-    lang = detect_language(file_path)
-    if lang is None:
-        return ("", [])
-    parser = create_parser_for_language(lang,
-                detect_embedded_sql=detect_embedded_sql)
-    if parser is None:
-        return (lang.value, [])
-    file_id = FileId(0)  # Rust assigns the real ID
-    chunks = parser.parse_file(Path(file_path), file_id)
-    return (lang.value, [c.to_dict() for c in chunks])
+    ...  # see chunkhound/pipeline_bridge.py:parse_batch_callback for the real body
 
 
-def embed_callback(
-    texts: list[str],
-    provider: str,
-    model: str,
-) -> list[list[float]]:
-    """Adapter: batch embed (called from Rust embed thread).
+def embed_batch_callback(texts: list[str]) -> list[list[float]]:
+    """Adapter: batch embed (called from Rust rayon threads, GIL held).
 
-    All embedding config is baked into the service via global config —
-    api_key, base_url, ssl_verify, output_dims, client_side_truncation,
-    batch_size, timeout, max_retries, max_concurrent_batches, Azure config.
+    Delegates to a provider + event loop cached per OS thread id (created
+    once per thread and reused for its lifetime) — see the real
+    _embed_batch() for why a naive threading.local() cache doesn't work
+    across separate Python::with_gil() calls from the same rayon thread.
     """
-    from chunkhound.registry import get_registry
-    service = get_registry().embedding_service
-    return service.generate_embeddings(texts, provider, model)</code></pre>
+    return _embed_batch(texts)</code></pre>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ -->
@@ -1107,18 +1092,19 @@ def embed_callback(
   pipeline = IndexingPipeline(config_dict)
   report = pipeline.run(
       files=discovered_files,  # Python runs full discovery engine first
-      parse_callback=pipeline_bridge.parse_file_callback,
-      embed_callback=pipeline_bridge.embed_callback,
-      progress_callback=lambda p, c, t, i: print(f"{p}: {c}/{t}"),
+      parse_batch_callback=pipeline_bridge.parse_batch_callback,
+      embed_batch_callback=pipeline_bridge.embed_batch_callback,
+      progress_callback=lambda p, c, t: print(f"{p}: {c}/{t}"),
+      incremental=True,
   )
   print(f"{report.files_processed} files, {report.chunks_written} chunks")
 
 
                 Rust → Python (GIL acquire + callback)
                 ═══════════════════════════════════════════
-  parse_callback(file_path, detect_sql) → (language, list[dict])
-  embed_callback(texts, provider, model) → list[list[float]]
-  progress_callback(phase, current, total, info_dict) → bool
+  parse_batch_callback(file_paths, parse_config) → list[(language, chunks, error)]
+  embed_batch_callback(texts) → list[list[float]]
+  progress_callback(phase, current, total) → None  # no abort mechanism
 </div>
 
 <div class="note">
@@ -1260,7 +1246,7 @@ for error in report.errors:
     <tr><td><code>src/pipeline/types.rs</code></td><td>~100</td><td><code>ParsedFile</code>, <code>NewChunk</code>, <code>DiffResult</code>, <code>EmbeddedBatch</code> — internal pipeline types</td></tr>
     <tr><td><code>src/pipeline/differ.rs</code></td><td>~130</td><td><code>load_db_snapshot()</code> (one bulk SELECT), <code>diff_and_remove()</code> (in-memory compare, removes matched files → leftovers are orphans)</td></tr>
     <tr><td><code>src/pipeline/report.rs</code></td><td>~60</td><td><code>PipelineReport</code> PyO3 class with readonly properties</td></tr>
-    <tr><td><code>src/pipeline/state.rs</code></td><td>~80</td><td><code>PipelineState</code>: counters (files processed/errored/skipped, chunks written), error accumulator</td></tr>
+    <tr><td><code>src/pipeline/state.rs</code></td><td>—</td><td><strong>Not built as a separate module.</strong> Counters, error accumulation, and disk-limit status ended up as fields directly on <code>PipelineReport</code> (see <code>report.rs</code>) rather than a distinct <code>PipelineState</code> struct.</td></tr>
   </table>
 </div>
 
@@ -1269,8 +1255,8 @@ for error in report.errors:
 <div class="card">
   <table>
     <tr><th>File</th><th>Est. Lines</th><th>Purpose</th></tr>
-    <tr><td><code>chunkhound/pipeline_bridge.py</code></td><td>~100</td><td>Callback adapters: <code>parse_file_callback()</code>, <code>embed_callback()</code></td></tr>
-    <tr><td><code>chunkhound/services/pipeline_service.py</code></td><td>~80</td><td><code>PipelineService</code> — same interface as <code>DirectoryIndexingService</code>. Calls <code>run()</code> in <code>asyncio.to_thread</code>.</td></tr>
+    <tr><td><code>chunkhound/pipeline_bridge.py</code></td><td>~100</td><td>Callback adapters: <code>parse_batch_callback()</code>, <code>embed_batch_callback()</code>, plus <code>run_rust_pipeline()</code>, the actual entry point called from <code>indexing_coordinator.py</code></td></tr>
+    <tr><td><code>chunkhound/services/pipeline_service.py</code></td><td>—</td><td><strong>Not built as a separate service class.</strong> The Rust path is instead called directly from <code>chunkhound/services/indexing_coordinator.py</code>'s existing <code>process_directory()</code>, gated by <code>chunkhound/providers/database/rust_pipeline_flag.py</code> — no parallel <code>DirectoryIndexingService</code>-shaped class was introduced.</td></tr>
   </table>
 </div>
 
@@ -1279,11 +1265,10 @@ for error in report.errors:
 <div class="card">
   <table>
     <tr><th>File</th><th>Change</th></tr>
-    <tr><td><code>src/lib.rs</code></td><td>Add <code>#[cfg(feature = "rust-pipeline")] mod pipeline;</code>. Register <code>IndexingPipeline</code>, <code>PipelineReport</code> only when feature is enabled. The existing <code>scan_files</code> and <code>RustDbWriter</code> are always compiled — only the new pipeline orchestrator is gated.</td></tr>
-    <tr><td><code>src/db_writer.rs</code></td><td>Add <code>chunk_ids_to_delete: Vec&lt;i64&gt;</code> variant to <code>DbWriterBatch</code> for per-file deletion (currently supports chunk-level deletion only).</td></tr>
-    <tr><td><code>Cargo.toml</code></td><td>Add <code>rayon = "1"</code>. Add <code>[features] rust-pipeline = ["rayon"]</code>. Add <code>default = ["rust-pipeline"]</code> so the feature is opt-out, not opt-in. Disabling it shrinks the <code>.so</code> for users who only need <code>scan_files</code> + <code>RustDbWriter</code>.</td></tr>
-    <tr><td><code>chunkhound_native/__init__.py</code></td><td>Conditionally export <code>IndexingPipeline</code>, <code>PipelineReport</code> — only if the <code>.so</code> was compiled with the <code>rust-pipeline</code> feature. Check via <code>hasattr(native, "IndexingPipeline")</code>.</td></tr>
-    <tr><td><code>chunkhound/services/directory_indexing_service.py</code></td><td>Opt-in: checks <code>os.environ.get("CHUNKHOUND_USE_RUST")</code> + <code>hasattr(chunkhound_native, "IndexingPipeline")</code>. Both must be true to use the Rust pipeline. Graceful fallback to Python path.</td></tr>
+    <tr><td><code>src/lib.rs</code></td><td>Adds <code>mod pipeline;</code> and registers <code>IndexingPipeline</code>, <code>PipelineReport</code>, <code>ParseCallConfig</code>. Unconditionally — an earlier draft of this plan considered a <code>rust-pipeline</code> Cargo feature to make this optional; that feature was removed as unnecessary (there's no supported build without the pipeline).</td></tr>
+    <tr><td><code>Cargo.toml</code></td><td>Adds <code>rayon = "1"</code> and the other pipeline dependencies. No feature flag — the pipeline module compiles in every build.</td></tr>
+    <tr><td><code>chunkhound_native/__init__.py</code></td><td>Exports <code>IndexingPipeline</code>, <code>PipelineReport</code>, <code>ParseCallConfig</code> unconditionally (direct attribute access from the compiled extension, same pattern as <code>scan_files</code>) — no conditional/<code>hasattr</code> export.</td></tr>
+    <tr><td><code>chunkhound/services/indexing_coordinator.py</code></td><td>Opt-<strong>out</strong>, not opt-in: <code>rust_pipeline_flag._get_use_rust()</code> defaults to <code>True</code>; set <code>CHUNKHOUND_USE_RUST=0</code> to fall back to the Python path. Also falls back automatically for non-DuckDB providers or a non-standard DB filename.</td></tr>
   </table>
 </div>
 
@@ -1333,8 +1318,12 @@ for error in report.errors:
 <p>
   Every phase starts by writing the contract test, confirming it <strong style="color: var(--red)">FAILS</strong>,
   then implementing the minimum Rust + Python to make it <strong style="color: var(--green)">PASS</strong>.
-  The 9 correctness-gate tests from <a href="#testing">§12</a> are distributed across phases so each
-  phase has exactly one exit criterion: the new tests pass, and all prior tests still pass.
+  The 9 correctness-gate tests planned in <a href="#testing">§12</a> were meant to be distributed across
+  phases so each phase has exactly one exit criterion: the new tests pass, and all prior tests still pass.
+  <strong>As shipped, the contract-test suite grew well beyond this original count</strong> — 21 test files
+  under <code>tests/contracts/</code> today, covering additional scenarios (disk-usage limits, compaction
+  timing, schema parity, native rpath/diagnostics) that emerged during implementation and aren't reflected
+  in the 9-test plan below.
 </p>
 
 <div class="diagram">
@@ -1410,11 +1399,11 @@ for error in report.errors:
       <td>
         <strong>Rust (<code>src/pipeline/</code>):</strong>
         <ul>
-          <li><code>mod.rs</code> — module root, gated with <code>#[cfg(feature = "rust-pipeline")]</code></li>
+          <li><code>mod.rs</code> — module root (as shipped: no Cargo feature gate; always compiled in)</li>
           <li><code>config.rs</code> — <code>PipelineConfig</code> extracted from Python dict</li>
           <li><code>types.rs</code> — <code>ParsedFile</code>, <code>NewChunk</code>, <code>DiffResult</code>, <code>DbFileState</code></li>
-          <li><code>report.rs</code> — <code>PipelineReport</code> PyO3 class</li>
-          <li><code>state.rs</code> — <code>PipelineState</code> counters</li>
+          <li><code>report.rs</code> — <code>PipelineReport</code> PyO3 class (as shipped: also holds the counters/error accumulator described below as a separate <code>state.rs</code> — that file was never built)</li>
+          <li><code>state.rs</code> (not built) — <code>PipelineState</code> counters</li>
           <li><code>differ.rs</code> — <code>load_db_snapshot()</code> (bulk SELECT) + <code>diff_and_remove()</code></li>
           <li><code>pipeline.rs</code> — <code>IndexingPipeline</code> PyO3 class with <code>parse_batch()</code> + single-threaded loop: parse → diff → <code>DbWriterBatch</code> → store</li>
         </ul>
@@ -1423,8 +1412,9 @@ for error in report.errors:
           <li><code>chunkhound/pipeline_bridge.py</code> — <code>parse_file_callback()</code> adapter</li>
           <li><code>tests/contracts/test_identical_chunks.py</code></li>
         </ul>
-        <strong>Build:</strong> Add <code>rayon</code> to <code>Cargo.toml</code>, add <code>[features] rust-pipeline</code>,
-        register <code>IndexingPipeline</code> + <code>PipelineReport</code> in <code>lib.rs</code>.
+        <strong>Build:</strong> Add <code>rayon</code> to <code>Cargo.toml</code>,
+        register <code>IndexingPipeline</code> + <code>PipelineReport</code> in <code>lib.rs</code>
+        unconditionally (as shipped: no Cargo feature gate).
       </td>
     </tr>
     <tr>
@@ -1580,6 +1570,15 @@ for error in report.errors:
     behind a feature flag. Validate that the full test suite passes with Rust enabled.
   </div>
 
+  <div class="note" style="margin-bottom: 16px; border-left-color: var(--amber);">
+    <strong>What actually shipped:</strong> there was never a compile-time <code>rust-pipeline</code>
+    feature flag (it was considered, added, and then removed — see §9/§10) — <code>IndexingPipeline</code>
+    is always compiled in, so "compiled without the feature" is not a state a real build can be in.
+    The runtime toggle also shipped as opt-<strong>out</strong>: <code>CHUNKHOUND_USE_RUST</code> defaults
+    to enabled; the gradual "Python default → opt-in → bake-in → Rust default" rollout below was the
+    original plan, not what happened.
+  </div>
+
   <table>
     <tr><th style="width: 80px;">Step</th><th>What</th></tr>
     <tr>
@@ -1587,8 +1586,11 @@ for error in report.errors:
       <td>
         <code>test_cli_integration</code> — <code>CHUNKHOUND_USE_RUST=1 uv run chunkhound index /path</code>
         uses Rust pipeline and produces output identical to Python path.<br>
-        <code>test_graceful_fallback</code> — <code>CHUNKHOUND_USE_RUST=1</code> but compiled
-        without <code>rust-pipeline</code> feature → falls back to Python silently.
+        <code>test_graceful_fallback</code> (original plan) — <code>CHUNKHOUND_USE_RUST=1</code> but compiled
+        without the pipeline → falls back to Python silently. This scenario no longer exists once the
+        Cargo feature flag was removed; the shipped fallback tests instead cover
+        <code>CHUNKHOUND_USE_RUST=0</code> and non-DuckDB/non-standard-db-path cases
+        (see <code>tests/unit/test_rust_pipeline_flag.py</code>).
       </td>
     </tr>
     <tr>
@@ -1596,17 +1598,18 @@ for error in report.errors:
       <td>
         <strong>Python:</strong>
         <ul>
-          <li><code>chunkhound/services/pipeline_service.py</code> — same interface as
-          <code>DirectoryIndexingService</code>, calls <code>IndexingPipeline.run()</code>
-          via <code>asyncio.to_thread</code></li>
-          <li>Toggle logic in <code>directory_indexing_service.py</code>: check
-          <code>CHUNKHOUND_USE_RUST=1</code> AND <code>hasattr(chunkhound_native, "IndexingPipeline")</code>.
-          Both must be true to use Rust pipeline. Graceful fallback to Python otherwise.</li>
-          <li><code>chunkhound_native/__init__.py</code> — conditionally export
-          <code>IndexingPipeline</code> + <code>PipelineReport</code></li>
+          <li><code>chunkhound/services/pipeline_service.py</code> (original plan) — <strong>not built</strong>;
+          the Rust path is called directly from <code>indexing_coordinator.py</code>'s existing
+          <code>process_directory()</code> instead, via <code>pipeline_bridge.run_rust_pipeline()</code></li>
+          <li>Toggle logic (as shipped, in <code>chunkhound/providers/database/rust_pipeline_flag.py</code>
+          and <code>indexing_coordinator.py</code>): <code>_get_use_rust()</code> defaults to <code>True</code>
+          (opt-out); also falls back to Python for non-DuckDB providers or a non-<code>chunks.db</code>
+          filename</li>
+          <li><code>chunkhound_native/__init__.py</code> — exports <code>IndexingPipeline</code> +
+          <code>PipelineReport</code> unconditionally, no conditional export needed</li>
         </ul>
-        <strong>Default:</strong> Compiled in (<code>default = ["rust-pipeline"]</code> in
-        <code>Cargo.toml</code>) but inactive at runtime (<code>CHUNKHOUND_USE_RUST</code> not set).
+        <strong>Default (as shipped):</strong> Compiled in unconditionally, and active at runtime by
+        default — <code>CHUNKHOUND_USE_RUST=0</code> is the opt-out, not <code>=1</code> the opt-in.
       </td>
     </tr>
     <tr>
@@ -1614,9 +1617,10 @@ for error in report.errors:
       <td>
         <code>uv run pytest tests/ -v</code> passes with <code>CHUNKHOUND_USE_RUST=1</code>.
         Existing <code>test_smoke.py</code> and full test suite pass with both backends.
-        Ready for gradual rollout: Python default → <code>CHUNKHOUND_USE_RUST=1</code>
+        (Original plan) Ready for gradual rollout: Python default → <code>CHUNKHOUND_USE_RUST=1</code>
         opt-in → benchmark (≥2× target, see <a href="#benchmarking">§13</a>) → Rust default
-        after 2-week bake-in with zero regressions.
+        after 2-week bake-in with zero regressions. As shipped, Rust became the default directly
+        rather than through a staged opt-in/bake-in rollout.
       </td>
     </tr>
   </table>
@@ -1638,7 +1642,7 @@ for error in report.errors:
 
 <div class="card">
   <h3>12.1 Contract Tests — Primary Correctness Gate</h3>
-  <p>These 9 tests are the <strong>only</strong> correctness gate — if they pass, the pipeline is correct. No internal unit tests needed. Each test is introduced in a specific phase of the <a href="#next-steps">TDD implementation sequence (§11)</a>: write the test first, confirm it fails, then implement the code to make it pass.</p>
+  <p>These 9 tests were planned as the <strong>only</strong> correctness gate — if they pass, the pipeline is correct. No internal unit tests needed. Each test is introduced in a specific phase of the <a href="#next-steps">TDD implementation sequence (§11)</a>: write the test first, confirm it fails, then implement the code to make it pass. <strong>As shipped, this grew to 21 test files under <code>tests/contracts/</code></strong> — the 9 below plus tests added later for disk-usage limits, compaction timing, schema parity, native-extension diagnostics/rpath, and per-file timeouts. See <code>tests/contracts/</code> directly for the current, authoritative list.</p>
   <table>
     <tr><th>Test</th><th>What it verifies</th></tr>
     <tr>
@@ -1696,11 +1700,12 @@ for error in report.errors:
   <p>Before commit and before PR, the contract tests must pass with the Rust pipeline enabled:</p>
   <table>
     <tr><th>Command</th><th>Gate</th></tr>
-    <tr><td><code>CHUNKHOUND_USE_RUST=1 uv run pytest tests/ -k "test_identical or test_incremental or test_skip or test_progress or test_empty or test_parse_error or test_embed_api or test_db_write" -v</code></td><td>Mandatory before commits. Exercises the Rust pipeline end-to-end.</td></tr>
+    <tr><td><code>uv run pytest tests/contracts/ -v</code></td><td>As shipped: runs the full, current contract-test suite (21 files). The <code>-k</code> filter originally planned here only names the first 9 tests and misses everything added later (disk-usage limits, compaction, schema parity, native diagnostics/rpath) — use the whole directory, not a keyword filter.</td></tr>
+    <tr><td><code>uv run pytest tests/test_smoke.py -v -n auto</code></td><td>Mandatory before commits (see <code>AGENTS.md</code>).</td></tr>
     <tr><td><code>uv run pytest tests/ -v</code></td><td>Mandatory before pushing to a PR. Full test suite.</td></tr>
   </table>
   <div class="note">
-    <strong>Note:</strong> The existing <code>tests/test_smoke.py</code> suite tests imports, CLI, and server startup — it does not exercise the indexing pipeline. Running it with <code>CHUNKHOUND_USE_RUST=1</code> passes trivially and provides no pipeline confidence. The contract tests above ARE the smoke gate for the Rust pipeline.
+    <strong>Note:</strong> <code>tests/test_smoke.py</code> tests imports, CLI, and server startup — it does not exercise the indexing pipeline. The contract tests above are the correctness gate for the Rust pipeline; smoke tests are a separate, faster sanity check.
   </div>
 </div>
 
