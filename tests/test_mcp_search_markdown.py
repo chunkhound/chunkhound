@@ -1,4 +1,5 @@
 """Tests for MCP search markdown formatter and execute_tool str return."""
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -6,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _result(
     file_path: str = "src/auth/login.py",
@@ -48,8 +50,11 @@ def _pagination(
     next_offset: int = 10,
 ) -> dict:
     return dict(
-        offset=offset, page_size=page_size, has_more=has_more,
-        total=total, next_offset=next_offset,
+        offset=offset,
+        page_size=page_size,
+        has_more=has_more,
+        total=total,
+        next_offset=next_offset,
     )
 
 
@@ -57,10 +62,13 @@ def _pagination(
 # Tests for format_search_results_markdown
 # ---------------------------------------------------------------------------
 
-class TestFormatSearchResultsMarkdown:
 
-    def _fmt(self, results: list, pagination: dict | None = None, search_type: str = "regex") -> str:
+class TestFormatSearchResultsMarkdown:
+    def _fmt(
+        self, results: list, pagination: dict | None = None, search_type: str = "regex"
+    ) -> str:
         from chunkhound.mcp_server.tools import format_search_results_markdown
+
         return format_search_results_markdown(
             results, pagination or _pagination(), search_type
         )
@@ -88,8 +96,11 @@ class TestFormatSearchResultsMarkdown:
 
     def test_similarity_hidden_for_regex(self) -> None:
         import re
+
         md = self._fmt([_result()], search_type="regex")
-        assert not re.search(r'\(\d+%\)', md), "Similarity percentage should not appear in regex results"
+        assert not re.search(r"\(\d+%\)", md), (
+            "Similarity percentage should not appear in regex results"
+        )
 
     def test_code_block_contains_content(self) -> None:
         md = self._fmt([_result(content="def my_method(self):\n    pass")])
@@ -101,17 +112,31 @@ class TestFormatSearchResultsMarkdown:
         assert "```python" in md
 
     def test_go_fence_hint(self) -> None:
-        md = self._fmt([_result(file_path="main.go", language="go", symbol=None, name=None)])
+        md = self._fmt(
+            [_result(file_path="main.go", language="go", symbol=None, name=None)]
+        )
         assert "```go" in md
 
     def test_unknown_ext_fence_hint_is_empty(self) -> None:
-        md = self._fmt([_result(file_path="Makefile", language="unknown", symbol=None, name=None)])
+        md = self._fmt(
+            [_result(file_path="Makefile", language="unknown", symbol=None, name=None)]
+        )
         assert "```\n" in md
 
     def test_pagination_footer_shows_totals(self) -> None:
         md = self._fmt([_result()], pagination=_pagination(total=47, next_offset=10))
         assert "47" in md
         assert "next_offset=10" in md
+
+    def test_pagination_footer_omits_unknown_total(self) -> None:
+        pagination = _pagination(next_offset=10)
+        pagination["total"] = None
+
+        md = self._fmt([_result()], pagination=pagination)
+
+        assert "Results 1–1" in md
+        assert "next_offset=10" in md
+        assert "47" not in md
 
     def test_pagination_no_next_when_no_more(self) -> None:
         md = self._fmt(
@@ -124,11 +149,27 @@ class TestFormatSearchResultsMarkdown:
         md = self._fmt([])
         assert "No results" in md
 
+    def test_empty_budget_limited_results_use_uncertain_warning(self) -> None:
+        pagination = _pagination(has_more=False, next_offset=None)
+        pagination["candidate_budget_exhausted"] = True
+
+        md = self._fmt([], pagination=pagination)
+
+        assert "HNSW candidate budget reached" in md
+        assert "results may be incomplete" in md
+        assert "was exhausted" not in md
+
     def test_dropped_fields_absent(self) -> None:
         md = self._fmt([_result()])
         for field in (
-            "chunk_id", "chunk_type", "file_extension", "metadata",
-            "is_truncated", "code_preview", "line_count", "similarity_percentage",
+            "chunk_id",
+            "chunk_type",
+            "file_extension",
+            "metadata",
+            "is_truncated",
+            "code_preview",
+            "line_count",
+            "similarity_percentage",
         ):
             assert field not in md, f"Dropped field '{field}' leaked into markdown"
 
@@ -138,6 +179,7 @@ class TestFormatSearchResultsMarkdown:
 
     def test_shorter_than_equivalent_json(self) -> None:
         import json
+
         results = [_result() for _ in range(5)]
         md = self._fmt(results)
         json_str = json.dumps({"results": results, "pagination": _pagination()})
@@ -160,6 +202,7 @@ class TestFormatSearchResultsMarkdown:
         # Confirm the outer fence is longer than 3 backticks so the inner ```
         # cannot close it.
         import re
+
         opening = re.search(r"^(`{3,})\w*$", md, re.MULTILINE)
         assert opening is not None, "No opening fence found"
         fence = opening.group(1)
@@ -192,8 +235,8 @@ class TestFormatSearchResultsMarkdown:
 # Tests for execute_tool returning str for search
 # ---------------------------------------------------------------------------
 
-class TestExecuteToolSearchReturnsMarkdown:
 
+class TestExecuteToolSearchReturnsMarkdown:
     def _make_services(self, results: list, pagination: dict) -> MagicMock:
         services = MagicMock()
         services.search_service = MagicMock()
@@ -235,10 +278,19 @@ class TestExecuteToolSearchReturnsMarkdown:
             embedding_manager=None,
             arguments={"type": "regex", "query": "def my_method"},
         )
-        for field in ("chunk_id", "chunk_type", "\"language\"",
-                      "file_extension", "is_truncated", "code_preview",
-                      "line_count", "similarity_percentage"):
-            assert field not in result, f"Dropped field '{field}' leaked into MCP output"
+        for field in (
+            "chunk_id",
+            "chunk_type",
+            '"language"',
+            "file_extension",
+            "is_truncated",
+            "code_preview",
+            "line_count",
+            "similarity_percentage",
+        ):
+            assert field not in result, (
+                f"Dropped field '{field}' leaked into MCP output"
+            )
 
     async def test_trim_loop_reduces_oversized_results(self) -> None:
         """Token-limiting trim loop in execute_tool removes results until under MAX_RESPONSE_TOKENS.
@@ -247,14 +299,20 @@ class TestExecuteToolSearchReturnsMarkdown:
         (20 000).  The loop trims by 1/4 each pass; after one pass 8 results remain (~18 700
         tokens < limit).  The response must reflect the trim: fewer blocks and next_offset set.
         """
-        from chunkhound.mcp_server.tools import MAX_RESPONSE_TOKENS, estimate_tokens, execute_tool
+        from chunkhound.mcp_server.tools import (
+            MAX_RESPONSE_TOKENS,
+            estimate_tokens,
+            execute_tool,
+        )
 
         large_content = "x" * 7000
         results = [
             _result(file_path=f"file_{i}.py", content=large_content, symbol=f"func_{i}")
             for i in range(10)
         ]
-        svc = self._make_services(results, _pagination(has_more=False, next_offset=None, total=10))
+        svc = self._make_services(
+            results, _pagination(has_more=False, next_offset=None, total=10)
+        )
 
         result = await execute_tool(
             tool_name="search",
@@ -268,15 +326,23 @@ class TestExecuteToolSearchReturnsMarkdown:
         assert result_block_count < 10, (
             f"Trim loop should have removed results; found {result_block_count} blocks"
         )
-        assert "next_offset=" in result, "Trimmed response must set next_offset for the caller to page"
+        assert "next_offset=" in result, (
+            "Trimmed response must set next_offset for the caller to page"
+        )
         assert estimate_tokens(result) <= MAX_RESPONSE_TOKENS, (
             f"Trim loop must reduce output to within MAX_RESPONSE_TOKENS; "
             f"got {estimate_tokens(result)} tokens"
         )
 
-    async def test_trim_loop_returns_at_least_one_result_when_single_oversized(self) -> None:
+    async def test_trim_loop_returns_at_least_one_result_when_single_oversized(
+        self,
+    ) -> None:
         """Single oversized result is truncated to fit within MAX_RESPONSE_TOKENS, not dropped."""
-        from chunkhound.mcp_server.tools import MAX_RESPONSE_TOKENS, estimate_tokens, execute_tool
+        from chunkhound.mcp_server.tools import (
+            MAX_RESPONSE_TOKENS,
+            estimate_tokens,
+            execute_tool,
+        )
 
         # Content that alone exceeds MAX_RESPONSE_TOKENS (len // 3 > limit)
         huge_content = "x" * (MAX_RESPONSE_TOKENS * 4)
@@ -309,13 +375,23 @@ class TestExecuteToolSearchReturnsMarkdown:
         the one-shot truncation assumed. The feedback loop must keep shrinking until the
         actual rendered markdown is within budget.
         """
-        from chunkhound.mcp_server.tools import MAX_RESPONSE_TOKENS, estimate_tokens, execute_tool
+        from chunkhound.mcp_server.tools import (
+            MAX_RESPONSE_TOKENS,
+            estimate_tokens,
+            execute_tool,
+        )
 
         # 10 000 consecutive backticks → fence = 10 001 backticks × 2 lines ≈ 20 002 extra chars.
         backtick_run = "`" * 10_000
         huge_content = backtick_run + "\n" + "x" * (MAX_RESPONSE_TOKENS * 4)
         svc = self._make_services(
-            [_result(file_path="backtick_heavy.py", content=huge_content, symbol="bt_func")],
+            [
+                _result(
+                    file_path="backtick_heavy.py",
+                    content=huge_content,
+                    symbol="bt_func",
+                )
+            ],
             _pagination(has_more=False, next_offset=None, total=1),
         )
         result = await execute_tool(
@@ -325,7 +401,9 @@ class TestExecuteToolSearchReturnsMarkdown:
             arguments={"type": "regex", "query": "x"},
         )
         assert isinstance(result, str)
-        assert "backtick_heavy.py" in result, "File path must appear in truncated output"
+        assert "backtick_heavy.py" in result, (
+            "File path must appear in truncated output"
+        )
         assert estimate_tokens(result) <= MAX_RESPONSE_TOKENS, (
             f"Backtick-heavy content must be truncated to fit within MAX_RESPONSE_TOKENS; "
             f"got {estimate_tokens(result)} tokens (fence overhead was not accounted for)"
@@ -346,7 +424,9 @@ class TestExecuteToolSearchReturnsMarkdown:
         ]
         svc = self._make_services(
             results,
-            _pagination(offset=0, page_size=10, has_more=False, total=50, next_offset=10),
+            _pagination(
+                offset=0, page_size=10, has_more=False, total=50, next_offset=10
+            ),
         )
         result = await execute_tool(
             tool_name="search",

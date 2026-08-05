@@ -26,6 +26,11 @@ from loguru import logger
 
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
+from chunkhound.services.search.semantic_window import (
+    normalize_semantic_window_cap,
+    semantic_next_offset,
+    semantic_total,
+)
 
 # Multi-hop search parameters
 INITIAL_LIMIT_CAP_NORMAL = 100
@@ -112,19 +117,28 @@ class MultiHopStrategy:
             cap = INITIAL_LIMIT_CAP_EXHAUSTIVE  # 500 for exhaustive mode
         else:
             cap = INITIAL_LIMIT_CAP_NORMAL  # 100 for normal mode
-        initial_limit = min(page_size * 3, cap)
-        # Honor result_limit even for the initial fetch — the config promises
-        # "Maximum chunks accumulated" so the initial search must not exceed it.
-        if effective_result_limit is not None:
-            if effective_result_limit < initial_limit:
-                logger.debug(
-                    "result_limit=%d caps initial fetch from %d to %d",
-                    effective_result_limit,
-                    initial_limit,
-                    effective_result_limit,
-                )
-            initial_limit = min(initial_limit, effective_result_limit)
-        initial_results, _ = await self._single_hop_search(
+        window_cap = normalize_semantic_window_cap(self._db.semantic_result_window_cap)
+        materializable_limits = [
+            limit for limit in (window_cap, effective_result_limit) if limit is not None
+        ]
+        materializable_cap = (
+            min(materializable_limits) if materializable_limits else None
+        )
+        requested_end = offset + page_size
+        if materializable_cap is not None and requested_end > materializable_cap:
+            raise ValueError(
+                f"Requested result window ends at {requested_end}, beyond the "
+                f"multi-hop materialization limit of {materializable_cap}"
+            )
+
+        tuning_limit = min(page_size * 3, cap)
+        requested_fetch = requested_end + 1
+        if materializable_cap is not None:
+            requested_fetch = min(requested_fetch, materializable_cap)
+        initial_limit = max(tuning_limit, requested_fetch)
+        if materializable_cap is not None:
+            initial_limit = min(initial_limit, materializable_cap)
+        initial_results, initial_pagination = await self._single_hop_search(
             query=query,
             page_size=initial_limit,
             offset=0,
@@ -375,18 +389,22 @@ class MultiHopStrategy:
                 f"{threshold}, {len(all_results)} results remain"
             )
 
-        # Apply pagination
+        # Apply pagination. A capped provider only exposes an approximate prefix,
+        # so multi-hop cannot claim an exact total for that result window.
         total_results = len(all_results)
         paginated_results = all_results[offset : offset + page_size]
-
+        next_offset = semantic_next_offset(
+            offset, page_size, offset + page_size < total_results, window_cap
+        )
         pagination = {
             "offset": offset,
             "page_size": page_size,
-            "has_more": offset + page_size < total_results,
-            "next_offset": offset + page_size
-            if offset + page_size < total_results
-            else None,
-            "total": total_results,
+            "has_more": next_offset is not None,
+            "next_offset": next_offset,
+            "total": semantic_total(total_results, window_cap),
+            "candidate_budget_exhausted": bool(
+                initial_pagination.get("candidate_budget_exhausted", False)
+            ),
         }
 
         elapsed_time = time.perf_counter() - start_time

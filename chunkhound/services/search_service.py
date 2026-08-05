@@ -13,6 +13,11 @@ from .base_service import BaseService
 from .search.context_retriever import ContextRetriever
 from .search.multi_hop_strategy import MultiHopStrategy
 from .search.result_enhancer import ResultEnhancer
+from .search.semantic_window import (
+    semantic_hybrid_fetch_size,
+    semantic_hybrid_next_offset,
+    validate_semantic_window,
+)
 from .search.single_hop_strategy import SingleHopStrategy
 
 
@@ -53,6 +58,11 @@ class SearchService(BaseService):
             self._single_hop_strategy = None
             self._multi_hop_strategy = None
 
+    @property
+    def semantic_result_window_cap(self) -> int | None:
+        """Expose the provider's semantic pagination window cap (None = uncapped)."""
+        return self._db.semantic_result_window_cap
+
     async def search_semantic(
         self,
         query: str,
@@ -84,12 +94,14 @@ class SearchService(BaseService):
                 (e.g., 'src/', 'tests/')
             force_strategy: Optional strategy override ('single_hop', 'multi_hop')
             time_limit: Optional time limit for multi-hop expansion (default: 5.0s)
-            result_limit: Optional result limit for multi-hop expansion (default: 500, None = unlimited)
+            result_limit: Optional multi-hop expansion limit. Defaults to 500;
+                None is unlimited.
 
         Returns:
             Tuple of (results, pagination_metadata)
         """
         try:
+            validate_semantic_window(offset, page_size, self.semantic_result_window_cap)
             if not self._embedding_provider:
                 raise ValueError(
                     "Embedding provider not configured for semantic search"
@@ -101,8 +113,6 @@ class SearchService(BaseService):
             # Use provided provider/model or fall back to configured defaults
             search_provider = provider or embedding_provider.name
             search_model = model or embedding_provider.model
-
-            # logger.debug(f"Search using provider='{search_provider}', model='{search_model}'")
 
             # Choose search strategy based on force_strategy or provider capabilities
             use_multi_hop = False
@@ -125,7 +135,8 @@ class SearchService(BaseService):
                     and embedding_provider.supports_reranking()
                 ):
                     logger.warning(
-                        "Multi-hop strategy requested but provider doesn't support reranking, falling back to single-hop"
+                        "Multi-hop strategy requested but provider does not support "
+                        "reranking; falling back to single-hop"
                     )
                     use_multi_hop = False
 
@@ -297,7 +308,7 @@ class SearchService(BaseService):
         provider: str,
         model: str,
     ) -> dict[int, float]:
-        """Batch cosine similarity between a query embedding and stored chunk embeddings."""
+        """Batch cosine similarity between a query embedding and stored chunks."""
         return await self._db.get_chunk_similarities_async(
             chunk_ids, query_embedding, provider, model
         )
@@ -329,22 +340,29 @@ class SearchService(BaseService):
                 f"Performing hybrid search: query='{query}', pattern='{regex_pattern}'"
             )
 
-            # Perform searches concurrently
+            # Regex-only search is not constrained by a semantic provider window.
+            semantic_window_cap = (
+                self.semantic_result_window_cap
+                if self._embedding_provider is not None
+                else None
+            )
+            validate_semantic_window(offset, page_size, semantic_window_cap)
             tasks = []
 
-            # Semantic search
+            semantic_fetch_size = semantic_hybrid_fetch_size(
+                page_size, offset, semantic_window_cap
+            )
             if self._embedding_provider:
                 semantic_task = asyncio.create_task(
                     self.search_semantic(
                         query,
-                        page_size=page_size * 2,
+                        page_size=semantic_fetch_size,
                         offset=offset,
                         threshold=threshold,
                     )
                 )
                 tasks.append(("semantic", semantic_task))
 
-            # Regex search
             if regex_pattern:
 
                 async def get_regex_results() -> tuple[
@@ -369,24 +387,31 @@ class SearchService(BaseService):
                 semantic_results=results_by_type.get("semantic", []),
                 regex_results=results_by_type.get("regex", []),
                 semantic_weight=semantic_weight,
-                limit=page_size,
+                limit=page_size + 1,
             )
-
-            # Create combined pagination metadata
+            next_offset = semantic_hybrid_next_offset(
+                offset,
+                page_size,
+                len(combined_results),
+                list(pagination_data.values()),
+                semantic_window_cap,
+            )
+            page_results = combined_results[:page_size]
             combined_pagination = {
                 "offset": offset,
                 "page_size": page_size,
-                "has_more": len(combined_results) == page_size,
-                "next_offset": offset + page_size
-                if len(combined_results) == page_size
-                else None,
-                "total": None,  # Cannot estimate for hybrid search
+                "has_more": next_offset is not None,
+                "next_offset": next_offset,
+                "total": None,
+                "candidate_budget_exhausted": bool(
+                    pagination_data.get("semantic", {}).get(
+                        "candidate_budget_exhausted", False
+                    )
+                ),
             }
 
-            logger.info(
-                f"Hybrid search completed: {len(combined_results)} results found"
-            )
-            return combined_results, combined_pagination
+            logger.info(f"Hybrid search completed: {len(page_results)} results found")
+            return page_results, combined_pagination
 
         except Exception as e:
             logger.error(f"Hybrid search failed: {e}")
