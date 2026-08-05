@@ -4,6 +4,7 @@ Compares output from the Python indexing pipeline (and eventually the Rust
 pipeline) to assert byte-identical chunk output.
 """
 
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -341,27 +342,36 @@ def assert_identical(result_a: IndexResult, result_b: IndexResult) -> None:
         f"embeddings_generated mismatch: {result_a.embeddings_generated} != {result_b.embeddings_generated}"
     )
 
-    # Chunk tuples
-    a_only = set(result_a.chunk_tuples) - set(result_b.chunk_tuples)
-    b_only = set(result_b.chunk_tuples) - set(result_a.chunk_tuples)
+    # Chunk tuples — Counter, not set: a set would silently absorb a
+    # duplicated row (e.g. one pipeline writing the same chunk twice) since
+    # both sides reduce to the same set of distinct values. Counter equality
+    # requires matching multiplicities too.
+    a_counts = Counter(result_a.chunk_tuples)
+    b_counts = Counter(result_b.chunk_tuples)
 
-    if a_only or b_only:
+    if a_counts != b_counts:
+        a_only = a_counts - b_counts
+        b_only = b_counts - a_counts
         msg_parts = ["Chunk tuple mismatch:"]
         if a_only:
             msg_parts.append(
-                f"  Only in A ({len(a_only)}): {sorted(a_only)[:5]}..."
+                f"  Only in A / extra copies ({sum(a_only.values())}): "
+                f"{sorted(a_only.elements())[:5]}..."
             )
         if b_only:
             msg_parts.append(
-                f"  Only in B ({len(b_only)}): {sorted(b_only)[:5]}..."
+                f"  Only in B / extra copies ({sum(b_only.values())}): "
+                f"{sorted(b_only.elements())[:5]}..."
             )
         raise AssertionError("\n".join(msg_parts))
 
-    # Embedding tuples
-    emb_a = set(result_a.embedding_tuples)
-    emb_b = set(result_b.embedding_tuples)
-    if emb_a or emb_b:
-        if emb_a != emb_b:
+    # Embedding tuples — same multiset comparison as chunk tuples above.
+    emb_a_counts = Counter(result_a.embedding_tuples)
+    emb_b_counts = Counter(result_b.embedding_tuples)
+    if emb_a_counts or emb_b_counts:
+        if emb_a_counts != emb_b_counts:
             raise AssertionError(
-                f"Embedding tuple mismatch: A has {len(emb_a)}, B has {len(emb_b)}"
+                f"Embedding tuple mismatch: A has {len(result_a.embedding_tuples)} "
+                f"entries ({len(emb_a_counts)} unique), B has "
+                f"{len(result_b.embedding_tuples)} entries ({len(emb_b_counts)} unique)"
             )
