@@ -67,6 +67,10 @@ pub struct DbConfig {
     /// Minimum reclaimable bytes required before compaction triggers.
     /// Default: 52428800 (50 MB).
     pub compaction_min_size_bytes: u64,
+    /// Rows per INSERT statement for chunk/embedding writes (mirrors Python's
+    /// `indexing.db_batch_size`). Must be >= 1 — callers should clamp before
+    /// constructing this struct, since `slice::chunks(0)` panics.
+    pub insert_batch_size: usize,
 }
 
 pub fn create_backend(cfg: DbConfig) -> Box<dyn DbBackend> {

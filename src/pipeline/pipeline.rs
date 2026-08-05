@@ -179,6 +179,7 @@ impl IndexingPipeline {
             compaction_batch_threshold: self.config.compaction_batch_threshold,
             compaction_threshold: self.config.compaction_threshold,
             compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
+            insert_batch_size: self.config.db_batch_size.max(1),
         };
 
         // Ensure parent directory exists (DuckDB doesn't auto-create it).

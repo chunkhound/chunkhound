@@ -354,6 +354,7 @@ impl DuckDbHnswBackend {
         conn: &Connection,
         file_id: i64,
         chunks: &[ChunkRecord],
+        insert_batch_size: usize,
     ) -> Result<Vec<i64>, DbError> {
         if chunks.is_empty() {
             return Ok(vec![]);
@@ -363,10 +364,9 @@ impl DuckDbHnswBackend {
         // Avoids CREATE/DROP TEMPORARY TABLE DDL so this function is safe to call
         // inside an open transaction (DDL would cause implicit commits in some
         // DuckDB versions).
-        const CHUNK_INSERT_BATCH: usize = 100;
         let mut ids: Vec<i64> = Vec::with_capacity(chunks.len());
 
-        for chunk_slice in chunks.chunks(CHUNK_INSERT_BATCH) {
+        for chunk_slice in chunks.chunks(insert_batch_size.max(1)) {
             let row_ph = std::iter::repeat_n("(?,?,?,?,?,?,?,?,?,?)", chunk_slice.len())
                 .collect::<Vec<_>>()
                 .join(",");
@@ -440,6 +440,7 @@ impl DuckDbHnswBackend {
         conn: &Connection,
         batch: &DbWriterBatch,
         embedding_pairs: &[(i64, usize, usize)], // (chunk_id, file_idx, chunk_idx)
+        insert_batch_size: usize,
     ) -> Result<u64, DbError> {
         if embedding_pairs.is_empty() {
             return Ok(0);
@@ -463,12 +464,12 @@ impl DuckDbHnswBackend {
         // Avoids CREATE/DROP TEMPORARY TABLE DDL so this function is safe to call
         // inside an open transaction (DDL would cause implicit commits in some
         // DuckDB versions).
-        const EMBED_INSERT_BATCH: usize = 100;
+        let insert_batch_size = insert_batch_size.max(1);
         let mut total = 0u64;
         for (dims, items) in &by_dims {
             let table = format!("embeddings_{dims}");
 
-            for chunk_slice in items.chunks(EMBED_INSERT_BATCH) {
+            for chunk_slice in items.chunks(insert_batch_size) {
                 let row_ph = std::iter::repeat_n("(?,?,?,?::FLOAT[{dims}],?)", chunk_slice.len())
                     .collect::<Vec<_>>()
                     .join(",")
@@ -982,7 +983,11 @@ impl DuckDbHnswBackend {
     // for the embedding insert step that follows in the same transaction.
     // Pre-deletes for upserted files are handled by pre_delete_for_upsert (called
     // before BEGIN to avoid DuckDB's intra-transaction FK check limitation).
-    fn write_batch_inner(conn: &Connection, batch: &DbWriterBatch) -> Result<BatchInner, DbError> {
+    fn write_batch_inner(
+        conn: &Connection,
+        batch: &DbWriterBatch,
+        insert_batch_size: usize,
+    ) -> Result<BatchInner, DbError> {
         // Upsert files → collect file_ids
         let mut file_ids = Vec::with_capacity(batch.files.len());
         for file in &batch.files {
@@ -995,7 +1000,8 @@ impl DuckDbHnswBackend {
         let mut embedding_pairs: Vec<(i64, usize, usize)> = Vec::new();
 
         for (file_idx, (file, &file_id)) in batch.files.iter().zip(file_ids.iter()).enumerate() {
-            let chunk_ids = Self::insert_chunks_for_file(conn, file_id, &file.chunks)?;
+            let chunk_ids =
+                Self::insert_chunks_for_file(conn, file_id, &file.chunks, insert_batch_size)?;
             total_chunks += chunk_ids.len() as u64;
 
             for (chunk_idx, chunk_id) in chunk_ids.into_iter().enumerate() {
@@ -1306,7 +1312,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             let conn = self.conn_or_err()?;
             conn.execute_batch("BEGIN")?;
 
-            match Self::write_batch_inner(conn, batch) {
+            match Self::write_batch_inner(conn, batch, self.config.insert_batch_size) {
                 Ok(inner) => inner,
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK");
@@ -1322,11 +1328,12 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         // Insert embeddings (still inside txn).
         let embeddings_written = {
+            let insert_batch_size = self.config.insert_batch_size;
             let conn = self
                 .conn
                 .as_ref()
                 .expect("conn is Some: open() succeeded and BEGIN passed");
-            match Self::insert_embeddings_txn(conn, batch, &embedding_pairs) {
+            match Self::insert_embeddings_txn(conn, batch, &embedding_pairs, insert_batch_size) {
                 Ok(n) => n,
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK");
@@ -1554,6 +1561,7 @@ mod hnsw_metric_tests {
             compaction_batch_threshold: 1000,
             compaction_threshold: 0.3,
             compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
         };
         let mut backend = DuckDbHnswBackend::new(config);
         backend.open().expect("open");
@@ -1618,6 +1626,7 @@ mod hnsw_metric_tests {
             compaction_batch_threshold: 1000,
             compaction_threshold: 0.3,
             compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
         };
         let mut backend = DuckDbHnswBackend::new(config);
         backend.open().expect("open");
@@ -1695,6 +1704,7 @@ mod hnsw_metric_tests {
             compaction_batch_threshold: 1000,
             compaction_threshold: 0.3,
             compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
         };
         let mut backend = DuckDbHnswBackend::new(config);
         backend.open().expect("open");
@@ -1795,6 +1805,7 @@ mod test_support {
             compaction_batch_threshold: 50,
             compaction_threshold: 0.30,
             compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
         }
     }
 
@@ -1804,6 +1815,16 @@ mod test_support {
     ) -> DbConfig {
         DbConfig {
             compaction_batch_threshold,
+            ..config(db_path)
+        }
+    }
+
+    pub(super) fn config_with_insert_batch_size(
+        db_path: String,
+        insert_batch_size: usize,
+    ) -> DbConfig {
+        DbConfig {
+            insert_batch_size,
             ..config(db_path)
         }
     }
@@ -1852,6 +1873,26 @@ mod test_support {
                 .map(|i| file_record(&format!("{prefix}{i}.py"), Some(dims)))
                 .collect(),
             delete_paths: vec![],
+        }
+    }
+
+    /// A single file with `chunk_count` chunks, each holding a `dims`-wide
+    /// embedding when `embedding_dims` is `Some`.
+    pub(super) fn file_with_n_chunks(
+        path: &str,
+        chunk_count: usize,
+        embedding_dims: Option<u32>,
+    ) -> FileRecord {
+        FileRecord {
+            existing_file_id: None,
+            path: path.into(),
+            mtime: Some(1.0),
+            size_bytes: Some(100),
+            content_hash: Some("abc123".into()),
+            language: Some("python".into()),
+            chunks: (0..chunk_count)
+                .map(|i| chunk_record(&format!("def foo_{i}(): pass"), embedding_dims))
+                .collect(),
         }
     }
 }
@@ -2088,6 +2129,74 @@ mod hnsw_threshold_tests {
         assert!(
             tables_with_hnsw.contains("embeddings_64"),
             "HNSW missing for embeddings_64 (cache staleness regression): {indexes:?}"
+        );
+    }
+}
+
+/// `insert_batch_size` (from Python's `indexing.db_batch_size`) parameterizes
+/// the row-count-per-INSERT-statement chunking in `insert_chunks_for_file`/
+/// `insert_embeddings_txn`. These tests prove correctness at a non-default
+/// batch size that doesn't evenly divide the row count — the legitimate
+/// external contract here is "no rows dropped/duplicated at a batch
+/// boundary," not the internal INSERT-statement count itself.
+#[cfg(test)]
+mod insert_batch_size_tests {
+    use super::*;
+
+    #[test]
+    fn chunks_persist_correctly_at_non_default_batch_size() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config_with_insert_batch_size(db_path, 3));
+        backend.open().expect("open");
+
+        // 7 chunks, no embeddings — doesn't evenly divide the batch size of 3
+        // (batches of 3, 3, 1), exercising insert_chunks_for_file's chunking.
+        let batch = DbWriterBatch {
+            files: vec![test_support::file_with_n_chunks("a.py", 7, None)],
+            delete_paths: vec![],
+        };
+        let result = backend.write_batch(&batch).expect("write");
+        backend.close().expect("close");
+
+        assert_eq!(result.chunks_written, 7);
+        let conn = Connection::open(tmp.path().join("t.duckdb")).expect("reopen");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 7,
+            "all 7 chunks must persist despite the 3-row batch boundary"
+        );
+    }
+
+    #[test]
+    fn embeddings_persist_correctly_at_non_default_batch_size() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config_with_insert_batch_size(db_path, 3));
+        backend.open().expect("open");
+
+        // 7 chunks each with a 4-dim embedding, in one file — doesn't evenly
+        // divide the batch size of 3, exercising insert_embeddings_txn's
+        // chunking (grouped by dims).
+        let batch = DbWriterBatch {
+            files: vec![test_support::file_with_n_chunks("a.py", 7, Some(4))],
+            delete_paths: vec![],
+        };
+        let result = backend.write_batch(&batch).expect("write");
+        backend.close().expect("close");
+
+        assert_eq!(result.embeddings_written, 7);
+        let conn = Connection::open(tmp.path().join("t.duckdb")).expect("reopen");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embeddings_4", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 7,
+            "all 7 embeddings must persist despite the 3-row batch boundary"
         );
     }
 }
