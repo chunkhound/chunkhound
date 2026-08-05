@@ -49,7 +49,6 @@ pub(crate) struct PipelineConfig {
     pub embed_batch_size: usize,
 
     // Change detection
-    pub force_reindex: bool,
     pub mtime_epsilon_seconds: f64,
 
     // Orphan cleanup (mirrors config.indexing.cleanup on the Python side)
@@ -87,7 +86,6 @@ impl PipelineConfig {
             embed_thread_pool_size: extract_or(dict, "embed_thread_pool_size", 0u64)? as usize,
             embed_batch_size: extract_or(dict, "embed_batch_size", 200u64)? as usize,
 
-            force_reindex: extract_or(dict, "force_reindex", false)?,
             mtime_epsilon_seconds: extract_or(dict, "mtime_epsilon_seconds", 0.01)?,
             do_cleanup: extract_or(dict, "do_cleanup", true)?,
             skip_embeddings: extract_or(dict, "skip_embeddings", false)?,

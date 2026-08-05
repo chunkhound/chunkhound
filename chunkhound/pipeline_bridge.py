@@ -536,7 +536,6 @@ async def run_rust_pipeline(
         "parse_thread_pool_size": parse_thread_pool_size,
         "embed_thread_pool_size": max_concurrent,
         "embed_batch_size": embed_batch_size,
-        "force_reindex": force_reindex,
         "mtime_epsilon_seconds": mtime_eps,
         "do_cleanup": do_cleanup,
         "skip_embeddings": skip_embeddings,
