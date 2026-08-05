@@ -1516,6 +1516,94 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 }
 
+/// Mirrors `indexing_coordinator.py`'s `_check_disk_usage_limit` for a
+/// file-based (DuckDB) database: stats the exact `db_path` given (never a
+/// WAL/`.compact`/`.old`/`.swap_intent` sidecar), compares with `>=`, and
+/// fails OPEN (returns `None`) if the stat call itself errors or no limit is
+/// configured — matching Python's "never block indexing on a measurement
+/// error" behavior.
+///
+/// Returns `Some((size_mb, limit_mb))` when the limit is exceeded, `None`
+/// otherwise.
+pub(crate) fn check_disk_usage_limit(db_path: &Path, limit_mb: Option<f64>) -> Option<(f64, f64)> {
+    let limit_mb = limit_mb?;
+    let size_mb = match std::fs::metadata(db_path) {
+        Ok(meta) => meta.len() as f64 / (1024.0 * 1024.0),
+        Err(e) => {
+            log::warn!(
+                "Failed to check disk usage for {}: {}",
+                db_path.display(),
+                e
+            );
+            return None;
+        }
+    };
+    (size_mb >= limit_mb).then_some((size_mb, limit_mb))
+}
+
+#[cfg(test)]
+mod disk_usage_limit_tests {
+    use super::*;
+
+    fn write_file_of_size(path: &Path, bytes: usize) {
+        std::fs::write(path, vec![0u8; bytes]).expect("write fixture file");
+    }
+
+    #[test]
+    fn no_limit_configured_never_exceeded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        write_file_of_size(&db_path, 10 * 1024 * 1024);
+        assert_eq!(check_disk_usage_limit(&db_path, None), None);
+    }
+
+    #[test]
+    fn size_below_limit_not_exceeded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        write_file_of_size(&db_path, 1024 * 1024); // 1 MB
+        assert_eq!(check_disk_usage_limit(&db_path, Some(10.0)), None);
+    }
+
+    #[test]
+    fn size_at_exact_limit_is_exceeded() {
+        // Encodes Python's strict `>=` — a DB exactly at the limit already trips.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        write_file_of_size(&db_path, 5 * 1024 * 1024); // exactly 5 MB
+        let result = check_disk_usage_limit(&db_path, Some(5.0));
+        assert_eq!(result, Some((5.0, 5.0)));
+    }
+
+    #[test]
+    fn size_above_limit_exceeded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        write_file_of_size(&db_path, 10 * 1024 * 1024); // 10 MB
+        let result = check_disk_usage_limit(&db_path, Some(5.0));
+        assert_eq!(result, Some((10.0, 5.0)));
+    }
+
+    #[test]
+    fn stat_failure_fails_open() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing_path = tmp.path().join("does_not_exist.duckdb");
+        assert_eq!(check_disk_usage_limit(&missing_path, Some(0.0)), None);
+    }
+
+    #[test]
+    fn sibling_wal_file_excluded_from_measurement() {
+        // Main file well under the limit; a huge sibling `.wal` file must NOT
+        // be counted — the helper stats only the exact path given.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let wal_path = tmp.path().join("t.duckdb.wal");
+        write_file_of_size(&db_path, 1024); // 1 KB
+        write_file_of_size(&wal_path, 20 * 1024 * 1024); // 20 MB — must be ignored
+        assert_eq!(check_disk_usage_limit(&db_path, Some(5.0)), None);
+    }
+}
+
 #[cfg(test)]
 mod hnsw_metric_tests {
     use super::*;

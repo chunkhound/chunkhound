@@ -30,6 +30,11 @@ class IndexResult:
         default_factory=list
     )
     errors: list[str] = field(default_factory=list)
+    # Mirrors Python's DiskUsageLimitExceededError contract — set when a
+    # mid-run disk-usage check tripped and stopped further writes.
+    disk_limit_exceeded: bool = False
+    disk_limit_current_mb: float | None = None
+    disk_limit_max_mb: float | None = None
 
 
 def disconnect_registry_db() -> None:
@@ -249,6 +254,7 @@ def index_with_rust(
     parse_thread_pool_size: int = 4,
     compaction_threshold: float = 0.60,
     compaction_min_size_mb: int = 10,
+    disk_usage_limit_mb: float | None = None,
     progress_callback=None,
 ) -> IndexResult:
     """Index *fixture_dir* using the Rust pipeline."""
@@ -265,6 +271,7 @@ def index_with_rust(
         "compaction_threshold": compaction_threshold,
         "compaction_batch_threshold": 10,
         "compaction_min_size_mb": compaction_min_size_mb,
+        "disk_usage_limit_mb": disk_usage_limit_mb,
         "parse_batch_size": 200,
         "parse_thread_pool_size": parse_thread_pool_size,
         "embed_batch_size": 200,
@@ -305,6 +312,9 @@ def index_with_rust(
         chunk_tuples=chunk_tuples,
         embedding_tuples=embedding_tuples,
         errors=list(report.errors) if report.errors else [],
+        disk_limit_exceeded=report.disk_limit_exceeded,
+        disk_limit_current_mb=report.disk_limit_current_mb,
+        disk_limit_max_mb=report.disk_limit_max_mb,
     )
 
 

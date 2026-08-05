@@ -9,7 +9,7 @@ use super::config::PipelineConfig;
 use super::differ::{DbFileEntry, DiffResult};
 use super::report::PipelineReport;
 
-use crate::db::{create_backend, DbBackend, DbConfig};
+use crate::db::{check_disk_usage_limit, create_backend, DbBackend, DbConfig};
 use crate::error::DbError;
 use crate::types::{ChunkRecord, DbWriterBatch, FileRecord};
 
@@ -64,6 +64,8 @@ struct StoreOutcome {
     /// Per-file parse errors collected from the parse thread — merged in
     /// after all three threads join (see `pipeline_parse_embed_store`).
     parse_errors: Vec<String>,
+    /// Set when a mid-run disk-usage check tripped: `(current_mb, limit_mb)`.
+    disk_limit_exceeded: Option<(f64, f64)>,
 }
 
 #[pymethods]
@@ -265,6 +267,9 @@ impl IndexingPipeline {
             elapsed_secs: total_secs,
             errors: outcome.parse_errors,
             peak_rss_mb: None,
+            disk_limit_exceeded: outcome.disk_limit_exceeded.is_some(),
+            disk_limit_current_mb: outcome.disk_limit_exceeded.map(|(cur, _)| cur),
+            disk_limit_max_mb: outcome.disk_limit_exceeded.map(|(_, max)| max),
         })
     }
 }
@@ -462,6 +467,7 @@ impl IndexingPipeline {
         let embed_batch_size = self.config.embed_batch_size.max(1);
         let skip_embeddings = self.config.skip_embeddings;
         let project_root = self.config.project_root.clone();
+        let disk_usage_limit_mb = self.config.disk_usage_limit_mb;
         let provider = provider.to_string();
         let model = model.to_string();
 
@@ -614,12 +620,21 @@ impl IndexingPipeline {
                 // Pipeline diagnostic: cumulative time the store thread spends
                 // BLOCKED in recv() waiting for the embed stage to produce.
                 let mut store_wait_s = 0f64;
+                // Set when a mid-run disk-usage check trips (see below).
+                let mut disk_limit_hit: Option<(f64, f64)> = None;
 
                 let write_result: Result<(), String> = (|| {
                     let mut window: Vec<crate::types::DbWriterBatch> =
                         Vec::with_capacity(STORE_COMMIT_INTERVAL);
 
-                    loop {
+                    // Labeled so the disk-usage check below can break out of
+                    // the whole store loop, not just the inner per-window
+                    // `for`. Relies on STORE_COMMIT_INTERVAL == 1 to check
+                    // once per incoming batch (mirroring Python's
+                    // once-per-store-call granularity) — if that constant
+                    // ever grows, move this check to fire once per
+                    // window-fill instead of once per received batch.
+                    'store_loop: loop {
                         // Fill window: prepare_write per batch (auto-commit),
                         // block on recv until window full or channel closes.
                         window.clear();
@@ -629,6 +644,25 @@ impl IndexingPipeline {
                             store_wait_s += t_recv.elapsed().as_secs_f64();
                             match recv {
                                 Ok(batch) => {
+                                    // Pre-write guard, mirroring Python's
+                                    // _check_disk_usage_limit: is the DB
+                                    // already over the limit from prior
+                                    // commits, before this batch writes?
+                                    // Never inspects whether this batch's
+                                    // own writes would push it over.
+                                    if let Some(hit) = check_disk_usage_limit(
+                                        Path::new(&db_path),
+                                        disk_usage_limit_mb,
+                                    ) {
+                                        log::warn!(
+                                            "[store] disk usage limit exceeded: \
+                                             {:.1} MB >= {:.1} MB — stopping further writes",
+                                            hit.0,
+                                            hit.1
+                                        );
+                                        disk_limit_hit = Some(hit);
+                                        break 'store_loop;
+                                    }
                                     let t_prep = Instant::now();
                                     backend.prepare_write(&batch).map_err(|e| e.to_string())?;
                                     let prep_ms = t_prep.elapsed().as_secs_f64() * 1e3;
@@ -695,6 +729,19 @@ impl IndexingPipeline {
                 })();
                 log::debug!("[pipe] store blocked: embed-recv {store_wait_s:.1}s");
 
+                // Force the parse/embed threads' existing cooperative-shutdown
+                // cascade (the same mechanism a real store error already
+                // triggers): dropping store_rx makes embed's store_tx.send()
+                // fail fast, which drops parse_rx, making parse's
+                // parse_tx.send() fail — no new shutdown machinery needed.
+                // Deliberately stops promptly here rather than mirroring
+                // Python's own behavior of continuing to parse/embed the rest
+                // of the file list after the trip (a known Python-side
+                // inefficiency, not a contract worth reproducing).
+                if disk_limit_hit.is_some() {
+                    drop(store_rx);
+                }
+
                 // Check compaction need BEFORE building the HNSW index, not
                 // after. `run_compaction()`'s EXPORT/IMPORT rewrite copies
                 // `files`/`chunks`/`embeddings_*` into a fresh database with
@@ -747,6 +794,7 @@ impl IndexingPipeline {
                     // the store thread has no access to the parse thread's
                     // shared `parse_errors` accumulator.
                     parse_errors: Vec::new(),
+                    disk_limit_exceeded: disk_limit_hit,
                 })
             })
         };

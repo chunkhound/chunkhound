@@ -580,14 +580,36 @@ async def run_rust_pipeline(
             return {"file": None, "error": err}
         return {"file": file, "error": message}
 
+    errors: list[dict[str, Any]] = [
+        _split_rust_error(err) for err in (list(report.errors) if report.errors else [])
+    ]
+
+    # Mid-run disk-usage check (mirrors _check_disk_usage_limit's contract) —
+    # reported as structured data on the report, not a raised exception, so
+    # this reconstructs the same error-dict shape
+    # IndexingCoordinator._store_parsed_results builds for the Python path
+    # (see indexing_coordinator.py:1041-1049), which
+    # IndexingCoordinator.process_directory()'s generic disk-limit scan
+    # (indexing_coordinator.py:2175-2183) already consumes without needing
+    # any pipeline-specific handling.
+    if getattr(report, "disk_limit_exceeded", False):
+        current_mb = report.disk_limit_current_mb
+        limit_mb = report.disk_limit_max_mb
+        errors.append(
+            {
+                "file": None,
+                "error": f"Database disk usage limit exceeded: {current_mb:.1f} MB >= {limit_mb:.1f} MB",
+                "disk_limit_exceeded": True,
+                "current_size_mb": current_mb,
+                "limit_mb": limit_mb,
+            }
+        )
+
     return {
         "total_files": report.files_processed,
         "total_chunks": report.chunks_written,
         "embeddings_generated": report.embeddings_generated,
         "elapsed_secs": report.elapsed_secs,
         "files_skipped_unchanged": report.files_skipped,
-        "errors": [
-            _split_rust_error(err)
-            for err in (list(report.errors) if report.errors else [])
-        ],
+        "errors": errors,
     }

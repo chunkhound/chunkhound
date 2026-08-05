@@ -2,6 +2,7 @@ use crate::error::DbError;
 use crate::types::{BatchResult, DbWriterBatch};
 
 pub mod duckdb_backend;
+pub(crate) use duckdb_backend::check_disk_usage_limit;
 pub use duckdb_backend::DuckDbHnswBackend;
 
 pub trait DbBackend: Send {

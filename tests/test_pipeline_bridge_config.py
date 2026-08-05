@@ -16,15 +16,20 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _fake_report() -> SimpleNamespace:
-    return SimpleNamespace(
+def _fake_report(**overrides: object) -> SimpleNamespace:
+    defaults = dict(
         files_processed=0,
         chunks_written=0,
         embeddings_generated=0,
         elapsed_secs=0.0,
         files_skipped=0,
         errors=[],
+        disk_limit_exceeded=False,
+        disk_limit_current_mb=None,
+        disk_limit_max_mb=None,
     )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
 
 
 @pytest.mark.asyncio
@@ -114,3 +119,78 @@ async def test_missing_fragmentation_threshold_pct_defaults_to_30_pct(
     )
 
     assert captured_config_dict["compaction_threshold"] == pytest.approx(0.30)
+
+
+@pytest.mark.asyncio
+async def test_disk_limit_exceeded_report_becomes_structured_error_dict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tripped PipelineReport.disk_limit_exceeded must surface as the same
+    error-dict shape IndexingCoordinator._store_parsed_results builds for the
+    Python path (indexing_coordinator.py:1041-1049) -- {"file": None, "error":
+    ..., "disk_limit_exceeded": True, "current_size_mb": ..., "limit_mb": ...}
+    -- so the coordinator's existing generic disk-limit scan
+    (indexing_coordinator.py:2175-2183) picks it up with zero coordinator
+    changes, regardless of which pipeline ran.
+    """
+    from chunkhound import pipeline_bridge
+
+    fake_pipeline_instance = MagicMock()
+    fake_pipeline_instance.run.return_value = _fake_report(
+        disk_limit_exceeded=True,
+        disk_limit_current_mb=12.0,
+        disk_limit_max_mb=10.0,
+    )
+
+    fake_indexing_pipeline_cls = MagicMock(return_value=fake_pipeline_instance)
+
+    fake_native_module = types.SimpleNamespace(
+        IndexingPipeline=fake_indexing_pipeline_cls
+    )
+    monkeypatch.setitem(sys.modules, "chunkhound_native", fake_native_module)
+
+    result = await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=True,
+        config=None,
+    )
+
+    assert result["errors"] == [
+        {
+            "file": None,
+            "error": "Database disk usage limit exceeded: 12.0 MB >= 10.0 MB",
+            "disk_limit_exceeded": True,
+            "current_size_mb": 12.0,
+            "limit_mb": 10.0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disk_limit_not_exceeded_report_has_no_extra_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A normal (non-tripped) report must not append any disk-limit error."""
+    from chunkhound import pipeline_bridge
+
+    fake_pipeline_instance = MagicMock()
+    fake_pipeline_instance.run.return_value = _fake_report()
+
+    fake_indexing_pipeline_cls = MagicMock(return_value=fake_pipeline_instance)
+
+    fake_native_module = types.SimpleNamespace(
+        IndexingPipeline=fake_indexing_pipeline_cls
+    )
+    monkeypatch.setitem(sys.modules, "chunkhound_native", fake_native_module)
+
+    result = await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=True,
+        config=None,
+    )
+
+    assert result["errors"] == []
