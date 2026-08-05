@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+// PyO3 0.22's #[pyfunction] macro emits a PyErr→PyErr .into() in its generated wrapper code,
+// which clippy's useless_conversion lint flags. The allow must be crate-level because the lint
+// fires in the proc-macro expansion, not in the function's textual body. Fixed upstream in PyO3 0.23+.
 #![allow(clippy::useless_conversion)]
 mod db;
 mod error;

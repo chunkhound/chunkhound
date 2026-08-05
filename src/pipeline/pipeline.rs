@@ -91,7 +91,6 @@ impl IndexingPipeline {
     /// ``"write-index"``/``"write-compact"`` fires per run — compaction
     /// rebuilds indexes as part of its own rewrite, so the two never both
     /// run.
-    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (files, parse_batch_callback, embed_batch_callback=None, progress_callback=None, incremental=false))]
     fn run(
         &mut self,
@@ -440,6 +439,14 @@ impl IndexingPipeline {
     ///
     /// **Caller must release the GIL** before entering this method.
     /// Each thread re-acquires the GIL independently via ``Python::with_gil()``.
+    // Each parameter is moved or borrowed into a different one of the three
+    // spawned threads (parse/embed/store) with its own ownership needs
+    // (owned `Py<PyAny>` callbacks moved into one specific thread each,
+    // borrowed `&str`, owned collections consumed once) -- already collapsed
+    // where possible (`parse_config` bundles five scalars into one typed
+    // object, see `ParseCallConfig`'s doc comment). Grouping the rest into a
+    // struct would just move the same fields behind one more layer without
+    // reducing what each thread actually needs to take ownership of.
     #[allow(clippy::too_many_arguments)]
     fn pipeline_parse_embed_store(
         &self,
