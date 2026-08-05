@@ -24,10 +24,10 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 
 def _rust_pipeline_available() -> bool:
     try:
-        from chunkhound_native import IndexingPipeline
-    except ImportError:
+        from chunkhound_native import IndexingPipeline  # noqa: F401
+    except (ImportError, AttributeError):
         return False
-    return IndexingPipeline is not None
+    return True
 
 
 def _index_once(project_dir: Path, db_dir: Path) -> subprocess.CompletedProcess:

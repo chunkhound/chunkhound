@@ -35,7 +35,3 @@ lto = "thin"
 
 [dev-dependencies]
 tempfile = "3"
-
-[features]
-default = ["rust-pipeline"]
-rust-pipeline = []

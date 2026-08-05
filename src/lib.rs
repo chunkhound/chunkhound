@@ -7,7 +7,6 @@ mod db;
 mod error;
 mod types;
 
-#[cfg(feature = "rust-pipeline")]
 #[allow(dead_code)]
 mod pipeline;
 
@@ -134,12 +133,9 @@ fn chunkhound_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(scan_files, m)?)?;
 
-    #[cfg(feature = "rust-pipeline")]
-    {
-        m.add_class::<pipeline::IndexingPipeline>()?;
-        m.add_class::<pipeline::PipelineReport>()?;
-        m.add_class::<pipeline::ParseCallConfig>()?;
-    }
+    m.add_class::<pipeline::IndexingPipeline>()?;
+    m.add_class::<pipeline::PipelineReport>()?;
+    m.add_class::<pipeline::ParseCallConfig>()?;
 
     Ok(())
 }

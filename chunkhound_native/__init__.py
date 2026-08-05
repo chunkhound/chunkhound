@@ -59,14 +59,6 @@ except ImportError as e:
     ) from e
 
 scan_files = _native_module.scan_files
-
-try:
-    from .chunkhound_native import (  # type: ignore[import-untyped]
-        IndexingPipeline,
-        ParseCallConfig,
-        PipelineReport,
-    )
-except ImportError:
-    IndexingPipeline = None  # compiled without rust-pipeline feature
-    PipelineReport = None
-    ParseCallConfig = None
+IndexingPipeline = _native_module.IndexingPipeline
+PipelineReport = _native_module.PipelineReport
+ParseCallConfig = _native_module.ParseCallConfig

@@ -450,10 +450,10 @@ def parse_args() -> argparse.Namespace:
 
 def _rust_available() -> bool:
     try:
-        from chunkhound_native import IndexingPipeline
-    except ImportError:
+        from chunkhound_native import IndexingPipeline  # noqa: F401
+    except (ImportError, AttributeError):
         return False
-    return IndexingPipeline is not None
+    return True
 
 
 def main() -> None:
@@ -492,8 +492,8 @@ def main() -> None:
         backends = ["rust"]
     if "rust" in backends and not _rust_available():
         print(
-            "Rust pipeline unavailable (chunkhound_native.IndexingPipeline is "
-            "None) — skipping Rust backend."
+            "Rust pipeline unavailable (chunkhound_native.IndexingPipeline not "
+            "built) — skipping Rust backend."
         )
         backends = [b for b in backends if b != "rust"]
     if not backends:
