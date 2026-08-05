@@ -762,6 +762,16 @@ impl IndexingPipeline {
                 // do not restore that call here without also removing the
                 // `run_compaction()` branch's reliance on `reopen()`.
                 //
+                // Never compact after a disk-limit trip: the EXPORT/IMPORT
+                // rewrite needs a full second copy of the database on disk
+                // (old + new coexist until the swap), transiently roughly
+                // doubling disk usage — the exact thing this run just
+                // determined it can't afford. Falls back to the cheaper
+                // ensure_all_hnsw_indexes() over whatever was already
+                // written; actual compaction is deferred to a future run,
+                // where indexing_coordinator.py's pre-run check will catch
+                // the still-over-limit condition before any writes start.
+                //
                 // Chained onto `write_result` (rather than a separate `?`
                 // per step) so that a failure at any point — the write loop
                 // itself, or compaction/index-rebuild after it — funnels
@@ -769,11 +779,18 @@ impl IndexingPipeline {
                 // instead of returning early with the connection left open
                 // and HNSW indexes un-restored (Invariant 14).
                 let post_write_result: Result<(), String> = write_result.and_then(|()| {
-                    let needs_compaction = backend.needs_compaction().map_err(|e| e.to_string())?;
+                    let needs_compaction = disk_limit_hit.is_none()
+                        && backend.needs_compaction().map_err(|e| e.to_string())?;
                     if needs_compaction {
                         emit_progress_gil(&store_progress_cb, "write-compact", 0, 1);
                         backend.run_compaction().map_err(|e| e.to_string())?;
                     } else {
+                        if disk_limit_hit.is_some() {
+                            log::info!(
+                                "[store] skipping compaction after disk-limit trip; \
+                                 rebuilding HNSW indexes only"
+                            );
+                        }
                         emit_progress_gil(&store_progress_cb, "write-index", 0, 1);
                         backend
                             .ensure_all_hnsw_indexes()

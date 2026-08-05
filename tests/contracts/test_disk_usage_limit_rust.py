@@ -52,3 +52,42 @@ class TestDiskUsageLimitRust:
             assert result.disk_limit_current_mb is None
             assert result.disk_limit_max_mb is None
             assert result.chunks_written > 0
+
+    @pytest.mark.asyncio
+    async def test_disk_limit_trip_skips_compaction(self):
+        """A disk-limit trip must never trigger compaction (which would
+        transiently roughly double disk usage via its EXPORT/IMPORT rewrite —
+        the opposite of what a disk-limit trip should do). Forces compaction
+        eligibility (compaction_threshold=0.0, compaction_min_size_mb=0 --
+        the same forcing technique as test_compaction_before_index.py) at the
+        same time as disk_usage_limit_mb=0.0, so without the fix
+        "write-compact" would fire; with it, only "write-index" (the cheap
+        HNSW-only rebuild) must fire instead.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_dir = Path(tmp) / "db"
+
+            phases_seen: list[str] = []
+
+            def progress_callback(phase: str, current: int, total: int) -> None:
+                phases_seen.append(phase)
+
+            result = index_with_rust(
+                FIXTURE_DIR,
+                db_dir,
+                skip_embeddings=True,
+                disk_usage_limit_mb=0.0,
+                compaction_threshold=0.0,
+                compaction_min_size_mb=0,
+                progress_callback=progress_callback,
+            )
+
+            assert result.disk_limit_exceeded is True
+            assert "write-compact" not in phases_seen, (
+                "compaction must not run after a disk-limit trip -- it would "
+                "transiently roughly double disk usage right after "
+                "determining disk is already over budget"
+            )
+            assert "write-index" in phases_seen, (
+                "the cheap HNSW-only rebuild must still run in compaction's place"
+            )
