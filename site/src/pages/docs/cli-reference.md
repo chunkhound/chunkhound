@@ -117,6 +117,11 @@ chunkhound search "database migration" --commit-range main..HEAD
 ```
 
 > **Note:** `--regex` ignores git diff flags (`--last-n`, `--commit-range`, `--commit-hash`). For diff-scoped search, use semantic search (default).
+>
+> **Semantic pagination:** DuckDB semantic search supports the exclusive offset
+> window `[0, 1000)`. An offset of 1000 or a page that crosses the endpoint is
+> rejected. Candidate-budget exhaustion can return a short page; `has_more: false`
+> means no next page was materialized, so narrow the query or path filter.
 
 ## `chunkhound websearch`
 

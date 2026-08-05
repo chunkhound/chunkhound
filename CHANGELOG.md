@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+- **DuckDB semantic pagination is approximate** — Semantic pages now report
+  `total=None` instead of an exact count and must stay within the exclusive
+  `[0, 1000)` result window. Pages that start at or cross the endpoint are
+  rejected.
+- **DuckDB direct vector thresholds are similarity floors** —
+  `find_similar_chunks` and `search_by_embedding` now interpret `threshold`
+  as inclusive cosine similarity (`score >= threshold`), matching
+  `search_semantic`; callers previously using distance ceilings must convert
+  them with `1 - distance`.
+- **Read-only databases require HNSW indexes** — Read-only DuckDB databases
+  created from interrupted indexing runs (missing HNSW indexes) now fail
+  explicitly instead of falling back to a brute-force scan. Ensure indexing
+  completes successfully before creating read-only replicas.
+
+### Migration Guide
+
+**Python API consumers — semantic search pagination:** Code that paginates
+`search_semantic` results through the Python API must adapt to the new
+approximate pagination contract:
+
+- `pagination["total"]` is now `None` for semantic search — an exact result
+  count is no longer computed.
+- Terminate pagination loops with `pagination["has_more"]` instead of
+  comparing the accumulated page size against `total`.
+- Semantic result windows are capped at the exclusive `[0, 1000)` range;
+  pages that start at or cross that endpoint are rejected.
+- Candidate-budget exhaustion can return a short page. `has_more=False` means
+  no next page was materialized, not that every match was examined; narrow the
+  query or path filter when this occurs.
+
+Semantic search also requires a cosine-compatible HNSW index; all vector
+search operations use cosine similarity (`l2sq` and `ip` metrics are not
+supported by the search API).
+
+### Changed
+- **DuckDB vector search requires cosine HNSW** — `search_semantic`,
+  `find_similar_chunks`, and `search_by_embedding` require a cosine-compatible
+  HNSW index and emit a single-table candidate query eligible for HNSW scans.
+  DuckDB's optimizer may still choose a sequential scan for large candidate
+  windows. Post-filtered searches can return short pages when their candidate
+  budget is exhausted.
+- **HNSW search beam widened** — `hnsw_ef_search` increased from default 64
+  to 256 for better recall in the vector-candidate overfetch path.
+- **DuckDB vector metadata is consistent** — Results from every DuckDB vector
+  search entry point include parsed chunk metadata in the `metadata` mapping.
+- **Semantic search errors surface** — Database/provider errors during
+  semantic search now raise explicitly instead of returning empty result
+  pages.
+
 ## [5.2.0] - 2026-07-12
 
 ### Breaking Changes
