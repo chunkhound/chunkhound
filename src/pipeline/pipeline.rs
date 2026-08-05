@@ -629,12 +629,37 @@ impl IndexingPipeline {
 
                     // Labeled so the disk-usage check below can break out of
                     // the whole store loop, not just the inner per-window
-                    // `for`. Relies on STORE_COMMIT_INTERVAL == 1 to check
-                    // once per incoming batch (mirroring Python's
-                    // once-per-store-call granularity) — if that constant
-                    // ever grows, move this check to fire once per
-                    // window-fill instead of once per received batch.
+                    // `for`.
                     'store_loop: loop {
+                        // Pre-write guard, mirroring Python's
+                        // _check_disk_usage_limit: is the DB already over the
+                        // limit from prior commits, before this window writes
+                        // anything? Never inspects whether this window's own
+                        // writes would push it over. Checked once per window
+                        // — BEFORE any batch in it is received — rather than
+                        // once per received batch, so this is safe regardless
+                        // of STORE_COMMIT_INTERVAL: either the whole window is
+                        // left completely untouched, or it's fully processed
+                        // (prepare_write's deletes AND the matching inserts).
+                        // Checking mid-fill instead would let a tripped check
+                        // land after some batches in the window already had
+                        // prepare_write's un-rollback-able deletes applied but
+                        // before write_batches_in_one_txn ever inserted their
+                        // replacements — silent data loss the moment this
+                        // constant is ever raised above 1.
+                        if let Some(hit) =
+                            check_disk_usage_limit(Path::new(&db_path), disk_usage_limit_mb)
+                        {
+                            log::warn!(
+                                "[store] disk usage limit exceeded: \
+                                 {:.1} MB >= {:.1} MB — stopping further writes",
+                                hit.0,
+                                hit.1
+                            );
+                            disk_limit_hit = Some(hit);
+                            break 'store_loop;
+                        }
+
                         // Fill window: prepare_write per batch (auto-commit),
                         // block on recv until window full or channel closes.
                         window.clear();
@@ -644,25 +669,6 @@ impl IndexingPipeline {
                             store_wait_s += t_recv.elapsed().as_secs_f64();
                             match recv {
                                 Ok(batch) => {
-                                    // Pre-write guard, mirroring Python's
-                                    // _check_disk_usage_limit: is the DB
-                                    // already over the limit from prior
-                                    // commits, before this batch writes?
-                                    // Never inspects whether this batch's
-                                    // own writes would push it over.
-                                    if let Some(hit) = check_disk_usage_limit(
-                                        Path::new(&db_path),
-                                        disk_usage_limit_mb,
-                                    ) {
-                                        log::warn!(
-                                            "[store] disk usage limit exceeded: \
-                                             {:.1} MB >= {:.1} MB — stopping further writes",
-                                            hit.0,
-                                            hit.1
-                                        );
-                                        disk_limit_hit = Some(hit);
-                                        break 'store_loop;
-                                    }
                                     let t_prep = Instant::now();
                                     backend.prepare_write(&batch).map_err(|e| e.to_string())?;
                                     let prep_ms = t_prep.elapsed().as_secs_f64() * 1e3;
