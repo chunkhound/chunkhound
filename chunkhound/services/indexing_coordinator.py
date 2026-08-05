@@ -1039,15 +1039,7 @@ class IndexingCoordinator(BaseService):
         disk_limit_error = self._check_disk_usage_limit()
         if disk_limit_error:
             # Add disk limit error to stats for consistent error handling
-            stats["errors"].append(
-                {
-                    "file": None,  # Global error, not file-specific
-                    "error": str(disk_limit_error),
-                    "disk_limit_exceeded": True,
-                    "current_size_mb": disk_limit_error.current_size_mb,
-                    "limit_mb": disk_limit_error.limit_mb,
-                }
-            )
+            stats["errors"].append(disk_limit_error.to_error_dict())
             # Return early - don't process any files if disk limit exceeded
             return stats
 

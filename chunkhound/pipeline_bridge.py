@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, TypeVar
 if TYPE_CHECKING:
     from chunkhound.core.detection import Language
 
+from chunkhound.core.exceptions import DiskUsageLimitExceededError
 from chunkhound.core.types.common import FileId
 from chunkhound.parsers.parser_factory import create_parser_for_language
 
@@ -585,24 +586,21 @@ async def run_rust_pipeline(
     ]
 
     # Mid-run disk-usage check (mirrors _check_disk_usage_limit's contract) —
-    # reported as structured data on the report, not a raised exception, so
-    # this reconstructs the same error-dict shape
-    # IndexingCoordinator._store_parsed_results builds for the Python path
-    # (see indexing_coordinator.py:1041-1049), which
+    # reported as structured data on the report (a single Option<(f64, f64)>
+    # on the Rust side, so "tripped" and its two numbers can't desync), not a
+    # raised exception. Reuses DiskUsageLimitExceededError.to_error_dict() --
+    # the same single source of truth IndexingCoordinator._store_parsed_results
+    # uses for the Python path (indexing_coordinator.py:1039-1042) -- so
     # IndexingCoordinator.process_directory()'s generic disk-limit scan
-    # (indexing_coordinator.py:2175-2183) already consumes without needing
-    # any pipeline-specific handling.
-    if getattr(report, "disk_limit_exceeded", False):
-        current_mb = report.disk_limit_current_mb
-        limit_mb = report.disk_limit_max_mb
+    # (indexing_coordinator.py:2175-2183) picks this up with no
+    # pipeline-specific handling and no second copy of the message format.
+    disk_limit = getattr(report, "disk_limit", None)
+    if disk_limit is not None:
+        current_mb, limit_mb = disk_limit
         errors.append(
-            {
-                "file": None,
-                "error": f"Database disk usage limit exceeded: {current_mb:.1f} MB >= {limit_mb:.1f} MB",
-                "disk_limit_exceeded": True,
-                "current_size_mb": current_mb,
-                "limit_mb": limit_mb,
-            }
+            DiskUsageLimitExceededError(
+                current_size_mb=current_mb, limit_mb=limit_mb
+            ).to_error_dict()
         )
 
     return {

@@ -24,9 +24,8 @@ def _fake_report(**overrides: object) -> SimpleNamespace:
         elapsed_secs=0.0,
         files_skipped=0,
         errors=[],
-        disk_limit_exceeded=False,
-        disk_limit_current_mb=None,
-        disk_limit_max_mb=None,
+        # Option<(f64, f64)> on the Rust side: None or (current_mb, limit_mb)
+        disk_limit=None,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -125,22 +124,19 @@ async def test_missing_fragmentation_threshold_pct_defaults_to_30_pct(
 async def test_disk_limit_exceeded_report_becomes_structured_error_dict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A tripped PipelineReport.disk_limit_exceeded must surface as the same
-    error-dict shape IndexingCoordinator._store_parsed_results builds for the
-    Python path (indexing_coordinator.py:1041-1049) -- {"file": None, "error":
-    ..., "disk_limit_exceeded": True, "current_size_mb": ..., "limit_mb": ...}
-    -- so the coordinator's existing generic disk-limit scan
+    """A tripped PipelineReport.disk_limit must surface as the same
+    error-dict shape DiskUsageLimitExceededError.to_error_dict() builds --
+    also used by IndexingCoordinator._store_parsed_results for the Python
+    path (indexing_coordinator.py:1039-1042) -- {"file": None, "error": ...,
+    "disk_limit_exceeded": True, "current_size_mb": ..., "limit_mb": ...} --
+    so the coordinator's existing generic disk-limit scan
     (indexing_coordinator.py:2175-2183) picks it up with zero coordinator
     changes, regardless of which pipeline ran.
     """
     from chunkhound import pipeline_bridge
 
     fake_pipeline_instance = MagicMock()
-    fake_pipeline_instance.run.return_value = _fake_report(
-        disk_limit_exceeded=True,
-        disk_limit_current_mb=12.0,
-        disk_limit_max_mb=10.0,
-    )
+    fake_pipeline_instance.run.return_value = _fake_report(disk_limit=(12.0, 10.0))
 
     fake_indexing_pipeline_cls = MagicMock(return_value=fake_pipeline_instance)
 

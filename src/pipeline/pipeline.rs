@@ -267,9 +267,7 @@ impl IndexingPipeline {
             elapsed_secs: total_secs,
             errors: outcome.parse_errors,
             peak_rss_mb: None,
-            disk_limit_exceeded: outcome.disk_limit_exceeded.is_some(),
-            disk_limit_current_mb: outcome.disk_limit_exceeded.map(|(cur, _)| cur),
-            disk_limit_max_mb: outcome.disk_limit_exceeded.map(|(_, max)| max),
+            disk_limit: outcome.disk_limit_exceeded,
         })
     }
 }

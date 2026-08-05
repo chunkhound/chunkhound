@@ -305,6 +305,12 @@ def index_with_rust(
     chunk_tuples = collect_chunk_tuples_from_duckdb(db_dir)
     embedding_tuples = _collect_embedding_tuples(db_dir)
 
+    # report.disk_limit is a single Option<(f64, f64)> on the Rust side
+    # (current_mb, limit_mb) or None — unpacked here into IndexResult's three
+    # convenience fields for easier assertions in tests.
+    disk_limit = report.disk_limit
+    current_mb, max_mb = disk_limit if disk_limit is not None else (None, None)
+
     return IndexResult(
         files_processed=report.files_processed,
         chunks_written=report.chunks_written,
@@ -312,9 +318,9 @@ def index_with_rust(
         chunk_tuples=chunk_tuples,
         embedding_tuples=embedding_tuples,
         errors=list(report.errors) if report.errors else [],
-        disk_limit_exceeded=report.disk_limit_exceeded,
-        disk_limit_current_mb=report.disk_limit_current_mb,
-        disk_limit_max_mb=report.disk_limit_max_mb,
+        disk_limit_exceeded=disk_limit is not None,
+        disk_limit_current_mb=current_mb,
+        disk_limit_max_mb=max_mb,
     )
 
 

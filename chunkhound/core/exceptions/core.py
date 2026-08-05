@@ -323,3 +323,18 @@ class DiskUsageLimitExceededError(ChunkHoundError):
         super().__init__(message, context)
         self.current_size_mb = current_size_mb
         self.limit_mb = limit_mb
+
+    def to_error_dict(self) -> dict[str, Any]:
+        """Build the error-list entry shape both the Python and Rust
+        indexing paths report to IndexingCoordinator -- a single source of
+        truth for the ``disk_limit_exceeded``/``current_size_mb``/``limit_mb``
+        keys IndexingCoordinator.process_directory()'s generic disk-limit
+        scan relies on.
+        """
+        return {
+            "file": None,
+            "error": str(self),
+            "disk_limit_exceeded": True,
+            "current_size_mb": self.current_size_mb,
+            "limit_mb": self.limit_mb,
+        }

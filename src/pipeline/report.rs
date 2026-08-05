@@ -27,18 +27,16 @@ pub(crate) struct PipelineReport {
     #[pyo3(get)]
     pub peak_rss_mb: Option<f64>,
 
-    /// Mirrors Python's `DiskUsageLimitExceededError` contract: set when a
-    /// mid-run disk-usage check (see `db::check_disk_usage_limit`) tripped
-    /// and the store thread stopped further writes. Reported as data, not a
-    /// raised exception, matching `_check_disk_usage_limit`'s own contract.
+    /// Mirrors Python's `DiskUsageLimitExceededError` contract: set to
+    /// `Some((current_mb, limit_mb))` when a mid-run disk-usage check (see
+    /// `db::check_disk_usage_limit`) tripped and the store thread stopped
+    /// further writes; `None` otherwise. Reported as data, not a raised
+    /// exception, matching `_check_disk_usage_limit`'s own contract. A
+    /// single `Option<(f64, f64)>` rather than a `bool` plus two
+    /// independent `Option<f64>` fields — the tripped/not-tripped state and
+    /// its two numbers can't desync into an inconsistent combination this way.
     #[pyo3(get)]
-    pub disk_limit_exceeded: bool,
-
-    #[pyo3(get)]
-    pub disk_limit_current_mb: Option<f64>,
-
-    #[pyo3(get)]
-    pub disk_limit_max_mb: Option<f64>,
+    pub disk_limit: Option<(f64, f64)>,
 }
 
 impl PipelineReport {
@@ -51,9 +49,7 @@ impl PipelineReport {
             elapsed_secs: 0.0,
             errors: Vec::new(),
             peak_rss_mb: None,
-            disk_limit_exceeded: false,
-            disk_limit_current_mb: None,
-            disk_limit_max_mb: None,
+            disk_limit: None,
         }
     }
 }
