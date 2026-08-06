@@ -1477,12 +1477,21 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         let dims_metrics: Vec<(u32, String)> = existing
             .into_iter()
             .map(|(_, dims)| {
-                let metric = self
-                    .saved_hnsw_metrics
-                    .get(&dims)
-                    .cloned()
-                    .unwrap_or_else(|| "cosine".to_string());
-                (dims, metric)
+                let metric = self.saved_hnsw_metrics.get(&dims).cloned();
+                if metric.is_none() {
+                    // No captured metric for this dims — either this process never
+                    // saw a live index for it (e.g. drop_all_hnsw_indexes wasn't
+                    // called this session, such as after a mid-run crash), or the
+                    // index genuinely used cosine. Falling back to cosine is silent
+                    // data loss if a non-default metric was ever in use, so surface
+                    // it instead of guessing quietly.
+                    log::warn!(
+                        "No captured HNSW metric for {dims}-dim embeddings — \
+                         defaulting to cosine (this loses a non-default metric if \
+                         one was previously configured for this table)"
+                    );
+                }
+                (dims, metric.unwrap_or_else(|| "cosine".to_string()))
             })
             .collect();
         let conn = self.conn_or_err()?;
