@@ -10,9 +10,10 @@ handed the Rust pipeline a `db_path` it can't use (see
 `chunkhound/providers/database/rust_pipeline_flag.py`'s module docstring, which
 documented this as a known gap).
 
-The fix checks `isinstance(self._db, DuckDBProvider)` up front — before any
-Rust-specific behavior — and falls back to the Python path for any other
-provider. This test proves indexing still succeeds, through the DB the
+The fix checks the provider's `supports_rust_pipeline` capability up front —
+before any Rust-specific behavior — and falls back to the Python path for any
+provider that doesn't declare it (LanceDB doesn't; only `DuckDBProvider`
+does). This test proves indexing still succeeds, through the DB the
 provider actually is, when `CHUNKHOUND_USE_RUST=1` is set against LanceDB.
 """
 

@@ -37,6 +37,14 @@ class DatabaseProvider(Protocol):
         """Database connection path or identifier."""
         ...
 
+    @property
+    def supports_rust_pipeline(self) -> bool:
+        """Whether this provider's backend can be driven by the Rust indexing
+        pipeline (chunkhound_native.IndexingPipeline), which only implements
+        a DuckDB backend.
+        """
+        ...
+
     def get_base_directory(self) -> Path:
         """Get the base directory for path normalization.
 

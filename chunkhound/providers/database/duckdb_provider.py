@@ -336,6 +336,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         return self._connection_manager.db_path
 
     @property
+    def supports_rust_pipeline(self) -> bool:
+        """The Rust pipeline (chunkhound_native.IndexingPipeline) implements
+        a DuckDB backend."""
+        return True
+
+    @property
     def is_connected(self) -> bool:
         """Check if database connection is active - delegate to connection manager."""
         return self._connection_manager.is_connected

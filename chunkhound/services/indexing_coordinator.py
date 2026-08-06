@@ -1285,15 +1285,15 @@ class IndexingCoordinator(BaseService):
             # implements a DuckDB backend (DuckDbHnswBackend) — running it
             # against a LanceDB-configured project would disconnect the live
             # LanceDB provider and then hand Rust a db_path it can't use.
-            # Check the *actual* provider instance (not self.config, which
-            # may be None or out of sync with self._db) before any
-            # Rust-specific behavior (cleanup skip, change-detection bypass,
-            # provider disconnect) is gated on _use_rust below, so a
+            # Check the *actual* provider instance's declared capability (not
+            # self.config, which may be None or out of sync with self._db)
+            # before any Rust-specific behavior (cleanup skip, change-detection
+            # bypass, provider disconnect) is gated on _use_rust below, so a
             # non-DuckDB provider falls back to the Python path cleanly
-            # instead of breaking partway through.
-            from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-
-            if not isinstance(self._db, DuckDBProvider):
+            # instead of breaking partway through. Uses getattr rather than
+            # isinstance against a concrete class so IndexingCoordinator stays
+            # coupled only to the DatabaseProvider interface, not one backend.
+            if not getattr(self._db, "supports_rust_pipeline", False):
                 logger.info(
                     "Rust pipeline requested but database provider is '{}' "
                     "(Rust pipeline only supports DuckDB) — using Python path",

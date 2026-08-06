@@ -102,6 +102,13 @@ class SerialDatabaseProvider(ABC):
         return self._db_path
 
     @property
+    def supports_rust_pipeline(self) -> bool:
+        """The Rust pipeline only implements a DuckDB backend; override to
+        True in providers it actually supports.
+        """
+        return False
+
+    @property
     def is_connected(self) -> bool:
         """Check if database connection is active."""
         # For serial providers, we consider it connected if executor exists
