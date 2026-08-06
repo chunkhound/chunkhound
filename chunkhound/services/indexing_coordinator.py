@@ -192,6 +192,20 @@ def _calculate_worker_count(file_count: int, cpu_count: int) -> int:
         return min(cpu_count, MAX_WORKERS_LARGE_BATCH, file_count)
 
 
+def _normalize_to_path_tuples(
+    files: list[Path] | list[tuple[Path, str | None]],
+) -> list[tuple[Path, str | None]]:
+    """Normalize a bare-path-or-tuple file list to the tuple form.
+
+    Callers accept either representation (see `_process_files_in_batches`),
+    but `run_rust_pipeline` and similar single-shape consumers need one
+    concrete type. An isinstance check here (rather than relying on static
+    narrowing of a union-typed variable across branches) is what actually
+    lets mypy verify the result type.
+    """
+    return [item if isinstance(item, tuple) else (item, None) for item in files]
+
+
 async def run_batch_compaction_boundary(
     coordinator: "IndexingCoordinator",
     stats: "IndexingStats | None" = None,
@@ -585,7 +599,8 @@ class IndexingCoordinator(BaseService):
                 self._root_identity_validated = True
 
             # Use batch processor with single file for consistency
-            parsed_results = await self._process_files_in_batches([(file_path, None)])
+            single_file: list[tuple[Path, str | None]] = [(file_path, None)]
+            parsed_results = await self._process_files_in_batches(single_file)
 
             if not parsed_results:
                 return {
@@ -825,12 +840,7 @@ class IndexingCoordinator(BaseService):
             per_file_cap = max(4, int(target_secs / max(0.001, timeout_s_probe)))
             batch_size = min(batch_size, per_file_cap)
         # Normalize input to list[tuple[Path, str|None]]
-        normalized_files: list[tuple[Path, str | None]] = []
-        for item in files:
-            if isinstance(item, tuple):
-                normalized_files.append(item)
-            else:
-                normalized_files.append((item, None))
+        normalized_files = _normalize_to_path_tuples(files)
         file_batches = [
             normalized_files[i : i + batch_size]
             for i in range(0, len(normalized_files), batch_size)
@@ -1415,8 +1425,16 @@ class IndexingCoordinator(BaseService):
             skipped_unchanged = 0
             if _use_rust:
                 # Rust pipeline: convert plain paths to (path, None) tuples
-                # matching run_rust_pipeline's expected signature.
-                files_to_process = [(p, None) for p in files_to_process]
+                # matching run_rust_pipeline's expected signature. Built from
+                # `files` (known list[Path]) rather than `files_to_process`
+                # (the union-typed variable) so mypy can verify the element
+                # type without treating it as Path | tuple[Path, str | None].
+                # The explicit annotation matters too: list is invariant, so
+                # without it mypy infers list[tuple[Path, None]] (from the
+                # bare `None` literal) rather than list[tuple[Path, str |
+                # None]], and rejects the assignment below.
+                rust_files: list[tuple[Path, str | None]] = [(p, None) for p in files]
+                files_to_process = rust_files
             elif not force_reindex:
                 _t4 = _t.perf_counter() if _t0 is not None else None
                 change_task: TaskID | None = None
@@ -1990,7 +2008,7 @@ class IndexingCoordinator(BaseService):
 
                 try:
                     rust_stats = await run_rust_pipeline(
-                        files_to_process,
+                        _normalize_to_path_tuples(files_to_process),
                         db_path=db_path,
                         project_root=directory,
                         force_reindex=force_reindex,
