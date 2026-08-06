@@ -11,7 +11,6 @@ use crate::types::{BatchResult, ChunkRecord, DbWriterBatch, FileRecord};
 pub struct DuckDbHnswBackend {
     config: DbConfig,
     conn: Option<Connection>,
-    write_count: u32,
     has_vss: bool,
     hnsw_bulk_mode: bool,
     // Dims for which embeddings_N tables are known to exist in this session.
@@ -56,7 +55,6 @@ impl DuckDbHnswBackend {
         DuckDbHnswBackend {
             config,
             conn: None,
-            write_count: 0,
             has_vss: false,
             hnsw_bulk_mode: false,
             known_dims: HashSet::new(),
@@ -879,7 +877,6 @@ impl DuckDbHnswBackend {
 
         // Reopen — also handles HNSW index creation via ensure_all_hnsw_indexes().
         self.reopen()?;
-        self.write_count = 0;
         log::info!("compaction: complete");
         Ok(())
     }
@@ -1198,9 +1195,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
     fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
         self.prepare_write(batch)?;
-        let result = self.write_batch_incremental(batch)?;
-        self.write_count += 1;
-        Ok(result)
+        self.write_batch_incremental(batch)
     }
 
     fn prepare_write(&mut self, batch: &DbWriterBatch) -> Result<(), DbError> {
@@ -1298,17 +1293,14 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn needs_compaction(&self) -> Result<bool, DbError> {
-        // Two-signal metric-based detection (Phase 0).
-        // Falls back to simple write-count threshold when stats are unavailable.
-        if let Ok(stats) = self.compaction_stats() {
-            let effective = stats.free_ratio.max(stats.row_waste_ratio);
-            if effective >= self.config.compaction_threshold
-                && stats.reclaimable >= self.config.compaction_min_size_bytes
-            {
-                return Ok(true);
-            }
-        }
-        Ok(self.write_count >= self.config.compaction_batch_threshold)
+        // Two-signal metric-based detection (Phase 0). If stats are unavailable
+        // (e.g. DB not open), there's nothing to compact yet.
+        let Ok(stats) = self.compaction_stats() else {
+            return Ok(false);
+        };
+        let effective = stats.free_ratio.max(stats.row_waste_ratio);
+        Ok(effective >= self.config.compaction_threshold
+            && stats.reclaimable >= self.config.compaction_min_size_bytes)
     }
 
     fn run_compaction(&mut self) -> Result<(), DbError> {
@@ -1323,7 +1315,6 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             self.reopen_after_compaction_failure()?;
             let conn = self.conn_or_err()?;
             conn.execute_batch("CHECKPOINT")?;
-            self.write_count = 0;
         }
         Ok(())
     }
@@ -1517,7 +1508,6 @@ mod hnsw_metric_tests {
         let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
         let config = DbConfig {
             db_path,
-            compaction_batch_threshold: 1000,
             compaction_threshold: 0.3,
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
@@ -1577,7 +1567,6 @@ mod hnsw_metric_tests {
         let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
         let config = DbConfig {
             db_path: db_path.clone(),
-            compaction_batch_threshold: 1000,
             compaction_threshold: 0.3,
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
@@ -1678,20 +1667,9 @@ mod test_support {
     pub(super) fn config(db_path: String) -> DbConfig {
         DbConfig {
             db_path,
-            compaction_batch_threshold: 50,
             compaction_threshold: 0.30,
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
-        }
-    }
-
-    pub(super) fn config_with_threshold(
-        db_path: String,
-        compaction_batch_threshold: u32,
-    ) -> DbConfig {
-        DbConfig {
-            compaction_batch_threshold,
-            ..config(db_path)
         }
     }
 
@@ -1878,54 +1856,6 @@ mod crash_recovery_tests {
             !intent_path.exists(),
             "intent file must be removed; wrong path construction would leave it untouched"
         );
-    }
-}
-
-/// Compaction write-counter (fallback signal when two-signal detection has no
-/// stats yet) — ported from the deleted `RustDbWriter` PyO3 wrapper's test suite.
-#[cfg(test)]
-mod compaction_tests {
-    use super::*;
-
-    #[test]
-    fn needs_compaction_false_initially() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
-        let mut backend = DuckDbHnswBackend::new(test_support::config_with_threshold(db_path, 3));
-        backend.open().expect("open");
-        assert!(!backend.needs_compaction().expect("needs_compaction"));
-        backend.close().expect("close");
-    }
-
-    #[test]
-    fn needs_compaction_true_at_threshold() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
-        let mut backend = DuckDbHnswBackend::new(test_support::config_with_threshold(db_path, 2));
-        backend.open().expect("open");
-        backend
-            .write_batch(&test_support::single_file_batch("a.py"))
-            .expect("write a");
-        backend
-            .write_batch(&test_support::single_file_batch("b.py"))
-            .expect("write b");
-        assert!(backend.needs_compaction().expect("needs_compaction"));
-        backend.close().expect("close");
-    }
-
-    #[test]
-    fn run_compaction_resets_counter() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
-        let mut backend = DuckDbHnswBackend::new(test_support::config_with_threshold(db_path, 1));
-        backend.open().expect("open");
-        backend
-            .write_batch(&test_support::single_file_batch("a.py"))
-            .expect("write");
-        assert!(backend.needs_compaction().expect("needs_compaction"));
-        backend.run_compaction().expect("run_compaction");
-        assert!(!backend.needs_compaction().expect("needs_compaction"));
-        backend.close().expect("close");
     }
 }
 

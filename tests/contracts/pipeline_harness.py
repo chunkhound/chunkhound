@@ -271,7 +271,6 @@ def index_with_rust(
         "db_path": str(db_dir.resolve()),
         "db_batch_size": 100,
         "compaction_threshold": compaction_threshold,
-        "compaction_batch_threshold": 10,
         "compaction_min_size_mb": compaction_min_size_mb,
         "disk_usage_limit_mb": disk_usage_limit_mb,
         "parse_batch_size": parse_batch_size,

@@ -37,7 +37,6 @@ pub(crate) struct PipelineConfig {
     // Storage
     pub db_path: PathBuf,
     pub db_batch_size: usize,
-    pub compaction_batch_threshold: u32,
     pub compaction_threshold: f64,
     pub compaction_min_size_mb: u64,
     pub disk_usage_limit_mb: Option<f64>,
@@ -75,8 +74,6 @@ impl PipelineConfig {
             project_root: extract_or(dict, "project_root", String::new())?.into(),
             db_path: extract_or(dict, "db_path", String::new())?.into(),
             db_batch_size: extract_or(dict, "db_batch_size", 100u64)? as usize,
-            compaction_batch_threshold: extract_or(dict, "compaction_batch_threshold", 50u64)?
-                as u32,
             compaction_threshold: extract_or(dict, "compaction_threshold", 0.30)?,
             compaction_min_size_mb: extract_or(dict, "compaction_min_size_mb", 50u64)?,
             disk_usage_limit_mb: extract_opt(dict, "disk_usage_limit_mb")?,

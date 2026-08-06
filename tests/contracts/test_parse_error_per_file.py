@@ -51,7 +51,6 @@ def _rust_config(project_root: Path, db_dir: Path) -> dict:
         "db_path": str(db_dir.resolve()),
         "db_batch_size": 100,
         "compaction_threshold": 0.60,
-        "compaction_batch_threshold": 10,
         "compaction_min_size_mb": 10,
         "parse_batch_size": 200,
         "parse_thread_pool_size": 4,

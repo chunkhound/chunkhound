@@ -531,7 +531,6 @@ async def run_rust_pipeline(
         "db_path": str(db_path.resolve()),
         "db_batch_size": db_batch_size,
         "compaction_threshold": compaction_threshold,
-        "compaction_batch_threshold": 50,
         "compaction_min_size_mb": 50,
         "parse_batch_size": 200,
         "parse_thread_pool_size": parse_thread_pool_size,

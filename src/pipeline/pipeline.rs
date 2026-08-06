@@ -177,7 +177,6 @@ impl IndexingPipeline {
 
         let db_config = DbConfig {
             db_path: db_file.to_string_lossy().into_owned(),
-            compaction_batch_threshold: self.config.compaction_batch_threshold,
             compaction_threshold: self.config.compaction_threshold,
             compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
             insert_batch_size: self.config.db_batch_size.max(1),
