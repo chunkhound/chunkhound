@@ -141,6 +141,20 @@ pipeline's embed thread pool creates one provider instance per worker
 thread (see pipeline_bridge.py:_embed_batch), so without this guard the
 same detection message repeats once per thread instead of once per run."""
 
+_native_dims_discovery_logged: set[str] = set()
+"""Model names already announced via 'Discovered native embedding
+dimension'. The dimension is a static fact about the model, not something
+that changes per batch — without this guard it re-logs on every batch
+(the discovery condition trivially holds again once cached) and, per the
+same one-provider-per-thread reasoning as `_qwen_detection_logged` above,
+once per thread on top of that."""
+
+_client_side_truncation_logged: set[str] = set()
+"""Model names already announced via 'Applying client-side truncation'.
+The truncation ratio is fixed for a given model/config, not a per-batch
+event — same repeat-every-batch-and-thread problem as
+`_native_dims_discovery_logged` above."""
+
 
 def _validate_qwen_model_config() -> None:
     """Validate QWEN_MODEL_CONFIG structure at module load time.
@@ -1074,7 +1088,10 @@ class OpenAIEmbeddingProvider:
 
         for attempt in range(self._retry_attempts):
             try:
-                logger.debug(
+                # TRACE, not DEBUG: fires once per batch per embed thread —
+                # at --verbose (DEBUG) this drowns out everything else when
+                # the Rust pipeline runs many embed threads concurrently.
+                logger.trace(
                     f"Generating embeddings for {len(texts)} texts (attempt {attempt + 1})"
                 )
 
@@ -1108,9 +1125,11 @@ class OpenAIEmbeddingProvider:
                         cast(int, raw_dim),
                         self._required_output_dims_for_client_truncation(),
                     )
-                    logger.debug(
-                        f"Applying client-side truncation: {cast(int, raw_dim)}→{output_dims}"
-                    )
+                    if self._model not in _client_side_truncation_logged:
+                        _client_side_truncation_logged.add(self._model)
+                        logger.debug(
+                            f"Applying client-side truncation: {cast(int, raw_dim)}→{output_dims}"
+                        )
                     truncated_embeddings = apply_client_side_truncation(
                         cast(list[list[float]], embeddings), output_dims
                     )
@@ -1122,7 +1141,7 @@ class OpenAIEmbeddingProvider:
                 if hasattr(response, "usage") and response.usage:
                     self._usage_stats["tokens_used"] += response.usage.total_tokens
 
-                logger.debug(f"Successfully generated {len(embeddings)} embeddings")
+                logger.trace(f"Successfully generated {len(embeddings)} embeddings")
 
                 # Discover native dims and validate output dims (INV-1).
                 # Custom endpoints may reuse official model names, so runtime
@@ -1136,7 +1155,12 @@ class OpenAIEmbeddingProvider:
                     cast(int, raw_dim),
                     server_side_truncation=server_side_truncation,
                 )
-                if self._discovered_native_dims == raw_dim and not server_side_truncation:
+                if (
+                    self._discovered_native_dims == raw_dim
+                    and not server_side_truncation
+                    and self._model not in _native_dims_discovery_logged
+                ):
+                    _native_dims_discovery_logged.add(self._model)
                     logger.debug(
                         f"Discovered native embedding dimension: {self._discovered_native_dims}"
                     )
