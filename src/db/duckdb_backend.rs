@@ -51,6 +51,61 @@ impl DuckDbHnswBackend {
     /// parameter binding.
     const DELETE_BATCH: usize = 500;
 
+    /// Column DDL for the `files` table. Shared by `setup_schema` (initial DB
+    /// creation) and `run_attach_copy_compaction` (rebuilding the same table
+    /// from scratch during compaction) so the two can't silently drift apart —
+    /// previously each hardcoded its own copy of this list.
+    const FILES_COLUMNS_DDL: &str = "\
+        id INTEGER PRIMARY KEY DEFAULT nextval('files_id_seq'),
+        path TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        extension TEXT,
+        size INTEGER,
+        modified_time TIMESTAMP,
+        content_hash TEXT,
+        language TEXT,
+        skip_reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP";
+
+    /// Column DDL for the `chunks` table — see `FILES_COLUMNS_DDL`.
+    const CHUNKS_COLUMNS_DDL: &str = "\
+        id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
+        file_id INTEGER REFERENCES files(id),
+        chunk_type TEXT NOT NULL,
+        symbol TEXT,
+        code TEXT NOT NULL,
+        start_line INTEGER,
+        end_line INTEGER,
+        start_byte INTEGER,
+        end_byte INTEGER,
+        language TEXT,
+        metadata TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP";
+
+    /// Column DDL for the `schema_version` table — see `FILES_COLUMNS_DDL`.
+    const SCHEMA_VERSION_COLUMNS_DDL: &str = "\
+        version INTEGER PRIMARY KEY,
+        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        description TEXT";
+
+    /// Column DDL for an `embeddings_{dims}` table. Shared by
+    /// `ensure_embedding_table_dims` (initial creation) and
+    /// `run_attach_copy_compaction` (rebuilding during compaction) — see
+    /// `FILES_COLUMNS_DDL`.
+    fn embedding_columns_ddl(dims: u32) -> String {
+        format!(
+            "id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
+            chunk_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            embedding FLOAT[{dims}],
+            dims INTEGER NOT NULL DEFAULT {dims},
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        )
+    }
+
     pub fn new(config: DbConfig) -> Self {
         DuckDbHnswBackend {
             config,
@@ -74,54 +129,27 @@ impl DuckDbHnswBackend {
     // tests/contracts/test_schema_parity.py::TestSchemaParity catches column-level drift at CI time.
     // When adding or renaming columns, update schema_constants.py FIRST, then mirror here.
     fn setup_schema(conn: &Connection) -> Result<(), DbError> {
-        conn.execute_batch(
+        conn.execute_batch(&format!(
             "
             CREATE SEQUENCE IF NOT EXISTS files_id_seq START 1;
-            CREATE TABLE IF NOT EXISTS files (
-                id INTEGER PRIMARY KEY DEFAULT nextval('files_id_seq'),
-                path TEXT UNIQUE NOT NULL,
-                name TEXT NOT NULL,
-                extension TEXT,
-                size INTEGER,
-                modified_time TIMESTAMP,
-                content_hash TEXT,
-                language TEXT,
-                skip_reason TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
+            CREATE TABLE IF NOT EXISTS files ({files});
             CREATE SEQUENCE IF NOT EXISTS chunks_id_seq START 1;
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
-                file_id INTEGER REFERENCES files(id),
-                chunk_type TEXT NOT NULL,
-                symbol TEXT,
-                code TEXT NOT NULL,
-                start_line INTEGER,
-                end_line INTEGER,
-                start_byte INTEGER,
-                end_byte INTEGER,
-                language TEXT,
-                metadata TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
+            CREATE TABLE IF NOT EXISTS chunks ({chunks});
             CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq START 1;
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
             CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
             CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(chunk_type);
             CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol);
-            CREATE TABLE IF NOT EXISTS schema_version (
-                version INTEGER PRIMARY KEY,
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                description TEXT
-            );
+            CREATE TABLE IF NOT EXISTS schema_version ({schema_version});
             INSERT INTO schema_version (version, description)
                 SELECT 1, 'Initial schema'
                 WHERE NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 1);
         ",
-        )?;
+            files = Self::FILES_COLUMNS_DDL,
+            chunks = Self::CHUNKS_COLUMNS_DDL,
+            schema_version = Self::SCHEMA_VERSION_COLUMNS_DDL,
+        ))?;
         Ok(())
     }
 
@@ -166,17 +194,10 @@ impl DuckDbHnswBackend {
         } else {
             format!("idx_{dims}_chunk_id")
         };
+        let cols = Self::embedding_columns_ddl(dims);
         conn.execute_batch(&format!(
             "
-            CREATE TABLE IF NOT EXISTS \"{table}\" (
-                id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
-                chunk_id INTEGER NOT NULL,
-                provider TEXT NOT NULL,
-                model TEXT NOT NULL,
-                embedding FLOAT[{dims}],
-                dims INTEGER NOT NULL DEFAULT {dims},
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
+            CREATE TABLE IF NOT EXISTS \"{table}\" ({cols});
             CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
             ON \"{table}\" (chunk_id, provider, model);
             CREATE INDEX IF NOT EXISTS {chunk_id_idx}
@@ -783,46 +804,18 @@ impl DuckDbHnswBackend {
             max_embedding_id + 1
         ))?;
 
-        // Mirror the DDL from setup_schema().
-        import_conn.execute_batch(
-            "CREATE TABLE files (\
-                id INTEGER PRIMARY KEY DEFAULT nextval('files_id_seq'),\
-                path TEXT UNIQUE NOT NULL,\
-                name TEXT NOT NULL,\
-                extension TEXT,\
-                size INTEGER,\
-                modified_time TIMESTAMP,\
-                content_hash TEXT,\
-                language TEXT,\
-                skip_reason TEXT,\
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\
-            )",
-        )?;
-        import_conn.execute_batch(
-            "CREATE TABLE chunks (\
-                id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),\
-                file_id INTEGER REFERENCES files(id),\
-                chunk_type TEXT NOT NULL,\
-                symbol TEXT,\
-                code TEXT NOT NULL,\
-                start_line INTEGER,\
-                end_line INTEGER,\
-                start_byte INTEGER,\
-                end_byte INTEGER,\
-                language TEXT,\
-                metadata TEXT,\
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\
-            )",
-        )?;
-        import_conn.execute_batch(
-            "CREATE TABLE schema_version (\
-                version INTEGER PRIMARY KEY,\
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\
-                description TEXT\
-            )",
-        )?;
+        // Shares column DDL with setup_schema() / ensure_embedding_table_dims()
+        // via the *_COLUMNS_DDL constants and embedding_columns_ddl(), so the
+        // two can't drift apart.
+        import_conn.execute_batch(&format!("CREATE TABLE files ({})", Self::FILES_COLUMNS_DDL))?;
+        import_conn.execute_batch(&format!(
+            "CREATE TABLE chunks ({})",
+            Self::CHUNKS_COLUMNS_DDL
+        ))?;
+        import_conn.execute_batch(&format!(
+            "CREATE TABLE schema_version ({})",
+            Self::SCHEMA_VERSION_COLUMNS_DDL
+        ))?;
         import_conn.execute_batch("INSERT INTO schema_version SELECT * FROM src.schema_version")?;
 
         // --- Copy data: files, chunks ---
@@ -847,15 +840,8 @@ impl DuckDbHnswBackend {
                 .unwrap_or(0);
 
             import_conn.execute_batch(&format!(
-                "CREATE TABLE \"{tname}\" (\
-                    id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),\
-                    chunk_id INTEGER NOT NULL,\
-                    provider TEXT NOT NULL,\
-                    model TEXT NOT NULL,\
-                    embedding FLOAT[{dims}],\
-                    dims INTEGER NOT NULL DEFAULT {dims},\
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\
-                )"
+                "CREATE TABLE \"{tname}\" ({})",
+                Self::embedding_columns_ddl(dims)
             ))?;
             import_conn.execute_batch(&format!(
                 "INSERT INTO \"{tname}\" SELECT * FROM src.\"{tname}\""
