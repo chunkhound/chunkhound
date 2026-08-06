@@ -45,6 +45,18 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    def release_for_rust_pipeline(self) -> None:
+        """Release this provider's connection so the Rust pipeline can take
+        write ownership of the database file.
+
+        Only called when `supports_rust_pipeline` is True. Implementations
+        must leave themselves able to `connect()` again afterward, since the
+        coordinator always reconnects once the Rust pipeline finishes
+        (success or failure) so the process doesn't end up permanently
+        disconnected.
+        """
+        ...
+
     def get_base_directory(self) -> Path:
         """Get the base directory for path normalization.
 
