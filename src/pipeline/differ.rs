@@ -46,6 +46,18 @@ pub(crate) struct DbFileEntry {
 /// about callback overhead.
 const DIFF_TICK_INTERVAL: usize = 200;
 
+/// Canonical project-relative DB/lookup key for a path. Every site that
+/// stores or looks up a file by relative path must go through this, or
+/// Windows's native `\` separators (vs. this key's `/`) desync the DB
+/// row from the disk-side diff lookup — the file looks new and removed
+/// on every run.
+pub(crate) fn to_relative_key(abs_path: &Path, project_root: &Path) -> Option<String> {
+    abs_path
+        .strip_prefix(project_root)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+}
+
 /// Compute the diff between the files provided and the DB state.
 ///
 /// Returns the set of files that need re-processing, plus the set
@@ -139,9 +151,9 @@ pub(crate) fn compute_diff(
         };
 
         // Compute relative path (matching Python's _get_relative_path)
-        let rel = match abs_path.strip_prefix(project_root) {
-            Ok(p) => p.to_string_lossy().replace('\\', "/"),
-            Err(_) => {
+        let rel = match to_relative_key(abs_path, project_root) {
+            Some(r) => r,
+            None => {
                 // Can't relativize — process it anyway
                 disk_stats.insert(abs_path.clone(), (current_size, current_mtime_raw));
                 changed.push(abs_path.clone());
@@ -278,6 +290,20 @@ impl DiffResult {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn to_relative_key_normalizes_backslash_separators() {
+        // We don't need a real Windows filesystem to prove this: a path whose
+        // textual form already contains `\` (valid even on Unix, where `\` is
+        // just an ordinary filename byte) exercises the exact `.replace('\\', "/")`
+        // step that must run on every platform's `strip_prefix` remainder.
+        let root = Path::new("/project");
+        let abs = Path::new("/project/sub\\dir\\file.py");
+        assert_eq!(
+            to_relative_key(abs, root),
+            Some("sub/dir/file.py".to_string())
+        );
+    }
 
     #[test]
     fn test_empty_db_all_new() {

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::config::PipelineConfig;
-use super::differ::{DbFileEntry, DiffResult};
+use super::differ::{to_relative_key, DbFileEntry, DiffResult};
 use super::report::PipelineReport;
 
 use crate::db::{check_disk_usage_limit, create_backend, DbBackend, DbConfig};
@@ -364,10 +364,7 @@ impl IndexingPipeline {
             // Find the matching on-disk file by relative path and read its mtime
             // from the precomputed map (no extra stat call needed).
             for fp in files.iter() {
-                let rel = fp
-                    .strip_prefix(&self.config.project_root)
-                    .ok()
-                    .map(|r| r.to_string_lossy().replace('\\', "/"));
+                let rel = to_relative_key(fp, &self.config.project_root);
                 if rel.as_deref() == Some(e.path.as_str()) {
                     if let Some(&(_, dm)) = precomputed_stats.get(fp) {
                         offsets.push(e.mtime - dm);
@@ -1083,11 +1080,13 @@ impl IndexingPipeline {
 
             let path_str = pf.path.to_string_lossy().into_owned();
 
-            // Store relative path (like Python _get_relative_path).
+            // Store relative path (like Python _get_relative_path). Always
+            // `/`-normalized so this key matches to_relative_key's DB/lookup
+            // key on every OS (Windows renders `\` here otherwise).
             let rel_path = if project_root.as_os_str().is_empty() {
                 path_str
-            } else if let Ok(rel) = pf.path.strip_prefix(project_root) {
-                rel.to_string_lossy().into_owned()
+            } else if let Some(rel) = to_relative_key(&pf.path, project_root) {
+                rel
             } else {
                 pf.path
                     .file_name()
