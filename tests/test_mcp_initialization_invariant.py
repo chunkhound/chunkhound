@@ -262,6 +262,69 @@ class TestNonBlockingInitialization:
                     await server.cleanup()
 
 
+class TestMissingIndexVisibility:
+    """Verify a missing resolved database file is logged, not silently masked."""
+
+    @pytest.mark.asyncio
+    async def test_logs_when_resolved_db_path_is_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = MagicMock()
+        config.database.path = str(tmp_path / ".chunkhound")
+        config.database.get_db_path.return_value = tmp_path / "elsewhere" / "chunks.db"
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        debug_file = tmp_path / "debug.log"
+        monkeypatch.setenv("CHUNKHOUND_DEBUG_FILE", str(debug_file))
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_services = MagicMock()
+            mock_services.provider.is_connected = False
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+                await server.cleanup()
+
+        logged = debug_file.read_text()
+        assert "No existing index found" in logged
+        assert str(tmp_path / "elsewhere" / "chunks.db") in logged
+
+    @pytest.mark.asyncio
+    async def test_silent_when_resolved_db_path_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        existing_db = tmp_path / "chunks.db"
+        existing_db.write_bytes(b"")
+
+        config = MagicMock()
+        config.database.path = str(tmp_path / ".chunkhound")
+        config.database.get_db_path.return_value = existing_db
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        debug_file = tmp_path / "debug.log"
+        monkeypatch.setenv("CHUNKHOUND_DEBUG_FILE", str(debug_file))
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_services = MagicMock()
+            mock_services.provider.is_connected = False
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+                await server.cleanup()
+
+        assert not debug_file.exists() or "No existing index found" not in (
+            debug_file.read_text()
+        )
+
+
 class TestCleanup:
     """Verify cleanup invariants for connected providers."""
 

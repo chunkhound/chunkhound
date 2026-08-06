@@ -400,6 +400,24 @@ class MCPServerBase(ABC):
                 if not self.config.database.read_only:
                     db_path.parent.mkdir(parents=True, exist_ok=True)
 
+                # Logged before create_services() connects and creates an empty
+                # DB at the resolved path, so that case (legacy install, --db
+                # pointed at the wrong directory) stays distinguishable from it.
+                if str(db_path) != ":memory:":
+                    try:
+                        resolved_db_path = self.config.database.get_db_path()
+                        if not resolved_db_path.exists():
+                            self.debug_log(
+                                f"No existing index found at {resolved_db_path} "
+                                f"(configured database.path={db_path}); a fresh "
+                                "one will be created as files are scanned.",
+                                always=True,
+                            )
+                    except Exception as error:
+                        self.debug_log(
+                            f"Index-presence check skipped: {error}", always=True
+                        )
+
                 # Initialize embedding manager
                 self.embedding_manager = EmbeddingManager()
 
