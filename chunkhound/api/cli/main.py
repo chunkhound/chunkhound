@@ -13,7 +13,7 @@ from loguru import logger
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
 from .utils.config_factory import create_validated_config
-from .utils.rich_output import default_sink_filter
+from .utils.rich_output import install_default_log_sink
 
 # Required for PyInstaller multiprocessing support
 multiprocessing.freeze_support()
@@ -105,34 +105,9 @@ def setup_logging(verbose: bool = False) -> None:
         verbose: Whether to enable verbose logging
     """
     logger.remove()
-
-    if verbose:
-        logger.add(
-            sys.stderr,
-            level="DEBUG",
-            format=(
-                "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-                "<level>{level: <8}</level> | "
-                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-                "<level>{message}</level>"
-            ),
-        )
-    else:
-        # Rust pipeline progress (log::info!) should be visible without
-        # --verbose, but everything else stays gated at WARNING — the sink's
-        # own `level` admits INFO so Rust records reach this filter at all,
-        # and the filter enforces WARNING for every non-Rust record. Shared
-        # with ProgressManager (rich_output.py) so progress-bar-scoped
-        # logging doesn't diverge from this default.
-        logger.add(
-            sys.stderr,
-            level="INFO",
-            filter=default_sink_filter,
-            format=(
-                "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
-                "<level>{message}</level>"
-            ),
-        )
+    # Shared with ProgressManager (rich_output.py) so progress-bar-scoped
+    # logging never diverges from this process's actual verbosity.
+    install_default_log_sink(verbose)
     # Also set stdlib logging level to avoid mixed loggers being noisy
     _pylogging.basicConfig(level=_pylogging.DEBUG if verbose else _pylogging.ERROR)
 

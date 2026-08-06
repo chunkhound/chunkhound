@@ -27,17 +27,46 @@ if TYPE_CHECKING:
 
 
 def default_sink_filter(record: "Record") -> bool:
-    """Loguru filter shared by the CLI's default (non-verbose) log sink.
+    """Loguru filter for the CLI's default (non-verbose) log sink.
 
     Rust pipeline progress (log::info!, tagged via the `rust_native` extra)
     should be visible without --verbose, but everything else stays gated at
-    WARNING. Used both by `main.setup_logging()` for the process-wide default
-    sink and by `ProgressManager` so progress-bar-scoped logging doesn't
-    diverge from that default.
+    WARNING.
     """
     if record["extra"].get("rust_native"):
         return True
     return bool(record["level"].no >= logger.level("WARNING").no)
+
+
+def install_default_log_sink(verbose: bool = False) -> int:
+    """Install the CLI's single stderr log sink and return its handler id.
+
+    The one place that decides what "default" logging looks like for a
+    given verbosity — shared by `main.setup_logging()` (process startup)
+    and `ProgressManager` (progress-bar-scoped logging), so a progress bar
+    starting or ending never leaves logging in a state that diverges from
+    whatever verbosity the process was actually started with.
+    """
+    if verbose:
+        return logger.add(
+            sys.stderr,
+            level="DEBUG",
+            format=(
+                "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+                "<level>{level: <8}</level> | "
+                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+                "<level>{message}</level>"
+            ),
+        )
+    return logger.add(
+        sys.stderr,
+        level="INFO",
+        filter=default_sink_filter,
+        format=(
+            "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
+            "<level>{message}</level>"
+        ),
+    )
 
 
 def _format_bytes(n: int) -> str:
@@ -361,7 +390,9 @@ class RichOutputFormatter:
             transient=False,  # Don't make progress disappear when complete
         )
 
-        return ProgressManager(progress, self.console or Console())
+        return ProgressManager(
+            progress, self.console or Console(), verbose=self.verbose
+        )
 
     def completion_summary(self, stats: dict[str, Any], processing_time: float) -> None:
         """Display completion summary in a styled panel."""
@@ -501,18 +532,17 @@ class RichOutputFormatter:
 class ProgressManager:
     """Manages multiple progress bars with Rich."""
 
-    def __init__(self, progress: Progress, console: Console):
+    def __init__(self, progress: Progress, console: Console, verbose: bool = False):
         self.progress = progress
         self.console = console
+        self._verbose = verbose
         self._tasks: dict[str, TaskID] = {}
         self._live: Live | None = None
         self._temp_handler_id: int | None = None
 
     def __enter__(self) -> "ProgressManager":
         logger.remove()
-        self._temp_handler_id = logger.add(
-            sys.stderr, level="INFO", filter=default_sink_filter
-        )
+        self._temp_handler_id = install_default_log_sink(self._verbose)
         self._live = Live(self.progress, console=self.console, refresh_per_second=10)
         self._live.start()
         return self
@@ -524,11 +554,13 @@ class ProgressManager:
         finally:
             if self._temp_handler_id is not None:
                 logger.remove(self._temp_handler_id)
-            # Restore the same filtered default sink setup_logging() installs
-            # (not a bare `level="WARNING"` sink) so Rust progress logs stay
-            # visible after the progress bar closes instead of being
-            # permanently dropped for the rest of the process.
-            logger.add(sys.stderr, level="INFO", filter=default_sink_filter)
+            # Restore the same default sink setup_logging() would install for
+            # this process's actual verbosity (not a hardcoded non-verbose
+            # one) so logging behavior — including Rust progress visibility
+            # in non-verbose mode, or DEBUG visibility in --verbose mode —
+            # doesn't change for the rest of the process after the progress
+            # bar closes.
+            install_default_log_sink(self._verbose)
 
     def add_task(
         self,
