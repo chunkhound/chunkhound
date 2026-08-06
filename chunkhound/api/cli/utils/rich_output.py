@@ -338,6 +338,15 @@ class RichOutputFormatter:
         if not self._terminal_compatible or self.console is None:
             return _NoRichProgressManager()
 
+        # --verbose prints detailed log lines straight to stderr on every
+        # record, not through this Console — a live-updating progress bar
+        # sharing the same stream gets its redraws interleaved with (and
+        # visually broken by) that log output. Verbose users want the log
+        # lines, not the bar, so skip rendering it entirely rather than
+        # showing both.
+        if self.verbose:
+            return _NoRichProgressManager()
+
         # Create custom text columns that handle missing fields gracefully
         def render_field(
             task, field_name: str, default: str = "", style: str = ""
