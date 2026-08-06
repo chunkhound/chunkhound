@@ -10,10 +10,9 @@ pub trait DbBackend: Send {
     fn close(&mut self) -> Result<(), DbError>;
     fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError>;
 
-    /// Pipeline parallelism: phase 0 — pre-deletes, embed-table setup, HNSW drop.
-    /// Runs OUTSIDE any write transaction.  Takes an aggregated batch containing
-    /// all files and delete_paths for the entire indexing run so HNSW lifecycle
-    /// decisions see the full picture.
+    /// Pipeline parallelism: phase 0 — pre-deletes, embed-table setup.
+    /// Runs OUTSIDE any write transaction. HNSW drop/rebuild around the whole
+    /// run is handled separately via `drop_all_hnsw_indexes`/`ensure_all_hnsw_indexes`.
     fn prepare_write(&mut self, batch: &DbWriterBatch) -> Result<(), DbError> {
         let _ = batch;
         Ok(())
@@ -23,11 +22,6 @@ pub trait DbBackend: Send {
     /// BEGIN → upsert files + insert chunks + insert embeddings → COMMIT.
     fn write_batch_incremental(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
         self.write_batch(batch)
-    }
-
-    /// Pipeline parallelism: phase 2 — recreate HNSW indexes + final CHECKPOINT.
-    fn finish_write(&mut self) -> Result<(), DbError> {
-        Ok(())
     }
 
     /// Write multiple pre-prepared batches in a single transaction.

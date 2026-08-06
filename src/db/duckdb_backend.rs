@@ -13,17 +13,9 @@ pub struct DuckDbHnswBackend {
     conn: Option<Connection>,
     write_count: u32,
     has_vss: bool,
-    hnsw_cache: Option<Vec<HnswIndexInfo>>,
     hnsw_bulk_mode: bool,
     // Dims for which embeddings_N tables are known to exist in this session.
-    // Used to detect new dimensions mid-session so the HNSW cache can be
-    // invalidated and a fresh HNSW index created after the first commit.
     known_dims: HashSet<u32>,
-    // Pipeline-parallel state: HNSW index DDL to recreate after all batches commit.
-    // Set by prepare_write(), consumed by finish_write().
-    pending_hnsw_indexes: Vec<HnswIndexInfo>,
-    // Pipeline-parallel state: new dimension tables that need HNSW indexes.
-    pending_new_dims: Vec<u32>,
     // Metrics (e.g. "cosine", "l2sq") for each dims value, captured by
     // drop_all_hnsw_indexes() before bulk-mode drop so that ensure_all_hnsw_indexes()
     // can recreate indexes with the original metric instead of hardcoding cosine.
@@ -66,11 +58,8 @@ impl DuckDbHnswBackend {
             conn: None,
             write_count: 0,
             has_vss: false,
-            hnsw_cache: None,
             hnsw_bulk_mode: false,
             known_dims: HashSet::new(),
-            pending_hnsw_indexes: Vec::new(),
-            pending_new_dims: Vec::new(),
             saved_hnsw_metrics: HashMap::new(),
         }
     }
@@ -166,7 +155,6 @@ impl DuckDbHnswBackend {
         let conn = self.conn_or_err()?;
         let ok = Self::try_load_vss(conn);
         self.has_vss = ok;
-        self.hnsw_cache = None; // invalidate — VSS just loaded
         Ok(ok)
     }
 
@@ -253,26 +241,6 @@ impl DuckDbHnswBackend {
             |row| row.get::<_, String>(0),
         )
         .unwrap_or_else(|_| "cosine".to_string())
-    }
-
-    fn drop_hnsw_indexes(conn: &Connection, indexes: &[HnswIndexInfo]) -> Result<(), DbError> {
-        for idx in indexes {
-            let safe_name = idx.index_name.replace('"', "\"\"");
-            conn.execute(&format!("DROP INDEX IF EXISTS \"{safe_name}\""), [])?;
-        }
-        Ok(())
-    }
-
-    fn recreate_hnsw_indexes(conn: &Connection, indexes: &[HnswIndexInfo]) -> Result<(), DbError> {
-        for idx in indexes {
-            let safe_idx = idx.index_name.replace('"', "\"\"");
-            let safe_tbl = idx.table_name.replace('"', "\"\"");
-            conn.execute_batch(&format!(
-                "CREATE INDEX IF NOT EXISTS \"{safe_idx}\" ON \"{safe_tbl}\" USING HNSW (embedding) WITH (metric = '{}')",
-                idx.metric
-            ))?;
-        }
-        Ok(())
     }
 
     fn collect_dims_and_count(batch: &DbWriterBatch) -> (HashSet<u32>, usize) {
@@ -912,7 +880,6 @@ impl DuckDbHnswBackend {
         // Reopen — also handles HNSW index creation via ensure_all_hnsw_indexes().
         self.reopen()?;
         self.write_count = 0;
-        self.hnsw_cache = None;
         log::info!("compaction: complete");
         Ok(())
     }
@@ -1200,8 +1167,8 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         self.known_dims
             .extend(existing.into_iter().map(|(_, dims)| dims));
         self.conn = Some(conn);
-        // Crash recovery: if the process was killed between Step 2 (DROP HNSW) and
-        // Step 5 (RECREATE HNSW) in write_batch, HNSW indexes are absent but the
+        // Crash recovery: if the process was killed between drop_all_hnsw_indexes()
+        // and ensure_all_hnsw_indexes(), HNSW indexes are absent but the
         // embeddings_N tables still hold data.  Recreate any missing indexes now so
         // the next session doesn't silently fall back to brute-force vector scan.
         self.ensure_all_hnsw_indexes()?;
@@ -1231,15 +1198,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
     fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
         self.prepare_write(batch)?;
-        let result = match self.write_batch_incremental(batch) {
-            Ok(r) => r,
-            Err(e) => {
-                // Restore HNSW indexes on error to maintain Invariant 14.
-                let _ = self.finish_write();
-                return Err(e);
-            }
-        };
-        self.finish_write()?;
+        let result = self.write_batch_incremental(batch)?;
         self.write_count += 1;
         Ok(result)
     }
@@ -1259,7 +1218,6 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         // Step 0c: Ensure embedding tables outside txn (Invariant 13).
         let (unique_dims, total_emb) = Self::collect_dims_and_count(batch);
-        let new_dims: Vec<u32> = unique_dims.difference(&self.known_dims).copied().collect();
         {
             let conn = self.conn_or_err()?;
             for &dims in &unique_dims {
@@ -1267,42 +1225,12 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             }
         }
         self.known_dims.extend(unique_dims.iter().copied());
-        if !new_dims.is_empty() {
-            self.hnsw_cache = None;
-        }
 
         // Lazy VSS load — only when embeddings are actually present.
         if total_emb > 0 {
             self.ensure_vss()?;
         }
 
-        // Step 2: Discover + DROP HNSW indexes BEFORE BEGIN (Invariant 14).
-        let hnsw_indexes = {
-            let conn = self
-                .conn
-                .as_ref()
-                .ok_or_else(|| DbError::Other("not open".into()))?;
-            if !self.hnsw_bulk_mode && self.has_vss && total_emb >= 50 {
-                let indexes = match &self.hnsw_cache {
-                    Some(cached) => cached.clone(),
-                    None => {
-                        let discovered = Self::discover_hnsw_indexes(conn)?;
-                        self.hnsw_cache = Some(discovered.clone());
-                        discovered
-                    }
-                };
-                if !indexes.is_empty() {
-                    Self::drop_hnsw_indexes(conn, &indexes)?;
-                }
-                indexes
-            } else {
-                vec![]
-            }
-        };
-
-        // Save state for finish_write() to restore later.
-        self.pending_hnsw_indexes = hnsw_indexes;
-        self.pending_new_dims = new_dims;
         Ok(())
     }
 
@@ -1369,39 +1297,6 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         })
     }
 
-    fn finish_write(&mut self) -> Result<(), DbError> {
-        let hnsw_indexes = std::mem::take(&mut self.pending_hnsw_indexes);
-        let new_dims = std::mem::take(&mut self.pending_new_dims);
-
-        let conn = self
-            .conn
-            .as_ref()
-            .ok_or_else(|| DbError::Other("not open".into()))?;
-
-        // Step 5: Recreate HNSW indexes that were dropped in prepare_write.
-        if !hnsw_indexes.is_empty() {
-            Self::recreate_hnsw_indexes(conn, &hnsw_indexes)?;
-        }
-
-        // Step 5+: Create HNSW for newly-introduced embedding dimensions.
-        if !new_dims.is_empty() && self.has_vss {
-            for &dims in &new_dims {
-                let hnsw_name = format!("idx_hnsw_{dims}");
-                let table = format!("embeddings_{dims}");
-                let metric = self
-                    .saved_hnsw_metrics
-                    .get(&dims)
-                    .map(|s| s.as_str())
-                    .unwrap_or("cosine");
-                conn.execute_batch(&format!(
-                    "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"{table}\" USING HNSW (embedding) WITH (metric = '{metric}')"
-                ))?;
-            }
-        }
-
-        Ok(())
-    }
-
     fn needs_compaction(&self) -> Result<bool, DbError> {
         // Two-signal metric-based detection (Phase 0).
         // Falls back to simple write-count threshold when stats are unavailable.
@@ -1454,7 +1349,6 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         // conn borrow ends above; safe to mutate self fields now.
         self.saved_hnsw_metrics = new_metrics;
         self.hnsw_bulk_mode = true;
-        self.hnsw_cache = None;
         Ok(())
     }
 
@@ -1618,38 +1512,6 @@ mod hnsw_metric_tests {
     use super::*;
 
     #[test]
-    fn recreate_hnsw_indexes_preserves_non_cosine_metric() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        if !DuckDbHnswBackend::try_load_vss(&conn) {
-            eprintln!("VSS extension unavailable, skipping HNSW metric test");
-            return;
-        }
-
-        DuckDbHnswBackend::setup_schema(&conn).expect("setup schema");
-        DuckDbHnswBackend::ensure_embedding_table_dims(&conn, 3).expect("create embeddings_3");
-        conn.execute_batch(
-            "CREATE INDEX idx_hnsw_3 ON embeddings_3 USING HNSW (embedding) \
-             WITH (metric = 'l2sq')",
-        )
-        .expect("create l2sq HNSW index");
-
-        let discovered = DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover");
-        assert_eq!(discovered.len(), 1);
-        assert_eq!(discovered[0].metric, "l2sq");
-
-        DuckDbHnswBackend::drop_hnsw_indexes(&conn, &discovered).expect("drop");
-        DuckDbHnswBackend::recreate_hnsw_indexes(&conn, &discovered).expect("recreate");
-
-        let after_recreate =
-            DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover after recreate");
-        assert_eq!(after_recreate.len(), 1);
-        assert_eq!(
-            after_recreate[0].metric, "l2sq",
-            "recreate_hnsw_indexes must preserve the original non-cosine metric"
-        );
-    }
-
-    #[test]
     fn test_upsert_file_with_known_id_skips_insert() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
@@ -1706,89 +1568,6 @@ mod hnsw_metric_tests {
         assert_eq!(
             count, 1,
             "files table must have exactly one row after two writes to the same path"
-        );
-    }
-
-    #[test]
-    fn test_finish_write_new_dims_uses_saved_hnsw_metric() {
-        // Verify the pending_new_dims path in finish_write respects saved_hnsw_metrics.
-        // Scenario: a prior session created an l2sq HNSW that was dropped via
-        // drop_all_hnsw_indexes() (bulk mode). finish_write must recreate it with l2sq,
-        // not the hardcoded 'cosine'.
-        // RED with current code; GREEN after saved_hnsw_metrics lookup is added.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
-        let config = DbConfig {
-            db_path: db_path.clone(),
-            compaction_batch_threshold: 1000,
-            compaction_threshold: 0.3,
-            compaction_min_size_bytes: 52_428_800,
-            insert_batch_size: 100,
-        };
-        let mut backend = DuckDbHnswBackend::new(config);
-        backend.open().expect("open");
-
-        if !backend.has_vss {
-            eprintln!("VSS extension unavailable, skipping");
-            return;
-        }
-
-        // Simulate a prior session: create embeddings_4 table with l2sq HNSW.
-        {
-            let conn = backend.conn_or_err().expect("conn");
-            DuckDbHnswBackend::ensure_embedding_table_dims(conn, 4).expect("create embeddings_4");
-            conn.execute_batch(
-                "CREATE INDEX idx_hnsw_4 ON embeddings_4 \
-                 USING HNSW (embedding) WITH (metric = 'l2sq')",
-            )
-            .expect("create l2sq HNSW");
-        }
-        // Do NOT add 4 to known_dims — it must appear as new-to-session in prepare_write.
-
-        // Enter bulk mode: drops all HNSW and saves their metrics into saved_hnsw_metrics.
-        backend.drop_all_hnsw_indexes().expect("drop");
-        assert_eq!(
-            backend.saved_hnsw_metrics.get(&4).map(|s| s.as_str()),
-            Some("l2sq"),
-            "drop_all_hnsw_indexes must have saved the l2sq metric"
-        );
-
-        // Write a batch with one dim-4 embedding.
-        // In bulk mode prepare_write skips per-batch HNSW lifecycle.
-        // finish_write's pending_new_dims loop fires because dim 4 is new to known_dims.
-        let batch = crate::types::DbWriterBatch {
-            files: vec![crate::types::FileRecord {
-                existing_file_id: None,
-                path: "test.py".into(),
-                mtime: Some(1.0),
-                size_bytes: Some(100),
-                content_hash: Some("abc".into()),
-                language: Some("python".into()),
-                chunks: vec![crate::types::ChunkRecord {
-                    chunk_type: "function".into(),
-                    symbol: Some("f".into()),
-                    code: "def f(): pass".into(),
-                    start_line: Some(1),
-                    end_line: Some(1),
-                    start_byte: None,
-                    end_byte: None,
-                    language: Some("python".into()),
-                    metadata: None,
-                    embedding: Some(vec![1.0f32, 0.0, 0.0, 0.0]),
-                    provider: Some("test".into()),
-                    model: Some("test".into()),
-                }],
-            }],
-            delete_paths: vec![],
-        };
-        backend.write_batch(&batch).expect("write");
-
-        // finish_write must use saved_hnsw_metrics["l2sq"], not hardcoded "cosine".
-        let conn = backend.conn_or_err().expect("conn");
-        let metric = DuckDbHnswBackend::extract_hnsw_metric(conn, "idx_hnsw_4");
-        assert_eq!(
-            metric, "l2sq",
-            "finish_write must use saved_hnsw_metrics for pending_new_dims, not hardcoded cosine"
         );
     }
 
@@ -2147,86 +1926,6 @@ mod compaction_tests {
         backend.run_compaction().expect("run_compaction");
         assert!(!backend.needs_compaction().expect("needs_compaction"));
         backend.close().expect("close");
-    }
-}
-
-/// HNSW lifecycle threshold boundary (Invariant 14) — ported from the deleted
-/// `RustDbWriter` PyO3 wrapper's test suite.
-#[cfg(test)]
-mod hnsw_threshold_tests {
-    use super::*;
-
-    #[test]
-    fn below_threshold_no_hnsw_lifecycle() {
-        // Batches with < 50 embeddings must not trigger the HNSW drop/recreate lifecycle.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
-        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path));
-        backend.open().expect("open");
-        let result = backend
-            .write_batch(&test_support::embedding_batch("f", 128, 49))
-            .expect("write");
-        backend.close().expect("close");
-
-        assert_eq!(result.embeddings_written, 49);
-    }
-
-    #[test]
-    fn at_threshold_triggers_hnsw_lifecycle() {
-        // Batches with >= 50 embeddings must complete successfully through the
-        // HNSW drop/recreate lifecycle.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
-        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path));
-        backend.open().expect("open");
-        let result = backend
-            .write_batch(&test_support::embedding_batch("f", 128, 50))
-            .expect("write");
-        backend.close().expect("close");
-
-        assert_eq!(result.embeddings_written, 50);
-    }
-
-    #[test]
-    fn new_dims_mid_session_gets_hnsw() {
-        // A second embedding dimension introduced mid-session must get its own HNSW
-        // index. Regression for the hnsw_cache staleness bug: once the cache is
-        // primed for dims=128, a batch with a new dims=64 must invalidate the cache
-        // and create an HNSW index for embeddings_64.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("t.duckdb");
-        let db_path_str = db_path.to_string_lossy().into_owned();
-        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path_str));
-        backend.open().expect("open");
-        if !backend.has_vss {
-            eprintln!("VSS extension unavailable, skipping");
-            return;
-        }
-
-        backend
-            .write_batch(&test_support::embedding_batch("a", 128, 50))
-            .expect("write dims=128");
-        backend
-            .write_batch(&test_support::embedding_batch("b", 64, 50))
-            .expect("write dims=64 (new)");
-        backend
-            .write_batch(&test_support::embedding_batch("c", 64, 50))
-            .expect("write dims=64 (existing)");
-        backend.close().expect("close");
-
-        let conn = Connection::open(&db_path).expect("reopen for verification");
-        let _ = conn.execute_batch("LOAD vss");
-        let indexes = DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover");
-        let tables_with_hnsw: std::collections::HashSet<_> =
-            indexes.iter().map(|i| i.table_name.clone()).collect();
-        assert!(
-            tables_with_hnsw.contains("embeddings_128"),
-            "HNSW missing for embeddings_128: {indexes:?}"
-        );
-        assert!(
-            tables_with_hnsw.contains("embeddings_64"),
-            "HNSW missing for embeddings_64 (cache staleness regression): {indexes:?}"
-        );
     }
 }
 
