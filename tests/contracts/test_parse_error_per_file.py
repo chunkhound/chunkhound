@@ -39,46 +39,9 @@ these two boundaries instead is deterministic regardless of test order or
 which multiprocessing start method is active.
 """
 
-from pathlib import Path
-
-import duckdb
 import pytest
 
-
-def _rust_config(project_root: Path, db_dir: Path) -> dict:
-    return {
-        "project_root": str(project_root.resolve()),
-        "db_path": str(db_dir.resolve()),
-        "db_batch_size": 100,
-        "compaction_threshold": 0.60,
-        "compaction_min_size_mb": 10,
-        "parse_batch_size": 200,
-        "parse_thread_pool_size": 4,
-        "embed_batch_size": 200,
-        "force_reindex": False,
-        "mtime_epsilon_seconds": 0.01,
-        "do_cleanup": True,
-        "skip_embeddings": True,
-        "per_file_timeout_secs": 3.0,
-        "per_file_timeout_min_size_kb": 128,
-        "detect_embedded_sql": True,
-        "config_file_size_threshold_kb": 20,
-        "embedding_provider": "",
-        "embedding_model": "",
-    }
-
-
-def _db_counts(db_dir: Path) -> dict:
-    db_file = db_dir / "chunks.db"
-    if not db_file.exists():
-        return {"files": 0, "chunks": 0}
-    conn = duckdb.connect(str(db_file))
-    try:
-        files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
-        chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        return {"files": files, "chunks": chunks}
-    finally:
-        conn.close()
+from tests.contracts.pipeline_harness import collect_table_counts, default_rust_config
 
 
 class TestParseErrorPerFile:
@@ -92,7 +55,9 @@ class TestParseErrorPerFile:
         `_parse_one_file` implements in production.
         """
         try:
-            from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
+            from chunkhound_native import (
+                IndexingPipeline,  # type: ignore[import-untyped]
+            )
         except ImportError:
             pytest.fail(
                 "Rust IndexingPipeline is not yet available in chunkhound_native."
@@ -123,7 +88,7 @@ class TestParseErrorPerFile:
 
         file_paths = [str(good_a), str(good_b), str(bad_file)]
 
-        pipeline = IndexingPipeline(_rust_config(tmp_path, db_dir))
+        pipeline = IndexingPipeline(default_rust_config(tmp_path, db_dir))
 
         # Must not raise — the per-file error is collected, not fatal.
         report = pipeline.run(
@@ -143,7 +108,7 @@ class TestParseErrorPerFile:
             f"Expected an error mentioning broken.py, got: {report.errors}"
         )
 
-        counts = _db_counts(db_dir)
+        counts = collect_table_counts(db_dir)
         assert counts["chunks"] > 0
 
     def test_parse_one_file_catches_exceptions(self, monkeypatch, tmp_path):

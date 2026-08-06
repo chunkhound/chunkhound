@@ -7,6 +7,7 @@ pipeline) to assert byte-identical chunk output.
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import duckdb
 
@@ -260,9 +261,8 @@ def index_with_rust(
     progress_callback=None,
 ) -> IndexResult:
     """Index *fixture_dir* using the Rust pipeline."""
-    from tests.contracts.mock_embed import MOCK_MODEL, MOCK_PROVIDER, embed_texts
-
     from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
+    from tests.contracts.mock_embed import MOCK_MODEL, MOCK_PROVIDER, embed_texts
 
     db_dir.mkdir(parents=True, exist_ok=True)
 
@@ -386,3 +386,70 @@ def assert_identical(result_a: IndexResult, result_b: IndexResult) -> None:
                 f"entries ({len(emb_a_counts)} unique), B has "
                 f"{len(result_b.embedding_tuples)} entries ({len(emb_b_counts)} unique)"
             )
+
+
+def default_rust_config(
+    project_root: Path,
+    db_dir: Path,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Return the standard `IndexingPipeline` config dict.
+
+    Tests that drive `IndexingPipeline` directly (rather than through
+    `index_with_rust`, e.g. to inject a failing callback) need this same
+    ~18-key dict. Pass only the fields a given test actually varies via
+    `**overrides` instead of repeating the whole shape — a previous
+    per-file copy of this dict already drifted (`parse_thread_pool_size`
+    differed between two files with no test-specific reason).
+    """
+    config: dict[str, Any] = {
+        "project_root": str(project_root.resolve()),
+        "db_path": str(db_dir.resolve()),
+        "db_batch_size": 100,
+        "compaction_threshold": 0.60,
+        "compaction_min_size_mb": 10,
+        "parse_batch_size": 200,
+        "parse_thread_pool_size": 4,
+        "embed_batch_size": 200,
+        "force_reindex": False,
+        "mtime_epsilon_seconds": 0.01,
+        "do_cleanup": True,
+        "skip_embeddings": True,
+        "per_file_timeout_secs": 3.0,
+        "per_file_timeout_min_size_kb": 128,
+        "detect_embedded_sql": True,
+        "config_file_size_threshold_kb": 20,
+        "embedding_provider": "",
+        "embedding_model": "",
+    }
+    config.update(overrides)
+    return config
+
+
+def collect_table_counts(db_dir: Path) -> dict[str, int]:
+    """Row counts for files/chunks/any embeddings_* table.
+
+    Returns zeros if `chunks.db` doesn't exist yet (e.g. before the first
+    index run). Callers that only care about a subset of these three keys
+    can simply ignore the rest.
+    """
+    db_file = db_dir / "chunks.db"
+    if not db_file.exists():
+        return {"files": 0, "chunks": 0, "embeddings": 0}
+
+    conn = duckdb.connect(str(db_file))
+    try:
+        files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_name LIKE 'embeddings_%'"
+        ).fetchall()
+        embeddings = 0
+        for (table_name,) in tables:
+            embeddings += conn.execute(
+                f'SELECT COUNT(*) FROM "{table_name}"'
+            ).fetchone()[0]
+        return {"files": files, "chunks": chunks, "embeddings": embeddings}
+    finally:
+        conn.close()

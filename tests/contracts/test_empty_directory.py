@@ -12,57 +12,14 @@ ever touching the DB, so scenario 2 never actually deleted anything. Fixed in
 incremental diff + streaming pipeline so pending deletes get flushed.
 """
 
-import duckdb
-import pytest
 import tempfile
 from pathlib import Path
 
+import pytest
+
+from tests.contracts.pipeline_harness import collect_table_counts, default_rust_config
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
-
-
-def _rust_config(project_root: Path, db_dir: Path) -> dict:
-    return {
-        "project_root": str(project_root.resolve()),
-        "db_path": str(db_dir.resolve()),
-        "db_batch_size": 100,
-        "compaction_threshold": 0.60,
-        "compaction_min_size_mb": 10,
-        "parse_batch_size": 200,
-        "parse_thread_pool_size": 4,
-        "embed_batch_size": 200,
-        "force_reindex": False,
-        "mtime_epsilon_seconds": 0.01,
-        "do_cleanup": True,
-        "skip_embeddings": True,
-        "per_file_timeout_secs": 3.0,
-        "per_file_timeout_min_size_kb": 128,
-        "detect_embedded_sql": True,
-        "config_file_size_threshold_kb": 20,
-        "embedding_provider": "",
-        "embedding_model": "",
-    }
-
-
-def _table_counts(db_dir: Path) -> dict:
-    """Row counts for files/chunks/any embeddings_* table."""
-    db_file = db_dir / "chunks.db"
-    if not db_file.exists():
-        return {"files": 0, "chunks": 0, "embeddings": 0}
-
-    conn = duckdb.connect(str(db_file))
-    try:
-        files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
-        chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        tables = conn.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'embeddings_%'"
-        ).fetchall()
-        embeddings = 0
-        for (table_name,) in tables:
-            embeddings += conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-        return {"files": files, "chunks": chunks, "embeddings": embeddings}
-    finally:
-        conn.close()
 
 
 def _get_rust_pipeline():
@@ -91,7 +48,7 @@ class TestEmptyDirectory:
             empty_dir = Path(tmp_dir)
             db_dir = Path(tmp_db) / "db"
 
-            pipeline = IndexingPipeline(_rust_config(empty_dir, db_dir))
+            pipeline = IndexingPipeline(default_rust_config(empty_dir, db_dir))
             report = pipeline.run(
                 files=[],
                 parse_batch_callback=parse_batch_callback,
@@ -118,7 +75,7 @@ class TestEmptyDirectory:
             files = sorted(FIXTURE_DIR.resolve().glob("*"))
             file_paths = [str(f) for f in files if f.is_file()]
 
-            pipeline = IndexingPipeline(_rust_config(FIXTURE_DIR, db_dir))
+            pipeline = IndexingPipeline(default_rust_config(FIXTURE_DIR, db_dir))
             first_report = pipeline.run(
                 files=file_paths,
                 parse_batch_callback=parse_batch_callback,
@@ -128,7 +85,7 @@ class TestEmptyDirectory:
             )
             assert first_report.chunks_written > 0
 
-            before = _table_counts(db_dir)
+            before = collect_table_counts(db_dir)
             assert before["files"] > 0
             assert before["chunks"] > 0
 
@@ -144,7 +101,7 @@ class TestEmptyDirectory:
             assert second_report.files_processed == 0
             assert second_report.chunks_written == 0
 
-            after = _table_counts(db_dir)
+            after = collect_table_counts(db_dir)
             assert after["files"] == 0, (
                 f"Expected orphaned files cleaned up, found {after['files']}"
             )

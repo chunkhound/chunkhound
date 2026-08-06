@@ -30,32 +30,10 @@ import pytest
 from tests.contracts.pipeline_harness import (
     assert_identical,
     collect_chunk_tuples_from_duckdb,
+    default_rust_config,
 )
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
-
-
-def _rust_config(project_root: Path, db_dir: Path, *, parse_batch_size: int) -> dict:
-    return {
-        "project_root": str(project_root.resolve()),
-        "db_path": str(db_dir.resolve()),
-        "db_batch_size": 100,
-        "compaction_threshold": 0.60,
-        "compaction_min_size_mb": 10,
-        "parse_batch_size": parse_batch_size,
-        "parse_thread_pool_size": 4,
-        "embed_batch_size": 200,
-        "force_reindex": False,
-        "mtime_epsilon_seconds": 0.01,
-        "do_cleanup": True,
-        "skip_embeddings": True,
-        "per_file_timeout_secs": 3.0,
-        "per_file_timeout_min_size_kb": 128,
-        "detect_embedded_sql": True,
-        "config_file_size_threshold_kb": 20,
-        "embedding_provider": "",
-        "embedding_model": "",
-    }
 
 
 def _get_pid_probe(_args) -> int:
@@ -122,7 +100,7 @@ class TestParsePoolReused:
         db_single_batch = tmp_path / "db_single_batch"
         db_single_batch.mkdir()
         pipeline_single = IndexingPipeline(
-            _rust_config(FIXTURE_DIR, db_single_batch, parse_batch_size=200)
+            default_rust_config(FIXTURE_DIR, db_single_batch, parse_batch_size=200)
         )
         report_single = pipeline_single.run(
             files=file_paths,
@@ -135,7 +113,7 @@ class TestParsePoolReused:
         db_many_batches = tmp_path / "db_many_batches"
         db_many_batches.mkdir()
         pipeline_many = IndexingPipeline(
-            _rust_config(FIXTURE_DIR, db_many_batches, parse_batch_size=2)
+            default_rust_config(FIXTURE_DIR, db_many_batches, parse_batch_size=2)
         )
         report_many = pipeline_many.run(
             files=file_paths,

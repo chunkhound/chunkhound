@@ -20,28 +20,7 @@ from pathlib import Path
 
 import pytest
 
-
-def _rust_config(project_root: Path, db_dir: Path) -> dict:
-    return {
-        "project_root": str(project_root.resolve()),
-        "db_path": str(db_dir.resolve()),
-        "db_batch_size": 100,
-        "compaction_threshold": 0.60,
-        "compaction_min_size_mb": 10,
-        "parse_batch_size": 200,
-        "parse_thread_pool_size": 4,
-        "embed_batch_size": 200,
-        "force_reindex": False,
-        "mtime_epsilon_seconds": 0.01,
-        "do_cleanup": True,
-        "skip_embeddings": True,
-        "per_file_timeout_secs": 3.0,
-        "per_file_timeout_min_size_kb": 128,
-        "detect_embedded_sql": True,
-        "config_file_size_threshold_kb": 20,
-        "embedding_provider": "",
-        "embedding_model": "",
-    }
+from tests.contracts.pipeline_harness import default_rust_config
 
 
 def _write_fixture_files(tmp_path: Path) -> list[str]:
@@ -58,7 +37,9 @@ class TestProgressCallback:
 
     def test_fires_expected_phases_in_order(self, tmp_path):
         try:
-            from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
+            from chunkhound_native import (
+                IndexingPipeline,  # type: ignore[import-untyped]
+            )
         except ImportError:
             pytest.fail(
                 "Rust IndexingPipeline is not yet available in chunkhound_native."
@@ -74,7 +55,7 @@ class TestProgressCallback:
         def progress_callback(phase: str, current: int, total: int, chunks: int = 0) -> None:
             calls.append((phase, current, total))
 
-        pipeline = IndexingPipeline(_rust_config(tmp_path, db_dir))
+        pipeline = IndexingPipeline(default_rust_config(tmp_path, db_dir))
         report = pipeline.run(
             files=file_paths,
             parse_batch_callback=parse_batch_callback,
@@ -130,7 +111,9 @@ class TestProgressCallback:
         so an exception is silently swallowed rather than propagated.
         """
         try:
-            from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
+            from chunkhound_native import (
+                IndexingPipeline,  # type: ignore[import-untyped]
+            )
         except ImportError:
             pytest.fail(
                 "Rust IndexingPipeline is not yet available in chunkhound_native."
@@ -144,7 +127,7 @@ class TestProgressCallback:
         def raising_progress_callback(phase: str, current: int, total: int) -> None:
             raise RuntimeError("simulated progress callback failure")
 
-        pipeline = IndexingPipeline(_rust_config(tmp_path, db_dir))
+        pipeline = IndexingPipeline(default_rust_config(tmp_path, db_dir))
 
         # Must not raise.
         report = pipeline.run(

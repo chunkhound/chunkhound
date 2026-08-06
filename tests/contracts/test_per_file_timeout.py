@@ -28,6 +28,7 @@ import pytest
 
 import chunkhound.pipeline_bridge as pipeline_bridge
 from chunkhound.pipeline_bridge import parse_file_callback
+from tests.contracts.pipeline_harness import default_rust_config
 
 
 class TestParseCallConfigWiring:
@@ -56,26 +57,18 @@ class TestParseCallConfigWiring:
             seen_configs.append(parse_config)
             return [("python", [], None) for _ in file_paths]
 
-        config_dict = {
-            "project_root": str(tmp_path.resolve()),
-            "db_path": str(db_dir.resolve()),
-            "db_batch_size": 100,
-            "compaction_threshold": 0.60,
-            "compaction_min_size_mb": 10,
-            "parse_batch_size": 200,
-            "parse_thread_pool_size": 7,
-            "embed_batch_size": 200,
-            "force_reindex": False,
-            "mtime_epsilon_seconds": 0.01,
-            "do_cleanup": True,
-            "skip_embeddings": True,
-            "per_file_timeout_secs": 2.5,
-            "per_file_timeout_min_size_kb": 99,
-            "detect_embedded_sql": False,
-            "config_file_size_threshold_kb": 13,
-            "embedding_provider": "",
-            "embedding_model": "",
-        }
+        # Distinctive, unlikely-default values for every field ParseCallConfig
+        # forwards to the callback — proves they're actually wired through,
+        # not just falling back to defaults that would happen to match.
+        config_dict = default_rust_config(
+            tmp_path,
+            db_dir,
+            parse_thread_pool_size=7,
+            per_file_timeout_secs=2.5,
+            per_file_timeout_min_size_kb=99,
+            detect_embedded_sql=False,
+            config_file_size_threshold_kb=13,
+        )
 
         pipeline = IndexingPipeline(config_dict)
         pipeline.run(

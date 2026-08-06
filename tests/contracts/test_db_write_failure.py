@@ -19,35 +19,14 @@ directly exercise the per-batch rollback path above) is deferred — it needs a
 fault-injection seam in `DbBackend` that doesn't exist yet.
 """
 
-import pytest
 import tempfile
 from pathlib import Path
 
+import pytest
+
+from tests.contracts.pipeline_harness import default_rust_config
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
-
-
-def _rust_config(project_root: Path, db_dir: Path) -> dict:
-    return {
-        "project_root": str(project_root.resolve()),
-        "db_path": str(db_dir),
-        "db_batch_size": 100,
-        "compaction_threshold": 0.60,
-        "compaction_min_size_mb": 10,
-        "parse_batch_size": 200,
-        "parse_thread_pool_size": 4,
-        "embed_batch_size": 200,
-        "force_reindex": False,
-        "mtime_epsilon_seconds": 0.01,
-        "do_cleanup": True,
-        "skip_embeddings": True,
-        "per_file_timeout_secs": 3.0,
-        "per_file_timeout_min_size_kb": 128,
-        "detect_embedded_sql": True,
-        "config_file_size_threshold_kb": 20,
-        "embedding_provider": "",
-        "embedding_model": "",
-    }
 
 
 class TestDbWriteFailure:
@@ -56,7 +35,9 @@ class TestDbWriteFailure:
     @pytest.mark.asyncio
     async def test_uncreatable_db_path_raises_cleanly(self):
         try:
-            from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
+            from chunkhound_native import (
+                IndexingPipeline,  # type: ignore[import-untyped]
+            )
         except ImportError:
             pytest.fail(
                 "Rust IndexingPipeline is not yet available in chunkhound_native."
@@ -73,7 +54,7 @@ class TestDbWriteFailure:
             files = sorted(FIXTURE_DIR.resolve().glob("*"))
             file_paths = [str(f) for f in files if f.is_file()]
 
-            pipeline = IndexingPipeline(_rust_config(FIXTURE_DIR, db_dir))
+            pipeline = IndexingPipeline(default_rust_config(FIXTURE_DIR, db_dir))
 
             with pytest.raises(RuntimeError):
                 pipeline.run(
