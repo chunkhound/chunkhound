@@ -7,8 +7,12 @@ import multiprocessing
 import sys
 import time
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from loguru import Record
 
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
@@ -48,16 +52,13 @@ def _install_logging_to_loguru_bridge(*, verbose: bool = False) -> None:
 
     class _Bridge(_logging.Handler):
         def emit(self, record: _logging.LogRecord) -> None:
-            # Rust pipeline messages come through the ``chunkhound_native``
-            # logger.  Loguru is at WARNING by default, so forward these
-            # as WARNING so they are visible without ``--verbose``.
-            level = (
-                "WARNING"
-                if record.name.startswith("chunkhound_native")
-                else record.levelname
-            )
+            # Preserve the record's real level — a Rust log::warn! must still
+            # display (and be greppable) as WARNING, distinct from routine
+            # log::info! progress lines. Visibility of Rust INFO lines
+            # without --verbose is handled by the sink filter in
+            # setup_logging(), not by relabeling the level here.
             try:
-                level = logger.level(level).name
+                level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
 
@@ -70,9 +71,10 @@ def _install_logging_to_loguru_bridge(*, verbose: bool = False) -> None:
                 frame = frame.f_back
                 depth += 1
 
-            logger.opt(depth=depth, exception=record.exc_info).log(
-                level, record.getMessage()
-            )
+            is_rust = record.name.startswith("chunkhound_native")
+            logger.bind(rust_native=is_rust).opt(
+                depth=depth, exception=record.exc_info
+            ).log(level, record.getMessage())
 
     _bridge = _Bridge()
     _bridge.setLevel(_logging.DEBUG if verbose else _logging.INFO)
@@ -119,9 +121,19 @@ def setup_logging(verbose: bool = False) -> None:
             ),
         )
     else:
+        # Rust pipeline progress (log::info!) should be visible without
+        # --verbose, but everything else stays gated at WARNING — the sink's
+        # own `level` admits INFO so Rust records reach this filter at all,
+        # and the filter enforces WARNING for every non-Rust record.
+        def _default_sink_filter(record: "Record") -> bool:
+            if record["extra"].get("rust_native"):
+                return True
+            return bool(record["level"].no >= logger.level("WARNING").no)
+
         logger.add(
             sys.stderr,
-            level="WARNING",
+            level="INFO",
+            filter=_default_sink_filter,
             format=(
                 "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
                 "<level>{message}</level>"
