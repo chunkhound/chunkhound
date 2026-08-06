@@ -1,0 +1,22 @@
+name: 'Set up Rust toolchain'
+description: >
+  Install the stable Rust toolchain and cache Cargo's registry/git checkouts
+  and the build output directory, keyed on Cargo.lock. Shared by
+  build-rust-extension, build-native-wheel, and ci.yml's rust-checks job,
+  which previously each carried their own copy of these two steps.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust stable toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Rust build artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-

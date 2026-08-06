@@ -13,18 +13,8 @@ runs:
       shell: bash
       run: uv python install 3.12
 
-    - name: Install Rust stable toolchain
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Cache Rust build artifacts
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-cargo-
+    - name: Set up Rust toolchain
+      uses: ./.github/actions/setup-rust-toolchain
 
     - name: Build native wheel
       shell: bash
