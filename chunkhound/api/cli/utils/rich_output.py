@@ -2,7 +2,7 @@
 
 import os
 import sys
-from typing import Any, Literal, TextIO
+from typing import TYPE_CHECKING, Any, Literal, TextIO
 
 import rich.box
 from loguru import logger
@@ -21,6 +21,23 @@ from rich.progress import (
 )
 from rich.table import Table
 from rich.text import Text
+
+if TYPE_CHECKING:
+    from loguru import Record
+
+
+def default_sink_filter(record: "Record") -> bool:
+    """Loguru filter shared by the CLI's default (non-verbose) log sink.
+
+    Rust pipeline progress (log::info!, tagged via the `rust_native` extra)
+    should be visible without --verbose, but everything else stays gated at
+    WARNING. Used both by `main.setup_logging()` for the process-wide default
+    sink and by `ProgressManager` so progress-bar-scoped logging doesn't
+    diverge from that default.
+    """
+    if record["extra"].get("rust_native"):
+        return True
+    return bool(record["level"].no >= logger.level("WARNING").no)
 
 
 def _format_bytes(n: int) -> str:
@@ -493,7 +510,9 @@ class ProgressManager:
 
     def __enter__(self) -> "ProgressManager":
         logger.remove()
-        self._temp_handler_id = logger.add(sys.stderr, level="INFO")
+        self._temp_handler_id = logger.add(
+            sys.stderr, level="INFO", filter=default_sink_filter
+        )
         self._live = Live(self.progress, console=self.console, refresh_per_second=10)
         self._live.start()
         return self
@@ -505,7 +524,11 @@ class ProgressManager:
         finally:
             if self._temp_handler_id is not None:
                 logger.remove(self._temp_handler_id)
-            logger.add(sys.stderr, level="WARNING")
+            # Restore the same filtered default sink setup_logging() installs
+            # (not a bare `level="WARNING"` sink) so Rust progress logs stay
+            # visible after the progress bar closes instead of being
+            # permanently dropped for the rest of the process.
+            logger.add(sys.stderr, level="INFO", filter=default_sink_filter)
 
     def add_task(
         self,

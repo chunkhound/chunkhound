@@ -7,16 +7,13 @@ import multiprocessing
 import sys
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 from loguru import logger
-
-if TYPE_CHECKING:
-    from loguru import Record
 
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
 from .utils.config_factory import create_validated_config
+from .utils.rich_output import default_sink_filter
 
 # Required for PyInstaller multiprocessing support
 multiprocessing.freeze_support()
@@ -124,16 +121,13 @@ def setup_logging(verbose: bool = False) -> None:
         # Rust pipeline progress (log::info!) should be visible without
         # --verbose, but everything else stays gated at WARNING — the sink's
         # own `level` admits INFO so Rust records reach this filter at all,
-        # and the filter enforces WARNING for every non-Rust record.
-        def _default_sink_filter(record: "Record") -> bool:
-            if record["extra"].get("rust_native"):
-                return True
-            return bool(record["level"].no >= logger.level("WARNING").no)
-
+        # and the filter enforces WARNING for every non-Rust record. Shared
+        # with ProgressManager (rich_output.py) so progress-bar-scoped
+        # logging doesn't diverge from this default.
         logger.add(
             sys.stderr,
             level="INFO",
-            filter=_default_sink_filter,
+            filter=default_sink_filter,
             format=(
                 "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
                 "<level>{message}</level>"
