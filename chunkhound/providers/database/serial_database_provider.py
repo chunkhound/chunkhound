@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
+from chunkhound.core.exceptions import DatabaseError
 from chunkhound.core.models import Chunk, File
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.file_discovery_cache import FileDiscoveryCache
@@ -164,11 +165,23 @@ class SerialDatabaseProvider(ABC):
         Called before handing write ownership to the Rust pipeline.  Unlike
         disconnect(), this keeps the ThreadPoolExecutor alive so connect()
         can reopen the connection once the Rust pipeline has finished.
+
+        Raises:
+            DatabaseError: if the connection could not be closed. The caller
+                must not proceed to hand write ownership to the Rust pipeline
+                in that case — Python's DuckDB connection would still be open
+                on the same file Rust is about to write to.
         """
         try:
             self._execute_in_db_thread_sync("disconnect", False)
         except Exception as e:
-            logger.error(f"Error releasing connection for Rust pipeline: {e}")
+            raise DatabaseError(
+                operation="release_for_rust_pipeline",
+                reason=(
+                    "failed to close the Python DuckDB connection before "
+                    f"handing write ownership to the Rust pipeline: {e}"
+                ),
+            ) from e
         finally:
             self._executor.clear_thread_local()
 

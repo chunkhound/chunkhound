@@ -54,6 +54,13 @@ class DatabaseProvider(Protocol):
         coordinator always reconnects once the Rust pipeline finishes
         (success or failure) so the process doesn't end up permanently
         disconnected.
+
+        Raises:
+            DatabaseError: if the connection could not be closed.
+                Implementations must raise rather than swallow this — the
+                caller must not hand write ownership to the Rust pipeline
+                while Python's own connection to the same file may still be
+                open, or the database can be corrupted.
         """
         ...
 

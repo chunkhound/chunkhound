@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import duckdb
 from loguru import logger
 
+from chunkhound.core.exceptions import DatabaseError
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
@@ -539,11 +540,18 @@ class DuckDBProvider(SerialDatabaseProvider):
         data and Python reconnects, duckdb.connect() returns a connection to the same
         already-open in-memory database (stale cache) instead of reading Rust's
         freshly-written data from disk.
+
+        Raises:
+            DatabaseError: if either connection could not be closed. The caller
+                must not proceed to hand write ownership to the Rust pipeline in
+                that case — Python's DuckDB connection(s) would still be open on
+                the same file Rust is about to write to.
         """
+        failures: list[str] = []
         try:
             self._execute_in_db_thread_sync("disconnect", False)
         except Exception as e:
-            logger.error(f"Error releasing connection for Rust pipeline: {e}")
+            failures.append(f"executor connection: {e}")
         finally:
             self._executor.clear_thread_local()
             try:
@@ -552,7 +560,17 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # skip_checkpoint=True: executor already checkpointed above.
                 self._connection_manager.disconnect(skip_checkpoint=True)
             except Exception as e:
-                logger.error(f"Error closing connection manager for Rust pipeline: {e}")
+                failures.append(f"connection manager: {e}")
+
+        if failures:
+            raise DatabaseError(
+                operation="release_for_rust_pipeline",
+                reason=(
+                    "failed to close the Python DuckDB connection(s) before "
+                    "handing write ownership to the Rust pipeline: "
+                    f"{'; '.join(failures)}"
+                ),
+            )
 
     def disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close database connection with optional checkpointing - delegate to connection manager."""
