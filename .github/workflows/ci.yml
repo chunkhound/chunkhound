@@ -189,18 +189,11 @@ jobs:
           key: ${{ runner.os }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-duckdb-
 
-      - name: Check Rust formatting
-        run: cargo fmt --check
-
-      - name: Clippy (Rust lints)
-        env:
-          DUCKDB_DOWNLOAD_LIB: "1"
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Rust lint (fmt + clippy)
+        run: make rust-check
 
       - name: Run Rust unit tests
-        env:
-          DUCKDB_DOWNLOAD_LIB: "1"
-        run: cargo test
+        run: make rust-test
 
   pages-artifact:
     needs: [site-build, tests, rust-checks, site-build-validation, watchman-rollout-gate]
