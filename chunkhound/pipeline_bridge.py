@@ -449,11 +449,21 @@ def _detect_embed_concurrency(embedding_cfg: Any) -> int:
 
 
 _T = TypeVar("_T")
+_MISSING = object()
 
 
 def _cfg_or(obj: Any, attr: str, default: _T, cast: Callable[[Any], _T]) -> _T:
-    """Read obj.attr, cast it, falling back to default if missing or falsy."""
-    return cast(getattr(obj, attr, default) or default)
+    """Read obj.attr, cast it, falling back to default only if missing or None.
+
+    Unlike a naive ``getattr(obj, attr, default) or default``, this honors
+    explicit falsy values (e.g. ``0`` to disable a size gate, ``0.0`` for an
+    exact mtime match) instead of silently overriding them — matching how
+    the legacy Python path reads these same config fields.
+    """
+    value = getattr(obj, attr, _MISSING)
+    if value is _MISSING or value is None:
+        return default
+    return cast(value)
 
 
 async def run_rust_pipeline(
