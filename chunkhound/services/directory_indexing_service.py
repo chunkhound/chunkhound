@@ -21,7 +21,7 @@ def _rust_pipeline_active() -> bool:
     Python-side HNSW steps that the Rust pipeline already handles
     internally.
     """
-    from chunkhound.providers.database.rust_pipeline_flag import _get_use_rust
+    from chunkhound.utils.rust_pipeline_flag import _get_use_rust
     return _get_use_rust()
 
 

@@ -1,6 +1,6 @@
 """Tests for the CHUNKHOUND_USE_RUST feature-flag guard."""
 
-from chunkhound.providers.database.rust_pipeline_flag import _get_use_rust
+from chunkhound.utils.rust_pipeline_flag import _get_use_rust
 
 
 def test_rust_enabled_by_default(monkeypatch):

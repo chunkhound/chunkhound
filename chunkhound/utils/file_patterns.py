@@ -19,10 +19,10 @@ from pathlib import Path
 from re import Pattern
 
 from chunkhound.core.utils.path_utils import get_relative_path_safe
+from chunkhound.utils.rust_pipeline_flag import _get_use_rust
 
 from chunkhound_native import scan_files as _rust_scan_files
 
-_USE_RUST = os.environ.get("CHUNKHOUND_USE_RUST", "1") == "1"
 _log = logging.getLogger(__name__)
 
 HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
@@ -466,7 +466,7 @@ def walk_directory_tree(
     """
     # Fast Rust path: ignore crate handles gitignore + exclude_patterns natively.
     # ignore_engine is applied as a post-filter so Rust handles the expensive I/O walk.
-    if _USE_RUST:
+    if _get_use_rust():
         _exts, _names, _has_complex = _summarize_include_patterns(patterns)
         if (
             not _has_complex

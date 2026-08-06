@@ -1276,10 +1276,13 @@ class IndexingCoordinator(BaseService):
             self._root_identity_validated = True
 
         # Detect Rust pipeline early so we can skip DB-queried phases below.
-        import chunkhound.utils.file_patterns as _file_patterns
-        from chunkhound.providers.database.rust_pipeline_flag import _get_use_rust
+        from chunkhound.utils.rust_pipeline_flag import _get_use_rust
 
-        _use_rust = _get_use_rust()
+        # Discovery (file scanning) has no DB-specific constraints, so it
+        # always follows the raw flag; the write pipeline (_use_rust below)
+        # can still be downgraded to Python for a non-DuckDB provider.
+        _rust_flag = _get_use_rust()
+        _use_rust = _rust_flag
         if _use_rust:
             # The Rust pipeline (chunkhound_native.IndexingPipeline) only
             # implements a DuckDB backend (DuckDbHnswBackend) — running it
@@ -1316,7 +1319,7 @@ class IndexingCoordinator(BaseService):
                 _use_rust = False
         logger.info(
             "Indexing backend: discovery={} pipeline={}",
-            "rust" if _file_patterns._USE_RUST else "python",
+            "rust" if _rust_flag else "python",
             "rust" if _use_rust else "python",
         )
 

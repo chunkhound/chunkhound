@@ -7,7 +7,7 @@ change-detection / provider-disconnect behavior on that alone — with no check
 that the configured database provider was actually DuckDB. Pointed at a
 LanceDB-backed project, this disconnected the live LanceDB connection and then
 handed the Rust pipeline a `db_path` it can't use (see
-`chunkhound/providers/database/rust_pipeline_flag.py`'s module docstring, which
+`chunkhound/utils/rust_pipeline_flag.py`'s module docstring, which
 documented this as a known gap).
 
 The fix checks the provider's `supports_rust_pipeline` capability up front —
