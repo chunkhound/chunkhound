@@ -16,6 +16,7 @@ import pytest
 
 from tests.contracts.mock_embed import MockEmbeddingProvider
 from tests.contracts.pipeline_harness import (
+    assert_chunk_multiset_identical,
     assert_identical,
     index_with_python,
     index_with_rust,
@@ -90,12 +91,12 @@ class TestPipelineParallel:
             db_full.mkdir(parents=True, exist_ok=True)
             full_result = index_with_rust(work_dir, db_full, skip_embeddings=False)
 
-            full_chunks = set(full_result.chunk_tuples)
-            inc_chunks = set(incremental.chunk_tuples)
-            missing = full_chunks - inc_chunks
-            extra = inc_chunks - full_chunks
-            assert not missing, f"Chunks missing from incremental ({len(missing)}): {sorted(missing)[:3]}"
-            assert not extra, f"Extra chunks in incremental ({len(extra)}): {sorted(extra)[:3]}"
+            assert_chunk_multiset_identical(
+                full_result.chunk_tuples,
+                incremental.chunk_tuples,
+                label_a="full",
+                label_b="incremental",
+            )
 
             # Verify incremental mode was actually used (fewer files processed).
             assert incremental.files_processed < full_result.files_processed, (

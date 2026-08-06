@@ -326,6 +326,39 @@ def index_with_rust(
     )
 
 
+def assert_chunk_multiset_identical(
+    chunks_a: list[tuple],
+    chunks_b: list[tuple],
+    *,
+    label_a: str = "A",
+    label_b: str = "B",
+) -> None:
+    """Assert two chunk-tuple collections are identical, including duplicate counts.
+
+    Counter, not set: a set would silently absorb a duplicated row (e.g. one
+    pipeline writing the same chunk twice) since both sides reduce to the same
+    set of distinct values. Counter equality requires matching multiplicities too.
+    """
+    a_counts = Counter(chunks_a)
+    b_counts = Counter(chunks_b)
+
+    if a_counts != b_counts:
+        a_only = a_counts - b_counts
+        b_only = b_counts - a_counts
+        msg_parts = ["Chunk tuple mismatch:"]
+        if a_only:
+            msg_parts.append(
+                f"  Only in {label_a} / extra copies ({sum(a_only.values())}): "
+                f"{sorted(a_only.elements())[:5]}..."
+            )
+        if b_only:
+            msg_parts.append(
+                f"  Only in {label_b} / extra copies ({sum(b_only.values())}): "
+                f"{sorted(b_only.elements())[:5]}..."
+            )
+        raise AssertionError("\n".join(msg_parts))
+
+
 def assert_identical(result_a: IndexResult, result_b: IndexResult) -> None:
     """Assert two IndexResults are byte-identical.
 
@@ -342,28 +375,7 @@ def assert_identical(result_a: IndexResult, result_b: IndexResult) -> None:
         f"embeddings_generated mismatch: {result_a.embeddings_generated} != {result_b.embeddings_generated}"
     )
 
-    # Chunk tuples — Counter, not set: a set would silently absorb a
-    # duplicated row (e.g. one pipeline writing the same chunk twice) since
-    # both sides reduce to the same set of distinct values. Counter equality
-    # requires matching multiplicities too.
-    a_counts = Counter(result_a.chunk_tuples)
-    b_counts = Counter(result_b.chunk_tuples)
-
-    if a_counts != b_counts:
-        a_only = a_counts - b_counts
-        b_only = b_counts - a_counts
-        msg_parts = ["Chunk tuple mismatch:"]
-        if a_only:
-            msg_parts.append(
-                f"  Only in A / extra copies ({sum(a_only.values())}): "
-                f"{sorted(a_only.elements())[:5]}..."
-            )
-        if b_only:
-            msg_parts.append(
-                f"  Only in B / extra copies ({sum(b_only.values())}): "
-                f"{sorted(b_only.elements())[:5]}..."
-            )
-        raise AssertionError("\n".join(msg_parts))
+    assert_chunk_multiset_identical(result_a.chunk_tuples, result_b.chunk_tuples)
 
     # Embedding tuples — same multiset comparison as chunk tuples above.
     emb_a_counts = Counter(result_a.embedding_tuples)

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from tests.contracts.pipeline_harness import (
+    assert_chunk_multiset_identical,
     disconnect_registry_db,
     index_with_python,
     index_with_rust,
@@ -99,12 +100,12 @@ class TestIncrementalUpdates:
         # ── Step 5: Assert identical final chunk set ──────────
         # The Rust report.chunks_written counts only newly written chunks,
         # while Python counts all chunks. Compare the actual DB content.
-        py_chunks = set(result_py_full.chunk_tuples)
-        rs_chunks = set(result_rs_inc.chunk_tuples)
-        missing = py_chunks - rs_chunks
-        extra = rs_chunks - py_chunks
-        assert not missing, f"Chunks missing from Rust incremental ({len(missing)}): {sorted(missing)[:3]}"
-        assert not extra, f"Extra chunks in Rust incremental ({len(extra)}): {sorted(extra)[:3]}"
+        assert_chunk_multiset_identical(
+            result_py_full.chunk_tuples,
+            result_rs_inc.chunk_tuples,
+            label_a="Python full",
+            label_b="Rust incremental",
+        )
 
         # ── Step 6: Verify Rust was actually incremental ───────
         assert result_rs_inc.files_processed < result_py_full.files_processed, (
