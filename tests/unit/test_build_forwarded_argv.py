@@ -119,3 +119,30 @@ def test_skip_dests_excludes_action() -> None:
     args = _parse(parser, ["--config", "x.yaml", "--llm-model", "m"])
     forwarded = build_forwarded_argv(parser, args, skip_dests={"config"})
     assert forwarded == ["--llm-model", "m"]
+
+
+def _hnsw_parser() -> argparse.ArgumentParser:
+    """Parser registering the real DatabaseConfig duckdb-hnsw flags."""
+    from chunkhound.core.config.database_config import DatabaseConfig
+
+    p = argparse.ArgumentParser(add_help=False)
+    DatabaseConfig.add_cli_arguments(p)
+    return p
+
+
+def test_database_hnsw_none_default_skipped() -> None:
+    parser = _hnsw_parser()
+    args = _parse(parser, [])
+    assert build_forwarded_argv(parser, args) == []
+
+
+def test_database_hnsw_false_emits_negative_flag() -> None:
+    parser = _hnsw_parser()
+    args = _parse(parser, ["--no-duckdb-hnsw"])
+    assert build_forwarded_argv(parser, args) == ["--no-duckdb-hnsw"]
+
+
+def test_database_hnsw_true_emits_positive_flag() -> None:
+    parser = _hnsw_parser()
+    args = _parse(parser, ["--duckdb-hnsw"])
+    assert build_forwarded_argv(parser, args) == ["--duckdb-hnsw"]

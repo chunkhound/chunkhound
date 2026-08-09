@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from ._utils import _parse_env_bool
+
 _EXPLICIT_DB_SUFFIXES = {".db", ".duckdb"}
 
 
@@ -75,6 +77,21 @@ class DatabaseConfig(BaseModel):
         "30 = compact when the DB is ~30% larger than live data. "
         "0 = compact whenever any overhead exists, None = never auto-compact. "
         "Does not disable the fixed compaction boundaries in chunkhound index.",
+    )
+
+    # DuckDB HNSW vector index usage. Startup config: enabled uses the
+    # persisted HNSW index (approximate, capped at 1000 candidates); disabled
+    # runs exact linear scans (uncapped) and never creates/uses HNSW indexes.
+    # Env: CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED (strict bool).
+    # CLI: --duckdb-hnsw / --no-duckdb-hnsw.
+    duckdb_hnsw_enabled: bool = Field(
+        default=True,
+        description=(
+            "Use the DuckDB HNSW vector index for semantic searches. "
+            "True = approximate search via the persisted HNSW index "
+            "(1000-candidate cap). False = exact linear scan, uncapped, "
+            "no HNSW index creation or use."
+        ),
     )
 
     # Serial executor operation timeout (execute_sync waits only)
@@ -194,6 +211,15 @@ class DatabaseConfig(BaseModel):
         )
 
         parser.add_argument(
+            "--duckdb-hnsw",
+            dest="duckdb_hnsw_enabled",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Enable/disable the DuckDB HNSW vector index for semantic "
+            "searches (default: enabled, from config or True).",
+        )
+
+        parser.add_argument(
             "--db-execute-timeout",
             type=float,
             help=(
@@ -207,7 +233,7 @@ class DatabaseConfig(BaseModel):
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load database config from environment variables."""
-        config = {}
+        config: dict[str, Any] = {}
         # Support both new and legacy env var names
         if db_path := (
             os.getenv("CHUNKHOUND_DATABASE__PATH") or os.getenv("CHUNKHOUND_DB_PATH")
@@ -230,8 +256,20 @@ class DatabaseConfig(BaseModel):
                 pass
         if read_only := os.getenv("CHUNKHOUND_DATABASE__READ_ONLY"):
             config["read_only"] = read_only.lower() in ("true", "1", "yes")
+        raw_hnsw = os.getenv("CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED")
+        if raw_hnsw is not None:
+            parsed = _parse_env_bool(raw_hnsw)
+            if parsed is None:
+                raise ValueError(
+                    "CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED must be a boolean "
+                    "value (true/false/1/0/yes/no/on/off), got "
+                    f"{raw_hnsw!r}"
+                )
+            config["duckdb_hnsw_enabled"] = parsed
 
-        if threshold_pct := os.getenv("CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT"):
+        if threshold_pct := os.getenv(
+            "CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT"
+        ):
             try:
                 config["fragmentation_threshold_pct"] = float(threshold_pct)
             except ValueError:
@@ -262,12 +300,19 @@ class DatabaseConfig(BaseModel):
             overrides["max_disk_usage_mb"] = args.max_disk_usage_gb * 1024.0
         if getattr(args, "read_only", False):
             overrides["read_only"] = True
-        if hasattr(args, "fragmentation_threshold_pct") and args.fragmentation_threshold_pct is not None:
-            overrides["fragmentation_threshold_pct"] = float(args.fragmentation_threshold_pct)
         if (
-            hasattr(args, "db_execute_timeout")
-            and args.db_execute_timeout is not None
+            hasattr(args, "duckdb_hnsw_enabled")
+            and args.duckdb_hnsw_enabled is not None
         ):
+            overrides["duckdb_hnsw_enabled"] = args.duckdb_hnsw_enabled
+        if (
+            hasattr(args, "fragmentation_threshold_pct")
+            and args.fragmentation_threshold_pct is not None
+        ):
+            overrides["fragmentation_threshold_pct"] = float(
+                args.fragmentation_threshold_pct
+            )
+        if hasattr(args, "db_execute_timeout") and args.db_execute_timeout is not None:
             overrides["execute_timeout_seconds"] = float(args.db_execute_timeout)
         return overrides
 
@@ -280,4 +325,5 @@ class DatabaseConfig(BaseModel):
             parts.append(f"fragmentation_threshold_pct={self.fragmentation_threshold_pct}")
         if self.execute_timeout_seconds is not None:
             parts.append(f"execute_timeout_seconds={self.execute_timeout_seconds}")
+        parts.append(f"duckdb_hnsw_enabled={self.duckdb_hnsw_enabled}")
         return f"DatabaseConfig({', '.join(parts)})"
