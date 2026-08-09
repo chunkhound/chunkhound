@@ -6,6 +6,7 @@ by Rust.
 """
 
 import atexit
+import functools
 import os
 import threading
 from concurrent.futures import ProcessPoolExecutor
@@ -397,6 +398,8 @@ def _parse_one_file(
 def parse_batch_callback(
     file_paths: list[str],
     parse_config: Any = None,
+    *,
+    index_unknown_files: bool = False,
 ) -> list[tuple[str, list[dict], str | None]]:
     """Adapter: batch-parse files in parallel (called from Rust parse thread).
 
@@ -413,13 +416,19 @@ def parse_batch_callback(
             once per IndexingPipeline.run() and passes to every call for
             that run. Direct callers that omit it (tests bypassing Rust) get
             _DEFAULT_PARSE_CONFIG instead.
+        index_unknown_files: Passed through to _ParsePoolConfig — Rust's own
+            ParseCallConfig has no such field, so run_rust_pipeline() binds
+            this from the resolved indexing config via functools.partial
+            rather than it flowing through parse_config.
 
     Returns:
         List of (language, chunks, error) tuples — same order as file_paths.
         `error` is `None` on success, or a message string if that file's
         parse raised or timed out.
     """
-    cfg = _ParsePoolConfig.from_any(parse_config)
+    cfg = _ParsePoolConfig.from_any(
+        parse_config, index_unknown_files=index_unknown_files
+    )
     args_list = [(p, cfg) for p in file_paths]
     pool = _get_parse_pool(cfg.parse_thread_pool_size)
     return list(pool.map(_parse_one_file, args_list))
@@ -558,12 +567,6 @@ async def run_rust_pipeline(
         "disk_usage_limit_mb": disk_usage_limit_mb,
     }
 
-    def _parse_batch_callback(file_paths_batch: list[str], parse_config: Any = None) -> list[tuple[str, list[dict], str | None]]:
-        cfg = _ParsePoolConfig.from_any(parse_config, index_unknown_files=_index_unknown)
-        args_list = [(p, cfg) for p in file_paths_batch]
-        pool = _get_parse_pool(cfg.parse_thread_pool_size)
-        return list(pool.map(_parse_one_file, args_list))
-
     pipeline = IndexingPipeline(config_dict)
 
     # Extract file paths from (path, hash) tuples
@@ -573,7 +576,9 @@ async def run_rust_pipeline(
     report = await asyncio.to_thread(
         pipeline.run,
         files=file_paths,
-        parse_batch_callback=_parse_batch_callback,
+        parse_batch_callback=functools.partial(
+            parse_batch_callback, index_unknown_files=_index_unknown
+        ),
         embed_batch_callback=embed_batch_callback if not skip_embeddings else None,
         progress_callback=progress_callback,
         incremental=not force_reindex,
