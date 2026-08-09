@@ -14,15 +14,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
-if TYPE_CHECKING:
-    from chunkhound.core.detection import Language
-
 from chunkhound.core.exceptions import DiskUsageLimitExceededError
 from chunkhound.core.types.common import FileId
 from chunkhound.parsers.parser_factory import create_parser_for_language
 
-_embed_providers: dict[int, Any] = {}
-_embed_loops: dict[int, Any] = {}
+if TYPE_CHECKING:
+    import asyncio
+
+    from chunkhound.interfaces.embedding_provider import EmbeddingProvider
+
+_embed_providers: dict[int, "EmbeddingProvider"] = {}
+_embed_loops: dict[int, "asyncio.AbstractEventLoop"] = {}
 _embed_cache_lock = threading.Lock()
 
 _parse_pool: ProcessPoolExecutor | None = None
@@ -238,7 +240,7 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
 
     emb_provider = _embed_providers[tid]
 
-    async def _embed():
+    async def _embed() -> list[list[float]]:
         return await emb_provider.embed(texts)
 
     # Rayon threads are NOT the main thread and have no event loop of their
@@ -510,7 +512,7 @@ async def run_rust_pipeline(
     """
     import asyncio
 
-    from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
+    from chunkhound_native import IndexingPipeline
 
     # ── Config mapping ──────────────────────────────────────
     indexing_cfg = getattr(config, "indexing", None) if config else None
