@@ -30,7 +30,15 @@ class TestPipelineParallel:
 
     @pytest.mark.asyncio
     async def test_pipeline_parallel_identical_output(self):
-        """Streaming pipeline (parse ∥ embed ∥ store) output matches Python."""
+        """Streaming pipeline (parse ∥ embed ∥ store) output matches Python.
+
+        Uses ``parse_batch_size=1`` so the 5-file fixture is split into 5
+        batches instead of 1 — otherwise everything fits in a single default
+        (200-file) batch and there is nothing to overlap. Forcing multiple
+        batches means batch N+1 can be parsing while batch N is still being
+        embedded/stored, actually exercising the concurrent parse/embed/store
+        threads this test is named for.
+        """
         with tempfile.TemporaryDirectory() as tmp_py, tempfile.TemporaryDirectory() as tmp_rs:
             db_py = Path(tmp_py) / "db"
             db_py.mkdir(parents=True, exist_ok=True)
@@ -42,7 +50,9 @@ class TestPipelineParallel:
                 embedding_provider=MockEmbeddingProvider(),
             )
 
-            result_rs = index_with_rust(FIXTURE_DIR, db_rs, skip_embeddings=False)
+            result_rs = index_with_rust(
+                FIXTURE_DIR, db_rs, skip_embeddings=False, parse_batch_size=1
+            )
 
             assert_identical(result_py, result_rs)
 
