@@ -14,11 +14,7 @@ runs:
 
     - name: Cache DuckDB precompiled library
       if: hashFiles('Cargo.toml') != ''
-      uses: actions/cache@v4
-      with:
-        path: target/duckdb-download/
-        key: ${{ runner.os }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-duckdb-
+      uses: ./.github/actions/cache-duckdb-lib
 
     - name: Build Rust extension (maturin develop)
       if: hashFiles('Cargo.toml') != ''

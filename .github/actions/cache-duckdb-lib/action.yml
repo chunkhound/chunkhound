@@ -1,0 +1,19 @@
+name: 'Cache DuckDB precompiled library'
+description: >
+  Cache the DuckDB shared library downloaded via DUCKDB_DOWNLOAD_LIB=1,
+  keyed on Cargo.lock, in a separate cache from setup-rust-toolchain's
+  Cargo registry/build-output cache (a Cargo.lock bump alone shouldn't force
+  a redownload of this large, independently-versioned artifact). Shared by
+  build-rust-extension and ci.yml's rust-checks job, which previously each
+  carried their own byte-identical copy of this step. build-native-wheel
+  does not use this cache — release builds always download fresh.
+
+runs:
+  using: composite
+  steps:
+    - name: Cache DuckDB precompiled library
+      uses: actions/cache@v4
+      with:
+        path: target/duckdb-download/
+        key: ${{ runner.os }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-duckdb-

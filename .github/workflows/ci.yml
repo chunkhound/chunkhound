@@ -173,11 +173,7 @@ jobs:
         uses: ./.github/actions/setup-rust-toolchain
 
       - name: Cache DuckDB precompiled library
-        uses: actions/cache@v4
-        with:
-          path: target/duckdb-download/
-          key: ${{ runner.os }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-duckdb-
+        uses: ./.github/actions/cache-duckdb-lib
 
       - name: Rust lint (fmt + clippy)
         run: make rust-check
