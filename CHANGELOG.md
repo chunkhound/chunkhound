@@ -17,10 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as inclusive cosine similarity (`score >= threshold`), matching
   `search_semantic`; callers previously using distance ceilings must convert
   them with `1 - distance`.
-- **Read-only databases require HNSW indexes** — Read-only DuckDB databases
-  created from interrupted indexing runs (missing HNSW indexes) now fail
-  explicitly instead of falling back to a brute-force scan. Ensure indexing
-  completes successfully before creating read-only replicas.
+- **Read-only databases require HNSW indexes (when HNSW is enabled)** —
+  Read-only DuckDB databases created from interrupted indexing runs (missing
+  HNSW indexes) now fail explicitly instead of falling back to a brute-force
+  scan, **but only when `duckdb_hnsw_enabled` is `true`** (the default).
+  When HNSW is disabled via `--no-duckdb-hnsw`, exact linear scans work on
+  read-only databases without any persisted index.
 
 ### Migration Guide
 
@@ -43,6 +45,12 @@ search operations use cosine similarity (`l2sq` and `ip` metrics are not
 supported by the search API).
 
 ### Changed
+- **DuckDB HNSW is now configurable** — `database.duckdb_hnsw_enabled`
+  (`true` by default; CLI `--duckdb-hnsw` / `--no-duckdb-hnsw`; env
+  `CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED`) switches between approximate
+  HNSW search and exact linear scans. Disabled mode never creates or uses
+  HNSW indexes, drops the `[0, 1000)` result window, and lets read-only
+  search succeed without a persisted index.
 - **DuckDB vector search requires cosine HNSW** — `search_semantic`,
   `find_similar_chunks`, and `search_by_embedding` require a cosine-compatible
   HNSW index and emit a single-table candidate query eligible for HNSW scans.

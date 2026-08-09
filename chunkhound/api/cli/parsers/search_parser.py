@@ -70,8 +70,10 @@ def add_search_subparser(subparsers: Any) -> argparse.ArgumentParser:
         type=int,
         default=10,
         help=(
-            "Number of results per page (default: 10); DuckDB semantic searches "
-            "require a positive size and offset + page-size <= 1000"
+            "Number of results per page (default: 10); DuckDB HNSW semantic "
+            "searches (when --duckdb-hnsw enabled; disable via "
+            "--no-duckdb-hnsw) require a positive size and offset + "
+            "page-size <= 1000"
         ),
     )
     search_parser.add_argument(
@@ -79,7 +81,8 @@ def add_search_subparser(subparsers: Any) -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Starting offset for pagination (default: 0); DuckDB semantic pages "
+            "Starting offset for pagination (default: 0); DuckDB HNSW semantic "
+            "pages (when --duckdb-hnsw enabled; disable via --no-duckdb-hnsw) "
             "must stay within the exclusive [0, 1000) result window"
         ),
     )

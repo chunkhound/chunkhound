@@ -477,7 +477,7 @@ GIT HISTORY SEARCH (type='semantic' only):
 - last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
 - vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
-DuckDB semantic requests must stay within the exclusive [0,1000) window; semantic pagination total may be None, and candidate-budget exhaustion means a short result set may be incomplete.
+DuckDB semantic requests (when --duckdb-hnsw enabled; disable via --no-duckdb-hnsw) must stay within the exclusive [0,1000) window; semantic pagination total may be None, and candidate-budget exhaustion means a short result set may be incomplete.
 
 OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
@@ -686,7 +686,7 @@ async def search_impl(
         type: Search mode — "regex" for exact pattern matching, "semantic" for meaning-based similarity
         query: For regex: a regex pattern like "def authenticate" or "class.*Handler". For semantic: a natural language concept like "retry logic" or "database connection pooling"
         path: Optional relative subdirectory to restrict search scope, e.g. "src/auth" or "lib/payments" (no leading slash)
-        page_size: Number of results per page (1-100); DuckDB semantic requests must stay within the exclusive [0,1000) window
+        page_size: Number of results per page (1-100); DuckDB semantic requests (when --duckdb-hnsw enabled; disable via --no-duckdb-hnsw) must stay within the exclusive [0,1000) window
         offset: Starting offset for pagination; semantic pagination total may be None, and candidate-budget exhaustion means a short result set may be incomplete
         commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
         commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
