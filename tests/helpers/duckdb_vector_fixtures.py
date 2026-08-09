@@ -6,7 +6,7 @@ File-backed providers only: DuckDB cannot persist an HNSW index in memory.
 from __future__ import annotations
 
 import os
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -110,6 +110,35 @@ def require_hnsw_index(provider: DuckDBProvider, dims: int = 3) -> None:
             f"CHUNKHOUND_REQUIRE_HNSW=1 but no HNSW index was created for {dims}D"
         )
     pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+
+
+def profile_last_query(
+    provider: DuckDBProvider, output: Path, run: Callable[[], object]
+) -> str:
+    """Return DuckDB's upper-cased JSON profile of the last query ``run`` issued.
+
+    Profiles the real executed plan (not a reconstructed EXPLAIN), so plan
+    assertions stay honest across query-building refactors.
+    """
+    try:
+        provider.execute_query("PRAGMA enable_profiling='json'", [])
+        provider.execute_query(f"PRAGMA profiling_output='{output.as_posix()}'", [])
+    except Exception:
+        pytest.skip("DuckDB profiling unavailable in this environment")
+    try:
+        run()
+    finally:
+        try:
+            provider.execute_query("PRAGMA disable_profiling", [])
+        except Exception:
+            pass
+    try:
+        text = output.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pytest.skip("DuckDB profiling produced no output in this environment")
+    if not text.strip():
+        pytest.skip("DuckDB profiling produced empty output in this environment")
+    return text.upper()
 
 
 def seed_searchable_chunks(
