@@ -252,6 +252,15 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     _SUPPORTED_HNSW_METRICS = frozenset({"cosine", "ip", "l2sq"})
 
+    @property
+    def hnsw_enabled(self) -> bool:
+        """Report whether HNSW indexing/approximate search is configured on.
+
+        Disabled mode ranks embeddings exactly instead, so every HNSW creation
+        site must no-op and every vector API must take the exact SQL path.
+        """
+        return self.config is None or self.config.duckdb_hnsw_enabled
+
     @staticmethod
     def _validate_threshold(threshold: float | None) -> None:
         """Reject thresholds outside the valid cosine similarity range [-1, 1]."""
@@ -967,7 +976,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         create_hnsw: bool = True,
     ) -> None:
         """Restore the canonical non-table DDL for one embedding table."""
-        if create_hnsw:
+        if create_hnsw and self.hnsw_enabled:
             hnsw_index_name = _embedding_hnsw_index_name(dims)
             try:
                 conn.execute(f"""
@@ -1975,9 +1984,10 @@ class DuckDBProvider(SerialDatabaseProvider):
         # METRIC: Cosine similarity (normalized vectors)
         # BUILD_TIME: ~10s for 100k vectors
         """
+        if not self.hnsw_enabled:
+            logger.info("Skipping HNSW index creation because DuckDB HNSW is disabled")
+            return
         logger.info(f"Creating HNSW index for {provider}/{model} ({dims}D, {metric})")
-
-        # Use synchronous executor for non-async method
         self._execute_in_db_thread_sync(
             "create_vector_index", provider, model, dims, metric
         )
@@ -2358,7 +2368,16 @@ class DuckDBProvider(SerialDatabaseProvider):
     def _executor_ensure_all_hnsw_indexes(
         self, conn: Any, state: dict[str, Any]
     ) -> None:
-        """Create canonical HNSW indexes on all embedding tables that have data."""
+        """Create canonical HNSW indexes on all embedding tables that have data.
+
+        No-ops when HNSW is disabled, which also keeps compaction finalize and
+        restore from resurrecting indexes the configuration turned off.
+        """
+        if not self.hnsw_enabled:
+            logger.debug(
+                "Skipping HNSW index creation for all tables because DuckDB HNSW is disabled"
+            )
+            return
         tables = conn.execute(
             "SELECT table_name FROM information_schema.tables "
             f"WHERE {_embedding_tables_where_clause()}"
@@ -2390,6 +2409,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], index_info: dict[str, Any]
     ) -> None:
         """Recreate one previously discovered HNSW index with its original name."""
+        if not self.hnsw_enabled:
+            logger.debug(
+                f"Skipping HNSW index recreate for {index_info.get('index_name')!r} "
+                "because DuckDB HNSW is disabled"
+            )
+            return
         table_name = str(index_info["table_name"])
         dims = int(index_info["dims"])
         self._executor_ensure_embedding_table_exists(conn, state, dims)
@@ -3922,9 +3947,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         return f"%/{escaped}"
 
     @property
-    def semantic_result_window_cap(self) -> int:
-        """Return DuckDB's exclusive semantic result-window endpoint."""
-        return _MAX_DUCKDB_SEMANTIC_OFFSET
+    def semantic_result_window_cap(self) -> int | None:
+        """Return DuckDB's exclusive semantic result-window endpoint.
+
+        The cap exists because HNSW is approximate; exact search paginates
+        deterministically at any depth, so disabled mode is uncapped.
+        """
+        return _MAX_DUCKDB_SEMANTIC_OFFSET if self.hnsw_enabled else None
 
     def search_semantic(
         self,
@@ -3936,14 +3965,15 @@ class DuckDBProvider(SerialDatabaseProvider):
         threshold: float | None = None,
         path_filter: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Perform approximate cosine-HNSW semantic search.
+        """Perform cosine semantic search over stored embeddings.
 
-        Requires a cosine-compatible HNSW index; cosine is the only metric the
-        search API supports (l2sq and ip are not). The search gathers HNSW
-        candidates before applying provider, model, path, and threshold filters.
-        Pages must remain in the exclusive [0, 1000) window; ``total`` is always
-        ``None`` and exhausted candidate budgets can yield short pages. Database
-        failures are raised rather than masked.
+        With HNSW enabled this is approximate: it requires a cosine-compatible
+        HNSW index (cosine is the only metric the search API supports) and
+        gathers candidates before applying provider, model, path, and threshold
+        filters, so pages must stay inside the exclusive [0, 1000) window and an
+        exhausted candidate budget can yield short pages. With HNSW disabled it
+        is exact, filtered before ranking, and uncapped. ``total`` is always
+        ``None``; database failures are raised rather than masked.
         """
         return self._execute_in_db_thread_sync(
             "search_semantic",
@@ -3970,6 +4000,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, table_name: str, dims: int
     ) -> None:
         """Ensure cosine search has a metric-compatible HNSW index."""
+        if not self.hnsw_enabled:
+            return
         metrics = self._executor_hnsw_metrics(conn, table_name)
         if "cosine" in metrics.values():
             return
@@ -4067,12 +4099,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         placeholders = ", ".join("?" for _ in ids)
         conditions = [f"c.id IN ({placeholders})"]
         params: list[Any] = list(ids)
-        if path_like is not None:
-            conditions.append("CONCAT('/', f.path) LIKE ? ESCAPE '\\'")
-            params.append(path_like)
-        if exclude_chunk_id is not None:
-            conditions.append("c.id != ?")
-            params.append(exclude_chunk_id)
+        self._append_chunk_scope_conditions(
+            conditions, params, path_like, exclude_chunk_id
+        )
         query = f"""
             SELECT c.id, c.symbol, c.code, c.chunk_type, c.start_line, c.end_line,
                    f.path, f.language, c.metadata
@@ -4081,6 +4110,101 @@ class DuckDBProvider(SerialDatabaseProvider):
             WHERE {" AND ".join(conditions)}
         """
         return query, params
+
+    @staticmethod
+    def _append_chunk_scope_conditions(
+        conditions: list[str],
+        params: list[Any],
+        path_like: str | None,
+        exclude_chunk_id: int | None,
+    ) -> None:
+        """Append the path/self-exclusion filters shared by every vector query."""
+        if path_like is not None:
+            conditions.append("CONCAT('/', f.path) LIKE ? ESCAPE '\\'")
+            params.append(path_like)
+        if exclude_chunk_id is not None:
+            conditions.append("c.id != ?")
+            params.append(exclude_chunk_id)
+
+    def _build_exact_vector_query(
+        self,
+        table_name: str,
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+        path_like: str | None,
+        max_distance: float | None,
+        exclude_chunk_id: int | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[str, list[Any]]:
+        """Build the exact-ranking query used when HNSW is disabled.
+
+        Every filter is applied before the sort, both for correctness (no
+        candidate starvation) and because the join/filter shape keeps DuckDB's
+        VSS optimizer from rewriting the top-N into an HNSW index scan.
+        Parameters are ordered by textual ``?`` position.
+        """
+        distance = (
+            f"array_cosine_distance(e.embedding, ?::FLOAT[{len(query_embedding)}])"
+        )
+        conditions = ["e.provider = ?", "e.model = ?"]
+        # Param order matches textual ? position: embedding for SELECT distance,
+        # then provider, model, scope filters, optional threshold, limit, offset.
+        params: list[Any] = [query_embedding, provider, model]
+        self._append_chunk_scope_conditions(
+            conditions, params, path_like, exclude_chunk_id
+        )
+        if max_distance is not None:
+            # Reference the column alias (DuckDB extension) to avoid a second
+            # embedding bind and keep max_distance bound to the comparison.
+            conditions.append("distance <= ?")
+            params.append(max_distance)
+        query = f"""
+            SELECT c.id, c.symbol, c.code, c.chunk_type, c.start_line, c.end_line,
+                   f.path, f.language, c.metadata, {distance} AS distance
+            FROM {table_name} e
+            JOIN chunks c ON c.id = e.chunk_id
+            JOIN files f ON f.id = c.file_id
+            WHERE {" AND ".join(conditions)}
+            ORDER BY distance ASC, c.id ASC
+            LIMIT ? OFFSET ?
+        """
+        return query, [*params, limit, offset]
+
+    def _executor_exact_vector_search(
+        self,
+        conn: Any,
+        table_name: str,
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+        path_like: str | None,
+        max_distance: float | None,
+        exclude_chunk_id: int | None,
+        label_key: str,
+        limit: int,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Rank all matching embeddings exactly; shared by every vector API."""
+        self._validate_query_embedding(query_embedding)
+        query, params = self._build_exact_vector_query(
+            table_name,
+            query_embedding,
+            provider,
+            model,
+            path_like,
+            max_distance,
+            exclude_chunk_id,
+            limit,
+            offset,
+        )
+        return [
+            # distance is the last SELECT column (see _build_exact_vector_query:
+            # c.id(0)..c.metadata(8), distance(9)); row[-1] avoids a magic index.
+            self._format_vector_result(row, float(row[-1]), label_key)
+            for row in conn.execute(query, params).fetchall()
+        ]
 
     def _executor_filter_vector_candidates(
         self,
@@ -4298,19 +4422,21 @@ class DuckDBProvider(SerialDatabaseProvider):
         return results, budget_exhausted
 
     def _validate_semantic_window(self, offset: int, page_size: int) -> None:
-        """Reject pagination that DuckDB's approximate search cannot honor."""
-        validate_semantic_window(offset, page_size, _MAX_DUCKDB_SEMANTIC_OFFSET)
+        """Reject pagination the configured search mode cannot honor."""
+        validate_semantic_window(offset, page_size, self.semantic_result_window_cap)
 
     @staticmethod
-    def _empty_semantic_pagination(offset: int, page_size: int) -> dict[str, Any]:
-        """Return pagination metadata for an empty semantic result page."""
+    def _semantic_pagination(
+        offset: int, page_size: int, has_more: bool, budget_exhausted: bool = False
+    ) -> dict[str, Any]:
+        """Build semantic pagination metadata; ``total`` is never counted."""
         return {
             "offset": offset,
             "page_size": page_size,
-            "has_more": False,
-            "next_offset": None,
+            "has_more": has_more,
+            "next_offset": offset + page_size if has_more else None,
             "total": None,
-            "candidate_budget_exhausted": False,
+            "candidate_budget_exhausted": budget_exhausted,
         }
 
     def _build_semantic_pagination(
@@ -4329,22 +4455,45 @@ class DuckDBProvider(SerialDatabaseProvider):
             budget_exhausted: True when candidate budget was exhausted, indicating
                 more results may exist beyond what was fetched
         """
-        page_results = all_results[offset : offset + page_size]
         next_offset = offset + page_size
         # Only advertise a next page already materialized by the look-ahead
         # query. Budget exhaustion is visible separately because it is uncertain.
-        has_more = (
-            len(all_results) > next_offset and next_offset < _MAX_DUCKDB_SEMANTIC_OFFSET
+        cap = self.semantic_result_window_cap
+        has_more = len(all_results) > next_offset and (
+            cap is None or next_offset < cap
         )
-        pagination = {
-            "offset": offset,
-            "page_size": page_size,
-            "has_more": has_more,
-            "next_offset": next_offset if has_more else None,
-            "total": None,
-            "candidate_budget_exhausted": budget_exhausted,
-        }
-        return page_results, pagination
+        return all_results[offset:next_offset], self._semantic_pagination(
+            offset, page_size, has_more, budget_exhausted
+        )
+
+    def _executor_exact_semantic_page(
+        self,
+        conn: Any,
+        table_name: str,
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+        page_size: int,
+        offset: int,
+        path_like: str | None,
+        max_distance: float | None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Page exact results with a look-ahead row instead of a COUNT query."""
+        rows = self._executor_exact_vector_search(
+            conn,
+            table_name,
+            query_embedding,
+            provider,
+            model,
+            path_like,
+            max_distance,
+            None,
+            "symbol",
+            page_size + 1,
+            offset,
+        )
+        has_more = len(rows) > page_size
+        return rows[:page_size], self._semantic_pagination(offset, page_size, has_more)
 
     def _executor_search_semantic(
         self,
@@ -4366,12 +4515,24 @@ class DuckDBProvider(SerialDatabaseProvider):
         table_name = f"embeddings_{dims}"
         if not self._executor_table_exists(conn, state, table_name):
             logger.warning(f"No embeddings table found for {dims} dimensions")
-            return [], self._empty_semantic_pagination(offset, page_size)
-        self._executor_ensure_hnsw_index(conn, table_name, dims)
+            return [], self._semantic_pagination(offset, page_size, False)
         path_like = self._vector_path_like(path_filter)
         # Fetch one extra result to detect if more exist beyond current page.
         # This avoids a separate COUNT query (which would require full table scan).
         max_distance = None if threshold is None else 1.0 - threshold
+        if not self.hnsw_enabled:
+            return self._executor_exact_semantic_page(
+                conn,
+                table_name,
+                query_embedding,
+                provider,
+                model,
+                page_size,
+                offset,
+                path_like,
+                max_distance,
+            )
+        self._executor_ensure_hnsw_index(conn, table_name, dims)
         all_results, budget_exhausted = self._executor_search_vector_candidates(
             conn,
             table_name,
@@ -4600,8 +4761,22 @@ class DuckDBProvider(SerialDatabaseProvider):
             )
             return []
         table_name, target_embedding = found
-        self._executor_ensure_hnsw_index(conn, table_name, len(target_embedding))
         path_like = self._vector_path_like(path_filter)
+        max_distance = None if threshold is None else 1.0 - threshold
+        if not self.hnsw_enabled:
+            return self._executor_exact_vector_search(
+                conn,
+                table_name,
+                target_embedding,
+                provider,
+                model,
+                path_like,
+                max_distance,
+                chunk_id,
+                "name",
+                limit,
+            )
+        self._executor_ensure_hnsw_index(conn, table_name, len(target_embedding))
         results, budget_exhausted = self._executor_search_vector_candidates(
             conn,
             table_name,
@@ -4610,7 +4785,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             model,
             limit,
             path_like,
-            None if threshold is None else 1.0 - threshold,
+            max_distance,
             "name",
             exclude_chunk_id=chunk_id,
         )
@@ -4685,8 +4860,22 @@ class DuckDBProvider(SerialDatabaseProvider):
         if not self._executor_table_exists(conn, state, table_name):
             logger.warning(f"No embeddings table found for {dims} dimensions")
             return []
-        self._executor_ensure_hnsw_index(conn, table_name, dims)
         path_like = self._vector_path_like(path_filter)
+        max_distance = None if threshold is None else 1.0 - threshold
+        if not self.hnsw_enabled:
+            return self._executor_exact_vector_search(
+                conn,
+                table_name,
+                query_embedding,
+                provider,
+                model,
+                path_like,
+                max_distance,
+                None,
+                "name",
+                limit,
+            )
+        self._executor_ensure_hnsw_index(conn, table_name, dims)
         results, budget_exhausted = self._executor_search_vector_candidates(
             conn,
             table_name,
@@ -4695,7 +4884,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             model,
             limit,
             path_like,
-            None if threshold is None else 1.0 - threshold,
+            max_distance,
             "name",
         )
         self._require_complete_vector_limit(
