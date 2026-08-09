@@ -298,6 +298,7 @@ class OpenAIEmbeddingProvider:
         api_version: str | None = None,
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
+        max_concurrent_batches: int | None = None,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -327,6 +328,11 @@ class OpenAIEmbeddingProvider:
             api_version: Azure OpenAI API version (e.g., '2024-02-01')
             azure_endpoint: Azure OpenAI endpoint URL
             azure_deployment: Azure OpenAI deployment name
+            max_concurrent_batches: Expected number of concurrent requests this
+                instance will serve (e.g. EmbeddingService's semaphore width).
+                Sizes the HTTP connection pool so legitimate concurrency isn't
+                bottlenecked on socket availability. None/unset falls back to
+                RECOMMENDED_CONCURRENCY-sized defaults.
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -364,6 +370,7 @@ class OpenAIEmbeddingProvider:
         self._rerank_ssl_verify: bool = (
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
         )
+        self._max_concurrent_batches = max_concurrent_batches
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -506,18 +513,30 @@ class OpenAIEmbeddingProvider:
                 )
 
         # Bound the connection pool explicitly rather than relying on
-        # httpx's defaults (max_connections=100, max_keepalive_connections=20).
-        # embed_batch() issues requests sequentially per provider instance
-        # (see _embed_batch_internal — no asyncio.gather), so a handful of
-        # connections is always enough; the real risk this guards against
-        # is FD exhaustion from *multiple* provider instances (e.g. one per
-        # Rust embed thread, see pipeline_bridge.py:_embed_batch) each
-        # holding onto up to max_keepalive_connections idle sockets for
+        # httpx's defaults (max_connections=100, max_keepalive_connections=20),
+        # which guards against FD exhaustion from *multiple* provider
+        # instances (e.g. one per Rust embed thread, see
+        # pipeline_bridge.py:_embed_batch) each holding onto idle sockets for
         # their lifetime with no explicit close() call.
+        #
+        # A single shared instance can still serve genuinely concurrent
+        # requests, though: EmbeddingService gates concurrent embed_batch()
+        # calls on one provider instance with an
+        # asyncio.Semaphore(max_concurrent_batches) (see
+        # services/embedding_service.py), and max_concurrent_batches is
+        # user-configurable with no upper bound. Size the pool to cover that
+        # real concurrency instead of a flat cap, so a high explicit
+        # concurrency setting doesn't get silently serialized down to 10.
+        requested_concurrency = self._max_concurrent_batches or 0
+        max_connections = max(10, requested_concurrency)
+        max_keepalive_connections = max(5, min(max_connections, requested_concurrency))
         client_kwargs["http_client"] = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout=self._timeout),
             verify=verify_tls,
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            limits=httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_keepalive_connections,
+            ),
         )
 
         # IMPORTANT: Create the client in async context to avoid TaskGroup errors on Ubuntu

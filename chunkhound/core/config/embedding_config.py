@@ -361,6 +361,7 @@ class EmbeddingConfig(BaseSettings):
             "batch_size": self.batch_size,
             "timeout": self.timeout,
             "max_retries": self.max_retries,
+            "max_concurrent_batches": self.max_concurrent_batches,
         }
 
         # Add API key if available

@@ -375,6 +375,91 @@ async def test_openai_provider_ignores_ssl_verify_without_base_url(
 
 
 @pytest.mark.asyncio
+async def test_openai_provider_connection_pool_defaults_to_ten(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Without an explicit concurrency hint, the pool stays at its historical size."""
+
+    limits_calls: dict[str, object] = {}
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            pass
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeHTTPClient:
+        async def aclose(self) -> None:
+            return None
+
+    def _fake_async_client(**kwargs):
+        limits_calls["limits"] = kwargs["limits"]
+        return _FakeHTTPClient()
+
+    monkeypatch.setattr(openai_provider_module, "OPENAI_AVAILABLE", True)
+    monkeypatch.setattr(
+        openai_provider_module,
+        "openai",
+        SimpleNamespace(AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI),
+    )
+    monkeypatch.setattr(openai_provider_module.httpx, "AsyncClient", _fake_async_client)
+
+    provider = OpenAIEmbeddingProvider(api_key="sk-test")
+    await provider._ensure_client()
+
+    limits = limits_calls["limits"]
+    assert limits.max_connections == 10
+    assert limits.max_keepalive_connections == 5
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_connection_pool_scales_with_configured_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A high explicit max_concurrent_batches must not be silently throttled.
+
+    Regression test: EmbeddingService gates concurrent embed_batch() calls on
+    one shared provider instance with asyncio.Semaphore(max_concurrent_batches),
+    which is user-configurable with no upper bound. A flat connection-pool cap
+    lower than that value would serialize requests below the user's configured
+    concurrency with no error or warning.
+    """
+
+    limits_calls: dict[str, object] = {}
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            pass
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeHTTPClient:
+        async def aclose(self) -> None:
+            return None
+
+    def _fake_async_client(**kwargs):
+        limits_calls["limits"] = kwargs["limits"]
+        return _FakeHTTPClient()
+
+    monkeypatch.setattr(openai_provider_module, "OPENAI_AVAILABLE", True)
+    monkeypatch.setattr(
+        openai_provider_module,
+        "openai",
+        SimpleNamespace(AsyncOpenAI=_FakeAsyncOpenAI, AsyncAzureOpenAI=_FakeAsyncOpenAI),
+    )
+    monkeypatch.setattr(openai_provider_module.httpx, "AsyncClient", _fake_async_client)
+
+    provider = OpenAIEmbeddingProvider(api_key="sk-test", max_concurrent_batches=50)
+    await provider._ensure_client()
+
+    limits = limits_calls["limits"]
+    assert limits.max_connections >= 50
+    assert limits.max_keepalive_connections >= 5
+
+
+@pytest.mark.asyncio
 async def test_openai_rerank_ssl_override_applies_without_embedding_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ):
