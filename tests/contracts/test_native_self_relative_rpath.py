@@ -43,6 +43,7 @@ def test_extension_rpath_is_self_relative():
     )
 
 
+@pytest.mark.xdist_group(name="native_ext_fs_mutation")
 @requires_native
 @requires_elf
 def test_extension_imports_without_absolute_fallback_path():
@@ -56,7 +57,14 @@ def test_extension_imports_without_absolute_fallback_path():
     prove anything, since that absolute entry still resolves the dependency
     on the same build machine regardless of $ORIGIN. This test must actually
     remove that fallback to be a real regression guard for the $ORIGIN
-    mechanism."""
+    mechanism.
+
+    xdist_group: hides target/duckdb-download (a shared, real build-cache
+    dir) and spawns a subprocess that does a fresh, from-disk
+    `chunkhound_native` import -- must not run concurrently (under `-n auto`)
+    with test_native_duckdb_diagnostics.py's file-moving test or
+    test_reopen_after_close.py's CLI-subprocess test. Same group name used
+    there."""
     pkg_dir = Path(_native_pkg.__file__).resolve().parent
     lib_present = any(pkg_dir.glob("libduckdb.so*"))
     assert lib_present, (

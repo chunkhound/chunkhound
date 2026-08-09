@@ -40,6 +40,7 @@ def _restore_real_native_module():
     import chunkhound_native  # noqa: F401
 
 
+@pytest.mark.xdist_group(name="native_ext_fs_mutation")
 def test_missing_duckdb_library_raises_clear_error(monkeypatch):
     """Simulates an install where the bundled runtime library never made it
     onto disk, regardless of whatever the dev tree happens to have copied
@@ -49,7 +50,15 @@ def test_missing_duckdb_library_raises_clear_error(monkeypatch):
     which lives under the OS temp dir) so the move stays on the same drive
     -- on Windows, a plain rename works even on a DLL already loaded into
     this process, but a cross-drive move falls back to copy+delete, and
-    deleting a loaded DLL is denied."""
+    deleting a loaded DLL is denied.
+
+    xdist_group: this moves the real, shared, installed bundled library out
+    from under every other process for the duration of the move -- must not
+    run concurrently (under `-n auto`) with anything else that does a fresh,
+    from-disk `chunkhound_native` import, e.g.
+    test_native_self_relative_rpath.py's subprocess-based test or
+    test_reopen_after_close.py's CLI-subprocess test. Same group name used
+    there."""
     import chunkhound_native as native_pkg
 
     pkg_dir = Path(native_pkg.__file__).resolve().parent

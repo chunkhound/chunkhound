@@ -236,6 +236,12 @@ addopts = [
     "--verbose",
     "--tb=short",
     "--strict-markers",
+    # pytest-xdist's default "load" scheduler ignores the xdist_group marker
+    # entirely -- only "loadgroup" honors it, co-locating same-group tests on
+    # one worker. Several tests rely on this (see native_ext_fs_mutation in
+    # tests/contracts/) to avoid racing each other's real filesystem mutation
+    # under `-n auto`. No-op for ungrouped tests and for runs without -n.
+    "--dist=loadgroup",
 ]
 filterwarnings = [
     # Suppress SWIG-related warnings from tree-sitter bindings

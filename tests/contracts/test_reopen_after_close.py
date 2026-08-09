@@ -49,12 +49,20 @@ def _index_once(project_dir: Path, db_dir: Path) -> subprocess.CompletedProcess:
     )
 
 
+@pytest.mark.xdist_group(name="native_ext_fs_mutation")
 @pytest.mark.skipif(
     not _rust_pipeline_available(),
     reason="chunkhound_native.IndexingPipeline not built",
 )
 def test_rust_pipeline_db_survives_process_restart(tmp_path: Path) -> None:
     """Index a directory, then re-index it in a fresh process — must not crash.
+
+    xdist_group: each `_index_once()` call spawns a CLI subprocess that does
+    a fresh, from-disk `chunkhound_native` import -- must not run
+    concurrently (under `-n auto`) with test_native_duckdb_diagnostics.py's
+    or test_native_self_relative_rpath.py's tests, which temporarily move the
+    real bundled DuckDB library / build-cache dir out of the way. Same group
+    name used there.
 
     Reproduces via the plain CLI (no custom harness):
       1. `chunkhound index <dir> --db <db>` — fresh DB, succeeds.
