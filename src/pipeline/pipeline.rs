@@ -350,17 +350,22 @@ impl IndexingPipeline {
             })
             .collect();
 
+        // Build a relative-path -> on-disk-file lookup once, so matching each
+        // db_entries row is O(1) instead of an O(files) linear scan (this loop
+        // runs on every incremental index, so an O(db_entries * files) scan
+        // scales quadratically on large repos).
+        let rel_key_to_path: std::collections::HashMap<String, &std::path::PathBuf> = files
+            .iter()
+            .filter_map(|fp| to_relative_key(fp, &self.config.project_root).map(|rel| (rel, fp)))
+            .collect();
+
         let mut offsets: Vec<f64> = Vec::new();
         for e in &db_entries {
             // Find the matching on-disk file by relative path and read its mtime
             // from the precomputed map (no extra stat call needed).
-            for fp in files.iter() {
-                let rel = to_relative_key(fp, &self.config.project_root);
-                if rel.as_deref() == Some(e.path.as_str()) {
-                    if let Some(&(_, dm)) = precomputed_stats.get(fp) {
-                        offsets.push(e.mtime - dm);
-                    }
-                    break;
+            if let Some(&fp) = rel_key_to_path.get(&e.path) {
+                if let Some(&(_, dm)) = precomputed_stats.get(fp) {
+                    offsets.push(e.mtime - dm);
                 }
             }
         }
