@@ -3,12 +3,9 @@
 Design's `test_embed_api_failure` contract: an embed callback that raises is
 caught per-batch inside the Rust pipeline (`embed_batch_parallel`); chunks are
 still stored with `embedding=NULL`, and the pipeline continues rather than
-aborting. This already matches the design with no production changes needed —
-this test just exercises it.
-
-Note: `PipelineReport.errors` is not yet wired for embed failures (a known,
-separately-tracked gap — the embed thread only `log::warn!`s on failure), so
-this test does not assert on `report.errors`.
+aborting. The failure is also surfaced in `report.errors` (one entry per
+affected file) instead of only reaching a log line, so callers can detect
+that some chunks were written without embeddings.
 """
 
 import tempfile
@@ -71,6 +68,12 @@ class TestEmbedApiFailure:
             assert report.chunks_written > 0, "Chunks should still be stored"
             assert report.embeddings_generated == 0, (
                 "No vectors should be attached when every embed call fails"
+            )
+            assert report.errors, (
+                "Embed failures must be surfaced in report.errors, not just logged"
+            )
+            assert all("simulated embed API failure" in err for err in report.errors), (
+                f"Every reported error should trace back to the injected failure: {report.errors}"
             )
 
             counts = collect_table_counts(db_dir)

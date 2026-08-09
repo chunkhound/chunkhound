@@ -60,11 +60,26 @@ fn emit_progress_gil_chunks(
 struct StoreOutcome {
     chunks_written: u64,
     embeddings_written: u64,
-    /// Per-file parse errors collected from the parse thread — merged in
-    /// after all three threads join (see `pipeline_parse_embed_store`).
-    parse_errors: Vec<String>,
+    /// Per-file parse AND embed errors, collected from the parse/embed
+    /// threads — merged in after all three threads join (see
+    /// `pipeline_parse_embed_store`). Named `errors` (not `parse_errors`)
+    /// because it carries both kinds, matching `PipelineReport.errors`.
+    errors: Vec<String>,
     /// Set when a mid-run disk-usage check tripped: `(current_mb, limit_mb)`.
     disk_limit_exceeded: Option<(f64, f64)>,
+}
+
+/// Result of one `embed_batch_parallel` call — one streamed batch.
+struct EmbedBatchOutcome {
+    /// Count of chunks that actually received an embedding vector (excludes
+    /// chunks in sub-batches whose callback invocation failed).
+    embedded: u64,
+    /// One formatted `"{file}: embedding failed for {n} chunk(s): {message}"`
+    /// entry per (file, failed sub-batch) — mirrors the parse thread's
+    /// `parse_errors` format so both flow into `PipelineReport.errors`
+    /// identically on the Python side (see pipeline_bridge.py's
+    /// `_split_rust_error`).
+    errors: Vec<String>,
 }
 
 #[pymethods]
@@ -262,7 +277,7 @@ impl IndexingPipeline {
             chunks_written: outcome.chunks_written,
             embeddings_generated: outcome.embeddings_written,
             elapsed_secs: total_secs,
-            errors: outcome.parse_errors,
+            errors: outcome.errors,
             peak_rss_mb: None,
             disk_limit: outcome.disk_limit_exceeded,
         })
@@ -483,6 +498,10 @@ impl IndexingPipeline {
         // these don't abort the run, unlike `error` above, which is for
         // whole-batch-callback failures.
         let parse_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        // Per-file embed errors (e.g. an embed API call for one sub-batch
+        // failed) — same non-fatal treatment as `parse_errors`: those chunks
+        // are written without an embedding rather than aborting the run.
+        let embed_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
         // ── Parse thread ──────────────────────────────────────
         let parse_handle = {
@@ -791,9 +810,9 @@ impl IndexingPipeline {
                     chunks_written,
                     embeddings_written,
                     // Filled in by the caller after all three threads join —
-                    // the store thread has no access to the parse thread's
-                    // shared `parse_errors` accumulator.
-                    parse_errors: Vec::new(),
+                    // the store thread has no access to the parse/embed
+                    // threads' shared error accumulators.
+                    errors: Vec::new(),
                     disk_limit_exceeded: disk_limit_hit,
                 })
             })
@@ -808,6 +827,7 @@ impl IndexingPipeline {
         // down and rebuilt on each one.
         let embed_handle: std::thread::JoinHandle<Result<u64, String>> = {
             let error = Arc::clone(&error);
+            let embed_errors = Arc::clone(&embed_errors);
             std::thread::spawn(move || {
                 let pool = Self::build_embed_pool(embed_thread_pool_size)?;
                 let mut pending_delete_paths = Some(delete_paths);
@@ -873,7 +893,7 @@ impl IndexingPipeline {
                                 // — progress is instead computed and
                                 // emitted once per batch below, using
                                 // running totals.
-                                if let Err(e) = Self::embed_batch_parallel(
+                                match Self::embed_batch_parallel(
                                     &pool,
                                     embed_batch_size,
                                     &mut parsed_files,
@@ -883,13 +903,20 @@ impl IndexingPipeline {
                                     &model,
                                     None,
                                 ) {
-                                    let mut err = error.lock().unwrap();
-                                    if err.is_none() {
-                                        *err = Some(e);
+                                    Ok(outcome) => {
+                                        if !outcome.errors.is_empty() {
+                                            embed_errors.lock().unwrap().extend(outcome.errors);
+                                        }
+                                        embedded_chunks += outcome.embedded;
                                     }
-                                    break;
+                                    Err(e) => {
+                                        let mut err = error.lock().unwrap();
+                                        if err.is_none() {
+                                            *err = Some(e);
+                                        }
+                                        break;
+                                    }
                                 }
-                                embedded_chunks += embed_targets.len() as u64;
                             }
                         }
                     }
@@ -993,6 +1020,10 @@ impl IndexingPipeline {
             Ok(Err(e)) => return Err(e),
             Err(_) => return Err("pipeline embed thread panicked".to_string()),
         };
+        // Per-batch embed errors don't abort the run (unlike `error` above) —
+        // collected here so they can be merged into the final report below,
+        // instead of only reaching a log::warn! line as before.
+        let file_embed_errors = Arc::try_unwrap(embed_errors).unwrap().into_inner().unwrap();
 
         // Emit final parse/embed progress — both stages are fully done by
         // the time every batch has been received and embedded here, even
@@ -1007,7 +1038,8 @@ impl IndexingPipeline {
 
         match store_join {
             Ok(Ok(mut result)) => {
-                result.parse_errors = file_parse_errors;
+                result.errors = file_parse_errors;
+                result.errors.extend(file_embed_errors);
                 Ok(result)
             }
             Ok(Err(e)) => Err(e),
@@ -1252,7 +1284,7 @@ impl IndexingPipeline {
         provider: &str,
         model: &str,
         progress_callback: Option<Py<PyAny>>,
-    ) -> Result<(), String> {
+    ) -> Result<EmbedBatchOutcome, String> {
         use rayon::prelude::*;
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Mutex;
@@ -1262,6 +1294,16 @@ impl IndexingPipeline {
         let completed = AtomicU64::new(0);
 
         let all_results: Mutex<Vec<(usize, usize, Vec<f32>)>> = Mutex::new(Vec::new());
+        // Per-batch callback failures don't abort the run (like Python's
+        // asyncio.gather(return_exceptions=True) path) — collected here
+        // instead of only reaching a log::warn! line, so the chunks that
+        // ended up written without an embedding are still visible to the
+        // caller in `PipelineReport.errors`.
+        let batch_errors: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        // Cloned once upfront (read-only, cheap — paths only) so the failure
+        // path below can name the affected file without holding a borrow of
+        // `parsed` across the parallel section (`parsed` is mutated after).
+        let file_paths: Vec<PathBuf> = parsed.iter().map(|pf| pf.path.clone()).collect();
 
         pool.install(|| {
             targets.par_chunks(batch_size).for_each(|batch| {
@@ -1270,7 +1312,7 @@ impl IndexingPipeline {
                     batch.iter().map(|(fi, ci, _)| (*fi, *ci)).collect();
                 let batch_len = batch.len() as u64;
 
-                let _success = match Python::with_gil(|gil_py| {
+                match Python::with_gil(|gil_py| {
                     let cb = callback.bind(gil_py);
                     let ret = cb.call1((texts,))?;
                     let vectors: Vec<Vec<f64>> = ret.extract()?;
@@ -1288,11 +1330,28 @@ impl IndexingPipeline {
                             }
                         }
                         all_results.lock().unwrap().extend(batch_results);
-                        true
                     }
                     Err(e) => {
                         log::warn!("embed batch failed ({} chunks), continuing: {e}", batch_len);
-                        false
+                        // Group by file so one failed sub-batch spanning
+                        // several files reports one line per file (matching
+                        // parse_errors' one-line-per-file granularity)
+                        // instead of one line per chunk.
+                        let mut per_file: std::collections::HashMap<usize, usize> =
+                            std::collections::HashMap::new();
+                        for (fi, _ci) in &indices {
+                            *per_file.entry(*fi).or_insert(0) += 1;
+                        }
+                        let mut errs = batch_errors.lock().unwrap();
+                        for (fi, count) in per_file {
+                            let path = file_paths
+                                .get(fi)
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "<unknown>".to_string());
+                            errs.push(format!(
+                                "{path}: embedding failed for {count} chunk(s): {e}"
+                            ));
+                        }
                     }
                 };
 
@@ -1310,14 +1369,19 @@ impl IndexingPipeline {
 
         // Apply embeddings to parsed chunks (single-threaded, after all batches).
         // Mutating pure-Rust Vec<f32> fields — no GIL required.
-        for (fi, ci, vec) in all_results.into_inner().unwrap() {
+        let results = all_results.into_inner().unwrap();
+        let embedded = results.len() as u64;
+        for (fi, ci, vec) in results {
             let chunk = &mut parsed[fi].chunks[ci];
             chunk.embedding = Some(vec);
             chunk.provider = Some(provider.to_string());
             chunk.model = Some(model.to_string());
         }
 
-        Ok(())
+        Ok(EmbedBatchOutcome {
+            embedded,
+            errors: batch_errors.into_inner().unwrap(),
+        })
     }
 
     /// Extract NewChunk structs from a Python list[dict].
