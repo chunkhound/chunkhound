@@ -6,7 +6,7 @@ use duckdb::Connection;
 
 use crate::db::{DbBackend, DbConfig};
 use crate::error::DbError;
-use crate::types::{BatchResult, ChunkRecord, DbWriterBatch, FileRecord};
+use crate::types::{BatchResult, ChunkRecord, DbFileEntry, DbWriterBatch, FileRecord};
 
 pub struct DuckDbHnswBackend {
     config: DbConfig,
@@ -1419,6 +1419,34 @@ pub(crate) fn check_disk_usage_limit(db_path: &Path, limit_mb: Option<f64>) -> O
         }
     };
     (size_mb >= limit_mb).then_some((size_mb, limit_mb))
+}
+
+/// Columns read by the pipeline's diff phase (`pipeline::differ::compute_diff`).
+/// Keep in sync with `DuckDbHnswBackend::FILES_COLUMNS_DDL` above — if
+/// `modified_time` or `content_hash` are renamed there, update this too.
+const FILE_STATE_SELECT: &str =
+    "SELECT id, path, EXTRACT(EPOCH FROM modified_time), content_hash FROM files";
+
+/// Snapshot every row of the `files` table for the diff phase. Returns an
+/// empty Vec if `db_file` doesn't exist yet (fresh index — every file is new).
+pub(crate) fn read_file_states(db_file: &Path) -> Result<Vec<DbFileEntry>, DbError> {
+    if !db_file.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(db_file)?;
+    let mut stmt = conn.prepare(FILE_STATE_SELECT)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DbFileEntry {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                mtime: row.get(2)?,
+                content_hash: row.get(3)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
 }
 
 #[cfg(test)]

@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::types::DbFileEntry;
+
 /// Result of diffing the filesystem against the DB.
 #[derive(Debug, Default)]
 pub(crate) struct DiffResult {
@@ -27,15 +29,6 @@ pub(crate) struct DiffResult {
     /// Populated by the diff phase so the parse stage can skip re-stat-ing
     /// files whose metadata was already read here.
     pub disk_stats: HashMap<PathBuf, (u64, f64)>,
-}
-
-/// Snapshot of a single file from the DB.
-#[derive(Debug, Clone)]
-pub(crate) struct DbFileEntry {
-    pub(crate) id: i64,
-    pub(crate) path: String,
-    pub(crate) mtime: f64, // Unix timestamp
-    pub(crate) content_hash: Option<String>,
 }
 
 /// How often (in files scanned) to invoke `on_tick` — bounds the number of

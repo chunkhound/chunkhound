@@ -6,12 +6,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::config::PipelineConfig;
-use super::differ::{to_relative_key, DbFileEntry, DiffResult};
+use super::differ::{to_relative_key, DiffResult};
 use super::report::PipelineReport;
 
-use crate::db::{check_disk_usage_limit, create_backend, DbBackend, DbConfig};
-use crate::error::DbError;
-use crate::types::{ChunkRecord, DbWriterBatch, FileRecord};
+use crate::db::{check_disk_usage_limit, create_backend, duckdb_backend, DbBackend, DbConfig};
+use crate::types::{ChunkRecord, DbFileEntry, DbWriterBatch, FileRecord};
 
 /// The main PyO3 class — Python calls `.run()` from `asyncio.to_thread`.
 #[pyclass]
@@ -312,28 +311,7 @@ impl IndexingPipeline {
             });
         }
 
-        let conn = duckdb::Connection::open(&db_file).map_err(DbError::from)?;
-
-        let mut stmt = conn
-            .prepare("SELECT id, path, EXTRACT(EPOCH FROM modified_time), content_hash FROM files")
-            .map_err(DbError::from)?;
-
-        let db_entries: Vec<DbFileEntry> = stmt
-            .query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                let path: String = row.get(1)?;
-                let mtime: f64 = row.get(2)?;
-                let content_hash: Option<String> = row.get(3)?;
-                Ok(DbFileEntry {
-                    id,
-                    path,
-                    mtime,
-                    content_hash,
-                })
-            })
-            .map_err(DbError::from)?
-            .filter_map(|r| r.ok())
-            .collect();
+        let db_entries: Vec<DbFileEntry> = duckdb_backend::read_file_states(&db_file)?;
 
         // DuckDB stores to_timestamp(epoch) using local time, so EXTRACT(EPOCH)
         // returns a value shifted by the timezone offset.  Compute the median
