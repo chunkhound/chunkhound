@@ -13,18 +13,6 @@ from chunkhound.services.indexing_coordinator import run_batch_compaction_bounda
 from chunkhound.utils.file_patterns import normalize_include_patterns
 
 
-def _rust_pipeline_active() -> bool:
-    """Check whether the Rust parse→embed→write pipeline is enabled.
-
-    Delegates to rust_pipeline_flag._get_use_rust(), which defaults to True
-    (opt-out); CHUNKHOUND_USE_RUST=0 disables it. Used to gate
-    Python-side HNSW steps that the Rust pipeline already handles
-    internally.
-    """
-    from chunkhound.utils.rust_pipeline_flag import _get_use_rust
-    return _get_use_rust()
-
-
 @dataclass
 class IndexingStats:
     """Statistics from directory processing."""
@@ -166,8 +154,14 @@ class DirectoryIndexingService:
 
     async def _drop_hnsw_indexes(self) -> None:
         """Drop HNSW indexes before bulk indexing."""
-        # Rust pipeline handles HNSW internally — skip Python-side HNSW ops.
-        if _rust_pipeline_active():
+        # Rust pipeline handles HNSW internally when it actually ends up
+        # running for this provider/db_path — use the coordinator's resolved
+        # decision (same check process_directory() will make), not the raw
+        # feature flag, so a fallback run (e.g. LanceDB, non-chunks.db path)
+        # still gets its indexes pre-dropped instead of paying per-batch HNSW
+        # maintenance overhead during the bulk Python insert. log_reason=False
+        # since process_directory() logs the same resolution shortly after.
+        if self.indexing_coordinator.resolve_rust_pipeline_decision(log_reason=False):
             return
         db = getattr(self.indexing_coordinator, "_db", None)
         if db is not None and hasattr(db, "drop_all_hnsw_indexes"):

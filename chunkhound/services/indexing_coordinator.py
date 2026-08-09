@@ -1250,6 +1250,57 @@ class IndexingCoordinator(BaseService):
             stats["file_id"] = file_ids[0]
         return stats
 
+    def resolve_rust_pipeline_decision(self, *, log_reason: bool = True) -> bool:
+        """Resolve whether the Rust write pipeline will actually run for this
+        DB provider, downgrading to Python for providers/paths it can't
+        handle.
+
+        Depends only on the CHUNKHOUND_USE_RUST env var and self._db (not on
+        any state process_directory computes), so it's safe to call before
+        process_directory actually runs — e.g. DirectoryIndexingService uses
+        this to decide whether to pre-drop HNSW indexes, since the Rust
+        pipeline handles HNSW internally only when it actually ends up
+        running.
+        """
+        from chunkhound.utils.rust_pipeline_flag import _get_use_rust
+
+        if not _get_use_rust():
+            return False
+        # The Rust pipeline (chunkhound_native.IndexingPipeline) only
+        # implements a DuckDB backend (DuckDbHnswBackend) — running it
+        # against a LanceDB-configured project would disconnect the live
+        # LanceDB provider and then hand Rust a db_path it can't use. Check
+        # the *actual* provider instance's declared capability (not
+        # self.config, which may be None or out of sync with self._db) so a
+        # non-DuckDB provider falls back to the Python path cleanly instead
+        # of breaking partway through. Uses getattr rather than isinstance
+        # against a concrete class so IndexingCoordinator stays coupled only
+        # to the DatabaseProvider interface, not one backend.
+        if not getattr(self._db, "supports_rust_pipeline", False):
+            if log_reason:
+                logger.info(
+                    "Rust pipeline requested but database provider is '{}' "
+                    "(Rust pipeline only supports DuckDB) — using Python path",
+                    type(self._db).__name__,
+                )
+            return False
+        if not hasattr(self._db, "db_path"):
+            # Test DB fakes may not expose db_path — fall through to Python
+            # before the cleanup gate fires so orphan cleanup isn't skipped.
+            return False
+        if Path(str(self._db.db_path)).name != "chunks.db":
+            # Rust pipeline hardcodes appending "chunks.db" to the directory
+            # it receives, so it can only write to a file named chunks.db.
+            # Fall back to Python for any other DB filename.
+            if log_reason:
+                logger.info(
+                    "Rust pipeline skipped — db_path '{}' is not named chunks.db; "
+                    "using Python path",
+                    self._db.db_path,
+                )
+            return False
+        return True
+
     async def process_directory(
         self,
         directory: Path,
@@ -1292,41 +1343,7 @@ class IndexingCoordinator(BaseService):
         # always follows the raw flag; the write pipeline (_use_rust below)
         # can still be downgraded to Python for a non-DuckDB provider.
         _rust_flag = _get_use_rust()
-        _use_rust = _rust_flag
-        if _use_rust:
-            # The Rust pipeline (chunkhound_native.IndexingPipeline) only
-            # implements a DuckDB backend (DuckDbHnswBackend) — running it
-            # against a LanceDB-configured project would disconnect the live
-            # LanceDB provider and then hand Rust a db_path it can't use.
-            # Check the *actual* provider instance's declared capability (not
-            # self.config, which may be None or out of sync with self._db)
-            # before any Rust-specific behavior (cleanup skip, change-detection
-            # bypass, provider disconnect) is gated on _use_rust below, so a
-            # non-DuckDB provider falls back to the Python path cleanly
-            # instead of breaking partway through. Uses getattr rather than
-            # isinstance against a concrete class so IndexingCoordinator stays
-            # coupled only to the DatabaseProvider interface, not one backend.
-            if not getattr(self._db, "supports_rust_pipeline", False):
-                logger.info(
-                    "Rust pipeline requested but database provider is '{}' "
-                    "(Rust pipeline only supports DuckDB) — using Python path",
-                    type(self._db).__name__,
-                )
-                _use_rust = False
-            elif not hasattr(self._db, "db_path"):
-                # Test DB fakes may not expose db_path — fall through to Python
-                # before the cleanup gate fires so orphan cleanup isn't skipped.
-                _use_rust = False
-            elif Path(str(self._db.db_path)).name != "chunks.db":
-                # Rust pipeline hardcodes appending "chunks.db" to the directory
-                # it receives, so it can only write to a file named chunks.db.
-                # Fall back to Python for any other DB filename.
-                logger.info(
-                    "Rust pipeline skipped — db_path '{}' is not named chunks.db; "
-                    "using Python path",
-                    self._db.db_path,
-                )
-                _use_rust = False
+        _use_rust = self.resolve_rust_pipeline_decision()
         logger.info(
             "Indexing backend: discovery={} pipeline={}",
             "rust" if _rust_flag else "python",
