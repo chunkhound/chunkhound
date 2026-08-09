@@ -37,6 +37,7 @@ def test_tool_registry_populated():
         "daemon_status",
         "code_research",
         "websearch",
+        "fetchurl",
     ]
     for tool_name in expected_tools:
         assert tool_name in TOOL_REGISTRY, f"Tool '{tool_name}' should be in registry"
@@ -149,6 +150,11 @@ def test_capability_flags():
     assert TOOL_REGISTRY["websearch"].requires_llm
     assert TOOL_REGISTRY["websearch"].requires_reranker
 
+    # fetchurl: LLM + reranker required; embeddings-only providers not sufficient.
+    assert not TOOL_REGISTRY["fetchurl"].requires_embeddings
+    assert TOOL_REGISTRY["fetchurl"].requires_llm
+    assert TOOL_REGISTRY["fetchurl"].requires_reranker
+
 
 def test_websearch_schema():
     """Verify websearch has correct schema from decorator."""
@@ -194,6 +200,50 @@ def test_websearch_hidden_without_capabilities():
 
     assert "websearch" not in tool_names, (
         f"websearch should be hidden without capabilities, got {tool_names}"
+    )
+
+
+def test_fetchurl_schema():
+    """Verify fetchurl exposes only client-facing params (§16.2)."""
+    tool = TOOL_REGISTRY["fetchurl"]
+
+    assert len(tool.description) > 50, (
+        "fetchurl should have a comprehensive description"
+    )
+
+    props = tool.parameters["properties"]
+    assert set(props.keys()) == {"url", "query"}, (
+        f"fetchurl schema must expose only url + query, got {sorted(props.keys())}"
+    )
+    assert props["query"].get("default") == ""
+
+    required = tool.parameters.get("required", [])
+    assert "url" in required, "'url' should be required for fetchurl"
+    assert "query" not in required, "'query' should not be required (has default)"
+
+
+def test_fetchurl_hidden_without_capabilities():
+    """Verify fetchurl is filtered out of tools/list when reranker is unavailable.
+
+    Isolates the reranker-only path per spec §16.2 bullet 1: LLM present, and
+    an embedding provider is present but its ``supports_reranking()`` is
+    False — the tool must still be hidden.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from chunkhound.mcp_server.base import MCPServerBase
+
+    embedding_manager = MagicMock()
+    embedding_manager.get_provider.return_value.supports_reranking.return_value = False
+    stub = SimpleNamespace(
+        embedding_manager=embedding_manager, llm_manager=object()
+    )
+    tool_dicts = MCPServerBase._build_filtered_tool_dicts(stub)  # type: ignore[arg-type]
+    tool_names = [d["name"] for d in tool_dicts]
+
+    assert "fetchurl" not in tool_names, (
+        f"fetchurl should be hidden when reranker is unavailable, got {tool_names}"
     )
 
 
@@ -1977,6 +2027,7 @@ def test_filtered_tool_dicts_hides_llm_tools_without_manager():
     # Tools with requires_llm=True must be absent
     assert "code_research" not in names
     assert "websearch" not in names
+    assert "fetchurl" not in names
 
     # Tools without requires_llm must be present
     assert "search" in names, "search should be present (no LLM required)"

@@ -750,13 +750,60 @@ If any of these are missing, the MCP `websearch` tool is not registered (capabil
 
 | Constant | Value | Description |
 |---|---|---|
-| `MAX_FETCH_CONCURRENCY` | `5` | Max concurrent page fetches (defined in `chunkhound.utils.websearch_core`) |
 | `WEBSEARCH_LIMIT_MAX` | `100` | Upper bound for the `--limit` / `limit` parameter |
 
 ### Browser Dependency
 
-The fetch path uses **zendriver** (v0.15.3, core dependency — no extra install needed) to drive the system-installed Google Chrome for rich page rendering. Chrome >=124 is required. If Chrome is not found or too old, fetches fall back to `urllib` (less capable — may miss JS-rendered content and cannot fetch PDFs).
+The fetch path uses **zendriver** (v0.15.3, core dependency — no extra install needed) to drive the system-installed Google Chrome for rich page rendering. Chrome >=124 is required. If Chrome is not found or too old, fetches fall back to `urllib` (less capable — may miss JS-rendered content and cannot fetch some PDFs).
 
 ### Research Config Linkage
 
 The web search tool delegates to the same deep research pipeline as `code_research`. All settings in the [Research Configuration](#research-configuration) section apply: `algorithm`, `multi_hop_time_limit`, `relevance_threshold`, `query_expansion_enabled`, `target_tokens`, etc.
+
+## Fetch URL
+
+The `fetchurl` tool fetches a single URL, extracts its content, and returns a focused Markdown answer via one LLM call (short pages) or a rerank+elbow pipeline over page chunks (long pages with a query). It is available as an MCP tool and as `chunkhound fetchurl`. Fetches use the same **zendriver + system Chrome** transport as [Web Search](#web-search) with the same `urllib` fallback — see that section's [Browser Dependency](#browser-dependency) note for Chrome version requirements and fallback behavior.
+
+### Requirements
+
+The fetch URL tool requires two provider capabilities to be configured:
+
+- **LLM provider** — for the extraction/answer call
+- **Reranker-capable embedding provider** — VoyageAI (SDK), or a Cohere/TEI HTTP reranker. `rerank_model` is required for the VoyageAI SDK and Cohere paths; TEI needs `rerank_format=tei` + `rerank_url` (no `rerank_model`).
+
+If either is missing, the MCP `fetchurl` tool is not registered (capability gating hides it from `tools/list`) and the CLI command exits `1` with an explicit error message.
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `url` | string | required | Absolute `http://` or `https://` URL. Non-`http(s)` schemes are rejected, as are hosts resolving to loopback / private / link-local / reserved / multicast / unspecified addresses. |
+| `query` / `--query` / `-q` | string | `""` | Optional question. When set, focuses extraction and enables the rerank+elbow path on pages exceeding `fetchurl.rerank_threshold_tokens`. |
+
+### Environment Variables
+
+| Variable | Description |
+|---|---|
+| `CHUNKHOUND_FETCHURL_RERANK_THRESHOLD_TOKENS` | Overrides `fetchurl.rerank_threshold_tokens`. |
+| `CHUNKHOUND_FETCHURL_TRUNCATE_TOKENS` | Overrides `fetchurl.truncate_tokens`. |
+| `CHUNKHOUND_FETCHURL_MAX_RETRIES` | Overrides `fetchurl.max_retries`. |
+
+### Configuration File
+
+```json
+{
+  "fetchurl": {
+    "rerank_threshold_tokens": 15000,
+    "truncate_tokens": 15000,
+    "max_retries": 3
+  }
+}
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `rerank_threshold_tokens` | int (≥1) | 15000 | Estimated token count above which the chunk-rerank path (chunk + rerank + elbow filter) is used instead of the truncate path (token-truncate + single LLM call). Only applies when `query` is set — without a query, the truncate path is always used regardless of page size. Tokens are estimated at 4 chars/token. |
+| `truncate_tokens` | int (≥1) | 15000 | Token cap applied to the truncate-option input before the LLM call. Content is sliced to `truncate_tokens × 4` characters. |
+| `max_retries` | int (1–10) | 3 | Fetch attempts including the first. Uses exponential backoff with full jitter capped at 8s. Browser-transport death consumes an attempt slot and downgrades remaining attempts to `urllib`. |
+
+> **CLI vs MCP:** The three knobs above are exposed as `--fetchurl-*` flags on the CLI (`chunkhound fetchurl`). The MCP `fetchurl` tool accepts only `url` and `query` — knob overrides must come from config or `CHUNKHOUND_FETCHURL_*` env vars.

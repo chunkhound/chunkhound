@@ -77,6 +77,11 @@ def add_config_arguments(parser: argparse.ArgumentParser, configs: list[str]) ->
 
         LLMConfig.add_cli_arguments(parser)
 
+    if "fetchurl" in configs:
+        from chunkhound.core.config.fetchurl_config import FetchUrlConfig
+
+        FetchUrlConfig.add_cli_arguments(parser)
+
     if "research" in configs:
         from chunkhound.core.config.research_config import ResearchConfig
 

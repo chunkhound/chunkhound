@@ -44,6 +44,13 @@ Semantic search also requires a cosine-compatible HNSW index; all vector
 search operations use cosine similarity (`l2sq` and `ip` metrics are not
 supported by the search API).
 
+### Added
+- **Fetchurl CLI command and MCP tool** — New `chunkhound fetchurl <url> [-q "…"]` CLI subcommand and matching `fetchurl` MCP tool fetch a single URL (HTML or PDF), extract its content, and return a focused Markdown answer.
+  - Short pages are token-truncated and summarized in one LLM call; long pages with a query go through a chunk + rerank + elbow-filter pipeline that passes only the most relevant sections to the LLM.
+  - Requires LLM + reranker providers — the MCP tool is hidden from `tools/list` when either is missing.
+  - Configurable via `fetchurl.rerank_threshold_tokens` (default 15000), `fetchurl.truncate_tokens` (default 15000), and `fetchurl.max_retries` (default 3), or their `CHUNKHOUND_FETCHURL_*` env-var equivalents.
+  - Uses the same zendriver + system Chrome transport as `websearch`, with `urllib` fallback.
+
 ### Changed
 - **DuckDB HNSW is now configurable** — `database.duckdb_hnsw_enabled`
   (`true` by default; CLI `--duckdb-hnsw` / `--no-duckdb-hnsw`; env
@@ -64,6 +71,7 @@ supported by the search API).
 - **Semantic search errors surface** — Database/provider errors during
   semantic search now raise explicitly instead of returning empty result
   pages.
+
 
 ## [5.2.0] - 2026-07-12
 
