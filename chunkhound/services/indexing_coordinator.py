@@ -1673,10 +1673,13 @@ class IndexingCoordinator(BaseService):
                 from chunkhound.pipeline_bridge import run_rust_pipeline
 
                 db_path = Path(str(self._db.db_path)).parent
-                skip_embeddings = (
+                _embeddings_disabled_by_config = (
                     self.config.embeddings_disabled
                     if self.config and hasattr(self.config, "embeddings_disabled")
                     else False
+                )
+                skip_embeddings = (
+                    _embeddings_disabled_by_config or self._embedding_provider is None
                 )
 
                 # ── Progress callback for Rust pipeline ─────────────────
