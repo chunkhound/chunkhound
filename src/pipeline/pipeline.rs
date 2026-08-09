@@ -1320,6 +1320,11 @@ impl IndexingPipeline {
                 }) {
                     Ok(vectors) => {
                         let mut batch_results = Vec::with_capacity(batch.len());
+                        // Indices for which the callback returned no vector at
+                        // all (a well-formed but short response — e.g. a
+                        // provider that silently truncates — rather than a
+                        // raised exception, which is handled below instead).
+                        let mut missing: Vec<(usize, usize)> = Vec::new();
                         for (i, (fi, ci)) in indices.iter().enumerate() {
                             if let Some(vec) = vectors.get(i) {
                                 batch_results.push((
@@ -1327,31 +1332,39 @@ impl IndexingPipeline {
                                     *ci,
                                     vec.iter().map(|x| *x as f32).collect(),
                                 ));
+                            } else {
+                                missing.push((*fi, *ci));
                             }
                         }
                         all_results.lock().unwrap().extend(batch_results);
+                        if !missing.is_empty() {
+                            log::warn!(
+                                "embed batch returned {} vector(s) for {} chunk(s), {} missing",
+                                vectors.len(),
+                                batch_len,
+                                missing.len()
+                            );
+                            let reason = format!(
+                                "provider returned {} vector(s) for {} requested",
+                                vectors.len(),
+                                batch_len
+                            );
+                            batch_errors
+                                .lock()
+                                .unwrap()
+                                .extend(Self::format_batch_errors(&missing, &file_paths, &reason));
+                        }
                     }
                     Err(e) => {
                         log::warn!("embed batch failed ({} chunks), continuing: {e}", batch_len);
-                        // Group by file so one failed sub-batch spanning
-                        // several files reports one line per file (matching
-                        // parse_errors' one-line-per-file granularity)
-                        // instead of one line per chunk.
-                        let mut per_file: std::collections::HashMap<usize, usize> =
-                            std::collections::HashMap::new();
-                        for (fi, _ci) in &indices {
-                            *per_file.entry(*fi).or_insert(0) += 1;
-                        }
-                        let mut errs = batch_errors.lock().unwrap();
-                        for (fi, count) in per_file {
-                            let path = file_paths
-                                .get(fi)
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_else(|| "<unknown>".to_string());
-                            errs.push(format!(
-                                "{path}: embedding failed for {count} chunk(s): {e}"
+                        batch_errors
+                            .lock()
+                            .unwrap()
+                            .extend(Self::format_batch_errors(
+                                &indices,
+                                &file_paths,
+                                &e.to_string(),
                             ));
-                        }
                     }
                 };
 
@@ -1382,6 +1395,33 @@ impl IndexingPipeline {
             embedded,
             errors: batch_errors.into_inner().unwrap(),
         })
+    }
+
+    /// Group `(file_index, chunk_index)` pairs by file and format one
+    /// `"{path}: embedding failed for {n} chunk(s): {reason}"` line per
+    /// affected file — shared by `embed_batch_parallel`'s two failure paths
+    /// (a raised exception, and a well-formed-but-short response) so both
+    /// produce errors at the same per-file granularity as `parse_errors`.
+    fn format_batch_errors(
+        indices: &[(usize, usize)],
+        file_paths: &[PathBuf],
+        reason: &str,
+    ) -> Vec<String> {
+        let mut per_file: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+        for (fi, _ci) in indices {
+            *per_file.entry(*fi).or_insert(0) += 1;
+        }
+        per_file
+            .into_iter()
+            .map(|(fi, count)| {
+                let path = file_paths
+                    .get(fi)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                format!("{path}: embedding failed for {count} chunk(s): {reason}")
+            })
+            .collect()
     }
 
     /// Extract NewChunk structs from a Python list[dict].
