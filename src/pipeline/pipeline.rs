@@ -297,7 +297,6 @@ impl IndexingPipeline {
             return Ok(DiffResult {
                 changed: files.to_vec(),
                 removed: Vec::new(),
-                files_scanned: files.len(),
                 ..Default::default()
             });
         } else {
@@ -309,7 +308,6 @@ impl IndexingPipeline {
             return Ok(DiffResult {
                 changed: files.to_vec(),
                 removed: Vec::new(),
-                files_scanned: files.len(),
                 ..Default::default()
             });
         }

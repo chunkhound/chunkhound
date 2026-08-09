@@ -7,7 +7,6 @@ mod db;
 mod error;
 mod types;
 
-#[allow(dead_code)]
 mod pipeline;
 
 use ignore::gitignore::GitignoreBuilder;

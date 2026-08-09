@@ -12,8 +12,6 @@ pub(crate) struct DiffResult {
     pub changed: Vec<PathBuf>,
     /// DB file paths that no longer exist on disk — need to be deleted.
     pub removed: Vec<String>,
-    /// Total files scanned on disk (for reporting).
-    pub files_scanned: usize,
     /// Files whose mtime differed from the DB but whose content hash matched
     /// the DB's stored hash — confirmed unchanged, never entered `changed`.
     pub skipped_by_hash: u64,
@@ -246,7 +244,6 @@ pub(crate) fn compute_diff(
     DiffResult {
         changed,
         removed,
-        files_scanned,
         skipped_by_hash,
         new_hashes,
         existing_ids,
@@ -255,6 +252,10 @@ pub(crate) fn compute_diff(
 }
 
 /// Read the mtime of a file as a Unix timestamp (seconds).
+///
+/// Only used by tests today (production code gets mtime from `precomputed_stats`
+/// or the `std::fs::metadata()` fallback inlined in `compute_diff`).
+#[cfg(test)]
 fn file_mtime(path: &Path) -> Option<f64> {
     std::fs::metadata(path).ok()?.modified().ok().map(|t| {
         t.duration_since(SystemTime::UNIX_EPOCH)
@@ -274,6 +275,8 @@ fn hash_file_contents(path: &Path) -> Option<String> {
     Some(format!("{digest:016x}"))
 }
 
+/// Test-only convenience accessors — production code reads `changed`/`removed` directly.
+#[cfg(test)]
 impl DiffResult {
     /// Number of files that need processing (changed).
     pub fn changed_count(&self) -> usize {
