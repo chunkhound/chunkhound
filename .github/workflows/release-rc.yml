@@ -10,6 +10,7 @@ on:
 
 permissions:
   id-token: write  # OIDC Trusted Publishing
+  issues: write    # gh issue create alert if publish-rc-native fails
 
 jobs:
   validate-tag:
@@ -149,6 +150,31 @@ jobs:
           merge-multiple: true
 
       - name: Publish chunkhound-native to PyPI
+        id: publish-rc-native
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist-native
+
+      - name: Alert on native publish failure
+        # chunkhound is already live on PyPI at this point (publish-rc-native
+        # runs after publish-rc, deliberately, so we never leave a good
+        # chunkhound pre-release un-shippable just because the native wheel
+        # failed). But that leaves a real window where chunkhound is live
+        # with no matching chunkhound-native release, and there's no PyPI
+        # API to yank a release automatically (yanking is a manual, web-UI-
+        # only action) -- so the best CI can do is make sure a human finds
+        # out immediately instead of via a user's broken-install report.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "chunkhound-native publish failed for ${{ github.ref_name }}" \
+            --body "chunkhound was published successfully to PyPI for ${{ github.ref_name }}, but chunkhound-native failed to publish for this tag.
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Next steps:
+          - Re-run this job if the failure looks transient (flaky runner, wheel-repair issue).
+          - If chunkhound-native can't be published soon, consider yanking the chunkhound pre-release for ${{ github.ref_name }} from pypi.org (Manage -> Releases -> Options -> Yank) so pip doesn't resolve a stale chunkhound-native floor version against this chunkhound release."
