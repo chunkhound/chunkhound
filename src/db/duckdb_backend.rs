@@ -1087,6 +1087,19 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             if let Ok(intent) = std::fs::read_to_string(&intent_path) {
                 match intent.trim() {
                     "pre-swap" => {
+                        // The db_path -> old_path rename (just before phase1's
+                        // intent write) may have already completed before the
+                        // crash, even though this breadcrumb still reads
+                        // "pre-swap" — the "phase1" write never made it to
+                        // disk. If old_path exists, the rename happened;
+                        // restore it before continuing, otherwise the
+                        // Connection::open() below would silently create an
+                        // empty database and orphan the real data at
+                        // old_path. Same recovery as the "phase1" case.
+                        let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
+                        if old_path.exists() {
+                            let _ = std::fs::rename(&old_path, &db_path);
+                        }
                         let _ = std::fs::remove_file(&intent_path);
                     }
                     "phase1" => {
@@ -1785,6 +1798,52 @@ mod crash_recovery_tests {
         backend.close().expect("close");
 
         assert!(!intent_path.exists(), "intent file must be removed");
+    }
+
+    #[test]
+    fn pre_swap_intent_after_rename_restores_old_file() {
+        // Simulates a crash between the db_path->old_path rename (Phase 2)
+        // and the "phase1" intent write landing on disk — the breadcrumb
+        // still reads "pre-swap" even though the rename already happened.
+        // Regression test for the data-loss bug where open() would silently
+        // create a fresh empty database at db_path and orphan the real data
+        // sitting at old_path.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        // Real data lives at old_path; db_path does not exist, matching the
+        // post-rename, pre-"phase1"-write crash state.
+        let mut bootstrap = DuckDbHnswBackend::new(test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        bootstrap.open().expect("open");
+        bootstrap
+            .write_batch(&test_support::single_file_batch("seed.py"))
+            .expect("write");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&intent_path, "pre-swap").expect("write intent");
+        assert!(!db_path.exists(), "db_path must not exist pre-recovery");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(!intent_path.exists());
+        assert!(!old_path.exists());
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "seed.py must have been recovered from the .old backup, not \
+             silently discarded by a fresh empty database"
+        );
     }
 
     #[test]
