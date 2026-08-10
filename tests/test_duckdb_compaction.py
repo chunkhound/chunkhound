@@ -1488,7 +1488,8 @@ class TestIndexFlowCompaction:
             )
         )
         coordinator = SimpleNamespace(
-            compact_database_with_metrics=AsyncMock(side_effect=_compact_database_with_metrics)
+            compact_database_with_metrics=AsyncMock(side_effect=_compact_database_with_metrics),
+            resolve_rust_pipeline_decision=lambda log_reason=True: False,
         )
 
         stats = await _Service(coordinator, config).process_directory(
