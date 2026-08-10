@@ -138,14 +138,18 @@ impl IndexingPipeline {
 
         // ── Incremental diff (Phase 3) ─────────────────────────
         let delete_paths: Vec<String>;
-        // Content hashes computed during the diff for files that must be
-        // reprocessed (see `differ::compute_diff`) — reused by the parse
-        // stage instead of re-hashing, and files confirmed unchanged by hash
-        // despite a differing mtime never reach `batch_paths` at all.
+        // Content hash for every scanned file the diff already had a DB row
+        // for (see `differ::compute_diff`) — freshly computed for files that
+        // must be reprocessed, or the DB's existing hash carried forward
+        // unchanged otherwise. Covers files that never reach `batch_paths`
+        // too (mtime-unchanged, or hash-confirmed unchanged despite a
+        // differing mtime) so a force-reindex caller — which reprocesses
+        // every file regardless — still writes back the correct hash for
+        // one it didn't need to change, instead of nulling it out.
         let new_hashes: std::collections::HashMap<PathBuf, String>;
         let existing_ids: std::collections::HashMap<PathBuf, i64>;
-        // (size_bytes, mtime) per changed file — produced once by the diff phase
-        // and reused by parse_one_batch to avoid a third stat pass per file.
+        // (size_bytes, mtime) per scanned file — produced once by the diff
+        // phase and reused by parse_one_batch to avoid a third stat pass.
         let disk_stats: std::collections::HashMap<PathBuf, (u64, f64)>;
         let mut files_skipped_by_hash = 0u64;
         if incremental {
@@ -171,13 +175,24 @@ impl IndexingPipeline {
             if self.config.do_cleanup {
                 let diff = self.compute_diff_blocking(py, &progress_callback, &batch_paths)?;
                 delete_paths = diff.removed;
+                // compute_diff_blocking populates new_hashes/existing_ids/disk_stats
+                // for every scanned file it already had a DB row for — not just
+                // ones it decided need reprocessing — precisely so this branch can
+                // reuse that work: batch_paths stays the full file list (every
+                // file is reprocessed regardless of the diff's own verdict), and
+                // without this, a file the diff correctly deemed unchanged would
+                // still get re-stat()'d here and, worse, have its content_hash
+                // written back as NULL purely because this branch discarded the
+                // hash compute_diff had (or already had, from the DB) on hand.
+                new_hashes = diff.new_hashes;
+                existing_ids = diff.existing_ids;
+                disk_stats = diff.disk_stats;
             } else {
                 delete_paths = Vec::new();
+                new_hashes = std::collections::HashMap::new();
+                existing_ids = std::collections::HashMap::new();
+                disk_stats = std::collections::HashMap::new();
             }
-            new_hashes = std::collections::HashMap::new();
-            existing_ids = std::collections::HashMap::new();
-            // Non-incremental path: parse_one_batch falls back to stat() per file.
-            disk_stats = std::collections::HashMap::new();
         }
 
         // ── Resolve directory→db file path (shared by both write paths) ──
