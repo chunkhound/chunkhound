@@ -19,6 +19,10 @@ __pycache__/
 *.dll
 *.pyd
 
+# Leftover atomic-write temp files (see scripts/install_native.py and
+# scripts/copy_duckdb_runtime.py) if a build is interrupted mid-write
+*.tmp
+
 # Distribution / packaging
 .Python
 build/

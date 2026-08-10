@@ -52,13 +52,17 @@ for dest_dir in destinations:
     if not dest_dir.is_dir():
         continue
     dest = dest_dir / source.name
-    # unlink before copying: if `dest` already exists it may be hardlinked
-    # into uv's shared package cache (uv links from cache whenever cache and
-    # target share a filesystem), and shutil.copy2 overwrites file content
-    # in place -- silently corrupting that shared inode for every other venv
-    # sharing the cache instead of just updating this one.
-    dest.unlink(missing_ok=True)
-    shutil.copy2(source, dest)
+    # Copy to a temp file and atomically rename it into place: `dest` may be
+    # hardlinked into uv's shared package cache (uv links from cache whenever
+    # cache and target share a filesystem), and shutil.copy2 writing directly
+    # into `dest` would overwrite content in place -- silently corrupting
+    # that shared inode for every other venv sharing the cache. Renaming a
+    # fresh temp file over `dest` replaces the directory entry instead of
+    # writing through the old inode, and is atomic -- no window where `dest`
+    # is missing if the process is interrupted mid-copy.
+    tmp = dest.parent / (dest.name + ".tmp")
+    shutil.copy2(source, tmp)
+    tmp.replace(dest)
     copied.append(str(dest))
 
 if not copied:
