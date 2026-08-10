@@ -46,6 +46,7 @@ def _install_logging_to_loguru_bridge(*, verbose: bool = False) -> None:
     but before any Rust pipeline work.
     """
     import logging as _logging
+    from types import FrameType
 
     class _Bridge(_logging.Handler):
         def emit(self, record: _logging.LogRecord) -> None:
@@ -54,12 +55,16 @@ def _install_logging_to_loguru_bridge(*, verbose: bool = False) -> None:
             # log::info! progress lines. Visibility of Rust INFO lines
             # without --verbose is handled by the sink filter in
             # setup_logging(), not by relabeling the level here.
+            # loguru's logger.log() accepts either a registered level name
+            # (str) or a raw severity number (int) — the fallback below is
+            # for stdlib logging levels loguru has no registered name for.
+            level: str | int
             try:
                 level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
 
-            frame = _logging.currentframe()
+            frame: FrameType | None = _logging.currentframe()
             depth = 2
             while (
                 frame is not None
