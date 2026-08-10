@@ -338,3 +338,24 @@ class DiskUsageLimitExceededError(ChunkHoundError):
             "current_size_mb": self.current_size_mb,
             "limit_mb": self.limit_mb,
         }
+
+
+class RustPipelineError(ChunkHoundError):
+    """Raised when the Rust indexing pipeline (chunkhound_native.IndexingPipeline)
+    fails.
+
+    Wraps the underlying PyO3 exception's message so callers can distinguish a
+    failure raised inside the native extension (parsing, embedding batching, or
+    DB-write errors) from any other exception IndexingCoordinator.process_directory()
+    can raise, instead of both collapsing into an indistinguishable generic error.
+    """
+
+    def __init__(self, reason: str, context: dict[str, Any] | None = None):
+        """Initialize Rust pipeline error.
+
+        Args:
+            reason: The underlying PyO3 exception's message
+            context: Optional additional context
+        """
+        super().__init__(f"Rust pipeline failed: {reason}", context)
+        self.reason = reason

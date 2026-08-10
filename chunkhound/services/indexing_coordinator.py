@@ -35,7 +35,7 @@ from rich.progress import Progress, TaskID
 
 from chunkhound.core.detection import detect_language
 from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
-from chunkhound.core.exceptions import DiskUsageLimitExceededError
+from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.models import Chunk, File
 from chunkhound.core.types.common import FilePath, Language
 from chunkhound.core.utils import estimate_tokens_chunking
@@ -2245,6 +2245,13 @@ class IndexingCoordinator(BaseService):
                     "limit_mb": e.limit_mb,
                     "error": str(e),
                     "pipeline": "rust" if _use_rust else "python",
+                }
+            elif isinstance(e, RustPipelineError):
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "pipeline": "rust",
+                    "rust_pipeline_error": True,
                 }
             else:
                 return {

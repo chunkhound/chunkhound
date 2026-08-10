@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
-from chunkhound.core.exceptions import DiskUsageLimitExceededError
+from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.types.common import FileId
 from chunkhound.parsers.parser_factory import create_parser_for_language
 
@@ -569,22 +569,30 @@ async def run_rust_pipeline(
         "disk_usage_limit_mb": disk_usage_limit_mb,
     }
 
-    pipeline = IndexingPipeline(config_dict)
-
     # Extract file paths from (path, hash) tuples
     file_paths = [str(p.resolve()) for p, _ in files_to_process]
 
-    # Run pipeline in thread pool — pipeline releases the GIL internally
-    report = await asyncio.to_thread(
-        pipeline.run,
-        files=file_paths,
-        parse_batch_callback=functools.partial(
-            parse_batch_callback, index_unknown_files=_index_unknown
-        ),
-        embed_batch_callback=embed_batch_callback if not skip_embeddings else None,
-        progress_callback=progress_callback,
-        incremental=not force_reindex,
-    )
+    # Both the pipeline construction and pipeline.run() raise a plain PyO3
+    # PyRuntimeError on failure (see src/pipeline/pipeline.rs), indistinguishable
+    # from any other exception IndexingCoordinator.process_directory() can hit.
+    # Re-raise as RustPipelineError so callers can tell "the native pipeline
+    # itself failed" apart from surrounding Python glue-code errors.
+    try:
+        pipeline = IndexingPipeline(config_dict)
+
+        # Run pipeline in thread pool — pipeline releases the GIL internally
+        report = await asyncio.to_thread(
+            pipeline.run,
+            files=file_paths,
+            parse_batch_callback=functools.partial(
+                parse_batch_callback, index_unknown_files=_index_unknown
+            ),
+            embed_batch_callback=embed_batch_callback if not skip_embeddings else None,
+            progress_callback=progress_callback,
+            incremental=not force_reindex,
+        )
+    except Exception as e:
+        raise RustPipelineError(reason=str(e)) from e
 
     # Map PipelineReport → coordinator stats dict.
     # `report.errors` entries are Rust-formatted as "{path}: {message}"
