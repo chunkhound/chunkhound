@@ -174,6 +174,25 @@ rust-test:  make rust-test    # cargo test
 # those tools only operate on built wheels, not maturin develop's editable
 # installs.
 #
+# chunkhound-native is a hard dependency of the main chunkhound package, so
+# `pip install chunkhound` only works on platforms with a published
+# chunkhound-native wheel. Currently covered: macOS arm64, Linux x86_64
+# (manylinux_2_34), Linux aarch64 (manylinux_2_34, via ubuntu-24.04-arm),
+# Windows x86_64. Known, deliberate gaps (not oversights):
+#   - Intel macOS (x86_64-apple-darwin): needs either a paid GitHub "larger
+#     runner" (macos-13's free tier is retired; Apple/GitHub sunset Intel
+#     macOS runners entirely in Fall 2027) or cross-compiling from the arm64
+#     runner, which hits an open, unresolved PyO3 issue (framework linking,
+#     e.g. CoreFoundation not found, when targeting x86_64-apple-darwin from
+#     an arm64 host). Not worth either cost given the shrinking Intel Mac
+#     install base and the 2027 sunset — revisit only if that changes.
+#   - musl/Alpine and pre-manylinux_2_34 glibc (Ubuntu 20.04, RHEL/CentOS 8,
+#     Amazon Linux 2): would need a manylinux-container-based build instead
+#     of the current native-runner build; not yet done.
+#   - No sdist: chunkhound-native has no source fallback, so any platform
+#     without a matching wheel above hard-fails `pip install chunkhound`
+#     with no degraded install path.
+#
 # Air-gapped / no internet (Linux only, untested since this rewrite): the
 # download step above needs GitHub access. libduckdb-sys still supports
 # linking against a static .a you already have via DUCKDB_LIB_DIR +

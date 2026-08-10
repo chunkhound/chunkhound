@@ -88,6 +88,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # No Intel macOS (x86_64-apple-darwin) leg -- see AGENTS.md's
+        # RUST_COMMANDS section for why that's a deliberate, documented gap
+        # rather than an oversight.
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
 
     steps:
