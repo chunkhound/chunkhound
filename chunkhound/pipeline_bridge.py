@@ -530,8 +530,12 @@ async def run_rust_pipeline(
     )
     mtime_eps = _cfg_or(indexing_cfg, "mtime_epsilon_seconds", 0.01, float)
     detect_sql = bool(getattr(indexing_cfg, "detect_embedded_sql", True))
-    config_file_threshold = _cfg_or(
-        indexing_cfg, "config_file_size_threshold_kb", 20, int
+    # Rust's config_file_size_threshold_kb is a u32 — a negative value (the
+    # documented "<=0 disables the gate" convention, see batch_processor.py)
+    # would overflow PyO3's u64 extraction and crash pipeline construction,
+    # so clamp to 0 (which disables the gate the same way) before crossing.
+    config_file_threshold = max(
+        0, _cfg_or(indexing_cfg, "config_file_size_threshold_kb", 20, int)
     )
     db_batch_size = _cfg_or(indexing_cfg, "db_batch_size", 100, int)
 

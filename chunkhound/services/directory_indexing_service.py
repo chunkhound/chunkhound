@@ -118,8 +118,15 @@ class DirectoryIndexingService:
             # flag requests Rust, and that fallback still needs this
             # embed pass — using the raw flag here would silently skip
             # embedding generation for those projects.
+            #
+            # Also still run the pass if the Rust pipeline reported errors:
+            # its per-file errors include embed failures (src/pipeline/
+            # pipeline.rs's embed_errors accumulator), and a file with a
+            # failed embed still gets its content_hash written as up to
+            # date — without this pass it would never be retried.
             used_rust_pipeline = process_result.get("pipeline") == "rust"
-            if not no_embeddings and not used_rust_pipeline:
+            rust_had_errors = used_rust_pipeline and process_result.get("errors", 0) > 0
+            if not no_embeddings and (not used_rust_pipeline or rust_had_errors):
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 stats.embeddings_generated = embed_result.get("generated", 0)
