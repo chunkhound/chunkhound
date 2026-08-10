@@ -12,10 +12,10 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 from loguru import logger
 
+from chunkhound.services.search.hybrid_utils import finalize_hybrid_pagination
 from chunkhound.services.search.semantic_window import (
     normalize_semantic_window_cap,
     semantic_hybrid_fetch_size,
-    semantic_hybrid_next_offset,
     semantic_next_offset,
     semantic_total,
     validate_semantic_window,
@@ -501,25 +501,9 @@ class DiffAwareSearchService:
             semantic_weight=semantic_weight,
             limit=page_size + 1,
         )
-        next_offset = semantic_hybrid_next_offset(
-            offset,
-            page_size,
-            len(combined),
-            list(pagination_data.values()),
-            semantic_window_cap,
+        pagination = finalize_hybrid_pagination(
+            offset, page_size, combined, pagination_data, semantic_window_cap
         )
-        pagination: dict[str, Any] = {
-            "offset": offset,
-            "page_size": page_size,
-            "has_more": next_offset is not None,
-            "next_offset": next_offset,
-            "total": None,
-            "candidate_budget_exhausted": bool(
-                pagination_data.get("semantic", {}).get(
-                    "candidate_budget_exhausted", False
-                )
-            ),
-        }
         return combined[:page_size], pagination
 
     def get_chunk_context(

@@ -11,11 +11,11 @@ from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
 from .base_service import BaseService
 from .search.context_retriever import ContextRetriever
+from .search.hybrid_utils import finalize_hybrid_pagination
 from .search.multi_hop_strategy import MultiHopStrategy
 from .search.result_enhancer import ResultEnhancer
 from .search.semantic_window import (
     semantic_hybrid_fetch_size,
-    semantic_hybrid_next_offset,
     validate_semantic_window,
 )
 from .search.single_hop_strategy import SingleHopStrategy
@@ -389,26 +389,14 @@ class SearchService(BaseService):
                 semantic_weight=semantic_weight,
                 limit=page_size + 1,
             )
-            next_offset = semantic_hybrid_next_offset(
+            combined_pagination = finalize_hybrid_pagination(
                 offset,
                 page_size,
-                len(combined_results),
-                list(pagination_data.values()),
+                combined_results,
+                pagination_data,
                 semantic_window_cap,
             )
             page_results = combined_results[:page_size]
-            combined_pagination = {
-                "offset": offset,
-                "page_size": page_size,
-                "has_more": next_offset is not None,
-                "next_offset": next_offset,
-                "total": None,
-                "candidate_budget_exhausted": bool(
-                    pagination_data.get("semantic", {}).get(
-                        "candidate_budget_exhausted", False
-                    )
-                ),
-            }
 
             logger.info(f"Hybrid search completed: {len(page_results)} results found")
             return page_results, combined_pagination
