@@ -17,15 +17,22 @@ pub(crate) struct DiffResult {
     /// Files whose mtime differed from the DB but whose content hash matched
     /// the DB's stored hash — confirmed unchanged, never entered `changed`.
     pub skipped_by_hash: u64,
-    /// Content hash freshly computed for each file remaining in `changed`
-    /// (keyed by the same absolute path used there), so the parse stage
-    /// doesn't need to re-hash a file the diff phase already read.
+    /// Content hash for every file scanned that already had a DB row (keyed
+    /// by absolute path) — a freshly-computed hash for a file in `changed`,
+    /// or the DB's already-stored hash reused as-is for a file left
+    /// unchanged (mtime matched, or hash-confirmed identical despite a
+    /// differing mtime). Covers every scanned file, not just `changed`, so a
+    /// force-reindex caller — which reprocesses every file regardless of
+    /// this diff's outcome — can still write back the correct hash for a
+    /// file it didn't need to change, instead of nulling it out.
     pub new_hashes: HashMap<PathBuf, String>,
-    /// DB row id for each file in `changed` that already existed in the DB
-    /// (keyed by absolute path). New files (first index) are absent here.
-    /// Lets the write phase skip the per-file SELECT in upsert_file.
+    /// DB row id for every file scanned that already existed in the DB
+    /// (keyed by absolute path), whether or not it ended up in `changed`.
+    /// New files (first index) are absent here. Lets the write phase skip
+    /// the per-file SELECT in upsert_file.
     pub existing_ids: HashMap<PathBuf, i64>,
-    /// (size_bytes, mtime) for every file in `changed`, keyed by absolute path.
+    /// (size_bytes, mtime) for every file scanned, keyed by absolute path —
+    /// covers `changed` files and unchanged/hash-confirmed ones alike.
     /// Populated by the diff phase so the parse stage can skip re-stat-ing
     /// files whose metadata was already read here.
     pub disk_stats: HashMap<PathBuf, (u64, f64)>,
@@ -169,8 +176,18 @@ pub(crate) fn compute_diff(
                             Some(new_hash) if new_hash == stored_hash => {
                                 // Content confirmed unchanged despite the
                                 // mtime bump — skip entirely, never enters
-                                // the parse/embed/store pipeline.
+                                // the parse/embed/store pipeline. Still
+                                // stash the (already-computed) hash/stat/id
+                                // so a force-reindex caller — which
+                                // reprocesses this file regardless — writes
+                                // back the same hash instead of nulling it.
                                 skipped_by_hash += 1;
+                                new_hashes.insert(abs_path.clone(), new_hash);
+                                if let Some(&id) = db_ids.get(rel.as_str()) {
+                                    existing_ids.insert(abs_path.clone(), id);
+                                }
+                                disk_stats
+                                    .insert(abs_path.clone(), (current_size, current_mtime_raw));
                             }
                             Some(new_hash) => {
                                 new_hashes.insert(abs_path.clone(), new_hash);
@@ -206,10 +223,34 @@ pub(crate) fn compute_diff(
                             changed.push(abs_path.clone());
                         }
                     }
+                } else {
+                    // mtime matches → skip reprocessing, same trust the
+                    // mtime-only fast path above already relies on (not a
+                    // new assumption: a false match from clock skew or an
+                    // mtime-preserving restore tool is already possible
+                    // here regardless of this branch, and self-corrects the
+                    // next time the mtime genuinely differs). Given that
+                    // trust, no extra read/hash is needed — mirror the DB's
+                    // already-stored hash/id/stat verbatim, so a
+                    // force-reindex caller (which reprocesses this file
+                    // regardless) writes back the same values instead of
+                    // nulling them out.
+                    if let Some(&stored_hash) = db_hashes.get(rel.as_str()) {
+                        new_hashes.insert(abs_path.clone(), stored_hash.to_string());
+                    }
+                    if let Some(&id) = db_ids.get(rel.as_str()) {
+                        existing_ids.insert(abs_path.clone(), id);
+                    }
+                    disk_stats.insert(abs_path.clone(), (current_size, current_mtime_raw));
                 }
-                // else: mtime matches → file unchanged, skip (not in disk_stats)
             } else {
-                // Can't stat the file → process it anyway (safety)
+                // Can't stat the file → process it anyway (safety). No
+                // new_hashes entry, so a force-reindex would write NULL for
+                // this file's content_hash — accepted, not fixed: a stat()
+                // failure moments after the scanner found the file almost
+                // always means a concurrent delete, which will also fail
+                // the read-for-parse and drop the row entirely rather than
+                // reach the write path with a null hash.
                 if let Some(&id) = db_ids.get(rel.as_str()) {
                     existing_ids.insert(abs_path.clone(), id);
                 }
@@ -384,24 +425,64 @@ mod tests {
     }
 
     #[test]
-    fn test_disk_stats_absent_for_unchanged_file() {
+    fn test_unchanged_file_still_populates_side_maps() {
+        // Skipped from `changed` (nothing to reprocess), but a force-reindex
+        // caller reprocesses every file regardless of `changed` — it needs
+        // disk_stats/new_hashes/existing_ids for this file too, or it writes
+        // back a null content_hash for a file that never actually changed.
         let tmp = tempfile::tempdir().unwrap();
         let f1 = create_file(&tmp, "a.py");
         let mtime = file_mtime(&f1).unwrap();
+        let stored_hash = hash_file_contents(&f1).unwrap();
 
         let db = vec![DbFileEntry {
-            id: 1,
+            id: 7,
             path: "a.py".into(),
             mtime,
-            content_hash: None,
+            content_hash: Some(stored_hash.clone()),
         }];
 
         let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
         assert!(diff.changed.is_empty(), "unchanged file should be skipped");
-        assert!(
-            diff.disk_stats.is_empty(),
-            "unchanged files must not appear in disk_stats — they never reach parse_one_batch"
+        assert_eq!(
+            diff.new_hashes.get(&f1),
+            Some(&stored_hash),
+            "unchanged file must carry its existing DB hash forward, not a null/empty one"
         );
+        assert_eq!(
+            diff.existing_ids.get(&f1).copied(),
+            Some(7),
+            "unchanged file must still carry its DB row id forward"
+        );
+        assert!(
+            diff.disk_stats.contains_key(&f1),
+            "unchanged file must still appear in disk_stats so a force-reindex \
+             caller (which reprocesses it regardless) can skip re-stat-ing it"
+        );
+    }
+
+    #[test]
+    fn test_hash_confirmed_unchanged_still_populates_side_maps() {
+        // Mirrors the branch above but for the "mtime bumped, hash still
+        // matches" case — the hash was already computed to make that call,
+        // so stashing it is free, not an extra read.
+        let tmp = tempfile::tempdir().unwrap();
+        let f1 = create_file(&tmp, "a.py");
+        let hash = hash_file_contents(&f1).unwrap();
+
+        let db = vec![DbFileEntry {
+            id: 9,
+            path: "a.py".into(),
+            mtime: 0.0, // clearly different from the file's real mtime
+            content_hash: Some(hash.clone()),
+        }];
+
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        assert_eq!(diff.skipped_by_hash, 1);
+        assert!(diff.changed.is_empty());
+        assert_eq!(diff.new_hashes.get(&f1), Some(&hash));
+        assert_eq!(diff.existing_ids.get(&f1).copied(), Some(9));
+        assert!(diff.disk_stats.contains_key(&f1));
     }
 
     #[test]
