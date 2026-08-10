@@ -3,8 +3,21 @@ description: >
   Build the chunkhound_native release wheel via `maturin build --release
   --auditwheel repair` and smoke-test that it actually imports. Shared by
   release.yml and release-rc.yml, which previously each carried their own
-  byte-identical copy of this step. Assumes the calling job has already
+  byte-identical copy of this step, plus ci.yml's native-wheel-smoke-arm64
+  job (with skip-tag-version-patch: true, since a CI branch/PR ref has no
+  release tag to derive a version from). Assumes the calling job has already
   checked out the repo and installed `uv`.
+
+inputs:
+  skip-tag-version-patch:
+    description: >
+      Set to "true" for non-release callers (e.g. a CI smoke build) where
+      GITHUB_REF_NAME isn't a release tag. Leaving this false (the default)
+      preserves the original behavior for release.yml/release-rc.yml: a
+      malformed/missing tag crashes the build loudly instead of silently
+      publishing the Cargo.toml placeholder version.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -27,19 +40,26 @@ runs:
         # hyphen, e.g. 5.2.0a3) -- convert before patching. maturin parses the
         # Cargo version via pep440_rs, which normalizes the hyphenated form to
         # the same PEP 440 version, so the wheel still ends up as 5.2.0a3.
-        export TAG_VERSION="${GITHUB_REF_NAME#v}"
-        uv run --no-project --python 3.12 python - <<'PYEOF'
+        if [[ "${{ inputs.skip-tag-version-patch }}" != "true" ]]; then
+          export TAG_VERSION="${GITHUB_REF_NAME#v}"
+          uv run --no-project --python 3.12 python - <<'PYEOF'
         import os, re, pathlib
 
         tag_version = os.environ["TAG_VERSION"]
         m = re.match(r"^(\d+\.\d+\.\d+)([a-zA-Z].*)?$", tag_version)
+        if not m:
+            raise SystemExit(
+                f"GITHUB_REF_NAME {tag_version!r} is not a PEP 440 release tag; "
+                "refusing to build/publish an unversioned wheel. Pass "
+                "skip-tag-version-patch: true for non-release callers."
+            )
         cargo_version = f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
-
         path = pathlib.Path("Cargo.toml")
         text = path.read_text()
         new_text = re.sub(r'(?m)^version = ".*"', f'version = "{cargo_version}"', text, count=1)
         path.write_text(new_text)
         PYEOF
+        fi
         # maturin treats a sibling pyproject.toml as authoritative package metadata
         # ("mixed" Rust/Python project support), which misnames this wheel as
         # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
@@ -69,7 +89,7 @@ runs:
         # -- see maturin >=1.13). Without this flag maturin only *warns*
         # about the external dependency on macOS/Windows instead of fixing
         # it (Linux's default is already "repair"; passing it explicitly
-        # everywhere keeps the three platforms' behavior identical).
+        # everywhere keeps every platform's behavior identical).
         # On Linux, repair shells out to `patchelf`, which is an optional
         # maturin extra (not a default dependency) -- request it explicitly
         # or the build fails with "Failed to execute 'patchelf'".

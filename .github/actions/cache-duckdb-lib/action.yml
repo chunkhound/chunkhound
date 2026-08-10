@@ -15,5 +15,5 @@ runs:
       uses: actions/cache@v4
       with:
         path: target/duckdb-download/
-        key: ${{ runner.os }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-duckdb-
+        key: ${{ runner.os }}-${{ runner.arch }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-${{ runner.arch }}-duckdb-

@@ -181,6 +181,27 @@ jobs:
       - name: Run Rust unit tests
         run: make rust-test
 
+  # ubuntu-24.04-arm has no track record in this project yet (added for the
+  # chunkhound-native release wheel matrix) -- build+repair+smoke-import it on
+  # every PR via the same composite action release.yml/release-rc.yml use, so
+  # an aarch64-specific failure (auditwheel policy detection, patchelf, a
+  # dependency crate) surfaces here instead of on a live release tag.
+  native-wheel-smoke-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build native wheel
+        uses: ./.github/actions/build-native-wheel
+        with:
+          skip-tag-version-patch: 'true'
+
   pages-artifact:
     needs: [site-build, tests, rust-checks, site-build-validation, watchman-rollout-gate]
     if: github.ref == 'refs/heads/main'
