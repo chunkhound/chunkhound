@@ -125,7 +125,7 @@ chunkhound search "database migration" --commit-range main..HEAD
 > crosses the endpoint is rejected. Candidate-budget exhaustion can return a
 > short page; `has_more: false` means no next page was materialized, so narrow
 > the query or path filter. With HNSW disabled, exact linear scans apply and
-> the `[0, 1000)` window does not bound results.
+> the `[0, 1000)` window does not bound results. Threshold is an inclusive similarity floor (score >= threshold); convert legacy distance ceiling via 1 - distance.
 
 ## `chunkhound websearch`
 

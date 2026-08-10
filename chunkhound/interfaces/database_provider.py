@@ -279,8 +279,8 @@ class DatabaseProvider(Protocol):
             model: Embedding model name
             page_size: Number of results per page
             offset: Starting position for pagination
-            threshold: Similarity floor for semantic search
-                (results have similarity >= threshold)
+            threshold: Inclusive similarity floor
+                (results have similarity >= threshold; e.g., legacy distance 0.2 → threshold 0.8)
             path_filter: Optional relative path to limit search scope
                 (e.g., 'src/', 'tests/')
 
@@ -315,6 +315,7 @@ class DatabaseProvider(Protocol):
             model: Embedding model name
             limit: Maximum number of results to return
             threshold: Inclusive similarity floor (results have similarity >= threshold)
+                (e.g., legacy distance 0.2 → threshold 0.8)
             path_filter: Optional relative path to limit search scope
 
         Returns:
@@ -339,6 +340,7 @@ class DatabaseProvider(Protocol):
             model: Embedding model name
             limit: Maximum number of results to return
             threshold: Inclusive similarity floor (results have similarity >= threshold)
+                (e.g., legacy distance 0.2 → threshold 0.8)
             path_filter: Optional relative path to limit search scope
 
         Returns:
