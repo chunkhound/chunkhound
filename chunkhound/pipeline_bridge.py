@@ -9,10 +9,11 @@ import atexit
 import functools
 import os
 import threading
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.types.common import FileId
@@ -68,12 +69,16 @@ class _ParsePoolConfig:
     index_unknown_files: bool = False
 
     @classmethod
-    def from_any(cls, parse_config: Any, *, index_unknown_files: bool = False) -> "_ParsePoolConfig":
+    def from_any(
+        cls, parse_config: Any, *, index_unknown_files: bool = False
+    ) -> "_ParsePoolConfig":
         """Build a picklable config from whatever parse_batch_callback()
         received — the real Rust ParseCallConfig, a duck-typed stand-in
         (e.g. in tests), or None."""
         if parse_config is None:
-            return _DEFAULT_PARSE_CONFIG if not index_unknown_files else cls(index_unknown_files=True)
+            if not index_unknown_files:
+                return _DEFAULT_PARSE_CONFIG
+            return cls(index_unknown_files=True)
         return cls(
             detect_embedded_sql=parse_config.detect_embedded_sql,
             per_file_timeout_secs=parse_config.per_file_timeout_secs,
@@ -520,7 +525,9 @@ async def run_rust_pipeline(
     database_cfg = getattr(config, "database", None) if config else None
 
     per_file_timeout = _cfg_or(indexing_cfg, "per_file_timeout_seconds", 0.0, float)
-    per_file_timeout_min = _cfg_or(indexing_cfg, "per_file_timeout_min_size_kb", 128, int)
+    per_file_timeout_min = _cfg_or(
+        indexing_cfg, "per_file_timeout_min_size_kb", 128, int
+    )
     mtime_eps = _cfg_or(indexing_cfg, "mtime_epsilon_seconds", 0.01, float)
     detect_sql = bool(getattr(indexing_cfg, "detect_embedded_sql", True))
     config_file_threshold = _cfg_or(
@@ -531,7 +538,9 @@ async def run_rust_pipeline(
     # fragmentation_threshold_pct is a percentage (30.0 = 30%); Rust's
     # compaction_threshold expects a ratio (0.30) — same setting the Python
     # indexing path already honors via --fragmentation-threshold-pct.
-    fragmentation_pct = _cfg_or(database_cfg, "fragmentation_threshold_pct", 30.0, float)
+    fragmentation_pct = _cfg_or(
+        database_cfg, "fragmentation_threshold_pct", 30.0, float
+    )
     compaction_threshold = fragmentation_pct / 100.0
 
     embedding_provider = _cfg_or(embedding_cfg, "provider", "", str)
@@ -543,7 +552,9 @@ async def run_rust_pipeline(
         max_concurrent = _detect_embed_concurrency(embedding_cfg)
     max_concurrent = max_concurrent or 1
     _parse_concurrent = _cfg_or(indexing_cfg, "max_concurrent", 0, int)
-    parse_thread_pool_size = _parse_concurrent if _parse_concurrent > 0 else _default_parse_pool_workers()
+    parse_thread_pool_size = (
+        _parse_concurrent if _parse_concurrent > 0 else _default_parse_pool_workers()
+    )
     _index_unknown = bool(getattr(indexing_cfg, "index_unknown_files", False))
     disk_usage_limit_mb = getattr(database_cfg, "max_disk_usage_mb", None)
 

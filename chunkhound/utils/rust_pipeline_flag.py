@@ -23,7 +23,8 @@ import chunkhound_native  # noqa: F401
 
 
 def _get_use_rust() -> bool:
-    """Read the CHUNKHOUND_USE_RUST env var at call time (avoids module-reload in tests).
+    """Read the CHUNKHOUND_USE_RUST env var at call time (avoids module-reload
+    in tests).
 
     Defaults to True (opt-out) — see module docstring. Set
     CHUNKHOUND_USE_RUST=0 to fall back to the Python pipeline.
