@@ -239,7 +239,20 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
         config = get_registry()._config
         if config is None or config.embedding is None:
             raise RuntimeError("No embedding configuration available")
-        provider = EmbeddingProviderFactory.create_provider(config.embedding)
+        # Each embed thread gets its own provider instance here, and each
+        # instance is only ever used by this one thread, one batch at a
+        # time (rayon dedicates a worker thread per unit of
+        # embed_thread_pool_size). Override max_concurrent_batches to 1 for
+        # this instance's own connection-pool sizing: passing the global
+        # value through would make every one of the N threads size its
+        # pool as if it alone handled all N-way concurrency (see
+        # OpenAIEmbeddingProvider._ensure_client's pool-sizing comment),
+        # ballooning total pool capacity to ~N² across N threads instead of
+        # the true 1-request-per-thread usage pattern.
+        per_thread_embedding_cfg = config.embedding.model_copy(
+            update={"max_concurrent_batches": 1}
+        )
+        provider = EmbeddingProviderFactory.create_provider(per_thread_embedding_cfg)
         with _embed_cache_lock:
             _embed_providers.setdefault(tid, provider)
 
