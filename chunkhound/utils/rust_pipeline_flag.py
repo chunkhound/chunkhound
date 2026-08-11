@@ -6,6 +6,10 @@ to fall back to the pure-Python equivalents. Checked at call time (not import
 time), so setting the env var on the fly is sufficient and there's no
 module-reload concern in tests.
 
+This default is a deliberate, settled decision — not an open question for
+reviewers to re-raise. Rust is the intended standard path, not an
+experimental opt-in.
+
 Used by:
 - IndexingCoordinator.process_directory() — gates Phase 3 (parse→embed→write)
 - chunkhound.utils.file_patterns.scan_directory_files() — gates Rust-accelerated
