@@ -495,6 +495,85 @@ def test_schema_migration_backfills_unique_index_and_deduplicates_rows(
         migrated_provider.disconnect(skip_checkpoint=True)
 
 
+def test_ensure_embedding_upsert_contract_rebuilds_hnsw_once_when_deduping(
+    tmp_path: Path,
+) -> None:
+    """The dedupe-then-create-unique-index sequence must guard the HNSW
+    index with a single drop/rebuild cycle, not one per step.
+
+    Regression test: _executor_ensure_embedding_upsert_contract used to call
+    _executor_run_embedding_table_hnsw_guarded_mutation twice back-to-back
+    (once for the dedupe DELETE, once for the CREATE UNIQUE INDEX) when
+    duplicates were found -- each call independently dropped and rebuilt
+    every HNSW index on the table, silently doubling a full index rebuild's
+    cost for one logical operation.
+    """
+    pytest.importorskip("duckdb")
+
+    db_path = tmp_path / "db.duckdb"
+
+    provider = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
+    provider.connect()
+    try:
+        provider._ensure_embedding_table_exists(3)
+        provider.create_vector_index("legacy", "mini", 3, "cosine")
+        provider.connection.execute(
+            "DROP INDEX IF EXISTS idx_3_chunk_provider_model_unique"
+        )
+        provider.connection.execute(
+            """
+            INSERT INTO embeddings_3 (chunk_id, provider, model, embedding, dims)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [1, "legacy", "mini", [1.0, 2.0, 3.0], 3],
+        )
+        provider.connection.execute(
+            """
+            INSERT INTO embeddings_3 (chunk_id, provider, model, embedding, dims)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [1, "legacy", "mini", [4.0, 5.0, 6.0], 3],
+        )
+
+        expected_hnsw_names = _get_hnsw_index_names(provider)
+
+        original_get_indexes = provider._executor_get_vector_indexes_for_table
+        call_count = 0
+
+        def _counting_get_indexes(conn, state, table_name):
+            nonlocal call_count
+            call_count += 1
+            return original_get_indexes(conn, state, table_name)
+
+        provider._executor_get_vector_indexes_for_table = _counting_get_indexes
+
+        state: dict = {"transaction_active": False}
+        provider._executor_ensure_embedding_upsert_contract(
+            provider.connection, state, "embeddings_3", 3
+        )
+
+        assert call_count == 1, (
+            "the dedupe-then-index-creation sequence must guard the HNSW "
+            f"index with exactly one drop/rebuild cycle, got {call_count}"
+        )
+
+        rows = _get_embedding_rows(provider, 1, "legacy", "mini")
+        assert len(rows) == 1
+        assert list(rows[0]["embedding"]) == [4.0, 5.0, 6.0]
+
+        index_names = {
+            row["index_name"]
+            for row in provider.execute_query(
+                "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'embeddings_3'",
+                [],
+            )
+        }
+        assert "idx_3_chunk_provider_model_unique" in index_names
+        assert _get_hnsw_index_names(provider) == expected_hnsw_names
+    finally:
+        provider.disconnect(skip_checkpoint=True)
+
+
 def test_connect_upgrades_legacy_embeddings_1536_before_unique_index_creation(
     tmp_path: Path,
 ) -> None:
