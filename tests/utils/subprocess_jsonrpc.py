@@ -19,35 +19,31 @@ import json
 import logging
 from typing import Any, cast
 
+from .jsonrpc_envelope import (
+    JsonRpcResponseError,
+    JsonRpcTimeoutError,
+    McpClientError,
+    SubprocessCrashError,
+    SubprocessJsonRpcError,
+    build_notification,
+    build_request,
+    unwrap_result,
+)
+
 logger = logging.getLogger(__name__)
 
-
-class SubprocessJsonRpcError(Exception):
-    """Base exception for JSON-RPC subprocess communication errors."""
-
-    pass
-
-
-class SubprocessCrashError(SubprocessJsonRpcError):
-    """Raised when the subprocess terminates unexpectedly."""
-
-    pass
-
-
-class JsonRpcTimeoutError(SubprocessJsonRpcError):
-    """Raised when a JSON-RPC request times out."""
-
-    pass
-
-
-class JsonRpcResponseError(SubprocessJsonRpcError):
-    """Raised when a JSON-RPC response contains an error."""
-
-    def __init__(self, code: int, message: str, data: dict[str, Any] | None = None):
-        self.code = code
-        self.message = message
-        self.data = data
-        super().__init__(f"JSON-RPC error {code}: {message}")
+# Re-exported for backwards compatibility — these used to be defined here;
+# callers still import them from this module (see tests/utils/__init__.py).
+# ``SubprocessJsonRpcError`` is an alias for ``McpClientError`` (see
+# jsonrpc_envelope.py) kept so existing imports of the old name keep working.
+__all__ = [
+    "McpClientError",
+    "SubprocessJsonRpcError",
+    "SubprocessCrashError",
+    "JsonRpcTimeoutError",
+    "JsonRpcResponseError",
+    "SubprocessJsonRpcClient",
+]
 
 
 class SubprocessJsonRpcClient:
@@ -148,14 +144,7 @@ class SubprocessJsonRpcClient:
         response_future: asyncio.Future[dict[str, Any]] = asyncio.Future()
         self._pending_requests[request_id] = response_future
 
-        # Build and send request
-        request = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-        }
-        if params is not None:
-            request["params"] = params
+        request = build_request(method, params, request_id)
 
         try:
             request_json = json.dumps(request) + "\n"
@@ -180,22 +169,7 @@ class SubprocessJsonRpcClient:
                     f"Request {method} (id={request_id}) timed out after {timeout}s"
                 )
 
-            # Check for JSON-RPC error
-            if "error" in response:
-                error = response["error"]
-                raise JsonRpcResponseError(
-                    code=error.get("code", -1),
-                    message=error.get("message", "Unknown error"),
-                    data=error.get("data"),
-                )
-
-            # Return result
-            if "result" not in response:
-                raise SubprocessJsonRpcError(
-                    f"Response missing 'result' field: {response}"
-                )
-
-            return cast(dict[str, Any], response["result"])
+            return cast(dict[str, Any], unwrap_result(response, method))
 
         except Exception:
             # Clean up pending request on any error
@@ -219,14 +193,7 @@ class SubprocessJsonRpcClient:
         if self._closed:
             raise RuntimeError("Client is closed")
 
-        # Build and send notification (no id field)
-        notification: dict[str, Any] = {
-            "jsonrpc": "2.0",
-            "method": method,
-        }
-        if params is not None:
-            notification["params"] = params
-
+        notification = build_notification(method, params)
         notification_json = json.dumps(notification) + "\n"
         # stdin is guaranteed to exist by __init__ check
         assert self._process.stdin is not None

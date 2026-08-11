@@ -36,6 +36,16 @@ def add_websearch_subparser(subparsers: Any) -> argparse.ArgumentParser:
         metavar="N",
         help=f"Max results to return (1-{WEBSEARCH_LIMIT_MAX}, default: 30)",
     )
+    p.add_argument(
+        "--previous-query",
+        default=None,
+        metavar="Q",
+        help=(
+            "Prior query for single-hop chaining: steers expansion toward "
+            "new dimensions and frames synthesis in the prior topic's "
+            "context."
+        ),
+    )
 
     add_common_arguments(p)
     add_config_arguments(p, ["embedding", "llm", "research"])

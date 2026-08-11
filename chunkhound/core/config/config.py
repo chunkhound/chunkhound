@@ -23,9 +23,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .database_config import DatabaseConfig
 from .embedding_config import EmbeddingConfig
+from .fetchurl_config import FetchUrlConfig
 from .indexing_config import IndexingConfig
 from .llm_config import LLMConfig
-from .mcp_config import MCPConfig
+from .mcp_config import MCPConfig, is_loopback_host
 from .research_config import ResearchConfig
 
 
@@ -50,6 +51,7 @@ class Config(BaseModel):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
+    fetchurl: FetchUrlConfig = Field(default_factory=FetchUrlConfig)
     debug: bool = Field(default=False)
 
     # Private field to store the target directory from CLI args
@@ -250,6 +252,11 @@ class Config(BaseModel):
             # Create ResearchConfig instance with the data
             config_data["research"] = ResearchConfig(**config_data["research"])
 
+        # Special handling for FetchUrlConfig
+        if "fetchurl" in config_data and isinstance(config_data["fetchurl"], dict):
+            # Create FetchUrlConfig instance with the data
+            config_data["fetchurl"] = FetchUrlConfig(**config_data["fetchurl"])
+
         # Add target_dir to config_data for initialization
         config_data["target_dir"] = target_dir
 
@@ -292,6 +299,8 @@ class Config(BaseModel):
             config["indexing"] = indexing_config
         if research_config := ResearchConfig.load_from_env():
             config["research"] = research_config
+        if fetchurl_config := FetchUrlConfig.load_from_env():
+            config["fetchurl"] = fetchurl_config
 
         return config
 
@@ -330,6 +339,8 @@ class Config(BaseModel):
             overrides["indexing"] = indexing_overrides
         if research_overrides := ResearchConfig.extract_cli_overrides(args):
             overrides["research"] = research_overrides
+        if fetchurl_overrides := FetchUrlConfig.extract_cli_overrides(args):
+            overrides["fetchurl"] = fetchurl_overrides
 
         return overrides
 
@@ -427,7 +438,7 @@ class Config(BaseModel):
         # LLM/embedding config in the parent so misconfiguration fails fast
         # before fetching DDG results and writing tempfiles.
         requires_llm = (
-            command in ("research", "websearch", "_quickresearch")
+            command in ("research", "websearch", "_quickresearch", "fetchurl")
             or (command == "map" and not getattr(args, "overview_only", False))
             or (command == "autodoc" and not getattr(args, "assets_only", False))
         )
@@ -470,6 +481,22 @@ class Config(BaseModel):
         elif command == "search":
             if self.embedding and not self.embedding.is_provider_configured():
                 errors.append("Embedding provider not properly configured")
+
+        if command == "mcp" and self.mcp.transport == "http":
+            if not is_loopback_host(self.mcp.host) and not self.mcp.auth_token:
+                errors.append(
+                    "mcp.host is non-loopback but no auth_token is set. Binding "
+                    "the HTTP transport to a non-localhost address without "
+                    "--auth-token is refused. Set --auth-token, or omit --host "
+                    "to bind to 127.0.0.1 (default)."
+                )
+            if self.mcp.cors and not self.mcp.auth_token:
+                errors.append(
+                    "mcp.cors is enabled but no auth_token is set. Enabling CORS "
+                    "without --auth-token lets any website open in the same "
+                    "browser read from the HTTP transport, even on a loopback "
+                    "host. Set --auth-token, or omit --cors."
+                )
 
         if self.database.read_only:
             # _quickresearch always uses a :memory: DB (see quickresearch.py),

@@ -21,6 +21,11 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.interfaces.llm_provider import (
+    PROVIDER_MANAGED_OUTPUT,
+    LLMProvider,
+    OutputLimitIntent,
+)
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services import prompts
 from chunkhound.services.clustering_service import ClusterGroup
@@ -31,11 +36,28 @@ from chunkhound.services.research.shared.evidence_ledger import (
 from chunkhound.services.research.shared.models import (
     SINGLE_PASS_TIMEOUT_SECONDS,
     TARGET_OUTPUT_TOKENS,
+    ResearchContext,
     build_output_guidance,
 )
 
 # Minimum characters for a valid synthesis answer (not tokens)
 MIN_SYNTHESIS_LENGTH = 100
+
+
+def _synthesis_output_allowance(
+    llm: LLMProvider, legacy_allowance: int
+) -> int | OutputLimitIntent:
+    """Select legacy numeric or provider-managed output-limit intent."""
+    if llm.synthesis_output_limit_policy.output_limits_enabled:
+        return legacy_allowance
+    return PROVIDER_MANAGED_OUTPUT
+
+
+def _format_output_allowance(allowance: int | OutputLimitIntent) -> str:
+    """Format request allowance without applying numeric formatting to intents."""
+    if isinstance(allowance, int):
+        return f"{allowance:,}"
+    return allowance.value
 
 
 class SynthesisEngine:
@@ -116,10 +138,9 @@ class SynthesisEngine:
 
     async def _single_pass_synthesis(
         self,
-        root_query: str,
         chunks: list[dict[str, Any]],
         files: dict[str, str],
-        context: Any,
+        context: ResearchContext,
         synthesis_budgets: dict[str, int],
         constants_context: str = "",
         facts_context: str = "",
@@ -136,10 +157,9 @@ class SynthesisEngine:
             - Footer size scales with number of files/chunks analyzed
 
         Args:
-            root_query: Original research query
             chunks: All chunks from BFS traversal (will be filtered to match budgeted files)
             files: Budgeted file contents (subset within token limits)
-            context: Research context
+            context: Research context (root_query, optional previous_query)
             synthesis_budgets: Dynamic budgets based on repository size
             constants_context: Constants ledger context for LLM prompts
             facts_context: Facts ledger context for LLM prompts
@@ -250,7 +270,10 @@ class SynthesisEngine:
         system = prompts.SYNTHESIS_SYSTEM_BUILDER(output_guidance)
 
         # Combine root_query with constants and facts context
-        query_with_context = root_query + constants_section + facts_section
+        follow_up_section = prompts.build_follow_up_section(context.previous_query)
+        query_with_context = (
+            context.root_query + constants_section + facts_section + follow_up_section
+        )
 
         prompt = prompts.SYNTHESIS_USER.format(
             root_query=query_with_context,
@@ -258,16 +281,20 @@ class SynthesisEngine:
             source_context=source_context,
         )
 
+        request_output_allowance = _synthesis_output_allowance(
+            llm, max_output_tokens
+        )
         logger.info(
             f"Calling LLM for single-pass synthesis "
-            f"(max_completion_tokens={max_output_tokens:,}, "
+            f"(max_completion_tokens="
+            f"{_format_output_allowance(request_output_allowance)}, "
             f"timeout={SINGLE_PASS_TIMEOUT_SECONDS}s)"
         )
 
         response = await llm.complete(
             prompt,
             system=system,
-            max_completion_tokens=max_output_tokens,
+            max_completion_tokens=request_output_allowance,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,
         )
 
@@ -312,8 +339,8 @@ class SynthesisEngine:
     async def _map_synthesis_on_cluster(
         self,
         cluster: ClusterGroup,
-        root_query: str,
         chunks: list[dict[str, Any]],
+        context: ResearchContext,
         synthesis_budgets: dict[str, int],
         total_input_tokens: int,
         constants_context: str = "",
@@ -323,8 +350,8 @@ class SynthesisEngine:
 
         Args:
             cluster: Cluster group with files to synthesize
-            root_query: Original research query
             chunks: All chunks (will be filtered to cluster files)
+            context: Research context (root_query, optional previous_query)
             synthesis_budgets: Dynamic budgets based on repository size
             total_input_tokens: Sum of all cluster tokens (for proportional budget allocation)
             constants_context: Constants ledger context for LLM prompts
@@ -430,7 +457,9 @@ Focus on:
 Be thorough but concise - your analysis will be combined with other clusters.
 {build_output_guidance(cluster_target)}"""
 
-        prompt = f"""Query: {root_query}
+        map_hint = prompts.build_follow_up_hint(context.previous_query)
+
+        prompt = f"""Query: {context.root_query}{map_hint}
 {constants_section}{facts_section}
 {reference_table}
 
@@ -440,16 +469,20 @@ Analyze the following sources and provide insights relevant to the query above:
 
 Provide a comprehensive analysis focusing on the query."""
 
+        request_output_allowance = _synthesis_output_allowance(
+            llm, cluster_output_tokens
+        )
         logger.debug(
             f"Calling LLM for cluster {cluster.cluster_id} synthesis "
-            f"(max_completion_tokens={cluster_output_tokens:,}, "
+            f"(max_completion_tokens="
+            f"{_format_output_allowance(request_output_allowance)}, "
             f"timeout={SINGLE_PASS_TIMEOUT_SECONDS}s)"
         )
 
         response = await llm.complete(
             prompt,
             system=system,
-            max_completion_tokens=cluster_output_tokens,
+            max_completion_tokens=request_output_allowance,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,
         )
 
@@ -479,10 +512,10 @@ Provide a comprehensive analysis focusing on the query."""
 
     async def _reduce_synthesis(
         self,
-        root_query: str,
         cluster_results: list[dict[str, Any]],
         all_chunks: list[dict[str, Any]],
         all_files: dict[str, str],
+        context: ResearchContext,
         synthesis_budgets: dict[str, int],
         constants_context: str = "",
         facts_context: str = "",
@@ -500,10 +533,10 @@ Provide a comprehensive analysis focusing on the query."""
             - The LLM is told both values to help it prioritize content
 
         Args:
-            root_query: Original research query
             cluster_results: Results from map step (cluster summaries)
             all_chunks: All chunks from clusters (will be filtered to match synthesized files)
             all_files: All files that were synthesized across clusters
+            context: Research context (root_query, optional previous_query)
             synthesis_budgets: Dynamic budgets based on repository size
             constants_context: Constants ledger context for LLM prompts
             facts_context: Facts ledger context for LLM prompts
@@ -600,7 +633,9 @@ Your task:
 
 {build_output_guidance(TARGET_OUTPUT_TOKENS)}"""
 
-        prompt = f"""Query: {root_query}
+        follow_up_section = prompts.build_follow_up_section(context.previous_query)
+
+        prompt = f"""Query: {context.root_query}{follow_up_section}
 {constants_section}{facts_section}
 {reference_table}
 
@@ -613,15 +648,19 @@ NOTE: All citation numbers [N] in the cluster analyses have been remapped to mat
 
 Provide a complete, integrated analysis that addresses the original query."""
 
+        request_output_allowance = _synthesis_output_allowance(
+            llm, max_output_tokens
+        )
         logger.debug(
             f"Calling LLM for reduce synthesis "
-            f"(input: {total_input_tokens:,} tokens, max_completion_tokens={max_output_tokens:,})"
+            f"(input: {total_input_tokens:,} tokens, max_completion_tokens="
+            f"{_format_output_allowance(request_output_allowance)})"
         )
 
         response = await llm.complete(
             prompt,
             system=system,
-            max_completion_tokens=max_output_tokens,
+            max_completion_tokens=request_output_allowance,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,
         )
 

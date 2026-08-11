@@ -19,6 +19,10 @@ GENERATE_SCRIPT = ROOT / "site" / "scripts" / "generate-og-images.mjs"
 VALID_SVG = """<svg viewBox="0 0 1200 630" width="1200" height="630" xmlns="http://www.w3.org/2000/svg">
   <rect width="1200" height="630" fill="#21221e"/>
 </svg>"""
+OG_SVGS = (
+    "og-image-dark.svg",
+    "og-image-light.svg",
+)
 
 INVALID_SVG = "this is not valid svg content"
 
@@ -35,17 +39,18 @@ def _run_generate(public_dir: pathlib.Path) -> subprocess.CompletedProcess:
     )
 
 
-def test_generates_both_pngs_from_svgs() -> None:
-    """Both dark and light SVGs produce valid 1200px-wide PNGs."""
+def test_generates_all_social_pngs_from_svgs() -> None:
+    """Every social SVG produces a valid 1200x630 PNG."""
     with tempfile.TemporaryDirectory() as tmp:
         public_dir = pathlib.Path(tmp)
-        for name in ("og-image-dark.svg", "og-image-light.svg"):
+        for name in OG_SVGS:
             (public_dir / name).write_text(VALID_SVG, encoding="utf-8")
 
         result = _run_generate(public_dir)
         assert result.returncode == 0, f"Script failed: {result.stderr}"
 
-        for name in ("og-image-dark.png", "og-image-light.png"):
+        for svg_name in OG_SVGS:
+            name = svg_name.replace(".svg", ".png")
             png_path = public_dir / name
             assert png_path.exists(), f"{name} was not generated"
             assert png_path.stat().st_size > 50, f"{name} is too small to be a valid PNG"
@@ -71,7 +76,7 @@ def test_invalid_svg_errors() -> None:
     """Invalid SVG content produces a descriptive error."""
     with tempfile.TemporaryDirectory() as tmp:
         public_dir = pathlib.Path(tmp)
-        for name in ("og-image-dark.svg", "og-image-light.svg"):
+        for name in OG_SVGS:
             (public_dir / name).write_text(INVALID_SVG, encoding="utf-8")
 
         result = _run_generate(public_dir)

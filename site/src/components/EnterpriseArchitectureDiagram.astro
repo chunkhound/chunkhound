@@ -1,0 +1,36 @@
+<figure class="architecture-figure" aria-labelledby="architecture-map-title">
+  <figcaption id="architecture-map-title">Current shipped architecture: local process, local database</figcaption>
+  <div class="architecture-map">
+    <div class="node client">
+      <strong>Editor or AI client</strong>
+      <span>MCP (stdio or HTTP)</span>
+    </div>
+    <span class="arrow" aria-hidden="true">→</span>
+    <div class="node daemon">
+      <strong>ChunkHound process</strong>
+      <span>CLI or per-project daemon · local IPC when shared</span>
+    </div>
+    <span class="arrow" aria-hidden="true">→</span>
+    <div class="node database">
+      <strong>Project database</strong>
+      <span>Local DuckDB or LanceDB · local incremental indexing</span>
+    </div>
+  </div>
+  <p class="figure-note">
+    Embedding, reranking, and LLM providers may be local or remote. They are provider
+    dependencies, not a central ChunkHound query service.
+  </p>
+</figure>
+
+<style>
+  .architecture-figure { max-width: 880px; margin: var(--space-7) 0 0; }
+  figcaption { margin-bottom: var(--space-4); color: var(--text-primary); font-size: var(--text-sm); font-weight: 600; }
+  .architecture-map { display: grid; grid-template-columns: 1fr auto 1.2fr auto 1fr; gap: var(--space-3); align-items: center; padding: var(--space-5); border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-xl); background: var(--bg-surface); }
+  .node { display: grid; min-height: 76px; gap: var(--space-1); padding: var(--space-4); align-content: center; border: var(--border-w-subtle) solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-muted); }
+  .node strong { color: var(--text-primary); font-size: var(--text-sm); }
+  .node span, .figure-note { color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  .daemon { border-color: var(--primary); background: var(--primary-bg); }
+  .arrow { color: var(--primary); font-size: var(--text-lg); font-weight: 600; }
+  .figure-note { max-width: 760px; margin-top: var(--space-4); }
+  @media (max-width: 700px) { .architecture-map { grid-template-columns: 1fr; } .arrow { justify-self: center; transform: rotate(90deg); } }
+</style>

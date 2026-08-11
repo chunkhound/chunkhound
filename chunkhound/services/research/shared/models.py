@@ -192,6 +192,10 @@ class ResearchContext:
     root_query: str
     ancestors: list[str] = field(default_factory=list)
     traversal_path: list[str] = field(default_factory=list)
+    # Follow-up chain hook consumed by the synthesis engine's three follow-up-note
+    # injection sites (framing-only — does not affect search, retrieval, or
+    # reranking within this service). None / empty means un-chained.
+    previous_query: str | None = None
 
 
 def build_output_guidance(target_tokens: int = TARGET_OUTPUT_TOKENS) -> str:

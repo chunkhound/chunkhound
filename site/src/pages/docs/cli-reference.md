@@ -148,6 +148,41 @@ chunkhound websearch "OAuth refresh token rotation best practices"
 chunkhound websearch "Rust 2025 edition new features" --limit 50
 ```
 
+## `chunkhound fetchurl`
+
+Fetch a single URL (HTML or PDF), extract its content, and return a focused Markdown answer. Use it to pull a specific page into the loop without running a full web search.
+
+```bash
+chunkhound fetchurl <url> [options]
+```
+
+| Argument | Description |
+|---|---|
+| `url` | Absolute `http://` or `https://` URL (required) |
+
+**Options:**
+
+| Flag | Description |
+|---|---|
+| `--query TEXT`, `-q TEXT` | Optional question to focus the extraction. When set, enables rerank+elbow on long pages (default: `""`) |
+| `--fetchurl-rerank-threshold-tokens N` | Token count above which chunk-rerank is used instead of truncate (default: 15000) |
+| `--fetchurl-truncate-tokens N` | Token cap applied to the truncate-option input before the LLM call (default: 15000) |
+| `--fetchurl-max-retries N` | Fetch attempts including the first, with exponential backoff (default: 3; range 1–10) |
+
+> **Requires** LLM + reranker providers. See [Configuration](/docs/configuration#fetch-url) for setup details.
+>
+> **Note:** hosts resolving to loopback / private / link-local / reserved / multicast / unspecified addresses are rejected.
+
+**Examples:**
+
+```bash
+# Extract a whole page into a Markdown summary
+chunkhound fetchurl https://example.com/spec.html
+
+# Focus the extraction on a specific question
+chunkhound fetchurl https://example.com/rfc.pdf -q "how are retries bounded?"
+```
+
 ## `chunkhound research`
 
 Deep code research. Generates a synthesized answer with citations by searching the codebase, reading relevant files, and using an LLM to analyze the results.
@@ -207,6 +242,14 @@ chunkhound mcp [path] [options]
 | Flag | Description |
 |---|---|
 | `--no-daemon` | Run without daemon (single client mode) |
+| `--read-only` | Open the database read-only; disables indexing/watcher and runs without the daemon (DuckDB only) |
+| `--stdio` | Use stdio transport (default, without the daemon) |
+| `--show-setup` | Display MCP setup instructions and exit |
+| `--transport {stdio,http}` | Transport type for MCP server (default: `stdio`) |
+| `--host HOST` | Host to bind the HTTP transport to (default: `127.0.0.1`) |
+| `--port PORT` | Port to bind the HTTP transport to (default: `5173`) |
+| `--auth-token TOKEN` | Bearer token required to authenticate HTTP transport requests |
+| `--cors` | Enable CORS for the HTTP transport (for browser-based clients) |
 | `--config PATH` | Path to configuration file |
 | `--verbose` | Verbose output |
 | `--debug` | Debug output |
@@ -214,12 +257,22 @@ chunkhound mcp [path] [options]
 **Examples:**
 
 ```bash
-# Start MCP server for current directory
+# Start MCP server for current directory (stdio)
 chunkhound mcp
 
 # Start MCP server for a specific project
 chunkhound mcp /path/to/project
+
+# Start MCP server over HTTP transport
+chunkhound mcp --transport http --port 5173
+
+# HTTP transport bound to all interfaces, with auth required
+chunkhound mcp --transport http --host 0.0.0.0 --port 5173 --auth-token "$TOKEN" --cors
 ```
+
+> **Note:** binding to a non-loopback `--host` without `--auth-token` is refused at startup.
+> `--cors` also requires `--auth-token` — without a token, any website open in the same
+> browser could read from the HTTP transport, even on the default loopback host.
 
 ## `chunkhound map`
 

@@ -15,7 +15,10 @@ To add a new OpenAI-compatible provider you must also touch:
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
+
+from chunkhound.interfaces.llm_provider import OutputLimitCapability
 
 
 @dataclass(frozen=True)
@@ -32,15 +35,19 @@ class OpenAICompatibleSpec:
         max_tokens_param_name: API parameter name for output token limit
             (``"max_completion_tokens"`` for newer APIs, ``"max_tokens"`` for older)
         synthesis_concurrency: Recommended parallel synthesis operations count
+        output_limit_omission: Whether the canonical endpoint authoritatively
+            supports omitting its output-token cap
         docs_url: External API documentation URL
         auth_url: Authentication portal URL
     """
+
     name: str
     default_base_url: str
     supports_structured_outputs: bool = True
     supports_reasoning_effort: bool = False
     max_tokens_param_name: str = "max_completion_tokens"
     synthesis_concurrency: int = 3
+    output_limit_omission: OutputLimitCapability = OutputLimitCapability.UNKNOWN
     docs_url: str = ""
     auth_url: str = ""
 
@@ -55,6 +62,7 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         supports_structured_outputs=False,
         max_tokens_param_name="max_tokens",
         synthesis_concurrency=10,
+        output_limit_omission=OutputLimitCapability.SUPPORTED,
         docs_url="https://platform.deepseek.com/api-docs",
         auth_url="https://platform.deepseek.com",
     ),
@@ -63,6 +71,7 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         default_base_url="https://api.x.ai/v1",
         supports_reasoning_effort=True,
         synthesis_concurrency=5,
+        output_limit_omission=OutputLimitCapability.SUPPORTED,
         docs_url="https://docs.x.ai/docs/models",
         auth_url="https://console.x.ai",
     ),

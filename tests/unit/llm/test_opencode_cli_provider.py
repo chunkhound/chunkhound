@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
-from chunkhound.interfaces.llm_provider import LLMResponse
+from chunkhound.interfaces.llm_provider import LLMResponse, OutputLimitCapability
 from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
 
 
@@ -43,6 +43,10 @@ class TestOpenCodeCLIProvider:
     def test_provider_name(self, provider):
         """Test provider name property."""
         assert provider.name == "opencode-cli"
+
+    def test_output_cap_omission_capability_is_unknown(self, provider):
+        """OpenCode exposes no cross-provider output-cap omission contract."""
+        assert provider.output_limit_metadata.omission is OutputLimitCapability.UNKNOWN
 
     def test_model_property(self, provider):
         """Test model property."""

@@ -13,7 +13,11 @@ from loguru import logger
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils import estimate_tokens_llm
-from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
+from chunkhound.interfaces.llm_provider import (
+    LLMProvider,
+    LLMResponse,
+    OutputLimitIntent,
+)
 from chunkhound.utils.json_extraction import parse_and_validate_structured_json
 
 
@@ -119,7 +123,7 @@ class BaseCLIProvider(LLMProvider):
         self,
         prompt: str,
         system: str | None = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | OutputLimitIntent = 4096,
         timeout: int | None = None,
     ) -> LLMResponse:
         """Generate a completion for the given prompt.
@@ -134,8 +138,9 @@ class BaseCLIProvider(LLMProvider):
             LLMResponse with content and estimated token usage
         """
         try:
+            output_limit = self.resolve_synthesis_output_limit(max_completion_tokens)
             content = await self._run_cli_command(
-                prompt, system, max_completion_tokens, timeout
+                prompt, system, output_limit.max_tokens, timeout
             )
 
             # Validate content is not empty
@@ -179,7 +184,7 @@ class BaseCLIProvider(LLMProvider):
         prompt: str,
         json_schema: dict[str, Any],
         system: str | None = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | OutputLimitIntent = 4096,
         timeout: int | None = None,
     ) -> dict[str, Any]:
         """Generate a structured JSON completion conforming to the given schema.
@@ -209,8 +214,9 @@ class BaseCLIProvider(LLMProvider):
         )
 
         try:
+            output_limit = self.resolve_synthesis_output_limit(max_completion_tokens)
             content = await self._run_cli_command(
-                structured_prompt, system, max_completion_tokens, timeout
+                structured_prompt, system, output_limit.max_tokens, timeout
             )
 
             # Validate content is not empty

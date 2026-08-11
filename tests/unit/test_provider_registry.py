@@ -13,7 +13,7 @@ import pytest
 
 from chunkhound.core.config.llm_config import LLMProviderLiteral
 from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
-
+from chunkhound.interfaces.llm_provider import OutputLimitCapability
 
 # ── Registry integrity ──────────────────────────────────────────────────────
 
@@ -37,6 +37,15 @@ def test_spec_names_match_dict_keys():
     for key, spec in OPENAI_COMPATIBLE_PROVIDERS.items():
         assert spec.name == key, (
             f"Spec name {spec.name!r} does not match dict key {key!r}"
+        )
+
+
+def test_canonical_deepseek_and_grok_specs_support_output_cap_omission():
+    """Canonical built-ins carry provider/API omission capability metadata."""
+    for name in ("deepseek", "grok"):
+        assert (
+            OPENAI_COMPATIBLE_PROVIDERS[name].output_limit_omission
+            is OutputLimitCapability.SUPPORTED
         )
 
 
@@ -141,6 +150,7 @@ def test_spec_constructs_provider_via_factory(name, spec):
         f"{name}: expected synthesis_concurrency={spec.synthesis_concurrency}, "
         f"got {provider.get_synthesis_concurrency()}"
     )
+    assert provider.output_limit_metadata.omission is spec.output_limit_omission
 
 
 @pytest.mark.parametrize(
@@ -163,9 +173,9 @@ def test_spec_constructs_provider_with_base_url_override(name, spec):
         },
     )
 
-    # The provider uses an internal AsyncOpenAI client; we cannot inspect
-    # the base URL directly, but we can verify the constructor didn't raise.
-    assert provider is not None
+    assert provider.base_url is not None
+    assert provider.base_url.rstrip("/") == custom_url
+    assert provider.output_limit_metadata.omission is OutputLimitCapability.UNKNOWN
 
 
 # ── Missing-model error ─────────────────────────────────────────────────────

@@ -3,6 +3,10 @@
 // which clippy's useless_conversion lint flags. The allow must be crate-level because the lint
 // fires in the proc-macro expansion, not in the function's textual body. Fixed upstream in PyO3 0.23+.
 #![allow(clippy::useless_conversion)]
+mod db;
+mod db_writer;
+mod error;
+mod types;
 
 use ignore::gitignore::GitignoreBuilder;
 use ignore::{WalkBuilder, WalkState};
@@ -128,5 +132,6 @@ fn scan_files(
 #[pymodule]
 fn chunkhound_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scan_files, m)?)?;
+    m.add_class::<db_writer::RustDbWriter>()?;
     Ok(())
 }
