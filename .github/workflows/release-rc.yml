@@ -164,17 +164,8 @@ jobs:
         # API to yank a release automatically (yanking is a manual, web-UI-
         # only action) -- so the best CI can do is make sure a human finds
         # out immediately instead of via a user's broken-install report.
+        # Needs the workflow-level `issues: write` permission declared above.
         if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh issue create \
-            --repo "${{ github.repository }}" \
-            --title "chunkhound-native publish failed for ${{ github.ref_name }}" \
-            --body "chunkhound was published successfully to PyPI for ${{ github.ref_name }}, but chunkhound-native failed to publish for this tag.
-
-          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-          Next steps:
-          - Re-run this job if the failure looks transient (flaky runner, wheel-repair issue).
-          - If chunkhound-native can't be published soon, consider yanking the chunkhound pre-release for ${{ github.ref_name }} from pypi.org (Manage -> Releases -> Options -> Yank) so pip doesn't resolve a stale chunkhound-native floor version against this chunkhound release."
+        uses: ./.github/actions/alert-native-publish-failure
+        with:
+          tag: ${{ github.ref_name }}

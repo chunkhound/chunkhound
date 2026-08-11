@@ -1,0 +1,52 @@
+name: 'Alert on native publish failure'
+description: >
+  File a GitHub issue when chunkhound-native fails to publish after
+  chunkhound itself already published successfully -- the window this
+  leaves (a live chunkhound release with no matching chunkhound-native
+  wheel, and no PyPI API to auto-yank a release) needs a human to notice
+  immediately rather than via a user's broken-install report. Shared by
+  release.yml's publish-native job and release-rc.yml's publish-rc-native
+  job, which previously each carried their own byte-identical `gh issue
+  create` step differing only in which tag context variable resolves the
+  tag. The two callers' bodies used to differ by a single "release" vs
+  "pre-release" word describing the tag to yank on pypi.org; genericized
+  to "release" here since PyPI's own UI (Manage -> Releases) doesn't
+  distinguish pre-releases from releases either.
+
+inputs:
+  tag:
+    description: >
+      The published tag to reference in the issue title/body. Callers must
+      resolve this themselves before invoking the action -- release.yml
+      (a `release: published` trigger) uses `github.event.release.tag_name`;
+      release-rc.yml (a `push: tags` trigger) uses `github.ref_name`. These
+      are NOT interchangeable: `github.event.release` is unset outside a
+      `release` event.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Deliberately no `if:` here. Composite-action steps' failure()/
+    # success()/always() see only this composite action's own internal
+    # step chain, not the calling job's prior steps -- an `if: failure()`
+    # here would never fire even though the caller's publish step failed.
+    # The gate belongs on the `uses:` line in the calling workflow instead
+    # (see release.yml/release-rc.yml), since that's what determines
+    # whether this action even runs. Once invoked, this single step
+    # should just run unconditionally.
+    - name: Create failure alert issue
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh issue create \
+          --repo "${{ github.repository }}" \
+          --title "chunkhound-native publish failed for ${{ inputs.tag }}" \
+          --body "chunkhound was published successfully to PyPI for ${{ inputs.tag }}, but chunkhound-native failed to publish for this tag.
+
+        Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+        Next steps:
+        - Re-run this job if the failure looks transient (flaky runner, wheel-repair issue).
+        - If chunkhound-native can't be published soon, consider yanking the chunkhound release for ${{ inputs.tag }} from pypi.org (Manage -> Releases -> Options -> Yank) so pip doesn't resolve a stale chunkhound-native floor version against this chunkhound release."
