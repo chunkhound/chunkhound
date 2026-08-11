@@ -1407,6 +1407,27 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         let _ = conn.execute_batch("SET threads = 1");
         build_result
     }
+
+    fn read_file_states(&self) -> Result<Vec<DbFileEntry>, DbError> {
+        let db_path = Path::new(&self.config.db_path);
+        if !db_path.exists() {
+            return Ok(Vec::new());
+        }
+        let conn = Connection::open(db_path)?;
+        let mut stmt = conn.prepare(FILE_STATE_SELECT)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(DbFileEntry {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    mtime: row.get(2)?,
+                    content_hash: row.get(3)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
 }
 
 /// Mirrors `indexing_coordinator.py`'s `_check_disk_usage_limit` for a
@@ -1449,28 +1470,6 @@ pub(crate) fn check_disk_usage_limit(db_path: &Path, limit_mb: Option<f64>) -> O
 /// would skip that reversal and return a value off by the full UTC offset.
 const FILE_STATE_SELECT: &str =
     "SELECT id, path, EXTRACT(EPOCH FROM modified_time::TIMESTAMPTZ), content_hash FROM files";
-
-/// Snapshot every row of the `files` table for the diff phase. Returns an
-/// empty Vec if `db_file` doesn't exist yet (fresh index — every file is new).
-pub(crate) fn read_file_states(db_file: &Path) -> Result<Vec<DbFileEntry>, DbError> {
-    if !db_file.exists() {
-        return Ok(Vec::new());
-    }
-    let conn = Connection::open(db_file)?;
-    let mut stmt = conn.prepare(FILE_STATE_SELECT)?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(DbFileEntry {
-                id: row.get(0)?,
-                path: row.get(1)?,
-                mtime: row.get(2)?,
-                content_hash: row.get(3)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(rows)
-}
 
 #[cfg(test)]
 mod file_state_roundtrip_tests {

@@ -1,5 +1,5 @@
 use crate::error::DbError;
-use crate::types::{BatchResult, DbWriterBatch};
+use crate::types::{BatchResult, DbFileEntry, DbWriterBatch};
 
 pub mod duckdb_backend;
 pub(crate) use duckdb_backend::check_disk_usage_limit;
@@ -48,6 +48,16 @@ pub trait DbBackend: Send {
     }
     fn ensure_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
         Ok(())
+    }
+
+    /// Snapshot every row of the `files` table for the pipeline's diff phase.
+    /// Default: no-op (empty index / non-DuckDB backends treat every file as
+    /// new). Deliberately `&self`, not `&mut self`, and does NOT go through
+    /// `open()`'s heavier lifecycle (crash recovery, VSS load,
+    /// `ensure_all_hnsw_indexes()`) -- callers may invoke this on a backend
+    /// that was only just `create_backend()`'d and never `.open()`ed.
+    fn read_file_states(&self) -> Result<Vec<DbFileEntry>, DbError> {
+        Ok(Vec::new())
     }
 }
 

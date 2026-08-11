@@ -9,7 +9,7 @@ use super::config::PipelineConfig;
 use super::differ::DiffResult;
 use super::report::PipelineReport;
 
-use crate::db::{check_disk_usage_limit, create_backend, duckdb_backend, DbBackend, DbConfig};
+use crate::db::{check_disk_usage_limit, create_backend, DbBackend, DbConfig};
 use crate::error::DbError;
 use crate::types::{ChunkRecord, DbFileEntry, DbWriterBatch, FileRecord};
 
@@ -363,7 +363,14 @@ impl IndexingPipeline {
             });
         }
 
-        let db_entries: Vec<DbFileEntry> = duckdb_backend::read_file_states(&db_file)?;
+        let db_config = DbConfig {
+            db_path: db_file.to_string_lossy().into_owned(),
+            compaction_threshold: self.config.compaction_threshold,
+            compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
+            insert_batch_size: self.config.db_batch_size.max(1),
+        };
+        let backend: Box<dyn DbBackend> = create_backend(db_config);
+        let db_entries: Vec<DbFileEntry> = backend.read_file_states()?;
 
         // Read mtime AND size in a single pass so that compute_diff (which
         // needs mtime for change detection) and parse_one_batch (which needs

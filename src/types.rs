@@ -41,9 +41,10 @@ pub struct BatchResult {
 }
 
 /// Snapshot of a single `files` row, as read from the DB by
-/// `db::duckdb_backend::read_file_states` and consumed by the pipeline's
-/// diff phase (`pipeline::differ::compute_diff`). Shared between the two
-/// modules so the `files` table's column shape has exactly one reader.
+/// `DbBackend::read_file_states` (implemented by `DuckDbHnswBackend`) and
+/// consumed by the pipeline's diff phase (`pipeline::differ::compute_diff`).
+/// Shared between the two modules so the `files` table's column shape has
+/// exactly one reader.
 #[derive(Debug, Clone)]
 pub struct DbFileEntry {
     pub id: i64,
