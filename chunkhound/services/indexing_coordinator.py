@@ -124,6 +124,257 @@ def _update_speed_field(progress: Progress, task_id: TaskID, unit: str) -> None:
         progress.update(task_id, speed=f"{rate:.1f} {unit}")
 
 
+class _RustProgressBridge:
+    """Bridges the Rust pipeline's `progress_callback(phase, current, total,
+    chunks=0)` calls to Rich progress bars, and exposes the handful of
+    values `process_directory` needs to read back after the run completes.
+
+    Constructed once per `run_rust_pipeline()` call, only when both
+    `_use_rust` and `self.progress` are truthy -- callers pass `None`
+    instead of an instance otherwise.
+    """
+
+    def __init__(
+        self,
+        progress: Progress,
+        parse_task: TaskID,
+        data_task: TaskID,
+        index_task: TaskID,
+        compact_task: TaskID,
+        diff_task: TaskID | None,
+        embed_task: TaskID | None,
+        compact_db_file: str,
+    ) -> None:
+        self._pr = progress
+        self._pt = parse_task
+        self._data_task = data_task
+        self._index_task = index_task
+        self._compact_task = compact_task
+        self._diff_task = diff_task
+        self._embed_task = embed_task
+        self._compact_db_file = compact_db_file
+
+        # Closure-internal bookkeeping (previously `nonlocal` locals).
+        self._embed_start = 0.0
+        self._embed_reset_done = False
+        self._data_task_total = 1
+        self._data_start = 0.0
+        self._data_reset_done = False
+        self._diff_start = 0.0
+        self._diff_reset_done = False
+        self._parse_reset_done = False
+        self._compact_info: str | None = None
+
+        # Read by process_directory after run_rust_pipeline() returns.
+        self.diff_elapsed = 0.0
+        self.compact_ran = False
+        self.compact_size_before: int | None = None
+        self.compact_size_after: int | None = None
+        self.compact_reduction_pct: float | None = None
+
+    def __call__(self, phase: str, current: int, total: int, chunks: int = 0) -> None:
+        # `chunks` is the cumulative chunk count, sent only by the
+        # write-data phase (4-arg call); other phases use 3 args and
+        # leave it at 0.
+        _pr = self._pr
+        _pt = self._pt
+        if phase == "diff":
+            if self._diff_task is not None:
+                # First-call-based reset, mirroring the embed phase below:
+                # current may already be > 0 on the first callback.
+                if not self._diff_reset_done:
+                    _pr.reset(self._diff_task, total=max(total, 1), start=True)
+                    self._diff_start = time.time()
+                    self._diff_reset_done = True
+                _pr.update(
+                    self._diff_task,
+                    completed=current,
+                    total=max(total, 1),
+                    info=f"{current}/{total} checked",
+                )
+                if current >= total:
+                    self.diff_elapsed = time.time() - self._diff_start
+                    _pr.update(self._diff_task, info="done")
+        elif phase == "parse":
+            # First-call-based reset: _pt's clock started ticking at
+            # add_task() time, before the diff phase even ran, so its raw
+            # elapsed would understate the parse-phase rate.
+            if not self._parse_reset_done:
+                _pr.reset(_pt, total=max(total, 1), start=True)
+                self._parse_reset_done = True
+            _pr.update(_pt, completed=current, info=f"{current}/{total} parsed")
+            _update_speed_field(_pr, _pt, "files/min")
+        elif phase == "embed":
+            if self._embed_task is not None:
+                # First-call-based reset (not current==0-based): the
+                # streaming pipeline reports a live, per-batch-refined
+                # total, so its first call may already have current > 0.
+                if not self._embed_reset_done:
+                    _pr.reset(self._embed_task, total=max(total, 1), start=True)
+                    self._embed_start = time.time()
+                    self._embed_reset_done = True
+                elapsed = time.time() - self._embed_start
+                # Require a minimum sample window before trusting the
+                # division — a near-zero elapsed (e.g. right at the reset
+                # above) against an already-nonzero current would
+                # otherwise produce a nonsensical speed.
+                speed = current / elapsed if elapsed > 0.05 else 0
+                _pr.update(
+                    self._embed_task,
+                    completed=current,
+                    total=max(total, 1),
+                    speed=f"{speed:.1f} chunks/s",
+                    info=f"{current}/{total} embedded",
+                )
+        elif phase == "write":
+            # Backward compat: old Rust extensions emit one "write"
+            # callback with no sub-phase breakdown.
+            _pr.reset(self._data_task, start=True)
+            _pr.update(self._data_task, completed=1, info="done")
+            if self._index_task is not None:
+                _pr.reset(self._index_task, start=True)
+                _pr.update(self._index_task, completed=1, info="done")
+            if self._compact_task is not None:
+                _pr.reset(self._compact_task, start=True)
+                _pr.update(self._compact_task, completed=1, info="done")
+        elif phase == "write-prepare":
+            # Python's DuckDB connection is already closed by now
+            # (disconnected before run_rust_pipeline() was even called) —
+            # this is purely a progress bar update. Prepare is sub-second
+            # (create tables); roll it into the write-data bar as an
+            # opening tick.
+            self._data_task_total = max(total, 1)
+            _pr.reset(self._data_task, total=self._data_task_total, start=True)
+            _pr.update(self._data_task, info="preparing...")
+        elif phase == "write-data":
+            # Batch-keyed in the streaming pipeline (total > 1 — the
+            # exact, upfront-known batch count); single-shot in the
+            # sequential path (total == 1).
+            if total > 1:
+                # Speed = true throughput in chunks/s (not cumulative
+                # batches/min, which decays from the hot start and sags as
+                # files get heavier). Mirrors the embed bar. `chunks` is
+                # cumulative; timer starts on the first write-data callback.
+                if not self._data_reset_done:
+                    self._data_start = time.time()
+                    self._data_reset_done = True
+                _elapsed = time.time() - self._data_start
+                _cps = chunks / _elapsed if _elapsed > 0.05 else 0
+                _pr.update(
+                    self._data_task,
+                    completed=current,
+                    speed=f"{_cps:.1f} chunks/s",
+                    info=f"{current}/{total} batches written",
+                )
+            else:
+                _pr.update(self._data_task, info="writing...")
+        elif phase == "write-index":
+            # Data write done; compaction wasn't needed — build the HNSW
+            # index directly. The compact bar never runs on this path —
+            # resolve it to "not needed" right away (reset+finish
+            # together) so it doesn't sit unstarted and then get stamped
+            # "done" by write-done/done below, which used to render as a
+            # started-but-never-ticked zombie bar (elapsed stuck at
+            # "-:--:--" with a live spinner).
+            _pr.update(
+                self._data_task,
+                completed=self._data_task_total,
+                info="done",
+            )
+            _pr.reset(self._index_task, start=True)
+            _pr.update(self._index_task, info="building...")
+            _pr.reset(self._compact_task, start=True)
+            _pr.update(self._compact_task, completed=1, info="not needed")
+            self._compact_info = "not needed"
+        elif phase == "write-compact":
+            # Data write done; compaction is needed. Compaction rebuilds
+            # the HNSW index as part of its own EXPORT/IMPORT rewrite, so
+            # "write-index" never fires in this path — the index bar
+            # never runs on its own here. Resolve it immediately (mirrors
+            # the write-index branch above) instead of leaving it
+            # unstarted for write-done/done to stamp "done" on top of a
+            # zombie bar.
+            _pr.update(
+                self._data_task,
+                completed=self._data_task_total,
+                info="done",
+            )
+            _pr.reset(self._index_task, start=True)
+            _pr.update(
+                self._index_task, completed=1, info="included in compaction"
+            )
+            _pr.reset(self._compact_task, start=True)
+            _pr.update(
+                self._compact_task, info="compacting (includes index rebuild)..."
+            )
+            self.compact_ran = True
+            # write-compact firing at all already means the Rust backend
+            # decided real compaction is needed (backend.needs_compaction()
+            # == True) — that decision doesn't depend on whether any files
+            # were reparsed this run, so always snapshot the pre-compaction
+            # size.
+            try:
+                self.compact_size_before = os.path.getsize(self._compact_db_file)
+            except OSError:
+                self.compact_size_before = None
+        elif phase == "write-done":
+            # Final wrap-up. _index_task and _compact_task were already
+            # resolved above by whichever of write-index/write-compact
+            # actually fired; only the compact bar's final size/ratio text
+            # (when compaction ran) still needs filling in here, once
+            # compaction has actually completed.
+            _pr.update(
+                self._data_task,
+                completed=self._data_task_total,
+                info="done",
+            )
+            if self.compact_ran:
+                if self.compact_size_before is not None:
+                    try:
+                        self.compact_size_after = os.path.getsize(
+                            self._compact_db_file
+                        )
+                        pct = (
+                            (self.compact_size_before - self.compact_size_after)
+                            / self.compact_size_before
+                            * 100
+                            if self.compact_size_before
+                            else 0.0
+                        )
+                        direction = "smaller" if pct >= 0 else "larger"
+                        self._compact_info = (
+                            f"{_format_bytes(self.compact_size_before)} → "
+                            f"{_format_bytes(self.compact_size_after)} "
+                            f"({abs(pct):.0f}% {direction})"
+                        )
+                        self.compact_reduction_pct = pct
+                    except OSError:
+                        self._compact_info = "done"
+                else:
+                    self._compact_info = "done"
+                _pr.update(
+                    self._compact_task, completed=1, info=self._compact_info
+                )
+            else:
+                # write-index path: the compact bar was already resolved
+                # to "not needed" above; only the index bar (still running
+                # since write-index started it) needs finishing.
+                _pr.update(self._index_task, completed=1, info="done")
+        elif phase == "done":
+            # Ensure the write bars are at 100%. The parse and embed bars
+            # don't need re-finalizing here — both phases always receive
+            # an exact final (total, total) call of their own before
+            # "done" fires, in both the sequential and streaming pipeline
+            # paths. _index_task/_compact_task are already resolved by
+            # write-index/write-compact/write-done above — only re-sync
+            # _data_task here.
+            _pr.update(
+                self._data_task,
+                completed=self._data_task_total,
+                info="done",
+            )
+
+
 class _StatResult:
     """Lightweight stat-like object used in _store_parsed_results."""
 
@@ -1718,15 +1969,19 @@ class IndexingCoordinator(BaseService):
                 # them up immediately — dynamically added tasks via
                 # add_task() inside a PyO3 callback are not reliably
                 # rendered by Live until a major refresh.
+                _progress_bridge: _RustProgressBridge | None = None
                 if _use_rust and self.progress:
+                    # parse_task was created above under `if self.progress:`,
+                    # so it's guaranteed non-None here (self.progress is
+                    # truthy in this branch) — mypy can't see that guarantee
+                    # across the two blocks.
                     _pt: TaskID = parse_task  # type: ignore[assignment]
-                    _pr = self.progress
 
                     # Hide the coordinator's store_task ("Handling files") —
                     # the Rust write sub-phase bars render fine-grained progress
                     # themselves.  Keep parse_task for the parse phase.
                     if store_task is not None:
-                        _pr.remove_task(store_task)
+                        self.progress.remove_task(store_task)
                         store_task = None
 
                     # Pre-create embed task (total set to 1 placeholder; the
@@ -1734,280 +1989,40 @@ class IndexingCoordinator(BaseService):
                     # start=False so the clock doesn't tick until the phase begins.
                     _embed_task: TaskID | None = None
                     if not skip_embeddings:
-                        _embed_task = _pr.add_task(
+                        _embed_task = self.progress.add_task(
                             "  └─ Embedding", total=1, speed="", info="", start=False
                         )
-                    _embed_start = 0.0
-                    _embed_reset_done = False
-                    _data_task_total = 1
-                    # Timer for the write-data bar's chunks/s speed (set on the
-                    # first write-data callback, so elapsed measures actual writing).
-                    _data_start = 0.0
-                    _data_reset_done = False
-                    _diff_start = 0.0
-                    _diff_reset_done = False
-                    _parse_reset_done = False
 
                     # Pre-create all write sub-phase bars (no need for a
                     # separate "prepare" bar — prepare is sub-second).
                     # start=False — clocks are restarted via reset(start=True)
                     # when each phase actually begins.
-                    _data_task: TaskID = _pr.add_task(
+                    _data_task: TaskID = self.progress.add_task(
                         "  └─ Writing data", total=1, speed="", info="", start=False
                     )
-                    _index_task: TaskID = _pr.add_task(
+                    _index_task: TaskID = self.progress.add_task(
                         "  └─ Building indexes", total=1, speed="", info="", start=False
                     )
-                    _compact_task: TaskID = _pr.add_task(
+                    _compact_task: TaskID = self.progress.add_task(
                         "  └─ Compacting", total=1, speed="", info="", start=False
                     )
-                    # Captured now (before self._db.disconnect() below) so the
-                    # compaction phase handlers can stat the file for a
-                    # before/after size comparison without touching self._db.
+                    # Captured now (before self._db.release_for_rust_pipeline()
+                    # below) so the compaction phase handlers can stat the
+                    # file for a before/after size comparison without
+                    # touching self._db.
                     _compact_db_file = str(self._db.db_path)
-                    _compact_info: str | None = None
 
-                    def _progress_cb(
-                        phase: str, current: int, total: int, chunks: int = 0
-                    ) -> None:
-                        # `chunks` is the cumulative chunk count, sent only by the
-                        # write-data phase (4-arg call); other phases use 3 args and
-                        # leave it at 0.
-                        nonlocal \
-                            _embed_start, \
-                            _embed_reset_done, \
-                            _data_task_total, \
-                            _data_start, \
-                            _data_reset_done, \
-                            _diff_start, \
-                            _diff_reset_done, \
-                            _diff_elapsed, \
-                            _parse_reset_done, \
-                            _compact_ran, \
-                            _compact_size_before, \
-                            _compact_size_after, \
-                            _compact_reduction_pct, \
-                            _compact_info
-                        if phase == "diff":
-                            if _diff_task is not None:
-                                # First-call-based reset, mirroring the embed
-                                # phase above: current may already be > 0 on
-                                # the first callback.
-                                if not _diff_reset_done:
-                                    _pr.reset(_diff_task, total=max(total, 1),
-                                              start=True)
-                                    _diff_start = time.time()
-                                    _diff_reset_done = True
-                                _pr.update(
-                                    _diff_task,
-                                    completed=current,
-                                    total=max(total, 1),
-                                    info=f"{current}/{total} checked",
-                                )
-                                if current >= total:
-                                    _diff_elapsed = time.time() - _diff_start
-                                    _pr.update(_diff_task, info="done")
-                        elif phase == "parse":
-                            # First-call-based reset: _pt's clock started
-                            # ticking at add_task() time, before the diff
-                            # phase even ran, so its raw elapsed would
-                            # understate the parse-phase rate.
-                            if not _parse_reset_done:
-                                _pr.reset(_pt, total=max(total, 1), start=True)
-                                _parse_reset_done = True
-                            _pr.update(_pt, completed=current,
-                                       info=f"{current}/{total} parsed")
-                            _update_speed_field(_pr, _pt, "files/min")
-                        elif phase == "embed":
-                            if _embed_task is not None:
-                                # First-call-based reset (not current==0-based):
-                                # the streaming pipeline reports a live,
-                                # per-batch-refined total, so its first call
-                                # may already have current > 0.
-                                if not _embed_reset_done:
-                                    _pr.reset(_embed_task, total=max(total, 1),
-                                              start=True)
-                                    _embed_start = time.time()
-                                    _embed_reset_done = True
-                                elapsed = time.time() - _embed_start
-                                # Require a minimum sample window before
-                                # trusting the division — a near-zero
-                                # elapsed (e.g. right at the reset above)
-                                # against an already-nonzero current would
-                                # otherwise produce a nonsensical speed.
-                                speed = current / elapsed if elapsed > 0.05 else 0
-                                _pr.update(
-                                    _embed_task,
-                                    completed=current,
-                                    total=max(total, 1),
-                                    speed=f"{speed:.1f} chunks/s",
-                                    info=f"{current}/{total} embedded",
-                                )
-                        elif phase == "write":
-                            # Backward compat: old Rust extensions emit one
-                            # "write" callback with no sub-phase breakdown.
-                            _pr.reset(_data_task, start=True)
-                            _pr.update(_data_task, completed=1, info="done")
-                            if _index_task is not None:
-                                _pr.reset(_index_task, start=True)
-                                _pr.update(_index_task, completed=1, info="done")
-                            if _compact_task is not None:
-                                _pr.reset(_compact_task, start=True)
-                                _pr.update(_compact_task, completed=1, info="done")
-                        elif phase == "write-prepare":
-                            # Python's DuckDB connection is already closed by
-                            # now (disconnected before run_rust_pipeline() was
-                            # even called, above) — this is purely a progress
-                            # bar update. Prepare is sub-second (create
-                            # tables); roll it into the write-data bar as an
-                            # opening tick.
-                            _data_task_total = max(total, 1)
-                            _pr.reset(_data_task, total=_data_task_total, start=True)
-                            _pr.update(_data_task, info="preparing...")
-                        elif phase == "write-data":
-                            # Batch-keyed in the streaming pipeline (total >
-                            # 1 — the exact, upfront-known batch count);
-                            # single-shot in the sequential path (total == 1).
-                            if total > 1:
-                                # Speed = true throughput in chunks/s (not
-                                # cumulative batches/min, which decays from the hot
-                                # start and sags as files get heavier). Mirrors the
-                                # embed bar. `chunks` is cumulative; timer starts on
-                                # the first write-data callback.
-                                if not _data_reset_done:
-                                    _data_start = time.time()
-                                    _data_reset_done = True
-                                _elapsed = time.time() - _data_start
-                                _cps = chunks / _elapsed if _elapsed > 0.05 else 0
-                                _pr.update(
-                                    _data_task,
-                                    completed=current,
-                                    speed=f"{_cps:.1f} chunks/s",
-                                    info=f"{current}/{total} batches written",
-                                )
-                            else:
-                                _pr.update(_data_task, info="writing...")
-                        elif phase == "write-index":
-                            # Data write done; compaction wasn't needed —
-                            # build the HNSW index directly. The compact bar
-                            # never runs on this path — resolve it to "not
-                            # needed" right away (reset+finish together) so
-                            # it doesn't sit unstarted and then get stamped
-                            # "done" by write-done/done below, which used to
-                            # render as a started-but-never-ticked zombie bar
-                            # (elapsed stuck at "-:--:--" with a live spinner).
-                            _pr.update(
-                                _data_task,
-                                completed=_data_task_total,
-                                info="done",
-                            )
-                            _pr.reset(_index_task, start=True)
-                            _pr.update(_index_task, info="building...")
-                            _pr.reset(_compact_task, start=True)
-                            _pr.update(_compact_task, completed=1, info="not needed")
-                            _compact_info = "not needed"
-                        elif phase == "write-compact":
-                            # Data write done; compaction is needed.
-                            # Compaction rebuilds the HNSW index as part of
-                            # its own EXPORT/IMPORT rewrite, so "write-index"
-                            # never fires in this path — the index bar never
-                            # runs on its own here. Resolve it immediately
-                            # (mirrors the write-index branch above) instead
-                            # of leaving it unstarted for write-done/done to
-                            # stamp "done" on top of a zombie bar.
-                            _pr.update(
-                                _data_task,
-                                completed=_data_task_total,
-                                info="done",
-                            )
-                            _pr.reset(_index_task, start=True)
-                            _pr.update(
-                                _index_task, completed=1, info="included in compaction"
-                            )
-                            _pr.reset(_compact_task, start=True)
-                            _pr.update(
-                                _compact_task, info="compacting (includes index rebuild)..."
-                            )
-                            _compact_ran = True
-                            # write-compact firing at all already means the
-                            # Rust backend decided real compaction is needed
-                            # (backend.needs_compaction() == True) — that
-                            # decision doesn't depend on whether any files
-                            # were reparsed this run, so always snapshot the
-                            # pre-compaction size.
-                            try:
-                                _compact_size_before = os.path.getsize(
-                                    _compact_db_file
-                                )
-                            except OSError:
-                                _compact_size_before = None
-                        elif phase == "write-done":
-                            # Final wrap-up. _index_task and _compact_task
-                            # were already resolved above by whichever of
-                            # write-index/write-compact actually fired; only
-                            # the compact bar's final size/ratio text (when
-                            # compaction ran) still needs filling in here,
-                            # once compaction has actually completed.
-                            _pr.update(
-                                _data_task,
-                                completed=_data_task_total,
-                                info="done",
-                            )
-                            if _compact_ran:
-                                if _compact_size_before is not None:
-                                    try:
-                                        _compact_size_after = os.path.getsize(
-                                            _compact_db_file
-                                        )
-                                        pct = (
-                                            (_compact_size_before - _compact_size_after)
-                                            / _compact_size_before
-                                            * 100
-                                            if _compact_size_before
-                                            else 0.0
-                                        )
-                                        direction = "smaller" if pct >= 0 else "larger"
-                                        _compact_info = (
-                                            f"{_format_bytes(_compact_size_before)} → "
-                                            f"{_format_bytes(_compact_size_after)} "
-                                            f"({abs(pct):.0f}% {direction})"
-                                        )
-                                        _compact_reduction_pct = pct
-                                    except OSError:
-                                        _compact_info = "done"
-                                else:
-                                    _compact_info = "done"
-                                _pr.update(
-                                    _compact_task, completed=1, info=_compact_info
-                                )
-                            else:
-                                # write-index path: the compact bar was
-                                # already resolved to "not needed" above;
-                                # only the index bar (still running since
-                                # write-index started it) needs finishing.
-                                _pr.update(_index_task, completed=1, info="done")
-                        elif phase == "done":
-                            # Ensure the write bars are at 100%. The parse and
-                            # embed bars don't need re-finalizing here — both
-                            # phases always receive an exact final
-                            # (total, total) call of their own before "done"
-                            # fires, in both the sequential and streaming
-                            # pipeline paths. (A previous version of this
-                            # handler re-synced them via `_pr.tasks[task_id]`,
-                            # which is a list indexed by position, not a
-                            # mapping keyed by TaskID — since `store_task` is
-                            # removed above, that indexing silently read the
-                            # wrong task's `.total` for any task created after
-                            # the removal.) _index_task/_compact_task are
-                            # already resolved by write-index/write-compact/
-                            # write-done above — only re-sync _data_task here.
-                            _pr.update(
-                                _data_task,
-                                completed=_data_task_total,
-                                info="done",
-                            )
-                else:
-                    _progress_cb = None
+                    _progress_bridge = _RustProgressBridge(
+                        progress=self.progress,
+                        parse_task=_pt,
+                        data_task=_data_task,
+                        index_task=_index_task,
+                        compact_task=_compact_task,
+                        diff_task=_diff_task,
+                        embed_task=_embed_task,
+                        compact_db_file=_compact_db_file,
+                    )
+                _progress_cb = _progress_bridge
 
                 # Close Python-side DuckDB BEFORE the Rust pipeline starts.
                 #
@@ -2061,6 +2076,13 @@ class IndexingCoordinator(BaseService):
                     # process's life.
                     if released_for_rust and self._db is not None:
                         self._db.connect()
+
+                if _progress_bridge is not None:
+                    _diff_elapsed = _progress_bridge.diff_elapsed
+                    _compact_ran = _progress_bridge.compact_ran
+                    _compact_size_before = _progress_bridge.compact_size_before
+                    _compact_size_after = _progress_bridge.compact_size_after
+                    _compact_reduction_pct = _progress_bridge.compact_reduction_pct
 
                 agg_total_files = int(rust_stats.get("total_files", 0))
                 agg_total_chunks = int(rust_stats.get("total_chunks", 0))
