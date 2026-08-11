@@ -343,14 +343,15 @@ impl IndexingPipeline {
 
         let db_entries: Vec<DbFileEntry> = duckdb_backend::read_file_states(&db_file)?;
 
-        // DuckDB stores to_timestamp(epoch) using local time, so EXTRACT(EPOCH)
-        // returns a value shifted by the timezone offset.  Compute the median
-        // offset (db_mtime - disk_mtime) and normalize.
+        // Read mtime AND size in a single pass so that compute_diff (which
+        // needs mtime for change detection) and parse_one_batch (which needs
+        // mtime + size for ParsedFile) can both reuse these values instead of
+        // calling stat() again — collapsing two stat passes into one.
         //
-        // We read both mtime AND size in this single pass so that compute_diff
-        // (which needs mtime for change detection) and parse_one_batch (which
-        // needs mtime + size for ParsedFile) can both reuse these values
-        // instead of calling stat() again — collapsing three stat passes into one.
+        // `db_entries`' mtime already reverses the write-side local-timezone
+        // cast (see `FILE_STATE_SELECT` in duckdb_backend.rs), so it's
+        // directly comparable to these on-disk values with no further
+        // normalization needed.
         let precomputed_stats: std::collections::HashMap<std::path::PathBuf, (u64, f64)> = files
             .iter()
             .filter_map(|p| {
@@ -365,45 +366,8 @@ impl IndexingPipeline {
             })
             .collect();
 
-        // Build a relative-path -> on-disk-file lookup once, so matching each
-        // db_entries row is O(1) instead of an O(files) linear scan (this loop
-        // runs on every incremental index, so an O(db_entries * files) scan
-        // scales quadratically on large repos).
-        let rel_key_to_path: std::collections::HashMap<String, &std::path::PathBuf> = files
-            .iter()
-            .filter_map(|fp| to_relative_key(fp, &self.config.project_root).map(|rel| (rel, fp)))
-            .collect();
-
-        let mut offsets: Vec<f64> = Vec::new();
-        for e in &db_entries {
-            // Find the matching on-disk file by relative path and read its mtime
-            // from the precomputed map (no extra stat call needed).
-            if let Some(&fp) = rel_key_to_path.get(&e.path) {
-                if let Some(&(_, dm)) = precomputed_stats.get(fp) {
-                    offsets.push(e.mtime - dm);
-                }
-            }
-        }
-
-        offsets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let tz_offset = if offsets.len() >= 2 {
-            offsets[offsets.len() / 2]
-        } else {
-            offsets.first().copied().unwrap_or(0.0)
-        };
-
-        let normalized: Vec<DbFileEntry> = db_entries
-            .iter()
-            .map(|e| DbFileEntry {
-                id: e.id,
-                path: e.path.clone(),
-                mtime: e.mtime - tz_offset,
-                content_hash: e.content_hash.clone(),
-            })
-            .collect();
-
         let result = super::differ::compute_diff(
-            &normalized,
+            &db_entries,
             files,
             &self.config.project_root,
             self.config.mtime_epsilon_seconds,

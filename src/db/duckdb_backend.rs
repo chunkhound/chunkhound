@@ -1437,8 +1437,18 @@ pub(crate) fn check_disk_usage_limit(db_path: &Path, limit_mb: Option<f64>) -> O
 /// Columns read by the pipeline's diff phase (`pipeline::differ::compute_diff`).
 /// Keep in sync with `DuckDbHnswBackend::FILES_COLUMNS_DDL` above — if
 /// `modified_time` or `content_hash` are renamed there, update this too.
+///
+/// `modified_time` is written via `to_timestamp(?)` (an epoch -> TIMESTAMPTZ
+/// conversion), which DuckDB then implicitly casts down into this naive
+/// TIMESTAMP column using the session's local timezone — so the stored wall-
+/// clock digits already have a local-time shift baked in. Casting back to
+/// TIMESTAMPTZ before extracting the epoch reverses that same shift (assuming
+/// the session timezone hasn't changed between write and read), matching what
+/// Python's `datetime.timestamp()` does when it reads the same naive value
+/// back via the driver. Extracting the epoch directly from the naive column
+/// would skip that reversal and return a value off by the full UTC offset.
 const FILE_STATE_SELECT: &str =
-    "SELECT id, path, EXTRACT(EPOCH FROM modified_time), content_hash FROM files";
+    "SELECT id, path, EXTRACT(EPOCH FROM modified_time::TIMESTAMPTZ), content_hash FROM files";
 
 /// Snapshot every row of the `files` table for the diff phase. Returns an
 /// empty Vec if `db_file` doesn't exist yet (fresh index — every file is new).
@@ -1460,6 +1470,74 @@ pub(crate) fn read_file_states(db_file: &Path) -> Result<Vec<DbFileEntry>, DbErr
         .filter_map(|r| r.ok())
         .collect();
     Ok(rows)
+}
+
+#[cfg(test)]
+mod file_state_roundtrip_tests {
+    use super::*;
+
+    #[test]
+    fn mtime_roundtrip_is_timezone_symmetric() {
+        // Regression test: the diff phase's read of `modified_time`
+        // (FILE_STATE_SELECT) must reverse whatever local-timezone cast
+        // `to_timestamp(?)` applied at write time, or every stored mtime
+        // comes back shifted by the local UTC offset — pushing nearly every
+        // file outside mtime_epsilon and forcing a full content-hash
+        // re-verification (or reprocessing) of files that never changed.
+        //
+        // Rather than mutating the process's TZ (this crate forbids unsafe
+        // code, and `std::env::set_var` requires it), set DuckDB's session
+        // TimeZone explicitly and identically on both the write and read
+        // connections — exactly what two connections opened by the same
+        // process on the same non-UTC machine would see by default, and
+        // deterministic regardless of the host running this test.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db");
+
+        let original_mtime = 1_735_689_600.123_456_f64; // arbitrary UTC epoch
+        {
+            let conn = Connection::open(&db_path).expect("open for write");
+            conn.execute_batch("SET TimeZone = 'America/New_York';")
+                .expect("set tz");
+            conn.execute_batch(
+                "CREATE TABLE files (id BIGINT, path TEXT, modified_time TIMESTAMP, \
+                 content_hash TEXT)",
+            )
+            .expect("create table");
+            conn.execute(
+                "INSERT INTO files VALUES (1, 'a.py', to_timestamp(?), 'abc')",
+                [original_mtime],
+            )
+            .expect("insert");
+        }
+
+        let entries = {
+            let conn = Connection::open(&db_path).expect("open for read");
+            conn.execute_batch("SET TimeZone = 'America/New_York';")
+                .expect("set tz");
+            let mut stmt = conn.prepare(FILE_STATE_SELECT).expect("prepare");
+            stmt.query_map([], |row| {
+                Ok(DbFileEntry {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    mtime: row.get(2)?,
+                    content_hash: row.get(3)?,
+                })
+            })
+            .expect("query")
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>()
+        };
+
+        assert_eq!(entries.len(), 1);
+        assert!(
+            (entries[0].mtime - original_mtime).abs() < 0.001,
+            "read-back mtime {} must match the written mtime {} (within float \
+             precision) even under a non-UTC session timezone",
+            entries[0].mtime,
+            original_mtime
+        );
+    }
 }
 
 #[cfg(test)]

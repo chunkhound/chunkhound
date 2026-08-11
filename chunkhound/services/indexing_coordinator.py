@@ -1629,8 +1629,21 @@ class IndexingCoordinator(BaseService):
             parse_task: TaskID | None = None
             store_task: TaskID | None = None
             if self.progress:
+                # For the Rust pipeline, `files_to_process` is the full
+                # discovered-file list (line 1453) — Rust's own diff phase
+                # narrows it down internally, and the first "parse" callback
+                # below resets this bar's total to the real changed-file
+                # count. Seeding it with the full count here would show a
+                # misleadingly large total (e.g. "0/65000") until that reset
+                # fires. Start with a placeholder instead, matching the other
+                # Rust-phase bars (diff/embed/etc.) below, which all defer
+                # their real total to a reset() once Rust reports it.
                 parse_task = self.progress.add_task(
-                    "  └─ Parsing files", total=len(files_to_process), speed="", info=""
+                    "  └─ Parsing files",
+                    total=1 if _use_rust else len(files_to_process),
+                    speed="",
+                    info="",
+                    start=not _use_rust,
                 )
                 store_task = self.progress.add_task(
                     "  └─ Handling files",
