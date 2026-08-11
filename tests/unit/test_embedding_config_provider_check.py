@@ -460,6 +460,113 @@ async def test_openai_provider_connection_pool_scales_with_configured_concurrenc
 
 
 @pytest.mark.asyncio
+async def test_azure_openai_provider_connection_pool_defaults_to_ten(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The Azure client path must also bound its pool, not just the standard one.
+
+    Regression test: _ensure_azure_client() used to build AsyncAzureOpenAI
+    with no http_client= at all, silently falling back to the openai SDK's
+    own internal httpx defaults — reintroducing the FD-exhaustion risk the
+    standard client's pool-sizing fix was meant to close, for every
+    Azure-backed Rust embed thread.
+    """
+
+    captured: dict[str, object] = {}
+    limits_calls: dict[str, object] = {}
+
+    class _FakeAsyncAzureOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeHTTPClient:
+        async def aclose(self) -> None:
+            return None
+
+    def _fake_async_client(**kwargs):
+        limits_calls["limits"] = kwargs["limits"]
+        return _FakeHTTPClient()
+
+    monkeypatch.setattr(openai_provider_module, "OPENAI_AVAILABLE", True)
+    monkeypatch.setattr(
+        openai_provider_module,
+        "openai",
+        SimpleNamespace(
+            AsyncOpenAI=_FakeAsyncAzureOpenAI, AsyncAzureOpenAI=_FakeAsyncAzureOpenAI
+        ),
+    )
+    monkeypatch.setattr(openai_provider_module.httpx, "AsyncClient", _fake_async_client)
+
+    provider = OpenAIEmbeddingProvider(
+        api_key="sk-test",
+        azure_endpoint="https://foo.openai.azure.com",
+        api_version="2024-02-01",
+    )
+    await provider._ensure_client()
+
+    assert "http_client" in captured, (
+        "AsyncAzureOpenAI must receive a pool-bounded http_client, not fall "
+        "back to the SDK's own internal httpx defaults"
+    )
+    limits = limits_calls["limits"]
+    assert limits.max_connections == 10
+    assert limits.max_keepalive_connections == 5
+
+
+@pytest.mark.asyncio
+async def test_azure_openai_provider_connection_pool_scales_with_configured_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A high explicit max_concurrent_batches must not be silently throttled
+    on the Azure client path either — mirrors the standard-client regression
+    test above."""
+
+    captured: dict[str, object] = {}
+    limits_calls: dict[str, object] = {}
+
+    class _FakeAsyncAzureOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeHTTPClient:
+        async def aclose(self) -> None:
+            return None
+
+    def _fake_async_client(**kwargs):
+        limits_calls["limits"] = kwargs["limits"]
+        return _FakeHTTPClient()
+
+    monkeypatch.setattr(openai_provider_module, "OPENAI_AVAILABLE", True)
+    monkeypatch.setattr(
+        openai_provider_module,
+        "openai",
+        SimpleNamespace(
+            AsyncOpenAI=_FakeAsyncAzureOpenAI, AsyncAzureOpenAI=_FakeAsyncAzureOpenAI
+        ),
+    )
+    monkeypatch.setattr(openai_provider_module.httpx, "AsyncClient", _fake_async_client)
+
+    provider = OpenAIEmbeddingProvider(
+        api_key="sk-test",
+        azure_endpoint="https://foo.openai.azure.com",
+        api_version="2024-02-01",
+        max_concurrent_batches=50,
+    )
+    await provider._ensure_client()
+
+    assert "http_client" in captured
+    limits = limits_calls["limits"]
+    assert limits.max_connections >= 50
+    assert limits.max_keepalive_connections >= 5
+
+
+@pytest.mark.asyncio
 async def test_openai_rerank_ssl_override_applies_without_embedding_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ):

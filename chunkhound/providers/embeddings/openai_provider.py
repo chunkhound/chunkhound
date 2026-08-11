@@ -469,6 +469,33 @@ class OpenAIEmbeddingProvider:
         # Store rerank config separately for get_max_rerank_batch_size()
         self._qwen_rerank_config = qwen_rerank_config
 
+    @staticmethod
+    def _connection_limits(max_concurrent_batches: int | None) -> httpx.Limits:
+        """Bound the HTTP connection pool from configured concurrency.
+
+        Shared by the standard and Azure client paths — each Rust embed
+        thread gets its own provider instance (max_concurrent_batches=1
+        override, see pipeline_bridge.py), so an unbounded default pool per
+        instance risks FD exhaustion across N threads each holding onto idle
+        sockets with no explicit close() call.
+
+        A single shared instance can still serve genuinely concurrent
+        requests, though: EmbeddingService gates concurrent embed_batch()
+        calls on one provider instance with an
+        asyncio.Semaphore(max_concurrent_batches) (see
+        services/embedding_service.py), and max_concurrent_batches is
+        user-configurable with no upper bound. Size the pool to cover that
+        real concurrency instead of a flat cap, so a high explicit
+        concurrency setting doesn't get silently serialized down to 10.
+        """
+        requested_concurrency = max_concurrent_batches or 0
+        max_connections = max(10, requested_concurrency)
+        max_keepalive_connections = max(5, min(max_connections, requested_concurrency))
+        return httpx.Limits(
+            max_connections=max_connections,
+            max_keepalive_connections=max_keepalive_connections,
+        )
+
     async def _ensure_client(self) -> None:
         """Ensure the OpenAI client is initialized (must be called from async context)."""
         if self._client is not None and self._client_initialized:
@@ -518,25 +545,10 @@ class OpenAIEmbeddingProvider:
         # instances (e.g. one per Rust embed thread, see
         # pipeline_bridge.py:_embed_batch) each holding onto idle sockets for
         # their lifetime with no explicit close() call.
-        #
-        # A single shared instance can still serve genuinely concurrent
-        # requests, though: EmbeddingService gates concurrent embed_batch()
-        # calls on one provider instance with an
-        # asyncio.Semaphore(max_concurrent_batches) (see
-        # services/embedding_service.py), and max_concurrent_batches is
-        # user-configurable with no upper bound. Size the pool to cover that
-        # real concurrency instead of a flat cap, so a high explicit
-        # concurrency setting doesn't get silently serialized down to 10.
-        requested_concurrency = self._max_concurrent_batches or 0
-        max_connections = max(10, requested_concurrency)
-        max_keepalive_connections = max(5, min(max_connections, requested_concurrency))
         client_kwargs["http_client"] = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout=self._timeout),
             verify=verify_tls,
-            limits=httpx.Limits(
-                max_connections=max_connections,
-                max_keepalive_connections=max_keepalive_connections,
-            ),
+            limits=self._connection_limits(self._max_concurrent_batches),
         )
 
         # IMPORTANT: Create the client in async context to avoid TaskGroup errors on Ubuntu
@@ -565,12 +577,22 @@ class OpenAIEmbeddingProvider:
             f"api_version={self._api_version}, deployment={self._azure_deployment}"
         )
 
-        # AzureOpenAI client has different constructor parameters
+        # AzureOpenAI client has different constructor parameters. No
+        # verify= override here (unlike _ensure_client): ssl_verify only
+        # applies to custom/self-hosted base_urls, and validate_azure_config()
+        # already enforces azure_endpoint/base_url mutual exclusivity, so
+        # httpx's own default (verify=True) is correct for a real Azure
+        # endpoint. http_client bounds the connection pool for the same
+        # FD-exhaustion reason _ensure_client does — see _connection_limits.
         self._client = openai.AsyncAzureOpenAI(
             api_key=self._api_key,
             api_version=self._api_version,
             azure_endpoint=self._azure_endpoint,
             timeout=self._timeout,
+            http_client=httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout=self._timeout),
+                limits=self._connection_limits(self._max_concurrent_batches),
+            ),
         )
         self._client_initialized = True
 
