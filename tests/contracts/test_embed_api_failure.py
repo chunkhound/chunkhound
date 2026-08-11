@@ -48,7 +48,7 @@ class TestEmbedApiFailure:
             db_dir.mkdir(parents=True, exist_ok=True)
 
             files = sorted(FIXTURE_DIR.resolve().glob("*"))
-            file_paths = [str(f) for f in files if f.is_file()]
+            file_entries = [(str(f), f.name) for f in files if f.is_file()]
 
             pipeline = IndexingPipeline(
                 default_rust_config(
@@ -63,7 +63,7 @@ class TestEmbedApiFailure:
             # Must not raise — the failure is caught per-batch inside
             # embed_batch_parallel, not propagated to the caller.
             report = pipeline.run(
-                files=file_paths,
+                files=file_entries,
                 parse_batch_callback=parse_batch_callback,
                 embed_batch_callback=failing_embed,
                 progress_callback=None,
@@ -114,7 +114,7 @@ class TestEmbedShortResponse:
             db_dir.mkdir(parents=True, exist_ok=True)
 
             files = sorted(FIXTURE_DIR.resolve().glob("*"))
-            file_paths = [str(f) for f in files if f.is_file()]
+            file_entries = [(str(f), f.name) for f in files if f.is_file()]
 
             pipeline = IndexingPipeline(
                 default_rust_config(
@@ -127,7 +127,7 @@ class TestEmbedShortResponse:
             )
 
             report = pipeline.run(
-                files=file_paths,
+                files=file_entries,
                 parse_batch_callback=parse_batch_callback,
                 embed_batch_callback=short_embed,
                 progress_callback=None,

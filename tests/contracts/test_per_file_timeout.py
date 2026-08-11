@@ -72,7 +72,7 @@ class TestParseCallConfigWiring:
 
         pipeline = IndexingPipeline(config_dict)
         pipeline.run(
-            files=[str(good_file)],
+            files=[(str(good_file), "good.py")],
             parse_batch_callback=capturing_batch_callback,
             embed_batch_callback=None,
             progress_callback=None,

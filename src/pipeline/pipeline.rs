@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::config::PipelineConfig;
-use super::differ::{to_relative_key, DiffResult};
+use super::differ::DiffResult;
 use super::report::PipelineReport;
 
 use crate::db::{check_disk_usage_limit, create_backend, duckdb_backend, DbBackend, DbConfig};
@@ -109,7 +109,14 @@ impl IndexingPipeline {
     fn run(
         &mut self,
         py: Python<'_>,
-        files: Vec<String>,
+        // (absolute_path, relative_key) pairs. relative_key is computed once
+        // by Python's get_relative_path_safe() — the single symlink-aware
+        // source of truth (git-worktree support: a symlink's logical path is
+        // preserved even when its target resolves outside project_root) —
+        // instead of being re-derived here via a naive strip_prefix, which
+        // previously diverged from Python's DB-write path for symlinked
+        // files and could misclassify their DB rows as removed.
+        files: Vec<(String, String)>,
         parse_batch_callback: Py<PyAny>,
         embed_batch_callback: Option<Py<PyAny>>,
         progress_callback: Option<Py<PyAny>>,
@@ -134,7 +141,17 @@ impl IndexingPipeline {
         }
 
         let mut file_count = files.len() as u64;
-        let mut batch_paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+        let mut batch_paths: Vec<PathBuf> = files.iter().map(|(p, _)| PathBuf::from(p)).collect();
+        // Applies to every file for the whole run, independent of the diff's
+        // own verdict — built once here rather than routed through
+        // `DiffResult`, since `build_db_batch` needs it for files the diff
+        // never touches too (e.g. the "no DB yet" early-return path above
+        // doesn't apply, but a fresh DB with no prior rows still needs every
+        // file's relative key to write its first row).
+        let rel_keys: std::collections::HashMap<PathBuf, String> = files
+            .into_iter()
+            .map(|(p, rel)| (PathBuf::from(p), rel))
+            .collect();
 
         // ── Incremental diff (Phase 3) ─────────────────────────
         let delete_paths: Vec<String>;
@@ -153,7 +170,8 @@ impl IndexingPipeline {
         let disk_stats: std::collections::HashMap<PathBuf, (u64, f64)>;
         let mut files_skipped_by_hash = 0u64;
         if incremental {
-            let diff = self.compute_diff_blocking(py, &progress_callback, &batch_paths)?;
+            let diff =
+                self.compute_diff_blocking(py, &progress_callback, &batch_paths, &rel_keys)?;
             // Only process changed files
             batch_paths = diff.changed;
             // Respect do_cleanup flag: skip orphan deletion when cleanup is disabled.
@@ -173,7 +191,8 @@ impl IndexingPipeline {
             // remove orphaned DB rows (files deleted from disk since the last
             // run) — unless cleanup is disabled by config.
             if self.config.do_cleanup {
-                let diff = self.compute_diff_blocking(py, &progress_callback, &batch_paths)?;
+                let diff =
+                    self.compute_diff_blocking(py, &progress_callback, &batch_paths, &rel_keys)?;
                 delete_paths = diff.removed;
                 // compute_diff_blocking populates new_hashes/existing_ids/disk_stats
                 // for every scanned file it already had a DB row for — not just
@@ -270,6 +289,7 @@ impl IndexingPipeline {
                     new_hashes,
                     existing_ids,
                     disk_stats,
+                    rel_keys,
                 )
             })
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -315,6 +335,7 @@ impl IndexingPipeline {
         py: Python<'_>,
         progress_callback: &Option<Py<PyAny>>,
         files: &[PathBuf],
+        rel_keys: &std::collections::HashMap<PathBuf, String>,
     ) -> PyResult<DiffResult> {
         let total_files = files.len() as u64;
         emit_progress(py, progress_callback, "diff", 0, total_files);
@@ -369,7 +390,7 @@ impl IndexingPipeline {
         let result = super::differ::compute_diff(
             &db_entries,
             files,
-            &self.config.project_root,
+            rel_keys,
             self.config.mtime_epsilon_seconds,
             Some(&precomputed_stats),
             Some(&mut |current, total| {
@@ -434,6 +455,7 @@ impl IndexingPipeline {
         new_hashes: std::collections::HashMap<PathBuf, String>,
         existing_ids: std::collections::HashMap<PathBuf, i64>,
         disk_stats: std::collections::HashMap<PathBuf, (u64, f64)>,
+        rel_keys: std::collections::HashMap<PathBuf, String>,
     ) -> Result<StoreOutcome, String> {
         use std::sync::mpsc;
         use std::sync::{Arc, Mutex};
@@ -442,7 +464,6 @@ impl IndexingPipeline {
         let embed_thread_pool_size = self.config.embed_thread_pool_size;
         let embed_batch_size = self.config.embed_batch_size.max(1);
         let skip_embeddings = self.config.skip_embeddings;
-        let project_root = self.config.project_root.clone();
         let disk_usage_limit_mb = self.config.disk_usage_limit_mb;
         let provider = provider.to_string();
         let model = model.to_string();
@@ -513,6 +534,7 @@ impl IndexingPipeline {
                             &batch,
                             &new_hashes,
                             &disk_stats,
+                            &rel_keys,
                         )
                     }) {
                         Ok(parsed) => parsed,
@@ -935,12 +957,8 @@ impl IndexingPipeline {
                     // diff) to the first streamed batch only — deleting is
                     // idempotent, but there is no need to repeat it per batch.
                     let batch_delete_paths = pending_delete_paths.take().unwrap_or_default();
-                    let db_batch = Self::build_db_batch(
-                        &parsed_files,
-                        &project_root,
-                        batch_delete_paths,
-                        &existing_ids,
-                    );
+                    let db_batch =
+                        Self::build_db_batch(&parsed_files, batch_delete_paths, &existing_ids);
                     let t_send = Instant::now();
                     let sent = store_tx.send(db_batch);
                     embed_wait_store += t_send.elapsed().as_secs_f64();
@@ -1031,13 +1049,16 @@ impl IndexingPipeline {
         }
     }
 
-    /// Convert parsed files into a `DbWriterBatch`, resolving each file's
-    /// relative path against `project_root` (mirrors Python's
-    /// `_get_relative_path`). Shared by the single-shot write path and the
-    /// 3-stage streaming path, which calls this once per batch.
+    /// Convert parsed files into a `DbWriterBatch`. Each file's relative
+    /// path (`pf.rel_path`) was already computed by Python's
+    /// `get_relative_path_safe()` and carried through parsing on
+    /// `ParsedFile` — this function no longer re-derives it, which used to
+    /// diverge from Python's DB-write path for symlinked files (see
+    /// `differ::compute_diff`'s doc comment for the full history). Shared by
+    /// the single-shot write path and the 3-stage streaming path, which
+    /// calls this once per batch.
     fn build_db_batch(
         parsed: &[super::types::ParsedFile],
-        project_root: &Path,
         delete_paths: Vec<String>,
         existing_ids: &std::collections::HashMap<PathBuf, i64>,
     ) -> DbWriterBatch {
@@ -1070,25 +1091,9 @@ impl IndexingPipeline {
                 })
                 .collect();
 
-            let path_str = pf.path.to_string_lossy().into_owned();
-
-            // Store relative path (like Python _get_relative_path). Always
-            // `/`-normalized so this key matches to_relative_key's DB/lookup
-            // key on every OS (Windows renders `\` here otherwise).
-            let rel_path = if project_root.as_os_str().is_empty() {
-                path_str
-            } else if let Some(rel) = to_relative_key(&pf.path, project_root) {
-                rel
-            } else {
-                pf.path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path_str.clone())
-            };
-
             file_records.push(FileRecord {
                 existing_file_id: existing_ids.get(&pf.path).copied(),
-                path: rel_path,
+                path: pf.rel_path.clone(),
                 mtime: Some(pf.mtime),
                 size_bytes: Some(pf.file_size as i64),
                 content_hash: if pf.content_hash.is_empty() {
@@ -1108,6 +1113,13 @@ impl IndexingPipeline {
     }
 
     /// Call the Python batch callback and extract ParsedFile results.
+    // `rel_keys` pushed this to 8 args — each is a distinct read-only lookup
+    // map produced once by the diff phase (new_hashes/disk_stats/rel_keys)
+    // or a borrowed callback/path slice; bundling them into a struct would
+    // just move the same fields behind one more layer without reducing what
+    // this function actually needs, matching the same tradeoff already made
+    // for `pipeline_parse_embed_store` and `embed_batch_parallel` below.
+    #[allow(clippy::too_many_arguments)]
     fn parse_one_batch(
         py: Python<'_>,
         cb: &Py<PyAny>,
@@ -1116,6 +1128,7 @@ impl IndexingPipeline {
         batch: &[PathBuf],
         new_hashes: &std::collections::HashMap<PathBuf, String>,
         disk_stats: &std::collections::HashMap<PathBuf, (u64, f64)>,
+        rel_keys: &std::collections::HashMap<PathBuf, String>,
     ) -> Result<Vec<super::types::ParsedFile>, String> {
         let cb = cb.bind(py);
         let py_paths = PyList::new_bound(py, paths);
@@ -1158,6 +1171,7 @@ impl IndexingPipeline {
             if let Some(err) = py_error {
                 parsed.push(super::types::ParsedFile {
                     path: path.clone(),
+                    rel_path: rel_keys.get(path).cloned().unwrap_or_default(),
                     language: None,
                     file_size: 0,
                     mtime: 0.0,
@@ -1177,6 +1191,7 @@ impl IndexingPipeline {
                 None => {
                     parsed.push(super::types::ParsedFile {
                         path: path.clone(),
+                        rel_path: rel_keys.get(path).cloned().unwrap_or_default(),
                         language: None,
                         file_size: 0,
                         mtime: 0.0,
@@ -1207,6 +1222,7 @@ impl IndexingPipeline {
 
             parsed.push(super::types::ParsedFile {
                 path: path.clone(),
+                rel_path: rel_keys.get(path).cloned().unwrap_or_default(),
                 language: if lang.is_empty() { None } else { Some(lang) },
                 file_size,
                 mtime,

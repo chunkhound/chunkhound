@@ -12,6 +12,7 @@ from typing import Any
 import duckdb
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.registry import configure_registry, create_indexing_coordinator
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 
@@ -267,7 +268,6 @@ def index_with_rust(
     db_dir.mkdir(parents=True, exist_ok=True)
 
     config_dict = {
-        "project_root": str(fixture_dir.resolve()),
         "db_path": str(db_dir.resolve()),
         "db_batch_size": 100,
         "compaction_threshold": compaction_threshold,
@@ -290,13 +290,25 @@ def index_with_rust(
 
     pipeline = IndexingPipeline(config_dict)
 
-    files = sorted(fixture_dir.resolve().glob("*"))
-    file_paths = [str(f) for f in files if f.is_file()]
+    resolved_fixture_dir = fixture_dir.resolve()
+    files = sorted(resolved_fixture_dir.glob("*"))
+    # (absolute_path, relative_key) pairs — relative_key computed via the same
+    # production helper Rust now relies on (get_relative_path_safe), so this
+    # harness exercises the real symlink-aware path-keying contract rather
+    # than a simplified stand-in. Base dir must match what `files` was
+    # globbed from (the already-resolved fixture dir), or a symlinked leaf
+    # entry's is_symlink() branch (which keeps both sides unresolved as-is)
+    # would compare against a differently-spelled base and fail to relativize.
+    file_entries = [
+        (str(f), get_relative_path_safe(f, resolved_fixture_dir).as_posix())
+        for f in files
+        if f.is_file()
+    ]
 
     from chunkhound.pipeline_bridge import parse_batch_callback
 
     report = pipeline.run(
-        files=file_paths,
+        files=file_entries,
         parse_batch_callback=parse_batch_callback,
         embed_batch_callback=embed_texts if not skip_embeddings else None,
         progress_callback=progress_callback,
@@ -403,7 +415,6 @@ def default_rust_config(
     differed between two files with no test-specific reason).
     """
     config: dict[str, Any] = {
-        "project_root": str(project_root.resolve()),
         "db_path": str(db_dir.resolve()),
         "db_batch_size": 100,
         "compaction_threshold": 0.60,

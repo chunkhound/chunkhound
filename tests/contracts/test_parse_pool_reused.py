@@ -92,8 +92,8 @@ class TestParsePoolReused:
         from chunkhound.pipeline_bridge import parse_batch_callback
 
         files = sorted(f for f in FIXTURE_DIR.glob("*") if f.is_file())
-        file_paths = [str(f) for f in files]
-        assert len(file_paths) >= 3, (
+        file_entries = [(str(f), f.name) for f in files]
+        assert len(file_entries) >= 3, (
             "fixture must have enough files to force multiple batches"
         )
 
@@ -103,7 +103,7 @@ class TestParsePoolReused:
             default_rust_config(FIXTURE_DIR, db_single_batch, parse_batch_size=200)
         )
         report_single = pipeline_single.run(
-            files=file_paths,
+            files=file_entries,
             parse_batch_callback=parse_batch_callback,
             embed_batch_callback=None,
             progress_callback=None,
@@ -116,7 +116,7 @@ class TestParsePoolReused:
             default_rust_config(FIXTURE_DIR, db_many_batches, parse_batch_size=2)
         )
         report_many = pipeline_many.run(
-            files=file_paths,
+            files=file_entries,
             parse_batch_callback=parse_batch_callback,
             embed_batch_callback=None,
             progress_callback=None,

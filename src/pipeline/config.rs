@@ -31,9 +31,6 @@ fn extract_or<'py, T: FromPyObject<'py>>(
 /// Parsing-tuning flags pass through to the parse callback unchanged.
 #[derive(Debug, Clone)]
 pub(crate) struct PipelineConfig {
-    // Project root (for relative path computation, like Python's _get_relative_path).
-    pub project_root: PathBuf,
-
     // Storage
     pub db_path: PathBuf,
     pub db_batch_size: usize,
@@ -71,7 +68,6 @@ impl PipelineConfig {
     /// Extract configuration from a Python dict.
     pub fn from_py_dict(dict: &Bound<'_, PyDict>) -> PyResult<Self> {
         Ok(Self {
-            project_root: extract_or(dict, "project_root", String::new())?.into(),
             db_path: extract_or(dict, "db_path", String::new())?.into(),
             db_batch_size: extract_or(dict, "db_batch_size", 100u64)? as usize,
             compaction_threshold: extract_or(dict, "compaction_threshold", 0.30)?,

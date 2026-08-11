@@ -39,6 +39,8 @@ these two boundaries instead is deterministic regardless of test order or
 which multiprocessing start method is active.
 """
 
+from pathlib import Path
+
 import pytest
 
 from tests.contracts.pipeline_harness import collect_table_counts, default_rust_config
@@ -87,12 +89,13 @@ class TestParseErrorPerFile:
         db_dir.mkdir(parents=True, exist_ok=True)
 
         file_paths = [str(good_a), str(good_b), str(bad_file)]
+        file_entries = [(p, Path(p).name) for p in file_paths]
 
         pipeline = IndexingPipeline(default_rust_config(tmp_path, db_dir))
 
         # Must not raise — the per-file error is collected, not fatal.
         report = pipeline.run(
-            files=file_paths,
+            files=file_entries,
             parse_batch_callback=batch_callback,
             embed_batch_callback=None,
             progress_callback=None,

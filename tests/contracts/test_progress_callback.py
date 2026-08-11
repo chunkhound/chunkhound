@@ -23,12 +23,16 @@ import pytest
 from tests.contracts.pipeline_harness import default_rust_config
 
 
-def _write_fixture_files(tmp_path: Path) -> list[str]:
+def _write_fixture_files(tmp_path: Path) -> list[tuple[str, str]]:
+    """Returns (absolute_path, relative_key) pairs, per IndexingPipeline.run()'s
+    files contract — these fixtures live directly under tmp_path, so the
+    relative key is just the filename."""
     files = []
     for i in range(3):
-        f = tmp_path / f"mod_{i}.py"
+        name = f"mod_{i}.py"
+        f = tmp_path / name
         f.write_text(f"def fn_{i}():\n    return {i}\n")
-        files.append(str(f))
+        files.append((str(f), name))
     return files
 
 

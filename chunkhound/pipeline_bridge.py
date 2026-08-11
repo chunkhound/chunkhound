@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.types.common import FileId
+from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.parsers.parser_factory import create_parser_for_language
 
 if TYPE_CHECKING:
@@ -576,7 +577,6 @@ async def run_rust_pipeline(
     disk_usage_limit_mb = getattr(database_cfg, "max_disk_usage_mb", None)
 
     config_dict = {
-        "project_root": str(project_root.resolve()),
         "db_path": str(db_path.resolve()),
         "db_batch_size": db_batch_size,
         "compaction_threshold": compaction_threshold,
@@ -597,8 +597,31 @@ async def run_rust_pipeline(
         "disk_usage_limit_mb": disk_usage_limit_mb,
     }
 
-    # Extract file paths from (path, hash) tuples
-    file_paths = [str(p.resolve()) for p, _ in files_to_process]
+    # Build (absolute_path, relative_key) pairs from (path, hash) tuples.
+    # relative_key is computed once here via get_relative_path_safe() — the
+    # single symlink-aware source of truth already used by the Python
+    # real-time/DB-write path (path_utils.py) — instead of letting Rust
+    # re-derive it from a resolved absolute path via a naive strip_prefix,
+    # which silently diverges for symlinked files/directories (see
+    # differ.rs's `to_relative_key` removal).
+    file_entries: list[tuple[str, str]] = []
+    skipped_entries: list[dict[str, str | None]] = []
+    for p, _ in files_to_process:
+        try:
+            rel_key = get_relative_path_safe(p, project_root).as_posix()
+        except ValueError:
+            # Genuinely outside project_root even by its own logical path —
+            # should be rare (files reach here via a walk rooted at
+            # project_root). Skip rather than crash the whole batch.
+            skipped_entries.append({"file": str(p), "error": "not under project root"})
+            continue
+        # Symlinks: read through the logical path — opening it already
+        # follows the link transparently, and resolving here would defeat
+        # get_relative_path_safe's whole purpose. Regular files: resolve for
+        # I/O, matching prior behavior (Windows 8.3 short names, macOS
+        # /var -> /private/var).
+        io_path = p if p.is_symlink() else p.resolve()
+        file_entries.append((str(io_path), rel_key))
 
     # Both the pipeline construction and pipeline.run() raise a plain PyO3
     # PyRuntimeError on failure (see src/pipeline/pipeline.rs), indistinguishable
@@ -611,7 +634,7 @@ async def run_rust_pipeline(
         # Run pipeline in thread pool — pipeline releases the GIL internally
         report = await asyncio.to_thread(
             pipeline.run,
-            files=file_paths,
+            files=file_entries,
             parse_batch_callback=functools.partial(
                 parse_batch_callback, index_unknown_files=_index_unknown
             ),
@@ -636,6 +659,7 @@ async def run_rust_pipeline(
     errors: list[dict[str, Any]] = [
         _split_rust_error(err) for err in (list(report.errors) if report.errors else [])
     ]
+    errors.extend(skipped_entries)
 
     # Mid-run disk-usage check (mirrors _check_disk_usage_limit's contract) —
     # reported as structured data on the report (a single Option<(f64, f64)>

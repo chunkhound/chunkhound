@@ -44,18 +44,6 @@ pub(crate) struct DiffResult {
 /// about callback overhead.
 const DIFF_TICK_INTERVAL: usize = 200;
 
-/// Canonical project-relative DB/lookup key for a path. Every site that
-/// stores or looks up a file by relative path must go through this, or
-/// Windows's native `\` separators (vs. this key's `/`) desync the DB
-/// row from the disk-side diff lookup — the file looks new and removed
-/// on every run.
-pub(crate) fn to_relative_key(abs_path: &Path, project_root: &Path) -> Option<String> {
-    abs_path
-        .strip_prefix(project_root)
-        .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-}
-
 /// Compute the diff between the files provided and the DB state.
 ///
 /// Returns the set of files that need re-processing, plus the set
@@ -64,6 +52,16 @@ pub(crate) fn to_relative_key(abs_path: &Path, project_root: &Path) -> Option<St
 /// `db_file_entries` is the result of querying
 /// `SELECT id, path, modified_time, content_hash FROM files`.
 /// `files_on_disk` are the absolute paths provided by the caller (scanner).
+/// `rel_keys` maps each absolute path to its canonical project-relative
+/// DB/lookup key, computed once by Python's `get_relative_path_safe()` — the
+/// single symlink-aware source of truth (git-worktree support: a symlink's
+/// logical path is preserved even when its target resolves outside
+/// project_root). This function used to re-derive the key itself via a naive
+/// `strip_prefix(project_root)`, which diverged from Python's DB-write path
+/// for symlinked files (a different or missing key meant the file's DB row
+/// could be misclassified as `removed` and deleted while the file itself was
+/// simultaneously processed as `changed`) — see the fix that replaced that
+/// re-derivation with this caller-supplied map.
 /// `mtime_epsilon` controls how close two timestamps must be to be considered equal.
 /// `precomputed_stats`, if provided, is a map of absolute path → (size_bytes, mtime)
 /// produced by a prior stat pass (e.g. the TZ-offset pass in `compute_diff_blocking`).
@@ -72,7 +70,7 @@ pub(crate) fn to_relative_key(abs_path: &Path, project_root: &Path) -> Option<St
 pub(crate) fn compute_diff(
     db_file_entries: &[DbFileEntry],
     files_on_disk: &[PathBuf],
-    project_root: &Path,
+    rel_keys: &HashMap<PathBuf, String>,
     mtime_epsilon: f64,
     precomputed_stats: Option<&HashMap<PathBuf, (u64, f64)>>,
     mut on_tick: Option<&mut dyn FnMut(usize, usize)>,
@@ -148,11 +146,15 @@ pub(crate) fn compute_diff(
                 })
         };
 
-        // Compute relative path (matching Python's _get_relative_path)
-        let rel = match to_relative_key(abs_path, project_root) {
-            Some(r) => r,
+        // Relative key supplied by the caller (see `rel_keys` doc above).
+        let rel = match rel_keys.get(abs_path) {
+            Some(r) => r.clone(),
             None => {
-                // Can't relativize — process it anyway
+                // Should be unreachable: Python guarantees a relative key
+                // for every path it sends. Treat defensively — an internal
+                // contract violation, not a normal runtime condition — and
+                // log so it's visible if it ever fires.
+                log::warn!("no relative key provided for {abs_path:?}; processing anyway");
                 disk_stats.insert(abs_path.clone(), (current_size, current_mtime_raw));
                 changed.push(abs_path.clone());
                 continue;
@@ -328,18 +330,12 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    #[test]
-    fn to_relative_key_normalizes_backslash_separators() {
-        // We don't need a real Windows filesystem to prove this: a path whose
-        // textual form already contains `\` (valid even on Unix, where `\` is
-        // just an ordinary filename byte) exercises the exact `.replace('\\', "/")`
-        // step that must run on every platform's `strip_prefix` remainder.
-        let root = Path::new("/project");
-        let abs = Path::new("/project/sub\\dir\\file.py");
-        assert_eq!(
-            to_relative_key(abs, root),
-            Some("sub/dir/file.py".to_string())
-        );
+    /// Build a `rel_keys` map for a single (path, key) pair — the common case
+    /// in these tests, where the on-disk path's DB key is just its filename.
+    fn rel_key_for(path: &Path, key: &str) -> HashMap<PathBuf, String> {
+        [(path.to_path_buf(), key.to_string())]
+            .into_iter()
+            .collect()
     }
 
     #[test]
@@ -349,7 +345,13 @@ mod tests {
         let f2 = create_file(&tmp, "b.rs");
 
         let files = vec![f1.clone(), f2.clone()];
-        let diff = compute_diff(&[], &files, tmp.path(), 0.01, None, None);
+        let rel_keys: HashMap<PathBuf, String> = [
+            (f1.clone(), "a.py".to_string()),
+            (f2.clone(), "b.rs".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let diff = compute_diff(&[], &files, &rel_keys, 0.01, None, None);
 
         assert_eq!(diff.changed_count(), 2);
         assert_eq!(diff.removed_count(), 0);
@@ -368,7 +370,8 @@ mod tests {
             content_hash: None,
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        let rel_keys = rel_key_for(&f1, "a.py");
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
         assert!(diff.changed.is_empty(), "unchanged file should be skipped");
     }
 
@@ -385,7 +388,8 @@ mod tests {
             content_hash: None,
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        let rel_keys = rel_key_for(&f1, "a.py");
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
         assert_eq!(
             diff.changed_count(),
             1,
@@ -413,7 +417,8 @@ mod tests {
         let f1 = create_file(&tmp, "new.py");
 
         // Empty DB — file has never been indexed.
-        let diff = compute_diff(&[], std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        let rel_keys = rel_key_for(&f1, "new.py");
+        let diff = compute_diff(&[], std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
         assert_eq!(diff.changed_count(), 1);
         let (size, mtime) = diff
             .disk_stats
@@ -442,7 +447,8 @@ mod tests {
             content_hash: Some(stored_hash.clone()),
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        let rel_keys = rel_key_for(&f1, "a.py");
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
         assert!(diff.changed.is_empty(), "unchanged file should be skipped");
         assert_eq!(
             diff.new_hashes.get(&f1),
@@ -477,7 +483,8 @@ mod tests {
             content_hash: Some(hash.clone()),
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        let rel_keys = rel_key_for(&f1, "a.py");
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
         assert_eq!(diff.skipped_by_hash, 1);
         assert!(diff.changed.is_empty());
         assert_eq!(diff.new_hashes.get(&f1), Some(&hash));
@@ -502,10 +509,11 @@ mod tests {
         // into disk_stats unchanged, proving that no second stat call is made.
         let mut pre = HashMap::new();
         pre.insert(f1.clone(), (99_999u64, 42.0f64));
+        let rel_keys = rel_key_for(&f1, "a.py");
         let diff = compute_diff(
             &db,
             std::slice::from_ref(&f1),
-            tmp.path(),
+            &rel_keys,
             0.01,
             Some(&pre),
             None,
@@ -546,10 +554,58 @@ mod tests {
             },
         ];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        let rel_keys = rel_key_for(&f1, "a.py");
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
         assert_eq!(diff.changed_count(), 0); // a.py unchanged
         assert_eq!(diff.removed_count(), 1);
         assert!(diff.removed.contains(&"gone.py".to_string()));
+    }
+
+    #[test]
+    fn test_relative_key_from_caller_map_used_verbatim() {
+        // Regression test for the symlink path-key divergence bug: the
+        // relative key used to be re-derived here via
+        // `abs_path.strip_prefix(project_root)`, which silently failed (or
+        // produced the wrong key) whenever the caller's absolute path wasn't
+        // textually under a single "project root" — exactly what happens for
+        // a symlink whose target resolves outside project_root (Python's
+        // get_relative_path_safe() still gives it a valid *logical* relative
+        // key in that case). Prove `compute_diff` now trusts the caller's
+        // `rel_keys` map verbatim, independent of the absolute path's own
+        // structure: an absolute path with no plausible "project root" at
+        // all still matches its DB row correctly via the supplied key.
+        let tmp = tempfile::tempdir().unwrap();
+        let f1 = create_file(&tmp, "a.py");
+        let mtime = file_mtime(&f1).unwrap();
+
+        // A path a naive strip_prefix could never relativize sensibly (it
+        // shares no meaningful root with the file's own directory), mapped
+        // to the same logical key the DB row uses.
+        let elsewhere_abs = PathBuf::from("/completely/unrelated/tree/a.py");
+        let rel_keys: HashMap<PathBuf, String> = [
+            (f1.clone(), "a.py".to_string()),
+            (elsewhere_abs, "a.py".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let db = vec![DbFileEntry {
+            id: 1,
+            path: "a.py".into(),
+            mtime,
+            content_hash: None,
+        }];
+
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
+        assert!(
+            diff.changed.is_empty(),
+            "file must match its DB row via the supplied key, not be reprocessed"
+        );
+        assert_eq!(
+            diff.removed_count(),
+            0,
+            "file present via rel_keys must not be misclassified as removed"
+        );
     }
 
     #[test]
@@ -589,7 +645,8 @@ mod tests {
             content_hash: Some(hash),
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        let rel_keys = rel_key_for(&f1, "a.py");
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
         assert_eq!(
             diff.changed_count(),
             0,
@@ -610,7 +667,8 @@ mod tests {
             content_hash: Some("deadbeefdeadbeef".into()),
         }];
 
-        let diff = compute_diff(&db, std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        let rel_keys = rel_key_for(&f1, "a.py");
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
         assert_eq!(
             diff.changed_count(),
             1,
@@ -626,7 +684,8 @@ mod tests {
         let f1 = create_file(&tmp, "new.py");
 
         // Empty DB — the file has never been indexed.
-        let diff = compute_diff(&[], std::slice::from_ref(&f1), tmp.path(), 0.01, None, None);
+        let rel_keys = rel_key_for(&f1, "new.py");
+        let diff = compute_diff(&[], std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
 
         assert_eq!(diff.changed_count(), 1);
         assert!(

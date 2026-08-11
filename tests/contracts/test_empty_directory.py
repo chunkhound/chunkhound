@@ -73,11 +73,11 @@ class TestEmptyDirectory:
             db_dir.mkdir(parents=True, exist_ok=True)
 
             files = sorted(FIXTURE_DIR.resolve().glob("*"))
-            file_paths = [str(f) for f in files if f.is_file()]
+            file_entries = [(str(f), f.name) for f in files if f.is_file()]
 
             pipeline = IndexingPipeline(default_rust_config(FIXTURE_DIR, db_dir))
             first_report = pipeline.run(
-                files=file_paths,
+                files=file_entries,
                 parse_batch_callback=parse_batch_callback,
                 embed_batch_callback=None,
                 progress_callback=None,

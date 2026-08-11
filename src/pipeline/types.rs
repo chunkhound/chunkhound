@@ -8,6 +8,11 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedFile {
     pub path: PathBuf,
+    /// Project-relative DB key, computed by Python's `get_relative_path_safe()`
+    /// and supplied via `IndexingPipeline::run()`'s `rel_keys` map — the
+    /// single symlink-aware source of truth. Consumed verbatim by
+    /// `build_db_batch` instead of being re-derived from `path`.
+    pub rel_path: String,
     pub language: Option<String>,
     pub file_size: u64,
     pub mtime: f64,
