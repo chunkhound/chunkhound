@@ -10,6 +10,7 @@ use super::differ::DiffResult;
 use super::report::PipelineReport;
 
 use crate::db::{check_disk_usage_limit, create_backend, duckdb_backend, DbBackend, DbConfig};
+use crate::error::DbError;
 use crate::types::{ChunkRecord, DbFileEntry, DbWriterBatch, FileRecord};
 
 /// The main PyO3 class — Python calls `.run()` from `asyncio.to_thread`.
@@ -593,13 +594,15 @@ impl IndexingPipeline {
                 // tracing below.
                 let db_path = db_config.db_path.clone();
                 let mut backend: Box<dyn DbBackend> = create_backend(db_config);
-                backend.open().map_err(|e| e.to_string())?;
+                let open_result = backend.open();
+                Self::close_backend_on_err(backend.as_mut(), open_result)?;
                 // Dropping HNSW indexes is a catalog-only DDL operation (no
                 // data scan), so it's always sub-10ms in practice — not
                 // worth a dedicated progress bar (it would flash past
                 // unnoticed). Log it instead for the rare case it's slow.
                 let t_hnsw_drop = Instant::now();
-                backend.drop_all_hnsw_indexes().map_err(|e| e.to_string())?;
+                let drop_hnsw_result = backend.drop_all_hnsw_indexes();
+                Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
                 log::info!(
                     "[hnsw-drop] done in {:.3}s",
                     t_hnsw_drop.elapsed().as_secs_f64()
@@ -1049,6 +1052,21 @@ impl IndexingPipeline {
         }
     }
 
+    /// Run a fallible backend setup step (`open`/`drop_all_hnsw_indexes`),
+    /// closing the backend on failure so this step doesn't skip Invariant 14
+    /// — no failure path may leave the connection open or HNSW indexes
+    /// un-restored — mirroring the pattern the write/compact steps below
+    /// already use via `post_write_result`'s best-effort `backend.close()`.
+    fn close_backend_on_err<T>(
+        backend: &mut dyn DbBackend,
+        result: Result<T, DbError>,
+    ) -> Result<T, String> {
+        result.map_err(|e| {
+            let _ = backend.close();
+            e.to_string()
+        })
+    }
+
     /// Convert parsed files into a `DbWriterBatch`. Each file's relative
     /// path (`pf.rel_path`) was already computed by Python's
     /// `get_relative_path_safe()` and carried through parsing on
@@ -1477,5 +1495,108 @@ impl IndexingPipeline {
             .ok()
             .flatten()
             .and_then(|v| v.extract::<i64>().ok())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::BatchResult;
+    use std::cell::Cell;
+
+    /// Minimal `DbBackend` double for testing `close_backend_on_err` in
+    /// isolation — no PyO3/GIL/pipeline machinery needed, since the function
+    /// under test only touches `&mut dyn DbBackend` and a `Result`.
+    struct FakeBackend {
+        fail_open: bool,
+        fail_drop_hnsw: bool,
+        close_called: Cell<bool>,
+    }
+
+    impl DbBackend for FakeBackend {
+        fn open(&mut self) -> Result<(), DbError> {
+            if self.fail_open {
+                Err(DbError::Other("simulated open failure".into()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn close(&mut self) -> Result<(), DbError> {
+            self.close_called.set(true);
+            Ok(())
+        }
+
+        fn write_batch(&mut self, _batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
+            unreachable!("not exercised by these tests")
+        }
+
+        fn needs_compaction(&self) -> Result<bool, DbError> {
+            Ok(false)
+        }
+
+        fn run_compaction(&mut self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn drop_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
+            if self.fail_drop_hnsw {
+                Err(DbError::Other(
+                    "simulated drop_all_hnsw_indexes failure".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn test_open_failure_still_closes_backend() {
+        let mut backend = FakeBackend {
+            fail_open: true,
+            fail_drop_hnsw: false,
+            close_called: Cell::new(false),
+        };
+        let open_result = backend.open();
+        let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
+        assert!(result.is_err());
+        assert!(
+            backend.close_called.get(),
+            "close() must run even when open() fails (Invariant 14)"
+        );
+    }
+
+    #[test]
+    fn test_drop_hnsw_failure_still_closes_backend() {
+        let mut backend = FakeBackend {
+            fail_open: false,
+            fail_drop_hnsw: true,
+            close_called: Cell::new(false),
+        };
+        let drop_result = backend.drop_all_hnsw_indexes();
+        let result = IndexingPipeline::close_backend_on_err(&mut backend, drop_result);
+        assert!(result.is_err());
+        assert!(
+            backend.close_called.get(),
+            "close() must run even when drop_all_hnsw_indexes() fails (Invariant 14)"
+        );
+    }
+
+    #[test]
+    fn test_success_path_does_not_close_early() {
+        let mut backend = FakeBackend {
+            fail_open: false,
+            fail_drop_hnsw: false,
+            close_called: Cell::new(false),
+        };
+        let open_result = backend.open();
+        let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
+        assert!(result.is_ok());
+        assert!(
+            !backend.close_called.get(),
+            "close() must not run on the success path — the store thread closes \
+             explicitly later, and closing here would wrongly trigger a premature \
+             ensure_all_hnsw_indexes() before any batches are written"
+        );
     }
 }
