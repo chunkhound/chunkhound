@@ -16,6 +16,7 @@ to every project directory. Project-local files override the global layer.
 
 import json
 import os
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,35 @@ from .indexing_config import IndexingConfig
 from .llm_config import LLMConfig
 from .mcp_config import MCPConfig, is_loopback_host
 from .research_config import ResearchConfig
+
+
+class ConfigErrorCode(str, Enum):
+    """Stable machine-readable identifiers for `validate_for_command` errors.
+
+    Consumed by the remote-config terminal gate to compare pre-rules vs
+    post-rules error sets without depending on message-string wording.
+    """
+
+    MISSING_REQUIRED_CONFIG = "missing_required_config"
+    LLM_NOT_CONFIGURED = "llm_not_configured"
+    LLM_MISSING_ROLE_CONFIG = "llm_missing_role_config"
+    EMBEDDING_NOT_CONFIGURED = "embedding_not_configured"
+    MCP_NON_LOOPBACK_NO_AUTH = "mcp_non_loopback_no_auth"
+    MCP_CORS_NO_AUTH = "mcp_cors_no_auth"
+    DB_READONLY_WRONG_COMMAND = "db_readonly_wrong_command"
+    DB_READONLY_NON_DUCKDB = "db_readonly_non_duckdb"
+
+
+# Commands whose `validate_for_command_structured` gate must be re-checked by
+# the remote-config terminal delta gate, in addition to the current command.
+# Any new command whose command-scoped gate can be tripped by a
+# remote-pushable value must be added here. `_daemon` is intentionally not
+# listed: its branches today only produce `DB_READONLY_WRONG_COMMAND`, which
+# `index` already covers, so adding it would yield no net-new coverage. If a
+# future change makes `_daemon` structurally distinguishable at the terminal
+# gate (e.g. by extending the mcp host/auth gate at `validate_for_command_
+# structured` to also fire for `_daemon`), add it here at the same time.
+PERSISTENCE_HAZARD_COMMANDS: frozenset[str] = frozenset({"index", "mcp"})
 
 
 class Config(BaseModel):
@@ -413,23 +443,34 @@ class Config(BaseModel):
         """
         return cls(args=None)
 
-    def validate_for_command(self, command: str, args: Any | None = None) -> list[str]:
+    def validate_for_command_structured(
+        self, command: str, args: Any | None = None
+    ) -> list[tuple[ConfigErrorCode, str]]:
         """
-        Validate configuration for a specific command.
+        Validate configuration for a specific command, returning structured codes.
+
+        Mirrors `validate_for_command` branch-for-branch, pairing each error
+        message with a stable `ConfigErrorCode`. The remote-config terminal
+        delta gate uses the codes as a comparison key that is robust against
+        message-string wording changes.
 
         Args:
             command: Command name ('index', 'mcp', etc.)
 
         Returns:
-            List of validation errors (empty if valid)
+            List of (code, message) tuples (empty if valid)
         """
-        errors: list[str] = []
+        errors: list[tuple[ConfigErrorCode, str]] = []
 
         # Check for missing configuration
         missing_config = self.get_missing_config()
         if missing_config:
             errors.extend(
-                f"Missing required configuration: {item}" for item in missing_config
+                (
+                    ConfigErrorCode.MISSING_REQUIRED_CONFIG,
+                    f"Missing required configuration: {item}",
+                )
+                for item in missing_config
             )
 
         # websearch only spawns _quickresearch as a subprocess, but we validate
@@ -442,7 +483,9 @@ class Config(BaseModel):
         )
         if requires_llm:
             if self.llm is None:
-                errors.append("No LLM provider configured")
+                errors.append(
+                    (ConfigErrorCode.LLM_NOT_CONFIGURED, "No LLM provider configured")
+                )
             else:
                 llm_roles = ["utility", "synthesis"]
                 if command == "map" and (
@@ -457,7 +500,10 @@ class Config(BaseModel):
                 llm_missing = self.llm.get_missing_config_for_roles(tuple(llm_roles))
                 if llm_missing:
                     errors.extend(
-                        f"Missing required configuration: llm.{item}"
+                        (
+                            ConfigErrorCode.LLM_MISSING_ROLE_CONFIG,
+                            f"Missing required configuration: llm.{item}",
+                        )
                         for item in llm_missing
                     )
 
@@ -466,34 +512,60 @@ class Config(BaseModel):
             # Skip embedding validation if embeddings were explicitly disabled
             if not self.embeddings_disabled:
                 if self.embedding is None:
-                    errors.append("No embedding provider configured")
+                    errors.append(
+                        (
+                            ConfigErrorCode.EMBEDDING_NOT_CONFIGURED,
+                            "No embedding provider configured",
+                        )
+                    )
                 elif self.embedding and not self.embedding.is_provider_configured():
-                    errors.append("Embedding provider not properly configured")
+                    errors.append(
+                        (
+                            ConfigErrorCode.EMBEDDING_NOT_CONFIGURED,
+                            "Embedding provider not properly configured",
+                        )
+                    )
 
         # For MCP command, embedding is optional
         elif command == "mcp":
             if self.embedding and not self.embedding.is_provider_configured():
-                errors.append("Embedding provider not properly configured")
+                errors.append(
+                    (
+                        ConfigErrorCode.EMBEDDING_NOT_CONFIGURED,
+                        "Embedding provider not properly configured",
+                    )
+                )
 
         # For search command, embedding is optional but must be valid if present
         elif command == "search":
             if self.embedding and not self.embedding.is_provider_configured():
-                errors.append("Embedding provider not properly configured")
+                errors.append(
+                    (
+                        ConfigErrorCode.EMBEDDING_NOT_CONFIGURED,
+                        "Embedding provider not properly configured",
+                    )
+                )
 
         if command == "mcp" and self.mcp.transport == "http":
             if not is_loopback_host(self.mcp.host) and not self.mcp.auth_token:
                 errors.append(
-                    "mcp.host is non-loopback but no auth_token is set. Binding "
-                    "the HTTP transport to a non-localhost address without "
-                    "--auth-token is refused. Set --auth-token, or omit --host "
-                    "to bind to 127.0.0.1 (default)."
+                    (
+                        ConfigErrorCode.MCP_NON_LOOPBACK_NO_AUTH,
+                        "mcp.host is non-loopback but no auth_token is set. Binding "
+                        "the HTTP transport to a non-localhost address without "
+                        "--auth-token is refused. Set --auth-token, or omit --host "
+                        "to bind to 127.0.0.1 (default).",
+                    )
                 )
             if self.mcp.cors and not self.mcp.auth_token:
                 errors.append(
-                    "mcp.cors is enabled but no auth_token is set. Enabling CORS "
-                    "without --auth-token lets any website open in the same "
-                    "browser read from the HTTP transport, even on a loopback "
-                    "host. Set --auth-token, or omit --cors."
+                    (
+                        ConfigErrorCode.MCP_CORS_NO_AUTH,
+                        "mcp.cors is enabled but no auth_token is set. Enabling CORS "
+                        "without --auth-token lets any website open in the same "
+                        "browser read from the HTTP transport, even on a loopback "
+                        "host. Set --auth-token, or omit --cors.",
+                    )
                 )
 
         if self.database.read_only:
@@ -503,16 +575,35 @@ class Config(BaseModel):
             # manager drop read_only for :memory: paths.
             if command not in ("mcp", "_quickresearch"):
                 errors.append(
-                    "database.read_only=True is only valid for the 'mcp' subcommand"
+                    (
+                        ConfigErrorCode.DB_READONLY_WRONG_COMMAND,
+                        "database.read_only=True is only valid for the 'mcp' "
+                        "subcommand",
+                    )
                 )
             elif command == "mcp" and self.database.provider != "duckdb":
                 errors.append(
-                    "database.read_only=True is only supported with the DuckDB "
-                    f"provider (got '{self.database.provider}'). "
-                    "Use the DuckDB provider, or omit --read-only."
+                    (
+                        ConfigErrorCode.DB_READONLY_NON_DUCKDB,
+                        "database.read_only=True is only supported with the DuckDB "
+                        f"provider (got '{self.database.provider}'). "
+                        "Use the DuckDB provider, or omit --read-only.",
+                    )
                 )
 
         return errors
+
+    def validate_for_command(self, command: str, args: Any | None = None) -> list[str]:
+        """
+        Validate configuration for a specific command.
+
+        Args:
+            command: Command name ('index', 'mcp', etc.)
+
+        Returns:
+            List of validation errors (empty if valid)
+        """
+        return [msg for _, msg in self.validate_for_command_structured(command, args)]
 
     def get_missing_config(self) -> list[str]:
         """
