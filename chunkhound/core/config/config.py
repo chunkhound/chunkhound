@@ -18,7 +18,7 @@ import json
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -114,7 +114,14 @@ class Config(BaseModel):
             home / ".chunkhound.json",
         ]
 
-    def __init__(self, args: Any | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        args: Any | None = None,
+        *,
+        skip_layers: set[Literal["env", "global", "local_config", "config_file", "cli"]]
+        | None = None,
+        **kwargs: Any,
+    ) -> None:
         """Universal configuration initialization that handles all contexts.
 
         Automatically applies correct precedence order:
@@ -132,6 +139,10 @@ class Config(BaseModel):
 
         Args:
             args: Optional argparse.Namespace from command line parsing
+            skip_layers: Optional set of layer names to skip. Layer names are
+                {"env", "global", "local_config", "config_file", "cli"}. Default
+                None runs every layer (today's behavior). Used by the remote-
+                config pipeline to construct restricted-merge snapshots.
             **kwargs: Direct overrides for testing or special cases
         """
         # Start with defaults
@@ -183,82 +194,27 @@ class Config(BaseModel):
                 None if is_map else (getattr(args, "path", None) if args else None)
             )
 
+        skips = skip_layers or set()
+
         # 2. Load environment variables
-        env_vars = self._load_env_vars()
-        self._deep_merge(config_data, env_vars)
+        if "env" not in skips:
+            self._apply_env(config_data)
 
         # 2.5 Load global defaults config (env var or auto-discovered).
-        # Merged before local so project-local .chunkhound.json overrides globals.
-        # Lets users keep common settings (keys, excludes) in one place instead
-        # of copying .chunkhound.json into every project.
-        global_config_file = None
-        env_global = os.getenv("CHUNKHOUND_GLOBAL_CONFIG_FILE")
-        if env_global:
-            global_config_file = Path(env_global)
-            if not global_config_file.exists():
-                raise ValueError(
-                    f"Global config file not found: {global_config_file}. "
-                    "Check the path or remove CHUNKHOUND_GLOBAL_CONFIG_FILE."
-                )
-            config_data["global_config_file"] = global_config_file.resolve()
-        else:
-            for candidate in self._get_global_config_candidates():
-                if candidate.exists() and candidate.is_file():
-                    global_config_file = candidate
-                    config_data["global_config_file"] = global_config_file.resolve()
-                    break
-
-        if global_config_file:
-            try:
-                with open(global_config_file) as f:
-                    global_config = json.load(f)
-                    self._deep_merge(config_data, global_config)
-                    self._mark_exclude_user_supplied(config_data)
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"Invalid JSON in global config file {global_config_file}: {e}. "
-                    "Please check the file format and try again."
-                )
+        if "global" not in skips:
+            self._apply_global_json(config_data)
 
         # 3. Check for local .chunkhound.json (overrides env vars and globals)
-        if target_dir and target_dir.exists():
-            local_config_path = target_dir / ".chunkhound.json"
-            if local_config_path.exists() and local_config_path != config_file:
-                config_data["local_config_file"] = local_config_path.resolve()
-                try:
-                    with open(local_config_path) as f:
-                        local_config = json.load(f)
-                        self._deep_merge(config_data, local_config)
-                        self._mark_exclude_user_supplied(config_data)
-                except json.JSONDecodeError as e:
-                    raise ValueError(
-                        f"Invalid JSON in config file {local_config_path}: {e}. "
-                        "Please check the file format and try again."
-                    )
+        if "local_config" not in skips:
+            self._apply_local_json(config_data, target_dir, config_file)
 
         # 4. Load explicit config file last so it wins over auto-discovered local config
-        if config_file and not config_file.exists():
-            raise ValueError(
-                f"Config file not found: {config_file}. "
-                "Check the path or visit https://chunkhound.ai to generate a config."
-            )
-        if config_file:
-            try:
-                with open(config_file) as f:
-                    file_config = json.load(f)
-                    self._deep_merge(config_data, file_config)
-                    self._mark_exclude_user_supplied(config_data)
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"Invalid JSON in config file {config_file}: {e}. "
-                    "Please check the file format and try again."
-                )
+        if "config_file" not in skips:
+            self._apply_config_file(config_data, config_file)
 
         # 5. Apply CLI arguments (highest precedence)
-        if args:
-            cli_overrides = self._extract_cli_overrides(args)
-            self._mark_exclude_user_supplied(cli_overrides)
-            self._deep_merge(config_data, cli_overrides)
+        if "cli" not in skips and args:
+            self._apply_cli(config_data, args)
 
         # 6. Apply any direct kwargs (for testing)
         if kwargs:
@@ -297,6 +253,91 @@ class Config(BaseModel):
         idx = data.get("indexing")
         if isinstance(idx, dict) and isinstance(idx.get("exclude"), list):
             idx["exclude_user_supplied"] = True
+
+    def _apply_env(self, config_data: dict[str, Any]) -> None:
+        """Merge environment-variable-derived values into ``config_data``."""
+        env_vars = self._load_env_vars()
+        self._deep_merge(config_data, env_vars)
+
+    def _apply_global_json(self, config_data: dict[str, Any]) -> None:
+        """Merge the global defaults JSON into ``config_data`` when discoverable."""
+        global_config_file: Path | None = None
+        env_global = os.getenv("CHUNKHOUND_GLOBAL_CONFIG_FILE")
+        if env_global:
+            global_config_file = Path(env_global)
+            if not global_config_file.exists():
+                raise ValueError(
+                    f"Global config file not found: {global_config_file}. "
+                    "Check the path or remove CHUNKHOUND_GLOBAL_CONFIG_FILE."
+                )
+            config_data["global_config_file"] = global_config_file.resolve()
+        else:
+            for candidate in self._get_global_config_candidates():
+                if candidate.exists() and candidate.is_file():
+                    global_config_file = candidate
+                    config_data["global_config_file"] = global_config_file.resolve()
+                    break
+
+        if global_config_file:
+            try:
+                with open(global_config_file) as f:
+                    global_config = json.load(f)
+                    self._deep_merge(config_data, global_config)
+                    self._mark_exclude_user_supplied(config_data)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Invalid JSON in global config file {global_config_file}: {e}. "
+                    "Please check the file format and try again."
+                )
+
+    def _apply_local_json(
+        self,
+        config_data: dict[str, Any],
+        target_dir: Path | None,
+        config_file: Path | None,
+    ) -> None:
+        """Merge ``target_dir/.chunkhound.json`` into ``config_data`` when present."""
+        if target_dir and target_dir.exists():
+            local_config_path = target_dir / ".chunkhound.json"
+            if local_config_path.exists() and local_config_path != config_file:
+                config_data["local_config_file"] = local_config_path.resolve()
+                try:
+                    with open(local_config_path) as f:
+                        local_config = json.load(f)
+                        self._deep_merge(config_data, local_config)
+                        self._mark_exclude_user_supplied(config_data)
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        f"Invalid JSON in config file {local_config_path}: {e}. "
+                        "Please check the file format and try again."
+                    )
+
+    def _apply_config_file(
+        self, config_data: dict[str, Any], config_file: Path | None
+    ) -> None:
+        """Merge the explicit ``--config`` JSON into ``config_data`` when supplied."""
+        if config_file and not config_file.exists():
+            raise ValueError(
+                f"Config file not found: {config_file}. "
+                "Check the path or visit https://chunkhound.ai to generate a config."
+            )
+        if config_file:
+            try:
+                with open(config_file) as f:
+                    file_config = json.load(f)
+                    self._deep_merge(config_data, file_config)
+                    self._mark_exclude_user_supplied(config_data)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Invalid JSON in config file {config_file}: {e}. "
+                    "Please check the file format and try again."
+                )
+
+    def _apply_cli(self, config_data: dict[str, Any], args: Any) -> None:
+        """Merge CLI-argument-derived overrides into ``config_data``."""
+        cli_overrides = self._extract_cli_overrides(args)
+        self._mark_exclude_user_supplied(cli_overrides)
+        self._deep_merge(config_data, cli_overrides)
 
     def _load_env_vars(self) -> dict[str, Any]:
         """Load configuration from environment variables.

@@ -37,13 +37,16 @@ def _fallback_config(args: argparse.Namespace) -> Config:
     )
 
 
-def create_validated_config(
+async def create_validated_config(
     args: argparse.Namespace, command: str
 ) -> tuple[Config, list[str]]:
     """Create and validate config for a specific command.
 
     This centralizes the config loading pattern that was duplicated across
     main.py, run.py, and mcp_server.py.
+
+    Async so the remote-config pipeline can await inside without changing
+    callers.
 
     Args:
         args: Parsed command-line arguments

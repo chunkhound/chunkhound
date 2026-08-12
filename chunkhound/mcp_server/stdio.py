@@ -330,7 +330,7 @@ async def main(args: Any = None) -> None:
     os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
     # Create and validate configuration
-    config, validation_errors = create_validated_config(args, "mcp")
+    config, validation_errors = await create_validated_config(args, "mcp")
 
     if validation_errors:
         msg = "; ".join(str(e) for e in validation_errors)

@@ -135,7 +135,7 @@ async def async_main() -> None:
     _daemon_startup_breadcrumb(args, "startup tracking began mode=daemon")
     config_validation_started = time.monotonic()
     _daemon_startup_breadcrumb(args, "phase started: cli_config_validation")
-    config, validation_errors = create_validated_config(args, args.command)
+    config, validation_errors = await create_validated_config(args, args.command)
     config_validation_duration = time.monotonic() - config_validation_started
 
     if validation_errors:
