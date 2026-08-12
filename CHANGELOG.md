@@ -36,6 +36,9 @@ approximate pagination contract:
   comparing the accumulated page size against `total`.
 - Semantic result windows are capped at the exclusive `[0, 1000)` range;
   pages that start at or cross that endpoint are rejected.
+- `pagination["candidate_budget_exhausted"]` is a new boolean field indicating
+  the HNSW candidate budget was reached before the page filled. When `true`,
+  the page is short due to approximate search, not table exhaustion.
 - Candidate-budget exhaustion can return a short page. `has_more=False` means
   no next page was materialized, not that every match was examined; narrow the
   query or path filter when this occurs.
