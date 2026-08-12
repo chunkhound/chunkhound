@@ -43,6 +43,7 @@ from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepos
 from chunkhound.services.search.semantic_window import validate_semantic_window
 from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.providers.database.like_utils import escape_like_pattern
+from chunkhound.utils.path_filter import validate_and_normalize_path_filter
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
@@ -3885,52 +3886,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         return chunks_with_metadata
 
     @staticmethod
-    def _validate_and_normalize_path_filter(path_filter: str | None) -> str | None:
-        """Validate and normalize path filter for security and consistency.
-
-        Args:
-            path_filter: User-provided path filter
-
-        Returns:
-            Normalized path filter safe for SQL LIKE queries, or None
-
-        Raises:
-            ValueError: If path contains dangerous patterns
-        """
-        if path_filter is None:
-            return None
-
-        # Remove leading/trailing whitespace
-        normalized = path_filter.strip()
-
-        if not normalized:
-            return None
-
-        # Security checks - prevent directory traversal
-        dangerous_patterns = ["..", "~", "*", "?", "[", "]", "\0", "\n", "\r"]
-        for pattern in dangerous_patterns:
-            if pattern in normalized:
-                raise ValueError(f"Path filter contains forbidden pattern: {pattern}")
-
-        # Normalize path separators to forward slashes
-        normalized = normalized.replace("\\", "/")
-
-        # Remove leading slashes to ensure relative paths
-        normalized = normalized.lstrip("/")
-
-        # Ensure trailing slash for directory patterns.
-        # A file extension is a dot that appears AFTER the first character.
-        # Leading-dot names without a second dot (.github, .env) are directories.
-        # Leading-dot names with an extension (.eslintrc.js, .babelrc.js) are files.
-        if normalized and not normalized.endswith("/"):
-            last = normalized.split("/")[-1]
-            has_file_extension = "." in last[1:]
-            if not has_file_extension:
-                normalized += "/"
-
-        return normalized
-
-    @staticmethod
     def _build_path_like_pattern(normalized_path: str) -> str:
         """Build a LIKE pattern from a normalized path filter.
 
@@ -4344,7 +4299,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _vector_path_like(self, path_filter: str | None) -> str | None:
         """Translate an optional API path filter for vector post-filtering."""
-        normalized_path = self._validate_and_normalize_path_filter(path_filter)
+        normalized_path = validate_and_normalize_path_filter(path_filter)
         return (
             self._build_path_like_pattern(normalized_path)
             if normalized_path is not None
@@ -4586,7 +4541,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Executor method for search_regex - runs in DB thread."""
         try:
             # Validate and normalize path filter
-            normalized_path = self._validate_and_normalize_path_filter(path_filter)
+            normalized_path = validate_and_normalize_path_filter(path_filter)
 
             # Build base WHERE clause
             where_conditions = ["regexp_matches(c.code, ?)"]

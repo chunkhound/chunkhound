@@ -20,10 +20,10 @@ from chunkhound.services.search.semantic_window import (
     semantic_total,
     validate_semantic_window,
 )
-
-# Providers without an explicit result-window capability retain the established
-# both-mode fetch size.
-_MAX_BOTH_DB_FETCH = 10_000
+from chunkhound.utils.path_filter import (
+    path_matches_filter,
+    validate_and_normalize_path_filter,
+)
 
 
 @runtime_checkable
@@ -194,20 +194,16 @@ class DiffAwareSearchService:
         # 3. Sort indices by score descending
         sorted_indices = np.argsort(scores)[::-1].tolist()
 
-        # G1 — path_filter (normalise to dir prefix to avoid partial name matches)
-        if path_filter:
-            for _danger in ("..", "~", "*", "?", "[", "]", "\0", "\n", "\r"):
-                if _danger in path_filter:
-                    raise ValueError(
-                        f"Path filter contains forbidden pattern: {_danger!r}"
-                    )
-            path_filter = path_filter.replace("\\", "/").lstrip("/")
-            _pf = path_filter.rstrip("/") + "/"
+        # G1 — path_filter: same normalization/matching semantics as DB search
+        normalized_filter = validate_and_normalize_path_filter(path_filter)
+        if normalized_filter:
             sorted_indices = [
                 i
                 for i in sorted_indices
                 if self._diff_chunks[i].file_path
-                and str(self._diff_chunks[i].file_path).startswith(_pf)
+                and path_matches_filter(
+                    str(self._diff_chunks[i].file_path), normalized_filter
+                )
             ]
 
         # 4. Apply threshold

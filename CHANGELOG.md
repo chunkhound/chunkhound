@@ -72,6 +72,14 @@ supported by the search API).
   semantic search now raise explicitly instead of returning empty result
   pages.
 
+### Fixed
+- **`path_filter` behaves identically for diff and DB search** — Git-diff
+  searches (`--last-n`, `--commit-range`, `--commit-hash`) previously treated
+  every filter as a directory prefix, so a file filter such as
+  `path_filter="src/module.py"` silently matched nothing. Both layers now share
+  one normalizer: file filters are right-anchored, directory filters match at
+  any depth.
+
 
 ## [5.2.0] - 2026-07-12
 

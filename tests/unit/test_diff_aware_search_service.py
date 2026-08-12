@@ -200,6 +200,30 @@ async def test_diff_mode_returns_diff_results_not_original():
 
 
 @pytest.mark.asyncio
+async def test_diff_semantic_path_filter_matches_qualified_file_exactly():
+    """Qualified file filters exclude suffixes and same-named files elsewhere."""
+    chunks = [
+        make_chunk("module", file_path="src/module.py"),
+        make_chunk("backup", file_path="src/module.py.bak"),
+        make_chunk("outside", file_path="tests/module.py"),
+    ]
+    service = DiffAwareSearchService(
+        make_original(),
+        chunks,
+        [[1.0, 0.0, 0.0]] * len(chunks),
+        "diff",
+        make_embedding_manager([[1.0, 0.0, 0.0]]),
+    )
+
+    results, pagination = await service.search_semantic(
+        "query", path_filter="src/module.py"
+    )
+
+    assert [result["file_path"] for result in results] == ["src/module.py"]
+    assert pagination["total"] == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("offset", "page_size"), [(-1, 1), (0, 0), (0, -1)])
 async def test_diff_semantic_rejects_invalid_windows(
     offset: int, page_size: int
