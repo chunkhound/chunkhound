@@ -24,6 +24,11 @@ pub struct FileRecord {
     pub size_bytes: Option<i64>,
     pub content_hash: Option<String>,
     pub language: Option<String>,
+    /// `None` clears any prior skip marker (written unconditionally on every
+    /// upsert, so a file that later parses successfully automatically has
+    /// its stale skip_reason overwritten). `Some(reason)` for a file with no
+    /// chunks to index (parse error, or unrecognized/empty content).
+    pub skip_reason: Option<String>,
     pub chunks: Vec<ChunkRecord>,
 }
 

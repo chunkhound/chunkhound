@@ -133,6 +133,7 @@ impl DuckDbHnswBackend {
             "
             CREATE SEQUENCE IF NOT EXISTS files_id_seq START 1;
             CREATE TABLE IF NOT EXISTS files ({files});
+            ALTER TABLE files ADD COLUMN IF NOT EXISTS skip_reason TEXT;
             CREATE SEQUENCE IF NOT EXISTS chunks_id_seq START 1;
             CREATE TABLE IF NOT EXISTS chunks ({chunks});
             CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq START 1;
@@ -294,8 +295,8 @@ impl DuckDbHnswBackend {
         // Skip the SELECT and go straight to UPDATE.
         if let Some(id) = file.existing_file_id {
             conn.execute(
-                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, updated_at = now() WHERE id = ?",
-                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, id],
+                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, skip_reason = ?, updated_at = now() WHERE id = ?",
+                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, file.skip_reason, id],
             )?;
             return Ok(id);
         }
@@ -312,14 +313,14 @@ impl DuckDbHnswBackend {
 
         if let Some(id) = existing_id {
             conn.execute(
-                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, updated_at = now() WHERE id = ?",
-                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, id],
+                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, skip_reason = ?, updated_at = now() WHERE id = ?",
+                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, file.skip_reason, id],
             )?;
             Ok(id)
         } else {
             let id: i64 = conn.query_row(
-                "INSERT INTO files (path, name, extension, size, modified_time, content_hash, language)
-                 VALUES (?, ?, ?, ?, CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, ?, ?)
+                "INSERT INTO files (path, name, extension, size, modified_time, content_hash, language, skip_reason)
+                 VALUES (?, ?, ?, ?, CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, ?, ?, ?)
                  RETURNING id",
                 duckdb::params![
                     file.path,
@@ -330,6 +331,7 @@ impl DuckDbHnswBackend {
                     file.mtime,
                     file.content_hash,
                     file.language,
+                    file.skip_reason,
                 ],
                 |row| row.get(0),
             )?;
@@ -1627,6 +1629,7 @@ mod hnsw_metric_tests {
                 size_bytes: Some(100),
                 content_hash: Some("abc".into()),
                 language: Some("python".into()),
+                skip_reason: None,
                 chunks: vec![],
             }],
             delete_paths: vec![],
@@ -1643,6 +1646,7 @@ mod hnsw_metric_tests {
                 size_bytes: Some(200),
                 content_hash: Some("def".into()),
                 language: Some("python".into()),
+                skip_reason: None,
                 chunks: vec![],
             }],
             delete_paths: vec![],
@@ -1812,6 +1816,7 @@ mod test_support {
             size_bytes: Some(100),
             content_hash: Some("abc123".into()),
             language: Some("python".into()),
+            skip_reason: None,
             chunks: vec![chunk_record("def foo(): pass", embedding_dims)],
         }
     }
@@ -1848,6 +1853,7 @@ mod test_support {
             size_bytes: Some(100),
             content_hash: Some("abc123".into()),
             language: Some("python".into()),
+            skip_reason: None,
             chunks: (0..chunk_count)
                 .map(|i| chunk_record(&format!("def foo_{i}(): pass"), embedding_dims))
                 .collect(),

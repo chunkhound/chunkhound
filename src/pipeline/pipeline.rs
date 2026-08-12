@@ -1090,13 +1090,13 @@ impl IndexingPipeline {
         let mut file_records = Vec::with_capacity(parsed.len());
 
         for pf in parsed {
-            if pf.error.is_some() {
-                continue;
-            }
-            if pf.chunks.is_empty() && pf.language.is_none() {
-                continue;
-            }
-
+            // Files with a parse error or with zero chunks and no detected
+            // language (images, binaries, generated data — anything with
+            // nothing to index) still get a row here, with empty `chunks`
+            // and `pf.skip_reason` set. Without this, such a file has no DB
+            // row at all, so every future run's diff phase (which only ever
+            // asks "does a row with a matching mtime exist for this path?")
+            // rediscovers it as new and reprocesses it forever.
             let chunks: Vec<ChunkRecord> = pf
                 .chunks
                 .iter()
@@ -1127,6 +1127,7 @@ impl IndexingPipeline {
                     Some(pf.content_hash.clone())
                 },
                 language: pf.language.clone(),
+                skip_reason: pf.skip_reason.clone(),
                 chunks,
             });
         }
@@ -1194,14 +1195,16 @@ impl IndexingPipeline {
                 .and_then(|v| v.extract::<String>().ok());
 
             if let Some(err) = py_error {
+                let (file_size, mtime) = Self::disk_stats_or_stat(path, disk_stats);
                 parsed.push(super::types::ParsedFile {
                     path: path.clone(),
                     rel_path: rel_keys.get(path).cloned().unwrap_or_default(),
                     language: None,
-                    file_size: 0,
-                    mtime: 0.0,
-                    content_hash: String::new(),
+                    file_size,
+                    mtime,
+                    content_hash: new_hashes.get(path).cloned().unwrap_or_default(),
                     chunks: Vec::new(),
+                    skip_reason: Some(Self::truncate_skip_reason(&format!("parse_error: {err}"))),
                     error: Some(err),
                 });
                 continue;
@@ -1214,14 +1217,16 @@ impl IndexingPipeline {
             {
                 Some(l) => l,
                 None => {
+                    let (file_size, mtime) = Self::disk_stats_or_stat(path, disk_stats);
                     parsed.push(super::types::ParsedFile {
                         path: path.clone(),
                         rel_path: rel_keys.get(path).cloned().unwrap_or_default(),
                         language: None,
-                        file_size: 0,
-                        mtime: 0.0,
-                        content_hash: String::new(),
+                        file_size,
+                        mtime,
+                        content_hash: new_hashes.get(path).cloned().unwrap_or_default(),
                         chunks: Vec::new(),
+                        skip_reason: Some("parse_error: invalid chunk list".into()),
                         error: Some("invalid chunk list".into()),
                     });
                     continue;
@@ -1234,21 +1239,18 @@ impl IndexingPipeline {
             // a third stat() pass per changed file. Falls back to a fresh
             // metadata() call for non-incremental runs (where disk_stats is
             // empty) or any file that wasn't in the precomputed map.
-            let (file_size, mtime) = disk_stats.get(path).copied().unwrap_or_else(|| {
-                let meta = std::fs::metadata(path).ok();
-                let mtime = meta
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0);
-                (meta.map_or(0, |m| m.len()), mtime)
-            });
+            let (file_size, mtime) = Self::disk_stats_or_stat(path, disk_stats);
+            let language = if lang.is_empty() { None } else { Some(lang) };
+            let skip_reason = if chunks.is_empty() && language.is_none() {
+                Some("unrecognized_or_empty".to_string())
+            } else {
+                None
+            };
 
             parsed.push(super::types::ParsedFile {
                 path: path.clone(),
                 rel_path: rel_keys.get(path).cloned().unwrap_or_default(),
-                language: if lang.is_empty() { None } else { Some(lang) },
+                language,
                 file_size,
                 mtime,
                 // Computed by the diff phase (`differ::compute_diff`), which
@@ -1256,11 +1258,49 @@ impl IndexingPipeline {
                 // reprocessing — reused here instead of hashing again.
                 content_hash: new_hashes.get(path).cloned().unwrap_or_default(),
                 chunks,
+                skip_reason,
                 error: None,
             });
         }
 
         Ok(parsed)
+    }
+
+    /// Resolve a file's (size, mtime) from the diff phase's precomputed map,
+    /// falling back to a fresh `stat()` when absent (non-incremental runs,
+    /// where the map is empty, or any file the diff phase didn't cover).
+    /// Shared by every `ParsedFile` construction site in `parse_one_batch` —
+    /// including the error branches, which must populate real values here
+    /// too: a `FileRecord` written with a zeroed mtime would never match the
+    /// file's real on-disk mtime on a later run, defeating the whole point
+    /// of persisting a skip row (see `build_db_batch`).
+    fn disk_stats_or_stat(
+        path: &std::path::Path,
+        disk_stats: &std::collections::HashMap<PathBuf, (u64, f64)>,
+    ) -> (u64, f64) {
+        disk_stats.get(path).copied().unwrap_or_else(|| {
+            let meta = std::fs::metadata(path).ok();
+            let mtime = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            (meta.map_or(0, |m| m.len()), mtime)
+        })
+    }
+
+    /// Bound a skip_reason string's length — parse error messages can
+    /// theoretically echo file content or a long traceback.
+    fn truncate_skip_reason(reason: &str) -> String {
+        const MAX_LEN: usize = 500;
+        if reason.len() <= MAX_LEN {
+            reason.to_string()
+        } else {
+            let mut truncated = reason.chars().take(MAX_LEN).collect::<String>();
+            truncated.push_str("...");
+            truncated
+        }
     }
 
     /// Size and build the rayon thread pool used for parallel embed

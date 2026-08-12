@@ -19,6 +19,12 @@ pub(crate) struct ParsedFile {
     pub content_hash: String,
     pub chunks: Vec<NewChunk>,
     pub error: Option<String>,
+    /// `None` for a normal successful parse. `Some(reason)` for a file that
+    /// was attempted but produced nothing to index (parse error, or zero
+    /// chunks with no detected language) — persisted to the DB instead of
+    /// dropped, so the diff phase recognizes it as already-checked on future
+    /// runs instead of rediscovering and reprocessing it forever.
+    pub skip_reason: Option<String>,
 }
 
 /// A chunk from the Python parse callback, before embedding.
