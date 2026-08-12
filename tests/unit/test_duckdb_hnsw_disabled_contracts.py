@@ -186,6 +186,27 @@ def test_exact_search_filters_before_ranking(exact_provider: DuckDBProvider) -> 
     assert not set(_ids(semantic)) & set(noise_ids)
 
 
+@pytest.mark.fast
+def test_find_similar_chunks_with_threshold_in_exact_mode(
+    exact_provider: DuckDBProvider,
+) -> None:
+    """find_similar_chunks applies threshold as an inclusive similarity floor.
+
+    Vectors are 1/sqrt(1 + (0.01 * index)^2) from the query chunk, so indices
+    1..32 clear the 0.95 floor and indices 33+ fall below it -- the threshold
+    boundary is exercised exactly.
+    """
+    chunk_ids = _seed(exact_provider, 40)
+
+    similar = exact_provider.find_similar_chunks(
+        chunk_ids[0], PROVIDER, MODEL, limit=40, threshold=0.95
+    )
+
+    assert _ids(similar) == chunk_ids[1:33]
+    assert all(result["score"] >= 0.95 for result in similar)
+    assert not has_hnsw_index(exact_provider, 3)
+
+
 @pytest.mark.hnsw
 @pytest.mark.fast
 def test_exact_search_ignores_a_persisted_hnsw_index(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ from loguru import logger
 
 from chunkhound.api.cli.commands.search import _format_search_results
 from chunkhound.core.config.database_config import DatabaseConfig
+from chunkhound.core.constants import HNSW_CANDIDATE_BUDGET
 from chunkhound.core.models import Chunk
 from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
 from chunkhound.embeddings import LocalEmbeddingResult
@@ -234,6 +235,56 @@ def test_filtered_search_short_page_at_candidate_budget(
     assert {result["chunk_id"] for result in similar} == set(target_ids) - {
         target_ids[0]
     }
+
+
+@pytest.mark.hnsw
+@pytest.mark.fast
+def test_list_api_raises_when_budget_exhausted_with_zero_results(
+    provider: DuckDBProvider,
+) -> None:
+    """List-only vector APIs fail loudly when budget exhaustion yields nothing.
+
+    A zero-result page under HNSW candidate-budget exhaustion means the beam
+    never reached a matching row. The paginated API reports it as metadata;
+    the list-only APIs must raise so callers cannot mistake it for a genuine
+    empty result.
+    """
+    noise_count = HNSW_CANDIDATE_BUDGET
+    noise_vectors = []
+    for index in range(noise_count):
+        distance = 0.001 + 0.5 * (index / noise_count)
+        noise_vectors.append(
+            [math.sqrt(max(0.0, 1.0 - distance * distance)), distance, 0.0]
+        )
+    noise_ids = insert_chunks(provider, "noise/module.py", noise_count)
+    insert_embeddings(
+        provider,
+        noise_ids,
+        noise_vectors,
+        provider_name="noise",
+        model="m",
+    )
+    require_hnsw_index(provider)
+    # Widen the search beam so every overfetch step returns its full limit and
+    # the candidate budget is genuinely exhausted at the final scan.
+    provider.execute_query("SET hnsw_ef_search = 20000", [])
+
+    with pytest.raises(RuntimeError, match="exhausted the HNSW candidate budget"):
+        provider.search_by_embedding(QUERY_VECTOR, "missing", "x", limit=10)
+
+    # find_similar_chunks needs the searched chunk to exist under the target
+    # provider/model; its own row is excluded and the noise rows are filtered,
+    # so exhaustion still yields zero results.
+    target_ids = insert_chunks(provider, "target/module.py", 1)
+    insert_embeddings(
+        provider,
+        target_ids,
+        [[0.9, 0.3, 0.1]],
+        provider_name="missing",
+        model="x",
+    )
+    with pytest.raises(RuntimeError, match="exhausted the HNSW candidate budget"):
+        provider.find_similar_chunks(target_ids[0], "missing", "x", limit=10)
 
 
 @pytest.mark.hnsw
