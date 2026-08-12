@@ -19,6 +19,10 @@ from loguru import logger
 
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.interfaces.llm_provider import (
+    PROVIDER_MANAGED_OUTPUT,
+    OutputLimitDecisionKind,
+)
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services import prompts
 from chunkhound.services.clustering_service import ClusterGroup
@@ -120,7 +124,9 @@ class PluggableResearchService(ProgressEmitterMixin):
             return self._config.num_expanded_queries
         return NUM_LLM_EXPANDED_QUERIES
 
-    async def deep_research(self, query: str) -> dict[str, Any]:
+    async def deep_research(
+        self, query: str, previous_query: str | None = None
+    ) -> dict[str, Any]:
         """Perform deep research on a query.
 
         Uses fixed BFS depth (max_depth=1) with dynamic synthesis budgets that scale
@@ -129,6 +135,10 @@ class PluggableResearchService(ProgressEmitterMixin):
 
         Args:
             query: Research question to investigate
+            previous_query: Follow-up chain hook. When set, the synthesis
+                stage frames map/reduce/single-pass outputs in the prior
+                topic's context. Does not affect which code is searched,
+                retrieved, or reranked. Empty / None means un-chained.
 
         Returns:
             Dictionary with answer and metadata
@@ -148,14 +158,38 @@ class PluggableResearchService(ProgressEmitterMixin):
             f"Synthesis output budget: {synthesis_budgets['output_tokens']:,} tokens"
         )
 
-        # Emit configuration info
+        # Report the selected synthesis provider's resolved request-limit policy.
+        output_policy = (
+            self._llm_manager.get_synthesis_provider().synthesis_output_limit_policy
+        )
+        if output_policy.output_limits_enabled:
+            output_policy_message = (
+                "legacy numeric (30,000-token single/reduce cap; computed per-map caps)"
+            )
+        else:
+            decision = output_policy.resolve(PROVIDER_MANAGED_OUTPUT)
+            if decision.kind is OutputLimitDecisionKind.OMIT:
+                output_policy_message = "provider-managed (cap omitted)"
+            elif decision.kind is OutputLimitDecisionKind.DECLARATION:
+                assert decision.max_tokens is not None
+                output_policy_message = (
+                    "provider-managed (provider-declared cap: "
+                    f"{decision.max_tokens:,} tokens)"
+                )
+            else:
+                assert decision.max_tokens is not None
+                output_policy_message = (
+                    f"provider-managed (fallback cap: {decision.max_tokens:,} tokens)"
+                )
+
         await self._emit_event(
             "main_info",
-            f"Max depth: {max_depth}, output budget: {synthesis_budgets['output_tokens'] // 1000}k tokens",
+            f"Max depth: {max_depth}; synthesis request limits: "
+            f"{output_policy_message}",
         )
 
         # Phase 1: Initial search
-        context = ResearchContext(root_query=query)
+        context = ResearchContext(root_query=query, previous_query=previous_query)
         await self._emit_event(
             "depth_start",
             "Phase 1: Initial search",
@@ -308,7 +342,6 @@ class PluggableResearchService(ProgressEmitterMixin):
             logger.info("Single cluster detected - using single-pass synthesis")
             facts_context = evidence_ledger.get_facts_reduce_prompt_context()
             answer = await self._synthesis_engine._single_pass_synthesis(
-                root_query=query,
                 chunks=prioritized_chunks,
                 files=budgeted_files,
                 context=context,
@@ -335,31 +368,15 @@ class PluggableResearchService(ProgressEmitterMixin):
                 f"(concurrency={max_concurrency})",
             )
 
-            semaphore = asyncio.Semaphore(max_concurrency)
-
-            # Calculate total input tokens across all clusters for proportional budget allocation
-            total_input_tokens = sum(cluster.total_tokens for cluster in cluster_groups)
-
-            async def map_with_semaphore(cluster: ClusterGroup) -> dict[str, Any]:
-                async with semaphore:
-                    # Get cluster-specific facts context
-                    cluster_files = set(cluster.file_paths)
-                    cluster_facts_context = evidence_ledger.get_facts_map_prompt_context(
-                        cluster_files,
-                        cluster_id=cluster.cluster_id,
-                    )
-                    return await self._synthesis_engine._map_synthesis_on_cluster(
-                        cluster,
-                        query,
-                        prioritized_chunks,
-                        synthesis_budgets,
-                        total_input_tokens,
-                        constants_context=constants_context,
-                        facts_context=cluster_facts_context,
-                    )
-
-            map_tasks = [map_with_semaphore(cluster) for cluster in cluster_groups]
-            cluster_results = await asyncio.gather(*map_tasks)
+            cluster_results = await self._run_synthesis_maps(
+                cluster_groups=cluster_groups,
+                context=context,
+                prioritized_chunks=prioritized_chunks,
+                synthesis_budgets=synthesis_budgets,
+                constants_context=constants_context,
+                evidence_ledger=evidence_ledger,
+                max_concurrency=max_concurrency,
+            )
 
             logger.info(
                 f"Map step complete: {len(cluster_results)} cluster summaries generated"
@@ -375,10 +392,10 @@ class PluggableResearchService(ProgressEmitterMixin):
             reduce_facts_context = evidence_ledger.get_facts_reduce_prompt_context()
 
             answer = await self._synthesis_engine._reduce_synthesis(
-                query,
                 cluster_results,
                 prioritized_chunks,
                 budgeted_files,
+                context,
                 synthesis_budgets,
                 constants_context=constants_context,
                 facts_context=reduce_facts_context,
@@ -423,6 +440,118 @@ class PluggableResearchService(ProgressEmitterMixin):
             "answer": answer,
             "metadata": metadata,
         }
+
+    async def _run_synthesis_maps(
+        self,
+        *,
+        cluster_groups: list[ClusterGroup],
+        context: ResearchContext,
+        prioritized_chunks: list[dict[str, Any]],
+        synthesis_budgets: dict[str, int],
+        constants_context: str,
+        evidence_ledger: EvidenceLedger,
+        max_concurrency: int,
+    ) -> list[dict[str, Any]]:
+        """Run bounded map synthesis and settle every child before returning."""
+        semaphore = asyncio.Semaphore(max_concurrency)
+        abort = asyncio.Event()
+        trigger: Exception | asyncio.CancelledError | None = None
+        total_input_tokens = sum(cluster.total_tokens for cluster in cluster_groups)
+
+        class MapAbortedError(Exception):
+            """Stop a queued map after a sibling has failed."""
+
+        async def run_map(cluster: ClusterGroup) -> dict[str, Any]:
+            nonlocal trigger
+
+            if abort.is_set():
+                raise MapAbortedError()
+
+            await semaphore.acquire()
+            try:
+                # A failure can release the semaphore while this task is queued.
+                if abort.is_set():
+                    raise MapAbortedError()
+
+                cluster_files = set(cluster.file_paths)
+                cluster_facts_context = evidence_ledger.get_facts_map_prompt_context(
+                    cluster_files,
+                    cluster_id=cluster.cluster_id,
+                )
+                try:
+                    return await self._synthesis_engine._map_synthesis_on_cluster(
+                        cluster=cluster,
+                        chunks=prioritized_chunks,
+                        context=context,
+                        synthesis_budgets=synthesis_budgets,
+                        total_input_tokens=total_input_tokens,
+                        constants_context=constants_context,
+                        facts_context=cluster_facts_context,
+                    )
+                except asyncio.CancelledError as error:
+                    if trigger is None:
+                        trigger = error
+                    abort.set()
+                    raise
+                except Exception as error:
+                    if trigger is None:
+                        trigger = error
+                    abort.set()
+                    raise
+            finally:
+                semaphore.release()
+
+        tasks = [
+            asyncio.create_task(run_map(cluster), name=f"synthesis-map-{index}")
+            for index, cluster in enumerate(cluster_groups)
+        ]
+
+        async def cancel_and_settle() -> None:
+            abort.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        try:
+            pending = set(tasks)
+            while pending:
+                _, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if abort.is_set():
+                    if trigger is not None:
+                        raise trigger
+                    raise RuntimeError("Map synthesis aborted without a trigger")
+
+            return [task.result() for task in tasks]
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            caller_cancelled = (
+                caller is not None and getattr(caller, "cancelling", lambda: 1)() > 0
+            )
+            try:
+                await cancel_and_settle()
+            except asyncio.CancelledError:
+                # A caller cancellation during cleanup still wins. Settle children
+                # before allowing it to propagate to the caller.
+                await cancel_and_settle()
+                raise
+            if caller_cancelled:
+                raise
+            if trigger is not None:
+                raise trigger from None
+            raise
+        except Exception:
+            try:
+                await cancel_and_settle()
+            except asyncio.CancelledError:
+                await cancel_and_settle()
+                raise
+            if trigger is not None:
+                raise trigger from None
+            raise
 
     def _build_search_query(self, query: str, context: ResearchContext) -> str:
         """Build search query combining input with BFS context.
@@ -675,10 +804,8 @@ class PluggableResearchService(ProgressEmitterMixin):
                         end_line = chunk.get("end_line", 1)
 
                         # Use smart boundary detection to expand to complete functions/classes
-                        expanded_start, expanded_end = (
-                            expand_to_natural_boundaries(
-                                lines, start_line, end_line, chunk, file_path
-                            )
+                        expanded_start, expanded_end = expand_to_natural_boundaries(
+                            lines, start_line, end_line, chunk, file_path
                         )
 
                         # Skip chunks with invalid boundary expansion

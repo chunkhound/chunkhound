@@ -412,6 +412,9 @@ def test_llm_manager_forwards_anthropic_extended_config(monkeypatch):
             captured.append(kwargs)
             self.model = kwargs["model"]
 
+        def configure_synthesis_output_limit_policy(self, **kwargs):  # noqa: ANN001
+            self.output_limit_policy = kwargs
+
     monkeypatch.setitem(LLMManager._providers, "anthropic", FakeAnthropicProvider)
 
     cfg = LLMConfig(
@@ -1099,6 +1102,9 @@ def test_supports_structured_outputs_not_passed_to_other_providers() -> None:
 
         async def complete(self, prompt, **kwargs):  # noqa: ANN001, ANN201
             pass
+
+        def configure_synthesis_output_limit_policy(self, **kwargs):  # noqa: ANN001
+            self.output_limit_policy = kwargs
 
     from chunkhound.llm_manager import LLMManager
 

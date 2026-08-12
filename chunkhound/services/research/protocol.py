@@ -21,11 +21,17 @@ class ResearchServiceProtocol(Protocol):
     ResearchServiceFactory.create() to instantiate implementations.
     """
 
-    async def deep_research(self, query: str) -> dict[str, Any]:
+    async def deep_research(
+        self, query: str, previous_query: str | None = None
+    ) -> dict[str, Any]:
         """Execute research on a query.
 
         Args:
             query: Research query to investigate
+            previous_query: Follow-up chain hook. When set, the synthesis
+                stage frames the answer in the prior topic's context —
+                search, retrieval, and reranking are unaffected. Empty /
+                None means un-chained.
 
         Returns:
             Dict with answer, citations, stats, and optional fields

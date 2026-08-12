@@ -32,7 +32,7 @@ pandas>=2.3.0
 psutil>=7.1.0
 watchdog>=6.0.0
 readchar>=4.2.0
-pymupdf>=1.26.0
+pymupdf>=1.27.0
 
 # Tree-sitter language support
 tree-sitter-hcl>=1.2.0

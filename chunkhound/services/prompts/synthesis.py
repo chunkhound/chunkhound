@@ -3,6 +3,40 @@
 Generates comprehensive analysis from BFS exploration results.
 """
 
+_FOLLOW_UP_FRAMING = (
+    '\n\nNote: This is a follow-up question. '
+    'The previous query was: "{previous_query}"\n'
+    "Interpret the current query in the context of this previous topic."
+)
+
+_FOLLOW_UP_MAP_HINT = '\nContext: follow-up to prior query "{previous_query}".'
+
+
+def build_follow_up_section(previous_query: str | None) -> str:
+    """Full framing for answer-authoring stages (single-pass, reduce).
+
+    Answer-authoring stages produce the user-facing response and need the
+    full framing block so the LLM reinterprets the query against prior
+    context. Do NOT collapse this with build_follow_up_hint — the two
+    stages have different roles and prompt shapes.
+    """
+    if not previous_query:
+        return ""
+    return _FOLLOW_UP_FRAMING.format(previous_query=previous_query)
+
+
+def build_follow_up_hint(previous_query: str | None) -> str:
+    """Compact one-liner for the map (per-cluster extraction) stage.
+
+    Map runs per-cluster to extract relevant material, not to author the
+    final answer, so it only needs a short reminder of the prior topic.
+    The full framing block lives in reduce.
+    """
+    if not previous_query:
+        return ""
+    return _FOLLOW_UP_MAP_HINT.format(previous_query=previous_query)
+
+
 # Shared citation requirements for all synthesis modes
 CITATION_REQUIREMENTS = (
     """**Citations**: MANDATORY reference numbers for every claim, """

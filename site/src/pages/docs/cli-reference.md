@@ -148,6 +148,41 @@ chunkhound websearch "OAuth refresh token rotation best practices"
 chunkhound websearch "Rust 2025 edition new features" --limit 50
 ```
 
+## `chunkhound fetchurl`
+
+Fetch a single URL (HTML or PDF), extract its content, and return a focused Markdown answer. Use it to pull a specific page into the loop without running a full web search.
+
+```bash
+chunkhound fetchurl <url> [options]
+```
+
+| Argument | Description |
+|---|---|
+| `url` | Absolute `http://` or `https://` URL (required) |
+
+**Options:**
+
+| Flag | Description |
+|---|---|
+| `--query TEXT`, `-q TEXT` | Optional question to focus the extraction. When set, enables rerank+elbow on long pages (default: `""`) |
+| `--fetchurl-rerank-threshold-tokens N` | Token count above which chunk-rerank is used instead of truncate (default: 15000) |
+| `--fetchurl-truncate-tokens N` | Token cap applied to the truncate-option input before the LLM call (default: 15000) |
+| `--fetchurl-max-retries N` | Fetch attempts including the first, with exponential backoff (default: 3; range 1–10) |
+
+> **Requires** LLM + reranker providers. See [Configuration](/docs/configuration#fetch-url) for setup details.
+>
+> **Note:** hosts resolving to loopback / private / link-local / reserved / multicast / unspecified addresses are rejected.
+
+**Examples:**
+
+```bash
+# Extract a whole page into a Markdown summary
+chunkhound fetchurl https://example.com/spec.html
+
+# Focus the extraction on a specific question
+chunkhound fetchurl https://example.com/rfc.pdf -q "how are retries bounded?"
+```
+
 ## `chunkhound research`
 
 Deep code research. Generates a synthesized answer with citations by searching the codebase, reading relevant files, and using an LLM to analyze the results.

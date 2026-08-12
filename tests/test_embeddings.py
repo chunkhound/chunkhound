@@ -470,6 +470,53 @@ def test_tei_format_validation_without_model() -> None:
     assert config.rerank_format == "tei"
 
 
+def test_voyage_format_propagates_through_config() -> None:
+    """rerank_format='voyage' should be accepted and flow into the provider."""
+    from chunkhound.core.config.embedding_config import EmbeddingConfig
+    from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+
+    config = EmbeddingConfig(
+        provider="voyageai",
+        base_url="https://ai.mongodb.com/v1",
+        model="voyage-3.5",
+        rerank_model="rerank-2.5",
+        rerank_format="voyage",
+    )
+    assert config.rerank_format == "voyage"
+
+    provider = EmbeddingProviderFactory.create_provider(config)
+    assert provider._rerank_format == "voyage"
+
+
+def test_voyage_format_requires_model() -> None:
+    """Voyage-native format, like Cohere, needs an explicit rerank_model."""
+    from chunkhound.core.config.embedding_config import EmbeddingConfig
+
+    with pytest.raises(ValueError, match="rerank_model is required"):
+        EmbeddingConfig(
+            provider="voyageai",
+            base_url="https://ai.mongodb.com/v1",
+            model="voyage-3.5",
+            rerank_url="/rerank",
+            rerank_format="voyage",
+        )
+
+
+def test_official_voyage_config_stays_on_sdk_rerank() -> None:
+    """Adding the 'voyage' format must not shift the official-API default:
+    official VoyageAI (no base_url) keeps rerank_format='auto' and no
+    rerank_url, so reranking stays on the SDK path, never the HTTP path."""
+    from chunkhound.core.config.embedding_config import EmbeddingConfig
+
+    config = EmbeddingConfig(
+        provider="voyageai",
+        model="voyage-3.5",
+        rerank_model="rerank-2.5",
+    )
+    assert config.rerank_format == "auto"
+    assert config.rerank_url is None
+
+
 def test_supports_reranking_with_incomplete_cohere_config() -> None:
     """Fail-fast validation should reject incomplete Cohere rerank config."""
     with pytest.raises(ValueError, match="rerank_model is required.*cohere"):

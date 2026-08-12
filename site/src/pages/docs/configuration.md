@@ -260,9 +260,50 @@ When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound
 | `synthesis_provider` | `string` | `null` | Override provider for synthesis operations |
 | `timeout` | `number` | `120` | LLM request timeout in seconds |
 | `max_retries` | `number` | `3` | Max retry attempts |
+| `output_limits_enabled` | `boolean` | `false` | Restore the exact legacy numeric output limits for research synthesis instead of provider-managed limits. |
+| `output_limit_fallback` | `number` | `64000` | Positive output-token fallback used when a synthesis provider cannot authoritatively omit a limit or declare one. |
 | `codex_reasoning_effort` | `string` | `null` | Default reasoning effort for Codex/OpenAI: `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `codex_reasoning_effort_utility` | `string` | `null` | Reasoning effort override for utility stage |
 | `codex_reasoning_effort_synthesis` | `string` | `null` | Reasoning effort override for synthesis stage |
+
+### Research Synthesis Output Limits
+
+Provider-managed output limits are the default (`llm.output_limits_enabled: false`). This policy applies only to the final research synthesis path: single-pass synthesis and the map and reduce calls of map-reduce synthesis. Non-research LLM operations continue to use their existing explicit numeric caps unchanged.
+
+For each provider-managed synthesis request, ChunkHound uses this precedence without guessing limits from model names:
+
+1. If the selected synthesis provider authoritatively supports omitting the output cap, omit it and let the provider manage the limit.
+2. Otherwise, use an authoritative declared positive maximum only when it includes a durable provider/API source.
+3. Otherwise, send the scalar `llm.output_limit_fallback` (default `64000`).
+
+`UNKNOWN` omission capability is handled conservatively: ChunkHound does not assume omission is safe, so it uses a valid sourced declaration or the scalar fallback. This is intentionally not a per-model lookup table.
+
+Built-in DeepSeek and Grok configurations at their canonical first-party endpoints authoritatively support omission. Provider-managed DeepSeek requests omit `max_tokens`, and provider-managed Grok Chat Completions requests omit `max_completion_tokens`. Setting a custom `base_url` on either built-in downgrades omission capability to `UNKNOWN`; generic OpenAI-compatible endpoints are also `UNKNOWN` and therefore use a sourced declaration or the configured fallback. An omitted client cap lets the provider apply its own policy—it does not mean output is unlimited.
+
+At research startup, the progress display reports the resolved synthesis request-limit policy using one of these forms (runtime cap values are comma-formatted):
+
+- `Max depth: 1; synthesis request limits: provider-managed (cap omitted)`
+- `Max depth: 1; synthesis request limits: provider-managed (provider-declared cap: 64,000 tokens)`
+- `Max depth: 1; synthesis request limits: provider-managed (fallback cap: 64,000 tokens)`
+- `Max depth: 1; synthesis request limits: legacy numeric (30,000-token single/reduce cap; computed per-map caps)`
+
+To roll back exactly to the legacy behavior, set `llm.output_limits_enabled: true`:
+
+```json
+{
+  "llm": {
+    "output_limits_enabled": true
+  }
+}
+```
+
+Legacy mode preserves a `30000`-token numeric request for single-pass and reduce synthesis. Each map request uses `max(5000, int(30000 * cluster_tokens / total_input_tokens))`; when total input tokens are zero, every map uses `30000`. Provider-managed mode changes only the request's transport allowance. Prompt guidance remains separate: `15000` for single-pass and reduce synthesis, and `min(legacy_map_allowance, 7500)` for each map.
+
+Operational caveats:
+
+- Provider-managed output does not guarantee that the provider will not truncate a response.
+- Native provider truncation signals still raise `RuntimeError`; synthesis does not retry the truncated stage or return a partial or degraded result.
+- When one concurrent map fails, local sibling cancellation is best-effort. It is not a guarantee that an already-dispatched remote request stopped or that the provider will not bill it.
 
 ### Anthropic-specific Options
 
@@ -414,6 +455,8 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_LLM_SYNTHESIS_PROVIDER` | Override provider for synthesis operations |
 | `CHUNKHOUND_LLM_TIMEOUT` | LLM request timeout in seconds (default: 120) |
 | `CHUNKHOUND_LLM_MAX_RETRIES` | Max retry attempts (default: 3) |
+| `CHUNKHOUND_LLM_OUTPUT_LIMITS_ENABLED` | Restore exact legacy research synthesis output limits (`true`/`false`; default: `false`) |
+| `CHUNKHOUND_LLM_OUTPUT_LIMIT_FALLBACK` | Positive provider-managed synthesis fallback in output tokens (default: `64000`) |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` | Reasoning effort for Codex models (`minimal`, `low`, `medium`, `high`, `xhigh`) |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY` | Reasoning effort override for utility stage |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS` | Reasoning effort override for synthesis stage |
@@ -705,13 +748,60 @@ If any of these are missing, the MCP `websearch` tool is not registered (capabil
 
 | Constant | Value | Description |
 |---|---|---|
-| `MAX_FETCH_CONCURRENCY` | `5` | Max concurrent page fetches (defined in `chunkhound.utils.websearch_core`) |
 | `WEBSEARCH_LIMIT_MAX` | `100` | Upper bound for the `--limit` / `limit` parameter |
 
 ### Browser Dependency
 
-The fetch path uses **zendriver** (v0.15.3, core dependency — no extra install needed) to drive the system-installed Google Chrome for rich page rendering. Chrome >=124 is required. If Chrome is not found or too old, fetches fall back to `urllib` (less capable — may miss JS-rendered content and cannot fetch PDFs).
+The fetch path uses **zendriver** (v0.15.3, core dependency — no extra install needed) to drive the system-installed Google Chrome for rich page rendering. Chrome >=124 is required. If Chrome is not found or too old, fetches fall back to `urllib` (less capable — may miss JS-rendered content and cannot fetch some PDFs).
 
 ### Research Config Linkage
 
 The web search tool delegates to the same deep research pipeline as `code_research`. All settings in the [Research Configuration](#research-configuration) section apply: `algorithm`, `multi_hop_time_limit`, `relevance_threshold`, `query_expansion_enabled`, `target_tokens`, etc.
+
+## Fetch URL
+
+The `fetchurl` tool fetches a single URL, extracts its content, and returns a focused Markdown answer via one LLM call (short pages) or a rerank+elbow pipeline over page chunks (long pages with a query). It is available as an MCP tool and as `chunkhound fetchurl`. Fetches use the same **zendriver + system Chrome** transport as [Web Search](#web-search) with the same `urllib` fallback — see that section's [Browser Dependency](#browser-dependency) note for Chrome version requirements and fallback behavior.
+
+### Requirements
+
+The fetch URL tool requires two provider capabilities to be configured:
+
+- **LLM provider** — for the extraction/answer call
+- **Reranker-capable embedding provider** — VoyageAI (SDK), or a Cohere/TEI HTTP reranker. `rerank_model` is required for the VoyageAI SDK and Cohere paths; TEI needs `rerank_format=tei` + `rerank_url` (no `rerank_model`).
+
+If either is missing, the MCP `fetchurl` tool is not registered (capability gating hides it from `tools/list`) and the CLI command exits `1` with an explicit error message.
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `url` | string | required | Absolute `http://` or `https://` URL. Non-`http(s)` schemes are rejected, as are hosts resolving to loopback / private / link-local / reserved / multicast / unspecified addresses. |
+| `query` / `--query` / `-q` | string | `""` | Optional question. When set, focuses extraction and enables the rerank+elbow path on pages exceeding `fetchurl.rerank_threshold_tokens`. |
+
+### Environment Variables
+
+| Variable | Description |
+|---|---|
+| `CHUNKHOUND_FETCHURL_RERANK_THRESHOLD_TOKENS` | Overrides `fetchurl.rerank_threshold_tokens`. |
+| `CHUNKHOUND_FETCHURL_TRUNCATE_TOKENS` | Overrides `fetchurl.truncate_tokens`. |
+| `CHUNKHOUND_FETCHURL_MAX_RETRIES` | Overrides `fetchurl.max_retries`. |
+
+### Configuration File
+
+```json
+{
+  "fetchurl": {
+    "rerank_threshold_tokens": 15000,
+    "truncate_tokens": 15000,
+    "max_retries": 3
+  }
+}
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `rerank_threshold_tokens` | int (≥1) | 15000 | Estimated token count above which the chunk-rerank path (chunk + rerank + elbow filter) is used instead of the truncate path (token-truncate + single LLM call). Only applies when `query` is set — without a query, the truncate path is always used regardless of page size. Tokens are estimated at 4 chars/token. |
+| `truncate_tokens` | int (≥1) | 15000 | Token cap applied to the truncate-option input before the LLM call. Content is sliced to `truncate_tokens × 4` characters. |
+| `max_retries` | int (1–10) | 3 | Fetch attempts including the first. Uses exponential backoff with full jitter capped at 8s. Browser-transport death consumes an attempt slot and downgrades remaining attempts to `urllib`. |
+
+> **CLI vs MCP:** The three knobs above are exposed as `--fetchurl-*` flags on the CLI (`chunkhound fetchurl`). The MCP `fetchurl` tool accepts only `url` and `query` — knob overrides must come from config or `CHUNKHOUND_FETCHURL_*` env vars.

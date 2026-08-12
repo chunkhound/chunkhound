@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
-from chunkhound.interfaces.llm_provider import LLMResponse
+from chunkhound.interfaces.llm_provider import (
+    PROVIDER_MANAGED_OUTPUT,
+    LLMResponse,
+    OutputLimitCapability,
+)
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
 
 
@@ -59,11 +63,80 @@ def test_official_openai_endpoint_keeps_real_api_key_contract():
     assert kwargs["base_url"] == "https://api.openai.com/v1"
 
 
+@pytest.mark.parametrize(
+    ("explicit_url", "environment_url", "resolved_url", "expected_capability"),
+    [
+        (None, None, None, OutputLimitCapability.SUPPORTED),
+        (
+            None,
+            "https://api.openai.com/v1",
+            "https://api.openai.com/v1",
+            OutputLimitCapability.SUPPORTED,
+        ),
+        (
+            None,
+            "https://gateway.example/v1",
+            "https://gateway.example/v1",
+            OutputLimitCapability.UNKNOWN,
+        ),
+        (
+            "https://api.openai.com/v1",
+            "https://gateway.example/v1",
+            "https://api.openai.com/v1",
+            OutputLimitCapability.SUPPORTED,
+        ),
+        (
+            "https://gateway.example/v1",
+            "https://api.openai.com/v1",
+            "https://gateway.example/v1",
+            OutputLimitCapability.UNKNOWN,
+        ),
+    ],
+    ids=[
+        "sdk-default",
+        "official-environment",
+        "custom-environment",
+        "explicit-official-precedence",
+        "explicit-custom-precedence",
+    ],
+)
+def test_output_limit_capability_uses_resolved_endpoint_route(
+    explicit_url: str | None,
+    environment_url: str | None,
+    resolved_url: str | None,
+    expected_capability: OutputLimitCapability,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_environment,
+) -> None:
+    """Capability classification and SDK construction use one selected route."""
+    if environment_url is not None:
+        monkeypatch.setenv("OPENAI_BASE_URL", environment_url)
+
+    with patch(
+        "chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI"
+    ) as mock_client:
+        provider = OpenAILLMProvider(
+            api_key="sk-test",
+            model="gpt-5",
+            base_url=explicit_url,
+        )
+
+    assert provider.output_limit_metadata.omission is expected_capability
+    if resolved_url is None:
+        assert "base_url" not in mock_client.call_args.kwargs
+    else:
+        assert mock_client.call_args.kwargs["base_url"] == resolved_url
+
+
 def test_custom_endpoint_ssl_verify_false_creates_insecure_http_client():
     """Explicit ssl_verify=false should only affect custom base_url traffic."""
     with (
-        patch("chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI") as mock_client,
-        patch("chunkhound.providers.llm.openai_compatible_provider.httpx.AsyncClient") as mock_http_client,
+        patch(
+            "chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI"
+        ) as mock_client,
+        patch(
+            "chunkhound.providers.llm.openai_compatible_provider.httpx.AsyncClient"
+        ) as mock_http_client,
     ):
         OpenAILLMProvider(
             api_key=None,
@@ -123,6 +196,154 @@ class TestOpenAILLMProvider:
         assert response.content == "Chunking is working perfectly!"
         assert response.tokens_used == 42
         assert response.model == "gpt-5-nano-mini"
+
+    @pytest.mark.asyncio
+    async def test_provider_managed_text_omits_caps_on_responses_and_chat(
+        self, mock_openai_client
+    ):
+        """Official OpenAI omits, rather than serializing enum/None cap values."""
+        responses_result = MagicMock()
+        responses_result.output = [
+            MagicMock(
+                type="message", content=[MagicMock(type="output_text", text="ok")]
+            )
+        ]
+        responses_result.usage = None
+        responses_result.status = "completed"
+        mock_openai_client.responses.create.return_value = responses_result
+
+        chat_result = MagicMock()
+        chat_result.choices = [
+            MagicMock(message=MagicMock(content="ok"), finish_reason="stop")
+        ]
+        chat_result.usage = None
+        mock_openai_client.chat.completions.create.return_value = chat_result
+
+        responses_provider = OpenAILLMProvider(api_key="sk-test", model="gpt-5")
+        chat_provider = OpenAILLMProvider(api_key="sk-test", model="gpt-3.5-turbo")
+        for provider in (responses_provider, chat_provider):
+            provider.configure_synthesis_output_limit_policy(
+                output_limits_enabled=False,
+                fallback_tokens=75_000,
+            )
+            await provider.complete(
+                "hello", max_completion_tokens=PROVIDER_MANAGED_OUTPUT
+            )
+
+        assert (
+            "max_output_tokens"
+            not in mock_openai_client.responses.create.call_args.kwargs
+        )
+        assert (
+            "max_completion_tokens"
+            not in mock_openai_client.chat.completions.create.call_args.kwargs
+        )
+
+    @pytest.mark.asyncio
+    async def test_provider_managed_structured_omits_caps_and_preserves_schema(
+        self, mock_openai_client
+    ):
+        """Both OpenAI APIs retain strict schemas while omitting managed caps."""
+        schema = {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        }
+        responses_result = MagicMock()
+        responses_result.output = [
+            MagicMock(
+                type="message",
+                content=[MagicMock(type="output_text", text='{"answer":"42"}')],
+            )
+        ]
+        responses_result.usage = None
+        responses_result.status = "completed"
+        mock_openai_client.responses.create.return_value = responses_result
+
+        chat_result = MagicMock()
+        chat_result.choices = [
+            MagicMock(
+                message=MagicMock(content='{"answer":"42"}'),
+                finish_reason="stop",
+            )
+        ]
+        chat_result.usage = None
+        mock_openai_client.chat.completions.create.return_value = chat_result
+
+        responses_provider = OpenAILLMProvider(api_key="sk-test", model="gpt-5")
+        chat_provider = OpenAILLMProvider(api_key="sk-test", model="gpt-3.5-turbo")
+        for provider in (responses_provider, chat_provider):
+            provider.configure_synthesis_output_limit_policy(
+                output_limits_enabled=False,
+                fallback_tokens=75_000,
+            )
+            result = await provider.complete_structured(
+                "hello",
+                schema,
+                max_completion_tokens=PROVIDER_MANAGED_OUTPUT,
+            )
+            assert result == {"answer": "42"}
+
+        responses_call = mock_openai_client.responses.create.call_args.kwargs
+        chat_call = mock_openai_client.chat.completions.create.call_args.kwargs
+        assert "max_output_tokens" not in responses_call
+        assert responses_call["text"]["format"]["schema"] == schema
+        assert "max_completion_tokens" not in chat_call
+        assert chat_call["response_format"]["json_schema"]["schema"] == schema
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model", "cap_field"),
+        [
+            ("gpt-5", "max_output_tokens"),
+            ("gpt-3.5-turbo", "max_completion_tokens"),
+        ],
+        ids=["responses", "chat"],
+    )
+    async def test_custom_environment_provider_managed_uses_fallback(
+        self,
+        model: str,
+        cap_field: str,
+        mock_openai_client,
+        monkeypatch: pytest.MonkeyPatch,
+        clean_environment,
+    ) -> None:
+        """A custom environment route sends fallback caps in both API dialects."""
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
+
+        responses_result = MagicMock()
+        responses_result.output = [
+            MagicMock(
+                type="message", content=[MagicMock(type="output_text", text="ok")]
+            )
+        ]
+        responses_result.usage = None
+        responses_result.status = "completed"
+        mock_openai_client.responses.create.return_value = responses_result
+
+        chat_result = MagicMock()
+        chat_result.choices = [
+            MagicMock(message=MagicMock(content="ok"), finish_reason="stop")
+        ]
+        chat_result.usage = None
+        mock_openai_client.chat.completions.create.return_value = chat_result
+
+        provider = OpenAILLMProvider(api_key="sk-test", model=model)
+        provider.configure_synthesis_output_limit_policy(
+            output_limits_enabled=False,
+            fallback_tokens=75_123,
+        )
+
+        await provider.complete("hello", max_completion_tokens=PROVIDER_MANAGED_OUTPUT)
+
+        create = (
+            mock_openai_client.responses.create
+            if cap_field == "max_output_tokens"
+            else mock_openai_client.chat.completions.create
+        )
+        assert provider.output_limit_metadata.omission is OutputLimitCapability.UNKNOWN
+        assert create.call_args.kwargs[cap_field] == 75_123
 
     @pytest.mark.asyncio
     async def test_configuration_is_respected_in_api_call(self, mock_openai_client):
@@ -307,10 +528,15 @@ class TestOpenAILLMProvider:
         assert not msg.startswith("LLM structured completion failed")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "incomplete_reason",
+        ["max_output_tokens", "content_filter", "other_reason"],
+        ids=["token-limit", "content-filter", "other"],
+    )
     async def test_structured_opt_out_incomplete_response_beats_empty_response(
-        self, mock_openai_client
+        self, mock_openai_client, incomplete_reason
     ):
-        """Incomplete Responses API status must preserve token-limit diagnostics."""
+        """Every incomplete Responses status must retain its provider reason."""
         mock_resp = AsyncMock()
         mock_resp.output = [
             AsyncMock(
@@ -320,6 +546,7 @@ class TestOpenAILLMProvider:
         ]
         mock_resp.usage = AsyncMock(input_tokens=123, output_tokens=0, total_tokens=123)
         mock_resp.status = "incomplete"
+        mock_resp.incomplete_details = AsyncMock(reason=incomplete_reason)
         mock_openai_client.responses.create.return_value = mock_resp
 
         provider = OpenAILLMProvider(
@@ -339,7 +566,11 @@ class TestOpenAILLMProvider:
 
         msg = str(exc.value)
         assert "incomplete" in msg
-        assert "token limit exceeded" in msg
+        if incomplete_reason == "max_output_tokens":
+            assert "token limit exceeded" in msg
+        else:
+            assert incomplete_reason in msg
+            assert "token limit exceeded" not in msg
         assert "empty response" not in msg
 
     @pytest.mark.asyncio
@@ -384,10 +615,15 @@ class TestOpenAILLMProvider:
         assert "empty response" not in str(exc.value)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "incomplete_reason",
+        ["max_output_tokens", "content_filter", "other_reason"],
+        ids=["token-limit", "content-filter", "other"],
+    )
     async def test_responses_api_incomplete_error_wins_over_empty_response(
-        self, mock_openai_client
+        self, mock_openai_client, incomplete_reason
     ):
-        """Responses API incomplete status must beat generic empty-response errors."""
+        """Every incomplete Responses status must retain its provider reason."""
         mock_resp = AsyncMock()
         mock_resp.output = [
             AsyncMock(
@@ -397,14 +633,21 @@ class TestOpenAILLMProvider:
         ]
         mock_resp.usage = AsyncMock(input_tokens=123, output_tokens=0, total_tokens=123)
         mock_resp.status = "incomplete"
+        mock_resp.incomplete_details = AsyncMock(reason=incomplete_reason)
         mock_openai_client.responses.create.return_value = mock_resp
 
         provider = OpenAILLMProvider(api_key="sk-test", model="gpt-5")
 
-        with pytest.raises(RuntimeError, match="token limit exceeded") as exc:
+        with pytest.raises(RuntimeError) as exc:
             await provider.complete("Hello")
 
-        assert "empty response" not in str(exc.value)
+        msg = str(exc.value)
+        if incomplete_reason == "max_output_tokens":
+            assert "token limit exceeded" in msg
+        else:
+            assert incomplete_reason in msg
+            assert "token limit exceeded" not in msg
+        assert "empty response" not in msg
 
     @pytest.mark.asyncio
     async def test_chat_completions_structured_path_for_non_responses_model(
@@ -503,12 +746,16 @@ class TestOpenAILLMProvider:
         assert call["max_completion_tokens"] == 250
         assert "max_output_tokens" not in call
 
-    async def test_internal_runtime_error_not_double_wrapped_chat_completions(self, mock_openai_client):
-        """RuntimeError from internal checks must pass through unwrapped (Chat Completions path)."""
+    async def test_internal_runtime_error_not_double_wrapped_chat_completions(
+        self, mock_openai_client
+    ):
+        """Chat Completions internal RuntimeError must pass through unwrapped."""
         mock_resp = MagicMock()
         mock_resp.choices[0].message.content = None
         mock_resp.choices[0].finish_reason = "stop"
-        mock_resp.usage = MagicMock(total_tokens=5, prompt_tokens=3, completion_tokens=2)
+        mock_resp.usage = MagicMock(
+            total_tokens=5, prompt_tokens=3, completion_tokens=2
+        )
         mock_openai_client.chat.completions.create.return_value = mock_resp
 
         provider = OpenAILLMProvider(api_key="sk-test", model="gpt-3.5-turbo")
@@ -520,8 +767,10 @@ class TestOpenAILLMProvider:
         assert "LLM completion failed" not in msg
 
     @pytest.mark.asyncio
-    async def test_internal_runtime_error_not_double_wrapped_responses_api(self, mock_openai_client):
-        """RuntimeError from internal checks must pass through unwrapped (Responses API path)."""
+    async def test_internal_runtime_error_not_double_wrapped_responses_api(
+        self, mock_openai_client
+    ):
+        """Responses API internal RuntimeError must pass through unwrapped."""
         mock_resp = MagicMock()
         mock_resp.output = []  # content_parts stays empty → content = None
         mock_resp.usage = MagicMock(total_tokens=5, input_tokens=3, output_tokens=2)
@@ -537,12 +786,16 @@ class TestOpenAILLMProvider:
         assert "LLM completion failed" not in msg
 
     @pytest.mark.asyncio
-    async def test_internal_runtime_error_not_double_wrapped_complete_structured(self, mock_openai_client):
-        """RuntimeError from internal checks must pass through unwrapped (complete_structured path)."""
+    async def test_internal_runtime_error_not_double_wrapped_complete_structured(
+        self, mock_openai_client
+    ):
+        """Structured internal RuntimeError must pass through unwrapped."""
         mock_resp = MagicMock()
         mock_resp.choices[0].message.content = None
         mock_resp.choices[0].finish_reason = "stop"
-        mock_resp.usage = MagicMock(total_tokens=5, prompt_tokens=3, completion_tokens=2)
+        mock_resp.usage = MagicMock(
+            total_tokens=5, prompt_tokens=3, completion_tokens=2
+        )
         mock_openai_client.chat.completions.create.return_value = mock_resp
 
         provider = OpenAILLMProvider(api_key="sk-test", model="gpt-3.5-turbo")
@@ -554,12 +807,12 @@ class TestOpenAILLMProvider:
         assert "LLM structured completion failed" not in msg
 
     @pytest.mark.asyncio
-    async def test_internal_runtime_error_not_double_wrapped_complete_structured_responses_api(
+    async def test_responses_structured_runtime_error_not_double_wrapped(
         self, mock_openai_client
     ):
-        """RuntimeError from _complete_structured_with_responses_api must pass through unwrapped."""
+        """Responses structured RuntimeError must pass through unwrapped."""
         mock_resp = MagicMock()
-        mock_resp.output = []   # empty output list → content_parts=[], raises RuntimeError
+        mock_resp.output = []  # Empty output triggers the internal RuntimeError.
         mock_resp.status = "completed"
         mock_resp.usage = MagicMock(total_tokens=5, input_tokens=3, output_tokens=2)
         mock_openai_client.responses.create.return_value = mock_resp

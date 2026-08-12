@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.site.html_helpers import attributes, canonical_href, meta_tag_content
 from tests.site.png_helpers import png_dimensions
 from tests.site.tsx_runner import run_tsx_raw, sanitized_subprocess_env
 
@@ -131,21 +132,6 @@ def _extract_astro_code_block_after_marker(html: str, marker: str) -> str:
     assert end_index != -1, f"Missing closing </pre> after {marker!r}"
 
     return html[pre_index : end_index + len("</pre>")]
-
-
-def _meta_tag_content(html: str, attr_name: str, attr_value: str) -> str | None:
-    """Extract content from the first <meta> tag matching attr_name=attr_value.
-
-    Only handles double-quoted attributes (sufficient for Astro HTML output).
-    Returns the first match if multiple tags share the same identifier.
-    """
-    for match in re.finditer(r"<meta\s+[^>]*>", html):
-        attributes = dict(
-            re.findall(r'([^\s=/>]+)\s*=\s*"([^"]*)"', match.group(0))
-        )
-        if attributes.get(attr_name) == attr_value:
-            return attributes.get("content")
-    return None
 
 
 def _title_content(html: str) -> str:
@@ -314,20 +300,22 @@ def test_built_site_has_og_meta_tags() -> None:
     )
 
     assert _title_content(homepage) == expected_title
-    assert _meta_tag_content(homepage, "name", "description") == expected_description
-    assert _meta_tag_content(homepage, "property", "og:title") == expected_title
+    assert canonical_href(homepage) == "https://chunkhound.ai/"
+    assert meta_tag_content(homepage, "name", "description") == expected_description
+    assert meta_tag_content(homepage, "property", "og:url") == "https://chunkhound.ai/"
+    assert meta_tag_content(homepage, "property", "og:title") == expected_title
     assert (
-        _meta_tag_content(homepage, "property", "og:description")
+        meta_tag_content(homepage, "property", "og:description")
         == expected_description
     )
-    assert _meta_tag_content(homepage, "name", "twitter:title") == expected_title
+    assert meta_tag_content(homepage, "name", "twitter:title") == expected_title
     assert (
-        _meta_tag_content(homepage, "name", "twitter:description")
+        meta_tag_content(homepage, "name", "twitter:description")
         == expected_description
     )
 
     # Meta tag checks must ignore serializer attribute order.
-    og_image = _meta_tag_content(homepage, "property", "og:image")
+    og_image = meta_tag_content(homepage, "property", "og:image")
     assert og_image is not None, "Missing og:image meta tag"
     assert og_image.startswith("https://"), (
         f"OG image URL should be absolute: {og_image}"
@@ -340,15 +328,15 @@ def test_built_site_has_og_meta_tags() -> None:
         ("og:image:height", "630"),
         ("og:type", "website"),
     ]:
-        content = _meta_tag_content(homepage, "property", prop)
+        content = meta_tag_content(homepage, "property", prop)
         assert content is not None, f"Missing meta tag: {prop}"
         assert content == expected
 
-    tw_image = _meta_tag_content(homepage, "name", "twitter:image")
+    tw_image = meta_tag_content(homepage, "name", "twitter:image")
     assert tw_image is not None, "Missing twitter:image meta tag"
     assert tw_image.endswith("/og-image-dark.png")
 
-    tw_card = _meta_tag_content(homepage, "name", "twitter:card")
+    tw_card = meta_tag_content(homepage, "name", "twitter:card")
     assert tw_card is not None, "Missing twitter:card meta tag"
     assert tw_card == "summary_large_image"
 
@@ -360,6 +348,19 @@ def test_readme_branding_assets_exist() -> None:
         assert "Your entire engineering context, deeply understood" in (
             ROOT / "site" / "public" / name
         ).read_text(encoding="utf-8")
+
+
+def test_social_preview_accent_dot_matches_wordmark_spacing() -> None:
+    """Accent dot sits at cx=595 after the wordmark in every site OG SVG.
+
+    cx=595 was hand-tuned for the site/public OG layout (cyan dot #0891b2/#22d3ee,
+    "Your entire engineering context..." tagline). The old cx=597 was off by 2px.
+    site/public/ is the source of truth; brand/ copies were removed to avoid drift.
+    """
+    for name in ("og-image-dark.svg", "og-image-light.svg"):
+        svg = (ROOT / "site" / "public" / name).read_text(encoding="utf-8")
+        assert '<circle cx="595" cy="64" r="8"' in svg, name
+        assert '<circle cx="597" cy="64" r="8"' not in svg, name
 
 
 def test_built_site_has_changelog_page() -> None:

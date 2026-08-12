@@ -24,7 +24,8 @@ from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
 # Default synthesis-grade reasoning model for Codex CLI.
-# Update here when OpenAI releases a newer synthesis model — this is the single source of truth.
+# Update here when OpenAI releases a newer synthesis model.
+# This is the single source of truth.
 # Use CHUNKHOUND_CODEX_DEFAULT_MODEL env var to override at runtime.
 CODEX_DEFAULT_SYNTHESIS_MODEL = "gpt-5.1-codex"
 
@@ -367,7 +368,7 @@ class CodexCLIProvider(BaseCLIProvider):
         content: str,
         *,
         cwd: str | None = None,
-        max_tokens: int,
+        max_tokens: int | None,
         timeout: int | None,
         model: str | None,
     ) -> str:
@@ -390,7 +391,7 @@ class CodexCLIProvider(BaseCLIProvider):
         estimated_tokens = self.estimate_tokens(content)
         if debug_codex:
             logger.debug(
-                "Codex CLI request: model=%s, chars=%d, est_tokens=%d, max_tokens=%d",
+                "Codex CLI request: model=%s, chars=%d, est_tokens=%d, max_tokens=%s",
                 effective_model,
                 content_chars,
                 estimated_tokens,
@@ -443,10 +444,10 @@ class CodexCLIProvider(BaseCLIProvider):
             f"model_reasoning_effort={self._toml_string(self._reasoning_effort)}",
         ]
 
-        # Enforce per-call output cap via ``-c model_max_output_tokens``.
-        # This keeps ``max_completion_tokens`` meaningful for the CLI provider
-        # and prevents long runs on overly-large output requests.
-        extra_args += ["-c", f"model_max_output_tokens={int(max_tokens)}"]
+        # Enforce an explicit output cap when one was resolved. Omitting this
+        # config delegates the output allowance to Codex/model defaults.
+        if max_tokens is not None:
+            extra_args += ["-c", f"model_max_output_tokens={max_tokens}"]
 
         override_mode = (
             os.getenv("CHUNKHOUND_CODEX_CONFIG_OVERRIDE", "env").strip().lower()
@@ -708,13 +709,10 @@ class CodexCLIProvider(BaseCLIProvider):
         timeout: int | None = None,
     ) -> str:
         text = self._merge_prompts(prompt, system)
-        max_tokens = (
-            max_completion_tokens if max_completion_tokens is not None else 4096
-        )
         return await self._run_exec(
             text,
             cwd=None,
-            max_tokens=max_tokens,
+            max_tokens=max_completion_tokens,
             timeout=timeout,
             model=self._model,
         )

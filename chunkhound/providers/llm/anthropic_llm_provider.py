@@ -29,7 +29,13 @@ from chunkhound.core.config.claude_model_resolution import (
 )
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils import estimate_tokens_llm
-from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
+from chunkhound.interfaces.llm_provider import (
+    LLMProvider,
+    LLMResponse,
+    OutputLimitCapability,
+    OutputLimitIntent,
+    OutputLimitMetadata,
+)
 
 try:
     from anthropic import AsyncAnthropic
@@ -352,6 +358,11 @@ class AnthropicLLMProvider(LLMProvider):
         self._thinking_tokens = 0  # Track full thinking tokens (billed)
 
     @property
+    def output_limit_metadata(self) -> OutputLimitMetadata:
+        """Anthropic requires a numeric ``max_tokens`` request field."""
+        return OutputLimitMetadata(omission=OutputLimitCapability.REQUIRED)
+
+    @property
     def name(self) -> str:
         """Provider name."""
         return "anthropic"
@@ -365,6 +376,13 @@ class AnthropicLLMProvider(LLMProvider):
     def timeout(self) -> int:
         """Request timeout in seconds."""
         return self._timeout
+
+    def _resolve_required_output_limit(self, requested: int | OutputLimitIntent) -> int:
+        """Resolve an allowance while enforcing Anthropic's required cap."""
+        resolved = self.resolve_synthesis_output_limit(requested).max_tokens
+        if resolved is None:  # Defensive invariant for future metadata changes.
+            raise RuntimeError("Anthropic requires a numeric output token limit")
+        return resolved
 
     def _extract_text_from_content(self, content_blocks: list[Any]) -> str:
         """Extract text from content blocks.
@@ -664,7 +682,7 @@ class AnthropicLLMProvider(LLMProvider):
         self,
         prompt: str,
         system: str | None = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | OutputLimitIntent = 4096,
         timeout: int | None = None,
     ) -> LLMResponse:
         """Generate a completion for the given prompt.
@@ -675,6 +693,8 @@ class AnthropicLLMProvider(LLMProvider):
             max_completion_tokens: Maximum tokens to generate
             timeout: Optional timeout in seconds (overrides default)
         """
+        resolved_max_tokens = self._resolve_required_output_limit(max_completion_tokens)
+
         # Build messages list (Anthropic separates system from messages)
         messages = [{"role": "user", "content": prompt}]
 
@@ -686,7 +706,7 @@ class AnthropicLLMProvider(LLMProvider):
             request_kwargs: dict[str, Any] = {
                 "model": self._model,
                 "messages": messages,
-                "max_tokens": max_completion_tokens,
+                "max_tokens": resolved_max_tokens,
                 "timeout": request_timeout,
             }
 
@@ -700,7 +720,7 @@ class AnthropicLLMProvider(LLMProvider):
             if thinking_cfg is not None:
                 if self._thinking_mode == "manual":
                     self._ensure_thinking_max_tokens(
-                        request_kwargs, max_completion_tokens
+                        request_kwargs, resolved_max_tokens
                     )
                 request_kwargs["thinking"] = thinking_cfg
 
@@ -721,6 +741,26 @@ class AnthropicLLMProvider(LLMProvider):
                 self._completion_tokens += response.usage.output_tokens
                 self._tokens_used += (
                     response.usage.input_tokens + response.usage.output_tokens
+                )
+
+            # Check for truncated responses before content validation so a native
+            # stop signal is not masked by a generic empty-response diagnostic.
+            if response.stop_reason == "max_tokens":
+                usage_info = ""
+                if response.usage:
+                    usage_info = (
+                        f" (input={response.usage.input_tokens:,}, "
+                        f"output={response.usage.output_tokens:,})"
+                    )
+
+                raise RuntimeError(
+                    f"LLM response truncated - token limit exceeded{usage_info}. "
+                    "For reasoning models (Claude Opus, Sonnet), this indicates "
+                    "the query requires extensive reasoning that exhausted the "
+                    "output budget. "
+                    f"The output budget is fixed at {resolved_max_tokens:,} "
+                    "tokens. Try breaking your query into smaller, more "
+                    "focused questions."
                 )
 
             # Extract response content from content blocks
@@ -748,25 +788,6 @@ class AnthropicLLMProvider(LLMProvider):
                     "LLM returned empty text content "
                     f"(stop_reason={response.stop_reason}). "
                     "This may indicate a content filter, API error, or model refusal."
-                )
-
-            # Check for truncated responses
-            if response.stop_reason == "max_tokens":
-                usage_info = ""
-                if response.usage:
-                    usage_info = (
-                        f" (input={response.usage.input_tokens:,}, "
-                        f"output={response.usage.output_tokens:,})"
-                    )
-
-                raise RuntimeError(
-                    f"LLM response truncated - token limit exceeded{usage_info}. "
-                    "For reasoning models (Claude Opus, Sonnet), this indicates "
-                    "the query requires extensive reasoning that exhausted the "
-                    "output budget. "
-                    f"The output budget is fixed at {max_completion_tokens:,} "
-                    "tokens. Try breaking your query into smaller, more "
-                    "focused questions."
                 )
 
             # Warn on unexpected stop reasons
@@ -798,7 +819,7 @@ class AnthropicLLMProvider(LLMProvider):
         prompt: str,
         json_schema: dict[str, Any],
         system: str | None = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | OutputLimitIntent = 4096,
         timeout: int | None = None,
     ) -> dict[str, Any]:
         """Generate a structured JSON completion conforming to the given schema.
@@ -827,6 +848,8 @@ class AnthropicLLMProvider(LLMProvider):
         Raises:
             RuntimeError: If response is refused, truncated, or contains invalid JSON
         """
+        resolved_max_tokens = self._resolve_required_output_limit(max_completion_tokens)
+
         # Build messages
         messages = [{"role": "user", "content": prompt}]
 
@@ -838,7 +861,7 @@ class AnthropicLLMProvider(LLMProvider):
             request_kwargs: dict[str, Any] = {
                 "model": self._model,
                 "messages": messages,
-                "max_tokens": max_completion_tokens,
+                "max_tokens": resolved_max_tokens,
                 "timeout": request_timeout,
             }
 
@@ -852,7 +875,7 @@ class AnthropicLLMProvider(LLMProvider):
             if thinking_cfg is not None:
                 if self._thinking_mode == "manual":
                     self._ensure_thinking_max_tokens(
-                        request_kwargs, max_completion_tokens
+                        request_kwargs, resolved_max_tokens
                     )
                 request_kwargs["thinking"] = thinking_cfg
 

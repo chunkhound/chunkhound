@@ -12,7 +12,7 @@ from chunkhound.core.config.claude_model_resolution import (
     CLAUDE_SONNET_SENTINEL,
 )
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
-from chunkhound.interfaces.llm_provider import LLMResponse
+from chunkhound.interfaces.llm_provider import LLMResponse, OutputLimitCapability
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 
 
@@ -39,6 +39,10 @@ class TestClaudeCodeCLIProvider:
     def test_provider_name(self, provider):
         """Test that provider name is correct."""
         assert provider.name == "claude-code-cli"
+
+    def test_output_cap_omission_capability_is_unknown(self, provider):
+        """Claude CLI exposes no authoritative output-cap omission contract."""
+        assert provider.output_limit_metadata.omission is OutputLimitCapability.UNKNOWN
 
     def test_provider_model(self, provider):
         """Test that model name is stored correctly."""

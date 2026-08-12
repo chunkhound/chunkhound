@@ -3,6 +3,7 @@
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -88,8 +89,131 @@ class LLMResponse:
     finish_reason: str | None = None
 
 
+class OutputLimitCapability(str, Enum):
+    """Whether a provider authoritatively supports omitting its output cap."""
+
+    SUPPORTED = "supported"
+    REQUIRED = "required"
+    UNKNOWN = "unknown"
+
+
+class OutputLimitIntent(str, Enum):
+    """Named non-numeric output-limit requests."""
+
+    PROVIDER_MANAGED = "provider_managed"
+
+
+PROVIDER_MANAGED_OUTPUT = OutputLimitIntent.PROVIDER_MANAGED
+
+
+class OutputLimitDecisionKind(str, Enum):
+    """Observable source of the output limit selected for one request."""
+
+    OMIT = "omit"
+    DECLARATION = "declaration"
+    FALLBACK = "fallback"
+    EXPLICIT = "explicit"
+
+
+@dataclass(frozen=True)
+class OutputLimitMetadata:
+    """Provider-owned capability and raw declared-limit provenance."""
+
+    omission: OutputLimitCapability = OutputLimitCapability.UNKNOWN
+    declared_max_tokens: object = None
+    declared_max_source: object = None
+
+    def eligible_declaration(self) -> tuple[int, str] | None:
+        """Return a declaration only when both value and provenance are valid."""
+        if type(self.declared_max_tokens) is not int:
+            return None
+        if self.declared_max_tokens <= 0:
+            return None
+        if not isinstance(self.declared_max_source, str):
+            return None
+        if not self.declared_max_source.strip():
+            return None
+        return self.declared_max_tokens, self.declared_max_source
+
+
+@dataclass(frozen=True)
+class OutputLimitDecision:
+    """Resolved wire-cap decision with provenance when one exists."""
+
+    kind: OutputLimitDecisionKind
+    max_tokens: int | None
+    source: str | None = None
+
+
+@dataclass(frozen=True)
+class OutputLimitPolicy:
+    """Resolve explicit or provider-managed synthesis output allowances."""
+
+    output_limits_enabled: bool
+    fallback_tokens: int
+    metadata: OutputLimitMetadata
+
+    def __post_init__(self) -> None:
+        if type(self.output_limits_enabled) is not bool:
+            raise ValueError("output_limits_enabled must be a boolean")
+        if type(self.fallback_tokens) is not int or self.fallback_tokens <= 0:
+            raise ValueError("fallback_tokens must be a positive integer")
+
+    def resolve(self, requested: int | OutputLimitIntent) -> OutputLimitDecision:
+        """Resolve a request without guessing provider/model output limits."""
+        if requested is PROVIDER_MANAGED_OUTPUT:
+            if self.output_limits_enabled:
+                raise ValueError(
+                    "provider-managed output was requested while legacy output "
+                    "limits are enabled"
+                )
+            if self.metadata.omission is OutputLimitCapability.SUPPORTED:
+                return OutputLimitDecision(OutputLimitDecisionKind.OMIT, None)
+            if declaration := self.metadata.eligible_declaration():
+                max_tokens, source = declaration
+                return OutputLimitDecision(
+                    OutputLimitDecisionKind.DECLARATION, max_tokens, source
+                )
+            return OutputLimitDecision(
+                OutputLimitDecisionKind.FALLBACK, self.fallback_tokens
+            )
+
+        if type(requested) is not int or requested <= 0:
+            raise ValueError("output allowance must be a positive integer")
+        return OutputLimitDecision(OutputLimitDecisionKind.EXPLICIT, requested)
+
+
 class LLMProvider(ABC):
     """Abstract base class for LLM providers."""
+
+    @property
+    def output_limit_metadata(self) -> OutputLimitMetadata:
+        """Return conservative provider-owned output-limit capabilities."""
+        return OutputLimitMetadata()
+
+    @property
+    def synthesis_output_limit_policy(self) -> OutputLimitPolicy:
+        """Return the immutable policy attached to this synthesis instance."""
+        policy = getattr(self, "_synthesis_output_limit_policy", None)
+        if policy is None:
+            return OutputLimitPolicy(True, 64_000, self.output_limit_metadata)
+        return policy
+
+    def configure_synthesis_output_limit_policy(
+        self, *, output_limits_enabled: bool, fallback_tokens: int
+    ) -> None:
+        """Attach synthesis policy using this selected provider's metadata."""
+        self._synthesis_output_limit_policy = OutputLimitPolicy(
+            output_limits_enabled=output_limits_enabled,
+            fallback_tokens=fallback_tokens,
+            metadata=self.output_limit_metadata,
+        )
+
+    def resolve_synthesis_output_limit(
+        self, requested: int | OutputLimitIntent
+    ) -> OutputLimitDecision:
+        """Resolve one synthesis output allowance through the attached policy."""
+        return self.synthesis_output_limit_policy.resolve(requested)
 
     @property
     @abstractmethod
@@ -114,7 +238,7 @@ class LLMProvider(ABC):
         self,
         prompt: str,
         system: str | None = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | OutputLimitIntent = 4096,
         timeout: int | None = None,
     ) -> LLMResponse:
         """
@@ -139,7 +263,7 @@ class LLMProvider(ABC):
         prompt: str,
         json_schema: dict[str, Any],
         system: str | None = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | OutputLimitIntent = 4096,
         timeout: int | None = None,
     ) -> dict[str, Any]:
         """

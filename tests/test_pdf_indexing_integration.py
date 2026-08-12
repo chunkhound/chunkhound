@@ -19,7 +19,7 @@ from chunkhound.core.models.chunk import Chunk
 
 # Import conditional PyMuPDF test skip
 try:
-    import fitz  # PyMuPDF
+    import pymupdf as fitz  # PyMuPDF
     PYMUPDF_AVAILABLE = True
 except ImportError:
     PYMUPDF_AVAILABLE = False

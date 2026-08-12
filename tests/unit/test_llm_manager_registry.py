@@ -1,7 +1,17 @@
+from typing import Any
+
 import pytest
 
-from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT, LLMConfig
 from chunkhound.core.exceptions.core import ConfigurationError
+from chunkhound.interfaces.llm_provider import (
+    PROVIDER_MANAGED_OUTPUT,
+    LLMProvider,
+    LLMResponse,
+    OutputLimitCapability,
+    OutputLimitDecisionKind,
+    OutputLimitMetadata,
+)
 from chunkhound.llm_manager import LLMManager
 
 
@@ -96,3 +106,149 @@ def test_create_provider_passes_base_url_to_anthropic_provider():
     )
 
     assert captured["base_url"] == "http://localhost:11434/v1"
+
+
+@pytest.mark.parametrize(
+    ("configured_mode", "expected_enabled"),
+    [(None, False), (False, False), (True, True)],
+    ids=["omitted", "explicit-provider-managed", "explicit-legacy"],
+)
+def test_synthesis_output_policy_flows_from_config_through_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_mode: bool | None,
+    expected_enabled: bool,
+) -> None:
+    """The selected synthesis provider owns the fully resolved config policy."""
+
+    class _RecordingProvider(LLMProvider):
+        def __init__(self, model: str = "recording-model", **_: Any) -> None:
+            self._model = model
+
+        @property
+        def name(self) -> str:
+            return "recording"
+
+        @property
+        def model(self) -> str:
+            return self._model
+
+        @property
+        def timeout(self) -> int:
+            return 30
+
+        @property
+        def output_limit_metadata(self) -> OutputLimitMetadata:
+            return OutputLimitMetadata(
+                omission=OutputLimitCapability.REQUIRED,
+                declared_max_tokens=91_337,
+                declared_max_source="https://provider.example/docs/output-limits",
+            )
+
+        async def complete(
+            self,
+            prompt: str,
+            system: str | None = None,
+            max_completion_tokens: int = 4096,
+            timeout: int | None = None,
+        ) -> LLMResponse:
+            raise NotImplementedError
+
+        async def batch_complete(
+            self,
+            prompts: list[str],
+            system: str | None = None,
+            max_completion_tokens: int = 4096,
+        ) -> list[LLMResponse]:
+            raise NotImplementedError
+
+        def estimate_tokens(self, text: str) -> int:
+            return len(text)
+
+        async def health_check(self) -> dict[str, Any]:
+            return {"status": "ok"}
+
+        def get_usage_stats(self) -> dict[str, Any]:
+            return {}
+
+    monkeypatch.setitem(LLMManager._providers, "openai", _RecordingProvider)
+    kwargs: dict[str, Any] = {"output_limit_fallback": 78_901}
+    if configured_mode is not None:
+        kwargs["output_limits_enabled"] = configured_mode
+    utility_config, synthesis_config = LLMConfig(**kwargs).get_provider_configs()
+
+    manager = LLMManager(utility_config, synthesis_config)
+    utility = manager.get_utility_provider()
+    synthesis = manager.get_synthesis_provider()
+    policy = synthesis.synthesis_output_limit_policy
+
+    assert "output_limits_enabled" not in utility_config
+    assert "output_limit_fallback" not in utility_config
+    assert not hasattr(utility, "_synthesis_output_limit_policy")
+    assert policy.output_limits_enabled is expected_enabled
+    assert policy.fallback_tokens == 78_901
+    assert policy.metadata.omission is OutputLimitCapability.REQUIRED
+    assert policy.metadata.declared_max_tokens == 91_337
+    assert policy.metadata.declared_max_source == (
+        "https://provider.example/docs/output-limits"
+    )
+
+    if expected_enabled:
+        explicit = policy.resolve(30_000)
+        assert explicit.kind is OutputLimitDecisionKind.EXPLICIT
+        assert explicit.max_tokens == 30_000
+    else:
+        managed = policy.resolve(PROVIDER_MANAGED_OUTPUT)
+        assert managed.kind is OutputLimitDecisionKind.DECLARATION
+        assert managed.max_tokens == 91_337
+
+
+@pytest.mark.parametrize("provider_name", ["deepseek", "grok"])
+@pytest.mark.parametrize(
+    ("base_url", "expected_capability", "expected_kind", "expected_tokens"),
+    [
+        (
+            None,
+            OutputLimitCapability.SUPPORTED,
+            OutputLimitDecisionKind.OMIT,
+            None,
+        ),
+        (
+            "https://compatible.example/v1",
+            OutputLimitCapability.UNKNOWN,
+            OutputLimitDecisionKind.FALLBACK,
+            64_123,
+        ),
+    ],
+    ids=["canonical", "custom"],
+)
+def test_registry_endpoint_capability_flows_through_selected_synthesis_provider(
+    provider_name: str,
+    base_url: str | None,
+    expected_capability: OutputLimitCapability,
+    expected_kind: OutputLimitDecisionKind,
+    expected_tokens: int | None,
+) -> None:
+    """The manager applies canonical metadata only to canonical endpoints."""
+    role_config: dict[str, Any] = {
+        "provider": provider_name,
+        "model": "contract-test-model",
+        "api_key": "sk-test",
+    }
+    if base_url is not None:
+        role_config["base_url"] = base_url
+
+    manager = LLMManager(
+        role_config,
+        {
+            **role_config,
+            "output_limits_enabled": False,
+            "output_limit_fallback": 64_123,
+        },
+    )
+
+    synthesis = manager.get_synthesis_provider()
+    decision = synthesis.resolve_synthesis_output_limit(PROVIDER_MANAGED_OUTPUT)
+
+    assert synthesis.output_limit_metadata.omission is expected_capability
+    assert decision.kind is expected_kind
+    assert decision.max_tokens == expected_tokens

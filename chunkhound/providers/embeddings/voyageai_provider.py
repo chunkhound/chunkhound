@@ -59,6 +59,15 @@ class VoyageModelConfig(TypedDict):
     default_dimension: int
 
 
+# Request param that carries the result limit, keyed by rerank format. Native
+# VoyageAI-compatible endpoints (e.g. MongoDB Atlas ai.mongodb.com) expect
+# "top_k" and reject Cohere's "top_n"; they also return the ranking under
+# "data" rather than "results" (see _parse_rerank_response). Formats absent
+# from this map are not Cohere-style: TEI sends no limit at all, and "auto"
+# probes Cohere-style only when a rerank_model is configured.
+_RERANK_LIMIT_PARAM = {"voyage": "top_k", "cohere": "top_n"}
+
+
 # Official VoyageAI model configuration based on API documentation
 VOYAGE_MODEL_CONFIG: dict[str, VoyageModelConfig] = {
     # Models with 120,000 token limit per batch
@@ -254,6 +263,9 @@ class VoyageAIEmbeddingProvider:
             rerank_format: Reranking API format when using rerank_url.
                 'cohere' for Cohere-compatible APIs (requires rerank_model),
                 'tei' for HuggingFace TEI (model set at deployment),
+                'voyage' for native VoyageAI-compatible endpoints such as
+                MongoDB Atlas (uses 'top_k' request param and a 'data'
+                response; requires rerank_model),
                 'auto' to detect from response (default).
             max_concurrent_batches: Maximum number of concurrent embed() calls.
                 Defaults to 1 for custom endpoints (e.g. Azure ML) to avoid
@@ -1064,33 +1076,33 @@ class VoyageAIEmbeddingProvider:
     def _build_rerank_payload(
         self, query: str, documents: list[str], top_k: int | None
     ) -> dict:
-        """Build rerank request payload for TEI or Cohere format."""
+        """Build rerank request payload for TEI, Cohere, or Voyage-native format."""
         fmt = self._rerank_format
-        if fmt == "tei":
+        limit_param = _RERANK_LIMIT_PARAM.get(fmt)
+
+        # TEI carries no model and names the document list "texts". Auto mode
+        # with no rerank_model has no model to send either, so it starts as TEI.
+        if fmt == "tei" or (limit_param is None and not self._rerank_model):
             return {"query": query, "texts": documents}
-        elif fmt == "cohere":
-            payload: dict = {"query": query, "documents": documents}
-            if self._rerank_model:
-                payload["model"] = self._rerank_model
-            if top_k is not None:
-                payload["top_n"] = top_k
-            return payload
-        else:  # auto: try Cohere if model provided, else TEI
-            if self._rerank_model:
-                payload = {
-                    "query": query,
-                    "documents": documents,
-                    "model": self._rerank_model,
-                }
-                if top_k is not None:
-                    payload["top_n"] = top_k
-                return payload
-            return {"query": query, "texts": documents}
+
+        # Cohere-style body, shared by 'cohere', 'voyage' and auto-with-model.
+        payload: dict[str, Any] = {"query": query, "documents": documents}
+        if self._rerank_model:
+            payload["model"] = self._rerank_model
+        if top_k is not None:
+            # 'auto' is absent from the map but probes Cohere-style first.
+            payload[limit_param or "top_n"] = top_k
+        return payload
 
     def _parse_rerank_response(
         self, data: dict, num_documents: int
     ) -> list[RerankResult]:
-        """Parse reranker HTTP response (Cohere or TEI format) into RerankResult list."""
+        """Parse a reranker HTTP response into RerankResult items."""
+        # Native VoyageAI-compatible endpoints (e.g. MongoDB Atlas) return the
+        # ranking under "data" rather than Cohere/TEI's "results"; the item shape
+        # (index + relevance_score/score) is identical, so treat it as an alias.
+        if "results" not in data and "data" in data:
+            data = {"results": data["data"]}
         if "results" not in data:
             raise ValueError(
                 f"Invalid rerank response: missing 'results' field. Got: {list(data.keys())}"

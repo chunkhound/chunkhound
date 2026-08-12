@@ -2,12 +2,20 @@
 interface Props {
   title?: string;
   description?: string;
+  socialImage?: string;
+  socialImageType?: string;
+  type?: string;
 }
 
 const {
   title = "ChunkHound — Your engineering context, deeply understood",
   description = "ChunkHound gives AI agents cited context across current code, git history, and technical web research — for safer edits, clearer reviews, and release-ready summaries. Local-first. MIT licensed.",
+  socialImage = "/og-image-dark.png",
+  socialImageType = "image/png",
+  type = "website",
 } = Astro.props;
+const canonicalUrl = new URL(Astro.url.pathname, Astro.site);
+const socialImageUrl = new URL(socialImage, Astro.site);
 
 import '../styles/global.css';
 ---
@@ -22,6 +30,7 @@ import '../styles/global.css';
       name="description"
       content={description}
     />
+    <link rel="canonical" href={canonicalUrl.href} />
 
     <!-- Open Graph -->
     <meta property="og:title" content={title} />
@@ -29,11 +38,12 @@ import '../styles/global.css';
       property="og:description"
       content={description}
     />
-    <meta property="og:image" content={new URL('/og-image-dark.png', Astro.site).href} />
-    <meta property="og:image:type" content="image/png" />
+    <meta property="og:url" content={canonicalUrl.href} />
+    <meta property="og:image" content={socialImageUrl.href} />
+    <meta property="og:image:type" content={socialImageType} />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:type" content="website" />
+    <meta property="og:type" content={type} />
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image" />
@@ -42,7 +52,7 @@ import '../styles/global.css';
       name="twitter:description"
       content={description}
     />
-    <meta name="twitter:image" content={new URL('/og-image-dark.png', Astro.site).href} />
+    <meta name="twitter:image" content={socialImageUrl.href} />
 
     <!-- Favicon -->
     <link rel="icon" type="image/svg+xml" href="/favicon-dark.svg" media="(prefers-color-scheme: dark)" />

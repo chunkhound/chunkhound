@@ -25,7 +25,7 @@ from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 try:
-    import fitz  # type: ignore  # PyMuPDF
+    import pymupdf as fitz  # type: ignore  # PyMuPDF
 
     PYMUPDF_AVAILABLE = True
 except ImportError:
