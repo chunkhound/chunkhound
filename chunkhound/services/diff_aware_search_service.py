@@ -12,6 +12,7 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 from loguru import logger
 
+from chunkhound.core.constants import HNSW_CANDIDATE_BUDGET
 from chunkhound.services.search.hybrid_utils import finalize_hybrid_pagination
 from chunkhound.services.search.semantic_window import (
     normalize_semantic_window_cap,
@@ -293,9 +294,9 @@ class DiffAwareSearchService:
         # 10,000-row fetch for providers without this capability.
         window_cap = normalize_semantic_window_cap(self.semantic_result_window_cap)
         db_fetch = (
-            min(_MAX_BOTH_DB_FETCH, window_cap)
+            min(HNSW_CANDIDATE_BUDGET, window_cap)
             if window_cap is not None
-            else _MAX_BOTH_DB_FETCH
+            else HNSW_CANDIDATE_BUDGET
         )
         diff_task = asyncio.create_task(
             self._search_diff(

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, cast
 import duckdb
 from loguru import logger
 
+from chunkhound.core.constants import HNSW_CANDIDATE_BUDGET
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
@@ -127,9 +128,9 @@ _OVERFETCH_INITIAL_FACTOR = 3
 # Exponential backoff factor when initial overfetch is insufficient. Doubles the
 # candidate window on each iteration until needed results are found or budget exhausted.
 _OVERFETCH_BACKOFF_FACTOR = 2
-# Maximum HNSW candidate budget. Balances recall vs latency for large corpora.
-# Beyond 10000 candidates, diminishing returns on additional overfetch.
-_MAX_HNSW_CANDIDATE_BUDGET = 10000
+# HNSW ef_search parameter - controls the size of the dynamic candidate list during search.
+# Widened from DuckDB default (64) for better recall in the vector-candidate overfetch path.
+_HNSW_EF_SEARCH = 256
 
 
 def _configure_vss_connection(conn: Any) -> None:
@@ -137,7 +138,7 @@ def _configure_vss_connection(conn: Any) -> None:
     conn.execute("INSTALL vss")
     conn.execute("LOAD vss")
     conn.execute("SET hnsw_enable_experimental_persistence = true")
-    conn.execute("SET hnsw_ef_search = 256")
+    conn.execute(f"SET hnsw_ef_search = {_HNSW_EF_SEARCH}")
 
 
 def _normalize_indexed_root(root: Path | str) -> str:
@@ -273,6 +274,15 @@ class DuckDBProvider(SerialDatabaseProvider):
             raise ValueError(
                 f"Threshold {threshold} is outside the valid cosine similarity range [-1, 1]"
             )
+
+    @staticmethod
+    def _threshold_to_max_distance(threshold: float | None) -> float | None:
+        """Convert inclusive similarity threshold to cosine distance bound.
+
+        Similarity and distance are complementary: similarity = 1 - distance.
+        A threshold of 0.9 (similarity >= 0.9) becomes max_distance of 0.1.
+        """
+        return None if threshold is None else 1.0 - threshold
 
     def __init__(
         self,
@@ -4260,7 +4270,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         *,
         needed: int,
         execute_query: Callable[[int], tuple[list[dict[str, Any]], int]],
-        max_scan: int = _MAX_HNSW_CANDIDATE_BUDGET,
+        max_scan: int = HNSW_CANDIDATE_BUDGET,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Widen vector candidate retrieval until enough results or exhaustion.
 
@@ -4347,7 +4357,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         max_distance: float | None,
         label_key: str,
         exclude_chunk_id: int | None = None,
-        max_scan: int = _MAX_HNSW_CANDIDATE_BUDGET,
+        max_scan: int = HNSW_CANDIDATE_BUDGET,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Retrieve, filter, and rank vector candidates for every vector API.
 
@@ -4474,7 +4484,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         path_like = self._vector_path_like(path_filter)
         # Fetch one extra result to detect if more exist beyond current page.
         # This avoids a separate COUNT query (which would require full table scan).
-        max_distance = None if threshold is None else 1.0 - threshold
+        max_distance = self._threshold_to_max_distance(threshold)
         if not self.hnsw_enabled:
             return self._executor_exact_semantic_page(
                 conn,
@@ -4717,7 +4727,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             return []
         table_name, target_embedding = found
         path_like = self._vector_path_like(path_filter)
-        max_distance = None if threshold is None else 1.0 - threshold
+        max_distance = self._threshold_to_max_distance(threshold)
         if not self.hnsw_enabled:
             return self._executor_exact_vector_search(
                 conn,
@@ -4816,7 +4826,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.warning(f"No embeddings table found for {dims} dimensions")
             return []
         path_like = self._vector_path_like(path_filter)
-        max_distance = None if threshold is None else 1.0 - threshold
+        max_distance = self._threshold_to_max_distance(threshold)
         if not self.hnsw_enabled:
             return self._executor_exact_vector_search(
                 conn,

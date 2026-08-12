@@ -6,3 +6,6 @@ OPENAI_DEFAULT_MODEL = "text-embedding-3-small"
 # Voyage AI embedding model defaults
 VOYAGE_DEFAULT_MODEL = "voyage-3.5"
 VOYAGE_DEFAULT_RERANK_MODEL = "rerank-2.5"
+
+# Bounds HNSW candidate widening and the DB side of diff/DB merged search.
+HNSW_CANDIDATE_BUDGET = 10_000
