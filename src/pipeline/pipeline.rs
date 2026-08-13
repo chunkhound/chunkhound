@@ -523,7 +523,7 @@ impl IndexingPipeline {
             std::thread::spawn(move || {
                 let mut parsed_files_count: u64 = 0;
                 for (batch_idx, batch) in batches {
-                    if error.lock().unwrap().is_some() {
+                    if error.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
                         break;
                     }
 
@@ -547,7 +547,7 @@ impl IndexingPipeline {
                     }) {
                         Ok(parsed) => parsed,
                         Err(e) => {
-                            let mut err = error.lock().unwrap();
+                            let mut err = error.lock().unwrap_or_else(|e| e.into_inner());
                             if err.is_none() {
                                 *err = Some(e);
                             }
@@ -556,7 +556,7 @@ impl IndexingPipeline {
                     };
 
                     {
-                        let mut errs = parse_errors.lock().unwrap();
+                        let mut errs = parse_errors.lock().unwrap_or_else(|e| e.into_inner());
                         for pf in &parsed {
                             if let Some(e) = &pf.error {
                                 errs.push(format!("{}: {}", pf.path.display(), e));
@@ -878,7 +878,7 @@ impl IndexingPipeline {
                         Ok(v) => v,
                         Err(_) => break,
                     };
-                    if error.lock().unwrap().is_some() {
+                    if error.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
                         break;
                     }
 
@@ -921,12 +921,16 @@ impl IndexingPipeline {
                                 ) {
                                     Ok(outcome) => {
                                         if !outcome.errors.is_empty() {
-                                            embed_errors.lock().unwrap().extend(outcome.errors);
+                                            embed_errors
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner())
+                                                .extend(outcome.errors);
                                         }
                                         embedded_chunks += outcome.embedded;
                                     }
                                     Err(e) => {
-                                        let mut err = error.lock().unwrap();
+                                        let mut err =
+                                            error.lock().unwrap_or_else(|e| e.into_inner());
                                         if err.is_none() {
                                             *err = Some(e);
                                         }
@@ -1020,12 +1024,19 @@ impl IndexingPipeline {
         if parse_join.is_err() {
             return Err("pipeline parse thread panicked".to_string());
         }
-        if let Some(e) = Arc::try_unwrap(error).unwrap().into_inner().unwrap() {
+        if let Some(e) = Arc::try_unwrap(error)
+            .expect("parse/embed threads already joined above and drop their clone on exit, so this is the sole remaining owner")
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner())
+        {
             return Err(e);
         }
         // Per-file parse errors don't abort the run (unlike `error` above) —
         // collected here so they can be merged into the final report below.
-        let file_parse_errors = Arc::try_unwrap(parse_errors).unwrap().into_inner().unwrap();
+        let file_parse_errors = Arc::try_unwrap(parse_errors)
+            .expect("parse thread already joined above and drops its clone on exit, so this is the sole remaining owner")
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
 
         let embedded_chunks = match embed_join {
             Ok(Ok(n)) => n,
@@ -1035,7 +1046,10 @@ impl IndexingPipeline {
         // Per-batch embed errors don't abort the run (unlike `error` above) —
         // collected here so they can be merged into the final report below,
         // instead of only reaching a log::warn! line as before.
-        let file_embed_errors = Arc::try_unwrap(embed_errors).unwrap().into_inner().unwrap();
+        let file_embed_errors = Arc::try_unwrap(embed_errors)
+            .expect("embed thread already joined above and drops its clone on exit, so this is the sole remaining owner")
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
 
         // Emit final parse/embed progress — both stages are fully done by
         // the time every batch has been received and embedded here, even
@@ -1401,7 +1415,10 @@ impl IndexingPipeline {
                                 missing.push((*fi, *ci));
                             }
                         }
-                        all_results.lock().unwrap().extend(batch_results);
+                        all_results
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend(batch_results);
                         if !missing.is_empty() {
                             log::warn!(
                                 "embed batch returned {} vector(s) for {} chunk(s), {} missing",
@@ -1416,7 +1433,7 @@ impl IndexingPipeline {
                             );
                             batch_errors
                                 .lock()
-                                .unwrap()
+                                .unwrap_or_else(|e| e.into_inner())
                                 .extend(Self::format_batch_errors(&missing, &file_paths, &reason));
                         }
                     }
@@ -1424,7 +1441,7 @@ impl IndexingPipeline {
                         log::warn!("embed batch failed ({} chunks), continuing: {e}", batch_len);
                         batch_errors
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|e| e.into_inner())
                             .extend(Self::format_batch_errors(
                                 &indices,
                                 &file_paths,
@@ -1447,7 +1464,7 @@ impl IndexingPipeline {
 
         // Apply embeddings to parsed chunks (single-threaded, after all batches).
         // Mutating pure-Rust Vec<f32> fields — no GIL required.
-        let results = all_results.into_inner().unwrap();
+        let results = all_results.into_inner().unwrap_or_else(|e| e.into_inner());
         let embedded = results.len() as u64;
         for (fi, ci, vec) in results {
             let chunk = &mut parsed[fi].chunks[ci];
@@ -1458,7 +1475,7 @@ impl IndexingPipeline {
 
         Ok(EmbedBatchOutcome {
             embedded,
-            errors: batch_errors.into_inner().unwrap(),
+            errors: batch_errors.into_inner().unwrap_or_else(|e| e.into_inner()),
         })
     }
 
