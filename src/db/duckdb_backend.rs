@@ -1443,8 +1443,8 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 /// otherwise.
 pub(crate) fn check_disk_usage_limit(db_path: &Path, limit_mb: Option<f64>) -> Option<(f64, f64)> {
     let limit_mb = limit_mb?;
-    let size_mb = match std::fs::metadata(db_path) {
-        Ok(meta) => meta.len() as f64 / (1024.0 * 1024.0),
+    let db_size = match std::fs::metadata(db_path) {
+        Ok(meta) => meta.len(),
         Err(e) => {
             log::warn!(
                 "Failed to check disk usage for {}: {}",
@@ -1454,6 +1454,15 @@ pub(crate) fn check_disk_usage_limit(db_path: &Path, limit_mb: Option<f64>) -> O
             return None;
         }
     };
+    // open() defers checkpoints until the WAL hits checkpoint_threshold (up to
+    // 8GB by default), so writes can sit in the `.wal` sidecar well past the
+    // main file's on-disk size — include it, or a deferred checkpoint lets
+    // true usage silently blow past the configured limit before this trips.
+    // A missing/unreadable WAL (e.g. already checkpointed) contributes 0
+    // rather than failing the whole check open.
+    let wal_path = PathBuf::from(format!("{}.wal", db_path.display()));
+    let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+    let size_mb = (db_size + wal_size) as f64 / (1024.0 * 1024.0);
     (size_mb >= limit_mb).then_some((size_mb, limit_mb))
 }
 
@@ -1592,15 +1601,31 @@ mod disk_usage_limit_tests {
     }
 
     #[test]
-    fn sibling_wal_file_excluded_from_measurement() {
-        // Main file well under the limit; a huge sibling `.wal` file must NOT
-        // be counted — the helper stats only the exact path given.
+    fn sibling_wal_file_included_in_measurement() {
+        // Main file well under the limit alone, but the deferred-checkpoint
+        // `.wal` sidecar pushes combined usage over — must be counted, or a
+        // large deferred checkpoint could let true usage silently exceed the
+        // configured limit undetected.
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("t.duckdb");
         let wal_path = tmp.path().join("t.duckdb.wal");
         write_file_of_size(&db_path, 1024); // 1 KB
-        write_file_of_size(&wal_path, 20 * 1024 * 1024); // 20 MB — must be ignored
-        assert_eq!(check_disk_usage_limit(&db_path, Some(5.0)), None);
+        write_file_of_size(&wal_path, 20 * 1024 * 1024); // 20 MB
+        let result = check_disk_usage_limit(&db_path, Some(5.0));
+        let (size_mb, limit_mb) = result.expect("combined size should exceed the 5MB limit");
+        assert!((size_mb - (20.0 + 1.0 / 1024.0)).abs() < 0.01);
+        assert_eq!(limit_mb, 5.0);
+    }
+
+    #[test]
+    fn missing_wal_file_contributes_zero() {
+        // No `.wal` sidecar at all (e.g. already checkpointed) — must not be
+        // treated as a stat failure, and must not fail the check open.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        write_file_of_size(&db_path, 10 * 1024 * 1024); // 10 MB
+        let result = check_disk_usage_limit(&db_path, Some(5.0));
+        assert_eq!(result, Some((10.0, 5.0)));
     }
 }
 
