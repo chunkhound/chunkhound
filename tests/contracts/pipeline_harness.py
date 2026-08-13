@@ -386,6 +386,13 @@ def assert_identical(result_a: IndexResult, result_b: IndexResult) -> None:
         f"embeddings_generated mismatch: {result_a.embeddings_generated} != {result_b.embeddings_generated}"
     )
 
+    a_errors = sorted(result_a.errors)
+    b_errors = sorted(result_b.errors)
+    assert a_errors == b_errors, (
+        f"errors mismatch: A has {len(a_errors)} error(s) {a_errors!r}, "
+        f"B has {len(b_errors)} error(s) {b_errors!r}"
+    )
+
     assert_chunk_multiset_identical(result_a.chunk_tuples, result_b.chunk_tuples)
 
     # Embedding tuples — same multiset comparison as chunk tuples above.
