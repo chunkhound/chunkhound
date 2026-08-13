@@ -75,7 +75,7 @@ def compile_pattern(pattern: str, cache: dict[str, Pattern[str]]) -> Pattern[str
     return cache[pattern]
 
 
-def _summarize_include_patterns(patterns: list[str]) -> tuple[set[str], set[str], bool]:
+def summarize_include_patterns(patterns: list[str]) -> tuple[set[str], set[str], bool]:
     """Derive fast-path include sets from simple patterns.
 
     Returns:
@@ -418,7 +418,7 @@ def scan_directory_files(
                     continue
 
                 # Fast include prefilter: avoid regex matching when file can't possibly match
-                allow_exts, allow_names, has_complex = _summarize_include_patterns(
+                allow_exts, allow_names, has_complex = summarize_include_patterns(
                     patterns
                 )
                 if not has_complex:
@@ -467,7 +467,7 @@ def walk_directory_tree(
     # Fast Rust path: ignore crate handles gitignore + exclude_patterns natively.
     # ignore_engine is applied as a post-filter so Rust handles the expensive I/O walk.
     if _get_use_rust():
-        _exts, _names, _has_complex = _summarize_include_patterns(patterns)
+        _exts, _names, _has_complex = summarize_include_patterns(patterns)
         if (
             not _has_complex
             and (_exts or _names)
@@ -541,7 +541,7 @@ def walk_directory_tree(
         return files, gitignore_patterns
 
     # Precompute include summary once for this walk
-    inc_allow_exts, inc_allow_names, inc_has_complex = _summarize_include_patterns(
+    inc_allow_exts, inc_allow_names, inc_has_complex = summarize_include_patterns(
         patterns
     )
     include_prefixes = _extract_include_prefixes(patterns)

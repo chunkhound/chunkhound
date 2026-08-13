@@ -22,15 +22,12 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Protocol, TYPE_CHECKING, cast
-
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from chunkhound.services.directory_indexing_service import IndexingStats
 
 from loguru import logger
-
-from chunkhound.utils.logging_guard import log_if_not_mcp
 from rich.progress import Progress, TaskID
 
 from chunkhound.core.detection import detect_language
@@ -56,10 +53,12 @@ from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.utils.file_patterns import (
     load_gitignore_patterns,
     scan_directory_files,
+    summarize_include_patterns,
     walk_directory_tree,
     walk_subtree_worker,
 )
 from chunkhound.utils.hashing import compute_file_hash
+from chunkhound.utils.logging_guard import log_if_not_mcp
 
 from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
@@ -3263,7 +3262,9 @@ class IndexingCoordinator(BaseService):
                         setattr(self, "_profile_parallel_used", False)
                     except Exception:
                         pass
-                    return sorted(files_git)
+                    return self._filter_unsupported_extensions(
+                        sorted(files_git), patterns
+                    )
 
         # Try parallel discovery if enabled
         if parallel_discovery:
@@ -3283,7 +3284,9 @@ class IndexingCoordinator(BaseService):
                         setattr(self, "_profile_parallel_used", True)
                     except Exception:
                         pass
-                    return discovered_files
+                    return self._filter_unsupported_extensions(
+                        discovered_files, patterns
+                    )
                 # Otherwise fall through to sequential (None signal)
             except Exception as e:
                 # Preserve full error context for debugging large repo issues
@@ -3328,7 +3331,44 @@ class IndexingCoordinator(BaseService):
             setattr(self, "_profile_parallel_used", False)
         except Exception:
             pass
-        return sorted(discovered_files)
+        return self._filter_unsupported_extensions(sorted(discovered_files), patterns)
+
+    def _filter_unsupported_extensions(
+        self, files: list[Path], patterns: list[str]
+    ) -> list[Path]:
+        """Drop files with no language support that only matched via a
+        complex/wildcard include pattern (e.g. a blanket directory wildcard
+        like `Q/**/*`).
+
+        A file explicitly named by a clean, non-wildcard-directory pattern
+        (e.g. `**/*.xyzunk`) is always kept — that's a deliberate, specific
+        request (parity with the existing "Unknown file type" skip-recording
+        path in `batch_processor.py`), distinct from a directory wildcard
+        that sweeps up every extension incidentally. Skipped entirely when
+        `index_unknown_files=True`.
+        """
+        idx_cfg = self._indexing_config_or_none()
+        if idx_cfg is not None and getattr(idx_cfg, "index_unknown_files", False):
+            return files
+
+        allowed_exts, allowed_names, _has_complex = summarize_include_patterns(
+            patterns
+        )
+        # Case-insensitive, matching both Language.is_known_path() and the
+        # Rust fast walker's scan_files() (src/lib.rs), which lowercases
+        # extensions before comparing — a pattern written as "*.JPG" must
+        # still recognize an on-disk "photo.jpg" (or vice versa).
+        allowed_exts_lower = {e.lower() for e in allowed_exts}
+        allowed_names_lower = {n.lower() for n in allowed_names}
+
+        def _keep(f: Path) -> bool:
+            if f.suffix.lower() in allowed_exts_lower or (
+                f.name.lower() in allowed_names_lower
+            ):
+                return True
+            return Language.is_known_path(f)
+
+        return [f for f in files if _keep(f)]
 
     def _discover_files_via_git(
         self,
