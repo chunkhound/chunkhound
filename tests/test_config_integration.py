@@ -320,7 +320,7 @@ def test_openrouter_json_config_without_model_reports_missing(
     ]
 
 
-def test_openrouter_env_config_with_model_loads_cleanly(
+def test_openrouter_env_model_satisfies_runtime_config_validation(
     monkeypatch, clean_environment
 ) -> None:
     monkeypatch.setenv("CHUNKHOUND_LLM_PROVIDER", "openrouter")
