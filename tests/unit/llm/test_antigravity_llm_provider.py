@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -559,6 +560,92 @@ async def test_cli_complete_failure(mock_subprocess):
 
 
 @pytest.mark.asyncio
+async def test_cli_retries_when_exit_zero_returns_nothing(mock_subprocess):
+    """An exit-0 attempt with no payload is transient and must be retried.
+
+    The CLI can exit 0 with empty stdout when the backend refuses a request.
+    Failing the whole call on the first such attempt aborts deep research
+    entirely, so the answer from a later attempt must still be delivered.
+    """
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+    provider.RETRY_BACKOFF_BASE_SECONDS = 0  # keep the test fast
+
+    empty = AsyncMock()
+    empty.pid = 12345
+    empty.returncode = 0
+    empty.communicate.return_value = (b"", b"")
+
+    ok = AsyncMock()
+    ok.pid = 12346
+    ok.returncode = 0
+    ok.communicate.return_value = (
+        json.dumps({"status": "SUCCESS", "response": "Recovered answer"}).encode(),
+        b"",
+    )
+    mock_subprocess.side_effect = [empty, ok]
+
+    result = await provider.complete("CLI prompt")
+
+    assert result.content == "Recovered answer"
+    assert mock_subprocess.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cli_non_success_status_is_not_an_answer(mock_subprocess):
+    """A non-SUCCESS envelope is a failure, even when it carries a body.
+
+    Its ``response`` is a diagnostic, not model output, and must never be
+    returned to the caller as an answer.
+    """
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+    provider.RETRY_BACKOFF_BASE_SECONDS = 0
+
+    mock_process = AsyncMock()
+    mock_process.pid = 12345
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (
+        json.dumps({"status": "ERROR", "response": "quota exhausted"}).encode(),
+        b"",
+    )
+    mock_subprocess.return_value = mock_process
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider.complete("CLI prompt")
+
+    assert "quota exhausted" not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_cli_returns_envelope_response_verbatim(mock_subprocess):
+    """The envelope's ``response`` is unwrapped and passed through untouched.
+
+    Structured completions parse this string as JSON, so the envelope must be
+    stripped away and its payload must not be reshaped.
+    """
+    provider = AntigravityCLIProvider(model="gemini-3.5-flash")
+
+    mock_process = AsyncMock()
+    mock_process.pid = 12345
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (
+        json.dumps({"status": "SUCCESS", "response": '{"answer": "4"}\n'}).encode(),
+        b"",
+    )
+    mock_subprocess.return_value = mock_process
+
+    parsed = await provider.complete_structured(
+        "What is 2+2?",
+        {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        },
+    )
+
+    assert parsed == {"answer": "4"}
+
+
+@pytest.mark.asyncio
 async def test_cli_scopes_temp_env_to_sandbox_dir(mock_subprocess):
     """Child temp-file APIs are scoped to the per-call sandbox cwd.
 
@@ -1056,7 +1143,7 @@ async def test_sdk_structured_validation(mock_antigravity_agent):
 
 def test_cli_synthesis_concurrency():
     provider = AntigravityCLIProvider(model="gemini-3.5-flash")
-    assert provider.get_synthesis_concurrency() == 1
+    assert provider.get_synthesis_concurrency() == 3
 
 
 @pytest.mark.asyncio

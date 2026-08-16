@@ -1,11 +1,12 @@
 import asyncio
-from typing import Any
+import json
 import os
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+from typing import Any
 
 from loguru import logger
 
@@ -16,6 +17,14 @@ from chunkhound.utils.windows_constants import get_utf8_env
 
 class AntigravityCLIProvider(BaseCLIProvider):
     """CLI LLM provider wrapping the agy / antigravity CLI command."""
+
+    # Delay before re-spawning after an attempt that exited 0 without a usable
+    # payload. Shaped like the repo's only other async retry delay
+    # (utils/fetchurl.py), with a lower cap because these are local subprocess
+    # spawns. Deterministic delay keeps the retry path cheap and reproducible to
+    # test.
+    RETRY_BACKOFF_BASE_SECONDS = 0.5
+    RETRY_BACKOFF_MAX_SECONDS = 4.0
 
     def _get_provider_name(self) -> str:
         """Get the provider name."""
@@ -30,6 +39,12 @@ class AntigravityCLIProvider(BaseCLIProvider):
     ) -> str:
         """Run CLI command and return output.
 
+        The CLI can exit 0 with an empty or non-SUCCESS payload when the backend
+        transiently refuses a request, so an attempt that produces no usable
+        content is re-spawned up to ``max_retries`` times. A non-zero exit, a
+        timeout, or a missing binary is not transient and still fails on the
+        first attempt.
+
         Args:
             prompt: User prompt
             system: Optional system prompt
@@ -38,7 +53,9 @@ class AntigravityCLIProvider(BaseCLIProvider):
             timeout: Optional timeout override
 
         Returns:
-            CLI output text
+            The response payload from the CLI, or an empty string when no
+            attempt produced usable content — BaseCLIProvider.complete() owns
+            the user-facing error for that case.
 
         Raises:
             RuntimeError: If CLI command fails
@@ -79,11 +96,26 @@ class AntigravityCLIProvider(BaseCLIProvider):
         # and run headless, reading the prompt from stdin — keeping source
         # snippets, paths, and secrets out of argv/`ps` and avoiding ARG_MAX
         # limits, consistent with the other CLI providers.
-        cmd = [binary_path, "--sandbox"]
+        cmd = [
+            binary_path,
+            "--sandbox",
+            # Indexed source content routinely starts with '/' (paths, comments).
+            # Without this flag agy would expand such a prompt as a slash command
+            # or skill instead of sending it to the model.
+            "--disable-slash-commands",
+            # JSON print mode returns {"status": ..., "response": ...}, which
+            # separates "the model produced nothing" from "the run failed" —
+            # text mode collapses both into empty stdout. The literal "json" must
+            # stay adjacent: --output-format consumes the next argv token, the
+            # same hazard documented for --print above.
+            "--output-format",
+            "json",
+        ]
         if self._model:
             cmd.extend(["--model", self._model])
 
-        # Clone and sanitize environment variables to prevent credentials/plugin hijacking
+        # Clone and sanitize environment variables to prevent credentials
+        # or plugin hijacking
         safe_keys = {
             "PATH",
             "HOME",
@@ -104,27 +136,13 @@ class AntigravityCLIProvider(BaseCLIProvider):
             "APPDATA",
             "LOCALAPPDATA",
         }
-        base_env = {k: v for k, v in os.environ.items() if k in safe_keys}
-        env = get_utf8_env(base_env)
+        base_env = get_utf8_env({k: v for k, v in os.environ.items() if k in safe_keys})
 
-        process = None
-        captured_process_pid: int | None = None
-        temp_dir = tempfile.mkdtemp(prefix="chunkhound-antigravity-")
-
-        # Scope the child's temp-file APIs to the per-call temp dir. TMPDIR/TMP/
-        # TEMP are omitted from the env allowlist above, so without this the CLI
-        # (or a descendant) writing via tempfile.* would land in the inherited
-        # system/user temp location and survive the final rmtree(temp_dir).
-        # Pointing them at temp_dir keeps those writes inside the sandbox dir
-        # that cleanup removes.
-        env["TMPDIR"] = temp_dir
-        env["TMP"] = temp_dir
-        env["TEMP"] = temp_dir
-
-        # Note: We intentionally preserve HOME, USERPROFILE, APPDATA, and LOCALAPPDATA
-        # rather than redirecting them to the temp directory. While this exposes user-level
-        # configuration to the CLI (a documented sandboxing tradeoff), it is strictly
-        # required for the CLI to locate its authentication credentials.
+        # Note: We intentionally preserve HOME, USERPROFILE, APPDATA, and
+        # LOCALAPPDATA rather than redirecting them to the temp directory. While
+        # this exposes user-level configuration to the CLI (a documented
+        # sandboxing tradeoff), it is strictly required for the CLI to locate its
+        # authentication credentials.
 
         # The prompt is delivered via stdin, so it is not part of cmd and cannot
         # leak through this log. Only the binary and flags are logged; the prompt
@@ -134,6 +152,136 @@ class AntigravityCLIProvider(BaseCLIProvider):
             f"Executing CLI command: {' '.join(cmd)} "
             f"(prompt via stdin: {len(merged_prompt)} chars) in sandboxed mode"
         )
+
+        # max_retries counts total attempts, matching the sibling CLI providers.
+        # Clamped to at least one so a misconfigured 0 still runs the CLI once
+        # instead of silently reporting an empty response without spawning it.
+        attempts = max(1, self._max_retries)
+        for attempt in range(attempts):
+            if attempt > 0:
+                await asyncio.sleep(
+                    min(
+                        self.RETRY_BACKOFF_MAX_SECONDS,
+                        self.RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                    )
+                )
+
+            # This loop deliberately has no except clause: a retryable outcome is
+            # signalled by the returned stdout, never by an exception. Every
+            # non-retryable failure raised by an attempt (non-zero exit, timeout,
+            # missing binary, cancellation) passes straight through unchanged.
+            stdout_text, stderr_text = await self._run_cli_attempt(
+                cmd, merged_prompt, base_env, request_timeout
+            )
+            content, status = self._parse_cli_output(stdout_text)
+            if content.strip() and (
+                status is None or status.strip().upper() == "SUCCESS"
+            ):
+                return content
+
+            self._log_unusable_attempt(
+                attempt, attempts, stdout_text, status, stderr_text
+            )
+
+        # No attempt produced usable content. Returning "" lets the existing
+        # empty-response check in BaseCLIProvider.complete() /
+        # complete_structured() raise its curated, prompt-free error, keeping the
+        # user-facing message identical to the single-attempt behaviour.
+        return ""
+
+    def _parse_cli_output(self, stdout_text: str) -> tuple[str, str | None]:
+        """Split the CLI's JSON print-mode envelope into (content, status).
+
+        Stdout that is not a JSON object is passed through verbatim with a None
+        status, so a CLI build that ignores --output-format still works. Cannot
+        raise: this runs outside the attempt's try block precisely so a parsing
+        failure can never be rewrapped into a RuntimeError carrying model output.
+
+        Args:
+            stdout_text: Decoded stdout from one CLI attempt
+
+        Returns:
+            (content, status) where content is the envelope's response field
+            verbatim (never stripped), or the raw stdout when it is not an
+            envelope, and status is the envelope's status field when present.
+        """
+        try:
+            envelope = json.loads(stdout_text)
+        except json.JSONDecodeError:
+            return stdout_text, None
+
+        if not isinstance(envelope, dict):
+            return stdout_text, None
+
+        response = envelope.get("response")
+        status = envelope.get("status")
+        return (
+            response if isinstance(response, str) else "",
+            status if isinstance(status, str) else None,
+        )
+
+    def _log_unusable_attempt(
+        self,
+        attempt: int,
+        attempts: int,
+        stdout_text: str,
+        status: str | None,
+        stderr_text: str,
+    ) -> None:
+        """Record why an exit-0 attempt yielded nothing usable.
+
+        Debug level only, and stderr only. The CLI's raw output can echo the
+        piped prompt, source snippets, and workspace paths, and stdout carries
+        model output — neither belongs in a default-level log or in any raised
+        message.
+        """
+        if not stdout_text.strip():
+            detail = "empty stdout"
+        elif status is not None:
+            detail = f"status={status!r}"
+        else:
+            detail = "no usable response in output"
+        logger.debug(
+            f"Antigravity CLI attempt {attempt + 1}/{attempts} "
+            f"returned no usable content ({detail})"
+        )
+
+        raw_err = stderr_text.strip()
+        if raw_err:
+            logger.debug(f"Antigravity CLI stderr: {sanitize_error_text(raw_err)}")
+
+    async def _run_cli_attempt(
+        self,
+        cmd: list[str],
+        merged_prompt: str,
+        base_env: dict[str, str],
+        request_timeout: int,
+    ) -> tuple[str, str]:
+        """Spawn the CLI once and return its decoded (stdout, stderr).
+
+        Each attempt owns its own sandbox temp directory and its own process-tree
+        cleanup, so the create/remove and spawn/reap invariants stay paired
+        inside a single scope and a retry never inherits a previous attempt's
+        working directory or its not-yet-reaped descendants.
+
+        Raises:
+            RuntimeError: If the CLI is missing, exits non-zero, or times out
+        """
+        env = dict(base_env)
+        process = None
+        captured_process_pid: int | None = None
+        temp_dir = tempfile.mkdtemp(prefix="chunkhound-antigravity-")
+
+        # Scope the child's temp-file APIs to the per-attempt temp dir. TMPDIR/TMP/
+        # TEMP are omitted from the env allowlist above, so without this the CLI
+        # (or a descendant) writing via tempfile.* would land in the inherited
+        # system/user temp location and survive the final rmtree(temp_dir).
+        # Pointing them at temp_dir keeps those writes inside the sandbox dir
+        # that cleanup removes.
+        env["TMPDIR"] = temp_dir
+        env["TMP"] = temp_dir
+        env["TEMP"] = temp_dir
+
         try:
             # Create subprocess with neutral CWD to prevent local config scans
             if sys.platform == "win32":
@@ -171,14 +319,16 @@ class AntigravityCLIProvider(BaseCLIProvider):
                 timeout=request_timeout,
             )
 
+            # Keep raw CLI output OUT of user-facing errors and default-level
+            # logs. It can echo the piped prompt, source snippets, and file
+            # paths, and sanitize_error_text() only redacts token-shaped
+            # secrets. Decode stderr only (never stdout, which carries model
+            # output), surface it at debug for troubleshooting, and raise a
+            # curated exit-code-only message.
+            stderr_text = (stderr or b"").decode("utf-8", errors="ignore")
+
             if process.returncode != 0:
-                # Keep raw CLI output OUT of user-facing errors and default-level
-                # logs. It can echo the piped prompt, source snippets, and file
-                # paths, and sanitize_error_text() only redacts token-shaped
-                # secrets. Decode stderr only (never stdout, which carries model
-                # output), surface it at debug for troubleshooting, and raise a
-                # curated exit-code-only message.
-                raw_err = (stderr or b"").decode("utf-8", errors="ignore").strip()
+                raw_err = stderr_text.strip()
                 if raw_err:
                     logger.debug(
                         f"Antigravity CLI stderr: {sanitize_error_text(raw_err)}"
@@ -190,7 +340,7 @@ class AntigravityCLIProvider(BaseCLIProvider):
                     f"Antigravity CLI command failed (exit code {process.returncode})"
                 )
 
-            return stdout.decode("utf-8", errors="ignore")
+            return stdout.decode("utf-8", errors="ignore"), stderr_text
 
         except FileNotFoundError as fnf:
             logger.error(f"Antigravity CLI binary not found: {fnf}")
@@ -224,8 +374,8 @@ class AntigravityCLIProvider(BaseCLIProvider):
                     )
             finally:
                 # Runs even if the shielded await above re-raises CancelledError
-                # (cancellation during process-tree teardown), so the per-call temp
-                # working directory is never leaked. rmtree with ignore_errors=True
+                # (cancellation during process-tree teardown), so the per-attempt
+                # temp working directory is never leaked. rmtree with ignore_errors=True
                 # is synchronous and cannot itself raise.
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -364,5 +514,13 @@ class AntigravityCLIProvider(BaseCLIProvider):
             }
 
     def get_synthesis_concurrency(self) -> int:
-        """Get recommended concurrency for parallel synthesis operations."""
-        return 1
+        """Get recommended concurrency for parallel synthesis operations.
+
+        Matches the BaseCLIProvider default of 3. Serializing synthesis is far
+        more expensive here than for a plain completion endpoint: agy is an
+        agent CLI that carries a large fixed system prompt on every invocation
+        (~19k input tokens even for a one-line prompt), so a research run issues
+        dozens of multi-second spawns. At concurrency 1 a single run took ~7
+        minutes, long enough for callers to give up before the answer arrived.
+        """
+        return 3
