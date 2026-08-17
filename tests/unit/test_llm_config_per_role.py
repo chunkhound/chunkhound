@@ -233,6 +233,17 @@ def test_registry_provider_missing_model_raises_configuration_error():
     )
 
 
+def test_openrouter_registry_provider_missing_model_raises_configuration_error():
+    cfg = LLMConfig(provider="openrouter", api_key=SecretStr("sk-test"))
+
+    with pytest.raises(
+        ConfigurationError, match="Model is required for 'openrouter'"
+    ) as exc_info:
+        cfg.get_provider_config_for_role("utility")
+
+    assert exc_info.value.config_key == "llm.model"
+
+
 def test_registry_provider_utility_override_with_model():
     """Per-role utility override to a registry provider with explicit model."""
     cfg = LLMConfig(
