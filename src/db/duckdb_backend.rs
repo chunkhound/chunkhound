@@ -1301,6 +1301,60 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         })
     }
 
+    /// Write all `batches` inside a single BEGIN/COMMIT, reducing checkpoint
+    /// frequency versus one commit per batch. `prepare_write` must already
+    /// have been called for each batch (per the trait's documented contract),
+    /// so all embedding tables this loop needs already exist and `known_dims`
+    /// is already up to date — this method only touches `conn`, never
+    /// `self.known_dims` or other `&mut self` state.
+    fn write_batches_in_one_txn(
+        &mut self,
+        batches: &[DbWriterBatch],
+    ) -> Result<Vec<BatchResult>, DbError> {
+        if batches.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let insert_batch_size = self.config.insert_batch_size;
+        let conn = self.conn_or_err()?;
+        conn.execute_batch("BEGIN")?;
+
+        let mut results = Vec::with_capacity(batches.len());
+        for batch in batches {
+            let batch_inner = match Self::write_batch_inner(conn, batch, insert_batch_size) {
+                Ok(inner) => inner,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(e);
+                }
+            };
+            let embeddings_written = match Self::insert_embeddings_txn(
+                conn,
+                batch,
+                &batch_inner.embedding_pairs,
+                insert_batch_size,
+            ) {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(e);
+                }
+            };
+            results.push(BatchResult {
+                file_ids: batch_inner.file_ids,
+                chunks_written: batch_inner.chunks_written,
+                embeddings_written,
+            });
+        }
+
+        if let Err(e) = conn.execute_batch("COMMIT") {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(DbError::DuckDb(e));
+        }
+
+        Ok(results)
+    }
+
     fn needs_compaction(&self) -> Result<bool, DbError> {
         // Two-signal metric-based detection (Phase 0). If stats are unavailable
         // (e.g. DB not open), there's nothing to compact yet.
@@ -2197,5 +2251,124 @@ mod insert_batch_size_tests {
             count, 7,
             "all 7 embeddings must persist despite the 3-row batch boundary"
         );
+    }
+}
+
+#[cfg(test)]
+mod write_batches_in_one_txn_tests {
+    use super::*;
+
+    #[test]
+    fn commits_all_batches_and_preserves_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path));
+        backend.open().expect("open");
+
+        let batch_a = test_support::embedding_batch("a", 4, 2);
+        let batch_b = test_support::embedding_batch("b", 4, 3);
+        backend.prepare_write(&batch_a).expect("prepare a");
+        backend.prepare_write(&batch_b).expect("prepare b");
+
+        let results = backend
+            .write_batches_in_one_txn(&[batch_a, batch_b])
+            .expect("write batches in one txn");
+        backend.close().expect("close");
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].file_ids.len(),
+            2,
+            "results[0] must correspond to batch_a (2 files), preserving input order"
+        );
+        assert_eq!(
+            results[1].file_ids.len(),
+            3,
+            "results[1] must correspond to batch_b (3 files), preserving input order"
+        );
+        assert_eq!(results[0].chunks_written, 2);
+        assert_eq!(results[1].chunks_written, 3);
+
+        let conn = Connection::open(tmp.path().join("t.duckdb")).expect("reopen");
+        let files_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count files");
+        let chunks_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .expect("count chunks");
+        let emb_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embeddings_4", [], |r| r.get(0))
+            .expect("count embeddings_4");
+        assert_eq!(files_count, 5, "both batches' files must persist");
+        assert_eq!(chunks_count, 5, "both batches' chunks must persist");
+        assert_eq!(emb_count, 5, "both batches' embeddings must persist");
+    }
+
+    #[test]
+    fn rolls_back_entire_window_on_mid_window_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path));
+        backend.open().expect("open");
+
+        let batch0 = test_support::single_file_batch("a.py");
+        // Deliberately built with an 8-dim embedding but prepare_write is
+        // never called for it below, so embeddings_8 is never created —
+        // insert_embeddings_txn's INSERT into it will fail with a real
+        // DuckDB catalog error, deterministically forcing a mid-window
+        // failure without any test-only hooks.
+        let batch1 = test_support::embedding_batch("b", 8, 1);
+        let batch2 = test_support::single_file_batch("c.py");
+
+        backend.prepare_write(&batch0).expect("prepare batch0");
+        backend.prepare_write(&batch2).expect("prepare batch2");
+
+        let result = backend.write_batches_in_one_txn(&[batch0, batch1, batch2]);
+        assert!(
+            result.is_err(),
+            "missing embeddings_8 table must surface as an error"
+        );
+
+        let conn = backend.conn_or_err().expect("conn");
+        let files_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count files");
+        let chunks_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .expect("count chunks");
+        assert_eq!(
+            files_count, 0,
+            "batch0's already-written file row must be rolled back with the rest of the window"
+        );
+        assert_eq!(
+            chunks_count, 0,
+            "batch0's already-written chunk must be rolled back with the rest of the window"
+        );
+
+        // Sanity check: the manual ROLLBACK must leave the connection usable,
+        // not stuck inside a broken transaction.
+        let post_rollback = test_support::single_file_batch("d.py");
+        backend
+            .write_batch(&post_rollback)
+            .expect("connection must remain usable after rollback");
+    }
+
+    #[test]
+    fn empty_slice_returns_empty_vec() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path));
+        backend.open().expect("open");
+
+        let results = backend
+            .write_batches_in_one_txn(&[])
+            .expect("empty slice must not error");
+        assert!(results.is_empty());
+
+        let conn = backend.conn_or_err().expect("conn");
+        let files_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count files");
+        assert_eq!(files_count, 0, "empty slice must not touch the DB");
     }
 }
