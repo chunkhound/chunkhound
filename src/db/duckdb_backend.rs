@@ -199,14 +199,29 @@ impl DuckDbHnswBackend {
         conn.execute_batch(&format!(
             "
             CREATE TABLE IF NOT EXISTS \"{table}\" ({cols});
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
-            ON \"{table}\" (chunk_id, provider, model);
             CREATE INDEX IF NOT EXISTS {chunk_id_idx}
             ON \"{table}\" (chunk_id);
             CREATE INDEX IF NOT EXISTS idx_{dims}_provider_model
             ON \"{table}\" (provider, model);
         "
         ))?;
+        // Created separately, best-effort: unlike the two plain indexes above,
+        // this can legitimately fail with a constraint violation if the table
+        // already has duplicate (chunk_id, provider, model) rows — e.g. a
+        // table rebuilt by compaction whose data predates this index ever
+        // being enforced. Python's post-reconnect
+        // _executor_ensure_embedding_upsert_contract dedupes and creates it
+        // as a fallback when this doesn't succeed.
+        if let Err(e) = conn.execute_batch(&format!(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
+             ON \"{table}\" (chunk_id, provider, model)"
+        )) {
+            log::warn!(
+                "Could not create unique upsert-contract index on {table} \
+                 (likely duplicate chunk_id/provider/model rows); Python's \
+                 reconnect will repair this: {e}"
+            );
+        }
         Ok(())
     }
 
@@ -856,6 +871,15 @@ impl DuckDbHnswBackend {
             import_conn.execute_batch(&format!(
                 "INSERT INTO \"{tname}\" SELECT * FROM src.\"{tname}\""
             ))?;
+            // Restore the canonical index set (chunk_id / provider_model /
+            // unique upsert-contract) that the bare CREATE TABLE above
+            // doesn't include. Without this, Python's post-reconnect
+            // _executor_ensure_embedding_upsert_contract finds the unique
+            // index missing and repairs it itself — which drops and rebuilds
+            // the HNSW index a second time (this same reopen() already builds
+            // it via ensure_all_hnsw_indexes()), an expensive redundant full
+            // index rebuild on every compaction.
+            Self::ensure_embedding_table_dims(&import_conn, dims)?;
         }
 
         // DETACH and CHECKPOINT.
@@ -1934,6 +1958,56 @@ mod hnsw_metric_tests {
             !restored.is_empty(),
             "HNSW index not restored after crash recovery"
         );
+    }
+
+    #[test]
+    fn compaction_restores_embedding_table_indexes() {
+        // Regression test: run_attach_copy_compaction() rebuilds each
+        // embedding table via a bare CREATE TABLE — it must also restore the
+        // chunk_id, provider_model, and unique upsert-contract indexes
+        // (normally created by ensure_embedding_table_dims() on first table
+        // creation). Without this, Python's post-reconnect
+        // _executor_ensure_embedding_upsert_contract finds the unique index
+        // missing and repairs it itself, which drops and rebuilds the HNSW
+        // index a second time — an expensive redundant full index rebuild on
+        // every compaction.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let db_path_str = db_path.to_string_lossy().into_owned();
+
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path_str));
+        backend.open().expect("open");
+        if !backend.has_vss {
+            eprintln!("VSS extension unavailable, skipping");
+            return;
+        }
+        backend
+            .write_batch(&test_support::embedding_batch("a", 8, 10))
+            .expect("write");
+
+        backend
+            .run_attach_copy_compaction()
+            .expect("compaction should succeed");
+
+        let conn = backend.conn_or_err().expect("conn");
+        for index_name in [
+            "idx_8_chunk_id",
+            "idx_8_provider_model",
+            "idx_8_chunk_provider_model_unique",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM duckdb_indexes() \
+                     WHERE table_name = 'embeddings_8' AND index_name = ?",
+                    [index_name],
+                    |r| r.get(0),
+                )
+                .expect("query duckdb_indexes");
+            assert!(
+                exists,
+                "{index_name} must exist on embeddings_8 after compaction"
+            );
+        }
     }
 }
 
