@@ -14,6 +14,7 @@ indexing rules, etc.) in one place instead of copying .chunkhound.json
 to every project directory. Project-local files override the global layer.
 """
 
+import copy
 import json
 import os
 from enum import Enum
@@ -22,12 +23,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from chunkhound.utils.logging_guard import log_if_not_mcp
+
 from .database_config import DatabaseConfig
 from .embedding_config import EmbeddingConfig
 from .fetchurl_config import FetchUrlConfig
 from .indexing_config import IndexingConfig
 from .llm_config import LLMConfig
 from .mcp_config import MCPConfig, is_loopback_host
+from .remote_config import RemoteConfig
 from .research_config import ResearchConfig
 
 
@@ -82,6 +86,7 @@ class Config(BaseModel):
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     fetchurl: FetchUrlConfig = Field(default_factory=FetchUrlConfig)
+    remote_config: RemoteConfig | None = Field(default=None)
     debug: bool = Field(default=False)
 
     # Private field to store the target directory from CLI args
@@ -120,6 +125,7 @@ class Config(BaseModel):
         *,
         skip_layers: set[Literal["env", "global", "local_config", "config_file", "cli"]]
         | None = None,
+        global_override: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         """Universal configuration initialization that handles all contexts.
@@ -143,6 +149,11 @@ class Config(BaseModel):
                 {"env", "global", "local_config", "config_file", "cli"}. Default
                 None runs every layer (today's behavior). Used by the remote-
                 config pipeline to construct restricted-merge snapshots.
+            global_override: When non-None, the global-JSON layer uses this
+                pre-parsed dict instead of reading a candidate file from disk.
+                Used exclusively via ``_snapshot_from_global_dict`` by the
+                remote-config pipeline to build snapshots without a speculative
+                disk write.
             **kwargs: Direct overrides for testing or special cases
         """
         # Start with defaults
@@ -202,7 +213,7 @@ class Config(BaseModel):
 
         # 2.5 Load global defaults config (env var or auto-discovered).
         if "global" not in skips:
-            self._apply_global_json(config_data)
+            self._apply_global_json(config_data, override=global_override)
 
         # 3. Check for local .chunkhound.json (overrides env vars and globals)
         if "local_config" not in skips:
@@ -219,7 +230,7 @@ class Config(BaseModel):
         # 6. Apply any direct kwargs (for testing)
         if kwargs:
             self._mark_exclude_user_supplied(kwargs)
-            self._deep_merge(config_data, kwargs)
+            Config.deep_merge(config_data, kwargs)
 
         # Special handling for EmbeddingConfig
         if "embedding" in config_data and isinstance(config_data["embedding"], dict):
@@ -241,6 +252,15 @@ class Config(BaseModel):
             # Create FetchUrlConfig instance with the data
             config_data["fetchurl"] = FetchUrlConfig(**config_data["fetchurl"])
 
+        # Special handling for RemoteConfig. `RemoteConfig | None` follows the
+        # `embedding | None` / `llm | None` pattern (no default_factory), so
+        # Pydantic will not auto-coerce a dict from env/kwargs; this block is
+        # load-bearing.
+        if "remote_config" in config_data and isinstance(
+            config_data["remote_config"], dict
+        ):
+            config_data["remote_config"] = RemoteConfig(**config_data["remote_config"])
+
         # Add target_dir to config_data for initialization
         config_data["target_dir"] = target_dir
 
@@ -257,20 +277,48 @@ class Config(BaseModel):
     def _apply_env(self, config_data: dict[str, Any]) -> None:
         """Merge environment-variable-derived values into ``config_data``."""
         env_vars = self._load_env_vars()
-        self._deep_merge(config_data, env_vars)
+        Config.deep_merge(config_data, env_vars)
 
-    def _apply_global_json(self, config_data: dict[str, Any]) -> None:
-        """Merge the global defaults JSON into ``config_data`` when discoverable."""
+    def _apply_global_json(
+        self,
+        config_data: dict[str, Any],
+        override: dict[str, Any] | None = None,
+    ) -> None:
+        """Merge the global defaults JSON into ``config_data`` when discoverable.
+
+        If ``override`` is provided, use it as the pre-parsed global-JSON
+        payload instead of resolving a candidate file. Callers pass this to
+        build snapshot Configs without a speculative disk write.
+
+        ``override`` is deep-copied because ``deep_merge`` shares nested-dict
+        references, so ``_mark_exclude_user_supplied`` would otherwise mutate
+        the caller's dict and leak the internal marker into the persisted
+        global JSON on the pipeline's next write.
+        """
+        if override is not None:
+            Config.deep_merge(config_data, copy.deepcopy(override))
+            self._mark_exclude_user_supplied(config_data)
+            return
+
         global_config_file: Path | None = None
         env_global = os.getenv("CHUNKHOUND_GLOBAL_CONFIG_FILE")
         if env_global:
             global_config_file = Path(env_global)
-            if not global_config_file.exists():
-                raise ValueError(
-                    f"Global config file not found: {global_config_file}. "
-                    "Check the path or remove CHUNKHOUND_GLOBAL_CONFIG_FILE."
+            if global_config_file.exists():
+                config_data["global_config_file"] = global_config_file.resolve()
+            else:
+                # Missing env-pinned target is a bootstrap case, not an error —
+                # the remote-config pipeline creates it on first apply. WARN so
+                # a typo is distinguishable from first-run.
+                log_if_not_mcp(
+                    "WARNING",
+                    "CHUNKHOUND_GLOBAL_CONFIG_FILE={} does not exist — "
+                    "treating as empty. The remote-config pipeline will "
+                    "create it on first apply if enabled; otherwise check "
+                    "the path or unset the variable.",
+                    global_config_file,
                 )
-            config_data["global_config_file"] = global_config_file.resolve()
+                global_config_file = None
         else:
             for candidate in self._get_global_config_candidates():
                 if candidate.exists() and candidate.is_file():
@@ -282,7 +330,7 @@ class Config(BaseModel):
             try:
                 with open(global_config_file) as f:
                     global_config = json.load(f)
-                    self._deep_merge(config_data, global_config)
+                    Config.deep_merge(config_data, global_config)
                     self._mark_exclude_user_supplied(config_data)
             except json.JSONDecodeError as e:
                 raise ValueError(
@@ -304,7 +352,20 @@ class Config(BaseModel):
                 try:
                     with open(local_config_path) as f:
                         local_config = json.load(f)
-                        self._deep_merge(config_data, local_config)
+                        # Trust boundary: remote-config URL/header must come
+                        # from operator-controlled surfaces (CLI or env), never
+                        # from a file — a project-local .chunkhound.json in a
+                        # cloned repo could otherwise redirect the fetch to an
+                        # attacker-controlled URL on first run.
+                        if local_config.pop("remote_config", None) is not None:
+                            log_if_not_mcp(
+                                "WARNING",
+                                "Ignoring 'remote_config' in {} — remote-config "
+                                "URL/auth may only be set via CLI flags or "
+                                "CHUNKHOUND_REMOTE_CONFIG__* env vars.",
+                                local_config_path,
+                            )
+                        Config.deep_merge(config_data, local_config)
                         self._mark_exclude_user_supplied(config_data)
                 except json.JSONDecodeError as e:
                     raise ValueError(
@@ -325,7 +386,18 @@ class Config(BaseModel):
             try:
                 with open(config_file) as f:
                     file_config = json.load(f)
-                    self._deep_merge(config_data, file_config)
+                    # Trust boundary: see _apply_local_json — same reasoning
+                    # applies to an explicit --config file, which can just as
+                    # easily be a checked-in artifact from an untrusted source.
+                    if file_config.pop("remote_config", None) is not None:
+                        log_if_not_mcp(
+                            "WARNING",
+                            "Ignoring 'remote_config' in {} — remote-config "
+                            "URL/auth may only be set via CLI flags or "
+                            "CHUNKHOUND_REMOTE_CONFIG__* env vars.",
+                            config_file,
+                        )
+                    Config.deep_merge(config_data, file_config)
                     self._mark_exclude_user_supplied(config_data)
             except json.JSONDecodeError as e:
                 raise ValueError(
@@ -337,7 +409,7 @@ class Config(BaseModel):
         """Merge CLI-argument-derived overrides into ``config_data``."""
         cli_overrides = self._extract_cli_overrides(args)
         self._mark_exclude_user_supplied(cli_overrides)
-        self._deep_merge(config_data, cli_overrides)
+        Config.deep_merge(config_data, cli_overrides)
 
     def _load_env_vars(self) -> dict[str, Any]:
         """Load configuration from environment variables.
@@ -370,6 +442,8 @@ class Config(BaseModel):
             config["research"] = research_config
         if fetchurl_config := FetchUrlConfig.load_from_env():
             config["fetchurl"] = fetchurl_config
+        if remote_config := RemoteConfig.load_from_env():
+            config["remote_config"] = remote_config
 
         return config
 
@@ -410,14 +484,17 @@ class Config(BaseModel):
             overrides["research"] = research_overrides
         if fetchurl_overrides := FetchUrlConfig.extract_cli_overrides(args):
             overrides["fetchurl"] = fetchurl_overrides
+        if remote_config_overrides := RemoteConfig.extract_cli_overrides(args):
+            overrides["remote_config"] = remote_config_overrides
 
         return overrides
 
-    def _deep_merge(self, base: dict[str, Any], update: dict[str, Any]) -> None:
-        """Deep merge update dictionary into base dictionary."""
+    @staticmethod
+    def deep_merge(base: dict[str, Any], update: dict[str, Any]) -> None:
+        """Merge ``update`` into ``base`` in place: nested dicts recurse, all other values overwrite."""
         for key, value in update.items():
             if key in base and isinstance(base[key], dict) and isinstance(value, dict):
-                self._deep_merge(base[key], value)
+                Config.deep_merge(base[key], value)
             else:
                 base[key] = value
 
@@ -483,6 +560,22 @@ class Config(BaseModel):
         fully-initialized Config without command-specific CLI parsing.
         """
         return cls(args=None)
+
+    @classmethod
+    def _snapshot_from_global_dict(cls, global_dict: dict[str, Any]) -> "Config":
+        """Build a snapshot Config whose global-JSON layer is ``global_dict``.
+
+        Applies env + provided global dict; skips local_config, config_file,
+        and CLI layers. Used by the remote-config pipeline for the pre-rules
+        half-merged snapshot (feeds rule predicates like ``when.existing``)
+        and for both sides of the terminal delta gate, avoiding a speculative
+        disk write.
+        """
+        return cls(
+            args=None,
+            skip_layers={"local_config", "config_file", "cli"},
+            global_override=global_dict,
+        )
 
     def validate_for_command_structured(
         self, command: str, args: Any | None = None

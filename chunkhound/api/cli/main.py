@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging as _pylogging
 import multiprocessing
+import os
 import sys
 import time
 from datetime import datetime
@@ -131,6 +132,15 @@ async def async_main() -> None:
         from pathlib import Path as _Path
 
         args.path = _Path(args.project_dir).resolve()
+
+    # Suppress stray log lines that could corrupt MCP stdio framing. The
+    # `mcp` command sets this later at chunkhound/api/cli/commands/mcp.py, but
+    # the remote-config pipeline runs inside create_validated_config below —
+    # WARNINGs from that path must go through log_if_not_mcp, which needs
+    # CHUNKHOUND_MCP_MODE to be set already. mcp_server/stdio.py and
+    # mcp_server/http_server.py set the same var before their factory call.
+    if args.command == "mcp":
+        os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
     _daemon_startup_breadcrumb(args, "startup tracking began mode=daemon")
     config_validation_started = time.monotonic()

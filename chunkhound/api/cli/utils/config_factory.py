@@ -7,10 +7,11 @@ instances, eliminating duplication across CLI commands and MCP servers.
 import argparse
 from pathlib import Path
 
-from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.config import Config
+from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.config.mcp_config import MCPConfig
+from chunkhound.core.config.remote import run_remote_config_fetch
 from chunkhound.core.config.research_config import ResearchConfig
 
 
@@ -55,6 +56,11 @@ async def create_validated_config(
     Returns:
         tuple: (config_instance, validation_errors)
     """
+    # Remote-config pre-step: may rewrite the global JSON on disk so the
+    # Config() call below observes the newly-fetched values. Silent on any
+    # recoverable failure — only disk-write failures escalate (via sys.exit).
+    await run_remote_config_fetch(args, command)
+
     try:
         config = Config(args=args)
     except ValueError as exc:

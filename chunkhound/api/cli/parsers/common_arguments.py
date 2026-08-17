@@ -21,6 +21,31 @@ def nonempty_path_filter(value: str) -> str:
     return stripped
 
 
+def add_remote_config_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register --remote-config-url / --remote-config-auth-header on ``parser``.
+
+    Shared between the top-level CLI (``add_common_arguments``) and the
+    stdio/http MCP direct-invocation parsers (``add_common_mcp_arguments``)
+    so the two surfaces cannot drift.
+    """
+    parser.add_argument(
+        "--remote-config-url",
+        type=str,
+        default=None,
+        help="URL to fetch remote configuration on startup",
+    )
+    parser.add_argument(
+        "--remote-config-auth-header",
+        type=str,
+        default=None,
+        help=(
+            "Value for the Authorization header when fetching remote "
+            "configuration. Supports ${VAR} interpolation against the "
+            "environment at fetch time."
+        ),
+    )
+
+
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     """Add arguments common to all commands.
 
@@ -38,6 +63,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         help="Configuration file path",
     )
+    add_remote_config_arguments(parser)
     parser.add_argument(
         "--debug",
         action="store_true",

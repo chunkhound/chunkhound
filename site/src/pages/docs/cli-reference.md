@@ -10,6 +10,18 @@ section: "manual"
 
 All ChunkHound commands and their options.
 
+## Global options
+
+These flags are accepted by every subcommand (`index`, `search`, `research`, `mcp`, `websearch`, `fetchurl`, `map`, `autodoc`, etc.):
+
+| Flag | Description |
+|---|---|
+| `--config PATH` | Path to an explicit configuration file (equivalent to `CHUNKHOUND_CONFIG_FILE`). |
+| `--remote-config-url URL` | URL to fetch remote configuration on startup. See [Remote Configuration](/docs/configuration/#remote-configuration). |
+| `--remote-config-auth-header VALUE` | Authorization header for the remote-config fetch. Supports `${VAR}` interpolation against the environment at fetch time. See [Remote Configuration](/docs/configuration/#remote-configuration). |
+| `--verbose` / `-v` | Enable verbose logging. |
+| `--debug` | Enable debug mode. |
+
 ## `chunkhound index`
 
 Index a directory for code search. Parses source files, generates embeddings, and stores chunks in the database.

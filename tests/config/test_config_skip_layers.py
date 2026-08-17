@@ -144,3 +144,14 @@ def test_skip_all_layers_still_applies_direct_kwargs(proj: Path) -> None:
         debug=True,
     )
     assert config.debug is True
+
+
+def test_snapshot_from_global_dict_does_not_mutate_caller_dict(proj: Path) -> None:
+    """Snapshot construction must leave the caller's dict untouched — otherwise
+    the remote-config pipeline leaks ``indexing.exclude_user_supplied`` into
+    the persisted global JSON on its next write.
+    """
+    original: dict[str, object] = {"indexing": {"exclude": ["*.tmp"]}}
+    snapshot_input = {"indexing": {"exclude": ["*.tmp"]}}
+    Config._snapshot_from_global_dict(snapshot_input)
+    assert snapshot_input == original
