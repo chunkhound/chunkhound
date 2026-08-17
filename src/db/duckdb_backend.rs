@@ -292,13 +292,21 @@ impl DuckDbHnswBackend {
             .map(|s| s.to_string());
 
         // Fast path: the diff phase already knows this file's DB id (incremental re-index).
-        // Skip the SELECT and go straight to UPDATE.
+        // Skip the SELECT and go straight to UPDATE — but require the id to still match
+        // this exact path and to have actually matched a row before trusting it. A stale
+        // id (e.g. the diff snapshot outliving a concurrent delete/rename) must not be
+        // reported as success: insert_chunks_for_file would either violate the
+        // files->chunks FK on a nonexistent id, or — worse — silently attach this file's
+        // chunks to an unrelated file's row. On a mismatch, fall through to the
+        // path-keyed slow path below instead of trusting the stale id.
         if let Some(id) = file.existing_file_id {
-            conn.execute(
-                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, skip_reason = ?, updated_at = now() WHERE id = ?",
-                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, file.skip_reason, id],
+            let rows_updated = conn.execute(
+                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, skip_reason = ?, updated_at = now() WHERE id = ? AND path = ?",
+                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, file.skip_reason, id, file.path],
             )?;
-            return Ok(id);
+            if rows_updated == 1 {
+                return Ok(id);
+            }
         }
 
         // Slow path (new files or non-incremental runs): DuckDB rejects ON CONFLICT DO UPDATE
@@ -1692,6 +1700,90 @@ mod hnsw_metric_tests {
             count, 1,
             "files table must have exactly one row after two writes to the same path"
         );
+    }
+
+    #[test]
+    fn test_upsert_file_with_stale_id_falls_back_to_path_lookup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
+        let config = DbConfig {
+            db_path,
+            compaction_threshold: 0.3,
+            compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
+        };
+        let mut backend = DuckDbHnswBackend::new(config);
+        backend.open().expect("open");
+
+        // Write two distinct files so we have a real "someone else's id" to collide with.
+        let batch1 = crate::types::DbWriterBatch {
+            files: vec![
+                crate::types::FileRecord {
+                    existing_file_id: None,
+                    path: "a.py".into(),
+                    mtime: Some(1.0),
+                    size_bytes: Some(100),
+                    content_hash: Some("abc".into()),
+                    language: Some("python".into()),
+                    skip_reason: None,
+                    chunks: vec![],
+                },
+                crate::types::FileRecord {
+                    existing_file_id: None,
+                    path: "b.py".into(),
+                    mtime: Some(1.0),
+                    size_bytes: Some(50),
+                    content_hash: Some("xyz".into()),
+                    language: Some("python".into()),
+                    skip_reason: None,
+                    chunks: vec![],
+                },
+            ],
+            delete_paths: vec![],
+        };
+        let result1 = backend.write_batch(&batch1).expect("first write");
+        let a_id = result1.file_ids[0];
+        let b_id = result1.file_ids[1];
+
+        // Simulate a stale diff snapshot: "b.py" is written carrying a's id (e.g. a
+        // rename/delete race between the diff snapshot and this write). The fast path
+        // must not blindly trust this and must not corrupt a's row.
+        let batch2 = crate::types::DbWriterBatch {
+            files: vec![crate::types::FileRecord {
+                existing_file_id: Some(a_id),
+                path: "b.py".into(),
+                mtime: Some(2.0),
+                size_bytes: Some(200),
+                content_hash: Some("def".into()),
+                language: Some("python".into()),
+                skip_reason: None,
+                chunks: vec![],
+            }],
+            delete_paths: vec![],
+        };
+        let result2 = backend.write_batch(&batch2).expect("second write");
+
+        assert_eq!(
+            result2.file_ids[0], b_id,
+            "a mismatched (id, path) pair must fall back to the path-keyed row for b.py, \
+             not silently report success against a's row"
+        );
+
+        let conn = backend.conn_or_err().expect("conn");
+        let a_hash: String = conn
+            .query_row("SELECT content_hash FROM files WHERE id = ?", [a_id], |r| {
+                r.get(0)
+            })
+            .expect("a row must still exist untouched");
+        assert_eq!(
+            a_hash, "abc",
+            "a's row must not have been overwritten by b's stale-id update"
+        );
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 2, "no phantom row should be created for b.py");
     }
 
     #[test]
