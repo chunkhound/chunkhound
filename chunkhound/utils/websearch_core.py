@@ -20,7 +20,8 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
 
 from chunkhound.core.config.config import Config
 
-MAX_FETCH_CONCURRENCY = 5
+_MAX_FETCH_CONCURRENCY = 5
 
 WEBSEARCH_LIMIT_MAX = 100
 
@@ -210,6 +211,73 @@ def _resolve_chrome_path(
     return None
 
 
+@asynccontextmanager
+async def _managed_browser(
+    warning_callback: Callable[[str], None] | None = None,
+) -> AsyncIterator[zd.Browser | None]:
+    """Yield a running Chrome browser, or None if none can be launched.
+
+    Shared by every zendriver-consuming caller (websearch/quickresearch's
+    ``fetch_and_save`` and fetchurl's ``_fetch_with_retry``). Callers must
+    tolerate ``None`` — ``fetch_url_to_content`` and ``_fetch_page`` already
+    dispatch to the urllib fallback when ``browser is None``.
+    """
+    # Lazy import: pulls in websockets + CDP binding modules. Wasted cost
+    # for CLI commands that never touch websearch (e.g. `chunkhound index`).
+    import zendriver as zd
+
+    # Must run before any tab.send() creates a Transaction.
+    _install_late_completion_guard()
+
+    # _resolve_chrome_path returns None for every "no usable Chrome >=124"
+    # case (not installed, too old, --version probe failed) and emits its
+    # own warning describing the cause. urllib is the unified fallback —
+    # we never hand a bad binary to zendriver, so the silent
+    # Response.charset parse-failure loop is never reached.
+    chrome_path = _resolve_chrome_path(warning_callback)
+    browser: zd.Browser | None = None
+    if chrome_path is not None:
+        # --headless=new is required for the PDF path: legacy --headless hands
+        # PDFs to Chrome's internal viewer and never exposes the response to
+        # _fetch_page. Pass both headless=True and the explicit flag — the
+        # relationship between zendriver's Config flag and the explicit arg is
+        # undocumented; belt-and-braces.
+        # --disable-dev-shm-usage: containers default /dev/shm to 64MB, which
+        # 5-way concurrent navigation of JS-heavy SPAs exhausts — Chrome dies
+        # and every in-flight tab raises ConnectionClosedError on its CDP
+        # WebSocket. --disable-gpu drops the unused GPU process to free RAM.
+        try:
+            browser = await zd.start(
+                headless=True,
+                browser_args=[
+                    "--headless=new",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+                browser_executable_path=chrome_path,
+            )
+        except Exception as e:
+            if warning_callback:
+                warning_callback(
+                    f"Browser launch failed: {e}. Falling back to urllib."
+                    " (If Google Chrome is not installed, install it to"
+                    " enable rich page fetches.)"
+                )
+            browser = None
+
+    try:
+        yield browser
+    finally:
+        if browser is not None:
+            # Bounded best-effort stop. browser.stop() can wedge on a stuck
+            # websocket close or a Chrome process ignoring SIGTERM; the subprocess
+            # process-group reaps any orphans when _quickresearch exits.
+            try:
+                await asyncio.wait_for(browser.stop(), timeout=10)
+            except asyncio.TimeoutError:
+                pass
+
+
 def clamp_limit(limit: int) -> int:
     """Silently clamp result-count limit to [1, WEBSEARCH_LIMIT_MAX].
 
@@ -351,6 +419,22 @@ def _html_to_markdown(html_text: str) -> str:
         ],
         heading_style="ATX",
     ).convert(html_text)
+
+
+_HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_html_title(html_text: str) -> str | None:
+    """Return the first <title> element's inner text, or None.
+
+    Runs on the raw HTML *before* markdownify's strip=["head", ...] removes it
+    in `_html_to_markdown`. HTML entities (``&amp;``, ``&#x27;``, ...) are
+    decoded here — they are part of extracting the title text, not fetchurl
+    policy. Whitespace-normalization and length-capping happen downstream in
+    fetchurl-specific code.
+    """
+    m = _HTML_TITLE_RE.search(html_text)
+    return html.unescape(m.group(1)) if m else None
 
 
 def _normalize_ct(raw: str | None) -> str:
@@ -576,6 +660,62 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             await _close_tab_quietly(tab)
 
 
+async def fetch_url_to_content(
+    url: str, browser: zd.Browser | None
+) -> tuple[str, str | bytes, dict[str, str | None]]:
+    """Fetch one URL and return (kind, payload, source_metadata).
+
+    kind ∈ {".pdf", ".md"}. source_metadata carries out-of-band signals
+    lifted from the raw response before content-type normalization —
+    currently just the HTML <title> element, which markdownify's
+    strip=["head", ...] in `_html_to_markdown` would otherwise discard.
+    PDF and non-HTML paths return {"title": None}.
+
+    Shared between _fetch_one (websearch/quickresearch, which discards
+    source_metadata) and `_fetch_with_retry` in `chunkhound.utils.fetchurl`
+    (which threads it into `_derive_page_title`, §4.1a).
+
+    Raises ValueError on unsupported Content-Type or empty rendered body.
+    """
+    if browser is not None:
+        ct, body, charset = await _fetch_page(browser, url)
+    else:
+        ct, body, charset = await asyncio.to_thread(_fetch_url, url)
+    source_metadata: dict[str, str | None] = {"title": None}
+    if ct == "application/pdf":
+        kind, content = _decode_pdf_or_fallback_html(body, charset)
+        # On the HTML fallback path (paywall/auth wall served with an
+        # application/pdf Content-Type but no %PDF- magic), capture <title>
+        # from the same bytes the fallback markdown was derived from.
+        #
+        # Known limitation: on the Chrome branch, `_fetch_page` hardcodes
+        # charset="utf-8" regardless of the actual response encoding — see the
+        # inline comment there explaining why the literal is preserved. Any
+        # non-UTF-8 paywall HTML served under application/pdf via Chrome will
+        # therefore be decoded as UTF-8 here, potentially mojibaking the
+        # <title>. `errors="replace"` prevents a crash. This is accepted for v1;
+        # a v2 refinement could plumb Chrome's Response.charset through
+        # _fetch_page instead of hardcoding utf-8.
+        if kind == ".md":
+            source_metadata["title"] = _extract_html_title(
+                body.decode(charset, errors="replace")
+            )
+    elif ct == "text/html":
+        html_text = body.decode(charset, errors="replace")
+        source_metadata["title"] = _extract_html_title(html_text)
+        kind, content = ".md", _html_to_markdown(html_text)
+    else:
+        raise ValueError(f"Unsupported content-type: {ct!r}")
+    # Auth walls and error pages often render to whitespace-only markdown —
+    # surface as a fetch failure rather than passing empty content downstream.
+    # bytes.strip() and str.strip() are both valid; the unconditional .strip()
+    # covers PDFs and HTML alike (an all-whitespace-bytes PDF payload still
+    # raises).
+    if not content.strip():
+        raise ValueError(f"{ct!r} body rendered empty ({len(body)} bytes)")
+    return kind, content, source_metadata
+
+
 async def _fetch_one(
     url: str,
     tmpdir: Path,
@@ -589,23 +729,7 @@ async def _fetch_one(
         if progress_callback:
             progress_callback(f"Fetching {url}...")
         try:
-            if browser is not None:
-                ct, body, charset = await _fetch_page(browser, url)
-            else:
-                ct, body, charset = await asyncio.to_thread(_fetch_url, url)
-            if ct == "application/pdf":
-                ext, content = _decode_pdf_or_fallback_html(body, charset)
-            elif ct == "text/html":
-                ext, content = ".md", _html_to_markdown(
-                    body.decode(charset, errors="replace")
-                )
-            else:
-                raise ValueError(f"Unsupported content-type: {ct!r}")
-            # Auth walls and error pages often render to whitespace-only
-            # markdown; surface that as a fetch failure rather than writing
-            # an empty file that consumes a result slot.
-            if not content.strip():
-                raise ValueError(f"{ct!r} body rendered empty ({len(body)} bytes)")
+            ext, content, _source_metadata = await fetch_url_to_content(url, browser)
             path = tmpdir / (_url_to_filename(url) + ext)
             if isinstance(content, bytes):
                 path.write_bytes(content)
@@ -626,7 +750,7 @@ async def fetch_and_save(
     mapping: dict[str, str] | None = None,
 ) -> None:
     """Fetch each URL concurrently (bounded) and save content to tmpdir."""
-    semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
+    semaphore = asyncio.Semaphore(_MAX_FETCH_CONCURRENCY)
 
     async def _run(browser: zd.Browser | None) -> None:
         tasks = [
@@ -638,61 +762,8 @@ async def fetch_and_save(
         ]
         await asyncio.gather(*tasks)
 
-    # Lazy import: pulls in websockets + CDP binding modules. Wasted cost
-    # for CLI commands that never touch websearch (e.g. `chunkhound index`).
-    import zendriver as zd
-
-    # Must run before any tab.send() creates a Transaction.
-    _install_late_completion_guard()
-
-    # _resolve_chrome_path returns None for every "no usable Chrome >=124"
-    # case (not installed, too old, --version probe failed) and emits its
-    # own warning describing the cause. urllib is the unified fallback —
-    # we never hand a bad binary to zendriver, so the silent
-    # Response.charset parse-failure loop is never reached.
-    chrome_path = _resolve_chrome_path(warning_callback)
-    if chrome_path is None:
-        await _run(None)
-        return
-
-    # --headless=new is required for the PDF path: legacy --headless hands
-    # PDFs to Chrome's internal viewer and never exposes the response to
-    # _fetch_page. Pass both headless=True and the explicit flag — the
-    # relationship between zendriver's Config flag and the explicit arg is
-    # undocumented; belt-and-braces.
-    # --disable-dev-shm-usage: containers default /dev/shm to 64MB, which
-    # 5-way concurrent navigation of JS-heavy SPAs exhausts — Chrome dies
-    # and every in-flight tab raises ConnectionClosedError on its CDP
-    # WebSocket. --disable-gpu drops the unused GPU process to free RAM.
-    try:
-        browser = await zd.start(
-            headless=True,
-            browser_args=[
-                "--headless=new",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
-            browser_executable_path=chrome_path,
-        )
-    except Exception as e:
-        if warning_callback:
-            warning_callback(
-                f"Browser launch failed: {e}. Falling back to urllib."
-                " (If Google Chrome is not installed, install it to"
-                " enable rich page fetches.)"
-            )
-        await _run(None)
-        return
-    try:
+    async with _managed_browser(warning_callback) as browser:
         await _run(browser)
-    finally:
-        # Bounded best-effort stop. browser.stop() can wedge on a stuck
-        # websocket close or a Chrome process ignoring SIGTERM; the subprocess
-        # process-group reaps any orphans when _quickresearch exits.
-        try:
-            await asyncio.wait_for(browser.stop(), timeout=10)
-        except asyncio.TimeoutError:
-            pass
 
 
 def search(

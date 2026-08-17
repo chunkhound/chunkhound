@@ -11,6 +11,7 @@ import inspect
 import os
 import re
 import shutil
+import ssl
 import tempfile
 import types
 import urllib.error
@@ -81,6 +82,19 @@ def _summarize_subprocess_stderr(stderr: bytes) -> str:
     if raise_summary:
         return raise_summary[-500:]
     return stderr_text[-200:]
+
+
+def _format_fetch_warnings(warnings: list[str]) -> str:
+    """Render fetch warnings as a trailing Markdown blockquote (empty if none).
+
+    Multi-line warnings are prefixed on every line so they stay in the block.
+    """
+    if not warnings:
+        return ""
+    return (
+        "\n\n> **Fetch warnings:**\n"
+        + "\n".join("> - " + w.replace("\n", "\n> ") for w in warnings)
+    )
 
 
 # =============================================================================
@@ -528,6 +542,8 @@ Use when the question requires external documentation, library references, or up
 For follow-up questions, pass the prior query as previous_query — the expander then targets new dimensions instead of re-exploring the same ground, and the synthesizer interprets the current question in the prior topic's context. \
 High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
 
+FETCHURL_DESCRIPTION = """Fetch a single URL (HTML or PDF) and return a Markdown answer. On large pages with a query, the tool reranks the page's sections against the query using a reranker and elbow cutoff, then passes only the most relevant sections to the LLM. On small pages or when no query is given, the page is truncated and summarized in one LLM call."""
+
 
 # =============================================================================
 # Tool Implementations
@@ -912,6 +928,8 @@ async def websearch_impl(
     queries = await expand_web_queries(query, llm_manager, previous_query=previous_query)
     try:
         results = await search_multi(queries, limit, None)
+    except urllib.error.HTTPError as e:
+        raise MCPError(f"Web search failed: HTTP {e.code} {e.reason}") from e
     except urllib.error.URLError as e:
         raise MCPError(f"Web search failed: {e.reason}") from e
     if not results:
@@ -973,14 +991,69 @@ async def websearch_impl(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     answer = replace_paths_with_urls(answer, mapping).rstrip()
-    # Warnings may be multi-line; prefix every line to keep the blockquote.
-    warn_block = (
-        "\n\n> **Fetch warnings:**\n"
-        + "\n".join(
-            "> - " + w.replace("\n", "\n> ") for w in warnings
+    return f"{answer}{_format_fetch_warnings(warnings)}"
+
+
+@register_tool(
+    description=FETCHURL_DESCRIPTION,
+    requires_llm=True,
+    requires_reranker=True,
+    name="fetchurl",
+)
+async def fetchurl_impl(
+    embedding_manager: EmbeddingManager,
+    llm_manager: LLMManager,
+    config: Config | None,
+    url: str,
+    query: str = "",
+) -> str:
+    """Fetch a URL and return a focused Markdown answer.
+
+    Args:
+        embedding_manager: Injected; used to obtain the reranker-capable embedding provider.
+        llm_manager: Injected; used for the extraction call.
+        config: Injected; used for fetchurl thresholds and retry policy.
+        url: Absolute http:// or https:// URL. file://, ftp://, data:, and hosts
+            resolving to loopback / private / link-local addresses are rejected.
+        query: Optional question. When set, focuses extraction; enables rerank+elbow
+            path on pages exceeding fetchurl.rerank_threshold_tokens.
+    """
+    from chunkhound.mcp_server.common import MCPError
+    from chunkhound.utils.fetchurl import FetchUrlError, run_fetchurl
+
+    # Reranker availability is gated upstream: requires_reranker=True on the
+    # @register_tool decorator hides fetchurl from tools/list and makes the
+    # MCP dispatcher raise before we get here (see mcp_server/common.py and
+    # mcp_server/base.py).
+    if config is None:
+        config = Config.from_environment()
+
+    warnings: list[str] = []
+    try:
+        answer = await run_fetchurl(
+            url,
+            query,
+            config,
+            embedding_manager.get_provider(),
+            llm_manager,
+            warning_callback=warnings.append,
+            verbose_log=None,
         )
-    ) if warnings else ""
-    return f"{answer}{warn_block}"
+    # asyncio.TimeoutError is a distinct class on Python 3.10 (aliased to
+    # builtin TimeoutError only from 3.11); keep both until requires-python
+    # >= 3.11.
+    except (TimeoutError, asyncio.TimeoutError) as e:
+        raise MCPError("fetchurl timed out") from e
+    except FetchUrlError as e:
+        raise MCPError(f"fetchurl failed: {e}") from e
+    except urllib.error.HTTPError as e:
+        raise MCPError(f"fetchurl failed: HTTP {e.code} {e.reason}") from e
+    except urllib.error.URLError as e:
+        raise MCPError(f"fetchurl failed: {e.reason}") from e
+    # ValueError = fetch_url_to_content content-type / empty-body reject.
+    except (ssl.SSLError, ValueError) as e:
+        raise MCPError(f"fetchurl failed: {e}") from e
+    return f"{answer}{_format_fetch_warnings(warnings)}"
 
 
 # =============================================================================
