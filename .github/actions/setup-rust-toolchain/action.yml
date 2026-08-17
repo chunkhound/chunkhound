@@ -18,5 +18,15 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           target/
-        key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
+        # env.pythonLocation is folded into the key because pyo3's build
+        # script bakes the absolute path to the Python install (incl. patch
+        # version, e.g. .../Python/3.14.7/x64) into cached target/ build
+        # output on Windows, where linking the cdylib requires python3.lib.
+        # Without this, a routine patch bump of the hosted runner's Python
+        # (3.14.6 -> 3.14.7) leaves the old path baked into a restored
+        # target/ that cargo doesn't know to invalidate, so the linker fails
+        # with LNK1181: cannot open input file 'python3.lib'. Jobs that never
+        # set up Python (e.g. rust-checks) get an empty segment here, which
+        # is fine -- they don't link against libpython.
+        key: ${{ runner.os }}-${{ runner.arch }}-py${{ env.pythonLocation }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-${{ runner.arch }}-py${{ env.pythonLocation }}-cargo-
