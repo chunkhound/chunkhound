@@ -45,6 +45,29 @@ def _vector_1536(value: float) -> list[float]:
     return [value] * 1536
 
 
+def _seed_duplicate_embedding_rows(
+    provider: DuckDBProvider,
+    dims: int = 3,
+    provider_name: str = "legacy",
+    model_name: str = "mini",
+) -> None:
+    """Create embeddings_{dims} with an HNSW index, no unique index, and
+    two duplicate (chunk_id=1, provider_name, model_name) rows."""
+    provider._ensure_embedding_table_exists(dims)
+    provider.create_vector_index(provider_name, model_name, dims, "cosine")
+    provider.connection.execute(
+        f"DROP INDEX IF EXISTS idx_{dims}_chunk_provider_model_unique"
+    )
+    for embedding in ([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]):
+        provider.connection.execute(
+            f"""
+            INSERT INTO embeddings_{dims} (chunk_id, provider, model, embedding, dims)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [1, provider_name, model_name, embedding, dims],
+        )
+
+
 def test_large_batch_insert_parameterizes_special_chars_and_preserves_indexes(
     tmp_path: Path,
 ) -> None:
@@ -425,25 +448,7 @@ def test_schema_migration_backfills_unique_index_and_deduplicates_rows(
     provider = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
     provider.connect()
     try:
-        provider._ensure_embedding_table_exists(3)
-        provider.create_vector_index("legacy", "mini", 3, "cosine")
-        provider.connection.execute(
-            "DROP INDEX IF EXISTS idx_3_chunk_provider_model_unique"
-        )
-        provider.connection.execute(
-            """
-            INSERT INTO embeddings_3 (chunk_id, provider, model, embedding, dims)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [1, "legacy", "mini", [1.0, 2.0, 3.0], 3],
-        )
-        provider.connection.execute(
-            """
-            INSERT INTO embeddings_3 (chunk_id, provider, model, embedding, dims)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [1, "legacy", "mini", [4.0, 5.0, 6.0], 3],
-        )
+        _seed_duplicate_embedding_rows(provider)
         initial_indexes = _get_hnsw_index_names(provider)
     finally:
         provider.disconnect(skip_checkpoint=True)
@@ -515,25 +520,7 @@ def test_ensure_embedding_upsert_contract_rebuilds_hnsw_once_when_deduping(
     provider = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
     provider.connect()
     try:
-        provider._ensure_embedding_table_exists(3)
-        provider.create_vector_index("legacy", "mini", 3, "cosine")
-        provider.connection.execute(
-            "DROP INDEX IF EXISTS idx_3_chunk_provider_model_unique"
-        )
-        provider.connection.execute(
-            """
-            INSERT INTO embeddings_3 (chunk_id, provider, model, embedding, dims)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [1, "legacy", "mini", [1.0, 2.0, 3.0], 3],
-        )
-        provider.connection.execute(
-            """
-            INSERT INTO embeddings_3 (chunk_id, provider, model, embedding, dims)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [1, "legacy", "mini", [4.0, 5.0, 6.0], 3],
-        )
+        _seed_duplicate_embedding_rows(provider)
 
         expected_hnsw_names = _get_hnsw_index_names(provider)
 
@@ -565,6 +552,83 @@ def test_ensure_embedding_upsert_contract_rebuilds_hnsw_once_when_deduping(
             row["index_name"]
             for row in provider.execute_query(
                 "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'embeddings_3'",
+                [],
+            )
+        }
+        assert "idx_3_chunk_provider_model_unique" in index_names
+        assert _get_hnsw_index_names(provider) == expected_hnsw_names
+    finally:
+        provider.disconnect(skip_checkpoint=True)
+
+
+def test_ensure_embedding_upsert_contract_restores_hnsw_after_index_creation_fails(
+    tmp_path: Path,
+) -> None:
+    """A failure in the CREATE UNIQUE INDEX step, after the dedupe DELETE
+    step already committed, must still restore the table's HNSW indexes.
+
+    Regression test: the guard's failure handling used to only restore
+    dropped HNSW indexes when the failing step was non-transactional --
+    on the (common) transactional-failure path it rolled back that step's
+    own empty transaction and re-raised, leaving the HNSW indexes dropped
+    with nothing to ever recreate them on a normal reconnect.
+    """
+    pytest.importorskip("duckdb")
+
+    db_path = tmp_path / "db.duckdb"
+
+    provider = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
+    provider.connect()
+    try:
+        _seed_duplicate_embedding_rows(provider)
+        expected_hnsw_names = _get_hnsw_index_names(provider)
+
+        original_create_unique_index = provider._executor_create_embedding_unique_index
+
+        def _raise_on_create_unique_index(conn, table_name, dims):
+            del conn, table_name, dims
+            raise RuntimeError("forced index creation failure")
+
+        provider._executor_create_embedding_unique_index = _raise_on_create_unique_index
+
+        state: dict = {"transaction_active": False}
+        with pytest.raises(RuntimeError, match="forced index creation failure"):
+            provider._executor_ensure_embedding_upsert_contract(
+                provider.connection, state, "embeddings_3", 3
+            )
+
+        # The dedupe DELETE already committed before the index-creation step
+        # failed, and is not rolled back -- this is the accepted tradeoff,
+        # not a regression (see this fix's design notes). The unique index
+        # genuinely was not created.
+        rows = _get_embedding_rows(provider, 1, "legacy", "mini")
+        assert len(rows) == 1
+        index_names = {
+            row["index_name"]
+            for row in provider.execute_query(
+                "SELECT index_name FROM duckdb_indexes() "
+                "WHERE table_name = 'embeddings_3'",
+                [],
+            )
+        }
+        assert "idx_3_chunk_provider_model_unique" not in index_names
+
+        # The HNSW indexes dropped at the start of the guard must be
+        # restored despite the failure -- this is the actual fix.
+        assert _get_hnsw_index_names(provider) == expected_hnsw_names
+
+        # The connection/transaction state must remain usable, and the
+        # partial-failure state must be self-healing on the next attempt.
+        provider._executor_create_embedding_unique_index = original_create_unique_index
+        state = {"transaction_active": False}
+        provider._executor_ensure_embedding_upsert_contract(
+            provider.connection, state, "embeddings_3", 3
+        )
+        index_names = {
+            row["index_name"]
+            for row in provider.execute_query(
+                "SELECT index_name FROM duckdb_indexes() "
+                "WHERE table_name = 'embeddings_3'",
                 [],
             )
         }

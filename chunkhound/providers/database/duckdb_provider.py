@@ -951,30 +951,50 @@ class DuckDBProvider(SerialDatabaseProvider):
                 conn.execute("CHECKPOINT")
             return results
         except Exception as e:
+            rollback_error: Exception | None = None
             if current_transactional and state.get("transaction_active", False):
                 try:
                     self._executor_rollback_transaction(conn, state)
-                except Exception as rollback_error:
-                    raise RuntimeError(
-                        f"embedding table mutation on {table_name} failed: {e}; "
-                        f"rollback failed: {rollback_error}"
-                    ) from rollback_error
-            else:
-                restore_failures: list[str] = []
-                for index_info in existing_indexes:
-                    try:
-                        self._executor_recreate_vector_index_from_info(
-                            conn, state, index_info
-                        )
-                    except Exception as recreate_error:
-                        restore_failures.append(
-                            f"{index_info['index_name']}: {recreate_error}"
-                        )
+                except Exception as exc:
+                    rollback_error = exc
+
+            # Steps that already committed before this failure are NOT undone
+            # here -- each transactional step in `steps` commits before the
+            # next one can safely run (see the docstring above), so there is
+            # no single transaction spanning all of `steps` left to roll
+            # back. The HNSW indexes dropped at the top of this method,
+            # however, must always be restored on any failure path --
+            # unconditionally, not only when the failing step happened to be
+            # non-transactional. (A prior version only restored them on that
+            # branch, leaving semantic search silently broken on the common
+            # path -- nothing else in this codebase repairs a missing HNSW
+            # index on a normal reconnect.)
+            restore_failures: list[str] = []
+            for index_info in existing_indexes:
+                try:
+                    self._executor_recreate_vector_index_from_info(
+                        conn, state, index_info
+                    )
+                except Exception as recreate_error:
+                    restore_failures.append(
+                        f"{index_info['index_name']}: {recreate_error}"
+                    )
+
+            if rollback_error is not None:
+                detail = f"rollback failed: {rollback_error}"
                 if restore_failures:
-                    joined_failures = "; ".join(restore_failures)
-                    raise RuntimeError(
-                        f"embedding table mutation on {table_name} failed and HNSW "
-                        f"restore was incomplete: {joined_failures}"
+                    detail += "; HNSW restore also incomplete: " + "; ".join(
+                        restore_failures
+                    )
+                raise RuntimeError(
+                    f"embedding table mutation on {table_name} failed: {e}; {detail}"
+                ) from rollback_error
+
+            if restore_failures:
+                joined_failures = "; ".join(restore_failures)
+                raise RuntimeError(
+                    f"embedding table mutation on {table_name} failed and HNSW "
+                    f"restore was incomplete: {joined_failures}"
                     ) from e
 
             raise
