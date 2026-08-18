@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Hard 10-second wall-clock fetch budget on every invocation. Single attempt, no client-side cache — recoverable failures (timeout, network, non-2xx, JSON parse, envelope validation) log a WARNING and the invocation proceeds against what's on disk. Disk-write failures during backup or persist escalate to `sys.exit(1)` with the target path and errno on stderr.
 - **Structured config validation error codes** — Startup validation now emits stable `ConfigErrorCode` identifiers (`missing_required_config`, `llm_not_configured`, `llm_missing_role_config`, `embedding_not_configured`, `mcp_non_loopback_no_auth`, `mcp_cors_no_auth`, `db_readonly_wrong_command`, `db_readonly_non_duckdb`) alongside human-readable messages, enabling machine-parseable diagnostics and powering the remote-config delta-only validation gate.
 
+### Fixed
+- **PyMuPDF `fitz` import deprecation warning on stdout** — PDF parsing now imports `pymupdf` instead of the legacy `fitz` alias, which since PyMuPDF 1.28.2 prints a deprecation warning to stdout and corrupts MCP stdio clients (e.g. CURe preflight). Adds a regression test asserting parser imports write nothing to stdout.
+
 ## [5.2.0] - 2026-07-12
 
 ### Breaking Changes
