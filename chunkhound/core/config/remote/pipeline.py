@@ -237,13 +237,32 @@ def _restore_refused(
     on_disk_dict: dict[str, Any],
     path: str,
 ) -> None:
-    """Restore a refused path from the pre-rules on-disk dict."""
+    """Restore a refused path from the pre-rules on-disk dict.
+
+    If a rule mutated the refused path, emit a WARNING naming the key —
+    apply_rule's INFO ``applied`` line would otherwise silently disagree
+    with disk state. The rule value is not logged (refused-path values
+    leak install topology).
+    """
     try:
         segments = rules.parse_path(path)
     except ValueError:
         return
 
+    working_present, working_value = _lookup(working_copy, segments)
     on_disk_present, on_disk_value = _lookup(on_disk_dict, segments)
+
+    if working_present == on_disk_present and working_value == on_disk_value:
+        # Rule didn't change it — nothing to revert or warn about.
+        return
+
+    log_if_not_mcp(
+        "WARNING",
+        "Remote-config refused_path {!r}: rule effect scrubbed "
+        "(operator-owned key)",
+        path,
+    )
+
     if on_disk_present:
         _set(working_copy, segments, on_disk_value)
     else:

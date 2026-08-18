@@ -24,6 +24,10 @@ silently break:
 13. Backup `.bak` file mode is `0o600` on POSIX (mirrors the primary write).
 14. Equal-dict case: no rule net-change → no write, no `.bak`.
 15. Envelope `version != 1` → whole payload discarded.
+16. Rule targeting a `REFUSED_PATHS` key is scrubbed with a WARNING
+    naming the key: reverts to the operator's on-disk value when present,
+    deletes otherwise. Silent when no rule touched the key. Parent-level
+    `op: merge` sneaking a refused sub-key is caught the same way.
 
 Tests exercise the pipeline through its public entry
 (`run_remote_config_fetch`) and observe disk state, argparse-shaped `args`,
@@ -776,6 +780,165 @@ async def test_remove_on_missing_path_logs_no_op(
     assert not any(
         "applied" in m and "database.provider" in m for m in messages
     ), f"remove on missing path must not log 'applied', got messages={messages}"
+
+
+async def test_rule_setting_refused_path_emits_scrub_warning(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Rule mutating a refused path logs INFO `applied` in apply_rule,
+    # then step 4b silently reverts it — audit line would lie. Scrub
+    # must emit WARNING naming the key. Value must not leak (refused
+    # paths reveal install topology).
+    from loguru import logger
+
+    envelope = {
+        "version": 1,
+        "rules": [
+            {"id": "database.path", "op": "set", "value": "/hijacked"},
+        ],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler_id)
+
+    assert any(
+        "refused_path" in m and "database.path" in m for m in messages
+    ), f"expected refused_path WARNING naming the key, got messages={messages}"
+    assert not any("/hijacked" in m for m in messages), (
+        f"rule value must not appear in logs, got messages={messages}"
+    )
+    # No prior on-disk value and scrub deletes → database.path absent.
+    target = _target_path(_isolate)
+    if target.exists():
+        data = _read_target(target)
+        assert "path" not in data.get("database", {}), (
+            f"database.path must not persist after scrub, got {data}"
+        )
+
+
+async def test_rule_setting_refused_path_over_existing_disk_value_emits_warning(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # When on-disk holds an operator value, scrub restores it. Still a
+    # rule effect reverted → WARNING fires. Neither value leaks.
+    from loguru import logger
+
+    target = _target_path(_isolate)
+    target.write_text(json.dumps({"database": {"path": "/original"}}))
+
+    envelope = {
+        "version": 1,
+        "rules": [
+            {"id": "database.path", "op": "set", "value": "/hijacked"},
+            # Non-refused rule forces a write — proves scrub reverts the
+            # refused change while allowed changes still land on disk.
+            {"id": "mcp.host", "op": "set", "value": "127.0.0.1"},
+        ],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler_id)
+
+    assert any(
+        "refused_path" in m and "database.path" in m for m in messages
+    ), f"expected refused_path WARNING, got messages={messages}"
+    assert not any("/hijacked" in m for m in messages), (
+        f"rule value must not leak, got messages={messages}"
+    )
+    assert not any("/original" in m for m in messages), (
+        f"on-disk value must not leak, got messages={messages}"
+    )
+    # Operator's on-disk value wins.
+    data = _read_target(target)
+    assert data["database"]["path"] == "/original"
+
+
+async def test_operator_owned_disk_value_does_not_emit_scrub_warning(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No rule touched the refused key → no WARNING. Otherwise the signal
+    # turns into background noise on every invocation.
+    from loguru import logger
+
+    target = _target_path(_isolate)
+    target.write_text(json.dumps({"database": {"path": "/operator-set"}}))
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.host", "op": "set", "value": "127.0.0.1"}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler_id)
+
+    assert not any(
+        "refused_path" in m or "database.path" in m for m in messages
+    ), (
+        "scrub must be silent when no rule touched the refused key, got "
+        f"messages={messages}"
+    )
+    # Operator's on-disk value intact.
+    data = _read_target(target)
+    assert data["database"]["path"] == "/operator-set"
+
+
+async def test_parent_merge_sneaking_refused_subkey_emits_scrub_warning(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A rule that names the parent (`database`) and merges a refused
+    # sub-key (`path`) is the interesting attack: apply_rule's audit
+    # line says "database applied: op=merge" — it never names
+    # `database.path` at all. Without the scrub WARNING, an operator
+    # grepping for the refused key sees nothing. The WARNING must fire
+    # naming the refused key, and disk must not carry the hijack.
+    from loguru import logger
+
+    envelope = {
+        "version": 1,
+        "rules": [
+            {
+                "id": "database",
+                "op": "merge",
+                "value": {"path": "/hijacked", "provider": "duckdb"},
+            },
+        ],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler_id)
+
+    assert any(
+        "refused_path" in m and "database.path" in m for m in messages
+    ), f"expected refused_path WARNING naming the key, got messages={messages}"
+    assert not any("/hijacked" in m for m in messages), (
+        f"rule value must not leak, got messages={messages}"
+    )
+    # Non-refused sibling landed; refused sub-key did not.
+    data = _read_target(_target_path(_isolate))
+    assert data["database"]["provider"] == "duckdb"
+    assert "path" not in data["database"], (
+        f"refused sub-key must not persist, got {data}"
+    )
 
 
 async def test_write_atomicity_preserves_prior_content_on_mid_write_failure(

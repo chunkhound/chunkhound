@@ -296,12 +296,12 @@ Writes are atomic (sibling `.tmp` + `replace()`), and any pre-existing target fi
 
 ### Delta-only validation gate
 
-After rules apply, the resulting config is snapshot-validated against the current command **and** every persistence-hazard command (currently `index` and `mcp`). Each snapshot returns a set of structured `ConfigErrorCode` values (see [Startup validation](#startup-validation)). The pipeline compares pre-rules and post-rules error sets:
+After rules apply, the resulting config is snapshot-validated against the current command **and** every persistence-hazard command (currently `index`, `mcp`, and `research`). Each snapshot returns a set of structured `ConfigErrorCode` values (see [Startup validation](#startup-validation)). The pipeline compares pre-rules and post-rules error sets:
 
 - If the post-rules set is a subset of the pre-rules set (no new codes), the fetch is written to disk.
 - If any new code appears, the fetch is discarded — nothing is written and an ERROR is logged naming each new code and the command it came from.
 
-This prevents a well-intentioned rule change during a `search` invocation from silently breaking the next `mcp` startup on the same machine.
+This prevents a well-intentioned rule change during a `search` invocation from silently breaking the next `mcp` startup or scheduled `research` run on the same machine.
 
 ### Fetch behavior and failure model
 

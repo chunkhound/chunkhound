@@ -55,13 +55,20 @@ class ConfigErrorCode(str, Enum):
 # Commands whose `validate_for_command_structured` gate must be re-checked by
 # the remote-config terminal delta gate, in addition to the current command.
 # Any new command whose command-scoped gate can be tripped by a
-# remote-pushable value must be added here. `_daemon` is intentionally not
-# listed: its branches today only produce `DB_READONLY_WRONG_COMMAND`, which
-# `index` already covers, so adding it would yield no net-new coverage. If a
-# future change makes `_daemon` structurally distinguishable at the terminal
-# gate (e.g. by extending the mcp host/auth gate at `validate_for_command_
-# structured` to also fire for `_daemon`), add it here at the same time.
-PERSISTENCE_HAZARD_COMMANDS: frozenset[str] = frozenset({"index", "mcp"})
+# remote-pushable value must be added here. `research` stands in for the
+# LLM-requiring commands (`websearch`, `fetchurl`, `_quickresearch`) — its
+# LLM validation branch produces the same codes (`LLM_NOT_CONFIGURED`,
+# `LLM_MISSING_ROLE_CONFIG`) they all do, so covering it catches a payload
+# that would remove or break `llm.*` from any low-privilege invocation
+# (e.g. `search`) before it lands on disk and silently breaks the next
+# scheduled `research` run. `_daemon` is
+# intentionally not listed: its branches today only produce
+# `DB_READONLY_WRONG_COMMAND`, which `index` already covers, so adding it
+# would yield no net-new coverage. If a future change makes `_daemon`
+# structurally distinguishable at the terminal gate (e.g. by extending the
+# mcp host/auth gate at `validate_for_command_structured` to also fire for
+# `_daemon`), add it here at the same time.
+PERSISTENCE_HAZARD_COMMANDS: frozenset[str] = frozenset({"index", "mcp", "research"})
 
 
 class Config(BaseModel):
