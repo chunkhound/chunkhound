@@ -33,6 +33,7 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         }:
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
 
 def _codes(config: Config, command: str) -> list[ConfigErrorCode]:

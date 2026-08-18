@@ -59,6 +59,7 @@ async def create_validated_config(
     # Remote-config pre-step: may rewrite the global JSON on disk so the
     # Config() call below observes the newly-fetched values. Silent on any
     # recoverable failure — only disk-write failures escalate (via sys.exit).
+    # Internal subprocess commands are skipped inside the entry point itself.
     await run_remote_config_fetch(args, command)
 
     try:

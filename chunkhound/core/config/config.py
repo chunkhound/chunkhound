@@ -368,8 +368,9 @@ class Config(BaseModel):
                             log_if_not_mcp(
                                 "WARNING",
                                 "Ignoring 'remote_config' in {} — remote-config "
-                                "URL/auth may only be set via CLI flags or "
-                                "CHUNKHOUND_REMOTE_CONFIG__* env vars.",
+                                "URL/auth may only be set via CLI flags, "
+                                "CHUNKHOUND_REMOTE_CONFIG__* env vars, or the "
+                                "global config file.",
                                 local_config_path,
                             )
                         Config.deep_merge(config_data, local_config)
@@ -400,8 +401,9 @@ class Config(BaseModel):
                         log_if_not_mcp(
                             "WARNING",
                             "Ignoring 'remote_config' in {} — remote-config "
-                            "URL/auth may only be set via CLI flags or "
-                            "CHUNKHOUND_REMOTE_CONFIG__* env vars.",
+                            "URL/auth may only be set via CLI flags, "
+                            "CHUNKHOUND_REMOTE_CONFIG__* env vars, or the "
+                            "global config file.",
                             config_file,
                         )
                     Config.deep_merge(config_data, file_config)

@@ -25,4 +25,5 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             monkeypatch.delenv(key, raising=False)
     resolved = tmp_path.resolve()
     monkeypatch.setenv("HOME", str(resolved))
+    monkeypatch.setenv("USERPROFILE", str(resolved))
     return resolved

@@ -25,6 +25,12 @@ Startup-latency cost:
   therefore adds up to 10s of startup delay per invocation. There is no
   per-invocation opt-out and no client-side cache — unset the URL (from
   the layer that supplies it) to disable for the current run.
+- ``_quickresearch`` and ``_daemon`` skip the fetch; their parents
+  (``websearch``, ``mcp``) already applied it and the child reads the result
+  from disk. Without this, ``chunkhound websearch`` and MCP-proxy → daemon
+  startup would each pay the 10s tax twice. The skip set lives on
+  ``chunkhound.core.config.remote._SUBPROCESS_SKIP``; add any new child that
+  inherits its parent's fetched config there.
 """
 
 import os
