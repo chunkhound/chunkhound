@@ -860,144 +860,40 @@ class DuckDBProvider(SerialDatabaseProvider):
         ).fetchall()
         return [int(row[0]) for row in rows]
 
-    def _executor_get_vector_indexes_for_table(
-        self, conn: Any, state: dict[str, Any], table_name: str
-    ) -> list[dict[str, Any]]:
-        """Return only the HNSW indexes for the target embedding table."""
-        return [
-            index_info
-            for index_info in self._executor_get_existing_vector_indexes(conn, state)
-            if index_info["table_name"] == table_name
-        ]
-
-    def _executor_run_embedding_table_hnsw_guarded_mutation(
+    def _executor_run_upsert_contract_step(
         self,
         conn: Any,
         state: dict[str, Any],
-        table_name: str,
-        mutation_label: str,
-        mutation_func: Callable[[], Any],
-        *,
-        optimize_for_bulk: bool = False,
-        transactional: bool = True,
-    ) -> Any:
-        """Run one embedding-table mutation behind a strict exact-index restore guard."""
-        return self._executor_run_embedding_table_hnsw_guarded_mutations(
-            conn,
-            state,
-            table_name,
-            [(mutation_label, mutation_func, transactional)],
-            optimize_for_bulk=optimize_for_bulk,
-        )[0]
+        step_label: str,
+        step_func: Callable[[], Any],
+    ) -> None:
+        """Run one upsert-contract repair step in its own transaction, unless
+        the caller already has one open (then run directly, deferring to it).
 
-    def _executor_run_embedding_table_hnsw_guarded_mutations(
-        self,
-        conn: Any,
-        state: dict[str, Any],
-        table_name: str,
-        steps: list[tuple[str, Callable[[], Any], bool]],
-        *,
-        optimize_for_bulk: bool = False,
-    ) -> list[Any]:
-        """Run a sequence of embedding-table mutations behind ONE HNSW
-        drop/rebuild guard, instead of one guard per mutation.
-
-        Each step still gets its own transaction when its `transactional`
-        flag is True (some DuckDB operations must not share a transaction —
-        e.g. a dedupe DELETE must commit before a CREATE UNIQUE INDEX runs,
-        or DuckDB's index builder still counts the deleted row as a live
-        duplicate). But the set of HNSW indexes on `table_name` doesn't
-        change between steps, so dropping and recreating them once for the
-        whole sequence — instead of once per step — avoids a redundant full
-        index rebuild (DuckDB's VSS HNSW indexes have no incremental/delta
-        path, so a rebuild is always O(table size)).
+        Deliberately does NOT touch any HNSW/vector index: a plain DELETE and
+        a plain (non-vector) CREATE UNIQUE INDEX are both safe to run against
+        a table with a live HNSW index left untouched — verified directly
+        against DuckDB's VSS extension. Dropping and rebuilding the HNSW
+        index around these steps, as a prior version of this code did, was a
+        redundant full O(table size) rebuild with no functional need, most
+        costly right after a compaction that just built the same index.
         """
-        existing_indexes = self._executor_get_vector_indexes_for_table(
-            conn, state, table_name
-        )
-
-        for index_info in existing_indexes:
-            self._executor_drop_vector_index_by_name(conn, index_info["index_name"])
-
-        results: list[Any] = []
-        current_transactional = False
+        transactional = not state.get("transaction_active", False)
+        if transactional:
+            self._executor_begin_transaction(conn, state)
         try:
-            if optimize_for_bulk:
-                conn.execute("SET preserve_insertion_order = false")
-
-            for mutation_label, mutation_func, transactional in steps:
-                current_transactional = transactional
-                if state.get("transaction_active", False) and transactional:
-                    raise DuckDBTransactionConflictError(
-                        f"{mutation_label} cannot run while another DuckDB "
-                        "transaction is active"
-                    )
-                if transactional:
-                    self._executor_begin_transaction(conn, state)
-
-                results.append(mutation_func())
-
-                # Commit data changes before recreating HNSW indexes. DuckDB VSS HNSW
-                # indexes do not support CreateDeltaIndex, so committing a transaction
-                # that contains an HNSW CREATE triggers a BoundIndex::CreateDeltaIndex
-                # assertion failure.
-                if transactional:
-                    self._executor_commit_transaction(conn, state, False)
-
-            for index_info in existing_indexes:
-                self._executor_recreate_vector_index_from_info(conn, state, index_info)
-
-            if not state.get("transaction_active", False):
-                conn.execute("CHECKPOINT")
-            return results
-        except Exception as e:
-            rollback_error: Exception | None = None
-            if current_transactional and state.get("transaction_active", False):
-                try:
-                    self._executor_rollback_transaction(conn, state)
-                except Exception as exc:
-                    rollback_error = exc
-
-            # Steps that already committed before this failure are NOT undone
-            # here -- each transactional step in `steps` commits before the
-            # next one can safely run (see the docstring above), so there is
-            # no single transaction spanning all of `steps` left to roll
-            # back. The HNSW indexes dropped at the top of this method,
-            # however, must always be restored on any failure path --
-            # unconditionally, not only when the failing step happened to be
-            # non-transactional. (A prior version only restored them on that
-            # branch, leaving semantic search silently broken on the common
-            # path -- nothing else in this codebase repairs a missing HNSW
-            # index on a normal reconnect.)
-            restore_failures: list[str] = []
-            for index_info in existing_indexes:
-                try:
-                    self._executor_recreate_vector_index_from_info(
-                        conn, state, index_info
-                    )
-                except Exception as recreate_error:
-                    restore_failures.append(
-                        f"{index_info['index_name']}: {recreate_error}"
-                    )
-
-            if rollback_error is not None:
-                detail = f"rollback failed: {rollback_error}"
-                if restore_failures:
-                    detail += "; HNSW restore also incomplete: " + "; ".join(
-                        restore_failures
-                    )
-                raise RuntimeError(
-                    f"embedding table mutation on {table_name} failed: {e}; {detail}"
-                ) from rollback_error
-
-            if restore_failures:
-                joined_failures = "; ".join(restore_failures)
-                raise RuntimeError(
-                    f"embedding table mutation on {table_name} failed and HNSW "
-                    f"restore was incomplete: {joined_failures}"
-                    ) from e
-
+            step_func()
+        except Exception:
+            if transactional:
+                self._executor_rollback_transaction(conn, state)
             raise
+        # Commit before the next step: DuckDB's index builder still counts a
+        # row deleted earlier in the same still-open transaction as a live
+        # duplicate, which trips "Data contains duplicates" even though the
+        # delete already ran -- the dedupe DELETE must commit before the
+        # CREATE UNIQUE INDEX step runs.
+        if transactional:
+            self._executor_commit_transaction(conn, state, False)
 
     def _executor_ensure_embedding_upsert_contract(
         self, conn: Any, state: dict[str, Any], table_name: str, dims: int
@@ -1013,39 +909,23 @@ class DuckDBProvider(SerialDatabaseProvider):
             conn, table_name
         )
 
-        steps: list[tuple[str, Callable[[], Any], bool]] = []
         if duplicate_row_ids:
-            # Deleting the duplicates and creating the UNIQUE index must NOT
-            # share a transaction: DuckDB's index builder still counts a row
-            # deleted earlier in the same still-open transaction as a live
-            # duplicate, which trips "Data contains duplicates" even though
-            # the delete already ran. Each step below still gets its own
-            # transaction, but the HNSW drop/rebuild guard now wraps both
-            # steps ONCE instead of once per step — the set of indexes on
-            # this table doesn't change between them, so guarding each step
-            # separately would rebuild the same HNSW index twice.
-            steps.append(
-                (
-                    f"dedupe_embedding_upsert_contract({table_name})",
-                    lambda: self._executor_delete_embeddings_by_row_ids(
-                        conn, table_name, duplicate_row_ids
-                    ),
-                    not state.get("transaction_active", False),
-                )
-            )
-
-        steps.append(
-            (
-                f"ensure_embedding_upsert_contract({table_name})",
-                lambda: self._executor_create_embedding_unique_index(
-                    conn, table_name, dims
+            self._executor_run_upsert_contract_step(
+                conn,
+                state,
+                f"dedupe_embedding_upsert_contract({table_name})",
+                lambda: self._executor_delete_embeddings_by_row_ids(
+                    conn, table_name, duplicate_row_ids
                 ),
-                not state.get("transaction_active", False),
             )
-        )
 
-        self._executor_run_embedding_table_hnsw_guarded_mutations(
-            conn, state, table_name, steps
+        self._executor_run_upsert_contract_step(
+            conn,
+            state,
+            f"ensure_embedding_upsert_contract({table_name})",
+            lambda: self._executor_create_embedding_unique_index(
+                conn, table_name, dims
+            ),
         )
 
     def _executor_create_embedding_table_indexes(

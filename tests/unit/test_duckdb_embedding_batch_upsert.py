@@ -500,18 +500,21 @@ def test_schema_migration_backfills_unique_index_and_deduplicates_rows(
         migrated_provider.disconnect(skip_checkpoint=True)
 
 
-def test_ensure_embedding_upsert_contract_rebuilds_hnsw_once_when_deduping(
+def test_ensure_embedding_upsert_contract_never_touches_hnsw_when_deduping(
     tmp_path: Path,
 ) -> None:
-    """The dedupe-then-create-unique-index sequence must guard the HNSW
-    index with a single drop/rebuild cycle, not one per step.
+    """The dedupe-then-create-unique-index sequence must never drop or
+    rebuild the table's HNSW index at all.
 
-    Regression test: _executor_ensure_embedding_upsert_contract used to call
-    _executor_run_embedding_table_hnsw_guarded_mutation twice back-to-back
-    (once for the dedupe DELETE, once for the CREATE UNIQUE INDEX) when
-    duplicates were found -- each call independently dropped and rebuilt
-    every HNSW index on the table, silently doubling a full index rebuild's
-    cost for one logical operation.
+    Regression test: _executor_ensure_embedding_upsert_contract used to run
+    its dedupe DELETE + CREATE UNIQUE INDEX steps behind a guard that
+    unconditionally dropped and fully rebuilt every HNSW index on the table
+    around them (first collapsed from two guard calls into one, then removed
+    entirely here). A plain DELETE and a plain non-vector CREATE UNIQUE INDEX
+    are both safe to run against a table with a live HNSW index -- dropping
+    and rebuilding it was a redundant O(table size) rebuild with no
+    functional need, most costly right after a compaction that had just
+    built the same index moments earlier.
     """
     pytest.importorskip("duckdb")
 
@@ -524,24 +527,17 @@ def test_ensure_embedding_upsert_contract_rebuilds_hnsw_once_when_deduping(
 
         expected_hnsw_names = _get_hnsw_index_names(provider)
 
-        original_get_indexes = provider._executor_get_vector_indexes_for_table
-        call_count = 0
+        def _fail_if_dropped(conn, index_name):
+            raise AssertionError(
+                f"HNSW index {index_name!r} must not be dropped while "
+                "repairing the upsert contract"
+            )
 
-        def _counting_get_indexes(conn, state, table_name):
-            nonlocal call_count
-            call_count += 1
-            return original_get_indexes(conn, state, table_name)
-
-        provider._executor_get_vector_indexes_for_table = _counting_get_indexes
+        provider._executor_drop_vector_index_by_name = _fail_if_dropped
 
         state: dict = {"transaction_active": False}
         provider._executor_ensure_embedding_upsert_contract(
             provider.connection, state, "embeddings_3", 3
-        )
-
-        assert call_count == 1, (
-            "the dedupe-then-index-creation sequence must guard the HNSW "
-            f"index with exactly one drop/rebuild cycle, got {call_count}"
         )
 
         rows = _get_embedding_rows(provider, 1, "legacy", "mini")
@@ -561,17 +557,20 @@ def test_ensure_embedding_upsert_contract_rebuilds_hnsw_once_when_deduping(
         provider.disconnect(skip_checkpoint=True)
 
 
-def test_ensure_embedding_upsert_contract_restores_hnsw_after_index_creation_fails(
+def test_ensure_embedding_upsert_contract_survives_index_creation_failure(
     tmp_path: Path,
 ) -> None:
     """A failure in the CREATE UNIQUE INDEX step, after the dedupe DELETE
-    step already committed, must still restore the table's HNSW indexes.
+    step already committed, must leave the connection usable, the HNSW
+    index untouched, and the repair self-healing on the next attempt.
 
-    Regression test: the guard's failure handling used to only restore
-    dropped HNSW indexes when the failing step was non-transactional --
-    on the (common) transactional-failure path it rolled back that step's
-    own empty transaction and re-raised, leaving the HNSW indexes dropped
-    with nothing to ever recreate them on a normal reconnect.
+    Historical note: this scenario used to also need to *restore* the
+    table's HNSW indexes, because the old guard unconditionally dropped
+    them before running either step. Since neither step ever touches the
+    HNSW index anymore (see
+    test_ensure_embedding_upsert_contract_never_touches_hnsw_when_deduping),
+    there is nothing to restore -- this test now just confirms the failure
+    path itself (partial commit, clean re-raise, retryable) still works.
     """
     pytest.importorskip("duckdb")
 
@@ -613,8 +612,7 @@ def test_ensure_embedding_upsert_contract_restores_hnsw_after_index_creation_fai
         }
         assert "idx_3_chunk_provider_model_unique" not in index_names
 
-        # The HNSW indexes dropped at the start of the guard must be
-        # restored despite the failure -- this is the actual fix.
+        # Never touched in the first place -- nothing to restore.
         assert _get_hnsw_index_names(provider) == expected_hnsw_names
 
         # The connection/transaction state must remain usable, and the
