@@ -417,12 +417,26 @@ async def run_rust_indexing_phase(
     # SerialExecutor holds its own separate thread-local DuckDB
     # connection (created lazily on its worker thread), which a
     # bare connection_manager close would leave dangling.
+    # `released_for_rust` tracks whether we *attempted* release, not
+    # whether it succeeded — release_for_rust_pipeline() can raise after
+    # only partially closing its two connections (see its docstring), and
+    # the reconnect in `finally` below must still run in that case, or a
+    # long-lived server process is left permanently disconnected.
     released_for_rust = False
+    release_error: Exception | None = None
     if db is not None and db.is_connected:
-        db.release_for_rust_pipeline()
         released_for_rust = True
+        try:
+            db.release_for_rust_pipeline()
+        except Exception as e:
+            release_error = e
 
     try:
+        if release_error is not None:
+            # Don't hand write ownership to Rust on an ambiguously-closed
+            # connection — release_for_rust_pipeline()'s docstring requires
+            # this. Still falls through to the reconnect attempt below.
+            raise release_error
         rust_stats = await run_rust_pipeline(
             files_to_process,
             db_path=db_path,
@@ -439,9 +453,9 @@ async def run_rust_indexing_phase(
         # kept the executor alive; connect() creates a fresh
         # thread-local connection inside that executor. Without
         # this in a finally, a raised exception (embed/DB-write
-        # failure, Rust panic surfaced as PyErr, etc.) leaves
-        # db permanently disconnected for the rest of the
-        # process's life.
+        # failure, Rust panic surfaced as PyErr, release_for_rust_pipeline()
+        # itself failing, etc.) leaves db permanently disconnected for the
+        # rest of the process's life.
         if released_for_rust and db is not None:
             db.connect()
 
