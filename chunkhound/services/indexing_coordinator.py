@@ -3345,10 +3345,17 @@ class IndexingCoordinator(BaseService):
         request (parity with the existing "Unknown file type" skip-recording
         path in `batch_processor.py`), distinct from a directory wildcard
         that sweeps up every extension incidentally. Skipped entirely when
-        `index_unknown_files=True`.
+        `index_unknown_files=True`, or when the include list contains the
+        unrestricted `**/*` sentinel — the same literal pattern
+        `IndexingConfig` appends to `include` for `index_unknown_files=True`
+        (see indexing_config.py), so a caller passing it directly (e.g. to
+        mean "discover everything, let batch_processor decide") gets the same
+        opt-out without needing to also thread a config object through.
         """
         idx_cfg = self._indexing_config_or_none()
         if idx_cfg is not None and getattr(idx_cfg, "index_unknown_files", False):
+            return files
+        if "**/*" in patterns:
             return files
 
         allowed_exts, allowed_names, _has_complex = summarize_include_patterns(

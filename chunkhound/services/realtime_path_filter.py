@@ -195,6 +195,13 @@ class RealtimePathFilter:
             if settings.index_unknown_files:
                 return True
 
+            # Unrestricted "**/*" is the same literal sentinel IndexingConfig
+            # appends to `include` for index_unknown_files=True — a caller
+            # passing it directly (bypassing the config object) gets the same
+            # opt-out, so discovery and cleanup stay in agreement.
+            if "**/*" in self._include_patterns:
+                return True
+
             cached_exts = self._allowed_exts or frozenset()
             cached_names = self._allowed_names or frozenset()
             if (
