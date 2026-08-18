@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+- **Default VoyageAI embedding model is now `voyage-code-4`** (was `voyage-3.5`). Embeddings from different models are not comparable, so an index built on the old default must be re-embedded before semantic search returns useful results. To stay on the previous model, set `"embedding": {"model": "voyage-3.5"}` or `CHUNKHOUND_EMBEDDING__MODEL=voyage-3.5`. Note the price difference: `voyage-code-4` is $0.12 per 1M tokens against `voyage-3.5`'s $0.06, with the first 200M tokens free.
+
 ### Added
+- **VoyageAI `voyage-4` series** (`voyage-code-4`, `voyage-4`, `voyage-4-large`, `voyage-4-lite`). All four support Matryoshka `output_dims` of 256, 512, 1024 (default), and 2048, and a 32K context window. `voyage-code-4` is code-specialized and built for coding-agent retrieval, which is ChunkHound's exact use case.
+- **VoyageAI model reference table** in `configuration.md`, listing context window and per-batch token limit for every model ChunkHound knows.
 - **Fetchurl CLI command and MCP tool** — New `chunkhound fetchurl <url> [-q "…"]` CLI subcommand and matching `fetchurl` MCP tool fetch a single URL (HTML or PDF), extract its content, and return a focused Markdown answer.
   - Short pages are token-truncated and summarized in one LLM call; long pages with a query go through a chunk + rerank + elbow-filter pipeline that passes only the most relevant sections to the LLM.
   - Requires LLM + reranker providers — the MCP tool is hidden from `tools/list` when either is missing.
@@ -15,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Uses the same zendriver + system Chrome transport as `websearch`, with `urllib` fallback.
 
 ### Fixed
+- **Wrong batch token limits for the `voyage-4` series.** The whole series was previously unknown to the provider and fell through to the 320K-token fallback. `voyage-4-large` actually caps at 120K, so large batches failed with `TOO_MANY_TOKENS_IN_BATCH`, while `voyage-4-lite` was capped at a third of its real 1M limit. Unsupported `output_dims` on these models were also accepted locally and only rejected later by the API; they now fail at configuration time.
 - **PyMuPDF `fitz` import deprecation warning on stdout** — PDF parsing now imports `pymupdf` instead of the legacy `fitz` alias, which since PyMuPDF 1.28.2 prints a deprecation warning to stdout and corrupts MCP stdio clients (e.g. CURe preflight). Adds a regression test asserting parser imports write nothing to stdout.
 
 ## [5.2.0] - 2026-07-12

@@ -33,7 +33,7 @@ Example global config (`~/.config/chunkhound/chunkhound.json`):
 {
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-3.5"
+    "model": "voyage-code-4"
   },
   "llm": {
     "provider": "anthropic"
@@ -102,7 +102,7 @@ Example — project uses its own exclude list (replaces global's list at the raw
   },
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-3.5",
+    "model": "voyage-code-4",
     "batch_size": 100
   },
   "indexing": {
@@ -138,8 +138,28 @@ Global defaults let you maintain shared settings (e.g. embedding provider + API 
 
 | Provider | Config Value | Env Var | Default Model | Notes |
 |---|---|---|---|---|
-| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` | Recommended for code search |
+| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-code-4` | Recommended for code search |
 | OpenAI | `openai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `text-embedding-3-small` | Widely available |
+
+### VoyageAI Models
+
+All models below accept `output_dims` of 256, 512, 1024 (default), or 2048. ChunkHound uses the per-batch token limit to size embedding requests, so picking a model with a larger limit means fewer round trips when indexing.
+
+| Model | Context | Tokens per batch | Notes |
+|---|---|---|---|
+| `voyage-code-4` | 32K | 320K | Default. Code-specialized, built for coding-agent retrieval |
+| `voyage-4` | 32K | 320K | General purpose, balanced cost and quality |
+| `voyage-4-large` | 32K | 120K | General purpose, highest retrieval quality |
+| `voyage-4-lite` | 32K | 1M | General purpose, lowest cost and latency |
+| `voyage-code-3` | 32K | 120K | Previous-generation code model |
+| `voyage-3.5` | 32K | 320K | Previous-generation general purpose |
+| `voyage-3.5-lite` | 32K | 1M | Previous-generation lite |
+| `voyage-3-large` | 32K | 120K | Previous-generation large |
+| `voyage-finance-2` | 32K | 120K | Finance domain, 1024 dims only |
+| `voyage-law-2` | 16K | 120K | Legal domain, 1024 dims only |
+| `voyage-multilingual-2` | 32K | 120K | Multilingual, 1024 dims only |
+
+Models outside this list still work. ChunkHound discovers their dimensions at runtime and falls back to a conservative 320K token batch limit.
 
 ### Embedding Options
 

@@ -246,8 +246,7 @@ class TestConfigIntegration:
         assert openai_config.get_default_model() == "text-embedding-3-small"
 
         voyageai_config = EmbeddingConfig(provider="voyageai")
-        # Default voyage model
-        assert voyageai_config.get_default_model() is not None
+        assert voyageai_config.get_default_model() == "voyage-code-4"
 
     def test_default_openai_model_has_correct_dimensions(self):
         """Default OpenAI model (text-embedding-3-small) maps to 1536 native dims."""
@@ -268,6 +267,18 @@ class TestConfigIntegration:
         assert provider.model == "text-embedding-3-small"
         assert provider.native_dims == 1536
         assert provider.dims == 1536
+
+    def test_default_voyage_model_is_configured(self):
+        """Default VoyageAI model resolves to a known entry with 1024 native dims."""
+        default_model = EmbeddingConfig(provider="voyageai").get_default_model()
+        assert default_model in VOYAGE_MODEL_CONFIG
+        assert VOYAGE_MODEL_CONFIG[default_model]["default_dimension"] == 1024
+        assert VOYAGE_MODEL_CONFIG[default_model]["dimensions"] == [
+            256,
+            512,
+            1024,
+            2048,
+        ]
 
 
 class TestVoyageSingleDimModels:
