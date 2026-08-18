@@ -17,7 +17,6 @@ import asyncio
 import math
 import multiprocessing
 import os
-import time
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from fnmatch import fnmatch
@@ -63,6 +62,7 @@ from chunkhound.utils.logging_guard import log_if_not_mcp
 from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
 from .chunk_cache_service import ChunkCacheService
+from .progress_utils import _update_speed_field
 from .realtime_path_filter import RealtimePathFilter, RealtimePathFilterSettings
 
 # Lazy multiprocessing start-method guard — applied once before pool creation.
@@ -95,283 +95,6 @@ def _ensure_mp_start_method() -> None:
 
 def _progress_info(stored: int, skipped: int, errs: int, chunks: int) -> str:
     return f"stored {stored} | skipped {skipped} | err {errs} | {chunks} chunks"
-
-
-def _format_bytes(n: int) -> str:
-    """Format a byte count as a human-readable string (e.g. '9.8GB')."""
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.1f}{unit}"
-        size /= 1024
-    return f"{size:.1f}TB"
-
-
-def _update_speed_field(progress: Progress, task_id: TaskID, unit: str) -> None:
-    """Compute and set a task's ``speed`` field from its own completed/elapsed.
-
-    Looks the task up by TaskID directly (``progress._tasks``) rather than via
-    the public ``progress.tasks`` list — that list is insertion-ordered and
-    desyncs from TaskID once any earlier task is removed (as ``store_task`` is
-    on the Rust pipeline path), which would silently target the wrong task.
-    """
-    task_obj = progress._tasks.get(task_id)
-    if task_obj is None:
-        return
-    if task_obj.elapsed and task_obj.elapsed > 0 and task_obj.completed:
-        rate = task_obj.completed / task_obj.elapsed * 60
-        progress.update(task_id, speed=f"{rate:.1f} {unit}")
-
-
-class _RustProgressBridge:
-    """Bridges the Rust pipeline's `progress_callback(phase, current, total,
-    chunks=0)` calls to Rich progress bars, and exposes the handful of
-    values `process_directory` needs to read back after the run completes.
-
-    Constructed once per `run_rust_pipeline()` call, only when both
-    `_use_rust` and `self.progress` are truthy -- callers pass `None`
-    instead of an instance otherwise.
-    """
-
-    def __init__(
-        self,
-        progress: Progress,
-        parse_task: TaskID,
-        data_task: TaskID,
-        index_task: TaskID,
-        compact_task: TaskID,
-        diff_task: TaskID | None,
-        embed_task: TaskID | None,
-        compact_db_file: str,
-    ) -> None:
-        self._pr = progress
-        self._pt = parse_task
-        self._data_task = data_task
-        self._index_task = index_task
-        self._compact_task = compact_task
-        self._diff_task = diff_task
-        self._embed_task = embed_task
-        self._compact_db_file = compact_db_file
-
-        # Closure-internal bookkeeping (previously `nonlocal` locals).
-        self._embed_start = 0.0
-        self._embed_reset_done = False
-        self._data_task_total = 1
-        self._data_start = 0.0
-        self._data_reset_done = False
-        self._diff_start = 0.0
-        self._diff_reset_done = False
-        self._parse_reset_done = False
-        self._compact_info: str | None = None
-
-        # Read by process_directory after run_rust_pipeline() returns.
-        self.diff_elapsed = 0.0
-        self.compact_ran = False
-        self.compact_size_before: int | None = None
-        self.compact_size_after: int | None = None
-        self.compact_reduction_pct: float | None = None
-
-    def __call__(self, phase: str, current: int, total: int, chunks: int = 0) -> None:
-        # `chunks` is the cumulative chunk count, sent only by the
-        # write-data phase (4-arg call); other phases use 3 args and
-        # leave it at 0.
-        _pr = self._pr
-        _pt = self._pt
-        if phase == "diff":
-            if self._diff_task is not None:
-                # First-call-based reset, mirroring the embed phase below:
-                # current may already be > 0 on the first callback.
-                if not self._diff_reset_done:
-                    _pr.reset(self._diff_task, total=max(total, 1), start=True)
-                    self._diff_start = time.time()
-                    self._diff_reset_done = True
-                _pr.update(
-                    self._diff_task,
-                    completed=current,
-                    total=max(total, 1),
-                    info=f"{current}/{total} checked",
-                )
-                if current >= total:
-                    self.diff_elapsed = time.time() - self._diff_start
-                    _pr.update(self._diff_task, info="done")
-        elif phase == "parse":
-            # First-call-based reset: _pt's clock started ticking at
-            # add_task() time, before the diff phase even ran, so its raw
-            # elapsed would understate the parse-phase rate.
-            if not self._parse_reset_done:
-                _pr.reset(_pt, total=max(total, 1), start=True)
-                self._parse_reset_done = True
-            _pr.update(_pt, completed=current, info=f"{current}/{total} parsed")
-            _update_speed_field(_pr, _pt, "files/min")
-        elif phase == "embed":
-            if self._embed_task is not None:
-                # First-call-based reset (not current==0-based): the
-                # streaming pipeline reports a live, per-batch-refined
-                # total, so its first call may already have current > 0.
-                if not self._embed_reset_done:
-                    _pr.reset(self._embed_task, total=max(total, 1), start=True)
-                    self._embed_start = time.time()
-                    self._embed_reset_done = True
-                elapsed = time.time() - self._embed_start
-                # Require a minimum sample window before trusting the
-                # division — a near-zero elapsed (e.g. right at the reset
-                # above) against an already-nonzero current would
-                # otherwise produce a nonsensical speed.
-                speed = current / elapsed if elapsed > 0.05 else 0
-                _pr.update(
-                    self._embed_task,
-                    completed=current,
-                    total=max(total, 1),
-                    speed=f"{speed:.1f} chunks/s",
-                    info=f"{current}/{total} embedded",
-                )
-        elif phase == "write":
-            # Backward compat: old Rust extensions emit one "write"
-            # callback with no sub-phase breakdown.
-            _pr.reset(self._data_task, start=True)
-            _pr.update(self._data_task, completed=1, info="done")
-            if self._index_task is not None:
-                _pr.reset(self._index_task, start=True)
-                _pr.update(self._index_task, completed=1, info="done")
-            if self._compact_task is not None:
-                _pr.reset(self._compact_task, start=True)
-                _pr.update(self._compact_task, completed=1, info="done")
-        elif phase == "write-prepare":
-            # Python's DuckDB connection is already closed by now
-            # (disconnected before run_rust_pipeline() was even called) —
-            # this is purely a progress bar update. Prepare is sub-second
-            # (create tables); roll it into the write-data bar as an
-            # opening tick.
-            self._data_task_total = max(total, 1)
-            _pr.reset(self._data_task, total=self._data_task_total, start=True)
-            _pr.update(self._data_task, info="preparing...")
-        elif phase == "write-data":
-            # Batch-keyed in the streaming pipeline (total > 1 — the
-            # exact, upfront-known batch count); single-shot in the
-            # sequential path (total == 1).
-            if total > 1:
-                # Speed = true throughput in chunks/s (not cumulative
-                # batches/min, which decays from the hot start and sags as
-                # files get heavier). Mirrors the embed bar. `chunks` is
-                # cumulative; timer starts on the first write-data callback.
-                if not self._data_reset_done:
-                    self._data_start = time.time()
-                    self._data_reset_done = True
-                _elapsed = time.time() - self._data_start
-                _cps = chunks / _elapsed if _elapsed > 0.05 else 0
-                _pr.update(
-                    self._data_task,
-                    completed=current,
-                    speed=f"{_cps:.1f} chunks/s",
-                    info=f"{current}/{total} batches written",
-                )
-            else:
-                _pr.update(self._data_task, info="writing...")
-        elif phase == "write-index":
-            # Data write done; compaction wasn't needed — build the HNSW
-            # index directly. The compact bar never runs on this path —
-            # resolve it to "not needed" right away (reset+finish
-            # together) so it doesn't sit unstarted and then get stamped
-            # "done" by write-done/done below, which used to render as a
-            # started-but-never-ticked zombie bar (elapsed stuck at
-            # "-:--:--" with a live spinner).
-            _pr.update(
-                self._data_task,
-                completed=self._data_task_total,
-                info="done",
-            )
-            _pr.reset(self._index_task, start=True)
-            _pr.update(self._index_task, info="building...")
-            _pr.reset(self._compact_task, start=True)
-            _pr.update(self._compact_task, completed=1, info="not needed")
-            self._compact_info = "not needed"
-        elif phase == "write-compact":
-            # Data write done; compaction is needed. Compaction rebuilds
-            # the HNSW index as part of its own EXPORT/IMPORT rewrite, so
-            # "write-index" never fires in this path — the index bar
-            # never runs on its own here. Resolve it immediately (mirrors
-            # the write-index branch above) instead of leaving it
-            # unstarted for write-done/done to stamp "done" on top of a
-            # zombie bar.
-            _pr.update(
-                self._data_task,
-                completed=self._data_task_total,
-                info="done",
-            )
-            _pr.reset(self._index_task, start=True)
-            _pr.update(
-                self._index_task, completed=1, info="included in compaction"
-            )
-            _pr.reset(self._compact_task, start=True)
-            _pr.update(
-                self._compact_task, info="compacting (includes index rebuild)..."
-            )
-            self.compact_ran = True
-            # write-compact firing at all already means the Rust backend
-            # decided real compaction is needed (backend.needs_compaction()
-            # == True) — that decision doesn't depend on whether any files
-            # were reparsed this run, so always snapshot the pre-compaction
-            # size.
-            try:
-                self.compact_size_before = os.path.getsize(self._compact_db_file)
-            except OSError:
-                self.compact_size_before = None
-        elif phase == "write-done":
-            # Final wrap-up. _index_task and _compact_task were already
-            # resolved above by whichever of write-index/write-compact
-            # actually fired; only the compact bar's final size/ratio text
-            # (when compaction ran) still needs filling in here, once
-            # compaction has actually completed.
-            _pr.update(
-                self._data_task,
-                completed=self._data_task_total,
-                info="done",
-            )
-            if self.compact_ran:
-                if self.compact_size_before is not None:
-                    try:
-                        self.compact_size_after = os.path.getsize(
-                            self._compact_db_file
-                        )
-                        pct = (
-                            (self.compact_size_before - self.compact_size_after)
-                            / self.compact_size_before
-                            * 100
-                            if self.compact_size_before
-                            else 0.0
-                        )
-                        direction = "smaller" if pct >= 0 else "larger"
-                        self._compact_info = (
-                            f"{_format_bytes(self.compact_size_before)} → "
-                            f"{_format_bytes(self.compact_size_after)} "
-                            f"({abs(pct):.0f}% {direction})"
-                        )
-                        self.compact_reduction_pct = pct
-                    except OSError:
-                        self._compact_info = "done"
-                else:
-                    self._compact_info = "done"
-                _pr.update(
-                    self._compact_task, completed=1, info=self._compact_info
-                )
-            else:
-                # write-index path: the compact bar was already resolved
-                # to "not needed" above; only the index bar (still running
-                # since write-index started it) needs finishing.
-                _pr.update(self._index_task, completed=1, info="done")
-        elif phase == "done":
-            # Ensure the write bars are at 100%. The parse and embed bars
-            # don't need re-finalizing here — both phases always receive
-            # an exact final (total, total) call of their own before
-            # "done" fires, in both the sequential and streaming pipeline
-            # paths. _index_task/_compact_task are already resolved by
-            # write-index/write-compact/write-done above — only re-sync
-            # _data_task here.
-            _pr.update(
-                self._data_task,
-                completed=self._data_task_total,
-                info="done",
-            )
 
 
 class _StatResult:
@@ -1950,153 +1673,51 @@ class IndexingCoordinator(BaseService):
             # Detected at top of process_directory to gate cleanup + change detection.
             if _use_rust:
                 # The Rust pipeline handles parse → embed → write in one call.
-                from chunkhound.pipeline_bridge import run_rust_pipeline
-
-                db_path = Path(str(self._db.db_path)).parent
-                _embeddings_disabled_by_config = (
-                    self.config.embeddings_disabled
-                    if self.config and hasattr(self.config, "embeddings_disabled")
-                    else False
-                )
-                skip_embeddings = (
-                    _embeddings_disabled_by_config or self._embedding_provider is None
+                from chunkhound.services.rust_pipeline_runner import (
+                    run_rust_indexing_phase,
                 )
 
-                # ── Progress callback for Rust pipeline ─────────────────
-                # Maps Rust phases → Rich progress bars.
-                # All bars are pre-created so that Rich's Live display picks
-                # them up immediately — dynamically added tasks via
-                # add_task() inside a PyO3 callback are not reliably
-                # rendered by Live until a major refresh.
-                _progress_bridge: _RustProgressBridge | None = None
-                if _use_rust and self.progress:
-                    # parse_task was created above under `if self.progress:`,
-                    # so it's guaranteed non-None here (self.progress is
-                    # truthy in this branch) — mypy can't see that guarantee
-                    # across the two blocks.
-                    _pt: TaskID = parse_task  # type: ignore[assignment]
+                # Hide the coordinator's store_task ("Handling files") —
+                # the Rust write sub-phase bars (built inside
+                # run_rust_indexing_phase) render fine-grained progress
+                # themselves. Keep parse_task for the parse phase.
+                if self.progress and store_task is not None:
+                    self.progress.remove_task(store_task)
+                    store_task = None
 
-                    # Hide the coordinator's store_task ("Handling files") —
-                    # the Rust write sub-phase bars render fine-grained progress
-                    # themselves.  Keep parse_task for the parse phase.
-                    if store_task is not None:
-                        self.progress.remove_task(store_task)
-                        store_task = None
+                rust_result = await run_rust_indexing_phase(
+                    db=self._db,
+                    config=self.config,
+                    embedding_provider=self._embedding_provider,
+                    progress=self.progress,
+                    files_to_process=_normalize_to_path_tuples(files_to_process),
+                    directory=directory,
+                    force_reindex=force_reindex,
+                    do_cleanup=do_cleanup,
+                    diff_task=_diff_task,
+                    parse_task=parse_task,
+                )
 
-                    # Pre-create embed task (total set to 1 placeholder; the
-                    # first embed callback will reset it to the real count).
-                    # start=False so the clock doesn't tick until the phase begins.
-                    _embed_task: TaskID | None = None
-                    if not skip_embeddings:
-                        _embed_task = self.progress.add_task(
-                            "  └─ Embedding", total=1, speed="", info="", start=False
-                        )
+                _diff_elapsed = rust_result.diff_elapsed
+                _compact_ran = rust_result.compact_ran
+                _compact_size_before = rust_result.compact_size_before
+                _compact_size_after = rust_result.compact_size_after
+                _compact_reduction_pct = rust_result.compact_reduction_pct
 
-                    # Pre-create all write sub-phase bars (no need for a
-                    # separate "prepare" bar — prepare is sub-second).
-                    # start=False — clocks are restarted via reset(start=True)
-                    # when each phase actually begins.
-                    _data_task: TaskID = self.progress.add_task(
-                        "  └─ Writing data", total=1, speed="", info="", start=False
-                    )
-                    _index_task: TaskID = self.progress.add_task(
-                        "  └─ Building indexes", total=1, speed="", info="", start=False
-                    )
-                    _compact_task: TaskID = self.progress.add_task(
-                        "  └─ Compacting", total=1, speed="", info="", start=False
-                    )
-                    # Captured now (before self._db.release_for_rust_pipeline()
-                    # below) so the compaction phase handlers can stat the
-                    # file for a before/after size comparison without
-                    # touching self._db.
-                    _compact_db_file = str(self._db.db_path)
-
-                    _progress_bridge = _RustProgressBridge(
-                        progress=self.progress,
-                        parse_task=_pt,
-                        data_task=_data_task,
-                        index_task=_index_task,
-                        compact_task=_compact_task,
-                        diff_task=_diff_task,
-                        embed_task=_embed_task,
-                        compact_db_file=_compact_db_file,
-                    )
-                _progress_cb = _progress_bridge
-
-                # Close Python-side DuckDB BEFORE the Rust pipeline starts.
-                #
-                # pipeline.run() opens its own independent DuckDB connection
-                # as its very first step — compute_diff_blocking() (the
-                # incremental-diff query) runs before parsing even begins.
-                # A live Python connection at that point conflicts with
-                # Rust's connection (DuckDB enforces a single writer),
-                # producing lock errors or, worse, silent on-disk corruption
-                # that only surfaces later as a deserialization error when
-                # some other process reopens the DB.
-                #
-                # Safe to close here: the parse_batch_callback's
-                # ProcessPoolExecutor (whose fork'd children inherit
-                # whatever DuckDB state is live at fork time) is a lazy,
-                # process-wide singleton (see pipeline_bridge._get_parse_pool)
-                # — it's created only once, on the first call from Rust's
-                # parse phase, which starts only after this call returns on
-                # this very first run. Every later run reuses the
-                # already-created workers, so no new fork ever happens after
-                # this point — there's nothing later to inherit a live
-                # connection. Must use the provider's full disconnect(),
-                # not just closing _connection_manager.connection: the
-                # SerialExecutor holds its own separate thread-local DuckDB
-                # connection (created lazily on its worker thread), which a
-                # bare connection_manager close would leave dangling.
-                released_for_rust = False
-                if self._db is not None and self._db.is_connected:
-                    self._db.release_for_rust_pipeline()
-                    released_for_rust = True
-
-                try:
-                    rust_stats = await run_rust_pipeline(
-                        _normalize_to_path_tuples(files_to_process),
-                        db_path=db_path,
-                        project_root=directory,
-                        force_reindex=force_reindex,
-                        skip_embeddings=skip_embeddings,
-                        do_cleanup=do_cleanup,
-                        config=self.config,
-                        progress_callback=_progress_cb,
-                    )
-                finally:
-                    # Reopen the Python-side DuckDB connection whether or not
-                    # the Rust pipeline succeeded — release_for_rust_pipeline()
-                    # kept the executor alive; connect() creates a fresh
-                    # thread-local connection inside that executor. Without
-                    # this in a finally, a raised exception (embed/DB-write
-                    # failure, Rust panic surfaced as PyErr, etc.) leaves
-                    # self._db permanently disconnected for the rest of the
-                    # process's life.
-                    if released_for_rust and self._db is not None:
-                        self._db.connect()
-
-                if _progress_bridge is not None:
-                    _diff_elapsed = _progress_bridge.diff_elapsed
-                    _compact_ran = _progress_bridge.compact_ran
-                    _compact_size_before = _progress_bridge.compact_size_before
-                    _compact_size_after = _progress_bridge.compact_size_after
-                    _compact_reduction_pct = _progress_bridge.compact_reduction_pct
-
-                agg_total_files = int(rust_stats.get("total_files", 0))
-                agg_total_chunks = int(rust_stats.get("total_chunks", 0))
-                agg_embeddings = int(rust_stats.get("embeddings_generated", 0))
-                agg_errors = list(rust_stats.get("errors", []))
+                agg_total_files = rust_result.total_files
+                agg_total_chunks = rust_result.total_chunks
+                agg_embeddings = rust_result.embeddings_generated
+                agg_errors = rust_result.errors
                 # Skipped/timeout tracking isn't reported by the pipeline yet —
                 # the coordinator's change detection already filtered unchanged files.
                 agg_skipped = 0
                 agg_skipped_timeout = []
                 agg_skipped_paths = []
 
-                _unchanged_by_hash = int(rust_stats.get("files_skipped_unchanged", 0))
                 logger.info(
                     f"Diff: {agg_total_files}/{len(files)} changed in "
-                    f"{_diff_elapsed * 1000:.0f}ms ({_unchanged_by_hash} unchanged-by-hash)"
+                    f"{_diff_elapsed * 1000:.0f}ms "
+                    f"({rust_result.files_skipped_unchanged} unchanged-by-hash)"
                 )
                 # Total skipped = discovered files minus those actually processed.
                 # skipped_by_hash only covers mtime-changed-but-hash-matched files;
