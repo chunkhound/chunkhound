@@ -1534,8 +1534,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                     content_hash: row.get(3)?,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 }
@@ -1643,18 +1642,53 @@ mod file_state_roundtrip_tests {
                 })
             })
             .expect("query")
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
         };
 
         assert_eq!(entries.len(), 1);
+        let read_mtime = entries[0].mtime.expect("mtime must not be NULL");
         assert!(
-            (entries[0].mtime - original_mtime).abs() < 0.001,
-            "read-back mtime {} must match the written mtime {} (within float \
-             precision) even under a non-UTC session timezone",
-            entries[0].mtime,
-            original_mtime
+            (read_mtime - original_mtime).abs() < 0.001,
+            "read-back mtime {read_mtime} must match the written mtime {original_mtime} \
+             (within float precision) even under a non-UTC session timezone"
         );
+    }
+
+    #[test]
+    fn read_file_states_keeps_null_mtime_rows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db");
+        {
+            let conn = Connection::open(&db_path).expect("open");
+            conn.execute_batch(
+                "CREATE TABLE files (id BIGINT, path TEXT, modified_time TIMESTAMP, \
+                 content_hash TEXT)",
+            )
+            .expect("create table");
+            conn.execute(
+                "INSERT INTO files (id, path, modified_time, content_hash) \
+                 VALUES (1, 'gone.py', NULL, NULL)",
+                [],
+            )
+            .expect("insert null mtime");
+        }
+
+        let backend = DuckDbHnswBackend::new(DbConfig {
+            db_path: db_path.to_string_lossy().into_owned(),
+            compaction_threshold: 0.3,
+            compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
+        });
+        let entries = backend.read_file_states().expect("read");
+        assert_eq!(
+            entries.len(),
+            1,
+            "NULL modified_time must not drop the row from the snapshot"
+        );
+        assert_eq!(entries[0].path, "gone.py");
+        assert_eq!(entries[0].mtime, None);
+        assert_eq!(entries[0].id, 1);
     }
 }
 
