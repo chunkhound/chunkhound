@@ -263,6 +263,7 @@ def index_with_rust(
     *,
     skip_embeddings: bool = False,
     incremental: bool = False,
+    do_cleanup: bool = True,
     parse_thread_pool_size: int = 4,
     parse_batch_size: int = 200,
     compaction_threshold: float = 0.60,
@@ -284,6 +285,7 @@ def index_with_rust(
         parse_batch_size=parse_batch_size,
         parse_thread_pool_size=parse_thread_pool_size,
         skip_embeddings=skip_embeddings,
+        do_cleanup=do_cleanup,
         embedding_provider=MOCK_PROVIDER,
         embedding_model=MOCK_MODEL,
     )

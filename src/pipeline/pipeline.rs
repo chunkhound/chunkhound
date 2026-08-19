@@ -187,31 +187,20 @@ impl IndexingPipeline {
             // Update file_count to reflect what will actually be processed
             file_count = batch_paths.len() as u64;
         } else {
-            // force_reindex re-indexes every file, but must still detect and
-            // remove orphaned DB rows (files deleted from disk since the last
-            // run) — unless cleanup is disabled by config.
-            if self.config.do_cleanup {
-                let diff =
-                    self.compute_diff_blocking(py, &progress_callback, &batch_paths, &rel_keys)?;
-                delete_paths = diff.removed;
-                // compute_diff_blocking populates new_hashes/existing_ids/disk_stats
-                // for every scanned file it already had a DB row for — not just
-                // ones it decided need reprocessing — precisely so this branch can
-                // reuse that work: batch_paths stays the full file list (every
-                // file is reprocessed regardless of the diff's own verdict), and
-                // without this, a file the diff correctly deemed unchanged would
-                // still get re-stat()'d here and, worse, have its content_hash
-                // written back as NULL purely because this branch discarded the
-                // hash compute_diff had (or already had, from the DB) on hand.
-                new_hashes = diff.new_hashes;
-                existing_ids = diff.existing_ids;
-                disk_stats = diff.disk_stats;
+            // force_reindex re-indexes every scanned file. Still run the diff
+            // so new_hashes/existing_ids/disk_stats are populated — otherwise
+            // parse writes content_hash as NULL (empty map → unwrap_or_default).
+            // do_cleanup only gates orphan deletion, not the hash maps.
+            let diff =
+                self.compute_diff_blocking(py, &progress_callback, &batch_paths, &rel_keys)?;
+            delete_paths = if self.config.do_cleanup {
+                diff.removed
             } else {
-                delete_paths = Vec::new();
-                new_hashes = std::collections::HashMap::new();
-                existing_ids = std::collections::HashMap::new();
-                disk_stats = std::collections::HashMap::new();
-            }
+                Vec::new()
+            };
+            new_hashes = diff.new_hashes;
+            existing_ids = diff.existing_ids;
+            disk_stats = diff.disk_stats;
         }
 
         // ── Resolve directory→db file path (shared by both write paths) ──

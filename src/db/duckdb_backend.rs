@@ -19,6 +19,10 @@ pub struct DuckDbHnswBackend {
     // drop_all_hnsw_indexes() before bulk-mode drop so that ensure_all_hnsw_indexes()
     // can recreate indexes with the original metric instead of hardcoding cosine.
     saved_hnsw_metrics: HashMap<u32, String>,
+    // Test seam: fail drop_all_hnsw_indexes after this many successful DROPs
+    // so we can assert close() still restores HNSW after a partial drop.
+    #[cfg(test)]
+    fail_drop_after: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +118,8 @@ impl DuckDbHnswBackend {
             hnsw_bulk_mode: false,
             known_dims: HashSet::new(),
             saved_hnsw_metrics: HashMap::new(),
+            #[cfg(test)]
+            fail_drop_after: None,
         }
     }
 
@@ -1407,11 +1413,15 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn drop_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
-        let conn = self.conn_or_err()?;
-        let indexes = Self::discover_hnsw_indexes(conn)?;
-        // Build metrics map from discovered indexes before dropping them.  Done as
-        // a local so we can drop all conn borrows before assigning to self.
-        let new_metrics: HashMap<u32, String> = indexes
+        let indexes = {
+            let conn = self.conn_or_err()?;
+            Self::discover_hnsw_indexes(conn)?
+        };
+        // Snapshot metrics and enter bulk mode before any DROP so a mid-loop
+        // failure still causes close() to restore indexes (CREATE IF NOT EXISTS
+        // is a no-op for indexes that never dropped). Assignments happen with
+        // no live conn borrow.
+        self.saved_hnsw_metrics = indexes
             .iter()
             .filter_map(|idx| {
                 idx.table_name
@@ -1420,13 +1430,25 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                     .map(|dims| (dims, idx.metric.clone()))
             })
             .collect();
+        self.hnsw_bulk_mode = true;
+
+        let conn = self.conn_or_err()?;
+        #[cfg(test)]
+        let mut dropped = 0usize;
         for idx in &indexes {
+            #[cfg(test)]
+            if self.fail_drop_after == Some(dropped) {
+                return Err(DbError::Other(
+                    "simulated mid-loop HNSW drop failure".into(),
+                ));
+            }
             let safe_name = idx.index_name.replace('"', "\"\"");
             conn.execute(&format!("DROP INDEX IF EXISTS \"{safe_name}\""), [])?;
+            #[cfg(test)]
+            {
+                dropped += 1;
+            }
         }
-        // conn borrow ends above; safe to mutate self fields now.
-        self.saved_hnsw_metrics = new_metrics;
-        self.hnsw_bulk_mode = true;
         Ok(())
     }
 
@@ -1957,6 +1979,60 @@ mod hnsw_metric_tests {
         assert!(
             !restored.is_empty(),
             "HNSW index not restored after crash recovery"
+        );
+    }
+
+    #[test]
+    fn close_restores_hnsw_after_partial_drop_failure() {
+        // If the second DROP fails after the first succeeded, close() must
+        // still rebuild missing indexes because bulk mode was entered before
+        // the loop.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let db_path_str = db_path.to_string_lossy().into_owned();
+
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path_str));
+        backend.open().expect("open");
+        if !backend.has_vss {
+            eprintln!("VSS extension unavailable, skipping");
+            return;
+        }
+        backend
+            .write_batch(&test_support::embedding_batch("a", 8, 2))
+            .expect("write 8-dim");
+        backend
+            .write_batch(&test_support::embedding_batch("b", 16, 2))
+            .expect("write 16-dim");
+        backend.ensure_all_hnsw_indexes().expect("ensure");
+
+        let before = {
+            let conn = backend.conn_or_err().expect("conn");
+            DuckDbHnswBackend::discover_hnsw_indexes(conn).expect("discover")
+        };
+        assert_eq!(before.len(), 2, "need two HNSW indexes to fail mid-loop");
+
+        backend.fail_drop_after = Some(1);
+        let drop_err = backend
+            .drop_all_hnsw_indexes()
+            .expect_err("second DROP should fail");
+        assert!(
+            drop_err.to_string().contains("simulated mid-loop"),
+            "unexpected drop error: {drop_err}"
+        );
+        assert!(
+            backend.hnsw_bulk_mode,
+            "bulk mode must be set before the failing DROP"
+        );
+
+        backend.close().expect("close restores remaining indexes");
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let _ = conn.execute_batch("LOAD vss");
+        let restored = DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover");
+        assert_eq!(
+            restored.len(),
+            2,
+            "both HNSW indexes must exist after close() following a partial drop"
         );
     }
 

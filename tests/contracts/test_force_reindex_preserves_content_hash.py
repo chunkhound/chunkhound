@@ -116,3 +116,38 @@ class TestForceReindexPreservesContentHash:
             f"because the file wasn't reprocessed: {hash_after_run_2!r} -> "
             f"{hash_after_run_3!r}"
         )
+
+    def test_force_reindex_with_cleanup_off_still_persists_content_hash(
+        self, fixture_dir: Path, tmp_path: Path
+    ):
+        """do_cleanup=False must not skip the diff that fills content hashes.
+
+        Same touch + two force-reindex sequence as the cleanup-on test.
+        Cleanup only means skip orphan deletes; hashes must still be written.
+        """
+        work_dir = tmp_path / "fixtures"
+        shutil.copytree(fixture_dir, work_dir)
+
+        db_dir = tmp_path / "db"
+        kwargs = dict(skip_embeddings=True, incremental=False, do_cleanup=False)
+
+        first = index_with_rust(work_dir, db_dir, **kwargs)
+        assert first.chunks_written > 0, "baseline force-reindex should produce chunks"
+
+        main_py = work_dir / "main.py"
+        new_mtime = main_py.stat().st_mtime + 100.0
+        os.utime(main_py, (new_mtime, new_mtime))
+
+        index_with_rust(work_dir, db_dir, **kwargs)
+        hash_after_run_2 = _content_hash_for_path(db_dir, "main.py")
+        assert hash_after_run_2, (
+            "force-reindex with cleanup off must persist main.py's content hash, "
+            f"got {hash_after_run_2!r}"
+        )
+
+        index_with_rust(work_dir, db_dir, **kwargs)
+        hash_after_run_3 = _content_hash_for_path(db_dir, "main.py")
+        assert hash_after_run_3 == hash_after_run_2, (
+            "cleanup-off force-reindex must carry an established hash forward: "
+            f"{hash_after_run_2!r} -> {hash_after_run_3!r}"
+        )
