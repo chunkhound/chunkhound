@@ -235,7 +235,7 @@ def _classify_voyageai_error(e: Exception) -> str | None:
 
 
 class VoyageAIEmbeddingProvider:
-    """VoyageAI embedding provider using voyage-code-4 by default."""
+    """VoyageAI embedding provider using voyage-3.5 by default."""
 
     # Recommended concurrent batches for VoyageAI API
     # Aggressive value (40) leverages VoyageAI's high rate limits:

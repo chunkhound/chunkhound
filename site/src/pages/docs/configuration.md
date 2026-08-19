@@ -138,7 +138,7 @@ Global defaults let you maintain shared settings (e.g. embedding provider + API 
 
 | Provider | Config Value | Env Var | Default Model | Notes |
 |---|---|---|---|---|
-| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-code-4` | Recommended for code search |
+| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` | Set `model` to `voyage-code-4` for code search |
 | OpenAI | `openai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `text-embedding-3-small` | Widely available |
 
 ### VoyageAI Models
@@ -147,12 +147,12 @@ All models below accept `output_dims` of 256, 512, 1024 (default), or 2048. Chun
 
 | Model | Context | Tokens per batch | Notes |
 |---|---|---|---|
-| `voyage-code-4` | 32K | 320K | Default. Code-specialized, built for coding-agent retrieval |
+| `voyage-code-4` | 32K | 320K | Code-specialized, built for coding-agent retrieval. Recommended for code search |
 | `voyage-4` | 32K | 320K | General purpose, balanced cost and quality |
 | `voyage-4-large` | 32K | 120K | General purpose, highest retrieval quality |
 | `voyage-4-lite` | 32K | 1M | General purpose, lowest cost and latency |
 | `voyage-code-3` | 32K | 120K | Previous-generation code model |
-| `voyage-3.5` | 32K | 320K | Previous-generation general purpose |
+| `voyage-3.5` | 32K | 320K | Default. Previous-generation general purpose |
 | `voyage-3.5-lite` | 32K | 1M | Previous-generation lite |
 | `voyage-3-large` | 32K | 120K | Previous-generation large |
 | `voyage-finance-2` | 32K | 120K | Finance domain, 1024 dims only |
@@ -160,6 +160,23 @@ All models below accept `output_dims` of 256, 512, 1024 (default), or 2048. Chun
 | `voyage-multilingual-2` | 32K | 120K | Multilingual, 1024 dims only |
 
 Models outside this list still work. ChunkHound discovers their dimensions at runtime and falls back to a conservative 320K token batch limit.
+
+### Changing the embedding model
+
+An index built with one model cannot be searched with another: stored vectors are filtered by provider and model, so a mismatch returns nothing until every chunk has been re-embedded. Re-embedding costs tokens and time, and the superseded vectors stay in the database until removed.
+
+The index therefore keeps the model it was built with. Changing `embedding.model` is a proposal, not an instruction:
+
+| Context | Behavior |
+|---|---|
+| Interactive `chunkhound index` | Warns, shows the chunk count, and asks whether to re-embed. Declining keeps the indexed model and asks again next run. |
+| Non-interactive (CI, `CHUNKHOUND_NO_PROMPTS=1`) | Warns and keeps the indexed model. Nothing is re-embedded. |
+| MCP server startup | Keeps the indexed model silently, logging the reason to stderr. |
+| Different *provider* configured | Cannot be kept (credentials and dimensions differ), so the configured provider is used and every chunk is re-embedded. |
+
+To adopt a new model deliberately, either accept the prompt, or start clean by deleting the database directory and re-indexing. To stop being asked, set `embedding.model` to whatever the index already holds.
+
+When a newer model supersedes the one in use, `chunkhound index` prints a one-line suggestion. It never acts on its own. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
 
 ### Embedding Options
 

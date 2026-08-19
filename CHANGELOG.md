@@ -7,11 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Breaking Changes
-- **Default VoyageAI embedding model is now `voyage-code-4`** (was `voyage-3.5`). Embeddings from different models are not comparable, so an index built on the old default must be re-embedded before semantic search returns useful results. To stay on the previous model, set `"embedding": {"model": "voyage-3.5"}` or `CHUNKHOUND_EMBEDDING__MODEL=voyage-3.5`. Note the price difference: `voyage-code-4` is $0.12 per 1M tokens against `voyage-3.5`'s $0.06, with the first 200M tokens free.
-
 ### Added
-- **VoyageAI `voyage-4` series** (`voyage-code-4`, `voyage-4`, `voyage-4-large`, `voyage-4-lite`). All four support Matryoshka `output_dims` of 256, 512, 1024 (default), and 2048, and a 32K context window. `voyage-code-4` is code-specialized and built for coding-agent retrieval, which is ChunkHound's exact use case.
+- **VoyageAI `voyage-4` series** (`voyage-code-4`, `voyage-4`, `voyage-4-large`, `voyage-4-lite`). All four support Matryoshka `output_dims` of 256, 512, 1024 (default), and 2048, and a 32K context window. `voyage-code-4` is code-specialized and built for coding-agent retrieval, which is ChunkHound's exact use case. The default stays `voyage-3.5`; set `embedding.model` to opt in.
+- **The index now owns its embedding model.** Changing `embedding.model` no longer silently re-embeds an existing database. `chunkhound index` warns, reports how many chunks a switch would rewrite, and asks; declining keeps the indexed model, leaves search working, and asks again next run. Non-interactive runs and MCP startup keep the indexed model without prompting, so an upgraded default can never rewrite a database behind the operator's back. A configured *provider* change is still applied, since credentials and dimensions leave nothing to fall back to.
+- **Upgrade suggestions.** When a newer model supersedes the one in use, `chunkhound index` prints a single informational line stating what a switch would cost. It never acts on its own. Silence it with `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1`.
 - **VoyageAI model reference table** in `configuration.md`, listing context window and per-batch token limit for every model ChunkHound knows.
 - **Fetchurl CLI command and MCP tool** — New `chunkhound fetchurl <url> [-q "…"]` CLI subcommand and matching `fetchurl` MCP tool fetch a single URL (HTML or PDF), extract its content, and return a focused Markdown answer.
   - Short pages are token-truncated and summarized in one LLM call; long pages with a query go through a chunk + rerank + elbow-filter pipeline that passes only the most relevant sections to the LLM.
@@ -20,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Uses the same zendriver + system Chrome transport as `websearch`, with `urllib` fallback.
 
 ### Fixed
+- **A changed embedding model silently emptied search results.** Because stored vectors are filtered by provider and model, pointing a different model at an existing index returned zero results until a full re-embed completed, and a re-embed interrupted partway left two model-tagged vectors per chunk. The index's model is now kept unless a switch is explicitly accepted.
 - **Wrong batch token limits for the `voyage-4` series.** The whole series was previously unknown to the provider and fell through to the 320K-token fallback. `voyage-4-large` actually caps at 120K, so large batches failed with `TOO_MANY_TOKENS_IN_BATCH`, while `voyage-4-lite` was capped at a third of its real 1M limit. Unsupported `output_dims` on these models were also accepted locally and only rejected later by the API; they now fail at configuration time.
 - **PyMuPDF `fitz` import deprecation warning on stdout** — PDF parsing now imports `pymupdf` instead of the legacy `fitz` alias, which since PyMuPDF 1.28.2 prints a deprecation warning to stdout and corrupts MCP stdio clients (e.g. CURe preflight). Adds a regression test asserting parser imports write nothing to stdout.
 

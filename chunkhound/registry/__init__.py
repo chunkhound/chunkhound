@@ -20,6 +20,7 @@ from chunkhound.core.config.config import Config
 
 # Import embedding factory for unified provider creation
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.core.embedding_model_drift import ModelDrift, detect_model_drift
 
 # Import core types
 from chunkhound.core.types.common import Language
@@ -27,6 +28,10 @@ from chunkhound.embeddings import EmbeddingManager
 
 # Import new unified parser system
 from chunkhound.parsers.parser_factory import get_parser_factory
+
+# Answers "the configured model differs from the indexed one; switch to it?".
+# True re-embeds under the configured model, False keeps the indexed one.
+ModelDriftDecision = Callable[[ModelDrift], bool]
 
 
 class LazyLanguageParsers(MutableMapping[Language, Any]):
@@ -110,14 +115,89 @@ class ProviderRegistry:
         self._config: Config | None = None
         self._embedding_manager: EmbeddingManager | None = None
 
-    def configure(self, config: Config) -> None:
-        """Configure the registry with application settings."""
+    def configure(
+        self,
+        config: Config,
+        on_model_drift: "ModelDriftDecision | None" = None,
+    ) -> None:
+        """Configure the registry with application settings.
+
+        ``on_model_drift`` is consulted only when the configured embedding
+        model disagrees with the one the index was built with. Omitting it
+        keeps the indexed model, which is what MCP and other non-interactive
+        entry points want; the CLI passes a callback that asks the operator.
+        """
         self._config = config
 
         # Create and register providers based on configuration
         self._setup_embedding_provider()
         self._setup_database_provider()
         self._setup_language_parsers()
+        self._resolve_embedding_model_drift(on_model_drift)
+
+    def _resolve_embedding_model_drift(
+        self, on_model_drift: "ModelDriftDecision | None"
+    ) -> None:
+        """Keep using the model the index was built with, unless told otherwise.
+
+        Search filters stored vectors by ``(provider, model)``, so pointing a
+        different model at an existing index returns nothing until every chunk
+        has been re-embedded. Pinning to the indexed model means a changed
+        default never silently rewrites, or breaks, an existing database.
+        """
+        if self._config and getattr(self._config, "embeddings_disabled", False):
+            return
+
+        embedding_provider = self._providers.get("embedding")
+        database_provider = self._providers.get("database")
+        if embedding_provider is None or database_provider is None:
+            return
+
+        drift = detect_model_drift(
+            database_provider,
+            embedding_provider.name,
+            embedding_provider.model,
+        )
+        if drift is None:
+            return
+
+        # A different provider cannot be pinned: its credentials, endpoint and
+        # dimensions all differ, so there is nothing to fall back to. Say so
+        # and let the configured provider re-embed.
+        if drift.indexed.provider != embedding_provider.name:
+            logger.warning(
+                f"Index was built with {drift.indexed} but {drift.configured} "
+                "is configured. Switching providers re-embeds every chunk."
+            )
+            return
+
+        if on_model_drift is not None and on_model_drift(drift):
+            logger.info(
+                f"Re-embedding {drift.indexed.embedding_count:,} chunks "
+                f"with {drift.configured} (accepted by operator)."
+            )
+            return
+
+        # A caller that supplied a decision hook has already told the operator
+        # what is happening, on its own stream; repeating it here duplicates
+        # the message and interleaves badly with the CLI's own output.
+        report = logger.debug if on_model_drift is not None else logger.warning
+
+        embedding_provider.update_config(model=drift.indexed.model)
+
+        # Pin the config as well as the live provider. Several callers build
+        # their own provider straight from ``config.embedding`` rather than
+        # asking the registry (``search`` and ``create_services`` both do), and
+        # those instances would otherwise query a model the index does not hold
+        # and quietly return nothing.
+        if self._config is not None and self._config.embedding is not None:
+            self._config.embedding.model = drift.indexed.model
+
+        report(
+            f"Using {drift.indexed} because the index was built with it "
+            f"({drift.indexed.embedding_count:,} embeddings). Configured "
+            f"{drift.configured} was not applied; nothing was re-embedded."
+        )
 
     def register_provider(
         self, name: str, provider: Any, singleton: bool = True
@@ -434,15 +514,23 @@ def get_registry() -> ProviderRegistry:
     return _registry
 
 
-def configure_registry(config: Config | dict[str, Any]) -> None:
-    """Configure the global provider registry."""
+def configure_registry(
+    config: Config | dict[str, Any],
+    on_model_drift: ModelDriftDecision | None = None,
+) -> None:
+    """Configure the global provider registry.
+
+    ``on_model_drift`` lets an interactive caller decide what to do when the
+    configured embedding model disagrees with the indexed one. Callers that
+    cannot prompt (MCP, daemons) omit it and keep the indexed model.
+    """
     if isinstance(config, dict):
         from chunkhound.core.config.config import Config as ConfigClass
 
         config_obj = ConfigClass(**config)
-        get_registry().configure(config_obj)
+        get_registry().configure(config_obj, on_model_drift)
     else:
-        get_registry().configure(config)
+        get_registry().configure(config, on_model_drift)
 
 
 # Convenience functions for common operations

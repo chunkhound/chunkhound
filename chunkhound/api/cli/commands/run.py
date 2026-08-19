@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,9 +13,15 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
+from chunkhound.core.embedding_model_drift import ModelDrift, format_drift_warning
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.daemon.process import pid_alive
-from chunkhound.registry import configure_registry, create_indexing_coordinator
+from chunkhound.registry import (
+    configure_registry,
+    create_indexing_coordinator,
+    get_registry,
+)
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.version import __version__
 
@@ -26,6 +33,73 @@ from ..utils.validation import (
     validate_path,
     validate_provider_args,
 )
+from . import autodoc_prompts as prompts
+
+
+def _make_model_drift_prompt(
+    formatter: RichOutputFormatter,
+    seen: list[ModelDrift],
+) -> Callable[[ModelDrift], bool]:
+    """Build the callback that decides whether to re-embed under a new model.
+
+    Declining costs nothing: the indexed model stays in use, search keeps
+    working, and the question returns on the next run. CI never stalls and
+    never re-embeds by surprise. Any drift is appended to ``seen`` so the
+    caller can suppress the upgrade hint rather than stack two model messages
+    in one run.
+    """
+
+    def decide(drift: ModelDrift) -> bool:
+        seen.append(drift)
+        formatter.warning(format_drift_warning(drift))
+
+        if os.environ.get("CHUNKHOUND_NO_PROMPTS") == "1":
+            formatter.info(f"Keeping {drift.indexed} (prompts disabled).")
+            return False
+        if not prompts.is_interactive():
+            formatter.info(f"Keeping {drift.indexed} (no interactive terminal).")
+            return False
+
+        accepted = prompts.prompt_yes_no(
+            f"Re-embed {drift.indexed.embedding_count:,} chunks "
+            f"with {drift.configured_model} now?",
+            default=False,
+        )
+        if not accepted:
+            formatter.info(
+                f"Keeping {drift.indexed}. Set embedding.model to "
+                f"{drift.indexed.model} to stop being asked."
+            )
+        return accepted
+
+    return decide
+
+
+def _suggest_model_upgrade(formatter: RichOutputFormatter) -> None:
+    """Mention a newer embedding model, without acting on it.
+
+    Adopting one re-embeds the whole index, so this only ever prints.
+    """
+    if os.environ.get("CHUNKHOUND_MCP_MODE") == "1":
+        return
+    if os.environ.get("CHUNKHOUND_NO_MODEL_SUGGESTIONS") == "1":
+        return
+
+    try:
+        model = get_registry().get_provider("embedding").model
+    except Exception:
+        return
+
+    successor = EMBEDDING_MODEL_UPGRADES.get(model)
+    if successor is None:
+        return
+
+    formatter.info(
+        f"{successor} supersedes {model}. Switching re-embeds every chunk and "
+        f"leaves the {model} vectors in place until removed, so it is not "
+        f"automatic: set embedding.model to {successor} when you want it. "
+        "Silence this with CHUNKHOUND_NO_MODEL_SUGGESTIONS=1."
+    )
 
 
 def _is_db_lock_error(exc: Exception) -> bool:
@@ -160,17 +234,31 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     if not _validate_run_arguments(args, formatter, config):
         sys.exit(1)
 
+    # MCP has no interactive layer and must not write to stdout, so it gets no
+    # decision hook at all; the registry then keeps the indexed model and logs
+    # the reason to stderr.
+    drift_seen: list[ModelDrift] = []
+    on_model_drift = (
+        None
+        if os.environ.get("CHUNKHOUND_MCP_MODE") == "1"
+        else _make_model_drift_prompt(formatter, drift_seen)
+    )
+
     try:
         # Configure registry with the Config object
         try:
-            configure_registry(config)
+            configure_registry(config, on_model_drift)
         except Exception as lock_exc:
             if _is_db_lock_error(lock_exc) and await _handle_daemon_lock_conflict(
                 Path(args.path).resolve(), formatter
             ):
-                configure_registry(config)  # retry once after daemon was stopped
+                # retry once after daemon was stopped
+                configure_registry(config, on_model_drift)
             else:
                 raise
+
+        if not drift_seen:
+            _suggest_model_upgrade(formatter)
 
         # Initialize metrics collector if diagnostics enabled
         metrics_collector = None
