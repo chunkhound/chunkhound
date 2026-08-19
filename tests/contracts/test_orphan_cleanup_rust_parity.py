@@ -7,12 +7,13 @@ Python's _cleanup_orphaned_files() whenever CHUNKHOUND_USE_RUST=1.
 Note: a plain incremental Rust run already deletes DB rows for any file absent
 from the discovered-file list handed to it (whatever the cause -- deleted from
 disk, or excluded by a pattern change) via its own diff logic, so that case was
-never actually broken. The gap only surfaces with force_reindex=True: Rust
-skips its own diff entirely on a forced full reindex (incremental=False means
-no delete_paths are computed at all), and -- before this fix -- Python's
-cleanup was *also* skipped whenever the Rust pipeline was active, regardless of
-force_reindex. So force_reindex=True + Rust used to mean zero orphan cleanup of
-any kind: a file deleted from disk kept its stale row forever.
+never actually broken. The gap only surfaces with force_reindex=True: a forced
+full reindex still runs the diff (to keep content hashes / file ids) but used
+to skip applying ``diff.removed`` unless ``do_cleanup`` is on — and before the
+Rust-owns-cleanup fix, Python's ``_cleanup_orphaned_files()`` was *also*
+skipped whenever the Rust pipeline was active. So force_reindex=True + Rust
+used to mean zero orphan cleanup of any kind: a file deleted from disk kept
+its stale row forever.
 
 This test drives that scenario through the real production entry point,
 IndexingCoordinator.process_directory() via DirectoryIndexingService, with the
@@ -51,13 +52,12 @@ def test_rust_pipeline_force_reindex_still_cleans_up_deleted_files(
     """A file deleted from disk must be cleaned up even on a Rust-driven,
     force_reindex=True run.
 
-    force_reindex=True makes Rust skip its own diff entirely (incremental=False
-    means no delete_paths are computed at all), so it never notices the file is
-    gone. Before this fix, Python's _cleanup_orphaned_files() -- which would
-    have caught it independently -- was *also* skipped whenever the Rust
-    pipeline was active, regardless of force_reindex. Net effect pre-fix:
-    force_reindex=True + Rust performed zero orphan cleanup of any kind, and
-    the deleted file's row lingered forever.
+    force_reindex=True still runs the diff (to keep hashes) and applies
+    ``diff.removed`` when cleanup is on. Before the Rust-owns-cleanup fix,
+    Python's ``_cleanup_orphaned_files()`` — which would have caught orphans
+    independently — was *also* skipped whenever the Rust pipeline was active.
+    Net effect pre-fix: force_reindex=True + Rust performed zero orphan
+    cleanup of any kind, and the deleted file's row lingered forever.
     """
     monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
 

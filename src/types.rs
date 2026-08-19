@@ -54,6 +54,6 @@ pub struct BatchResult {
 pub struct DbFileEntry {
     pub id: i64,
     pub path: String,
-    pub mtime: f64, // Unix timestamp
+    pub mtime: Option<f64>, // Unix timestamp; None if modified_time is NULL
     pub content_hash: Option<String>,
 }

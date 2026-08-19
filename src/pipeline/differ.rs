@@ -75,8 +75,8 @@ pub(crate) fn compute_diff(
     precomputed_stats: Option<&HashMap<PathBuf, (u64, f64)>>,
     mut on_tick: Option<&mut dyn FnMut(usize, usize)>,
 ) -> DiffResult {
-    // Build a lookup: DB path → mtime
-    let db_map: HashMap<&str, f64> = db_file_entries
+    // Build a lookup: DB path → stored mtime (None if the column is NULL).
+    let db_map: HashMap<&str, Option<f64>> = db_file_entries
         .iter()
         .map(|e| (e.path.as_str(), e.mtime))
         .collect();
@@ -163,7 +163,25 @@ pub(crate) fn compute_diff(
 
         disk_paths.insert(rel.clone());
 
-        if let Some(&db_mtime) = db_map.get(rel.as_str()) {
+        if let Some(stored_mtime) = db_map.get(rel.as_str()).copied() {
+            let db_mtime = match stored_mtime {
+                Some(m) => m,
+                None => {
+                    // NULL modified_time is not "unchanged" — reprocess, but
+                    // keep the row id so upsert updates in place. The path
+                    // stays in db_paths for orphan detection if the file is
+                    // gone from disk.
+                    if let Some(new_hash) = hash_file_contents(abs_path) {
+                        new_hashes.insert(abs_path.clone(), new_hash);
+                    }
+                    if let Some(&id) = db_ids.get(rel.as_str()) {
+                        existing_ids.insert(abs_path.clone(), id);
+                    }
+                    disk_stats.insert(abs_path.clone(), (current_size, current_mtime_raw));
+                    changed.push(abs_path.clone());
+                    continue;
+                }
+            };
             // File exists in DB — check if mtime changed
             if let Some(cur) = current_mtime {
                 if (cur - db_mtime).abs() > mtime_epsilon {
@@ -366,7 +384,7 @@ mod tests {
         let db = vec![DbFileEntry {
             id: 1,
             path: "a.py".into(),
-            mtime,
+            mtime: Some(mtime),
             content_hash: None,
         }];
 
@@ -384,7 +402,7 @@ mod tests {
         let db = vec![DbFileEntry {
             id: 42,
             path: "a.py".into(),
-            mtime: old_mtime,
+            mtime: Some(old_mtime),
             content_hash: None,
         }];
 
@@ -443,7 +461,7 @@ mod tests {
         let db = vec![DbFileEntry {
             id: 7,
             path: "a.py".into(),
-            mtime,
+            mtime: Some(mtime),
             content_hash: Some(stored_hash.clone()),
         }];
 
@@ -479,7 +497,7 @@ mod tests {
         let db = vec![DbFileEntry {
             id: 9,
             path: "a.py".into(),
-            mtime: 0.0, // clearly different from the file's real mtime
+            mtime: Some(0.0), // clearly different from the file's real mtime
             content_hash: Some(hash.clone()),
         }];
 
@@ -501,7 +519,7 @@ mod tests {
         let db = vec![DbFileEntry {
             id: 1,
             path: "a.py".into(),
-            mtime: 0.0,
+            mtime: Some(0.0),
             content_hash: None,
         }];
 
@@ -543,13 +561,13 @@ mod tests {
             DbFileEntry {
                 id: 1,
                 path: "a.py".into(),
-                mtime: file_mtime(&f1).unwrap(),
+                mtime: file_mtime(&f1),
                 content_hash: None,
             },
             DbFileEntry {
                 id: 2,
                 path: "gone.py".into(), // this file doesn't exist on disk
-                mtime: 1.0,
+                mtime: Some(1.0),
                 content_hash: None,
             },
         ];
@@ -592,7 +610,7 @@ mod tests {
         let db = vec![DbFileEntry {
             id: 1,
             path: "a.py".into(),
-            mtime,
+            mtime: Some(mtime),
             content_hash: None,
         }];
 
@@ -641,7 +659,7 @@ mod tests {
         let db = vec![DbFileEntry {
             id: 1,
             path: "a.py".into(),
-            mtime: 0.0, // clearly different from the file's real mtime
+            mtime: Some(0.0), // clearly different from the file's real mtime
             content_hash: Some(hash),
         }];
 
@@ -663,7 +681,7 @@ mod tests {
         let db = vec![DbFileEntry {
             id: 1,
             path: "a.py".into(),
-            mtime: 0.0,
+            mtime: Some(0.0),
             content_hash: Some("deadbeefdeadbeef".into()),
         }];
 
@@ -692,6 +710,48 @@ mod tests {
             diff.existing_ids.is_empty(),
             "new files (not in DB) must not appear in existing_ids"
         );
+    }
+
+    #[test]
+    fn test_null_mtime_on_disk_is_reprocessed_not_treated_as_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f1 = create_file(&tmp, "a.py");
+
+        let db = vec![DbFileEntry {
+            id: 11,
+            path: "a.py".into(),
+            mtime: None,
+            content_hash: None,
+        }];
+
+        let rel_keys = rel_key_for(&f1, "a.py");
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
+        assert_eq!(
+            diff.changed_count(),
+            1,
+            "NULL DB mtime is not proof of unchanged content"
+        );
+        assert_eq!(
+            diff.existing_ids.get(&f1).copied(),
+            Some(11),
+            "must keep the existing row id so upsert updates in place"
+        );
+        assert_eq!(diff.removed_count(), 0);
+    }
+
+    #[test]
+    fn test_null_mtime_missing_from_disk_is_removed() {
+        let db = vec![DbFileEntry {
+            id: 12,
+            path: "gone.py".into(),
+            mtime: None,
+            content_hash: None,
+        }];
+
+        let diff = compute_diff(&db, &[], &HashMap::new(), 0.01, None, None);
+        assert_eq!(diff.changed_count(), 0);
+        assert_eq!(diff.removed_count(), 1);
+        assert!(diff.removed.contains(&"gone.py".to_string()));
     }
 
     fn create_file(dir: &tempfile::TempDir, name: &str) -> PathBuf {
