@@ -123,8 +123,8 @@ def parse_file_callback(
     detect_embedded_sql: bool = True,
     config_file_size_threshold_kb: int = 20,
     index_unknown_files: bool = False,
-) -> tuple[str, list[dict]]:
-    """Adapter: path → (language, chunks).
+) -> tuple[str, list[dict], str | None]:
+    """Adapter: path → (language, chunks, skip_reason).
 
     Called from the Rust parse thread for each file (directly for small/
     typical files, or via _parse_with_timeout()'s child process for large
@@ -140,39 +140,37 @@ def parse_file_callback(
             gate (matches chunkhound.services.batch_processor's convention).
 
     Returns:
-        (language_value: str, chunks: list[dict])
-        Empty string language means unrecognized file (no chunks).
+        (language_value, chunks, skip_reason). skip_reason is None on a
+        successful parse. Skip tokens match batch_processor: ``Unknown file
+        type``, ``binary_file``, ``large_config_file``. Empty language plus
+        empty chunks without a skip token is not used — OSError on read/stat
+        is raised so ``_parse_one_file`` records it as a parse error.
     """
     from chunkhound.core.detection import detect_language
     from chunkhound.core.types.common import Language
 
     lang = detect_language(Path(file_path))
 
+    # Binary guard before unknown-type skip so a NUL-containing .bin is
+    # ``binary_file``, not ``Unknown file type``.
+    with open(file_path, "rb") as fh:
+        sample = fh.read(8192)
+    if b"\x00" in sample:
+        return ("", [], "binary_file")
+
     if lang is None or lang == Language.UNKNOWN:
         if not index_unknown_files:
-            return ("", [])
+            return ("", [], "Unknown file type")
         lang = Language.TEXT
-
-    # Binary guard — skip files with null bytes
-    try:
-        with open(file_path, "rb") as fh:
-            sample = fh.read(8192)
-        if b"\x00" in sample:
-            return ("", [])
-    except OSError:
-        return ("", [])
 
     # Config file size gate
     if lang.is_structured_config_language:
-        try:
-            size_kb = Path(file_path).stat().st_size / 1024
-            if (
-                config_file_size_threshold_kb > 0
-                and size_kb > config_file_size_threshold_kb
-            ):
-                return ("", [])
-        except OSError:
-            return ("", [])
+        size_kb = Path(file_path).stat().st_size / 1024
+        if (
+            config_file_size_threshold_kb > 0
+            and size_kb > config_file_size_threshold_kb
+        ):
+            return ("", [], "large_config_file")
 
     parser = create_parser_for_language(
         lang, detect_embedded_sql=detect_embedded_sql
@@ -180,7 +178,7 @@ def parse_file_callback(
 
     file_id = FileId(0)  # Rust assigns the real ID
     chunks = parser.parse_file(Path(file_path), file_id)
-    return (lang.value, [c.to_dict() for c in chunks])
+    return (lang.value, [c.to_dict() for c in chunks], None)
 
 
 def embed_batch_callback(texts: list[str]) -> list[list[float]]:
@@ -304,13 +302,13 @@ def _parse_file_worker_for_timeout(
     parsing directly.
     """
     try:
-        lang, chunks = parse_file_callback(
+        lang, chunks, skip = parse_file_callback(
             file_path,
             detect_embedded_sql=detect_embedded_sql,
             config_file_size_threshold_kb=config_file_size_threshold_kb,
             index_unknown_files=index_unknown_files,
         )
-        conn.send(("ok", (lang, chunks)))
+        conn.send(("ok", (lang, chunks, skip)))
     except Exception as e:
         try:
             conn.send(("error", str(e)))
@@ -325,7 +323,7 @@ def _parse_file_worker_for_timeout(
 
 def _parse_with_timeout(
     file_path: str, cfg: "_ParsePoolConfig"
-) -> tuple[str, list[dict], str | None]:
+) -> tuple[str, list[dict], str | None, str | None]:
     """Parse one file in a dedicated child process with a wall-clock timeout.
 
     Only used for files at or above cfg.per_file_timeout_min_size_kb (see
@@ -362,13 +360,13 @@ def _parse_with_timeout(
                 p.terminate()
                 p.join(timeout=0.5)
             if status == "ok":
-                lang, chunks = payload
-                return (lang, chunks, None)
-            return ("", [], str(payload))
+                lang, chunks, skip = payload
+                return (lang, chunks, None, skip)
+            return ("", [], str(payload), None)
         # Timed out — terminate the child process cleanly.
         p.terminate()
         p.join(timeout=0.5)
-        return ("", [], f"parse timed out after {cfg.per_file_timeout_secs}s")
+        return ("", [], f"parse timed out after {cfg.per_file_timeout_secs}s", None)
     finally:
         try:
             parent_conn.close()
@@ -378,7 +376,7 @@ def _parse_with_timeout(
 
 def _parse_one_file(
     args: tuple[str, "_ParsePoolConfig"],
-) -> tuple[str, list[dict], str | None]:
+) -> tuple[str, list[dict], str | None, str | None]:
     """Parse a single file — module-level so ProcessPoolExecutor can pickle it.
 
     Catches any exception so one bad file can't abort the whole batch —
@@ -396,22 +394,22 @@ def _parse_one_file(
             try:
                 size_kb = os.path.getsize(file_path) / 1024
             except OSError as e:
-                return ("", [], str(e))
+                return ("", [], str(e), None)
             if size_kb >= cfg.per_file_timeout_min_size_kb:
                 return _parse_with_timeout(file_path, cfg)
 
-        lang, chunks = parse_file_callback(
+        lang, chunks, skip = parse_file_callback(
             file_path,
             detect_embedded_sql=cfg.detect_embedded_sql,
             config_file_size_threshold_kb=cfg.config_file_size_threshold_kb,
             index_unknown_files=cfg.index_unknown_files,
         )
-        return (lang, chunks, None)
+        return (lang, chunks, None, skip)
     except Exception as e:
         # No file_path prefix here — the Rust caller already knows which
         # path this tuple corresponds to and prepends it when aggregating
         # into PipelineReport.errors.
-        return ("", [], str(e))
+        return ("", [], str(e), None)
 
 
 def parse_batch_callback(
@@ -419,7 +417,7 @@ def parse_batch_callback(
     parse_config: Any = None,
     *,
     index_unknown_files: bool = False,
-) -> list[tuple[str, list[dict], str | None]]:
+) -> list[tuple[str, list[dict], str | None, str | None]]:
     """Adapter: batch-parse files in parallel (called from Rust parse thread).
 
     Callback contract is batch-shaped, not per-file: Rust's parse thread
@@ -441,9 +439,10 @@ def parse_batch_callback(
             rather than it flowing through parse_config.
 
     Returns:
-        List of (language, chunks, error) tuples — same order as file_paths.
-        `error` is `None` on success, or a message string if that file's
-        parse raised or timed out.
+        List of (language, chunks, error, skip_reason) tuples — same order as
+        file_paths. ``error`` is None on success or skip; a message if that
+        file's parse raised or timed out. ``skip_reason`` is a skip token
+        (binary/unknown/large config) or None.
     """
     cfg = _ParsePoolConfig.from_any(
         parse_config, index_unknown_files=index_unknown_files
@@ -683,5 +682,6 @@ async def run_rust_pipeline(
         "embeddings_generated": report.embeddings_generated,
         "elapsed_secs": report.elapsed_secs,
         "files_skipped_unchanged": report.files_skipped,
+        "skipped_paths": list(getattr(report, "skipped_paths", None) or []),
         "errors": errors,
     }

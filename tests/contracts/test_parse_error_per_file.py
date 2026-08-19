@@ -72,10 +72,10 @@ class TestParseErrorPerFile:
                 if p == str(bad_file):
                     results.append(("", [], "simulated parser crash"))
                 else:
-                    lang, chunks = parse_file_callback(
+                    lang, chunks, skip = parse_file_callback(
                         p, detect_embedded_sql=parse_config.detect_embedded_sql
                     )
-                    results.append((lang, chunks, None))
+                    results.append((lang, chunks, None, skip))
             return results
 
         db_dir = tmp_path / "db"
@@ -128,7 +128,7 @@ class TestParseErrorPerFile:
             pipeline_bridge, "parse_file_callback", _raising_parse_file_callback
         )
 
-        lang, chunks, error = pipeline_bridge._parse_one_file(
+        lang, chunks, error, _skip = pipeline_bridge._parse_one_file(
             (str(bad_file), pipeline_bridge._DEFAULT_PARSE_CONFIG)
         )
 

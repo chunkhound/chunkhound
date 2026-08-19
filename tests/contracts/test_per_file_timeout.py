@@ -94,32 +94,45 @@ class TestConfigFileSizeThreshold:
     def test_file_above_configured_threshold_is_skipped(self, tmp_path):
         config_file = self._make_json_file(tmp_path)
 
-        lang, chunks = parse_file_callback(
+        lang, chunks, skip = parse_file_callback(
             str(config_file), config_file_size_threshold_kb=1
         )
 
         assert lang == ""
         assert chunks == []
+        assert skip == "large_config_file"
 
     def test_file_below_configured_threshold_is_processed(self, tmp_path):
         config_file = self._make_json_file(tmp_path)
 
-        lang, chunks = parse_file_callback(
+        lang, chunks, skip = parse_file_callback(
             str(config_file), config_file_size_threshold_kb=100
         )
 
         assert lang == "json"
+        assert skip is None
 
     def test_threshold_disabled_when_non_positive(self, tmp_path):
         """<= 0 disables the gate — matches
         chunkhound.services.batch_processor's existing convention."""
         config_file = self._make_json_file(tmp_path)
 
-        lang, chunks = parse_file_callback(
+        lang, chunks, skip = parse_file_callback(
             str(config_file), config_file_size_threshold_kb=0
         )
 
         assert lang == "json"
+        assert skip is None
+
+    def test_unknown_extension_returns_skip_token(self, tmp_path):
+        unknown = tmp_path / "data.xyzunk"
+        unknown.write_text("some content\n")
+
+        lang, chunks, skip = parse_file_callback(str(unknown))
+
+        assert lang == ""
+        assert chunks == []
+        assert skip == "Unknown file type"
 
 
 class TestPerFileTimeout:
@@ -142,7 +155,7 @@ class TestPerFileTimeout:
         cfg = pipeline_bridge._ParsePoolConfig(
             per_file_timeout_secs=3.0, per_file_timeout_min_size_kb=128
         )
-        lang, chunks, error = pipeline_bridge._parse_one_file((str(small_file), cfg))
+        lang, chunks, error, _skip = pipeline_bridge._parse_one_file((str(small_file), cfg))
 
         assert error is None
         assert lang == "python"
@@ -158,7 +171,7 @@ class TestPerFileTimeout:
 
         def _fake_parse_with_timeout(file_path, cfg):
             called["file_path"] = file_path
-            return ("python", [], None)
+            return ("python", [], None, None)
 
         monkeypatch.setattr(
             pipeline_bridge, "_parse_with_timeout", _fake_parse_with_timeout
@@ -187,7 +200,7 @@ class TestPerFileTimeout:
         cfg = pipeline_bridge._ParsePoolConfig(
             per_file_timeout_secs=0.0, per_file_timeout_min_size_kb=0
         )
-        lang, chunks, error = pipeline_bridge._parse_one_file((str(big_file), cfg))
+        lang, chunks, error, _skip = pipeline_bridge._parse_one_file((str(big_file), cfg))
 
         assert error is None
         assert lang == "python"
@@ -213,7 +226,7 @@ class TestPerFileTimeout:
             per_file_timeout_secs=0.001, per_file_timeout_min_size_kb=0
         )
 
-        lang, chunks, error = pipeline_bridge._parse_one_file((str(target), cfg))
+        lang, chunks, error, _skip = pipeline_bridge._parse_one_file((str(target), cfg))
 
         assert chunks == []
         assert error is not None

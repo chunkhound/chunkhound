@@ -66,6 +66,8 @@ struct StoreOutcome {
     /// `pipeline_parse_embed_store`). Named `errors` (not `parse_errors`)
     /// because it carries both kinds, matching `PipelineReport.errors`.
     errors: Vec<String>,
+    /// Parse-time skips (binary/unknown/large config), not timeouts.
+    skipped_paths: Vec<(String, String)>,
     /// Set when a mid-run disk-usage check tripped: `(current_mb, limit_mb)`.
     disk_limit_exceeded: Option<(f64, f64)>,
 }
@@ -302,6 +304,7 @@ impl IndexingPipeline {
             embeddings_generated: outcome.embeddings_written,
             elapsed_secs: total_secs,
             errors: outcome.errors,
+            skipped_paths: outcome.skipped_paths,
             peak_rss_mb: None,
             disk_limit: outcome.disk_limit_exceeded,
         })
@@ -499,6 +502,7 @@ impl IndexingPipeline {
         // these don't abort the run, unlike `error` above, which is for
         // whole-batch-callback failures.
         let parse_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let parse_skips: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
         // Per-file embed errors (e.g. an embed API call for one sub-batch
         // failed) — same non-fatal treatment as `parse_errors`: those chunks
         // are written without an embedding rather than aborting the run.
@@ -508,6 +512,7 @@ impl IndexingPipeline {
         let parse_handle = {
             let error = Arc::clone(&error);
             let parse_errors = Arc::clone(&parse_errors);
+            let parse_skips = Arc::clone(&parse_skips);
             std::thread::spawn(move || {
                 let mut parsed_files_count: u64 = 0;
                 for (batch_idx, batch) in batches {
@@ -545,9 +550,17 @@ impl IndexingPipeline {
 
                     {
                         let mut errs = parse_errors.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut skips = parse_skips.lock().unwrap_or_else(|e| e.into_inner());
                         for pf in &parsed {
                             if let Some(e) = &pf.error {
                                 errs.push(format!("{}: {}", pf.path.display(), e));
+                            } else if let Some(reason) = &pf.skip_reason {
+                                let skip_path = if pf.rel_path.is_empty() {
+                                    pf.path.display().to_string()
+                                } else {
+                                    pf.rel_path.clone()
+                                };
+                                skips.push((skip_path, reason.clone()));
                             }
                         }
                     }
@@ -830,6 +843,7 @@ impl IndexingPipeline {
                     // the store thread has no access to the parse/embed
                     // threads' shared error accumulators.
                     errors: Vec::new(),
+                    skipped_paths: Vec::new(),
                     disk_limit_exceeded: disk_limit_hit,
                 })
             })
@@ -1018,6 +1032,10 @@ impl IndexingPipeline {
             .expect("parse thread already joined above and drops its clone on exit, so this is the sole remaining owner")
             .into_inner()
             .unwrap_or_else(|e| e.into_inner());
+        let file_parse_skips = Arc::try_unwrap(parse_skips)
+            .expect("parse thread already joined above and drops its clone on exit, so this is the sole remaining owner")
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
 
         let embedded_chunks = match embed_join {
             Ok(Ok(n)) => n,
@@ -1047,6 +1065,7 @@ impl IndexingPipeline {
             Ok(Ok(mut result)) => {
                 result.errors = file_parse_errors;
                 result.errors.extend(file_embed_errors);
+                result.skipped_paths = file_parse_skips;
                 Ok(result)
             }
             Ok(Err(e)) => Err(e),
@@ -1188,6 +1207,10 @@ impl IndexingPipeline {
                 .get_item(2)
                 .ok()
                 .and_then(|v| v.extract::<String>().ok());
+            let callback_skip: Option<String> = item
+                .get_item(3)
+                .ok()
+                .and_then(|v| v.extract::<String>().ok());
 
             if let Some(err) = py_error {
                 let (file_size, mtime) = Self::disk_stats_or_stat(path, disk_stats);
@@ -1236,7 +1259,9 @@ impl IndexingPipeline {
             // empty) or any file that wasn't in the precomputed map.
             let (file_size, mtime) = Self::disk_stats_or_stat(path, disk_stats);
             let language = if lang.is_empty() { None } else { Some(lang) };
-            let skip_reason = if chunks.is_empty() && language.is_none() {
+            let skip_reason = if let Some(reason) = callback_skip {
+                Some(Self::truncate_skip_reason(&reason))
+            } else if chunks.is_empty() && language.is_none() {
                 Some("unrecognized_or_empty".to_string())
             } else {
                 None

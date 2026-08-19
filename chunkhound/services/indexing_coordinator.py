@@ -1720,9 +1720,8 @@ class IndexingCoordinator(BaseService):
                 # provider-side timeout — that must stay a real error, not get
                 # silently reclassified as a harmless parse skip.
                 #
-                # Non-timeout skip reasons (filtered/unsupported/config files)
-                # still aren't reported by the Rust pipeline — agg_skipped_paths
-                # stays empty, matching prior behavior for those cases.
+                # Non-timeout skip reasons (binary/unknown/large config) arrive
+                # on rust_result.skipped_paths, not in errors.
                 agg_errors = []
                 agg_skipped_timeout = []
                 for err in rust_result.errors:
@@ -1730,8 +1729,11 @@ class IndexingCoordinator(BaseService):
                         agg_skipped_timeout.append(str(err.get("file")))
                     else:
                         agg_errors.append(err)
-                agg_skipped = len(agg_skipped_timeout)
-                agg_skipped_paths = []
+                agg_skipped_paths = [
+                    (str(path), str(reason))
+                    for path, reason in rust_result.skipped_paths
+                ]
+                agg_skipped = len(agg_skipped_timeout) + len(agg_skipped_paths)
 
                 logger.info(
                     f"Diff: {agg_total_files}/{len(files)} changed in "

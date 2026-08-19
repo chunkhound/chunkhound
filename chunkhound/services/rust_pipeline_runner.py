@@ -301,6 +301,7 @@ class RustPhaseResult:
     embeddings_generated: int
     errors: list[dict[str, Any]]
     files_skipped_unchanged: int
+    skipped_paths: list[tuple[str, str]]
     diff_elapsed: float
     compact_ran: bool
     compact_size_before: int | None
@@ -477,6 +478,9 @@ async def run_rust_indexing_phase(
         embeddings_generated=int(rust_stats.get("embeddings_generated", 0)),
         errors=list(rust_stats.get("errors", [])),
         files_skipped_unchanged=int(rust_stats.get("files_skipped_unchanged", 0)),
+        skipped_paths=[
+            (str(p), str(r)) for p, r in rust_stats.get("skipped_paths", [])
+        ],
         diff_elapsed=diff_elapsed,
         compact_ran=compact_ran,
         compact_size_before=compact_size_before,

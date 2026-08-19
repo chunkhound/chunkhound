@@ -24,6 +24,11 @@ pub(crate) struct PipelineReport {
     #[pyo3(get)]
     pub errors: Vec<String>,
 
+    /// Parse-time skips that are not errors: ``(path, skip_reason)``.
+    /// Timeouts stay in ``errors`` so the coordinator can split them out.
+    #[pyo3(get)]
+    pub skipped_paths: Vec<(String, String)>,
+
     #[pyo3(get)]
     pub peak_rss_mb: Option<f64>,
 
@@ -48,6 +53,7 @@ impl PipelineReport {
             embeddings_generated: 0,
             elapsed_secs: 0.0,
             errors: Vec::new(),
+            skipped_paths: Vec::new(),
             peak_rss_mb: None,
             disk_limit: None,
         }
