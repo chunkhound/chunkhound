@@ -1434,9 +1434,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
 
         let conn = self.conn_or_err()?;
         #[cfg(test)]
-        let mut dropped = 0usize;
-        for idx in &indexes {
-            #[cfg(test)]
+        for (dropped, idx) in indexes.iter().enumerate() {
             if self.fail_drop_after == Some(dropped) {
                 return Err(DbError::Other(
                     "simulated mid-loop HNSW drop failure".into(),
@@ -1444,10 +1442,11 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             }
             let safe_name = idx.index_name.replace('"', "\"\"");
             conn.execute(&format!("DROP INDEX IF EXISTS \"{safe_name}\""), [])?;
-            #[cfg(test)]
-            {
-                dropped += 1;
-            }
+        }
+        #[cfg(not(test))]
+        for idx in &indexes {
+            let safe_name = idx.index_name.replace('"', "\"\"");
+            conn.execute(&format!("DROP INDEX IF EXISTS \"{safe_name}\""), [])?;
         }
         Ok(())
     }
