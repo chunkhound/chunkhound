@@ -160,10 +160,13 @@ jobs:
   rust-checks:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: windows-latest
+            job_timeout_minutes: 60
       fail-fast: false
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
 
     steps:
       - name: Checkout code
@@ -176,10 +179,29 @@ jobs:
         uses: ./.github/actions/cache-duckdb-lib
 
       - name: Rust lint (fmt + clippy)
+        if: matrix.os != 'windows-latest'
         run: make rust-check
 
       - name: Run Rust unit tests
+        if: matrix.os != 'windows-latest'
         run: make rust-test
+
+      # windows-latest runners don't reliably have GNU Make on PATH (MSYS2 ships
+      # on the image but isn't added to PATH) -- run the equivalent cargo
+      # commands directly. Keep in sync with Makefile's rust-check/rust-test.
+      - name: Rust lint (fmt + clippy) [Windows]
+        if: matrix.os == 'windows-latest'
+        env:
+          DUCKDB_DOWNLOAD_LIB: "1"
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Run Rust unit tests [Windows]
+        if: matrix.os == 'windows-latest'
+        env:
+          DUCKDB_DOWNLOAD_LIB: "1"
+        run: cargo test
 
   # ubuntu-24.04-arm has no track record in this project yet (added for the
   # chunkhound-native release wheel matrix) -- build+repair+smoke-import it on
