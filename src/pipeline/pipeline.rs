@@ -130,9 +130,8 @@ impl IndexingPipeline {
             // run on an empty directory). Otherwise an empty file list must
             // still flow through the incremental diff + streaming pipeline
             // below — files removed from disk since the last run (down to
-            // zero) need their orphaned DB rows deleted. See the
-            // `pending_delete_paths` flush in `pipeline_parse_embed_store`'s
-            // embed thread.
+            // zero) need their orphaned DB rows deleted. The store thread
+            // applies `delete_paths` once at start, before the insert loop.
             let no_db_yet = (self.config.db_path.as_os_str().is_empty()
                 || self.config.db_path.as_os_str() == ":memory:")
                 || !self.config.db_path.join("chunks.db").exists();
@@ -614,6 +613,19 @@ impl IndexingPipeline {
                     "[hnsw-drop] done in {:.3}s",
                     t_hnsw_drop.elapsed().as_secs_f64()
                 );
+                // Orphan deletes free space and must run even when the DB is
+                // already over disk_usage_limit_mb — that guard exists to
+                // stop inserts (growth), not cleanup. Applied here, before
+                // the insert loop, so a pre-recv disk-limit trip +
+                // drop(store_rx) cannot discard them.
+                if !delete_paths.is_empty() {
+                    let orphan_batch = DbWriterBatch {
+                        files: Vec::new(),
+                        delete_paths,
+                    };
+                    let delete_result = backend.prepare_write(&orphan_batch);
+                    Self::close_backend_on_err(backend.as_mut(), delete_result)?;
+                }
                 emit_progress_gil(&store_progress_cb, "write-prepare", 0, batch_count_u64);
 
                 // Write each batch as soon as it arrives (no window). The
@@ -846,7 +858,6 @@ impl IndexingPipeline {
             let embed_errors = Arc::clone(&embed_errors);
             std::thread::spawn(move || {
                 let pool = Self::build_embed_pool(embed_thread_pool_size)?;
-                let mut pending_delete_paths = Some(delete_paths);
                 let mut received_files: u64 = 0;
                 let mut seen_chunks: u64 = 0;
                 let mut embedded_chunks: u64 = 0;
@@ -967,12 +978,9 @@ impl IndexingPipeline {
                         t_batch.elapsed().as_secs_f64()
                     );
 
-                    // Attach the original delete_paths (from the incremental
-                    // diff) to the first streamed batch only — deleting is
-                    // idempotent, but there is no need to repeat it per batch.
-                    let batch_delete_paths = pending_delete_paths.take().unwrap_or_default();
-                    let db_batch =
-                        Self::build_db_batch(&parsed_files, batch_delete_paths, &existing_ids);
+                    // Orphan deletes are applied once by the store thread at
+                    // start — batches here are inserts only.
+                    let db_batch = Self::build_db_batch(&parsed_files, Vec::new(), &existing_ids);
                     let t_send = Instant::now();
                     let sent = store_tx.send(db_batch);
                     embed_wait_store += t_send.elapsed().as_secs_f64();
@@ -986,22 +994,6 @@ impl IndexingPipeline {
                     "[pipe] embed blocked: parse-recv {embed_wait_parse:.1}s  \
                      store-send {embed_wait_store:.1}s"
                 );
-
-                // No batch ever flowed through to carry `delete_paths` — this
-                // happens when there are zero files to parse (e.g. re-indexing
-                // a directory that's gone from "has files" to empty, or every
-                // file is unchanged). Send a files-less batch so orphaned rows
-                // still get deleted; `prepare_write()` handles `delete_paths`
-                // independently of `batch.files` being non-empty.
-                if let Some(paths) = pending_delete_paths.take() {
-                    if !paths.is_empty() {
-                        let db_batch = DbWriterBatch {
-                            files: Vec::new(),
-                            delete_paths: paths,
-                        };
-                        let _ = store_tx.send(db_batch);
-                    }
-                }
 
                 Ok(embedded_chunks)
             })

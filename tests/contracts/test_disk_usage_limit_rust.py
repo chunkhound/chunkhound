@@ -11,6 +11,7 @@ exception.
 import tempfile
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from tests.contracts.pipeline_harness import index_with_rust
@@ -22,6 +23,15 @@ def _write_many_fixture_files(project_dir: Path, count: int) -> None:
     project_dir.mkdir(parents=True, exist_ok=True)
     for i in range(count):
         (project_dir / f"mod_{i}.py").write_text(f"def fn_{i}():\n    return {i}\n")
+
+
+def _indexed_paths(db_dir: Path) -> set[str]:
+    conn = duckdb.connect(str(db_dir / "chunks.db"))
+    try:
+        rows = conn.execute("SELECT path FROM files").fetchall()
+    finally:
+        conn.close()
+    return {row[0] for row in rows}
 
 
 class TestDiskUsageLimitRust:
@@ -135,3 +145,47 @@ class TestDiskUsageLimitRust:
                 "the trip fires before the store thread's first receive, so "
                 "none of the ~50 in-flight batches should land"
             )
+
+    @pytest.mark.asyncio
+    async def test_disk_limit_trip_still_deletes_orphans(self):
+        """A pre-recv disk-limit trip must still apply orphan deletes.
+
+        The limit exists to stop inserts (growth). Deleting rows for files
+        removed from disk frees space and must not be discarded when store
+        aborts the insert loop and drops store_rx.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp) / "project"
+            project_dir.mkdir()
+            keep = project_dir / "keep.py"
+            orphan = project_dir / "orphan.py"
+            keep.write_text("def keep():\n    return 1\n")
+            orphan.write_text("def orphan():\n    return 1\n")
+            db_dir = Path(tmp) / "db"
+
+            first = index_with_rust(project_dir, db_dir, skip_embeddings=True)
+            assert first.disk_limit_exceeded is False
+            assert first.chunks_written > 0
+            assert _indexed_paths(db_dir) == {"keep.py", "orphan.py"}
+
+            orphan.unlink()
+
+            result = index_with_rust(
+                project_dir,
+                db_dir,
+                skip_embeddings=True,
+                incremental=True,
+                disk_usage_limit_mb=0.0,
+            )
+
+            assert result.disk_limit_exceeded is True
+            assert result.chunks_written == 0, (
+                "the trip fires before insert recv, so no replacement rows "
+                "should be written"
+            )
+            paths = _indexed_paths(db_dir)
+            assert "orphan.py" not in paths, (
+                "orphan deletes must run even when the DB is already over "
+                "the disk limit"
+            )
+            assert "keep.py" in paths
