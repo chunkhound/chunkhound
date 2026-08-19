@@ -20,23 +20,10 @@ proves the fix end-to-end: index a symlinked file, then re-index incrementally
 with zero filesystem changes, and confirm its row is not deleted.
 """
 
-from pathlib import Path
-
-import duckdb
 import pytest
 
 from chunkhound.pipeline_bridge import run_rust_pipeline
-from tests.contracts.pipeline_harness import collect_table_counts
-
-
-def _files_table_paths(db_dir: Path) -> set[str]:
-    db_file = db_dir / "chunks.db"
-    conn = duckdb.connect(str(db_file))
-    try:
-        rows = conn.execute("SELECT path FROM files").fetchall()
-        return {row[0] for row in rows}
-    finally:
-        conn.close()
+from tests.contracts.pipeline_harness import collect_table_counts, files_table_paths
 
 
 class TestSymlinkPreservesLogicalPath:
@@ -44,13 +31,6 @@ class TestSymlinkPreservesLogicalPath:
 
     @pytest.mark.asyncio
     async def test_symlinked_file_survives_incremental_reindex(self, tmp_path):
-        try:
-            import chunkhound_native  # noqa: F401
-        except ImportError:
-            pytest.fail(
-                "Rust IndexingPipeline is not yet available in chunkhound_native."
-            )
-
         project_root = tmp_path / "project"
         project_root.mkdir()
         target = project_root / "real_module.py"
@@ -75,7 +55,7 @@ class TestSymlinkPreservesLogicalPath:
 
         before_counts = collect_table_counts(db_dir)
         assert before_counts["files"] == 2
-        before_paths = _files_table_paths(db_dir)
+        before_paths = files_table_paths(db_dir)
         assert before_paths == {"real_module.py", "linked_module.py"}, (
             "the symlink's DB row must be keyed by its own logical path, "
             f"not its resolved target's path — got {before_paths}"
@@ -101,7 +81,7 @@ class TestSymlinkPreservesLogicalPath:
             "the symlinked file's DB row must survive an incremental "
             f"re-index with no filesystem changes, got {after_counts}"
         )
-        after_paths = _files_table_paths(db_dir)
+        after_paths = files_table_paths(db_dir)
         assert after_paths == before_paths, (
             "file paths must be stable across a no-op incremental run — "
             f"before={before_paths} after={after_paths}"

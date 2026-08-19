@@ -13,11 +13,11 @@ import asyncio
 import shutil
 from pathlib import Path
 
-import duckdb
 import pytest
 
 from tests.contracts.mock_embed import MockEmbeddingProvider
 from tests.contracts.pipeline_harness import (
+    chunk_ids_for_path,
     disconnect_registry_db,
     index_with_python,
     index_with_rust,
@@ -29,24 +29,6 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 @pytest.fixture
 def fixture_dir() -> Path:
     return FIXTURE_DIR
-
-
-def _chunk_ids_for_path(db_dir: Path, rel_path: str) -> list[int]:
-    db_file = db_dir / "chunks.db"
-    conn = duckdb.connect(str(db_file))
-    try:
-        rows = conn.execute(
-            """
-            SELECT c.id
-            FROM chunks c JOIN files f ON f.id = c.file_id
-            WHERE f.path = ?
-            ORDER BY c.id
-            """,
-            [rel_path],
-        ).fetchall()
-    finally:
-        conn.close()
-    return [int(r[0]) for r in rows]
 
 
 class TestTouchMtimeUnchanged:
@@ -92,7 +74,7 @@ class TestTouchMtimeUnchanged:
         # return stale data.
         disconnect_registry_db()
 
-        before_ids = _chunk_ids_for_path(db_dir, "main.py")
+        before_ids = chunk_ids_for_path(db_dir, "main.py")
         assert before_ids, "main.py should have chunk rows after the baseline index"
 
         # ── Step 2: Touch main.py's mtime only — no byte changes ──
@@ -120,7 +102,7 @@ class TestTouchMtimeUnchanged:
             f"got {result.chunks_written}"
         )
 
-        after_ids = _chunk_ids_for_path(db_dir, "main.py")
+        after_ids = chunk_ids_for_path(db_dir, "main.py")
         assert after_ids == before_ids, (
             "main.py's chunk rows must not be deleted+reinserted for a "
             f"touch-only mtime bump: before={before_ids}, after={after_ids}"

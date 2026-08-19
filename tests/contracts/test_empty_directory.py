@@ -22,33 +22,19 @@ from tests.contracts.pipeline_harness import collect_table_counts, default_rust_
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 
 
-def _get_rust_pipeline():
-    try:
-        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
-    except ImportError:
-        raise NotImplementedError(
-            "Rust IndexingPipeline is not yet available in chunkhound_native."
-        ) from None
-    return IndexingPipeline
-
-
 class TestEmptyDirectory:
     """Indexing an empty directory must not crash and must clean up orphans."""
 
     @pytest.mark.asyncio
     async def test_fresh_empty_directory(self):
         """Empty dir, empty DB -> 0 files, 0 chunks, no crash."""
-        IndexingPipeline = _get_rust_pipeline()
         from chunkhound.pipeline_bridge import parse_batch_callback
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
-        with (
-            tempfile.TemporaryDirectory() as tmp_dir,
-            tempfile.TemporaryDirectory() as tmp_db,
-        ):
-            empty_dir = Path(tmp_dir)
+        with tempfile.TemporaryDirectory() as tmp_db:
             db_dir = Path(tmp_db) / "db"
 
-            pipeline = IndexingPipeline(default_rust_config(empty_dir, db_dir))
+            pipeline = IndexingPipeline(default_rust_config(db_dir))
             report = pipeline.run(
                 files=[],
                 parse_batch_callback=parse_batch_callback,
@@ -65,8 +51,8 @@ class TestEmptyDirectory:
         """Fixture indexed normally, then re-run with files=[] (incremental)
         -> all files/chunks/embeddings are deleted from the DB.
         """
-        IndexingPipeline = _get_rust_pipeline()
         from chunkhound.pipeline_bridge import parse_batch_callback
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
         with tempfile.TemporaryDirectory() as tmp_db:
             db_dir = Path(tmp_db) / "db"
@@ -75,7 +61,7 @@ class TestEmptyDirectory:
             files = sorted(FIXTURE_DIR.resolve().glob("*"))
             file_entries = [(str(f), f.name) for f in files if f.is_file()]
 
-            pipeline = IndexingPipeline(default_rust_config(FIXTURE_DIR, db_dir))
+            pipeline = IndexingPipeline(default_rust_config(db_dir))
             first_report = pipeline.run(
                 files=file_entries,
                 parse_batch_callback=parse_batch_callback,

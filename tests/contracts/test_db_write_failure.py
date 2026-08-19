@@ -34,15 +34,8 @@ class TestDbWriteFailure:
 
     @pytest.mark.asyncio
     async def test_uncreatable_db_path_raises_cleanly(self):
-        try:
-            from chunkhound_native import (
-                IndexingPipeline,  # type: ignore[import-untyped]
-            )
-        except ImportError:
-            pytest.fail(
-                "Rust IndexingPipeline is not yet available in chunkhound_native."
-            )
         from chunkhound.pipeline_bridge import parse_batch_callback
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
         with tempfile.TemporaryDirectory() as tmp_root:
             # A regular file standing in the middle of the db_path — every
@@ -54,7 +47,7 @@ class TestDbWriteFailure:
             files = sorted(FIXTURE_DIR.resolve().glob("*"))
             file_entries = [(str(f), f.name) for f in files if f.is_file()]
 
-            pipeline = IndexingPipeline(default_rust_config(FIXTURE_DIR, db_dir))
+            pipeline = IndexingPipeline(default_rust_config(db_dir))
 
             with pytest.raises(RuntimeError):
                 pipeline.run(

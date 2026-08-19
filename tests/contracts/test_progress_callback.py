@@ -18,8 +18,6 @@ pseudocode.
 
 from pathlib import Path
 
-import pytest
-
 from tests.contracts.pipeline_harness import default_rust_config
 
 
@@ -40,15 +38,8 @@ class TestProgressCallback:
     """progress_callback(phase, current, total) fires the documented phase sequence."""
 
     def test_fires_expected_phases_in_order(self, tmp_path):
-        try:
-            from chunkhound_native import (
-                IndexingPipeline,  # type: ignore[import-untyped]
-            )
-        except ImportError:
-            pytest.fail(
-                "Rust IndexingPipeline is not yet available in chunkhound_native."
-            )
         from chunkhound.pipeline_bridge import parse_batch_callback
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
         file_paths = _write_fixture_files(tmp_path)
         db_dir = tmp_path / "db"
@@ -59,7 +50,7 @@ class TestProgressCallback:
         def progress_callback(phase: str, current: int, total: int, chunks: int = 0) -> None:
             calls.append((phase, current, total))
 
-        pipeline = IndexingPipeline(default_rust_config(tmp_path, db_dir))
+        pipeline = IndexingPipeline(default_rust_config(db_dir))
         report = pipeline.run(
             files=file_paths,
             parse_batch_callback=parse_batch_callback,
@@ -114,15 +105,8 @@ class TestProgressCallback:
         discards the callback's PyResult (`let _ = cb.bind(py).call1(...)`),
         so an exception is silently swallowed rather than propagated.
         """
-        try:
-            from chunkhound_native import (
-                IndexingPipeline,  # type: ignore[import-untyped]
-            )
-        except ImportError:
-            pytest.fail(
-                "Rust IndexingPipeline is not yet available in chunkhound_native."
-            )
         from chunkhound.pipeline_bridge import parse_batch_callback
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
         file_paths = _write_fixture_files(tmp_path)
         db_dir = tmp_path / "db"
@@ -131,7 +115,7 @@ class TestProgressCallback:
         def raising_progress_callback(phase: str, current: int, total: int) -> None:
             raise RuntimeError("simulated progress callback failure")
 
-        pipeline = IndexingPipeline(default_rust_config(tmp_path, db_dir))
+        pipeline = IndexingPipeline(default_rust_config(db_dir))
 
         # Must not raise.
         report = pipeline.run(

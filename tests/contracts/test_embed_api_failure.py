@@ -33,15 +33,8 @@ class TestEmbedApiFailure:
 
     @pytest.mark.asyncio
     async def test_embed_failure_stores_chunks_without_embeddings(self):
-        try:
-            from chunkhound_native import (
-                IndexingPipeline,  # type: ignore[import-untyped]
-            )
-        except ImportError:
-            pytest.fail(
-                "Rust IndexingPipeline is not yet available in chunkhound_native."
-            )
         from chunkhound.pipeline_bridge import parse_batch_callback
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
         with tempfile.TemporaryDirectory() as tmp_db:
             db_dir = Path(tmp_db) / "db"
@@ -52,7 +45,6 @@ class TestEmbedApiFailure:
 
             pipeline = IndexingPipeline(
                 default_rust_config(
-                    FIXTURE_DIR,
                     db_dir,
                     skip_embeddings=False,
                     embedding_provider="mock-fail",
@@ -99,15 +91,8 @@ class TestEmbedShortResponse:
 
     @pytest.mark.asyncio
     async def test_short_response_reports_missing_embedding(self):
-        try:
-            from chunkhound_native import (
-                IndexingPipeline,  # type: ignore[import-untyped]
-            )
-        except ImportError:
-            pytest.fail(
-                "Rust IndexingPipeline is not yet available in chunkhound_native."
-            )
         from chunkhound.pipeline_bridge import parse_batch_callback
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
         with tempfile.TemporaryDirectory() as tmp_db:
             db_dir = Path(tmp_db) / "db"
@@ -118,7 +103,6 @@ class TestEmbedShortResponse:
 
             pipeline = IndexingPipeline(
                 default_rust_config(
-                    FIXTURE_DIR,
                     db_dir,
                     skip_embeddings=False,
                     embedding_provider="mock-short",

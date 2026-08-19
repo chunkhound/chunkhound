@@ -25,8 +25,6 @@ pool silently leaking state across batches.
 import os
 from pathlib import Path
 
-import pytest
-
 from tests.contracts.pipeline_harness import (
     assert_identical,
     collect_chunk_tuples_from_duckdb,
@@ -81,15 +79,8 @@ class TestParsePoolReused:
         not depend on how a run happens to be chopped into
         parse_batch_callback() calls.
         """
-        try:
-            from chunkhound_native import (  # type: ignore[import-untyped]
-                IndexingPipeline,
-            )
-        except ImportError:
-            pytest.fail(
-                "Rust IndexingPipeline is not yet available in chunkhound_native."
-            )
         from chunkhound.pipeline_bridge import parse_batch_callback
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
         files = sorted(f for f in FIXTURE_DIR.glob("*") if f.is_file())
         file_entries = [(str(f), f.name) for f in files]
@@ -100,7 +91,7 @@ class TestParsePoolReused:
         db_single_batch = tmp_path / "db_single_batch"
         db_single_batch.mkdir()
         pipeline_single = IndexingPipeline(
-            default_rust_config(FIXTURE_DIR, db_single_batch, parse_batch_size=200)
+            default_rust_config(db_single_batch, parse_batch_size=200)
         )
         report_single = pipeline_single.run(
             files=file_entries,
@@ -113,7 +104,7 @@ class TestParsePoolReused:
         db_many_batches = tmp_path / "db_many_batches"
         db_many_batches.mkdir()
         pipeline_many = IndexingPipeline(
-            default_rust_config(FIXTURE_DIR, db_many_batches, parse_batch_size=2)
+            default_rust_config(db_many_batches, parse_batch_size=2)
         )
         report_many = pipeline_many.run(
             files=file_entries,
