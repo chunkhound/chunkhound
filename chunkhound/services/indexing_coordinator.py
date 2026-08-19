@@ -1707,11 +1707,30 @@ class IndexingCoordinator(BaseService):
                 agg_total_files = rust_result.total_files
                 agg_total_chunks = rust_result.total_chunks
                 agg_embeddings = rust_result.embeddings_generated
-                agg_errors = rust_result.errors
-                # Skipped/timeout tracking isn't reported by the pipeline yet —
-                # the coordinator's change detection already filtered unchanged files.
-                agg_skipped = 0
+                # Per-file parse timeouts arrive inside rust_result.errors as
+                # "parse timed out after {N}s" (chunkhound/pipeline_bridge.py's
+                # _parse_with_timeout, surfaced via _split_rust_error). Split
+                # those out into the skipped-due-to-timeout bucket — mirroring
+                # the Python path's equivalent split in _on_batch_store above —
+                # so run.py's timeout-exclusion prompt fires for the Rust path
+                # too. Match on the specific "parse timed out after" prefix,
+                # not a bare "timed out" substring: rust_result.errors also
+                # carries embed errors shaped like "embedding failed for N
+                # chunk(s): {message}", and {message} could itself mention a
+                # provider-side timeout — that must stay a real error, not get
+                # silently reclassified as a harmless parse skip.
+                #
+                # Non-timeout skip reasons (filtered/unsupported/config files)
+                # still aren't reported by the Rust pipeline — agg_skipped_paths
+                # stays empty, matching prior behavior for those cases.
+                agg_errors = []
                 agg_skipped_timeout = []
+                for err in rust_result.errors:
+                    if "parse timed out after" in (err.get("error") or ""):
+                        agg_skipped_timeout.append(str(err.get("file")))
+                    else:
+                        agg_errors.append(err)
+                agg_skipped = len(agg_skipped_timeout)
                 agg_skipped_paths = []
 
                 logger.info(
