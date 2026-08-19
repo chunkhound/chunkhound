@@ -25,7 +25,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from tests.contracts.pipeline_harness import index_with_rust
+from tests.contracts.pipeline_harness import chunk_ids_for_path, index_with_rust
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 
@@ -59,22 +59,6 @@ def _table_state(db_dir: Path) -> dict:
         }
     finally:
         conn.close()
-
-
-def _chunk_ids_for_path(db_dir: Path, rel_path: str) -> set[int]:
-    db_file = db_dir / "chunks.db"
-    conn = duckdb.connect(str(db_file))
-    try:
-        rows = conn.execute(
-            """
-            SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id
-            WHERE f.path = ?
-            """,
-            [rel_path],
-        ).fetchall()
-    finally:
-        conn.close()
-    return {int(r[0]) for r in rows}
 
 
 class TestUpsertNoDuplication:
@@ -125,7 +109,7 @@ class TestUpsertNoDuplication:
 
         index_with_rust(work_dir, db_dir, skip_embeddings=False)
         before = _table_state(db_dir)
-        old_chunk_ids = _chunk_ids_for_path(db_dir, "main.py")
+        old_chunk_ids = set(chunk_ids_for_path(db_dir, "main.py"))
         assert old_chunk_ids, "expected main.py to have chunks before modification"
 
         main_py = work_dir / "main.py"
@@ -136,7 +120,7 @@ class TestUpsertNoDuplication:
 
         index_with_rust(work_dir, db_dir, skip_embeddings=False, incremental=True)
         after = _table_state(db_dir)
-        new_chunk_ids = _chunk_ids_for_path(db_dir, "main.py")
+        new_chunk_ids = set(chunk_ids_for_path(db_dir, "main.py"))
 
         assert after["files_count"] == before["files_count"], (
             "files table grew — the modified file was inserted as a new "

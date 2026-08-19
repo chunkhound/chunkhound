@@ -276,26 +276,17 @@ def index_with_rust(
 
     db_dir.mkdir(parents=True, exist_ok=True)
 
-    config_dict = {
-        "db_path": str(db_dir.resolve()),
-        "db_batch_size": 100,
-        "compaction_threshold": compaction_threshold,
-        "compaction_min_size_mb": compaction_min_size_mb,
-        "disk_usage_limit_mb": disk_usage_limit_mb,
-        "parse_batch_size": parse_batch_size,
-        "parse_thread_pool_size": parse_thread_pool_size,
-        "embed_batch_size": 200,
-        "force_reindex": False,
-        "mtime_epsilon_seconds": 0.01,
-        "do_cleanup": True,
-        "skip_embeddings": skip_embeddings,
-        "per_file_timeout_secs": 3.0,
-        "per_file_timeout_min_size_kb": 128,
-        "detect_embedded_sql": True,
-        "config_file_size_threshold_kb": 20,
-        "embedding_provider": MOCK_PROVIDER,
-        "embedding_model": MOCK_MODEL,
-    }
+    config_dict = default_rust_config(
+        db_dir,
+        compaction_threshold=compaction_threshold,
+        compaction_min_size_mb=compaction_min_size_mb,
+        disk_usage_limit_mb=disk_usage_limit_mb,
+        parse_batch_size=parse_batch_size,
+        parse_thread_pool_size=parse_thread_pool_size,
+        skip_embeddings=skip_embeddings,
+        embedding_provider=MOCK_PROVIDER,
+        embedding_model=MOCK_MODEL,
+    )
 
     pipeline = IndexingPipeline(config_dict)
 
@@ -417,7 +408,6 @@ def assert_identical(result_a: IndexResult, result_b: IndexResult) -> None:
 
 
 def default_rust_config(
-    project_root: Path,
     db_dir: Path,
     **overrides: Any,
 ) -> dict[str, Any]:
@@ -425,7 +415,7 @@ def default_rust_config(
 
     Tests that drive `IndexingPipeline` directly (rather than through
     `index_with_rust`, e.g. to inject a failing callback) need this same
-    ~18-key dict. Pass only the fields a given test actually varies via
+    18-key dict. Pass only the fields a given test actually varies via
     `**overrides` instead of repeating the whole shape — a previous
     per-file copy of this dict already drifted (`parse_thread_pool_size`
     differed between two files with no test-specific reason).
@@ -435,6 +425,7 @@ def default_rust_config(
         "db_batch_size": 100,
         "compaction_threshold": 0.60,
         "compaction_min_size_mb": 10,
+        "disk_usage_limit_mb": None,
         "parse_batch_size": 200,
         "parse_thread_pool_size": 4,
         "embed_batch_size": 200,
@@ -480,3 +471,31 @@ def collect_table_counts(db_dir: Path) -> dict[str, int]:
         return {"files": files, "chunks": chunks, "embeddings": embeddings}
     finally:
         conn.close()
+
+
+def files_table_paths(db_dir: Path) -> set[str]:
+    """All `path` values currently in the `files` table."""
+    conn = duckdb.connect(str(db_dir / "chunks.db"))
+    try:
+        rows = conn.execute("SELECT path FROM files").fetchall()
+    finally:
+        conn.close()
+    return {row[0] for row in rows}
+
+
+def chunk_ids_for_path(db_dir: Path, rel_path: str) -> list[int]:
+    """Chunk ids for the file at *rel_path*, ordered by id."""
+    conn = duckdb.connect(str(db_dir / "chunks.db"))
+    try:
+        rows = conn.execute(
+            """
+            SELECT c.id
+            FROM chunks c JOIN files f ON f.id = c.file_id
+            WHERE f.path = ?
+            ORDER BY c.id
+            """,
+            [rel_path],
+        ).fetchall()
+    finally:
+        conn.close()
+    return [int(r[0]) for r in rows]

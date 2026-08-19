@@ -56,15 +56,8 @@ class TestParseErrorPerFile:
         returns an error tuple for one file — exactly the 3-tuple contract
         `_parse_one_file` implements in production.
         """
-        try:
-            from chunkhound_native import (
-                IndexingPipeline,  # type: ignore[import-untyped]
-            )
-        except ImportError:
-            pytest.fail(
-                "Rust IndexingPipeline is not yet available in chunkhound_native."
-            )
         from chunkhound.pipeline_bridge import parse_file_callback
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
         good_a = tmp_path / "good_a.py"
         good_a.write_text("def a():\n    return 1\n")
@@ -91,7 +84,7 @@ class TestParseErrorPerFile:
         file_paths = [str(good_a), str(good_b), str(bad_file)]
         file_entries = [(p, Path(p).name) for p in file_paths]
 
-        pipeline = IndexingPipeline(default_rust_config(tmp_path, db_dir))
+        pipeline = IndexingPipeline(default_rust_config(db_dir))
 
         # Must not raise — the per-file error is collected, not fatal.
         report = pipeline.run(

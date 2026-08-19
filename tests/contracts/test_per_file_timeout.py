@@ -36,14 +36,7 @@ class TestParseCallConfigWiring:
     every parse_batch_callback() call — not just detect_embedded_sql."""
 
     def test_rust_forwards_configured_values_to_callback(self, tmp_path):
-        try:
-            from chunkhound_native import (  # type: ignore[import-untyped]
-                IndexingPipeline,
-            )
-        except ImportError:
-            pytest.fail(
-                "Rust IndexingPipeline is not yet available in chunkhound_native."
-            )
+        from chunkhound_native import IndexingPipeline  # type: ignore[import-untyped]
 
         good_file = tmp_path / "good.py"
         good_file.write_text("def a():\n    return 1\n")
@@ -61,7 +54,6 @@ class TestParseCallConfigWiring:
         # forwards to the callback — proves they're actually wired through,
         # not just falling back to defaults that would happen to match.
         config_dict = default_rust_config(
-            tmp_path,
             db_dir,
             parse_thread_pool_size=7,
             per_file_timeout_secs=2.5,

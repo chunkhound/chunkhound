@@ -24,20 +24,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import duckdb
-import pytest
-
 from chunkhound.core.config.config import Config
 from chunkhound.registry import configure_registry, create_indexing_coordinator
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
-from tests.contracts.pipeline_harness import disconnect_registry_db
-
-try:
-    import chunkhound_native
-
-    _NATIVE_AVAILABLE = hasattr(chunkhound_native, "IndexingPipeline")
-except ImportError:
-    _NATIVE_AVAILABLE = False
+from tests.contracts.pipeline_harness import disconnect_registry_db, files_table_paths
 
 
 def _build_config(
@@ -55,18 +45,6 @@ def _build_config(
     )
 
 
-def _indexed_paths(db_dir: Path) -> set[str]:
-    conn = duckdb.connect(str(db_dir / "chunks.db"))
-    try:
-        rows = conn.execute("SELECT path FROM files").fetchall()
-    finally:
-        conn.close()
-    return {row[0] for row in rows}
-
-
-@pytest.mark.skipif(
-    not _NATIVE_AVAILABLE, reason="chunkhound_native.IndexingPipeline not built"
-)
 def test_rust_pipeline_force_reindex_still_cleans_up_deleted_files(
     tmp_path, monkeypatch
 ):
@@ -99,7 +77,7 @@ def test_rust_pipeline_force_reindex_still_cleans_up_deleted_files(
     service = DirectoryIndexingService(indexing_coordinator=coordinator, config=config)
     asyncio.run(service.process_directory(root, no_embeddings=True))
 
-    before = _indexed_paths(db_dir)
+    before = files_table_paths(db_dir)
     assert "keep.py" in before
     assert "deleted.py" in before
 
@@ -119,7 +97,7 @@ def test_rust_pipeline_force_reindex_still_cleans_up_deleted_files(
     )
     asyncio.run(service2.process_directory(root, no_embeddings=True))
 
-    after = _indexed_paths(db_dir)
+    after = files_table_paths(db_dir)
     assert "keep.py" in after
     assert "deleted.py" not in after, (
         "file deleted from disk should still be cleaned up on a "

@@ -22,14 +22,6 @@ import pytest
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 
 
-def _rust_pipeline_available() -> bool:
-    try:
-        from chunkhound_native import IndexingPipeline  # noqa: F401
-    except (ImportError, AttributeError):
-        return False
-    return True
-
-
 def _index_once(project_dir: Path, db_dir: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [
@@ -50,10 +42,6 @@ def _index_once(project_dir: Path, db_dir: Path) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.xdist_group(name="native_ext_fs_mutation")
-@pytest.mark.skipif(
-    not _rust_pipeline_available(),
-    reason="chunkhound_native.IndexingPipeline not built",
-)
 def test_rust_pipeline_db_survives_process_restart(tmp_path: Path) -> None:
     """Index a directory, then re-index it in a fresh process — must not crash.
 

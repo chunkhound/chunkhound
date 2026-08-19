@@ -177,8 +177,6 @@ def parse_file_callback(
     parser = create_parser_for_language(
         lang, detect_embedded_sql=detect_embedded_sql
     )
-    if parser is None:
-        return (lang.value, [])
 
     file_id = FileId(0)  # Rust assigns the real ID
     chunks = parser.parse_file(Path(file_path), file_id)
