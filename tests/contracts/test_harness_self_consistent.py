@@ -5,6 +5,7 @@ byte-identical output. Proves the comparison harness is correct before
 any Rust code exists.
 """
 
+import os
 import pytest
 import tempfile
 from pathlib import Path
@@ -65,3 +66,35 @@ class TestHarnessSelfConsistent:
         assert "settings.json" in found_files, (
             "settings.json must produce chunks"
         )
+
+    @pytest.mark.asyncio
+    async def test_index_with_python_restores_use_rust_env_var(self, monkeypatch):
+        """index_with_python() must not leak CHUNKHOUND_USE_RUST=0 process-wide.
+
+        pytest-xdist workers run many unrelated test items in one process —
+        a prior contract test forcing the Python path must not silently
+        disable the Rust default for tests that run afterward in the same
+        worker.
+        """
+        monkeypatch.setenv("CHUNKHOUND_USE_RUST", "sentinel-value")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            await index_with_python(
+                FIXTURE_DIR, Path(tmp) / "db", skip_embeddings=True
+            )
+
+        assert os.environ["CHUNKHOUND_USE_RUST"] == "sentinel-value"
+
+    @pytest.mark.asyncio
+    async def test_index_with_python_restores_unset_use_rust_env_var(
+        self, monkeypatch
+    ):
+        """If CHUNKHOUND_USE_RUST was unset beforehand, it must be unset after."""
+        monkeypatch.delenv("CHUNKHOUND_USE_RUST", raising=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            await index_with_python(
+                FIXTURE_DIR, Path(tmp) / "db", skip_embeddings=True
+            )
+
+        assert "CHUNKHOUND_USE_RUST" not in os.environ

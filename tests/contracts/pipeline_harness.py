@@ -76,55 +76,64 @@ async def index_with_python(
 
     Sets ``CHUNKHOUND_USE_RUST=0`` to explicitly force the Python path
     (the Rust pipeline is on by default; this override is intentional).
+    Restores the prior value afterward — pytest-xdist workers run many
+    test items in one process, so leaving this set process-wide would leak
+    into unrelated tests run later in the same worker.
     """
     import os
 
+    _prev_use_rust = os.environ.get("CHUNKHOUND_USE_RUST")
     os.environ["CHUNKHOUND_USE_RUST"] = "0"
+    try:
+        # Build a minimal Config — point the DB at *db_dir* and disable embeddings.
+        config = Config(
+            target_dir=fixture_dir.resolve(),
+            database={
+                "provider": "duckdb",
+                "path": str(db_dir.resolve()),
+            },
+            embeddings_disabled=skip_embeddings,
+        )
 
-    # Build a minimal Config — point the DB at *db_dir* and disable embeddings.
-    config = Config(
-        target_dir=fixture_dir.resolve(),
-        database={
-            "provider": "duckdb",
-            "path": str(db_dir.resolve()),
-        },
-        embeddings_disabled=skip_embeddings,
-    )
+        # Wire the registry with this config (creates providers, parsers, etc.)
+        configure_registry(config)
 
-    # Wire the registry with this config (creates providers, parsers, etc.)
-    configure_registry(config)
+        coordinator = create_indexing_coordinator()
 
-    coordinator = create_indexing_coordinator()
+        # Inject mock embedding provider if provided
+        if embedding_provider is not None:
+            coordinator._embedding_provider = embedding_provider
 
-    # Inject mock embedding provider if provided
-    if embedding_provider is not None:
-        coordinator._embedding_provider = embedding_provider
+        service = DirectoryIndexingService(
+            indexing_coordinator=coordinator,
+            config=config,
+        )
 
-    service = DirectoryIndexingService(
-        indexing_coordinator=coordinator,
-        config=config,
-    )
+        stats = await service.process_directory(
+            fixture_dir, no_embeddings=skip_embeddings
+        )
 
-    stats = await service.process_directory(
-        fixture_dir, no_embeddings=skip_embeddings
-    )
+        # Collect chunk tuples from the database.
+        # IMPORTANT: shut down the coordinator's DB connection before querying.
+        # On Windows, DuckDB opens database files in exclusive mode — a second
+        # duckdb.connect() would fail while DuckDBProvider holds the file.
+        chunk_tuples = _collect_chunk_tuples(coordinator)
+        coordinator._db.disconnect()
+        embedding_tuples = _collect_embedding_tuples(db_dir)
 
-    # Collect chunk tuples from the database.
-    # IMPORTANT: shut down the coordinator's DB connection before querying.
-    # On Windows, DuckDB opens database files in exclusive mode — a second
-    # duckdb.connect() would fail while DuckDBProvider holds the file.
-    chunk_tuples = _collect_chunk_tuples(coordinator)
-    coordinator._db.disconnect()
-    embedding_tuples = _collect_embedding_tuples(db_dir)
-
-    return IndexResult(
-        files_processed=stats.files_processed,
-        chunks_written=stats.chunks_created,
-        embeddings_generated=stats.embeddings_generated,
-        chunk_tuples=chunk_tuples,
-        embedding_tuples=embedding_tuples,
-        errors=[str(e) for e in (stats.errors_encountered or [])],
-    )
+        return IndexResult(
+            files_processed=stats.files_processed,
+            chunks_written=stats.chunks_created,
+            embeddings_generated=stats.embeddings_generated,
+            chunk_tuples=chunk_tuples,
+            embedding_tuples=embedding_tuples,
+            errors=[str(e) for e in (stats.errors_encountered or [])],
+        )
+    finally:
+        if _prev_use_rust is None:
+            os.environ.pop("CHUNKHOUND_USE_RUST", None)
+        else:
+            os.environ["CHUNKHOUND_USE_RUST"] = _prev_use_rust
 
 
 def _collect_chunk_tuples(coordinator) -> list[tuple[str, str, str, str, int, int]]:
