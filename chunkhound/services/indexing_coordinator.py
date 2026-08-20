@@ -2022,6 +2022,15 @@ class IndexingCoordinator(BaseService):
             return {"files": 0, "chunks": 0, "embeddings": 0}
         return await self._db.get_stats_async()
 
+    def allow_compaction_after_backfill(self) -> None:
+        """Re-enable Python compaction after a post-Rust embed backfill.
+
+        A Rust run sets ``_skip_compaction`` so DirectoryIndexingService does
+        not compact again after Rust already did. If the missing-embeddings
+        pass then writes new rows, the second compact boundary must run.
+        """
+        self._skip_compaction = False
+
     async def compact_database_with_metrics(self) -> dict[str, Any]:
         """Compact the database file unconditionally and return metrics.
 

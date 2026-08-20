@@ -129,7 +129,12 @@ class DirectoryIndexingService:
             if not no_embeddings and (not used_rust_pipeline or rust_had_errors):
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
-                stats.embeddings_generated += embed_result.get("generated", 0)
+                generated = embed_result.get("generated", 0)
+                stats.embeddings_generated += generated
+                # Rust already compacted; only the second boundary should run
+                # when this pass actually added embedding rows.
+                if used_rust_pipeline and generated > 0:
+                    self.indexing_coordinator.allow_compaction_after_backfill()
 
             # Second compaction boundary: needed when embeddings were
             # generated, or when files were processed (but the first
