@@ -82,7 +82,7 @@ supported by the search API).
   `path_filter="src/module.py"` silently matched nothing. Both layers now share
   one normalizer: file filters are right-anchored, directory filters match at
   any depth.
-
+- **PyMuPDF `fitz` import deprecation warning on stdout** — PDF parsing now imports `pymupdf` instead of the legacy `fitz` alias, which since PyMuPDF 1.28.2 prints a deprecation warning to stdout and corrupts MCP stdio clients (e.g. CURe preflight). Adds a regression test asserting parser imports write nothing to stdout.
 
 ## [5.2.0] - 2026-07-12
 
