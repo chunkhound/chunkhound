@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from loguru import logger
+
 from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.types.common import FileId
 from chunkhound.core.utils.path_utils import get_relative_path_safe
@@ -28,6 +30,75 @@ if TYPE_CHECKING:
 _embed_providers: dict[int, "EmbeddingProvider"] = {}
 _embed_loops: dict[int, "asyncio.AbstractEventLoop"] = {}
 _embed_cache_lock = threading.Lock()
+
+
+def _shutdown_embed_thread_resources() -> None:
+    """Close per-thread embedding HTTP clients and their event loops.
+
+    ``_embed_batch`` caches one OpenAI/httpx ``AsyncClient`` and one asyncio
+    loop per rayon worker OS thread. Those clients must be closed on the
+    *same* loop they were bound to, via ``loop.run_until_complete``.
+
+    ``run_until_complete`` is illegal on a thread that already has a
+    running loop (Python 3.10 ``_check_running``: "Cannot run the event
+    loop while another loop is running"). ``run_rust_pipeline`` used to
+    call this from ``async`` ``finally``, which dropped the shutdown
+    coroutine un-awaited and then closed the worker loops anyway — leaving
+    httpx Proactor transports to explode at process exit.
+
+    If this thread already has a running loop, hop to a fresh thread
+    that does not.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        _close_embed_thread_resources()
+        return
+
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            _close_embed_thread_resources()
+        finally:
+            done.set()
+
+    threading.Thread(
+        target=_run, name="chunkhound-embed-shutdown", daemon=True
+    ).start()
+    if not done.wait(timeout=30):
+        logger.debug("Embedding provider shutdown timed out")
+
+
+def _close_embed_thread_resources() -> None:
+    """Actually close cached embed providers. Caller must not hold a running loop."""
+    with _embed_cache_lock:
+        providers = dict(_embed_providers)
+        loops = dict(_embed_loops)
+        _embed_providers.clear()
+        _embed_loops.clear()
+
+    for tid, provider in providers.items():
+        loop = loops.pop(tid, None)
+        if loop is None or loop.is_closed():
+            continue
+        try:
+            loop.run_until_complete(provider.shutdown())
+        except Exception as e:
+            logger.debug(
+                "Embedding provider shutdown failed for thread {}: {}", tid, e
+            )
+        if not loop.is_closed():
+            loop.close()
+
+    for loop in loops.values():
+        if not loop.is_closed():
+            loop.close()
+
+
+atexit.register(_shutdown_embed_thread_resources)
 
 _parse_pool: ProcessPoolExecutor | None = None
 _parse_pool_lock = threading.Lock()
@@ -181,20 +252,30 @@ def parse_file_callback(
     return (lang.value, [c.to_dict() for c in chunks], None)
 
 
-def embed_batch_callback(texts: list[str]) -> list[list[float]]:
+def embed_batch_callback(
+    texts: list[str],
+    *,
+    embedding_cfg: Any = None,
+) -> list[list[float]]:
     """Parallel batch embed (called from Rust rayon threads with GIL held).
 
     Signature matches what ``embed_batch_parallel`` expects:
     ``callback.call1((texts,)) → List[List[float]]``.
 
+    ``embedding_cfg`` is bound by ``run_rust_pipeline`` via
+    ``functools.partial`` so each rayon call still looks like
+    ``callback(texts)``. It must be the coordinator's embedding
+    config for this run — not whatever happens to sit on the
+    process-wide registry.
+
     Used when ``embed_thread_pool_size > 1`` — each rayon thread
     processes one batch at a time, so the provider sees N concurrent
     API requests.
     """
-    return _embed_batch(texts)
+    return _embed_batch(texts, embedding_cfg)
 
 
-def _embed_batch(texts: list[str]) -> list[list[float]]:
+def _embed_batch(texts: list[str], embedding_cfg: Any = None) -> list[list[float]]:
     """Shared embed helper — run the async provider.embed() synchronously.
 
     Uses a provider AND an event loop cached per OS thread (keyed by
@@ -231,10 +312,8 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
     tid = threading.get_ident()
     if tid not in _embed_providers:
         from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
-        from chunkhound.registry import get_registry
 
-        config = get_registry()._config
-        if config is None or config.embedding is None:
+        if embedding_cfg is None:
             raise RuntimeError("No embedding configuration available")
         # Each embed thread gets its own provider instance here, and each
         # instance is only ever used by this one thread, one batch at a
@@ -246,7 +325,7 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
         # OpenAIEmbeddingProvider._ensure_client's pool-sizing comment),
         # ballooning total pool capacity to ~N² across N threads instead of
         # the true 1-request-per-thread usage pattern.
-        per_thread_embedding_cfg = config.embedding.model_copy(
+        per_thread_embedding_cfg = embedding_cfg.model_copy(
             update={"max_concurrent_batches": 1}
         )
         provider = EmbeddingProviderFactory.create_provider(per_thread_embedding_cfg)
@@ -635,12 +714,23 @@ async def run_rust_pipeline(
             parse_batch_callback=functools.partial(
                 parse_batch_callback, index_unknown_files=_index_unknown
             ),
-            embed_batch_callback=embed_batch_callback if not skip_embeddings else None,
+            embed_batch_callback=(
+                functools.partial(
+                    embed_batch_callback, embedding_cfg=embedding_cfg
+                )
+                if not skip_embeddings
+                else None
+            ),
             progress_callback=progress_callback,
             incremental=not force_reindex,
         )
     except Exception as e:
         raise RustPipelineError(reason=str(e)) from e
+    finally:
+        # Close per-thread httpx clients before the process event loop is
+        # torn down. Must not call loop.run_until_complete on this thread
+        # (the CLI loop is still running). See _shutdown_embed_thread_resources.
+        await asyncio.to_thread(_shutdown_embed_thread_resources)
 
     # Map PipelineReport → coordinator stats dict.
     # `report.errors` entries are Rust-formatted as "{path}: {message}"
