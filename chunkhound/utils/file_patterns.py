@@ -468,10 +468,39 @@ def walk_directory_tree(
     # ignore_engine is applied as a post-filter so Rust handles the expensive I/O walk.
     if _get_use_rust():
         _exts, _names, _has_complex = summarize_include_patterns(patterns)
-        if (
-            not _has_complex
-            and (_exts or _names)
-            and max_files is None       # Rust path doesn't support max_files cap
+        # "**/*" is the unrestricted sentinel IndexingConfig injects for
+        # index_unknown_files=True (see indexing_coordinator.py's
+        # _filter_unsupported_extensions and realtime_path_filter.py's
+        # should_index, which already treat it the same way) — it makes every
+        # other include pattern's extension restriction redundant, since
+        # include patterns are unioned, not intersected. Bypass the
+        # extension/name allow-list entirely via Rust's include_all instead
+        # of falling back to the slow Python walk for these (usually the
+        # largest, most permissive) scans.
+        _include_all = "**/*" in patterns
+        if _include_all:
+            _include_prefixes = _extract_include_prefixes(patterns)
+            # An explicit anchor into a HEAVY_DIRS-named directory (e.g.
+            # "node_modules/**/*.ts") means the caller wants that subtree
+            # included — _should_prune_heavy_dir won't prune it, but Rust's
+            # scan_files always passes skip_dirs=HEAVY_DIRS with no
+            # anchor-awareness, which would wrongly drop that entire subtree.
+            # Decline the fast path in that case so behavior matches the
+            # slow path exactly (parity, not a correctness guarantee — the
+            # slow path itself has a known pre-existing gap here: mixing an
+            # anchored pattern with an unanchored one like "**/*" makes
+            # _extract_include_prefixes/_can_prune_dir_by_prefix wrongly
+            # prune unrelated sibling directories too, since it doesn't know
+            # the unanchored pattern should force an unpruned walk. Fixing
+            # that is a separate, broader bug in the anchor-pruning heuristic
+            # itself, not specific to index_unknown_files).
+            if any(
+                not _should_prune_heavy_dir(HEAVY_DIRS, _include_prefixes, name)
+                for name in HEAVY_DIRS
+            ):
+                _include_all = False
+        if max_files is None and (
+            _include_all or (not _has_complex and (_exts or _names))
         ):
             _gitignore_excludes = (
                 [_fnmatch_to_gitignore(p) for p in exclude_patterns]
@@ -480,14 +509,18 @@ def walk_directory_tree(
             )
             _raw = _rust_scan_files(
                 str(start_path),
-                [ext.lstrip(".") for ext in _exts],
+                [] if _include_all else [ext.lstrip(".") for ext in _exts],
                 skip_dirs=list(HEAVY_DIRS),
                 exclude_patterns=_gitignore_excludes,
-                exact_names=list(_names) if _names else None,
+                exact_names=(
+                    None if _include_all else (list(_names) if _names else None)
+                ),
+                include_all=_include_all,
             )
             _log.debug(
-                "[RUST_SCANNER] scan_files root=%s exts=%s names=%s files=%d",
-                start_path, sorted(_exts), sorted(_names), len(_raw),
+                "[RUST_SCANNER] scan_files root=%s include_all=%s "
+                "exts=%s names=%s files=%d",
+                start_path, _include_all, sorted(_exts), sorted(_names), len(_raw),
             )
             # Rust's native gitignore can exclude nested git repos that appear in the
             # parent .gitignore. Detect such repos via the ignore engine's repo_roots
@@ -505,10 +538,13 @@ def walk_directory_tree(
                     if not any(p.startswith(_nr_str + os.sep) for p in _raw):
                         _extra = _rust_scan_files(
                             _nr_str,
-                            [ext.lstrip(".") for ext in _exts],
+                            [] if _include_all else [ext.lstrip(".") for ext in _exts],
                             skip_dirs=list(HEAVY_DIRS),
                             exclude_patterns=_gitignore_excludes,
-                            exact_names=list(_names) if _names else None,
+                            exact_names=None
+                            if _include_all
+                            else (list(_names) if _names else None),
+                            include_all=_include_all,
                         )
                         _log.debug(
                             "[RUST_SCANNER] nested-repo boundary re-scan: root=%s files=%d",
