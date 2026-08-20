@@ -653,15 +653,50 @@ impl DuckDbHnswBackend {
         batch: &DbWriterBatch,
         known_dims: &HashSet<u32>,
     ) -> Result<(), DbError> {
-        let by_id: Vec<i64> = batch
+        // Verify each candidate id still points at the same path before trusting it — a
+        // stale id (e.g. the diff snapshot outliving a concurrent delete/rename) must fall
+        // back to the path-keyed path below instead of dirtying/deleting an unrelated
+        // file's row. Mirrors upsert_file's `id = ? AND path = ?` fast-path guard.
+        let candidate_ids: Vec<i64> = batch
             .files
             .iter()
             .filter_map(|f| f.existing_file_id)
             .collect();
+        let mut id_to_path: HashMap<i64, String> = HashMap::new();
+        if !candidate_ids.is_empty() {
+            let ph = std::iter::repeat_n("?", candidate_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let params: Vec<duckdb::types::Value> = candidate_ids
+                .iter()
+                .map(|&id| duckdb::types::Value::BigInt(id))
+                .collect();
+            let mut stmt =
+                conn.prepare(&format!("SELECT id, path FROM files WHERE id IN ({ph})"))?;
+            let rows = stmt
+                .query_map(duckdb::params_from_iter(params), |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::DuckDb)?;
+            id_to_path.extend(rows);
+        }
+
+        let by_id: Vec<i64> = batch
+            .files
+            .iter()
+            .filter_map(|f| {
+                f.existing_file_id
+                    .filter(|id| id_to_path.get(id) == Some(&f.path))
+            })
+            .collect();
         let by_path: Vec<String> = batch
             .files
             .iter()
-            .filter(|f| f.existing_file_id.is_none())
+            .filter(|f| match f.existing_file_id {
+                None => true,
+                Some(id) => id_to_path.get(&id) != Some(&f.path),
+            })
             .map(|f| f.path.clone())
             .collect();
 
