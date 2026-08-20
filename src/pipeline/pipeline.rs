@@ -316,12 +316,9 @@ impl IndexingPipeline {
 impl IndexingPipeline {
     /// Read the DB state and compute which files changed.
     ///
-    /// Runs synchronously on the same thread/GIL guard as `run()` (called
-    /// before `py.allow_threads(...)` there), so `progress_callback` can be
-    /// invoked directly via `emit_progress` — no `clone_ref`/`with_gil`
-    /// needed. If this is ever moved onto a separate thread, it will need
-    /// the same `clone_ref` + `Python::with_gil` treatment as the
-    /// parse/embed/store callbacks below.
+    /// DuckDB snapshot, `stat`, and xxh3 hashing run under `py.allow_threads`
+    /// so the GIL is not held across that IO/CPU. Progress ticks re-acquire
+    /// it via `emit_progress_gil`, same as parse/embed/store workers.
     fn compute_diff_blocking(
         &self,
         py: Python<'_>,
@@ -354,48 +351,59 @@ impl IndexingPipeline {
             });
         }
 
-        let db_config = DbConfig {
-            db_path: db_file.to_string_lossy().into_owned(),
-            compaction_threshold: self.config.compaction_threshold,
-            compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
-            insert_batch_size: self.config.db_batch_size.max(1),
-        };
-        let backend: Box<dyn DbBackend> = create_backend(db_config);
-        let db_entries: Vec<DbFileEntry> = backend.read_file_states()?;
+        let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
+        let files_owned: Vec<PathBuf> = files.to_vec();
+        let rel_keys_owned = rel_keys.clone();
+        let db_path = db_file.to_string_lossy().into_owned();
+        let compaction_threshold = self.config.compaction_threshold;
+        let compaction_min_size_bytes = self.config.compaction_min_size_mb * 1024 * 1024;
+        let insert_batch_size = self.config.db_batch_size.max(1);
+        let mtime_epsilon = self.config.mtime_epsilon_seconds;
 
-        // Read mtime AND size in a single pass so that compute_diff (which
-        // needs mtime for change detection) and parse_one_batch (which needs
-        // mtime + size for ParsedFile) can both reuse these values instead of
-        // calling stat() again — collapsing two stat passes into one.
-        //
-        // `db_entries`' mtime already reverses the write-side local-timezone
-        // cast (see `FILE_STATE_SELECT` in duckdb_backend.rs), so it's
-        // directly comparable to these on-disk values with no further
-        // normalization needed.
-        let precomputed_stats: std::collections::HashMap<std::path::PathBuf, (u64, f64)> = files
-            .iter()
-            .filter_map(|p| {
-                let meta = std::fs::metadata(p).ok()?;
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0);
-                Some((p.clone(), (meta.len(), mtime)))
-            })
-            .collect();
+        let result = py.allow_threads(|| -> Result<DiffResult, DbError> {
+            let db_config = DbConfig {
+                db_path,
+                compaction_threshold,
+                compaction_min_size_bytes,
+                insert_batch_size,
+            };
+            let backend: Box<dyn DbBackend> = create_backend(db_config);
+            let db_entries: Vec<DbFileEntry> = backend.read_file_states()?;
 
-        let result = super::differ::compute_diff(
-            &db_entries,
-            files,
-            rel_keys,
-            self.config.mtime_epsilon_seconds,
-            Some(&precomputed_stats),
-            Some(&mut |current, total| {
-                emit_progress(py, progress_callback, "diff", current as u64, total as u64);
-            }),
-        );
+            // Read mtime AND size in a single pass so that compute_diff (which
+            // needs mtime for change detection) and parse_one_batch (which needs
+            // mtime + size for ParsedFile) can both reuse these values instead of
+            // calling stat() again — collapsing two stat passes into one.
+            //
+            // `db_entries`' mtime already reverses the write-side local-timezone
+            // cast (see `FILE_STATE_SELECT` in duckdb_backend.rs), so it's
+            // directly comparable to these on-disk values with no further
+            // normalization needed.
+            let precomputed_stats: std::collections::HashMap<PathBuf, (u64, f64)> = files_owned
+                .iter()
+                .filter_map(|p| {
+                    let meta = std::fs::metadata(p).ok()?;
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0);
+                    Some((p.clone(), (meta.len(), mtime)))
+                })
+                .collect();
+
+            Ok(super::differ::compute_diff(
+                &db_entries,
+                &files_owned,
+                &rel_keys_owned,
+                mtime_epsilon,
+                Some(&precomputed_stats),
+                Some(&mut |current, total| {
+                    emit_progress_gil(&progress_cb, "diff", current as u64, total as u64);
+                }),
+            ))
+        })?;
 
         // Unconditional final tick: small diffs (< DIFF_TICK_INTERVAL files)
         // may never hit the in-loop modulo, so the bar wouldn't otherwise
