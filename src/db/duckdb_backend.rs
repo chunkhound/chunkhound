@@ -632,11 +632,16 @@ impl DuckDbHnswBackend {
     //
     // Atomicity gap — two cases:
     //
-    // (a) Upsert files: only chunks/embeddings are deleted here; the file row survives.
-    //     If the process crashes after this COMMIT but before the write transaction below,
-    //     the file still exists in the files table with stale metadata.  Recovery is
-    //     self-healing: on the next index run the file is found in the DB and re-indexed
-    //     from disk — no data is permanently lost.
+    // (a) Upsert files: chunks/embeddings are deleted here and the file row is marked
+    //     dirty (`modified_time` and `content_hash` set to NULL) in the same COMMIT.
+    //     If the process crashes before the write transaction below, the next
+    //     incremental run sees NULL mtime and reprocesses the file (differ.rs treats
+    //     NULL modified_time as "changed" and does not hash-confirm skip). Leaving
+    //     mtime/hash intact would look "unchanged" after a force-reindex crash and
+    //     skip rewrite, leaving the file with zero chunks.
+    //     The dirty UPDATE runs *before* the chunk DELETEs in this transaction so we
+    //     do not trip DuckDB's FK check (UPDATE on files after deleting child chunks
+    //     in the same txn is rejected). Successful upsert_file overwrites the NULLs.
     //
     // (b) delete_paths (handled in Step 0a): files ARE removed from the DB.  If the process
     //     crashes after delete_paths commits but before the write transaction below commits,
@@ -678,6 +683,14 @@ impl DuckDbHnswBackend {
                     .iter()
                     .map(|&id| duckdb::types::Value::BigInt(id))
                     .collect();
+                // Dirty marker first — see comment (a) above.
+                conn.execute(
+                    &format!(
+                        "UPDATE files SET modified_time = NULL, content_hash = NULL \
+                         WHERE id IN ({ph})"
+                    ),
+                    duckdb::params_from_iter(params.clone()),
+                )?;
                 for (table_name, _dims) in &emb_tables {
                     conn.execute(
                         &format!(
@@ -700,6 +713,13 @@ impl DuckDbHnswBackend {
                     .iter()
                     .map(|p| duckdb::types::Value::Text(p.clone()))
                     .collect();
+                conn.execute(
+                    &format!(
+                        "UPDATE files SET modified_time = NULL, content_hash = NULL \
+                         WHERE path IN ({ph})"
+                    ),
+                    duckdb::params_from_iter(params.clone()),
+                )?;
                 let chunk_subquery = format!(
                     "SELECT id FROM chunks WHERE file_id IN \
                      (SELECT id FROM files WHERE path IN ({ph}))"
@@ -2221,6 +2241,67 @@ mod test_support {
 #[cfg(test)]
 mod crash_recovery_tests {
     use super::*;
+
+    #[test]
+    fn pre_delete_for_upsert_nulls_mtime_and_hash() {
+        // Crash window after prepare_write / before insert: chunks are gone and
+        // the file row must look dirty so the next incremental differ reprocesses.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+
+        let result = backend
+            .write_batch(&test_support::single_file_batch("a.py"))
+            .expect("seed write");
+        let file_id = result.file_ids[0];
+        assert!(
+            result.chunks_written > 0,
+            "seed must insert at least one chunk"
+        );
+
+        let dirty = crate::types::DbWriterBatch {
+            files: vec![crate::types::FileRecord {
+                existing_file_id: Some(file_id),
+                path: "a.py".into(),
+                mtime: Some(1.0),
+                size_bytes: Some(100),
+                content_hash: Some("abc123".into()),
+                language: Some("python".into()),
+                skip_reason: None,
+                chunks: vec![],
+            }],
+            delete_paths: vec![],
+        };
+        {
+            let conn = backend.conn_or_err().expect("conn");
+            DuckDbHnswBackend::pre_delete_for_upsert(conn, &dirty, &backend.known_dims)
+                .expect("pre_delete");
+        }
+
+        let conn = backend.conn_or_err().expect("conn");
+        let chunk_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .expect("chunk count");
+        assert_eq!(chunk_count, 0, "pre_delete must remove chunks");
+
+        let (mtime_is_null, hash_is_null): (bool, bool) = conn
+            .query_row(
+                "SELECT modified_time IS NULL, content_hash IS NULL FROM files WHERE id = ?",
+                [file_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("file dirty flags");
+        assert!(
+            mtime_is_null,
+            "modified_time must be NULL so differ reprocesses"
+        );
+        assert!(
+            hash_is_null,
+            "content_hash must be NULL so hash-confirm cannot skip"
+        );
+    }
 
     #[test]
     fn pre_swap_intent_cleared_on_open() {
