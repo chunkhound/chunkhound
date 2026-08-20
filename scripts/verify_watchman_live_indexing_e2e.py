@@ -423,6 +423,53 @@ def _editable_install_env() -> dict[str, str]:
     return env
 
 
+def _patch_locally_built_native_extension(venv_dir: Path) -> None:
+    """Overwrite a fresh venv's PyPI-resolved chunkhound_native with the
+    extension built earlier in this job by build-rust-extension/action.yml.
+
+    `uv pip install` always resolves the chunkhound-native dependency from
+    PyPI, which lags behind any native API a branch adds or changes --
+    build-rust-extension/action.yml already patches the job's own .venv for
+    this reason, but the fresh venvs this script creates need the same
+    treatment or they silently exercise a stale extension instead of the
+    change under test.
+    """
+    source_native_dir = _source_root() / "chunkhound_native"
+    built_ext = next(
+        iter(
+            sorted(source_native_dir.glob("*.so"))
+            + sorted(source_native_dir.glob("*.pyd"))
+        ),
+        None,
+    )
+    if built_ext is None:
+        raise FileNotFoundError(
+            "No locally-built chunkhound_native extension (*.so/*.pyd) found "
+            f"in {source_native_dir} -- refusing to verify against a stale "
+            "PyPI chunkhound-native."
+        )
+    site_native_dirs = list(venv_dir.glob("**/site-packages/chunkhound_native"))
+    if not site_native_dirs:
+        raise FileNotFoundError(
+            f"No chunkhound_native site-packages directory found under {venv_dir}"
+        )
+    site_native_dir = site_native_dirs[0]
+
+    def _replace(dest: Path, source: Path) -> None:
+        # Overwrite via unlink+copy, not copy2 over the existing path: uv
+        # installs by hardlinking from its shared cache, so writing through
+        # the existing inode would poison that cache for every other venv.
+        dest.unlink(missing_ok=True)
+        shutil.copy2(source, dest)
+
+    _replace(site_native_dir / built_ext.name, built_ext)
+    _replace(site_native_dir / "__init__.py", source_native_dir / "__init__.py")
+    for runtime_lib_name in ("libduckdb.so", "libduckdb.dylib", "duckdb.dll"):
+        runtime_lib = source_native_dir / runtime_lib_name
+        if runtime_lib.is_file():
+            _replace(site_native_dir / runtime_lib_name, runtime_lib)
+
+
 def _install_into_venv(
     *,
     venv_dir: Path,
@@ -453,6 +500,7 @@ def _install_into_venv(
         text=True,
         env=_editable_install_env(),
     )
+    _patch_locally_built_native_extension(venv_dir)
     chunkhound_exe = _chunkhound_path(venv_dir)
     if not chunkhound_exe.is_file():
         raise FileNotFoundError(
@@ -996,6 +1044,7 @@ async def _verify_wheel(wheel_path: Path) -> None:
             capture_output=True,
             text=True,
         )
+        _patch_locally_built_native_extension(venv_dir)
         chunkhound_exe = _chunkhound_path(venv_dir)
         if not chunkhound_exe.is_file():
             raise FileNotFoundError(
