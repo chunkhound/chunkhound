@@ -9,8 +9,7 @@ on:
       # tag push by maintainer is the human gate (protected via tag ruleset)
 
 permissions:
-  id-token: write  # OIDC Trusted Publishing
-  issues: write    # gh issue create alert if publish-rc-native fails
+  contents: read  # default for build jobs; publish-rc/publish-rc-native elevate below
 
 jobs:
   validate-tag:
@@ -118,6 +117,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     timeout-minutes: 15
+    permissions:
+      id-token: write  # OIDC Trusted Publishing
 
     steps:
       - name: Download main distribution artifacts
@@ -140,6 +141,9 @@ jobs:
     # entry referencing this environment name).
     environment: pypi-native
     timeout-minutes: 15
+    permissions:
+      id-token: write  # OIDC Trusted Publishing (chunkhound-native PyPI project)
+      issues: write    # gh issue create alert if publish-rc-native fails
 
     steps:
       - name: Download native wheel artifacts
@@ -164,7 +168,7 @@ jobs:
         # API to yank a release automatically (yanking is a manual, web-UI-
         # only action) -- so the best CI can do is make sure a human finds
         # out immediately instead of via a user's broken-install report.
-        # Needs the workflow-level `issues: write` permission declared above.
+        # Needs the job-level `issues: write` permission declared above.
         if: failure()
         uses: ./.github/actions/alert-native-publish-failure
         with:

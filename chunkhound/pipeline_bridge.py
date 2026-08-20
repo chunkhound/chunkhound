@@ -322,7 +322,7 @@ def _parse_file_worker_for_timeout(
 
 
 def _parse_with_timeout(
-    file_path: str, cfg: "_ParsePoolConfig"
+    file_path: str, cfg: _ParsePoolConfig
 ) -> tuple[str, list[dict], str | None, str | None]:
     """Parse one file in a dedicated child process with a wall-clock timeout.
 
@@ -375,7 +375,7 @@ def _parse_with_timeout(
 
 
 def _parse_one_file(
-    args: tuple[str, "_ParsePoolConfig"],
+    args: tuple[str, _ParsePoolConfig],
 ) -> tuple[str, list[dict], str | None, str | None]:
     """Parse a single file — module-level so ProcessPoolExecutor can pickle it.
 
