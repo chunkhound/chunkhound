@@ -58,7 +58,8 @@ runs:
           cp chunkhound_native/__init__.py "$SITE_CN/__init__.py"
           echo "Patched $SITE_CN with locally-built extension ($BUILT_SO)"
         else
-          echo "WARNING: Could not patch site-packages chunkhound_native (BUILT_SO=$BUILT_SO, SITE_CN=$SITE_CN)"
+          echo "ERROR: Could not patch site-packages chunkhound_native (BUILT_SO=$BUILT_SO, SITE_CN=$SITE_CN) -- refusing to run CI against a stale/unpatched extension"
+          exit 1
         fi
         # Copy the downloaded DuckDB runtime library next to the compiled
         # extension -- source tree and the site-packages copy patched in
