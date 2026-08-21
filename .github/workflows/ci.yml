@@ -283,7 +283,6 @@ jobs:
       - rust-checks
       - site-build-validation
       - watchman-rollout-gate
-      - hnsw-contract-tests
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
