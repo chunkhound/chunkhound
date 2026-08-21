@@ -42,6 +42,12 @@ approximate pagination contract:
 - Candidate-budget exhaustion can return a short page. `has_more=False` means
   no next page was materialized, not that every match was examined; narrow the
   query or path filter when this occurs.
+- **Multi-hop materialization limit (500 results)** — Multi-hop semantic search
+  accumulates results across hops and rejects pages whose `offset + page_size`
+  exceeds `min(semantic_result_window_cap, result_limit)`. With HNSW enabled the
+  provider cap is 1000 and the default `result_limit` is 500, so the effective
+  boundary is 500. Reduce `--page-size` or `--offset`, or increase
+  `multi_hop_result_limit` when a page exceeds that boundary.
 
 Semantic search also requires a cosine-compatible HNSW index; all vector
 search operations use cosine similarity (`l2sq` and `ip` metrics are not

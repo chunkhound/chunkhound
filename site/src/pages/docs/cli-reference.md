@@ -126,6 +126,15 @@ chunkhound search "database migration" --commit-range main..HEAD
 > short page; `has_more: false` means no next page was materialized, so narrow
 > the query or path filter. With HNSW disabled, exact linear scans apply and
 > the `[0, 1000)` window does not bound results. Threshold is an inclusive similarity floor (score >= threshold); convert legacy distance ceiling via 1 - distance.
+>
+> **Multi-hop pagination:** Multi-hop semantic search (auto-selected when the
+> embedding provider supports reranking, or forced via `--multi-hop`) enforces
+> `multi_hop_result_limit` results (default 500). With HNSW enabled, the 1,000
+> result window is also enforced, so the effective limit is the lower value.
+> Exact mode has no provider window cap; exhaustive exact mode has no
+> materialization cap. Pages whose `offset + page_size` exceeds the applicable
+> limit are rejected; reduce `--page-size` or `--offset`, or raise
+> `CHUNKHOUND_RESEARCH_MULTI_HOP_RESULT_LIMIT`.
 
 ## `chunkhound websearch`
 

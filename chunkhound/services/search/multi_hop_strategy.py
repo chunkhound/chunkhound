@@ -20,6 +20,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.exceptions import MaterializationLimitError
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 from chunkhound.services.search.semantic_window import (
@@ -100,11 +101,13 @@ class MultiHopStrategy:
         """Apply config defaults for time_limit and result_limit."""
         if self._config:
             effective_time_limit = (
-                time_limit if time_limit is not None
+                time_limit
+                if time_limit is not None
                 else self._config.get_effective_time_limit()
             )
             effective_result_limit = (
-                result_limit if result_limit is not None
+                result_limit
+                if result_limit is not None
                 else self._config.get_effective_result_limit()
             )
         else:
@@ -130,7 +133,7 @@ class MultiHopStrategy:
     ) -> None:
         """Reject pages that cannot be fully materialized."""
         if materializable_cap is not None and requested_end > materializable_cap:
-            raise ValueError(
+            raise MaterializationLimitError(
                 f"Requested result window ends at {requested_end}, beyond the "
                 f"multi-hop materialization limit of {materializable_cap}"
             )
@@ -363,8 +366,11 @@ class MultiHopStrategy:
         request: _ExpansionRequest,
     ) -> bool:
         candidates = self._find_new_candidates(
-            top_candidates, seen_ids,
-            request.provider, request.model, request.path_filter,
+            top_candidates,
+            seen_ids,
+            request.provider,
+            request.model,
+            request.path_filter,
         )
         if not candidates:
             logger.debug("Dynamic expansion terminated: no new candidates found")
@@ -613,8 +619,14 @@ class MultiHopStrategy:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform dynamic multi-hop semantic search with reranking."""
         request = _SearchRequest(
-            query=query, page_size=page_size, offset=offset, threshold=threshold,
-            provider=provider, model=model, path_filter=path_filter,
-            time_limit=time_limit, result_limit=result_limit,
+            query=query,
+            page_size=page_size,
+            offset=offset,
+            threshold=threshold,
+            provider=provider,
+            model=model,
+            path_filter=path_filter,
+            time_limit=time_limit,
+            result_limit=result_limit,
         )
         return await self._search_request(request, time.perf_counter())

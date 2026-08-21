@@ -5,6 +5,7 @@ from typing import cast
 
 import pytest
 
+from chunkhound.core.exceptions import MaterializationLimitError
 from chunkhound.core.types.common import Language
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
@@ -233,7 +234,7 @@ async def test_multi_hop_rejects_page_beyond_default_materialization_limit() -> 
     """The default 500-result accumulation limit is an explicit page boundary."""
     service, database = _build_deep_pagination_service()
 
-    with pytest.raises(ValueError, match="materialization limit of 500"):
+    with pytest.raises(MaterializationLimitError, match="materialization limit of 500"):
         await service.search_semantic("deep query", page_size=2, offset=499)
 
     assert database.semantic_calls == []

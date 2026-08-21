@@ -34,6 +34,7 @@ except (ImportError, AttributeError):
     from typing_extensions import NotRequired
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import MaterializationLimitError
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
@@ -757,14 +758,21 @@ async def search_impl(
             raise ValueError("No default embedding provider configured.")
 
         # Perform semantic search
-        results, pagination = await services.search_service.search_semantic(
-            query=query,
-            page_size=page_size,
-            offset=offset,
-            provider=provider_name,
-            model=model_name,
-            path_filter=path,
-        )
+        try:
+            results, pagination = await services.search_service.search_semantic(
+                query=query,
+                page_size=page_size,
+                offset=offset,
+                provider=provider_name,
+                model=model_name,
+                path_filter=path,
+            )
+        except MaterializationLimitError as e:
+            raise MaterializationLimitError(
+                f"{e}. Reduce page_size or offset; multi-hop search must fit "
+                "within its configured result limit.",
+                guidance_present=True,
+            ) from e
     else:  # regex
         # Perform regex search; pass query so results are scored by cosine similarity
         results, pagination = await services.search_service.search_regex_async(
