@@ -9,7 +9,7 @@ on:
       # tag push by maintainer is the human gate (protected via tag ruleset)
 
 permissions:
-  contents: read  # default for build jobs; publish-rc/publish-rc-native elevate below
+  contents: read  # default for build jobs; publish jobs elevate below
 
 jobs:
   validate-tag:
@@ -50,6 +50,7 @@ jobs:
           name: release-rc-dist-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
+          overwrite: true
 
   build-runtime-wheels:
     needs: validate-tag
@@ -80,6 +81,7 @@ jobs:
           name: release-rc-dist-${{ matrix.os }}
           path: dist/*.whl
           if-no-files-found: error
+          overwrite: true
 
   build-native-wheel:
     needs: validate-tag
@@ -111,9 +113,120 @@ jobs:
           name: release-rc-dist-native-${{ matrix.os }}
           path: dist/*.whl
           if-no-files-found: error
+          overwrite: true
+
+  validate-release:
+    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Download matching main wheel for validation
+        uses: actions/download-artifact@v4
+        with:
+          name: release-rc-dist-${{ matrix.os }}
+          path: main-dist
+
+      - name: Download matching native wheel for validation
+        uses: actions/download-artifact@v4
+        with:
+          name: release-rc-dist-native-${{ matrix.os }}
+          path: native-dist
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Validate combined wheel installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          main_wheels=(main-dist/*.whl)
+          native_wheels=(native-dist/*.whl)
+          if [[ ${#main_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one matching main wheel, found ${#main_wheels[@]}"
+            exit 1
+          fi
+          if [[ ${#native_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one matching native wheel, found ${#native_wheels[@]}"
+            exit 1
+          fi
+
+          uv python install 3.12
+          workspace_dir="$(pwd)"
+          validation_dir="$(mktemp -d)"
+          cd "$validation_dir"
+          uv run --no-project --python 3.12 \
+            --with "$workspace_dir/main-dist"/*.whl \
+            --with "$workspace_dir/native-dist"/*.whl \
+            python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+
+          from chunkhound_native import (
+              IndexingPipeline,
+              ParseCallConfig,
+              PipelineReport,
+              scan_files,
+          )
+
+          config_template = {
+              "db_batch_size": 100,
+              "compaction_threshold": 0.60,
+              "compaction_min_size_mb": 10,
+              "disk_usage_limit_mb": None,
+              "parse_batch_size": 200,
+              "parse_thread_pool_size": 2,
+              "embed_batch_size": 200,
+              "force_reindex": False,
+              "mtime_epsilon_seconds": 0.01,
+              "do_cleanup": True,
+              "skip_embeddings": True,
+              "per_file_timeout_secs": 3.0,
+              "per_file_timeout_min_size_kb": 128,
+              "detect_embedded_sql": True,
+              "config_file_size_threshold_kb": 20,
+              "embedding_provider": "",
+              "embedding_model": "",
+          }
+
+          with TemporaryDirectory() as temp_dir:
+              root = Path(temp_dir)
+              source_file = root / "sample.py"
+              source_file.write_text("def sample():\n    return 1\n")
+              discovered = scan_files(str(root), ["py"])
+              assert str(source_file) in discovered
+
+              db_dir = root / "db"
+              db_dir.mkdir()
+              config = {**config_template, "db_path": str(db_dir)}
+              seen_parse_configs = []
+
+              def parse_batch_callback(file_paths, parse_config):
+                  assert isinstance(parse_config, ParseCallConfig)
+                  seen_parse_configs.append(parse_config)
+                  return [("python", [], None) for _ in file_paths]
+
+              pipeline = IndexingPipeline(config)
+              report = pipeline.run(
+                  files=[(str(source_file), "sample.py")],
+                  parse_batch_callback=parse_batch_callback,
+                  embed_batch_callback=None,
+                  progress_callback=None,
+                  incremental=False,
+              )
+
+              assert isinstance(report, PipelineReport)
+              assert not report.errors
+              assert seen_parse_configs
+          PY
 
   publish-rc:
-    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    needs: [publish-rc-native, build-sdist, build-runtime-wheels]
     runs-on: ubuntu-latest
     environment: pypi
     timeout-minutes: 15
@@ -132,20 +245,27 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true
 
   publish-rc-native:
-    needs: [publish-rc]
+    needs: [build-native-wheel, validate-release]
     runs-on: ubuntu-latest
     # Separate environment so this job carries an OIDC token scoped to the
     # chunkhound-native PyPI project (each project needs its own trusted-publisher
-    # entry referencing this environment name).
+    # entry referencing this environment name). Native publication is deliberately
+    # first so the main package cannot become installable before its required
+    # native wheels are available.
     environment: pypi-native
     timeout-minutes: 15
     permissions:
+      contents: read
       id-token: write  # OIDC Trusted Publishing (chunkhound-native PyPI project)
       issues: write    # gh issue create alert if publish-rc-native fails
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download native wheel artifacts
         uses: actions/download-artifact@v4
         with:
@@ -153,23 +273,98 @@ jobs:
           path: dist-native
           merge-multiple: true
 
+      - name: Validate native wheel versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import zipfile
+          from email.parser import Parser
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          match = re.fullmatch(r"v(\d+\.\d+\.\d+(?:[a-zA-Z].*)?)", tag)
+          if match is None:
+              raise SystemExit(f"Malformed release tag: {tag!r}")
+          expected_version = match.group(1)
+
+          wheels = sorted(Path("dist-native").glob("*.whl"))
+          if not wheels:
+              raise SystemExit("No native wheel artifacts were downloaded")
+
+          for wheel in wheels:
+              parts = wheel.name.removesuffix(".whl").split("-")
+              if len(parts) != 5 or parts[0] != "chunkhound_native":
+                  raise SystemExit(f"Malformed native wheel filename: {wheel.name}")
+              if parts[1] != expected_version:
+                  raise SystemExit(
+                      f"Native wheel {wheel.name} has filename version {parts[1]!r}; "
+                      f"expected {expected_version!r}"
+                  )
+
+              try:
+                  with zipfile.ZipFile(wheel) as archive:
+                      metadata_files = [
+                          name
+                          for name in archive.namelist()
+                          if name.endswith(".dist-info/METADATA")
+                      ]
+                      if len(metadata_files) != 1:
+                          raise SystemExit(
+                              f"Native wheel {wheel.name} has malformed metadata"
+                          )
+                      metadata = Parser().parsestr(
+                          archive.read(metadata_files[0]).decode("utf-8")
+                      )
+              except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+                  raise SystemExit(f"Cannot read native wheel {wheel.name}: {exc}") from exc
+
+              package_name = metadata.get("Name")
+              normalized_name = re.sub(r"[-_.]+", "-", package_name or "").lower()
+              if normalized_name != "chunkhound-native":
+                  raise SystemExit(
+                      f"Native wheel {wheel.name} has package name "
+                      f"{package_name!r}"
+                  )
+              if metadata.get("Version") != expected_version:
+                  raise SystemExit(
+                      f"Native wheel {wheel.name} has metadata version "
+                      f"{metadata.get('Version')!r}; expected {expected_version!r}"
+                  )
+          PY
+
       - name: Publish chunkhound-native to PyPI
         id: publish-rc-native
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist-native
+          skip-existing: true
 
       - name: Alert on native publish failure
-        # chunkhound is already live on PyPI at this point (publish-rc-native
-        # runs after publish-rc, deliberately, so we never leave a good
-        # chunkhound pre-release un-shippable just because the native wheel
-        # failed). But that leaves a real window where chunkhound is live
-        # with no matching chunkhound-native release, and there's no PyPI
-        # API to yank a release automatically (yanking is a manual, web-UI-
-        # only action) -- so the best CI can do is make sure a human finds
-        # out immediately instead of via a user's broken-install report.
-        # Needs the job-level `issues: write` permission declared above.
+        # Native publication runs before publish-rc, so a failure prevents the
+        # main package from being released. The alert still makes failures in
+        # publication or the pre-publish version gate visible to maintainers.
         if: failure()
+        uses: ./.github/actions/alert-native-publish-failure
+        with:
+          tag: ${{ github.ref_name }}
+
+  alert-native-prepublish-failure:
+    needs: [build-native-wheel, validate-release]
+    if: ${{ always() && (needs['build-native-wheel'].result == 'failure' || needs['validate-release'].result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Alert on native build or validation failure
         uses: ./.github/actions/alert-native-publish-failure
         with:
           tag: ${{ github.ref_name }}
