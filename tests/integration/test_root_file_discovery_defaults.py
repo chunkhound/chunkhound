@@ -15,6 +15,7 @@ from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.utils.file_patterns import normalize_include_patterns
+from tests.integration.conftest import seed_py_and_png
 
 
 @pytest.mark.asyncio
@@ -78,12 +79,7 @@ async def test_custom_directory_wildcard_include_still_filters_unsupported_exten
         None,
     )
 
-    pkg_dir = tmp_path / "src" / "pkg"
-    pkg_dir.mkdir(parents=True)
-    py_file = pkg_dir / "module.py"
-    py_file.write_text("print('ok')\n")
-    png_file = pkg_dir / "image.png"
-    png_file.write_bytes(b"\x89PNG\r\n\x1a\n")
+    py_file, png_file = seed_py_and_png(tmp_path)
 
     files = await coordinator._discover_files(
         tmp_path,
@@ -121,12 +117,7 @@ async def test_index_unknown_files_disables_extension_filter_for_custom_include(
         SimpleNamespace(indexing=cfg),
     )
 
-    pkg_dir = tmp_path / "src" / "pkg"
-    pkg_dir.mkdir(parents=True)
-    py_file = pkg_dir / "module.py"
-    py_file.write_text("print('ok')\n")
-    png_file = pkg_dir / "image.png"
-    png_file.write_bytes(b"\x89PNG\r\n\x1a\n")
+    py_file, png_file = seed_py_and_png(tmp_path)
 
     files = await coordinator._discover_files(
         tmp_path,
@@ -225,4 +216,3 @@ async def test_explicit_pattern_carveout_is_case_insensitive(tmp_path, monkeypat
         f"Case-mismatched but explicitly-included extension should still be "
         f"discovered. Files: {[p.name for p in files]}"
     )
-

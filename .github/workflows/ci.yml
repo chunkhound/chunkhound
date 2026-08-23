@@ -225,7 +225,13 @@ jobs:
           skip-tag-version-patch: 'true'
 
   pages-artifact:
-    needs: [site-build, tests, rust-checks, site-build-validation, watchman-rollout-gate]
+    needs:
+      - site-build
+      - tests
+      - rust-checks
+      - site-build-validation
+      - watchman-rollout-gate
+      - native-wheel-smoke-arm64
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

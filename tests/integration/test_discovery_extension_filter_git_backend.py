@@ -16,6 +16,7 @@ from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.utils.file_patterns import normalize_include_patterns
+from tests.integration.conftest import seed_py_and_png
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 
@@ -33,10 +34,7 @@ async def test_git_backend_filters_unsupported_extensions_under_custom_include(
     tmp_path: Path,
 ):
     repo = tmp_path / "repo"
-    pkg_dir = repo / "src" / "pkg"
-    pkg_dir.mkdir(parents=True)
-    (pkg_dir / "module.py").write_text("print('ok')\n")
-    (pkg_dir / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    py_file, png_file = seed_py_and_png(repo)
 
     _git(repo, "init")
     _git(repo, "config", "user.email", "ci@example.com")
@@ -65,8 +63,8 @@ async def test_git_backend_filters_unsupported_extensions_under_custom_include(
         parallel_discovery=False,
     )
 
-    assert pkg_dir / "module.py" in files
-    assert pkg_dir / "image.png" not in files, (
+    assert py_file in files
+    assert png_file not in files, (
         f"Unsupported-extension file leaked through git-backend discovery. "
         f"Files: {[p.name for p in files]}"
     )

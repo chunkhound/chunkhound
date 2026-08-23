@@ -6,8 +6,8 @@ transitions for ``"diff"``, ``"parse"``, ``"embed"``, ``"write-prepare"``,
 ``"write-data"``, one of ``"write-index"``/``"write-compact"``,
 ``"write-done"``, and ``"done"``.
 
-Note: the design doc's original contract (`docs/rust-pipeline-architecture.html`
-§5.3) specified a 4-arg callback returning `bool` to support abort-on-`False`.
+Note: the original design specified a 4-arg callback returning `bool` to
+support abort-on-`False`.
 That was never implemented — `emit_progress`/`emit_progress_gil` call the
 Python callback with exactly 3 positional args and discard the return value
 via `let _ = cb.bind(py).call1(...)`, so a callback's return value is ignored

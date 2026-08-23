@@ -403,8 +403,6 @@ class EmbeddingConfig(BaseSettings):
         base_config["rerank_ssl_verify"] = self.rerank_ssl_verify
         if self.rerank_batch_size is not None:
             base_config["rerank_batch_size"] = self.rerank_batch_size
-        if self.max_concurrent_batches is not None:
-            base_config["max_concurrent_batches"] = self.max_concurrent_batches
 
         # Add matryoshka configuration if set
         if self.output_dims is not None:

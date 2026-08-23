@@ -22,6 +22,7 @@ from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
+from tests.integration.conftest import seed_py_and_png
 
 
 def _make_coordinator(
@@ -48,10 +49,7 @@ async def test_disabling_index_unknown_files_cleans_up_stale_unsupported_rows(
     tmp_path: Path,
 ):
     project = tmp_path / "project"
-    pkg_dir = project / "src" / "pkg"
-    pkg_dir.mkdir(parents=True)
-    (pkg_dir / "module.py").write_text("print('ok')\n")
-    (pkg_dir / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    seed_py_and_png(project)
 
     db = DuckDBProvider(":memory:", base_directory=project)
     db.connect()
