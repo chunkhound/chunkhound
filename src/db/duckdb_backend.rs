@@ -1192,8 +1192,8 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                         // empty database and orphan the real data at
                         // old_path. Same recovery as the "phase1" case.
                         let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
-                        if old_path.exists() {
-                            let _ = std::fs::rename(&old_path, &db_path);
+                        if old_path.exists() && !db_path.exists() {
+                            std::fs::rename(&old_path, &db_path)?;
                         }
                         let _ = std::fs::remove_file(&intent_path);
                     }
