@@ -109,7 +109,7 @@ class Config(BaseModel):
     config_file: Path | None = Field(default=None, exclude=True)
 
     @staticmethod
-    def _get_global_config_candidates() -> list[Path]:
+    def get_global_config_candidates() -> list[Path]:
         """Return preferred locations for global/user defaults config files.
 
         These provide defaults that apply across projects without needing
@@ -158,7 +158,7 @@ class Config(BaseModel):
                 config pipeline to construct restricted-merge snapshots.
             global_override: When non-None, the global-JSON layer uses this
                 pre-parsed dict instead of reading a candidate file from disk.
-                Used exclusively via ``_snapshot_from_global_dict`` by the
+                Used exclusively via ``snapshot_from_global_dict`` by the
                 remote-config pipeline to build snapshots without a speculative
                 disk write.
             **kwargs: Direct overrides for testing or special cases
@@ -327,7 +327,7 @@ class Config(BaseModel):
                 )
                 global_config_file = None
         else:
-            for candidate in self._get_global_config_candidates():
+            for candidate in self.get_global_config_candidates():
                 if candidate.exists() and candidate.is_file():
                     global_config_file = candidate
                     config_data["global_config_file"] = global_config_file.resolve()
@@ -571,7 +571,7 @@ class Config(BaseModel):
         return cls(args=None)
 
     @classmethod
-    def _snapshot_from_global_dict(cls, global_dict: dict[str, Any]) -> "Config":
+    def snapshot_from_global_dict(cls, global_dict: dict[str, Any]) -> "Config":
         """Build a snapshot Config whose global-JSON layer is ``global_dict``.
 
         Applies env + provided global dict; skips local_config, config_file,

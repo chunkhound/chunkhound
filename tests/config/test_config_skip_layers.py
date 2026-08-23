@@ -153,5 +153,5 @@ def test_snapshot_from_global_dict_does_not_mutate_caller_dict(proj: Path) -> No
     """
     original: dict[str, object] = {"indexing": {"exclude": ["*.tmp"]}}
     snapshot_input = {"indexing": {"exclude": ["*.tmp"]}}
-    Config._snapshot_from_global_dict(snapshot_input)
+    Config.snapshot_from_global_dict(snapshot_input)
     assert snapshot_input == original

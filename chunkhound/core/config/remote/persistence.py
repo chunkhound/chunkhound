@@ -3,7 +3,7 @@
 Contract:
 - Target file resolution: ``CHUNKHOUND_GLOBAL_CONFIG_FILE`` wins if set;
   otherwise the first existing candidate from
-  ``Config._get_global_config_candidates()``. If none exist, fall back to
+  ``Config.get_global_config_candidates()``. If none exist, fall back to
   the **last** candidate — ``~/.chunkhound.json`` — because that's the
   path the loader will discover on the *next* run, keeping fetch and read
   in agreement.
@@ -45,7 +45,7 @@ def resolve_target() -> Path:
     env_global = os.getenv("CHUNKHOUND_GLOBAL_CONFIG_FILE")
     if env_global:
         return Path(env_global).resolve()
-    candidates = Config._get_global_config_candidates()
+    candidates = Config.get_global_config_candidates()
     for candidate in candidates:
         if candidate.exists() and candidate.is_file():
             return candidate.resolve()

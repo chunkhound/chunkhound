@@ -10,7 +10,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect HOME so `_get_global_config_candidates` targets tmp_path
+    """Redirect HOME so `get_global_config_candidates` targets tmp_path
     and strip CHUNKHOUND_* env leakage between tests.
 
     ``tmp_path`` is pre-resolved so comparisons against the pipeline's

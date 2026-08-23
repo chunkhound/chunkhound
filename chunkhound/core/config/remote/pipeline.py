@@ -169,7 +169,7 @@ async def _run(args: Any, command: str) -> None:
     # global JSON so `when.existing` reflects reality, not mid-pipeline
     # mutations.
     try:
-        half_merged = Config._snapshot_from_global_dict(on_disk_dict)
+        half_merged = Config.snapshot_from_global_dict(on_disk_dict)
     except (ValueError, ValidationError) as exc:
         log_if_not_mcp(
             "WARNING",
@@ -214,7 +214,7 @@ async def _run(args: Any, command: str) -> None:
     # Config as `half_merged` (identical layer selector, same on_disk_dict,
     # no env mutation between here and there) — reuse it.
     try:
-        post_snapshot = Config._snapshot_from_global_dict(working_copy)
+        post_snapshot = Config.snapshot_from_global_dict(working_copy)
     except (ValueError, ValidationError) as exc:
         log_if_not_mcp(
             "ERROR",
