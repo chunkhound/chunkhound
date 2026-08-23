@@ -553,10 +553,14 @@ async def run_rust_pipeline(
     # fragmentation_threshold_pct is a percentage (30.0 = 30%); Rust's
     # compaction_threshold expects a ratio (0.30) — same setting the Python
     # indexing path already honors via --fragmentation-threshold-pct.
-    fragmentation_pct = _cfg_or(
-        database_cfg, "fragmentation_threshold_pct", 30.0, float
+    # An explicit None means "never auto-compact" (see DatabaseConfig's
+    # docstring and duckdb_provider.py's _fragmentation_exceeds_threshold) —
+    # unlike _cfg_or's other uses, that None must survive to Rust as None,
+    # not get coerced to the 30.0 default.
+    _fragmentation_pct = getattr(database_cfg, "fragmentation_threshold_pct", 30.0)
+    compaction_threshold = (
+        None if _fragmentation_pct is None else _fragmentation_pct / 100.0
     )
-    compaction_threshold = fragmentation_pct / 100.0
 
     embedding_provider = _cfg_or(embedding_cfg, "provider", "", str)
     embedding_model = _cfg_or(embedding_cfg, "model", "", str)

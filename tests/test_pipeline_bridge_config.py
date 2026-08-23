@@ -114,6 +114,36 @@ async def test_missing_fragmentation_threshold_pct_defaults_to_30_pct(
 
 
 @pytest.mark.asyncio
+async def test_explicit_none_fragmentation_threshold_pct_disables_compaction(
+    tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
+) -> None:
+    """fragmentation_threshold_pct=None means "never auto-compact" (see
+    DatabaseConfig's docstring), not "unset — use the 30% default". Rust's
+    compaction_threshold must receive that None verbatim so it can disable
+    the auto-compaction check entirely, matching what the Python indexing
+    path already does via duckdb_provider.py's
+    _fragmentation_exceeds_threshold(threshold=None) -> False.
+    """
+    from chunkhound import pipeline_bridge
+
+    config = SimpleNamespace(
+        database=SimpleNamespace(fragmentation_threshold_pct=None),
+        indexing=SimpleNamespace(),
+        embedding=None,
+    )
+
+    await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=True,
+        config=config,
+    )
+
+    assert fake_native_pipeline.captured_config["compaction_threshold"] is None
+
+
+@pytest.mark.asyncio
 async def test_explicit_zero_config_file_threshold_disables_gate(
     tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
 ) -> None:
