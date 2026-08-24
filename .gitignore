@@ -351,3 +351,6 @@ site/test-results/
 
 # xwin (Windows SDK cross-compile cache)
 .xwin-cache/
+
+# Codex CLI
+.codex/
