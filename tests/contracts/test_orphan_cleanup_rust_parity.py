@@ -29,11 +29,20 @@ from pathlib import Path
 from chunkhound.core.config.config import Config
 from chunkhound.registry import configure_registry, create_indexing_coordinator
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
-from tests.contracts.pipeline_harness import disconnect_registry_db, files_table_paths
+from tests.contracts.pipeline_harness import (
+    collect_table_counts,
+    disconnect_registry_db,
+    files_table_paths,
+)
 
 
 def _build_config(
-    root: Path, db_dir: Path, *, exclude: list[str], force_reindex: bool = False
+    root: Path,
+    db_dir: Path,
+    *,
+    exclude: list[str],
+    force_reindex: bool = False,
+    cleanup: bool = True,
 ) -> Config:
     return Config(
         target_dir=root,
@@ -42,6 +51,7 @@ def _build_config(
             "include": ["**/*.py"],
             "exclude": exclude,
             "force_reindex": force_reindex,
+            "cleanup": cleanup,
         },
         embeddings_disabled=True,
     )
@@ -104,3 +114,100 @@ def test_rust_pipeline_force_reindex_still_cleans_up_deleted_files(
         "file deleted from disk should still be cleaned up on a "
         "force_reindex=True run under the Rust pipeline"
     )
+
+
+def test_rust_pipeline_cleans_up_when_directory_becomes_empty(
+    tmp_path, monkeypatch
+):
+    """The production directory path must pass an empty file list to Rust."""
+    monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    indexed_file = root / "indexed.py"
+    indexed_file.write_text("def indexed():\n    return 1\n")
+    db_dir = tmp_path / "db"
+
+    config = _build_config(root, db_dir, exclude=[])
+    configure_registry(config)
+    service = DirectoryIndexingService(
+        indexing_coordinator=create_indexing_coordinator(), config=config
+    )
+    asyncio.run(service.process_directory(root, no_embeddings=True))
+    assert files_table_paths(db_dir) == {"indexed.py"}
+
+    disconnect_registry_db()
+    indexed_file.unlink()
+
+    config2 = _build_config(root, db_dir, exclude=[])
+    configure_registry(config2)
+    service2 = DirectoryIndexingService(
+        indexing_coordinator=create_indexing_coordinator(), config=config2
+    )
+    asyncio.run(service2.process_directory(root, no_embeddings=True))
+    disconnect_registry_db()
+
+    assert collect_table_counts(db_dir) == {
+        "files": 0,
+        "chunks": 0,
+        "embeddings": 0,
+    }
+
+
+def test_rust_pipeline_handles_fresh_empty_directory(
+    tmp_path, monkeypatch
+):
+    """A fresh empty project remains a successful no-op via the service."""
+    monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    db_dir = tmp_path / "db"
+    config = _build_config(root, db_dir, exclude=[])
+    configure_registry(config)
+    service = DirectoryIndexingService(
+        indexing_coordinator=create_indexing_coordinator(), config=config
+    )
+
+    stats = asyncio.run(service.process_directory(root, no_embeddings=True))
+    disconnect_registry_db()
+
+    assert stats.files_processed == 0
+    assert stats.chunks_created == 0
+    assert collect_table_counts(db_dir) == {
+        "files": 0,
+        "chunks": 0,
+        "embeddings": 0,
+    }
+
+
+def test_rust_pipeline_preserves_rows_when_cleanup_is_disabled(
+    tmp_path, monkeypatch
+):
+    """An empty discovery must still honor the cleanup configuration."""
+    monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    indexed_file = root / "indexed.py"
+    indexed_file.write_text("def indexed():\n    return 1\n")
+    db_dir = tmp_path / "db"
+
+    config = _build_config(root, db_dir, exclude=[])
+    configure_registry(config)
+    service = DirectoryIndexingService(
+        indexing_coordinator=create_indexing_coordinator(), config=config
+    )
+    asyncio.run(service.process_directory(root, no_embeddings=True))
+    disconnect_registry_db()
+    indexed_file.unlink()
+
+    config2 = _build_config(root, db_dir, exclude=[], cleanup=False)
+    configure_registry(config2)
+    service2 = DirectoryIndexingService(
+        indexing_coordinator=create_indexing_coordinator(), config=config2
+    )
+    asyncio.run(service2.process_directory(root, no_embeddings=True))
+    disconnect_registry_db()
+
+    assert files_table_paths(db_dir) == {"indexed.py"}

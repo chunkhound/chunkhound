@@ -1381,7 +1381,12 @@ class IndexingCoordinator(BaseService):
                 f"(backend={getattr(self, '_resolved_discovery_backend', 'n/a')})"
             )
 
-            if not files:
+            # The Rust pipeline must see an empty discovered-file list when a
+            # previously indexed directory has been emptied. Its incremental
+            # diff uses that list to discover and delete all orphaned DB rows.
+            # Keep the legacy Python fast return; Rust has its own fresh-DB
+            # empty-input short circuit in IndexingPipeline.run().
+            if not files and not _use_rust:
                 if _diff_task is not None and self.progress:
                     self.progress.remove_task(_diff_task)
                 return {
