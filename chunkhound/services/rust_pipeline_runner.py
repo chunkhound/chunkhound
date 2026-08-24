@@ -431,6 +431,12 @@ async def run_rust_indexing_phase(
             db.release_for_rust_pipeline()
         except Exception as e:
             release_error = e
+        else:
+            # Only publish "Rust owns the file" once the connection is
+            # actually closed — if release_for_rust_pipeline() raised, Rust
+            # never starts (see the `raise release_error` below), so no
+            # other caller should be blocked from reconnecting.
+            db.set_rust_pipeline_in_progress(True)
 
     try:
         if release_error is not None:
@@ -458,6 +464,9 @@ async def run_rust_indexing_phase(
         # itself failing, etc.) leaves db permanently disconnected for the
         # rest of the process's life.
         if released_for_rust and db is not None:
+            # Clear before connect(): connect()'s own defense-in-depth
+            # check would otherwise reject this trusted reconnect.
+            db.set_rust_pipeline_in_progress(False)
             db.connect()
 
     diff_elapsed = 0.0

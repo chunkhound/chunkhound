@@ -1,22 +1,23 @@
-"""Contract test: DB write failure surfaces cleanly (simple fail-fast case).
+"""Contract test: an unopenable DB path fails cleanly (pre-flight, not mid-run).
 
-Design's `test_db_write_failure` contract wants: DB write fails -> pipeline
-aborts, previously committed batches preserved. Reading
-`src/db/duckdb_backend.rs::write_batch_incremental` shows each streamed batch
-already runs in its own `BEGIN` / `COMMIT`+`CHECKPOINT` transaction with
-`ROLLBACK` on error — so "previously committed batches survive a later
-failure" already holds by inspection; there's no separate rollback logic to
-add.
+Covers the simple, already-testable case: a DB path that can never be opened
+at all (its parent path component is a regular file, not a directory, so
+`std::fs::create_dir_all` fails before any pipeline thread spawns). This
+proves the pipeline surfaces the failure as a clean `RuntimeError` rather
+than hanging or panicking.
 
-What this test covers instead is the simple, already-testable case: a DB path
-that can never be opened at all (its parent path component is a regular file,
-not a directory, so `std::fs::create_dir_all` fails before any pipeline
-thread spawns). This proves the pipeline surfaces the failure as a clean
-`RuntimeError` rather than hanging or panicking.
+This does NOT cover a DB write failing mid-run, partway through a real
+indexing pass -- that would need to inject a failure *between*
+successfully-committed batches, which needs a fault-injection seam in
+`DbBackend` that doesn't exist yet (no `db_write_callback`-style hook, and
+`create_backend()` hardcodes the concrete backend with no injection point).
+Tracked as future work, not implemented here.
 
-A test that injects a failure *between* successfully-committed batches (to
-directly exercise the per-batch rollback path above) is deferred — it needs a
-fault-injection seam in `DbBackend` that doesn't exist yet.
+For what it's worth, reading `src/db/duckdb_backend.rs::write_batch_incremental`
+shows each streamed batch already runs in its own `BEGIN` / `COMMIT`+`CHECKPOINT`
+transaction with `ROLLBACK` on error -- so "previously committed batches
+survive a later failure" already holds by inspection; there's no separate
+rollback logic needed once that fault-injection seam exists.
 """
 
 import tempfile
@@ -29,7 +30,7 @@ from tests.contracts.pipeline_harness import default_rust_config
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 
 
-class TestDbWriteFailure:
+class TestDbOpenFailure:
     """DB path that can never be created must fail cleanly, not hang/crash."""
 
     @pytest.mark.asyncio

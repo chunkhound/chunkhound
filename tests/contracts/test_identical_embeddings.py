@@ -1,8 +1,10 @@
 """Phase 2: Identical embeddings — Python vs Rust pipeline.
 
-Indexes the fixture directory with both pipelines using the deterministic
-mock embedding provider, then asserts byte-identical chunk tuples AND
-identical embedding vectors.
+Cross-pipeline identical-output coverage (with and without embeddings, and
+under forced multi-batch parsing) lives in
+``test_identical_chunks.py::TestIdenticalChunks.test_identical_output`` —
+this file covers the one embedding behavior that test doesn't: that the
+Rust pipeline never uses a separate store-embeddings callback.
 """
 
 import tempfile
@@ -10,12 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.contracts.mock_embed import MockEmbeddingProvider
-from tests.contracts.pipeline_harness import (
-    assert_identical,
-    index_with_python,
-    index_with_rust,
-)
+from tests.contracts.pipeline_harness import index_with_rust
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 
@@ -47,38 +44,3 @@ class TestIdenticalEmbeddings:
                 f"embeddings_generated={result.embeddings_generated}, "
                 f"chunks_written={result.chunks_written}"
             )
-
-    @pytest.mark.asyncio
-    async def test_identical_embeddings(self):
-        """Index with mock embeddings → identical chunk + embedding tuples."""
-        with tempfile.TemporaryDirectory() as tmp_py, tempfile.TemporaryDirectory() as tmp_rs:
-            db_py = Path(tmp_py) / "db"
-            db_py.mkdir(parents=True, exist_ok=True)
-            db_rs = Path(tmp_rs) / "db"
-            db_rs.mkdir(parents=True, exist_ok=True)
-
-            result_py = await index_with_python(
-                FIXTURE_DIR, db_py, skip_embeddings=False,
-                embedding_provider=MockEmbeddingProvider(),
-            )
-
-            result_rs = index_with_rust(FIXTURE_DIR, db_rs, skip_embeddings=False)
-
-            assert_identical(result_py, result_rs)
-
-    @pytest.mark.asyncio
-    async def test_skip_embeddings(self):
-        """When skip_embeddings=True, both pipelines produce 0 embeddings."""
-        with tempfile.TemporaryDirectory() as tmp_py, tempfile.TemporaryDirectory() as tmp_rs:
-            db_py = Path(tmp_py) / "db"
-            db_py.mkdir(parents=True, exist_ok=True)
-            db_rs = Path(tmp_rs) / "db"
-            db_rs.mkdir(parents=True, exist_ok=True)
-
-            result_py = await index_with_python(FIXTURE_DIR, db_py, skip_embeddings=True)
-
-            result_rs = index_with_rust(FIXTURE_DIR, db_rs, skip_embeddings=True)
-
-            assert result_py.embeddings_generated == 0
-            assert result_rs.embeddings_generated == 0
-            assert_identical(result_py, result_rs)

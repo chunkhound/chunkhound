@@ -280,7 +280,11 @@ def _embed_batch(texts: list[str], embedding_cfg: Any = None) -> list[list[float
 
     Uses a provider AND an event loop cached per OS thread (keyed by
     ``threading.get_ident()``), both created once per thread and reused for
-    the thread's lifetime.
+    the thread's lifetime -- scoped to the current pipeline run:
+    ``run_rust_pipeline()`` clears both caches on entry, since a thread id
+    is only stable *within* one run (Rust rebuilds its embed thread pool
+    from scratch on every run, so ids can otherwise be recycled and collide
+    with a stale entry left by an earlier, unrelated run).
 
     NOTE: this used to use ``threading.local()``, which turned out not to
     persist across separate ``Python::with_gil()`` calls from the same
@@ -401,7 +405,7 @@ def _parse_file_worker_for_timeout(
 
 
 def _parse_with_timeout(
-    file_path: str, cfg: "_ParsePoolConfig"
+    file_path: str, cfg: _ParsePoolConfig
 ) -> tuple[str, list[dict], str | None, str | None]:
     """Parse one file in a dedicated child process with a wall-clock timeout.
 
@@ -454,7 +458,7 @@ def _parse_with_timeout(
 
 
 def _parse_one_file(
-    args: tuple[str, "_ParsePoolConfig"],
+    args: tuple[str, _ParsePoolConfig],
 ) -> tuple[str, list[dict], str | None, str | None]:
     """Parse a single file — module-level so ProcessPoolExecutor can pickle it.
 
@@ -609,6 +613,17 @@ async def run_rust_pipeline(
 
     from chunkhound_native import IndexingPipeline
 
+    # Each run gets a brand-new Rust-side embed thread pool (built fresh in
+    # IndexingPipeline::run(), torn down at the end of that run), so a
+    # thread id observed here is only ever valid for the current run. OS
+    # thread ids get recycled once a thread exits, so without clearing here
+    # a later run's fresh worker thread could collide with a numeric id
+    # left behind by an earlier, unrelated run and silently reuse its
+    # stale embedding provider/event loop. See _embed_batch's docstring.
+    with _embed_cache_lock:
+        _embed_providers.clear()
+        _embed_loops.clear()
+
     # ── Config mapping ──────────────────────────────────────
     indexing_cfg = getattr(config, "indexing", None) if config else None
     embedding_cfg = getattr(config, "embedding", None) if config else None
@@ -632,10 +647,14 @@ async def run_rust_pipeline(
     # fragmentation_threshold_pct is a percentage (30.0 = 30%); Rust's
     # compaction_threshold expects a ratio (0.30) — same setting the Python
     # indexing path already honors via --fragmentation-threshold-pct.
-    fragmentation_pct = _cfg_or(
-        database_cfg, "fragmentation_threshold_pct", 30.0, float
+    # An explicit None means "never auto-compact" (see DatabaseConfig's
+    # docstring and duckdb_provider.py's _fragmentation_exceeds_threshold) —
+    # unlike _cfg_or's other uses, that None must survive to Rust as None,
+    # not get coerced to the 30.0 default.
+    _fragmentation_pct = getattr(database_cfg, "fragmentation_threshold_pct", 30.0)
+    compaction_threshold = (
+        None if _fragmentation_pct is None else _fragmentation_pct / 100.0
     )
-    compaction_threshold = fragmentation_pct / 100.0
 
     embedding_provider = _cfg_or(embedding_cfg, "provider", "", str)
     embedding_model = _cfg_or(embedding_cfg, "model", "", str)

@@ -372,6 +372,39 @@ def assert_chunk_multiset_identical(
         raise AssertionError("\n".join(msg_parts))
 
 
+def assert_embedding_multiset_identical(
+    embeddings_a: list[tuple],
+    embeddings_b: list[tuple],
+    *,
+    label_a: str = "A",
+    label_b: str = "B",
+) -> None:
+    """Assert two embedding-tuple collections are identical, including
+    duplicate counts.
+
+    Counter, not set — see assert_chunk_multiset_identical's docstring for
+    why: a set would silently absorb a duplicated row.
+    """
+    a_counts = Counter(embeddings_a)
+    b_counts = Counter(embeddings_b)
+
+    if a_counts != b_counts:
+        a_only = a_counts - b_counts
+        b_only = b_counts - a_counts
+        msg_parts = ["Embedding tuple mismatch:"]
+        if a_only:
+            msg_parts.append(
+                f"  Only in {label_a} / extra copies ({sum(a_only.values())}): "
+                f"{sorted(a_only.elements())[:5]}..."
+            )
+        if b_only:
+            msg_parts.append(
+                f"  Only in {label_b} / extra copies ({sum(b_only.values())}): "
+                f"{sorted(b_only.elements())[:5]}..."
+            )
+        raise AssertionError("\n".join(msg_parts))
+
+
 def assert_identical(result_a: IndexResult, result_b: IndexResult) -> None:
     """Assert two IndexResults are byte-identical.
 
@@ -396,17 +429,9 @@ def assert_identical(result_a: IndexResult, result_b: IndexResult) -> None:
     )
 
     assert_chunk_multiset_identical(result_a.chunk_tuples, result_b.chunk_tuples)
-
-    # Embedding tuples — same multiset comparison as chunk tuples above.
-    emb_a_counts = Counter(result_a.embedding_tuples)
-    emb_b_counts = Counter(result_b.embedding_tuples)
-    if emb_a_counts or emb_b_counts:
-        if emb_a_counts != emb_b_counts:
-            raise AssertionError(
-                f"Embedding tuple mismatch: A has {len(result_a.embedding_tuples)} "
-                f"entries ({len(emb_a_counts)} unique), B has "
-                f"{len(result_b.embedding_tuples)} entries ({len(emb_b_counts)} unique)"
-            )
+    assert_embedding_multiset_identical(
+        result_a.embedding_tuples, result_b.embedding_tuples
+    )
 
 
 def default_rust_config(

@@ -1192,8 +1192,8 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
                         // empty database and orphan the real data at
                         // old_path. Same recovery as the "phase1" case.
                         let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
-                        if old_path.exists() {
-                            let _ = std::fs::rename(&old_path, &db_path);
+                        if old_path.exists() && !db_path.exists() {
+                            std::fs::rename(&old_path, &db_path)?;
                         }
                         let _ = std::fs::remove_file(&intent_path);
                     }
@@ -1441,14 +1441,17 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn needs_compaction(&self) -> Result<bool, DbError> {
+        // None means auto-compaction is explicitly disabled.
+        let Some(threshold) = self.config.compaction_threshold else {
+            return Ok(false);
+        };
         // Two-signal metric-based detection (Phase 0). If stats are unavailable
         // (e.g. DB not open), there's nothing to compact yet.
         let Ok(stats) = self.compaction_stats() else {
             return Ok(false);
         };
         let effective = stats.free_ratio.max(stats.row_waste_ratio);
-        Ok(effective >= self.config.compaction_threshold
-            && stats.reclaimable >= self.config.compaction_min_size_bytes)
+        Ok(effective >= threshold && stats.reclaimable >= self.config.compaction_min_size_bytes)
     }
 
     fn run_compaction(&mut self) -> Result<(), DbError> {
@@ -1730,7 +1733,7 @@ mod file_state_roundtrip_tests {
 
         let backend = DuckDbHnswBackend::new(DbConfig {
             db_path: db_path.to_string_lossy().into_owned(),
-            compaction_threshold: 0.3,
+            compaction_threshold: Some(0.3),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
         });
@@ -1826,6 +1829,41 @@ mod disk_usage_limit_tests {
 }
 
 #[cfg(test)]
+mod compaction_threshold_tests {
+    use super::*;
+
+    #[test]
+    fn none_threshold_disables_compaction_without_opening_db() {
+        // Mirrors Python's fragmentation_threshold_pct=None ("never
+        // auto-compact") opt-out. Must short-circuit before touching the
+        // DB connection at all, so this works even on a never-`.open()`ed
+        // backend (needs_compaction() is polled opportunistically and must
+        // not itself force a connection).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let backend = DuckDbHnswBackend::new(test_support::config_with_compaction_threshold(
+            db_path, None,
+        ));
+        assert!(!backend.needs_compaction().expect("needs_compaction"));
+    }
+
+    #[test]
+    fn some_threshold_falls_through_to_metric_check() {
+        // With a real DB open and no fragmentation yet, a configured
+        // threshold must not itself force compaction — this pins the
+        // "Some(threshold) still requires exceeding it" half of the branch.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config_with_compaction_threshold(
+            db_path,
+            Some(0.30),
+        ));
+        backend.open().expect("open");
+        assert!(!backend.needs_compaction().expect("needs_compaction"));
+    }
+}
+
+#[cfg(test)]
 mod hnsw_metric_tests {
     use super::*;
 
@@ -1835,7 +1873,7 @@ mod hnsw_metric_tests {
         let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
         let config = DbConfig {
             db_path,
-            compaction_threshold: 0.3,
+            compaction_threshold: Some(0.3),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
         };
@@ -1896,7 +1934,7 @@ mod hnsw_metric_tests {
         let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
         let config = DbConfig {
             db_path,
-            compaction_threshold: 0.3,
+            compaction_threshold: Some(0.3),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
         };
@@ -1980,7 +2018,7 @@ mod hnsw_metric_tests {
         let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
         let config = DbConfig {
             db_path: db_path.clone(),
-            compaction_threshold: 0.3,
+            compaction_threshold: Some(0.3),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
         };
@@ -2184,7 +2222,7 @@ mod test_support {
     pub(super) fn config(db_path: String) -> DbConfig {
         DbConfig {
             db_path,
-            compaction_threshold: 0.30,
+            compaction_threshold: Some(0.30),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
         }
@@ -2196,6 +2234,16 @@ mod test_support {
     ) -> DbConfig {
         DbConfig {
             insert_batch_size,
+            ..config(db_path)
+        }
+    }
+
+    pub(super) fn config_with_compaction_threshold(
+        db_path: String,
+        compaction_threshold: Option<f64>,
+    ) -> DbConfig {
+        DbConfig {
+            compaction_threshold,
             ..config(db_path)
         }
     }

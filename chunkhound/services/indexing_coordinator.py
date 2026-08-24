@@ -1189,6 +1189,22 @@ class IndexingCoordinator(BaseService):
                             info=_progress_info(stored, skipped, errs, display_chunks),
                         )
 
+            except asyncio.CancelledError:
+                # CancelledError is a BaseException (not Exception) since Python
+                # 3.8, so it skips the `except Exception` branch below. Without
+                # this handler, a task cancellation (e.g. service shutdown)
+                # between begin_transaction_async() and commit_transaction_async()
+                # leaves the DB transaction open, and a later disconnect()'s
+                # mandatory CHECKPOINT fails with "transaction local changes".
+                try:
+                    await self._db.rollback_transaction_async()
+                except Exception:
+                    logger.warning(
+                        "Failed to roll back transaction while cancelling "
+                        f"processing of {result.file_path}",
+                        exc_info=True,
+                    )
+                raise
             except Exception as e:
                 await self._db.rollback_transaction_async()
                 stats["errors"].append({"file": str(result.file_path), "error": str(e)})
@@ -2022,12 +2038,12 @@ class IndexingCoordinator(BaseService):
             return {"files": 0, "chunks": 0, "embeddings": 0}
         return await self._db.get_stats_async()
 
-    def allow_compaction_after_backfill(self) -> None:
-        """Re-enable Python compaction after a post-Rust embed backfill.
+    def clear_compaction_skip(self) -> None:
+        """Force the next compact_database_with_metrics() call to run for real.
 
-        A Rust run sets ``_skip_compaction`` so DirectoryIndexingService does
-        not compact again after Rust already did. If the missing-embeddings
-        pass then writes new rows, the second compact boundary must run.
+        Called after a Python-side retry pass writes new data (e.g. missing
+        embeddings) following a Rust run that reported per-file errors —
+        Rust's own internal compaction never covered these newly-written rows.
         """
         self._skip_compaction = False
 

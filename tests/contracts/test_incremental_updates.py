@@ -13,6 +13,7 @@ import pytest
 
 from tests.contracts.pipeline_harness import (
     assert_chunk_multiset_identical,
+    assert_embedding_multiset_identical,
     disconnect_registry_db,
     index_with_python,
     index_with_rust,
@@ -103,6 +104,12 @@ class TestIncrementalUpdates:
         assert_chunk_multiset_identical(
             result_py_full.chunk_tuples,
             result_rs_inc.chunk_tuples,
+            label_a="Python full",
+            label_b="Rust incremental",
+        )
+        assert_embedding_multiset_identical(
+            result_py_full.embedding_tuples,
+            result_rs_inc.embedding_tuples,
             label_a="Python full",
             label_b="Rust incremental",
         )

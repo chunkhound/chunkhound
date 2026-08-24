@@ -13,6 +13,7 @@ from pathlib import Path
 import duckdb
 
 from tests.contracts.pipeline_harness import (
+    assert_chunk_multiset_identical,
     collect_chunk_tuples_from_duckdb,
     index_with_rust,
 )
@@ -43,12 +44,11 @@ def test_incremental_restores_chunks_after_dirty_pre_delete(
     finally:
         conn.close()
 
-    recovered = index_with_rust(
-        work_dir, db_dir, skip_embeddings=True, incremental=True
-    )
+    index_with_rust(work_dir, db_dir, skip_embeddings=True, incremental=True)
     chunks_after = collect_chunk_tuples_from_duckdb(db_dir)
-    assert chunks_after, (
-        "incremental index must restore chunks for dirty (NULL mtime) file rows, "
-        f"got {len(chunks_after)} chunks after recovery (pipeline chunks_written="
-        f"{recovered.chunks_written})"
+    assert_chunk_multiset_identical(
+        chunks_before,
+        chunks_after,
+        label_a="pre-crash baseline",
+        label_b="post-recovery",
     )

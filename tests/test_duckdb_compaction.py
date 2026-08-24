@@ -21,6 +21,7 @@ duckdb = pytest.importorskip("duckdb")
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
+from chunkhound.core.exceptions import DatabaseError
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import (
     ChunkType,
@@ -44,6 +45,7 @@ from chunkhound.providers.database.duckdb.schema_constants import (
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
+    DatabaseRustPipelineInProgressError,
 )
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.embedding_service import EmbeddingService
@@ -2778,6 +2780,144 @@ class TestConcurrentCompactionGuard:
             )
         )
         assert file_id > 0
+
+
+class TestRustPipelineGuard:
+    """rust_pipeline_in_progress flag blocks mutations and reconnects, mirroring
+    TestCompactionGuard/TestCompactionGuardExtended for the compaction flag."""
+
+    def test_mutations_blocked_while_rust_pipeline_owns_db(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """Insert while Rust owns the file raises DatabaseRustPipelineInProgressError."""
+        file_backed_db._executor.set_rust_pipeline_in_progress(True)
+
+        file_model = File(
+            path="blocked_rust.py", mtime=0.0, language=Language.PYTHON, size_bytes=10
+        )
+        try:
+            with pytest.raises(DatabaseRustPipelineInProgressError):
+                file_backed_db._execute_in_db_thread_sync("insert_file", file_model)
+        finally:
+            file_backed_db._executor.set_rust_pipeline_in_progress(False)
+
+    def test_reads_blocked_while_rust_pipeline_owns_db(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """search_regex while Rust owns the file raises DatabaseRustPipelineInProgressError."""
+        file_backed_db._executor.set_rust_pipeline_in_progress(True)
+
+        try:
+            with pytest.raises(DatabaseRustPipelineInProgressError):
+                file_backed_db.search_regex("pattern")
+        finally:
+            file_backed_db._executor.set_rust_pipeline_in_progress(False)
+
+    def test_connect_refused_while_rust_pipeline_owns_db(
+        self, tmp_path: Path
+    ) -> None:
+        """connect() fast-fails with DatabaseRustPipelineInProgressError."""
+        db_path = tmp_path / "guard_connect_rust.duckdb"
+        db = DuckDBProvider(db_path, base_directory=tmp_path)
+        db.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
+        db.connect()
+        db.release_for_rust_pipeline()
+        # Set the flag AFTER release_for_rust_pipeline() the same way
+        # run_rust_indexing_phase() does — release closes the connection,
+        # then the flag is published separately.
+        db._executor.set_rust_pipeline_in_progress(True)
+        try:
+            with pytest.raises(DatabaseRustPipelineInProgressError):
+                db.connect()
+        finally:
+            db._executor.set_rust_pipeline_in_progress(False)
+            db.connect()
+
+    def test_normal_operation_resumes_after_flag_cleared(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """Provider is usable again once the Rust-pipeline flag is cleared."""
+        file_backed_db._executor.set_rust_pipeline_in_progress(True)
+        file_backed_db._executor.set_rust_pipeline_in_progress(False)
+
+        file_id = file_backed_db.insert_file(
+            File(
+                path="after_rust_pipeline.py",
+                mtime=0.0,
+                language=Language.PYTHON,
+                size_bytes=10,
+            )
+        )
+        assert file_id > 0
+
+    def test_write_blocks_during_concurrent_rust_pipeline_window(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """A concurrently-published Rust-pipeline window blocks a write, and
+        clearing it unblocks subsequent operations."""
+        file_backed_db._executor.set_rust_pipeline_in_progress(True)
+        try:
+            with pytest.raises(DatabaseRustPipelineInProgressError):
+                file_backed_db.insert_file(
+                    File(
+                        path="blocked_conc_rust.py",
+                        mtime=0.0,
+                        language=Language.PYTHON,
+                        size_bytes=100,
+                    )
+                )
+        finally:
+            file_backed_db._executor.set_rust_pipeline_in_progress(False)
+
+        file_id = file_backed_db.insert_file(
+            File(
+                path="unblocked_conc_rust.py",
+                mtime=0.0,
+                language=Language.PYTHON,
+                size_bytes=100,
+            )
+        )
+        assert file_id > 0
+
+
+class TestCheckpointFailureSurfaces:
+    """A checkpoint failure during disconnect must raise, not just be logged.
+
+    Regression tests for PR #380 review finding #8: release_for_rust_pipeline()
+    used to treat "disconnect didn't raise" as proof the data was durably
+    flushed before handing the file to Rust, even when the underlying
+    CHECKPOINT silently failed.
+    """
+
+    def _fail_checkpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make any DuckDB connection's CHECKPOINT call raise, other SQL unaffected."""
+        original_execute = duckdb.DuckDBPyConnection.execute
+
+        def _patched_execute(self: Any, *args: Any, **kwargs: Any) -> Any:
+            if args and isinstance(args[0], str) and "CHECKPOINT" in args[0].upper():
+                raise RuntimeError("simulated checkpoint failure")
+            return original_execute(self, *args, **kwargs)
+
+        monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", _patched_execute)
+
+    def test_release_for_rust_pipeline_raises_on_checkpoint_failure(
+        self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed CHECKPOINT must surface as DatabaseError, not be swallowed."""
+        self._fail_checkpoint(monkeypatch)
+
+        with pytest.raises(DatabaseError):
+            file_backed_db.release_for_rust_pipeline()
+
+    def test_release_for_rust_pipeline_succeeds_on_clean_checkpoint(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """No regression on the happy path: a clean checkpoint still lets
+        release_for_rust_pipeline() (and a subsequent reconnect) return normally."""
+        file_backed_db.release_for_rust_pipeline()
+        file_backed_db.connect()
+        assert file_backed_db.is_connected
+
 
 def test_atomic_replace_retries_transient_windows_failures(
     monkeypatch: pytest.MonkeyPatch,

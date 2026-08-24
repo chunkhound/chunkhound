@@ -546,6 +546,11 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
         raise AssertionError(f"Unexpected subprocess.run invocation: {args}")
 
     monkeypatch.setattr(live_verifier.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        live_verifier,
+        "_patch_locally_built_native_extension",
+        lambda venv_dir: None,
+    )
 
     class FakeReader:
         async def read(self) -> bytes:
@@ -929,6 +934,11 @@ async def test_verify_wheel_uses_clean_room_runtime_env(
     monkeypatch.setattr(live_verifier.subprocess, "run", fake_run)
     monkeypatch.setattr(
         live_verifier,
+        "_patch_locally_built_native_extension",
+        lambda venv_dir: None,
+    )
+    monkeypatch.setattr(
+        live_verifier,
         "_create_subprocess_exec_safe",
         fake_create_subprocess_exec_safe,
     )
@@ -1076,6 +1086,11 @@ async def test_verify_wheel_proves_live_searchability_in_polling_fallback(
         return live_file, "fallback_live_symbol"
 
     monkeypatch.setattr(live_verifier.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        live_verifier,
+        "_patch_locally_built_native_extension",
+        lambda venv_dir: None,
+    )
     monkeypatch.setattr(
         live_verifier,
         "_create_subprocess_exec_safe",

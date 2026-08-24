@@ -36,6 +36,7 @@ from chunkhound.interfaces.embedding_provider import (
 from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
+    DatabaseRustPipelineInProgressError,
 )
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime import RealtimeStartupStatusTracker
@@ -1235,16 +1236,20 @@ class MCPServerBase(ABC):
         Uses a lock to prevent concurrent connect() calls which would
         leak a DuckDB connection handle.
 
-        During DuckDB compaction the connection is temporarily closed
-        (is_connected \u2192 False).  Non-DB tools (daemon_status, websearch,
-        git history diff search) are handled by ensure_tool_services()
-        which skips reconnect for tools without *requires_db*.
+        During DuckDB compaction, or while the Rust indexing pipeline owns
+        write access to the database file, the connection is temporarily
+        closed (is_connected \u2192 False).  Non-DB tools (daemon_status,
+        websearch, git history diff search) are handled by
+        ensure_tool_services() which skips reconnect for tools without
+        *requires_db*.
 
-        For DB-backed tools the compaction guard in the provider raises
-        DatabaseCompactionInProgressError, which we re-raise so the
+        For DB-backed tools the compaction/Rust-pipeline guard in the
+        provider raises DatabaseCompactionInProgressError /
+        DatabaseRustPipelineInProgressError, which we re-raise so the
         calling MCP tool handler returns an explicit error instead of
-        silently returning empty results.  _compact_finalize() restores
-        the connection when compaction finishes.
+        silently returning empty results.  _compact_finalize() /
+        run_rust_indexing_phase() restore the connection when the
+        respective owner finishes.
         """
         if self.services.provider.is_connected:
             return
@@ -1258,6 +1263,14 @@ class MCPServerBase(ABC):
                         "info",
                         "Database compaction in progress \u2014 DB-backed MCP tools will be "
                         "unavailable until compaction finishes. "
+                        "Non-DB tools (daemon_status, websearch) are unaffected.",
+                    )
+                    raise
+                except DatabaseRustPipelineInProgressError:
+                    log_if_not_mcp(
+                        "info",
+                        "Rust indexing pipeline owns the database \u2014 DB-backed MCP "
+                        "tools will be unavailable until it finishes. "
                         "Non-DB tools (daemon_status, websearch) are unaffected.",
                     )
                     raise

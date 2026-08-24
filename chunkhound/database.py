@@ -218,7 +218,13 @@ class Database:
             return result
 
         await self._run_batch_compaction_boundary()
-        await self._generate_missing_embeddings(exclude_patterns)
+        embed_result = await self._generate_missing_embeddings(exclude_patterns)
+        if embed_result.get("generated", 0) > 0:
+            # This retry pass wrote new embeddings after the Rust run's own
+            # internal compaction already ran — those rows were never
+            # compacted, so force the next boundary below to run for real
+            # instead of skipping.
+            self._indexing_coordinator.clear_compaction_skip()
         await self._run_batch_compaction_boundary()
         return result
 

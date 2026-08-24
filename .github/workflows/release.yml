@@ -5,9 +5,7 @@ on:
     types: [published]
 
 permissions:
-  contents: write  # gh release delete --cleanup-tag on failure
-  id-token: write  # OIDC Trusted Publishing
-  issues: write    # gh issue create alert if publish-native fails
+  contents: read  # default for build jobs; publish jobs elevate below
 
 jobs:
   build-sdist:
@@ -16,7 +14,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0  # hatch-vcs requires full history for version derivation
 
@@ -32,6 +30,7 @@ jobs:
           name: release-dist-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
+          overwrite: true
 
   build-runtime-wheels:
     runs-on: ${{ matrix.os }}
@@ -43,7 +42,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0  # hatch-vcs requires full history for version derivation
 
@@ -61,6 +60,7 @@ jobs:
           name: release-dist-${{ matrix.os }}
           path: dist/*.whl
           if-no-files-found: error
+          overwrite: true
 
   build-native-wheel:
     runs-on: ${{ matrix.os }}
@@ -75,7 +75,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -91,12 +91,68 @@ jobs:
           name: release-dist-native-${{ matrix.os }}
           path: dist/*.whl
           if-no-files-found: error
+          overwrite: true
+
+  validate-release:
+    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download matching main wheel for validation
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist-${{ matrix.os }}
+          path: main-dist
+
+      - name: Download matching native wheel for validation
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist-native-${{ matrix.os }}
+          path: native-dist
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Validate combined wheel installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          main_wheels=(main-dist/*.whl)
+          native_wheels=(native-dist/*.whl)
+          if [[ ${#main_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one matching main wheel, found ${#main_wheels[@]}"
+            exit 1
+          fi
+          if [[ ${#native_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one matching native wheel, found ${#native_wheels[@]}"
+            exit 1
+          fi
+
+          uv python install 3.12
+          workspace_dir="$(pwd)"
+          validation_dir="$(mktemp -d)"
+          cd "$validation_dir"
+          uv run --no-project --python 3.12 \
+            --with "$workspace_dir/main-dist"/*.whl \
+            --with "$workspace_dir/native-dist"/*.whl \
+            python "$workspace_dir/scripts/smoke_test_native_wheel.py"
 
   publish:
-    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    needs: [publish-native, build-sdist, build-runtime-wheels]
     runs-on: ubuntu-latest
     environment: pypi
     timeout-minutes: 15
+    permissions:
+      id-token: write  # OIDC Trusted Publishing
 
     steps:
       - name: Download main distribution artifacts
@@ -111,29 +167,27 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-
-      - name: Cleanup on failure (delete release and tag)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete "${{ github.event.release.tag_name }}" \
-            --cleanup-tag \
-            --yes \
-            --repo "${{ github.repository }}"
+          skip-existing: true
 
   publish-native:
-    needs: [publish]
+    needs: [build-native-wheel, validate-release]
     runs-on: ubuntu-latest
     # Separate environment so this job carries an OIDC token scoped to the
     # chunkhound-native PyPI project (each project needs its own trusted-publisher
-    # entry referencing this environment name). Depends on publish so the main
-    # package is confirmed live before attempting the native publish — avoids
-    # deleting a successfully-published release if only the native wheel fails.
+    # entry referencing this environment name). Native publication is deliberately
+    # first so the main package cannot become installable before its required
+    # native wheels are available.
     environment: pypi-native
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write  # OIDC Trusted Publishing (chunkhound-native PyPI project)
+      issues: write    # gh issue create alert if publish-native fails
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
       - name: Download native wheel artifacts
         uses: actions/download-artifact@v4
         with:
@@ -141,24 +195,41 @@ jobs:
           path: dist-native
           merge-multiple: true
 
+      - name: Validate native wheel versions
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/validate_native_wheel_versions.py
+
       - name: Publish chunkhound-native to PyPI
         id: publish-native
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist-native
+          skip-existing: true
 
       - name: Alert on native publish failure
-        # chunkhound is already live on PyPI at this point (publish-native
-        # runs after publish, deliberately, so we never delete a good
-        # chunkhound release just because the native wheel failed -- see
-        # the `needs: [publish]` comment above). But that leaves a real
-        # window where chunkhound is live with no matching chunkhound-native
-        # release, and there's no PyPI API to yank a release automatically
-        # (yanking is a manual, web-UI-only action) -- so the best CI can do
-        # is make sure a human finds out immediately instead of via a user's
-        # broken-install report. Needs the workflow-level `issues: write`
-        # permission declared above.
+        # Native publication runs before publish, so a failure prevents the
+        # main package from being released. The alert still makes failures in
+        # publication or the pre-publish version gate visible to maintainers.
         if: failure()
+        uses: ./.github/actions/alert-native-publish-failure
+        with:
+          tag: ${{ github.event.release.tag_name }}
+
+  alert-native-prepublish-failure:
+    needs: [build-native-wheel, validate-release]
+    if: ${{ always() && (needs['build-native-wheel'].result == 'failure' || needs['validate-release'].result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Alert on native build or validation failure
         uses: ./.github/actions/alert-native-publish-failure
         with:
           tag: ${{ github.event.release.tag_name }}

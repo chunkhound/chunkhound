@@ -84,6 +84,15 @@ def summarize_include_patterns(patterns: list[str]) -> tuple[set[str], set[str],
     - allowed_exts captures patterns like "**/*.py" or "*.py" -> {".py"}
     - allowed_names captures exact filename includes like "**/Makefile" or "Makefile"
     - has_complex true when any pattern isn't a pure extension or exact name
+
+    A directory-anchored pattern (e.g. "src/**/*.proto" or "docs/api/*.md")
+    is still treated as naming a specific extension/name, not as complex —
+    as long as every segment before the final one is either a plain literal
+    directory name or the recursive "**" wildcard. That anchor is incidental
+    to the request; only the final segment determines specificity. A bare
+    wildcard tail (e.g. "src/**/*") or a non-"**" wildcard directory segment
+    (e.g. "src/*/*.py") still falls through to has_complex=True — the former
+    is a genuine blanket sweep, the latter is ambiguous enough to leave gated.
     """
     exts: set[str] = set()
     names: set[str] = set()
@@ -113,19 +122,50 @@ def summarize_include_patterns(patterns: list[str]) -> tuple[set[str], set[str],
             return s
         return None
 
+    def _has_wildcard(segment: str) -> bool:
+        return any(ch in segment for ch in "*?[")
+
+    def classify(q: str) -> tuple[str, str] | None:
+        """Classify a pattern (after stripping a leading "**/") as
+        ("ext", value), ("name", value), or None (complex)."""
+        if "/" not in q:
+            ext = is_simple_ext(q)
+            if ext is not None:
+                return ("ext", ext)
+            nm = is_exact_name(q)
+            if nm is not None:
+                return ("name", nm)
+            return None
+
+        # Directory-anchored: only specific if every segment before the
+        # last is a plain literal name or "**" -- then classify the final
+        # segment the same way a non-anchored pattern would be.
+        segments = q.split("/")
+        anchor_segments, tail = segments[:-1], segments[-1]
+        for segment in anchor_segments:
+            if segment != "**" and _has_wildcard(segment):
+                return None
+        ext = is_simple_ext(tail)
+        if ext is not None:
+            return ("ext", ext)
+        nm = is_exact_name(tail)
+        if nm is not None:
+            return ("name", nm)
+        return None
+
     for p in patterns or []:
         q = p
         if q.startswith("**/"):
             q = q[3:]
-        ext = is_simple_ext(q)
-        if ext is not None:
-            exts.add(ext)
+        result = classify(q)
+        if result is None:
+            complex_pat = True
             continue
-        nm = is_exact_name(q)
-        if nm is not None:
-            names.add(nm)
-            continue
-        complex_pat = True
+        kind, value = result
+        if kind == "ext":
+            exts.add(value)
+        else:
+            names.add(value)
 
     return exts, names, complex_pat
 

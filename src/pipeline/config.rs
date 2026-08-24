@@ -28,13 +28,31 @@ fn extract_or<'py, T: FromPyObject<'py>>(
     }
 }
 
+/// Extract an optional field, but only defaults when the key is absent.
+/// An explicitly-passed Python `None` is preserved as `None` (a real
+/// "disabled" value) rather than being coerced to `default` — unlike
+/// `extract_or`, which treats "absent" and "explicit None" the same way.
+fn extract_opt_or_default<'py, T: FromPyObject<'py>>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+    default: T,
+) -> PyResult<Option<T>> {
+    match dict.get_item(key)? {
+        None => Ok(Some(default)),
+        Some(v) if v.is_none() => Ok(None),
+        Some(v) => Ok(Some(v.extract()?)),
+    }
+}
+
 /// Parsing-tuning flags pass through to the parse callback unchanged.
 #[derive(Debug, Clone)]
 pub(crate) struct PipelineConfig {
     // Storage
     pub db_path: PathBuf,
     pub db_batch_size: usize,
-    pub compaction_threshold: f64,
+    /// `None` means auto-compaction is disabled (mirrors Python's
+    /// `DatabaseConfig.fragmentation_threshold_pct = None`).
+    pub compaction_threshold: Option<f64>,
     pub compaction_min_size_mb: u64,
     pub disk_usage_limit_mb: Option<f64>,
 
@@ -70,7 +88,7 @@ impl PipelineConfig {
         Ok(Self {
             db_path: extract_or(dict, "db_path", String::new())?.into(),
             db_batch_size: extract_or(dict, "db_batch_size", 100u64)? as usize,
-            compaction_threshold: extract_or(dict, "compaction_threshold", 0.30)?,
+            compaction_threshold: extract_opt_or_default(dict, "compaction_threshold", 0.30)?,
             compaction_min_size_mb: extract_or(dict, "compaction_min_size_mb", 50u64)?,
             disk_usage_limit_mb: extract_opt(dict, "disk_usage_limit_mb")?,
 

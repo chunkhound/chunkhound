@@ -1,8 +1,9 @@
 """Contract test: orphan cleanup parity between the Rust and Python pipelines.
 
-Covers a gap found comparing docs/rust-pipeline-architecture.html against the
-implementation: IndexingCoordinator.process_directory() unconditionally skipped
-Python's _cleanup_orphaned_files() whenever CHUNKHOUND_USE_RUST=1.
+Covers a gap found during design review comparing the original pipeline
+design against the implementation: IndexingCoordinator.process_directory()
+unconditionally skipped Python's _cleanup_orphaned_files() whenever
+CHUNKHOUND_USE_RUST=1.
 
 Note: a plain incremental Rust run already deletes DB rows for any file absent
 from the discovered-file list handed to it (whatever the cause -- deleted from

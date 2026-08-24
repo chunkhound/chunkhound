@@ -100,7 +100,7 @@ runs:
         fi
         mv pyproject.toml.hidden pyproject.toml
 
-    - name: Smoke test native wheel
+    - name: Smoke test native wheel API
       shell: bash
       run: |
         # Run outside the repo root: the repo's own chunkhound_native/__init__.py
@@ -111,8 +111,9 @@ runs:
         # wheel that built successfully but doesn't actually import (e.g. a
         # macOS/Windows repair edge case) before it reaches PyPI -- alpha/beta/rc
         # tags publish with no other gate on the native wheel's importability.
-        WHEEL_DIR="$(pwd)/dist"
+        WORKSPACE_DIR="$(pwd)"
+        WHEEL_DIR="$WORKSPACE_DIR/dist"
         TMP_DIR="$(mktemp -d)"
         cd "$TMP_DIR"
         uv run --no-project --python 3.12 --with "$WHEEL_DIR"/chunkhound_native-*.whl \
-          python -c "from chunkhound_native import scan_files; r = scan_files('.', ['py']); assert isinstance(r, list)"
+          python "$WORKSPACE_DIR/scripts/smoke_test_native_wheel.py"

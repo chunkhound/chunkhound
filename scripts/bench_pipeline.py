@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Benchmark: Rust indexing pipeline vs Python indexing pipeline (full flow).
 
-Implements the harness described in docs/rust-pipeline-architecture.html §13:
-indexes the same directory with both pipelines, measuring wall-clock time,
+Implements the pipeline-comparison benchmark harness: indexes the same
+directory with both pipelines, measuring wall-clock time,
 peak RSS, and output DB size, across three scenarios:
 
   cold        empty DB, index the repo from scratch

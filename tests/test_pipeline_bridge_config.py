@@ -114,6 +114,36 @@ async def test_missing_fragmentation_threshold_pct_defaults_to_30_pct(
 
 
 @pytest.mark.asyncio
+async def test_explicit_none_fragmentation_threshold_pct_disables_compaction(
+    tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
+) -> None:
+    """fragmentation_threshold_pct=None means "never auto-compact" (see
+    DatabaseConfig's docstring), not "unset — use the 30% default". Rust's
+    compaction_threshold must receive that None verbatim so it can disable
+    the auto-compaction check entirely, matching what the Python indexing
+    path already does via duckdb_provider.py's
+    _fragmentation_exceeds_threshold(threshold=None) -> False.
+    """
+    from chunkhound import pipeline_bridge
+
+    config = SimpleNamespace(
+        database=SimpleNamespace(fragmentation_threshold_pct=None),
+        indexing=SimpleNamespace(),
+        embedding=None,
+    )
+
+    await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=True,
+        config=config,
+    )
+
+    assert fake_native_pipeline.captured_config["compaction_threshold"] is None
+
+
+@pytest.mark.asyncio
 async def test_explicit_zero_config_file_threshold_disables_gate(
     tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
 ) -> None:
@@ -358,3 +388,29 @@ async def test_embed_callback_uses_caller_config_not_registry(
         pipeline_bridge._embed_loops.clear()
 
     assert created_models == ["caller-model"]
+
+
+@pytest.mark.asyncio
+async def test_embed_caches_cleared_at_start_of_run(
+    tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
+) -> None:
+    """A stale provider/loop left behind by an earlier run (e.g. via OS
+    thread-id recycling across separate Rust embed thread pools) must not
+    survive into a new run. Regression test for PR #380 review finding #6.
+    """
+    from chunkhound import pipeline_bridge
+
+    sentinel_tid = 999999
+    pipeline_bridge._embed_providers[sentinel_tid] = object()  # stand-in provider
+    pipeline_bridge._embed_loops[sentinel_tid] = object()  # stand-in loop
+
+    await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=True,
+        config=None,
+    )
+
+    assert pipeline_bridge._embed_providers == {}
+    assert pipeline_bridge._embed_loops == {}

@@ -4,7 +4,7 @@ error triggers the missing-embeddings backfill pass.
 """
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -22,8 +22,9 @@ class _FakeCoordinator:
         self.resolve_rust_pipeline_decision = lambda log_reason=True: True
         self.process_directory = AsyncMock(return_value=process_result)
         self.generate_missing_embeddings = AsyncMock(return_value=backfill_result)
+        self.clear_compaction_skip = MagicMock(side_effect=self._clear_compaction_skip)
 
-    def allow_compaction_after_backfill(self) -> None:
+    def _clear_compaction_skip(self) -> None:
         self._skip_compaction = False
 
     async def compact_database_with_metrics(self) -> dict:
@@ -74,6 +75,10 @@ async def test_unrelated_rust_errors_do_not_zero_out_embeddings_count():
 
     assert stats.embeddings_generated == 3_677_386
     coordinator.generate_missing_embeddings.assert_awaited_once()
+    # Backfill found nothing to generate -- the compaction skip (Rust already
+    # compacted this run) must NOT be invalidated, or every successful Rust
+    # run would pay for a redundant real compaction.
+    coordinator.clear_compaction_skip.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -100,6 +105,11 @@ async def test_backfill_additions_are_added_not_overwritten():
     stats = await service.process_directory(Path("/does/not/matter"))
 
     assert stats.embeddings_generated == 1_000
+    # Backfill actually wrote new embeddings after Rust's own compaction ran
+    # -- those rows were never compacted, so the skip must be cleared so the
+    # second compaction boundary runs for real. Regression test for PR #380
+    # review finding #4 (stale _skip_compaction silently no-ops here).
+    coordinator.clear_compaction_skip.assert_called_once()
 
 
 @pytest.mark.asyncio

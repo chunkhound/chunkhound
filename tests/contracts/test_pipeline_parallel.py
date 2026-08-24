@@ -5,8 +5,11 @@ connected by bounded channels: a parse thread produces parsed batches, a
 dedicated embed thread consumes and embeds them, and a dedicated store
 thread writes embedded batches to DuckDB using per-batch transactions.
 
-The contract: output must be byte-identical to the Python reference
-pipeline (``index_with_python``).
+The identical-output-under-forced-multi-batch-parsing contract (which is
+what actually exercises the streaming overlap) lives in
+``test_identical_chunks.py::TestIdenticalChunks.test_identical_output``
+(the ``with-embeddings-parse-batch-1`` case). This file covers the
+parallel pipeline's other contract: incremental re-indexing.
 """
 
 import tempfile
@@ -14,11 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.contracts.mock_embed import MockEmbeddingProvider
 from tests.contracts.pipeline_harness import (
     assert_chunk_multiset_identical,
-    assert_identical,
-    index_with_python,
+    assert_embedding_multiset_identical,
     index_with_rust,
 )
 
@@ -27,34 +28,6 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 
 class TestPipelineParallel:
     """The 3-stage streaming pipeline must produce output identical to Python."""
-
-    @pytest.mark.asyncio
-    async def test_pipeline_parallel_identical_output(self):
-        """Streaming pipeline (parse ∥ embed ∥ store) output matches Python.
-
-        Uses ``parse_batch_size=1`` so the 5-file fixture is split into 5
-        batches instead of 1 — otherwise everything fits in a single default
-        (200-file) batch and there is nothing to overlap. Forcing multiple
-        batches means batch N+1 can be parsing while batch N is still being
-        embedded/stored, actually exercising the concurrent parse/embed/store
-        threads this test is named for.
-        """
-        with tempfile.TemporaryDirectory() as tmp_py, tempfile.TemporaryDirectory() as tmp_rs:
-            db_py = Path(tmp_py) / "db"
-            db_py.mkdir(parents=True, exist_ok=True)
-            db_rs = Path(tmp_rs) / "db"
-            db_rs.mkdir(parents=True, exist_ok=True)
-
-            result_py = await index_with_python(
-                FIXTURE_DIR, db_py, skip_embeddings=False,
-                embedding_provider=MockEmbeddingProvider(),
-            )
-
-            result_rs = index_with_rust(
-                FIXTURE_DIR, db_rs, skip_embeddings=False, parse_batch_size=1
-            )
-
-            assert_identical(result_py, result_rs)
 
     @pytest.mark.asyncio
     async def test_pipeline_parallel_incremental(self):
@@ -107,9 +80,16 @@ class TestPipelineParallel:
                 label_a="full",
                 label_b="incremental",
             )
+            assert_embedding_multiset_identical(
+                full_result.embedding_tuples,
+                incremental.embedding_tuples,
+                label_a="full",
+                label_b="incremental",
+            )
 
             # Verify incremental mode was actually used (fewer files processed).
             assert incremental.files_processed < full_result.files_processed, (
                 f"Incremental should process fewer files: "
-                f"inc={incremental.files_processed} < full={full_result.files_processed}"
+                f"inc={incremental.files_processed} < "
+                f"full={full_result.files_processed}"
             )

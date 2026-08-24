@@ -64,6 +64,20 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    def set_rust_pipeline_in_progress(self, active: bool) -> None:
+        """Publish whether the Rust pipeline currently owns write access to
+        the database file.
+
+        This is not set automatically as a side effect of
+        `release_for_rust_pipeline()` — callers must call this with `True`
+        only after that method returns successfully, and with `False` before
+        reconnecting once the Rust pipeline finishes. See
+        `chunkhound.services.rust_pipeline_runner.run_rust_indexing_phase()`
+        for the canonical (and currently sole) caller and the exact
+        set/clear boundaries.
+        """
+        ...
+
     def get_base_directory(self) -> Path:
         """Get the base directory for path normalization.
 
