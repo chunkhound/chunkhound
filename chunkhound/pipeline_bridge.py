@@ -199,7 +199,11 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
 
     Uses a provider AND an event loop cached per OS thread (keyed by
     ``threading.get_ident()``), both created once per thread and reused for
-    the thread's lifetime.
+    the thread's lifetime -- scoped to the current pipeline run:
+    ``run_rust_pipeline()`` clears both caches on entry, since a thread id
+    is only stable *within* one run (Rust rebuilds its embed thread pool
+    from scratch on every run, so ids can otherwise be recycled and collide
+    with a stale entry left by an earlier, unrelated run).
 
     NOTE: this used to use ``threading.local()``, which turned out not to
     persist across separate ``Python::with_gil()`` calls from the same
@@ -529,6 +533,17 @@ async def run_rust_pipeline(
     import asyncio
 
     from chunkhound_native import IndexingPipeline
+
+    # Each run gets a brand-new Rust-side embed thread pool (built fresh in
+    # IndexingPipeline::run(), torn down at the end of that run), so a
+    # thread id observed here is only ever valid for the current run. OS
+    # thread ids get recycled once a thread exits, so without clearing here
+    # a later run's fresh worker thread could collide with a numeric id
+    # left behind by an earlier, unrelated run and silently reuse its
+    # stale embedding provider/event loop. See _embed_batch's docstring.
+    with _embed_cache_lock:
+        _embed_providers.clear()
+        _embed_loops.clear()
 
     # ── Config mapping ──────────────────────────────────────
     indexing_cfg = getattr(config, "indexing", None) if config else None

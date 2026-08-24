@@ -248,3 +248,29 @@ async def test_disk_limit_not_exceeded_report_has_no_extra_error(
     )
 
     assert result["errors"] == []
+
+
+@pytest.mark.asyncio
+async def test_embed_caches_cleared_at_start_of_run(
+    tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
+) -> None:
+    """A stale provider/loop left behind by an earlier run (e.g. via OS
+    thread-id recycling across separate Rust embed thread pools) must not
+    survive into a new run. Regression test for PR #380 review finding #6.
+    """
+    from chunkhound import pipeline_bridge
+
+    sentinel_tid = 999999
+    pipeline_bridge._embed_providers[sentinel_tid] = object()  # stand-in provider
+    pipeline_bridge._embed_loops[sentinel_tid] = object()  # stand-in loop
+
+    await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=True,
+        config=None,
+    )
+
+    assert pipeline_bridge._embed_providers == {}
+    assert pipeline_bridge._embed_loops == {}
