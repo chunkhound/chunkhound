@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from loguru import logger
+
 from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.types.common import FileId
 from chunkhound.core.utils.path_utils import get_relative_path_safe
@@ -203,7 +205,11 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
     ``run_rust_pipeline()`` clears both caches on entry, since a thread id
     is only stable *within* one run (Rust rebuilds its embed thread pool
     from scratch on every run, so ids can otherwise be recycled and collide
-    with a stale entry left by an earlier, unrelated run).
+    with a stale entry left by an earlier, unrelated run). Entries evicted
+    this way are explicitly shut down by ``_shutdown_stale_embed_resources``
+    rather than just dropped for GC -- a provider holds a live HTTP client
+    and the loop is a real OS-level event loop, both of which need an
+    explicit close to avoid leaking a socket/fd on every run.
 
     NOTE: this used to use ``threading.local()``, which turned out not to
     persist across separate ``Python::with_gil()`` calls from the same
@@ -285,6 +291,47 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
         return asyncio.run(_embed())
     except RuntimeError:
         return asyncio.run(_embed())
+
+
+def _shutdown_stale_embed_resources(
+    providers: dict[int, "EmbeddingProvider"],
+    loops: dict[int, "asyncio.AbstractEventLoop"],
+) -> None:
+    """Best-effort cleanup for provider/loop entries evicted from the
+    per-thread embed caches at the start of a new run_rust_pipeline() call.
+
+    Runs off the event loop (via asyncio.to_thread) since closing a
+    provider's HTTP client is a blocking-ish async call. A resource that
+    won't close cleanly must never abort the indexing run waiting on this
+    cleanup -- failures are logged and swallowed.
+
+    Each provider's client is bound to whichever loop was running when it
+    was first used (see _embed_batch), so shutdown() must be awaited on
+    that same cached loop, not a fresh one.
+    """
+    import asyncio
+
+    for tid, provider in providers.items():
+        shutdown = getattr(provider, "shutdown", None)
+        if shutdown is None:
+            continue
+        try:
+            loop = loops.get(tid)
+            if loop is not None and not loop.is_closed():
+                loop.run_until_complete(shutdown())
+            else:
+                asyncio.run(shutdown())
+        except Exception as e:
+            logger.warning(
+                f"Failed to shut down stale embed provider (tid={tid}): {e}"
+            )
+
+    for tid, loop in loops.items():
+        try:
+            if not loop.is_closed():
+                loop.close()
+        except Exception as e:
+            logger.warning(f"Failed to close stale embed event loop (tid={tid}): {e}")
 
 
 def _parse_file_worker_for_timeout(
@@ -542,8 +589,14 @@ async def run_rust_pipeline(
     # left behind by an earlier, unrelated run and silently reuse its
     # stale embedding provider/event loop. See _embed_batch's docstring.
     with _embed_cache_lock:
+        stale_providers = dict(_embed_providers)
+        stale_loops = dict(_embed_loops)
         _embed_providers.clear()
         _embed_loops.clear()
+    if stale_providers or stale_loops:
+        await asyncio.to_thread(
+            _shutdown_stale_embed_resources, stale_providers, stale_loops
+        )
 
     # ── Config mapping ──────────────────────────────────────
     indexing_cfg = getattr(config, "indexing", None) if config else None

@@ -7,12 +7,13 @@ internal defaults.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -274,3 +275,32 @@ async def test_embed_caches_cleared_at_start_of_run(
 
     assert pipeline_bridge._embed_providers == {}
     assert pipeline_bridge._embed_loops == {}
+
+
+@pytest.mark.asyncio
+async def test_stale_embed_provider_is_shutdown(
+    tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
+) -> None:
+    """A stale provider evicted from the cache must be shut down (its HTTP
+    client closed), not just dropped for GC. Regression test for the
+    resource leak introduced by the finding #6 fix (PR #380 review
+    follow-up).
+    """
+    from chunkhound import pipeline_bridge
+
+    sentinel_tid = 888888
+    stale_provider = AsyncMock()
+    stale_loop = asyncio.new_event_loop()
+    pipeline_bridge._embed_providers[sentinel_tid] = stale_provider
+    pipeline_bridge._embed_loops[sentinel_tid] = stale_loop
+
+    await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=True,
+        config=None,
+    )
+
+    stale_provider.shutdown.assert_awaited_once()
+    assert stale_loop.is_closed()
