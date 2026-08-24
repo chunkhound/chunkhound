@@ -251,44 +251,162 @@ async def test_disk_limit_not_exceeded_report_has_no_extra_error(
     assert result["errors"] == []
 
 
-@pytest.mark.asyncio
-async def test_embed_caches_cleared_at_start_of_run(
-    tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
-) -> None:
-    """A stale provider/loop left behind by an earlier run (e.g. via OS
-    thread-id recycling across separate Rust embed thread pools) must not
-    survive into a new run. Regression test for PR #380 review finding #6.
+def test_embed_thread_http_clients_are_closed_with_their_loops() -> None:
+    """Per-thread embed clients must shut down before process exit.
+
+    Leaving httpx AsyncClients bound to worker loops causes Windows
+    Proactor transports to raise 'Event loop is closed' from __del__
+    after a successful `chunkhound index` (Python 3.10).
     """
+    import asyncio
+
     from chunkhound import pipeline_bridge
 
-    sentinel_tid = 999999
-    pipeline_bridge._embed_providers[sentinel_tid] = object()  # stand-in provider
-    pipeline_bridge._embed_loops[sentinel_tid] = object()  # stand-in loop
+    loop = asyncio.new_event_loop()
+    provider = MagicMock()
+    provider.shutdown = AsyncMock()
+    pipeline_bridge._embed_providers[999001] = provider
+    pipeline_bridge._embed_loops[999001] = loop
+    try:
+        pipeline_bridge._shutdown_embed_thread_resources()
+        provider.shutdown.assert_called_once()
+        assert loop.is_closed()
+        assert 999001 not in pipeline_bridge._embed_providers
+        assert 999001 not in pipeline_bridge._embed_loops
+    finally:
+        pipeline_bridge._embed_providers.pop(999001, None)
+        leftover = pipeline_bridge._embed_loops.pop(999001, None)
+        if leftover is not None and not leftover.is_closed():
+            leftover.close()
+        if not loop.is_closed():
+            loop.close()
+
+
+@pytest.mark.asyncio
+async def test_embed_shutdown_from_running_loop_awaits_provider() -> None:
+    """CLI shutdown runs while asyncio.run()'s loop is still running.
+
+    Direct loop.run_until_complete on that thread raises and previously
+    leaked OpenAIEmbeddingProvider.shutdown as 'never awaited'.
+    """
+    import asyncio
+
+    from chunkhound import pipeline_bridge
+
+    loop = asyncio.new_event_loop()
+    provider = MagicMock()
+    provider.shutdown = AsyncMock()
+    pipeline_bridge._embed_providers[999002] = provider
+    pipeline_bridge._embed_loops[999002] = loop
+    try:
+        pipeline_bridge._shutdown_embed_thread_resources()
+        provider.shutdown.assert_called_once()
+        assert loop.is_closed()
+        assert 999002 not in pipeline_bridge._embed_providers
+        assert 999002 not in pipeline_bridge._embed_loops
+    finally:
+        pipeline_bridge._embed_providers.pop(999002, None)
+        leftover = pipeline_bridge._embed_loops.pop(999002, None)
+        if leftover is not None and not leftover.is_closed():
+            leftover.close()
+        if not loop.is_closed():
+            loop.close()
+
+
+@pytest.mark.asyncio
+async def test_embed_callback_uses_caller_config_not_registry(
+    tmp_path: Path,
+    fake_native_pipeline: _FakeNativePipeline,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rust embed callbacks must use run_rust_pipeline's config.embedding.
+
+    Looking up get_registry()._config instead ignores the coordinator's
+    embedding settings whenever those two configs diverge (MCP with more
+    than one config, tests, explicit Config objects).
+    """
+    from chunkhound import pipeline_bridge
+    from chunkhound.core.config.embedding_config import EmbeddingConfig
+    from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+
+    caller_cfg = EmbeddingConfig(
+        provider="openai",
+        model="caller-model",
+        api_key="sk-caller",
+        base_url="http://caller.example/v1",
+        max_concurrent_batches=2,
+    )
+    registry_cfg = EmbeddingConfig(
+        provider="openai",
+        model="registry-model",
+        api_key="sk-registry",
+        base_url="http://registry.example/v1",
+        max_concurrent_batches=2,
+    )
+    fake_registry = types.ModuleType("chunkhound.registry")
+    fake_registry.get_registry = lambda: SimpleNamespace(  # type: ignore[attr-defined]
+        _config=SimpleNamespace(embedding=registry_cfg)
+    )
+    monkeypatch.setitem(sys.modules, "chunkhound.registry", fake_registry)
+
+    created_models: list[str | None] = []
+
+    def _create_provider(config: EmbeddingConfig) -> MagicMock:
+        created_models.append(config.model)
+        provider = MagicMock()
+        provider.embed = AsyncMock(return_value=[[0.1, 0.2]])
+        provider.shutdown = AsyncMock()
+        return provider
+
+    monkeypatch.setattr(
+        EmbeddingProviderFactory,
+        "create_provider",
+        staticmethod(_create_provider),
+    )
 
     await pipeline_bridge.run_rust_pipeline(
         files_to_process=[],
         db_path=tmp_path,
         project_root=tmp_path,
-        skip_embeddings=True,
-        config=None,
+        skip_embeddings=False,
+        config=SimpleNamespace(
+            database=SimpleNamespace(),
+            indexing=SimpleNamespace(),
+            embedding=caller_cfg,
+        ),
     )
 
-    assert pipeline_bridge._embed_providers == {}
-    assert pipeline_bridge._embed_loops == {}
+    cb = fake_native_pipeline.instance.run.call_args.kwargs["embed_batch_callback"]
+    pipeline_bridge._embed_providers.clear()
+    pipeline_bridge._embed_loops.clear()
+    try:
+        cb(["hello"])
+    finally:
+        pipeline_bridge._embed_providers.clear()
+        for loop in pipeline_bridge._embed_loops.values():
+            if not loop.is_closed():
+                loop.close()
+        pipeline_bridge._embed_loops.clear()
+
+    assert created_models == ["caller-model"]
 
 
 @pytest.mark.asyncio
-async def test_stale_embed_provider_is_shutdown(
+async def test_run_rust_pipeline_shuts_down_leftover_embed_resources(
     tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
 ) -> None:
-    """A stale provider evicted from the cache must be shut down (its HTTP
-    client closed), not just dropped for GC. Regression test for the
-    resource leak introduced by the finding #6 fix (PR #380 review
-    follow-up).
+    """A provider/loop left behind in the module-level caches (e.g. via OS
+    thread-id recycling across separate Rust embed thread pools, or a prior
+    run that somehow didn't reach its own cleanup) must be shut down -- not
+    just dropped for GC -- and cleared by the time run_rust_pipeline()
+    returns. Regression test for PR #380 review finding #6 and the
+    resource-leak follow-up: run_rust_pipeline's finally must actually
+    invoke _shutdown_embed_thread_resources, not just leave stale entries
+    for a future run to overwrite.
     """
     from chunkhound import pipeline_bridge
 
-    sentinel_tid = 888888
+    sentinel_tid = 999999
     stale_provider = AsyncMock()
     stale_loop = asyncio.new_event_loop()
     pipeline_bridge._embed_providers[sentinel_tid] = stale_provider
@@ -304,3 +422,5 @@ async def test_stale_embed_provider_is_shutdown(
 
     stale_provider.shutdown.assert_awaited_once()
     assert stale_loop.is_closed()
+    assert pipeline_bridge._embed_providers == {}
+    assert pipeline_bridge._embed_loops == {}

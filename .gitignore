@@ -348,3 +348,6 @@ HUMAN_REVIEW.md
 
 # Test artifacts (playwright, vitest, etc.)
 site/test-results/
+
+# xwin (Windows SDK cross-compile cache)
+.xwin-cache/

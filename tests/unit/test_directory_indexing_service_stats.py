@@ -17,13 +17,26 @@ class _FakeCoordinator:
 
     def __init__(self, process_result: dict, backfill_result: dict):
         self._process_result = process_result
+        self._skip_compaction = True
+        self.compact_calls: list[bool] = []
         self.resolve_rust_pipeline_decision = lambda log_reason=True: True
         self.process_directory = AsyncMock(return_value=process_result)
         self.generate_missing_embeddings = AsyncMock(return_value=backfill_result)
-        self.compact_database_with_metrics = AsyncMock(
-            return_value={"status": "skipped"}
-        )
-        self.clear_compaction_skip = MagicMock()
+        self.clear_compaction_skip = MagicMock(side_effect=self._clear_compaction_skip)
+
+    def _clear_compaction_skip(self) -> None:
+        self._skip_compaction = False
+
+    async def compact_database_with_metrics(self) -> dict:
+        self.compact_calls.append(self._skip_compaction)
+        if self._skip_compaction:
+            return {"status": "skipped", "reason": "Rust pipeline owns compaction"}
+        return {
+            "status": "success",
+            "size_before": 10,
+            "size_after": 9,
+            "reduction_pct": 10.0,
+        }
 
 
 class _FakeConfig:
@@ -97,3 +110,57 @@ async def test_backfill_additions_are_added_not_overwritten():
     # second compaction boundary runs for real. Regression test for PR #380
     # review finding #4 (stale _skip_compaction silently no-ops here).
     coordinator.clear_compaction_skip.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_rust_backfill_that_writes_embeddings_runs_second_compact():
+    """Rust already compacted; skip the first DIS boundary, but compact
+    after a backfill that actually wrote embedding rows."""
+    process_result = {
+        "status": "success",
+        "pipeline": "rust",
+        "files_processed": 100,
+        "total_chunks": 1_000,
+        "embeddings_generated": 990,
+        "errors": 3,
+        "skipped": 0,
+        "skipped_due_to_timeout": [],
+        "skipped_unchanged": 0,
+        "skipped_filtered": 0,
+    }
+    backfill_result = {"status": "success", "generated": 10}
+
+    coordinator = _FakeCoordinator(process_result, backfill_result)
+    service = DirectoryIndexingService(coordinator, _FakeConfig())
+
+    stats = await service.process_directory(Path("/does/not/matter"))
+
+    assert coordinator.compact_calls == [True, False]
+    assert stats.db_compactions == 1
+    coordinator.generate_missing_embeddings.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_rust_errors_with_empty_backfill_skip_both_compacts():
+    """Parse/embed errors that find nothing missing must not compact again."""
+    process_result = {
+        "status": "success",
+        "pipeline": "rust",
+        "files_processed": 100,
+        "total_chunks": 1_000,
+        "embeddings_generated": 1_000,
+        "errors": 3,
+        "skipped": 0,
+        "skipped_due_to_timeout": [],
+        "skipped_unchanged": 0,
+        "skipped_filtered": 0,
+    }
+    backfill_result = {"status": "up_to_date", "generated": 0}
+
+    coordinator = _FakeCoordinator(process_result, backfill_result)
+    service = DirectoryIndexingService(coordinator, _FakeConfig())
+
+    stats = await service.process_directory(Path("/does/not/matter"))
+
+    assert coordinator.compact_calls == [True, True]
+    assert stats.db_compactions == 0

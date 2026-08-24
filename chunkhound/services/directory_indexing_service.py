@@ -129,8 +129,9 @@ class DirectoryIndexingService:
             if not no_embeddings and (not used_rust_pipeline or rust_had_errors):
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
-                stats.embeddings_generated += embed_result.get("generated", 0)
-                if embed_result.get("generated", 0) > 0:
+                generated = embed_result.get("generated", 0)
+                stats.embeddings_generated += generated
+                if generated > 0:
                     # This retry pass wrote new embeddings after the Rust
                     # run's own internal compaction already ran — those
                     # rows were never compacted, so force the next boundary
