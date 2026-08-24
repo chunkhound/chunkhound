@@ -46,6 +46,8 @@ from chunkhound.providers.database.serial_database_provider import (
 )
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
+    DatabaseRustPipelineInProgressError,
+    DatabaseTemporarilyUnavailableError,
     _executor_local,
 )
 from chunkhound.utils.windows_constants import (
@@ -367,6 +369,15 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "Database compaction in progress — connection refused until "
                     "compaction completes"
                 )
+            if self._executor.is_rust_pipeline_in_progress():
+                logger.info(
+                    "Rust indexing pipeline owns the database — refusing "
+                    "connection until it finishes"
+                )
+                raise DatabaseRustPipelineInProgressError(
+                    "Rust indexing pipeline owns the database — connection "
+                    "refused until it finishes"
+                )
 
             # Validate stored indexed-root identity before any file-backed DB
             # open, WAL replay, extension load, or schema touch happens.
@@ -381,7 +392,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Call parent connect which handles executor initialization
             super().connect()
 
-        except DatabaseCompactionInProgressError:
+        except DatabaseTemporarilyUnavailableError:
             raise
         except Exception as e:
             logger.error(f"DuckDB connection failed: {e}")

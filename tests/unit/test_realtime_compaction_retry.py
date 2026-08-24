@@ -7,6 +7,7 @@ import pytest
 
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
+    DatabaseRustPipelineInProgressError,
 )
 from chunkhound.services.realtime.service import RealtimeIndexingService
 
@@ -73,6 +74,56 @@ async def test_change_processing_retries_when_compaction_is_active(
     try:
         await asyncio.wait_for(processed.wait(), timeout=2.0)
         assert attempts >= 2  # retry must have fired after first compaction-busy
+    finally:
+        process_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await process_task
+
+    assert service.failed_files == set()
+    assert service._last_error is None
+
+
+@pytest.mark.asyncio
+async def test_change_processing_retries_when_rust_pipeline_owns_db(
+    service: RealtimeIndexingService,
+    tmp_path: Path,
+) -> None:
+    """The same retry path also covers a Rust indexing pipeline run --
+    both raise a subclass of DatabaseTemporarilyUnavailableError, and the
+    realtime pipeline's except clauses must catch the shared base, not just
+    DatabaseCompactionInProgressError.
+    """
+    target_file = tmp_path / "busy_change_rust.py"
+    target_file.write_text("def busy_change_rust():\n    return 1\n", encoding="utf-8")
+
+    attempts = 0
+    processed = asyncio.Event()
+
+    async def flaky_process_file(
+        file_path: Path, skip_embeddings: bool = False
+    ) -> dict[str, int]:
+        nonlocal attempts
+        attempts += 1
+        assert file_path == target_file
+        assert skip_embeddings is True
+        if attempts == 1:
+            raise DatabaseRustPipelineInProgressError("rust busy")
+        processed.set()
+        return {"chunks": 1, "embeddings": 0}
+
+    service.services = SimpleNamespace(
+        indexing_coordinator=SimpleNamespace(process_file=flaky_process_file),
+        provider=SimpleNamespace(flush=AsyncMock()),
+    )
+    service.add_file = AsyncMock(return_value=True)
+
+    await service._enqueue_mutation(service._build_mutation("scan", target_file))
+
+    process_task = asyncio.create_task(service._process_loop())
+    service.process_task = process_task
+    try:
+        await asyncio.wait_for(processed.wait(), timeout=2.0)
+        assert attempts >= 2  # retry must have fired after first rust-busy
     finally:
         process_task.cancel()
         with pytest.raises(asyncio.CancelledError):

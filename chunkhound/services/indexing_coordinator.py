@@ -2022,6 +2022,15 @@ class IndexingCoordinator(BaseService):
             return {"files": 0, "chunks": 0, "embeddings": 0}
         return await self._db.get_stats_async()
 
+    def clear_compaction_skip(self) -> None:
+        """Force the next compact_database_with_metrics() call to run for real.
+
+        Called after a Python-side retry pass writes new data (e.g. missing
+        embeddings) following a Rust run that reported per-file errors —
+        Rust's own internal compaction never covered these newly-written rows.
+        """
+        self._skip_compaction = False
+
     async def compact_database_with_metrics(self) -> dict[str, Any]:
         """Compact the database file unconditionally and return metrics.
 

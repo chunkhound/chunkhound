@@ -130,6 +130,12 @@ class DirectoryIndexingService:
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 stats.embeddings_generated += embed_result.get("generated", 0)
+                if embed_result.get("generated", 0) > 0:
+                    # This retry pass wrote new embeddings after the Rust
+                    # run's own internal compaction already ran — those
+                    # rows were never compacted, so force the next boundary
+                    # below to run for real instead of skipping.
+                    self.indexing_coordinator.clear_compaction_skip()
 
             # Second compaction boundary: needed when embeddings were
             # generated, or when files were processed (but the first
