@@ -21,6 +21,7 @@ duckdb = pytest.importorskip("duckdb")
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
+from chunkhound.core.exceptions import DatabaseError
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import (
     ChunkType,
@@ -2877,6 +2878,45 @@ class TestRustPipelineGuard:
             )
         )
         assert file_id > 0
+
+
+class TestCheckpointFailureSurfaces:
+    """A checkpoint failure during disconnect must raise, not just be logged.
+
+    Regression tests for PR #380 review finding #8: release_for_rust_pipeline()
+    used to treat "disconnect didn't raise" as proof the data was durably
+    flushed before handing the file to Rust, even when the underlying
+    CHECKPOINT silently failed.
+    """
+
+    def _fail_checkpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make any DuckDB connection's CHECKPOINT call raise, other SQL unaffected."""
+        original_execute = duckdb.DuckDBPyConnection.execute
+
+        def _patched_execute(self: Any, *args: Any, **kwargs: Any) -> Any:
+            if args and isinstance(args[0], str) and "CHECKPOINT" in args[0].upper():
+                raise RuntimeError("simulated checkpoint failure")
+            return original_execute(self, *args, **kwargs)
+
+        monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", _patched_execute)
+
+    def test_release_for_rust_pipeline_raises_on_checkpoint_failure(
+        self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed CHECKPOINT must surface as DatabaseError, not be swallowed."""
+        self._fail_checkpoint(monkeypatch)
+
+        with pytest.raises(DatabaseError):
+            file_backed_db.release_for_rust_pipeline()
+
+    def test_release_for_rust_pipeline_succeeds_on_clean_checkpoint(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """No regression on the happy path: a clean checkpoint still lets
+        release_for_rust_pipeline() (and a subsequent reconnect) return normally."""
+        file_backed_db.release_for_rust_pipeline()
+        file_backed_db.connect()
+        assert file_backed_db.is_connected
 
 
 def test_atomic_replace_retries_transient_windows_failures(

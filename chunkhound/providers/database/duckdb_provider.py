@@ -622,6 +622,10 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
         except Exception as e:
             log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")
+            raise DatabaseError(
+                operation="disconnect",
+                reason=f"checkpoint failed before disconnect: {e}",
+            ) from e
         finally:
             # Close connection
             conn.close()

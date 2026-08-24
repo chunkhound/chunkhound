@@ -33,6 +33,7 @@ warnings.filterwarnings(
 import duckdb
 from loguru import logger
 
+from chunkhound.core.exceptions import DatabaseError
 from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.utils.windows_constants import _unlink_compacted
 
@@ -390,7 +391,10 @@ class DuckDBConnectionManager:
                     log_if_not_mcp("debug", "Skipping checkpoint before disconnect (already done)")
             except Exception as e:
                 log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")
-                # Continue with close - don't block shutdown
+                raise DatabaseError(
+                    operation="disconnect",
+                    reason=f"checkpoint failed before disconnect: {e}",
+                ) from e
             finally:
                 self.connection.close()
                 self.connection = None
