@@ -32,13 +32,16 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        ALERT_TAG: ${{ inputs.tag }}
+        ALERT_REPO: ${{ github.repository }}
+        ALERT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         gh issue create \
-          --repo "${{ github.repository }}" \
-          --title "chunkhound-native publish failed for ${{ inputs.tag }}" \
-          --body "chunkhound-native failed to publish for ${{ inputs.tag }} before chunkhound could be released to PyPI.
+          --repo "$ALERT_REPO" \
+          --title "chunkhound-native publish failed for $ALERT_TAG" \
+          --body "chunkhound-native failed to publish for $ALERT_TAG before chunkhound could be released to PyPI.
 
-        Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        Workflow run: $ALERT_RUN_URL
 
         Next steps:
         - Re-run the native publish job if the failure looks transient (flaky runner, wheel-repair issue, or PyPI propagation). The publish workflow skips native artifacts that were already uploaded, so the retry is safe after a partial upload.
