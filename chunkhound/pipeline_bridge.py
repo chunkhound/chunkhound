@@ -27,17 +27,36 @@ if TYPE_CHECKING:
 
     from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
-_embed_providers: dict[int, "EmbeddingProvider"] = {}
-_embed_loops: dict[int, "asyncio.AbstractEventLoop"] = {}
-_embed_cache_lock = threading.Lock()
+@dataclass
+class _EmbedThreadCache:
+    """Per-``run_rust_pipeline()`` cache of embed providers/event loops.
+
+    Keyed by raw OS thread id (see ``_embed_batch`` for why), one entry per
+    rayon worker thread. Deliberately NOT a module-level singleton: a
+    shared, process-wide cache let one ``run_rust_pipeline()`` call's
+    cleanup drain and shut down whatever a *different*, concurrently
+    running call's threads had cached — dict keys are bare thread ids with
+    no notion of "which run" — which could tear down a live HTTP
+    client/event loop while a sibling run's embed thread was still using
+    it. It separately let a stale entry from a thread id recycled by the
+    OS survive across runs and collide with a fresh one. Both classes of
+    bug are impossible by construction once each run owns its own cache
+    instance that no other run ever touches; see ``run_rust_pipeline``,
+    which creates one and threads it through ``embed_batch_callback``.
+    """
+
+    providers: dict[int, "EmbeddingProvider"] = field(default_factory=dict)
+    loops: dict[int, "asyncio.AbstractEventLoop"] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _shutdown_embed_thread_resources() -> None:
-    """Close per-thread embedding HTTP clients and their event loops.
+def _shutdown_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
+    """Close this run's per-thread embedding HTTP clients and event loops.
 
     ``_embed_batch`` caches one OpenAI/httpx ``AsyncClient`` and one asyncio
-    loop per rayon worker OS thread. Those clients must be closed on the
-    *same* loop they were bound to, via ``loop.run_until_complete``.
+    loop per rayon worker OS thread, in ``cache``. Those clients must be
+    closed on the *same* loop they were bound to, via
+    ``loop.run_until_complete``.
 
     ``run_until_complete`` is illegal on a thread that already has a
     running loop (Python 3.10 ``_check_running``: "Cannot run the event
@@ -54,14 +73,14 @@ def _shutdown_embed_thread_resources() -> None:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        _close_embed_thread_resources()
+        _close_embed_thread_resources(cache)
         return
 
     done = threading.Event()
 
     def _run() -> None:
         try:
-            _close_embed_thread_resources()
+            _close_embed_thread_resources(cache)
         finally:
             done.set()
 
@@ -72,13 +91,13 @@ def _shutdown_embed_thread_resources() -> None:
         logger.debug("Embedding provider shutdown timed out")
 
 
-def _close_embed_thread_resources() -> None:
-    """Actually close cached embed providers. Caller must not hold a running loop."""
-    with _embed_cache_lock:
-        providers = dict(_embed_providers)
-        loops = dict(_embed_loops)
-        _embed_providers.clear()
-        _embed_loops.clear()
+def _close_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
+    """Actually close cache's embed providers. Caller must not hold a running loop."""
+    with cache.lock:
+        providers = dict(cache.providers)
+        loops = dict(cache.loops)
+        cache.providers.clear()
+        cache.loops.clear()
 
     for tid, provider in providers.items():
         loop = loops.pop(tid, None)
@@ -97,8 +116,6 @@ def _close_embed_thread_resources() -> None:
         if not loop.is_closed():
             loop.close()
 
-
-atexit.register(_shutdown_embed_thread_resources)
 
 _parse_pool: ProcessPoolExecutor | None = None
 _parse_pool_lock = threading.Lock()
@@ -256,41 +273,49 @@ def embed_batch_callback(
     texts: list[str],
     *,
     embedding_cfg: Any = None,
+    cache: "_EmbedThreadCache | None" = None,
 ) -> list[list[float]]:
     """Parallel batch embed (called from Rust rayon threads with GIL held).
 
     Signature matches what ``embed_batch_parallel`` expects:
     ``callback.call1((texts,)) → List[List[float]]``.
 
-    ``embedding_cfg`` is bound by ``run_rust_pipeline`` via
-    ``functools.partial`` so each rayon call still looks like
-    ``callback(texts)``. It must be the coordinator's embedding
-    config for this run — not whatever happens to sit on the
-    process-wide registry.
+    ``embedding_cfg`` and ``cache`` are both bound by ``run_rust_pipeline``
+    via ``functools.partial`` so each rayon call still looks like
+    ``callback(texts)``. ``embedding_cfg`` must be the coordinator's
+    embedding config for this run — not whatever happens to sit on the
+    process-wide registry. ``cache`` must be *this run's own*
+    ``_EmbedThreadCache`` — see its docstring for why it can't be a shared
+    module-level cache.
 
     Used when ``embed_thread_pool_size > 1`` — each rayon thread
     processes one batch at a time, so the provider sees N concurrent
     API requests.
     """
-    return _embed_batch(texts, embedding_cfg)
+    return _embed_batch(texts, embedding_cfg, cache)
 
 
-def _embed_batch(texts: list[str], embedding_cfg: Any = None) -> list[list[float]]:
+def _embed_batch(
+    texts: list[str],
+    embedding_cfg: Any = None,
+    cache: "_EmbedThreadCache | None" = None,
+) -> list[list[float]]:
     """Shared embed helper — run the async provider.embed() synchronously.
 
     Uses a provider AND an event loop cached per OS thread (keyed by
-    ``threading.get_ident()``), both created once per thread and reused for
-    the thread's lifetime -- scoped to the current pipeline run: a thread id
-    is only stable *within* one run (Rust rebuilds its embed thread pool
-    from scratch on every run, so ids can otherwise be recycled and collide
-    with a stale entry left by an earlier, unrelated run), so
-    ``run_rust_pipeline()`` drains and explicitly shuts down both caches in
-    its ``finally`` (``_shutdown_embed_thread_resources`` /
-    ``_close_embed_thread_resources``) once that run's pipeline.run() call
-    returns, rather than leaving entries to be silently reused or dropped
-    for GC -- a provider holds a live HTTP client and the loop is a real
-    OS-level event loop, both of which need an explicit close to avoid
-    leaking a socket/fd every run.
+    ``threading.get_ident()``) in ``cache``, both created once per thread
+    and reused for the thread's lifetime -- scoped to the current pipeline
+    run: a thread id is only stable *within* one run (Rust rebuilds its
+    embed thread pool from scratch on every run, so ids can otherwise be
+    recycled and collide with a stale entry left by an earlier, unrelated
+    run). ``cache`` itself is scoped to one ``run_rust_pipeline()`` call
+    (see ``_EmbedThreadCache``), so ``run_rust_pipeline()`` drains and
+    explicitly shuts down *its own* cache in its ``finally``
+    (``_shutdown_embed_thread_resources`` / ``_close_embed_thread_resources``)
+    once that run's pipeline.run() call returns, rather than leaving
+    entries to be silently reused or dropped for GC -- a provider holds a
+    live HTTP client and the loop is a real OS-level event loop, both of
+    which need an explicit close to avoid leaking a socket/fd every run.
 
     NOTE: this used to use ``threading.local()``, which turned out not to
     persist across separate ``Python::with_gil()`` calls from the same
@@ -319,8 +344,11 @@ def _embed_batch(texts: list[str], embedding_cfg: Any = None) -> list[list[float
     """
     import asyncio
 
+    if cache is None:
+        raise RuntimeError("No embed thread cache available")
+
     tid = threading.get_ident()
-    if tid not in _embed_providers:
+    if tid not in cache.providers:
         from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 
         if embedding_cfg is None:
@@ -339,10 +367,10 @@ def _embed_batch(texts: list[str], embedding_cfg: Any = None) -> list[list[float
             update={"max_concurrent_batches": 1}
         )
         provider = EmbeddingProviderFactory.create_provider(per_thread_embedding_cfg)
-        with _embed_cache_lock:
-            _embed_providers.setdefault(tid, provider)
+        with cache.lock:
+            cache.providers.setdefault(tid, provider)
 
-    emb_provider = _embed_providers[tid]
+    emb_provider = cache.providers[tid]
 
     async def _embed() -> list[list[float]]:
         return await emb_provider.embed(texts)
@@ -351,11 +379,11 @@ def _embed_batch(texts: list[str], embedding_cfg: Any = None) -> list[list[float
     # own — give each thread a persistent loop, created once and reused for
     # every call made from that thread.
     if threading.current_thread() is not threading.main_thread():
-        if tid not in _embed_loops:
+        if tid not in cache.loops:
             loop = asyncio.new_event_loop()
-            with _embed_cache_lock:
-                _embed_loops.setdefault(tid, loop)
-        loop = _embed_loops[tid]
+            with cache.lock:
+                cache.loops.setdefault(tid, loop)
+        loop = cache.loops[tid]
         asyncio.set_event_loop(loop)
         return loop.run_until_complete(_embed())
 
@@ -713,6 +741,11 @@ async def run_rust_pipeline(
         io_path = p if p.is_symlink() else p.resolve()
         file_entries.append((str(io_path), rel_key))
 
+    # Own cache for this run's embed provider/loop-per-thread state — never
+    # shared with any other concurrent or past run_rust_pipeline() call. See
+    # _EmbedThreadCache's docstring for why that isolation matters.
+    embed_cache = _EmbedThreadCache()
+
     # Both the pipeline construction and pipeline.run() raise a plain PyO3
     # PyRuntimeError on failure (see src/pipeline/pipeline.rs), indistinguishable
     # from any other exception IndexingCoordinator.process_directory() can hit.
@@ -730,7 +763,9 @@ async def run_rust_pipeline(
             ),
             embed_batch_callback=(
                 functools.partial(
-                    embed_batch_callback, embedding_cfg=embedding_cfg
+                    embed_batch_callback,
+                    embedding_cfg=embedding_cfg,
+                    cache=embed_cache,
                 )
                 if not skip_embeddings
                 else None
@@ -741,10 +776,13 @@ async def run_rust_pipeline(
     except Exception as e:
         raise RustPipelineError(reason=str(e)) from e
     finally:
-        # Close per-thread httpx clients before the process event loop is
-        # torn down. Must not call loop.run_until_complete on this thread
-        # (the CLI loop is still running). See _shutdown_embed_thread_resources.
-        await asyncio.to_thread(_shutdown_embed_thread_resources)
+        # Close this run's own per-thread httpx clients before the process
+        # event loop is torn down. Must not call loop.run_until_complete on
+        # this thread (the CLI loop is still running). See
+        # _shutdown_embed_thread_resources. Passing embed_cache (rather than
+        # a shared/global cache) ensures this can never close a
+        # concurrently-running sibling run's providers/loops.
+        await asyncio.to_thread(_shutdown_embed_thread_resources, embed_cache)
 
     # Map PipelineReport → coordinator stats dict.
     # `report.errors` entries are Rust-formatted as "{path}: {message}"

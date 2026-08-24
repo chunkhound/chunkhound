@@ -265,19 +265,16 @@ def test_embed_thread_http_clients_are_closed_with_their_loops() -> None:
     loop = asyncio.new_event_loop()
     provider = MagicMock()
     provider.shutdown = AsyncMock()
-    pipeline_bridge._embed_providers[999001] = provider
-    pipeline_bridge._embed_loops[999001] = loop
+    cache = pipeline_bridge._EmbedThreadCache()
+    cache.providers[999001] = provider
+    cache.loops[999001] = loop
     try:
-        pipeline_bridge._shutdown_embed_thread_resources()
+        pipeline_bridge._shutdown_embed_thread_resources(cache)
         provider.shutdown.assert_called_once()
         assert loop.is_closed()
-        assert 999001 not in pipeline_bridge._embed_providers
-        assert 999001 not in pipeline_bridge._embed_loops
+        assert cache.providers == {}
+        assert cache.loops == {}
     finally:
-        pipeline_bridge._embed_providers.pop(999001, None)
-        leftover = pipeline_bridge._embed_loops.pop(999001, None)
-        if leftover is not None and not leftover.is_closed():
-            leftover.close()
         if not loop.is_closed():
             loop.close()
 
@@ -296,19 +293,16 @@ async def test_embed_shutdown_from_running_loop_awaits_provider() -> None:
     loop = asyncio.new_event_loop()
     provider = MagicMock()
     provider.shutdown = AsyncMock()
-    pipeline_bridge._embed_providers[999002] = provider
-    pipeline_bridge._embed_loops[999002] = loop
+    cache = pipeline_bridge._EmbedThreadCache()
+    cache.providers[999002] = provider
+    cache.loops[999002] = loop
     try:
-        pipeline_bridge._shutdown_embed_thread_resources()
+        pipeline_bridge._shutdown_embed_thread_resources(cache)
         provider.shutdown.assert_called_once()
         assert loop.is_closed()
-        assert 999002 not in pipeline_bridge._embed_providers
-        assert 999002 not in pipeline_bridge._embed_loops
+        assert cache.providers == {}
+        assert cache.loops == {}
     finally:
-        pipeline_bridge._embed_providers.pop(999002, None)
-        leftover = pipeline_bridge._embed_loops.pop(999002, None)
-        if leftover is not None and not leftover.is_closed():
-            leftover.close()
         if not loop.is_closed():
             loop.close()
 
@@ -377,50 +371,127 @@ async def test_embed_callback_uses_caller_config_not_registry(
     )
 
     cb = fake_native_pipeline.instance.run.call_args.kwargs["embed_batch_callback"]
-    pipeline_bridge._embed_providers.clear()
-    pipeline_bridge._embed_loops.clear()
+    cache = cb.keywords["cache"]
     try:
         cb(["hello"])
     finally:
-        pipeline_bridge._embed_providers.clear()
-        for loop in pipeline_bridge._embed_loops.values():
+        cache.providers.clear()
+        for loop in cache.loops.values():
             if not loop.is_closed():
                 loop.close()
-        pipeline_bridge._embed_loops.clear()
+        cache.loops.clear()
 
     assert created_models == ["caller-model"]
 
 
 @pytest.mark.asyncio
-async def test_run_rust_pipeline_shuts_down_leftover_embed_resources(
-    tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
+async def test_run_rust_pipeline_closes_its_own_embed_resources_after_run(
+    tmp_path: Path,
+    fake_native_pipeline: _FakeNativePipeline,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A provider/loop left behind in the module-level caches (e.g. via OS
-    thread-id recycling across separate Rust embed thread pools, or a prior
-    run that somehow didn't reach its own cleanup) must be shut down -- not
-    just dropped for GC -- and cleared by the time run_rust_pipeline()
-    returns. Regression test for PR #380 review finding #6 and the
-    resource-leak follow-up: run_rust_pipeline's finally must actually
-    invoke _shutdown_embed_thread_resources, not just leave stale entries
-    for a future run to overwrite.
+    """A provider/loop actually created by this run's own embed callback
+    must be shut down -- not just dropped for GC -- and cleared from that
+    run's cache by the time run_rust_pipeline() returns. Regression test for
+    PR #380 review finding #6: run_rust_pipeline's finally must actually
+    invoke _shutdown_embed_thread_resources on the cache it created, not
+    just leave entries for a future run to overwrite.
     """
     from chunkhound import pipeline_bridge
+    from chunkhound.core.config.embedding_config import EmbeddingConfig
+    from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 
-    sentinel_tid = 999999
-    stale_provider = AsyncMock()
-    stale_loop = asyncio.new_event_loop()
-    pipeline_bridge._embed_providers[sentinel_tid] = stale_provider
-    pipeline_bridge._embed_loops[sentinel_tid] = stale_loop
+    created: list[MagicMock] = []
+
+    def _create_provider(config: EmbeddingConfig) -> MagicMock:
+        provider = MagicMock()
+        provider.embed = AsyncMock(return_value=[[0.1, 0.2]])
+        provider.shutdown = AsyncMock()
+        created.append(provider)
+        return provider
+
+    monkeypatch.setattr(
+        EmbeddingProviderFactory, "create_provider", staticmethod(_create_provider)
+    )
+
+    captured_caches: list[pipeline_bridge._EmbedThreadCache] = []
+
+    def _run_side_effect(
+        *,
+        files: object,
+        parse_batch_callback: object,
+        embed_batch_callback: object,
+        progress_callback: object,
+        incremental: object,
+    ) -> SimpleNamespace:
+        assert embed_batch_callback is not None
+        captured_caches.append(embed_batch_callback.keywords["cache"])
+        embed_batch_callback(["hello"])
+        return _fake_report()
+
+    fake_native_pipeline.instance.run.side_effect = _run_side_effect
 
     await pipeline_bridge.run_rust_pipeline(
         files_to_process=[],
         db_path=tmp_path,
         project_root=tmp_path,
-        skip_embeddings=True,
-        config=None,
+        skip_embeddings=False,
+        config=SimpleNamespace(
+            database=SimpleNamespace(),
+            indexing=SimpleNamespace(),
+            embedding=EmbeddingConfig(
+                provider="openai",
+                model="m",
+                api_key="sk-test",
+                max_concurrent_batches=1,
+            ),
+        ),
     )
 
-    stale_provider.shutdown.assert_awaited_once()
-    assert stale_loop.is_closed()
-    assert pipeline_bridge._embed_providers == {}
-    assert pipeline_bridge._embed_loops == {}
+    assert len(created) == 1
+    created[0].shutdown.assert_awaited_once()
+    cache = captured_caches[0]
+    assert cache.providers == {}
+    assert cache.loops == {}
+
+
+@pytest.mark.asyncio
+async def test_run_rust_pipeline_does_not_touch_a_sibling_runs_embed_cache(
+    tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
+) -> None:
+    """run_rust_pipeline() must only drain/close its OWN embed cache, never
+    a different, concurrently in-flight run's providers/loops.
+
+    Regression test for the cross-run race in an earlier fix for PR #380
+    review finding #6: that fix stopped a thread-id recycled from an OLDER,
+    already-finished run from colliding with a newer one, but the cache it
+    drained/closed was still a single module-level dict shared by every
+    run_rust_pipeline() call -- so one run's cleanup could tear down a
+    still-live provider/event loop belonging to a *different*, concurrently
+    running call. Each run must own an isolated _EmbedThreadCache instance
+    that no other run ever reaches into.
+    """
+    from chunkhound import pipeline_bridge
+
+    sibling_cache = pipeline_bridge._EmbedThreadCache()
+    sibling_provider = AsyncMock()
+    sibling_loop = asyncio.new_event_loop()
+    sibling_cache.providers[999999] = sibling_provider
+    sibling_cache.loops[999999] = sibling_loop
+
+    try:
+        await pipeline_bridge.run_rust_pipeline(
+            files_to_process=[],
+            db_path=tmp_path,
+            project_root=tmp_path,
+            skip_embeddings=True,
+            config=None,
+        )
+
+        sibling_provider.shutdown.assert_not_awaited()
+        assert not sibling_loop.is_closed()
+        assert 999999 in sibling_cache.providers
+        assert 999999 in sibling_cache.loops
+    finally:
+        if not sibling_loop.is_closed():
+            sibling_loop.close()
