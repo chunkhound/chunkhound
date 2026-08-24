@@ -65,7 +65,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.14"]
-        split: [1, 2]
+        split: [1, 2, 3]
         include:
           - os: ubuntu-latest
             job_timeout_minutes: 30
@@ -174,7 +174,7 @@ jobs:
         with:
           timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}
           max_attempts: 2
-          command: uv run pytest tests/ -v --junit-xml=test-results.xml --splits 2 --group ${{ matrix.split }} ${{ matrix.pytest_extra_args || '' }}
+          command: uv run pytest tests/ -v --junit-xml=test-results.xml --splits 3 --group ${{ matrix.split }} ${{ matrix.pytest_extra_args || '' }}
 
       - name: Upload test results
         if: always()
