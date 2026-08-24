@@ -175,6 +175,51 @@ async def test_explicit_unsupported_extension_pattern_is_still_discovered(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_explicit_unsupported_extension_pattern_with_directory_anchor_is_still_discovered(
+    tmp_path,
+):
+    """A directory-anchored include pattern that explicitly names an
+    unsupported extension (e.g. `src/**/*.xyzunk`) must still be discovered,
+    the same as its non-anchored counterpart (`*.xyzunk`). The directory
+    anchor is incidental to the request being specific — only a bare
+    wildcard tail (e.g. `src/**/*`) makes it a blanket sweep. Regression
+    test for PR #380 review finding #5.
+    """
+    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    db.connect()
+
+    parser = create_parser_for_language(Language.PYTHON)
+    coordinator = IndexingCoordinator(
+        db,
+        tmp_path,
+        None,
+        {Language.PYTHON: parser},
+        None,
+        None,
+    )
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    py_file = src_dir / "main.py"
+    py_file.write_text("print('ok')\n")
+    unk_file = src_dir / "data.xyzunk"
+    unk_file.write_text("binary\n")
+
+    files = await coordinator._discover_files(
+        tmp_path,
+        patterns=normalize_include_patterns(["src/**/*.py", "src/**/*.xyzunk"]),
+        exclude_patterns=[],
+        parallel_discovery=False,
+    )
+
+    assert py_file in files
+    assert unk_file in files, (
+        f"Directory-anchored explicit include of an unsupported extension "
+        f"should still be discovered. Files: {[p.name for p in files]}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_explicit_pattern_carveout_is_case_insensitive(tmp_path, monkeypatch):
     """The explicit-pattern carve-out must match case-insensitively.
 

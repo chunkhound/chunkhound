@@ -19,6 +19,7 @@ import pytest
 
 from tests.contracts.pipeline_harness import (
     assert_chunk_multiset_identical,
+    assert_embedding_multiset_identical,
     index_with_rust,
 )
 
@@ -76,6 +77,12 @@ class TestPipelineParallel:
             assert_chunk_multiset_identical(
                 full_result.chunk_tuples,
                 incremental.chunk_tuples,
+                label_a="full",
+                label_b="incremental",
+            )
+            assert_embedding_multiset_identical(
+                full_result.embedding_tuples,
+                incremental.embedding_tuples,
                 label_a="full",
                 label_b="incremental",
             )
