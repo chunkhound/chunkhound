@@ -1189,6 +1189,22 @@ class IndexingCoordinator(BaseService):
                             info=_progress_info(stored, skipped, errs, display_chunks),
                         )
 
+            except asyncio.CancelledError:
+                # CancelledError is a BaseException (not Exception) since Python
+                # 3.8, so it skips the `except Exception` branch below. Without
+                # this handler, a task cancellation (e.g. service shutdown)
+                # between begin_transaction_async() and commit_transaction_async()
+                # leaves the DB transaction open, and a later disconnect()'s
+                # mandatory CHECKPOINT fails with "transaction local changes".
+                try:
+                    await self._db.rollback_transaction_async()
+                except Exception:
+                    logger.warning(
+                        "Failed to roll back transaction while cancelling "
+                        f"processing of {result.file_path}",
+                        exc_info=True,
+                    )
+                raise
             except Exception as e:
                 await self._db.rollback_transaction_async()
                 stats["errors"].append({"file": str(result.file_path), "error": str(e)})
