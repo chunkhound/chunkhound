@@ -164,7 +164,13 @@ class Database:
         logger.info("✅ Database connected via service layer")
 
     def close(self) -> None:
-        """Close database connection."""
+        """Close the database connection.
+
+        Raises:
+            DatabaseError: If checkpointing or disconnecting the provider
+                fails. The failure is propagated so callers cannot mistake an
+                unsuccessful shutdown for a durable one.
+        """
         with self._connection_lock:
             if self._provider.is_connected:
                 self._provider.disconnect()
