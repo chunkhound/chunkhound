@@ -1812,6 +1812,72 @@ class TestIndexingCoordinatorCompactionContract:
         }
 
 
+class TestIndexingCoordinatorGetStatsContract:
+    """get_stats() must distinguish a Rust-owned window from a genuinely
+    disconnected/empty database instead of returning identical zeros for
+    both. Regression test for PR #380 review finding #9."""
+
+    @pytest.mark.asyncio
+    async def test_rust_pipeline_active_reports_status_alongside_zeros(
+        self, tmp_path: Path
+    ) -> None:
+        class _Db:
+            db_path = ":memory:"
+            is_connected = False
+
+            def is_rust_pipeline_in_progress(self) -> bool:
+                return True
+
+        result = await IndexingCoordinator(_Db(), tmp_path).get_stats()
+
+        assert result == {
+            "files": 0,
+            "chunks": 0,
+            "embeddings": 0,
+            "providers": 0,
+            "status": "rust_pipeline_active",
+        }
+
+    @pytest.mark.asyncio
+    async def test_plain_disconnect_reports_zeros_without_status(
+        self, tmp_path: Path
+    ) -> None:
+        """A genuinely disconnected/never-connected DB keeps today's
+        behavior -- zeros, with no misleading "status" key."""
+
+        class _Db:
+            db_path = ":memory:"
+            is_connected = False
+
+            def is_rust_pipeline_in_progress(self) -> bool:
+                return False
+
+        result = await IndexingCoordinator(_Db(), tmp_path).get_stats()
+
+        assert result == {
+            "files": 0,
+            "chunks": 0,
+            "embeddings": 0,
+            "providers": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_connected_passes_through_real_stats(self, tmp_path: Path) -> None:
+        class _Db:
+            db_path = ":memory:"
+            is_connected = True
+
+            def is_rust_pipeline_in_progress(self) -> bool:
+                raise AssertionError("must not be consulted while connected")
+
+            async def get_stats_async(self) -> dict:
+                return {"files": 3, "chunks": 12, "embeddings": 12, "providers": 1}
+
+        result = await IndexingCoordinator(_Db(), tmp_path).get_stats()
+
+        assert result == {"files": 3, "chunks": 12, "embeddings": 12, "providers": 1}
+
+
 class TestDatabaseProcessDirectoryCompactionContract:
     """Legacy Database wrapper keeps the fixed index-flow compaction boundaries."""
 
@@ -2849,6 +2915,20 @@ class TestRustPipelineGuard:
             )
         )
         assert file_id > 0
+
+    def test_is_rust_pipeline_in_progress_reflects_the_flag(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """The public getter must track set_rust_pipeline_in_progress()."""
+        assert file_backed_db.is_rust_pipeline_in_progress() is False
+
+        file_backed_db._executor.set_rust_pipeline_in_progress(True)
+        try:
+            assert file_backed_db.is_rust_pipeline_in_progress() is True
+        finally:
+            file_backed_db._executor.set_rust_pipeline_in_progress(False)
+
+        assert file_backed_db.is_rust_pipeline_in_progress() is False
 
     def test_write_blocks_during_concurrent_rust_pipeline_window(
         self, file_backed_db: DuckDBProvider

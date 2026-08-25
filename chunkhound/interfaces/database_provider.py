@@ -78,6 +78,11 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    def is_rust_pipeline_in_progress(self) -> bool:
+        """Return True when the Rust pipeline currently owns write access to
+        the database file (see `set_rust_pipeline_in_progress`)."""
+        ...
+
     def get_base_directory(self) -> Path:
         """Get the base directory for path normalization.
 

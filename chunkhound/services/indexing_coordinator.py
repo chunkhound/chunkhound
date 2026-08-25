@@ -2035,12 +2035,22 @@ class IndexingCoordinator(BaseService):
         """Get database statistics.
 
         Returns:
-            Dictionary with file, chunk, and embedding counts.
-            When the provider is not connected (e.g. Rust pipeline path),
-            returns zeroed stats.
+            Dictionary with file, chunk, embedding, and provider counts.
+            When the provider is not connected because the Rust pipeline
+            currently owns the database file, returns zeroed stats plus
+            `"status": "rust_pipeline_active"` so callers can distinguish
+            this transient state from a genuinely empty/disconnected database.
         """
         if not self._db.is_connected:
-            return {"files": 0, "chunks": 0, "embeddings": 0}
+            zeros: dict[str, Any] = {
+                "files": 0,
+                "chunks": 0,
+                "embeddings": 0,
+                "providers": 0,
+            }
+            if self._db.is_rust_pipeline_in_progress():
+                zeros["status"] = "rust_pipeline_active"
+            return zeros
         return await self._db.get_stats_async()
 
     def clear_compaction_skip(self) -> None:
