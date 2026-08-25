@@ -31,6 +31,40 @@ class MakefileChunkSplitter(ChunkSplitter):
     preserving target/recipe semantic coherence.
     """
 
+    def _rule_content_limits(self, target: str) -> tuple[int, int]:
+        """Return content limits after reserving rule_target embedding context."""
+        rule_target_header = f"[target: {target}]"
+        rule_target_chars = sum(1 for char in rule_target_header if not char.isspace())
+        rule_target_tokens = estimate_tokens_chunking(rule_target_header)
+        return (
+            max(1, self.config.max_chunk_size - rule_target_chars),
+            max(1, self.config.safe_token_limit - rule_target_tokens),
+        )
+
+    def _emergency_split_with_limits(
+        self,
+        chunk: UniversalChunk,
+        max_chunk_size: int,
+        safe_token_limit: int,
+    ) -> list[UniversalChunk]:
+        """Emergency-split with Makefile rule_target budget already reserved."""
+        if (
+            max_chunk_size == self.config.max_chunk_size
+            and safe_token_limit == self.config.safe_token_limit
+        ):
+            return self._emergency_split(chunk)
+
+        constrained = ChunkSplitter(
+            CASTConfig(
+                max_chunk_size=max_chunk_size,
+                min_chunk_size=min(self.config.min_chunk_size, max_chunk_size),
+                merge_threshold=self.config.merge_threshold,
+                greedy_merge=self.config.greedy_merge,
+                safe_token_limit=safe_token_limit,
+            )
+        )
+        return constrained._emergency_split(chunk)
+
     def validate_and_split(self, chunk: UniversalChunk) -> list[UniversalChunk]:
         """Validate chunk size and split if necessary.
 
@@ -69,6 +103,8 @@ class MakefileChunkSplitter(ChunkSplitter):
         if not recipe_lines:
             return self._recursive_split(chunk)
 
+        max_chunk_size, safe_token_limit = self._rule_content_limits(target_line)
+
         # Group recipe lines into size-limited chunks
         result: list[UniversalChunk] = []
         current_group: list[str] = []
@@ -84,8 +120,8 @@ class MakefileChunkSplitter(ChunkSplitter):
             test_tokens = estimate_tokens_chunking(test_content)
 
             if (
-                test_metrics.non_whitespace_chars <= self.config.max_chunk_size
-                and test_tokens <= self.config.safe_token_limit
+                test_metrics.non_whitespace_chars <= max_chunk_size
+                and test_tokens <= safe_token_limit
             ):
                 current_group.append(recipe_line)
             else:
@@ -121,11 +157,15 @@ class MakefileChunkSplitter(ChunkSplitter):
             metrics = ChunkMetrics.from_content(rule_chunk.content)
             tokens = estimate_tokens_chunking(rule_chunk.content)
             if (
-                metrics.non_whitespace_chars > self.config.max_chunk_size
-                or tokens > self.config.safe_token_limit
+                metrics.non_whitespace_chars > max_chunk_size
+                or tokens > safe_token_limit
             ):
                 # Single recipe line exceeds limit - use emergency split
-                validated_result.extend(self._emergency_split(rule_chunk))
+                validated_result.extend(
+                    self._emergency_split_with_limits(
+                        rule_chunk, max_chunk_size, safe_token_limit
+                    )
+                )
             else:
                 validated_result.append(rule_chunk)
 
