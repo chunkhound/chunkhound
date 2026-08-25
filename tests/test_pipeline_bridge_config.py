@@ -279,32 +279,40 @@ def test_embed_thread_http_clients_are_closed_with_their_loops() -> None:
             loop.close()
 
 
-@pytest.mark.asyncio
-async def test_embed_shutdown_from_running_loop_awaits_provider() -> None:
-    """CLI shutdown runs while asyncio.run()'s loop is still running.
-
-    Direct loop.run_until_complete on that thread raises and previously
-    leaked OpenAIEmbeddingProvider.shutdown as 'never awaited'.
-    """
+def test_hung_embed_shutdown_is_bounded_by_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider.shutdown() that never returns must not hang cleanup
+    forever -- regression test for the missing-timeout half of the
+    PR #380 review's embed-cache finding."""
     import asyncio
+    import time
 
     from chunkhound import pipeline_bridge
 
+    monkeypatch.setattr(
+        pipeline_bridge, "_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS", 0.05
+    )
+
+    async def _hang() -> None:
+        await asyncio.sleep(9999)
+
     loop = asyncio.new_event_loop()
     provider = MagicMock()
-    provider.shutdown = AsyncMock()
+    provider.shutdown = _hang
     cache = pipeline_bridge._EmbedThreadCache()
-    cache.providers[999002] = provider
-    cache.loops[999002] = loop
-    try:
-        pipeline_bridge._shutdown_embed_thread_resources(cache)
-        provider.shutdown.assert_called_once()
-        assert loop.is_closed()
-        assert cache.providers == {}
-        assert cache.loops == {}
-    finally:
-        if not loop.is_closed():
-            loop.close()
+    cache.providers[999004] = provider
+    cache.loops[999004] = loop
+
+    start = time.monotonic()
+    pipeline_bridge._shutdown_embed_thread_resources(cache)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 5  # bounded by the (monkeypatched) 0.05s timeout, not 9999s
+    assert cache.providers == {}
+    assert cache.loops == {}
+    if not loop.is_closed():
+        loop.close()
 
 
 @pytest.mark.asyncio

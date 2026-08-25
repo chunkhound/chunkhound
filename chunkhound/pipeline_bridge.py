@@ -50,49 +50,28 @@ class _EmbedThreadCache:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
+_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS = 10.0
+"""Per-provider bound on provider.shutdown() during cleanup -- a hung
+close (e.g. a stuck socket) must not block the whole indexing run."""
+
+
 def _shutdown_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
     """Close this run's per-thread embedding HTTP clients and event loops.
 
     ``_embed_batch`` caches one OpenAI/httpx ``AsyncClient`` and one asyncio
     loop per rayon worker OS thread, in ``cache``. Those clients must be
     closed on the *same* loop they were bound to, via
-    ``loop.run_until_complete``.
+    ``loop.run_until_complete`` -- which requires this thread to have no
+    running loop of its own. The sole caller, ``run_rust_pipeline()``,
+    guarantees that by invoking this via ``asyncio.to_thread()``, which
+    always runs on a fresh worker thread.
 
-    ``run_until_complete`` is illegal on a thread that already has a
-    running loop (Python 3.10 ``_check_running``: "Cannot run the event
-    loop while another loop is running"). ``run_rust_pipeline`` used to
-    call this from ``async`` ``finally``, which dropped the shutdown
-    coroutine un-awaited and then closed the worker loops anyway — leaving
-    httpx Proactor transports to explode at process exit.
-
-    If this thread already has a running loop, hop to a fresh thread
-    that does not.
+    Each provider's shutdown is individually bounded by
+    ``_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS`` -- a hung close (e.g. a
+    stuck socket) must not block the whole indexing run.
     """
     import asyncio
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        _close_embed_thread_resources(cache)
-        return
-
-    done = threading.Event()
-
-    def _run() -> None:
-        try:
-            _close_embed_thread_resources(cache)
-        finally:
-            done.set()
-
-    threading.Thread(
-        target=_run, name="chunkhound-embed-shutdown", daemon=True
-    ).start()
-    if not done.wait(timeout=30):
-        logger.debug("Embedding provider shutdown timed out")
-
-
-def _close_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
-    """Actually close cache's embed providers. Caller must not hold a running loop."""
     with cache.lock:
         providers = dict(cache.providers)
         loops = dict(cache.loops)
@@ -104,7 +83,19 @@ def _close_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
         if loop is None or loop.is_closed():
             continue
         try:
-            loop.run_until_complete(provider.shutdown())
+            loop.run_until_complete(
+                asyncio.wait_for(
+                    provider.shutdown(),
+                    timeout=_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS,
+                )
+            )
+        except asyncio.TimeoutError:
+            logger.debug(
+                "Embedding provider shutdown timed out after {}s for "
+                "thread {}, abandoning it",
+                _EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS,
+                tid,
+            )
         except Exception as e:
             logger.debug(
                 "Embedding provider shutdown failed for thread {}: {}", tid, e
@@ -311,8 +302,8 @@ def _embed_batch(
     run). ``cache`` itself is scoped to one ``run_rust_pipeline()`` call
     (see ``_EmbedThreadCache``), so ``run_rust_pipeline()`` drains and
     explicitly shuts down *its own* cache in its ``finally``
-    (``_shutdown_embed_thread_resources`` / ``_close_embed_thread_resources``)
-    once that run's pipeline.run() call returns, rather than leaving
+    (``_shutdown_embed_thread_resources``) once that run's pipeline.run()
+    call returns, rather than leaving
     entries to be silently reused or dropped for GC -- a provider holds a
     live HTTP client and the loop is a real OS-level event loop, both of
     which need an explicit close to avoid leaking a socket/fd every run.
