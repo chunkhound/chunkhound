@@ -781,6 +781,12 @@ def walk_subtree_worker(
 
     Returns:
         Tuple of (list of file paths found, list of error messages)
+
+    Raises:
+        RuntimeError: Propagated verbatim from the Rust scanner when it hit
+            walk errors and found zero files for this subtree -- callers must
+            not treat that as "this subtree has no files" (see inline comment
+            at the `except RuntimeError` clause below).
     """
     errors = []
 
@@ -853,6 +859,16 @@ def walk_subtree_worker(
         error_msg = f"Permission denied accessing {subtree_path}: {e}"
         errors.append(error_msg)
         return [], errors
+    except RuntimeError:
+        # The Rust scanner (_rust_scan_files) raises RuntimeError specifically
+        # when it hit walk errors and still ended up with nothing to report --
+        # that combination is indistinguishable from "this subtree is
+        # genuinely empty", which downstream cleanup treats as license to
+        # delete every DB row under it. Unlike the two cases above (which are
+        # legitimately "nothing was here to index"), this one must not be
+        # swallowed into an empty result: let it propagate so the caller
+        # aborts/falls back instead of silently merging a false-empty subtree.
+        raise
     except Exception as e:
         # Unexpected error - capture for debugging
         error_msg = (

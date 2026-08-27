@@ -9,10 +9,12 @@ mod types;
 
 mod pipeline;
 
+use crate::error::ScanError;
 use ignore::gitignore::GitignoreBuilder;
 use ignore::{WalkBuilder, WalkState};
 use pyo3::prelude::*;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[pyfunction]
@@ -26,7 +28,7 @@ fn scan_files(
     exact_names: Option<Vec<String>>,
     include_all: bool,
 ) -> PyResult<Vec<String>> {
-    Ok(py.allow_threads(|| {
+    py.allow_threads(|| {
         scan_files_impl(
             root,
             extensions,
@@ -35,7 +37,8 @@ fn scan_files(
             exact_names,
             include_all,
         )
-    }))
+    })
+    .map_err(Into::into)
 }
 
 /// Core file-discovery logic, decoupled from the PyO3/GIL boundary so it can be
@@ -48,7 +51,23 @@ fn scan_files_impl(
     exclude_patterns: Option<Vec<String>>,
     exact_names: Option<Vec<String>>,
     include_all: bool,
-) -> Vec<String> {
+) -> Result<Vec<String>, ScanError> {
+    match std::fs::metadata(&root) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => {
+            return Err(ScanError::RootUnreadable {
+                root: root.clone(),
+                source: std::io::Error::other("path exists but is not a directory"),
+            });
+        }
+        Err(source) => {
+            return Err(ScanError::RootUnreadable {
+                root: root.clone(),
+                source,
+            });
+        }
+    }
+
     let ext_set = Arc::new(
         extensions
             .into_iter()
@@ -82,6 +101,8 @@ fn scan_files_impl(
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let error_count = Arc::new(AtomicUsize::new(0));
+    let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     WalkBuilder::new(&root)
         .git_ignore(true)
@@ -96,10 +117,24 @@ fn scan_files_impl(
             let skip_set = Arc::clone(&skip_set);
             let custom_gi = Arc::clone(&custom_gi);
             let results = Arc::clone(&results);
+            let error_count = Arc::clone(&error_count);
+            let first_error = Arc::clone(&first_error);
             Box::new(move |result| {
                 let entry = match result {
                     Ok(e) => e,
-                    Err(_) => return WalkState::Continue,
+                    Err(e) => {
+                        // Never let a swallowed walk error (permission denied,
+                        // a briefly-unmounted path, a raced-out entry) look
+                        // identical to "this subtree is genuinely empty" --
+                        // the pipeline treats an empty scan as license to
+                        // delete every DB row for files it didn't see.
+                        error_count.fetch_add(1, Ordering::Relaxed);
+                        let mut fe = first_error.lock().expect("first_error mutex poisoned");
+                        if fe.is_none() {
+                            *fe = Some(e.to_string());
+                        }
+                        return WalkState::Continue;
+                    }
                 };
                 let ft = match entry.file_type() {
                     Some(t) => t,
@@ -142,10 +177,36 @@ fn scan_files_impl(
             })
         });
 
-    Arc::try_unwrap(results)
+    let results = Arc::try_unwrap(results)
         .expect("Arc still has live references after walk completed")
         .into_inner()
-        .expect("results mutex poisoned")
+        .expect("results mutex poisoned");
+
+    let n_errors = error_count.load(Ordering::Relaxed);
+    if n_errors > 0 && results.is_empty() {
+        // Only fail closed when the walk errors leave *nothing* to show for
+        // it. A permission-denied subdirectory alongside otherwise-readable
+        // content is an intentional, tested tolerance (see
+        // test_permission_error_fallback in tests/test_parallel_discovery.py
+        // -- the project treats an inaccessible subtree like an excluded
+        // one, not a fatal error, as long as something else was still
+        // found). But errors + zero files is indistinguishable from "this
+        // project has no files at all", which callers treat as license to
+        // delete every DB row -- that specific combination must never be
+        // silently reported as an ordinary empty scan.
+        let example = first_error
+            .lock()
+            .expect("first_error mutex poisoned")
+            .clone()
+            .unwrap_or_default();
+        return Err(ScanError::Incomplete {
+            root,
+            count: n_errors,
+            example,
+        });
+    }
+
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -187,7 +248,8 @@ mod tests {
             None,
             None,
             true,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             file_names(&results),
@@ -214,7 +276,8 @@ mod tests {
             None,
             None,
             true,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             file_names(&results),
@@ -238,7 +301,8 @@ mod tests {
             Some(vec!["excluded.dat".to_string()]),
             None,
             true,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             file_names(&results),
@@ -262,7 +326,8 @@ mod tests {
             None,
             None,
             false,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             file_names(&results),
@@ -270,6 +335,128 @@ mod tests {
                 .into_iter()
                 .collect::<HashSet<String>>(),
             "default include_all=false must keep the existing extension allow-list behavior"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_error_with_zero_files_found_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let locked_dir = tmp.path().join("locked");
+        fs::create_dir(&locked_dir).unwrap();
+        fs::write(locked_dir.join("secret.py"), b"contents").unwrap();
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+        if fs::read_dir(&locked_dir).is_ok() {
+            // Running as root (or another environment where permission bits
+            // don't apply) -- the walk error under test can't be produced here.
+            fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let result = scan_files_impl(
+            tmp.path().to_string_lossy().into_owned(),
+            vec!["py".to_string()],
+            None,
+            None,
+            None,
+            false,
+        );
+
+        // Restore permissions before asserting so tempdir cleanup always succeeds,
+        // regardless of whether the assertion below panics.
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            result.is_err(),
+            "a walk error that leaves zero files found must fail closed instead of \
+             silently reporting an empty scan -- an empty scan is treated downstream \
+             as license to delete every existing DB row"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_scan_with_some_files_found_tolerates_the_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Mirrors tests/test_parallel_discovery.py::test_permission_error_fallback --
+        // an inaccessible subdirectory alongside otherwise-readable content is an
+        // intentional, tested tolerance (equivalent to an excluded subtree), not a
+        // fatal error, as long as something else was still found.
+        let tmp = tempfile::tempdir().unwrap();
+        create_file(&tmp, "visible.py");
+        let locked_dir = tmp.path().join("locked");
+        fs::create_dir(&locked_dir).unwrap();
+        fs::write(locked_dir.join("secret.py"), b"contents").unwrap();
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+        if fs::read_dir(&locked_dir).is_ok() {
+            fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let result = scan_files_impl(
+            tmp.path().to_string_lossy().into_owned(),
+            vec!["py".to_string()],
+            None,
+            None,
+            None,
+            false,
+        );
+
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let files = result.expect(
+            "a scan that errors on part of the tree but still finds files elsewhere \
+             must still succeed with the partial list, matching the project's existing \
+             tolerance for inaccessible subtrees",
+        );
+        assert_eq!(
+            file_names(&files),
+            ["visible.py".to_string()]
+                .into_iter()
+                .collect::<HashSet<String>>()
+        );
+    }
+
+    #[test]
+    fn nonexistent_root_fails_closed_with_root_unreadable() {
+        let result = scan_files_impl(
+            "/definitely/does/not/exist/chunkhound-test".to_string(),
+            vec!["py".to_string()],
+            None,
+            None,
+            None,
+            false,
+        );
+
+        assert!(
+            matches!(result, Err(ScanError::RootUnreadable { .. })),
+            "a nonexistent root must fail closed with a RootUnreadable error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn root_path_that_is_a_file_fails_closed_with_root_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = create_file(&tmp, "not_a_dir.txt");
+
+        let result = scan_files_impl(
+            file_path.to_string_lossy().into_owned(),
+            vec!["py".to_string()],
+            None,
+            None,
+            None,
+            false,
+        );
+
+        assert!(
+            matches!(result, Err(ScanError::RootUnreadable { .. })),
+            "a root path that is a file (not a directory) must fail closed with a \
+             RootUnreadable error, got: {result:?}"
         );
     }
 }
