@@ -79,6 +79,14 @@ def _format_bytes(n: int) -> str:
     return f"{size:.1f}TB"
 
 
+def _format_duration(seconds: float) -> str:
+    """Format a duration in seconds as HH:MM:SS."""
+    total_seconds = int(round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 class RichOutputFormatter:
     """Modern terminal UI formatter using Rich library."""
 
@@ -445,7 +453,9 @@ class RichOutputFormatter:
                 "Embeddings:", f"[magenta]{stats['embeddings_generated']}[/magenta]"
             )
 
-        summary_table.add_row("Time:", f"[cyan]{processing_time:.2f}s[/cyan]")
+        summary_table.add_row(
+            "Time:", f"[cyan]{_format_duration(processing_time)}[/cyan]"
+        )
 
         if stats.get("compaction_ran"):
             size_before = stats.get("compaction_size_before")
@@ -490,7 +500,7 @@ class RichOutputFormatter:
             print(f"Total chunks: {stats.get('chunks_created', 0)}", file=stream)
             if "embeddings_generated" in stats:
                 print(f"Embeddings: {stats['embeddings_generated']}", file=stream)
-            print(f"Time: {processing_time:.2f}s", file=stream)
+            print(f"Time: {_format_duration(processing_time)}", file=stream)
             if stats.get("compaction_ran"):
                 size_before = stats.get("compaction_size_before")
                 size_after = stats.get("compaction_size_after")
