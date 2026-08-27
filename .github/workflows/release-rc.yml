@@ -19,9 +19,11 @@ jobs:
     steps:
       - name: Validate pre-release tag format (PEP 440)
         shell: python
+        env:
+          TAG_TO_VALIDATE: ${{ github.ref_name }}
         run: |
-          import re, sys
-          tag = "${{ github.ref_name }}"
+          import os, re, sys
+          tag = os.environ["TAG_TO_VALIDATE"]
           if not re.match(r'^v\d+\.\d+\.\d+(a|b|rc)\d+$', tag):
               print(f"::error::Tag {tag!r} is not a valid PEP 440 pre-release (expected vX.Y.Z(a|b|rc)N)")
               sys.exit(1)
