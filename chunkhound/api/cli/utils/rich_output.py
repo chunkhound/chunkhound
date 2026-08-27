@@ -413,6 +413,8 @@ class RichOutputFormatter:
         summary_table.add_row(
             "Processed:", f"[green]{stats.get('files_processed', 0)}[/green] files"
         )
+        skipped_timeouts = stats.get("skipped_due_to_timeout") or []
+        timeout_count = len(skipped_timeouts)
         summary_table.add_row(
             "Skipped:", f"[yellow]{stats.get('files_skipped', 0)}[/yellow] files"
         )
@@ -425,6 +427,11 @@ class RichOutputFormatter:
             summary_table.add_row(
                 "  └─ Filtered:",
                 f"[yellow]{stats.get('skipped_filtered', 0)}[/yellow] files",
+            )
+        if timeout_count > 0:
+            summary_table.add_row(
+                "  └─ Timeout:",
+                f"[yellow]{timeout_count}[/yellow] files",
             )
         summary_table.add_row(
             "Errors:", f"[red]{stats.get('files_errors', 0)}[/red] files"
@@ -477,6 +484,8 @@ class RichOutputFormatter:
             print("Processing Complete", file=stream)
             print(f"Processed: {stats.get('files_processed', 0)} files", file=stream)
             print(f"Skipped: {stats.get('files_skipped', 0)} files", file=stream)
+            if timeout_count > 0:
+                print(f"  Timeout: {timeout_count} files", file=stream)
             print(f"Errors: {stats.get('files_errors', 0)} files", file=stream)
             print(f"Total chunks: {stats.get('chunks_created', 0)}", file=stream)
             if "embeddings_generated" in stats:
@@ -495,8 +504,7 @@ class RichOutputFormatter:
                         file=stream,
                     )
 
-        # If we have a list of files skipped due to timeout, display them
-        skipped_timeouts = stats.get("skipped_due_to_timeout", [])
+        # List the timed-out paths after the summary (count is already in the table)
         if skipped_timeouts:
             if self.console is not None:
                 timeout_table = Table.grid(padding=(0, 1))
