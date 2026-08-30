@@ -29,6 +29,7 @@ class FakeDatabaseProvider:
         self.connect_calls = 0
         self.rust_pipeline_active = False
         self.rust_pipeline_active_during_run: bool | None = None
+        self.rust_pipeline_active_during_release: bool | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -36,6 +37,7 @@ class FakeDatabaseProvider:
 
     def release_for_rust_pipeline(self) -> None:
         self.release_calls += 1
+        self.rust_pipeline_active_during_release = self.rust_pipeline_active
         if self._release_error is not None:
             # Mirrors the real contract: partially closed, still raises.
             raise self._release_error
@@ -179,9 +181,28 @@ async def test_rust_pipeline_flag_set_during_run_and_cleared_after(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rust_pipeline_flag_never_set_when_release_raises(monkeypatch):
-    """A failed release_for_rust_pipeline() must never publish "Rust owns the
-    file" -- Rust never actually starts in that case.
+async def test_rust_pipeline_flag_set_before_release_starts(monkeypatch):
+    """The flag must be published *before* release_for_rust_pipeline() runs,
+    not after it returns -- release runs a CHECKPOINT that can take seconds,
+    and a caller submitting work during that window must see the flag
+    already set so it fast-fails instead of queueing behind the disconnect
+    and reopening a connection just as Rust starts.
+    """
+    monkeypatch.setattr(
+        runner_module, "run_rust_pipeline", _fake_run_rust_pipeline_success
+    )
+    db = FakeDatabaseProvider(connected=True)
+
+    await run_rust_indexing_phase(**_phase_kwargs(db))
+
+    assert db.rust_pipeline_active_during_release is True
+
+
+@pytest.mark.asyncio
+async def test_rust_pipeline_flag_never_left_set_when_release_raises(monkeypatch):
+    """A failed release_for_rust_pipeline() must not leave "Rust owns the
+    file" published -- Rust never actually starts in that case, even though
+    the flag is briefly set before the release attempt.
     """
     rust_pipeline_called = False
 

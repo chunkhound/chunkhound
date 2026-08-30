@@ -427,16 +427,22 @@ async def run_rust_indexing_phase(
     release_error: Exception | None = None
     if db is not None and db.is_connected:
         released_for_rust = True
+        # Publish "Rust owns the file" *before* release starts, not after it
+        # returns: release_for_rust_pipeline() runs a CHECKPOINT that can take
+        # seconds, and the fast-fail guard on new submissions only helps if
+        # it's live for that whole window. Setting the flag only after release
+        # completes left a gap where a concurrent op could pass the stale
+        # guard, queue behind the disconnect, and open a fresh connection just
+        # as Rust starts — a single-writer lock error.
+        db.set_rust_pipeline_in_progress(True)
         try:
             db.release_for_rust_pipeline()
         except Exception as e:
             release_error = e
-        else:
-            # Only publish "Rust owns the file" once the connection is
-            # actually closed — if release_for_rust_pipeline() raised, Rust
-            # never starts (see the `raise release_error` below), so no
-            # other caller should be blocked from reconnecting.
-            db.set_rust_pipeline_in_progress(True)
+            # Release failed, so Rust never takes ownership (see the `raise
+            # release_error` below) — don't leave other callers fast-failing
+            # against a database Python still owns.
+            db.set_rust_pipeline_in_progress(False)
 
     try:
         if release_error is not None:
