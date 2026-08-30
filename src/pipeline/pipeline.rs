@@ -592,6 +592,7 @@ impl IndexingPipeline {
                         break;
                     }
                 }
+                parsed_files_count
             })
         };
 
@@ -1024,9 +1025,10 @@ impl IndexingPipeline {
         // A panic (as opposed to a returned Err stashed in `error`) never
         // sets `error`, so it must be checked explicitly here — otherwise
         // the run falls through and reports success on an incomplete parse.
-        if parse_join.is_err() {
-            return Err("pipeline parse thread panicked".to_string());
-        }
+        let parsed_files_count = match parse_join {
+            Ok(n) => n,
+            Err(_) => return Err("pipeline parse thread panicked".to_string()),
+        };
         if let Some(e) = Arc::try_unwrap(error)
             .expect("parse/embed threads already joined above and drop their clone on exit, so this is the sole remaining owner")
             .into_inner()
@@ -1064,7 +1066,11 @@ impl IndexingPipeline {
         // These land the bars on their exact final counts (the per-batch
         // embed estimate above should already match, but this is a cheap,
         // guaranteed-exact landing rather than relying on that convergence).
-        emit_progress_gil(&progress_cb, "parse", total_files, total_files);
+        // Uses the parse thread's own tally, not `total_files`, so a run cut
+        // short by the disk-limit shutdown cascade (which stops the parse
+        // thread before it reaches the last batch) reports how much was
+        // actually parsed instead of falsely claiming full completion.
+        emit_progress_gil(&progress_cb, "parse", parsed_files_count, total_files);
         if !skip_embeddings {
             emit_progress_gil(&progress_cb, "embed", embedded_chunks, embedded_chunks);
         }

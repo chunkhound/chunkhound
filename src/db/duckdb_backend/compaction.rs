@@ -158,8 +158,12 @@ impl DuckDbHnswBackend {
                 "CREATE TABLE \"{tname}\" ({})",
                 Self::embedding_columns_ddl(dims)
             ))?;
+            // Explicit column list (like files/chunks above), not `SELECT *`:
+            // a positional copy would silently misalign or fail if the source
+            // table's column shape ever differs from the freshly created one.
+            let emb_col = "id, chunk_id, provider, model, embedding, dims, created_at";
             import_conn.execute_batch(&format!(
-                "INSERT INTO \"{tname}\" SELECT * FROM src.\"{tname}\""
+                "INSERT INTO \"{tname}\" ({emb_col}) SELECT {emb_col} FROM src.\"{tname}\""
             ))?;
             // Restore the canonical index set (chunk_id / provider_model /
             // unique upsert-contract) that the bare CREATE TABLE above
@@ -422,6 +426,27 @@ mod compaction_index_restore_tests {
             .expect("compaction should succeed");
 
         let conn = backend.conn_or_err().expect("conn");
+
+        // Regression guard for the explicit-column INSERT (replacing a
+        // positional `SELECT *`): every row's `dims` must still read back as
+        // 8, proving the copy landed each column in the right place rather
+        // than shifting values across a mismatched positional layout.
+        let (row_count, dims_ok): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(*) FILTER (WHERE dims = 8) FROM embeddings_8",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("query embeddings_8");
+        assert!(
+            row_count > 0,
+            "embeddings_8 must not be empty after compaction"
+        );
+        assert_eq!(
+            row_count, dims_ok,
+            "every copied embedding row must have dims = 8"
+        );
+
         for index_name in [
             "idx_8_chunk_id",
             "idx_8_provider_model",
