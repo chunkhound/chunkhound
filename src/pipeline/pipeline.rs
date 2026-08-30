@@ -376,7 +376,7 @@ impl IndexingPipeline {
             // calling stat() again — collapsing two stat passes into one.
             //
             // `db_entries`' mtime already reverses the write-side local-timezone
-            // cast (see `FILE_STATE_SELECT` in duckdb_backend.rs), so it's
+            // cast (see `FILE_STATE_SELECT` in duckdb_backend/read.rs), so it's
             // directly comparable to these on-disk values with no further
             // normalization needed.
             let precomputed_stats: std::collections::HashMap<PathBuf, (u64, f64)> = files_owned
