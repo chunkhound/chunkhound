@@ -50,7 +50,7 @@ const DIFF_TICK_INTERVAL: usize = 200;
 /// of DB paths that should be deleted.
 ///
 /// `db_file_entries` is the result of querying
-/// `SELECT id, path, modified_time, content_hash FROM files`.
+/// `SELECT id, path, modified_time, size, content_hash FROM files`.
 /// `files_on_disk` are the absolute paths provided by the caller (scanner).
 /// `rel_keys` maps each absolute path to its canonical project-relative
 /// DB/lookup key, computed once by Python's `get_relative_path_safe()` — the
@@ -79,6 +79,16 @@ pub(crate) fn compute_diff(
     let db_map: HashMap<&str, Option<f64>> = db_file_entries
         .iter()
         .map(|e| (e.path.as_str(), e.mtime))
+        .collect();
+
+    // Build a lookup: DB path → stored size in bytes (None if the column is
+    // NULL, e.g. a pre-existing row written before this column was read).
+    // Used alongside mtime in the unchanged-gate below: a size-only change
+    // with a preserved mtime (e.g. some sync/restore tools reuse the source
+    // mtime while writing different bytes) must not be treated as unchanged.
+    let db_size_map: HashMap<&str, Option<i64>> = db_file_entries
+        .iter()
+        .map(|e| (e.path.as_str(), e.size_bytes))
         .collect();
 
     // Build a lookup: DB path → stored content hash (only entries that have one).
@@ -243,18 +253,39 @@ pub(crate) fn compute_diff(
                             changed.push(abs_path.clone());
                         }
                     }
+                } else if db_size_map
+                    .get(rel.as_str())
+                    .copied()
+                    .flatten()
+                    .is_some_and(|stored_size| stored_size as u64 != current_size)
+                {
+                    // mtime matches but the stored size doesn't — a
+                    // size-only change with a preserved mtime (some
+                    // sync/restore tools reuse the source mtime while
+                    // writing different bytes). Trusting mtime alone here
+                    // would leave stale chunks for a file that visibly
+                    // changed on disk. Reprocess, mirroring the
+                    // mtime-changed/hash-confirmed-different branch above.
+                    if let Some(new_hash) = hash_file_contents(abs_path) {
+                        new_hashes.insert(abs_path.clone(), new_hash);
+                    }
+                    if let Some(&id) = db_ids.get(rel.as_str()) {
+                        existing_ids.insert(abs_path.clone(), id);
+                    }
+                    disk_stats.insert(abs_path.clone(), (current_size, current_mtime_raw));
+                    changed.push(abs_path.clone());
                 } else {
-                    // mtime matches → skip reprocessing, same trust the
-                    // mtime-only fast path above already relies on (not a
-                    // new assumption: a false match from clock skew or an
-                    // mtime-preserving restore tool is already possible
-                    // here regardless of this branch, and self-corrects the
-                    // next time the mtime genuinely differs). Given that
-                    // trust, no extra read/hash is needed — mirror the DB's
-                    // already-stored hash/id/stat verbatim, so a
-                    // force-reindex caller (which reprocesses this file
-                    // regardless) writes back the same values instead of
-                    // nulling them out.
+                    // mtime (and, when known, size) match → skip
+                    // reprocessing, same trust the mtime-only fast path
+                    // above already relies on (not a new assumption: a
+                    // false match from clock skew or an mtime-preserving
+                    // restore tool is already possible here regardless of
+                    // this branch, and self-corrects the next time the
+                    // mtime genuinely differs). Given that trust, no extra
+                    // read/hash is needed — mirror the DB's already-stored
+                    // hash/id/stat verbatim, so a force-reindex caller
+                    // (which reprocesses this file regardless) writes back
+                    // the same values instead of nulling them out.
                     if let Some(&stored_hash) = db_hashes.get(rel.as_str()) {
                         new_hashes.insert(abs_path.clone(), stored_hash.to_string());
                     }
@@ -385,12 +416,41 @@ mod tests {
             id: 1,
             path: "a.py".into(),
             mtime: Some(mtime),
+            size_bytes: None,
             content_hash: None,
         }];
 
         let rel_keys = rel_key_for(&f1, "a.py");
         let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
         assert!(diff.changed.is_empty(), "unchanged file should be skipped");
+    }
+
+    #[test]
+    fn test_size_change_with_same_mtime_detected() {
+        // Regression test: a size-only change with a preserved mtime (some
+        // sync/restore tools reuse the source mtime while writing different
+        // bytes) must not be treated as unchanged just because mtime matches.
+        let tmp = tempfile::tempdir().unwrap();
+        let f1 = create_file(&tmp, "a.py");
+        let mtime = file_mtime(&f1).unwrap();
+        let real_size = std::fs::metadata(&f1).unwrap().len();
+
+        let db = vec![DbFileEntry {
+            id: 5,
+            path: "a.py".into(),
+            mtime: Some(mtime),
+            // Stored size deliberately wrong relative to the real file.
+            size_bytes: Some(real_size as i64 + 1),
+            content_hash: None,
+        }];
+
+        let rel_keys = rel_key_for(&f1, "a.py");
+        let diff = compute_diff(&db, std::slice::from_ref(&f1), &rel_keys, 0.01, None, None);
+        assert_eq!(
+            diff.changed_count(),
+            1,
+            "size mismatch must trigger re-process even when mtime matches"
+        );
     }
 
     #[test]
@@ -403,6 +463,7 @@ mod tests {
             id: 42,
             path: "a.py".into(),
             mtime: Some(old_mtime),
+            size_bytes: None,
             content_hash: None,
         }];
 
@@ -462,6 +523,7 @@ mod tests {
             id: 7,
             path: "a.py".into(),
             mtime: Some(mtime),
+            size_bytes: None,
             content_hash: Some(stored_hash.clone()),
         }];
 
@@ -498,6 +560,7 @@ mod tests {
             id: 9,
             path: "a.py".into(),
             mtime: Some(0.0), // clearly different from the file's real mtime
+            size_bytes: None,
             content_hash: Some(hash.clone()),
         }];
 
@@ -520,6 +583,7 @@ mod tests {
             id: 1,
             path: "a.py".into(),
             mtime: Some(0.0),
+            size_bytes: None,
             content_hash: None,
         }];
 
@@ -562,12 +626,14 @@ mod tests {
                 id: 1,
                 path: "a.py".into(),
                 mtime: file_mtime(&f1),
+                size_bytes: None,
                 content_hash: None,
             },
             DbFileEntry {
                 id: 2,
                 path: "gone.py".into(), // this file doesn't exist on disk
                 mtime: Some(1.0),
+                size_bytes: None,
                 content_hash: None,
             },
         ];
@@ -611,6 +677,7 @@ mod tests {
             id: 1,
             path: "a.py".into(),
             mtime: Some(mtime),
+            size_bytes: None,
             content_hash: None,
         }];
 
@@ -660,6 +727,7 @@ mod tests {
             id: 1,
             path: "a.py".into(),
             mtime: Some(0.0), // clearly different from the file's real mtime
+            size_bytes: None,
             content_hash: Some(hash),
         }];
 
@@ -682,6 +750,7 @@ mod tests {
             id: 1,
             path: "a.py".into(),
             mtime: Some(0.0),
+            size_bytes: None,
             content_hash: Some("deadbeefdeadbeef".into()),
         }];
 
@@ -721,6 +790,7 @@ mod tests {
             id: 11,
             path: "a.py".into(),
             mtime: None,
+            size_bytes: None,
             content_hash: None,
         }];
 
@@ -745,6 +815,7 @@ mod tests {
             id: 12,
             path: "gone.py".into(),
             mtime: None,
+            size_bytes: None,
             content_hash: None,
         }];
 

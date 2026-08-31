@@ -8,7 +8,7 @@ use crate::types::DbFileEntry;
 
 /// Columns read by the pipeline's diff phase (`pipeline::differ::compute_diff`).
 /// Keep in sync with `DuckDbHnswBackend::FILES_COLUMNS_DDL` in `schema.rs` — if
-/// `modified_time` or `content_hash` are renamed there, update this too.
+/// `modified_time`, `size`, or `content_hash` are renamed there, update this too.
 ///
 /// `modified_time` is written via `to_timestamp(?)` (an epoch -> TIMESTAMPTZ
 /// conversion), which DuckDB then implicitly casts down into this naive
@@ -20,10 +20,21 @@ use crate::types::DbFileEntry;
 /// back via the driver. Extracting the epoch directly from the naive column
 /// would skip that reversal and return a value off by the full UTC offset.
 const FILE_STATE_SELECT: &str =
-    "SELECT id, path, EXTRACT(EPOCH FROM modified_time::TIMESTAMPTZ), content_hash FROM files";
+    "SELECT id, path, EXTRACT(EPOCH FROM modified_time::TIMESTAMPTZ), size, content_hash FROM files";
 
 pub(super) fn read_file_states(backend: &DuckDbHnswBackend) -> Result<Vec<DbFileEntry>, DbError> {
     let db_path = Path::new(&backend.config.db_path);
+    // Recover any crashed compaction swap *before* reading, mirroring
+    // `open()`'s own recovery step (mod.rs). This function opens its own raw
+    // connection rather than going through `open()`, so without this call a
+    // leftover `.swap_intent` from a crashed phase-1 (the main file already
+    // renamed aside to `.old`, or missing/empty) would make this read see an
+    // empty or stale `files` table — the diff phase then concludes every
+    // previously indexed file was deleted. Idempotent: by the time the store
+    // thread's own `open()` runs later in this same run, the intent file is
+    // already gone and this is a no-op there.
+    let recovered = DuckDbHnswBackend::recover_swap_intent(db_path)?;
+    DuckDbHnswBackend::discard_incomplete_compact_if_phase1(recovered, db_path);
     if !db_path.exists() {
         return Ok(Vec::new());
     }
@@ -35,7 +46,8 @@ pub(super) fn read_file_states(backend: &DuckDbHnswBackend) -> Result<Vec<DbFile
                 id: row.get(0)?,
                 path: row.get(1)?,
                 mtime: row.get(2)?,
-                content_hash: row.get(3)?,
+                size_bytes: row.get(3)?,
+                content_hash: row.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -106,11 +118,11 @@ mod file_state_roundtrip_tests {
                 .expect("set tz");
             conn.execute_batch(
                 "CREATE TABLE files (id BIGINT, path TEXT, modified_time TIMESTAMP, \
-                 content_hash TEXT)",
+                 size INTEGER, content_hash TEXT)",
             )
             .expect("create table");
             conn.execute(
-                "INSERT INTO files VALUES (1, 'a.py', to_timestamp(?), 'abc')",
+                "INSERT INTO files VALUES (1, 'a.py', to_timestamp(?), 100, 'abc')",
                 [original_mtime],
             )
             .expect("insert");
@@ -126,7 +138,8 @@ mod file_state_roundtrip_tests {
                     id: row.get(0)?,
                     path: row.get(1)?,
                     mtime: row.get(2)?,
-                    content_hash: row.get(3)?,
+                    size_bytes: row.get(3)?,
+                    content_hash: row.get(4)?,
                 })
             })
             .expect("query")
@@ -151,12 +164,12 @@ mod file_state_roundtrip_tests {
             let conn = Connection::open(&db_path).expect("open");
             conn.execute_batch(
                 "CREATE TABLE files (id BIGINT, path TEXT, modified_time TIMESTAMP, \
-                 content_hash TEXT)",
+                 size INTEGER, content_hash TEXT)",
             )
             .expect("create table");
             conn.execute(
-                "INSERT INTO files (id, path, modified_time, content_hash) \
-                 VALUES (1, 'gone.py', NULL, NULL)",
+                "INSERT INTO files (id, path, modified_time, size, content_hash) \
+                 VALUES (1, 'gone.py', NULL, NULL, NULL)",
                 [],
             )
             .expect("insert null mtime");

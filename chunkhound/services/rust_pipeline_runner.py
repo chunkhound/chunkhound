@@ -423,9 +423,19 @@ async def run_rust_indexing_phase(
     # only partially closing its two connections (see its docstring), and
     # the reconnect in `finally` below must still run in that case, or a
     # long-lived server process is left permanently disconnected.
+    #
+    # Deliberately NOT gated on `db.is_connected`: that property only
+    # reflects the connection manager's connection, not the executor's
+    # separate thread-local one, and a prior run that failed mid-release
+    # can leave the two out of sync. Gating on it meant a `db` left
+    # disconnected by an earlier failure skipped this whole block —
+    # publishing no ownership flag and never calling release — while Rust
+    # still ran below, producing a second native writer on the same file
+    # with no guard at all. release_for_rust_pipeline() is idempotent (it
+    # tolerates already-closed connections), so it's always safe to call.
     released_for_rust = False
     release_error: Exception | None = None
-    if db is not None and db.is_connected:
+    if db is not None:
         released_for_rust = True
         # Publish "Rust owns the file" *before* release starts, not after it
         # returns: release_for_rust_pipeline() runs a CHECKPOINT that can take

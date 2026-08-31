@@ -17,11 +17,17 @@ diff's verdict) kept nulling out an already-established hash on every run.
 unchanged file (no extra read — mtime match is proof enough) instead of
 leaving it for the write path to null out.
 
-Note what's *not* a bug: a file whose mtime has never once changed since its
-very first index can never have a hash established in the first place (there
-was never a mtime-differs event to trigger computing one) — that's inherent,
-not a regression, and harmless: the mtime-only fast path already handles
-"provably untouched" files correctly without needing a hash at all.
+Gap 3 (fixed): `compute_diff_blocking` (src/pipeline/pipeline.rs) used to
+short-circuit with an empty `DiffResult` (no hashes at all) whenever
+`chunks.db` didn't exist yet, skipping `compute_diff` entirely on the very
+first index. That meant a brand-new file's hash was established later than
+Python's equivalent diff logic (`IndexingCoordinator`'s "new file not in DB"
+branch), which always computes and stores a new file's hash immediately —
+this was a latent Rust/Python parity gap, not an inherent limitation.
+Removing that short-circuit lets `compute_diff`'s existing "new file" branch
+(which already computed a hash for a new file added to an *existing* DB) run
+uniformly on the very first index too, so every file gets a hash from its
+first appearance onward, matching the Python path.
 """
 
 import os
@@ -62,14 +68,16 @@ class TestForceReindexPreservesContentHash:
         """Force-reindex three times, with a touch-only mtime bump once.
 
         Contract:
-        - Run 1: fresh-DB force-reindex. content_hash is unavoidably NULL
-          for every file — nothing to compare against yet.
+        - Run 1: fresh-DB force-reindex. Every file — including one whose
+          mtime will never subsequently change — gets a content_hash
+          established immediately, matching the Python path's "new file not
+          in DB" branch (IndexingCoordinator), which always computes a new
+          file's hash right away rather than deferring it.
         - Touch main.py's mtime only — no byte changes.
         - Run 2: force-reindex again. main.py's mtime now differs from the
-          DB's stored mtime and there's no prior hash for it, so the diff
-          step computes and stashes a fresh one — it must survive into the
-          write path. Files whose mtime never changed (and so never had a
-          hash established either) are still NULL here — expected, harmless.
+          DB's stored mtime, so the diff step recomputes its hash — it must
+          survive into the write path. empty.py's mtime never changed, so
+          its run-1 hash must carry forward unchanged.
         - Run 3: force-reindex again with *nothing* touched. main.py's mtime
           now matches the DB again, so the diff step doesn't recompute
           anything — it must carry main.py's run-2 hash forward unchanged
@@ -84,8 +92,16 @@ class TestForceReindexPreservesContentHash:
         # ── Run 1: first-ever force-reindex ─────────────────────
         first = index_with_rust(work_dir, db_dir, skip_embeddings=True, incremental=False)
         assert first.chunks_written > 0, "baseline force-reindex should produce chunks"
-        assert _content_hash_for_path(db_dir, "main.py") is None, (
-            "a fresh index has nothing to compare against yet — NULL is expected here"
+        hash_after_run_1 = _content_hash_for_path(db_dir, "main.py")
+        assert hash_after_run_1, (
+            "a brand-new file must get a content_hash on its very first "
+            "index, matching the Python path's new-file branch — got "
+            f"{hash_after_run_1!r}"
+        )
+        empty_hash_after_run_1 = _content_hash_for_path(db_dir, "empty.py")
+        assert empty_hash_after_run_1, (
+            "empty.py is also a brand-new file on run 1 and must get a hash "
+            f"immediately too, got {empty_hash_after_run_1!r}"
         )
 
         # ── Touch main.py's mtime only — no byte changes ────────
@@ -101,9 +117,9 @@ class TestForceReindexPreservesContentHash:
             "force-reindex must persist main.py's content hash instead of "
             f"discarding the diff step's already-computed hash, got {hash_after_run_2!r}"
         )
-        assert _content_hash_for_path(db_dir, "empty.py") is None, (
-            "empty.py's mtime never changed and it never had a hash established "
-            "either — staying NULL here is expected, not a regression"
+        assert _content_hash_for_path(db_dir, "empty.py") == empty_hash_after_run_1, (
+            "empty.py's mtime never changed — its run-1 hash must carry "
+            "forward unchanged, not get nulled out"
         )
 
         # ── Run 3: force-reindex again with nothing touched ─────

@@ -313,6 +313,48 @@ mod crash_recovery_tests {
     }
 
     #[test]
+    fn read_file_states_recovers_phase1_intent_before_reading() {
+        // Regression test: read_file_states() opens its own raw connection
+        // rather than going through open(), so it must run the same
+        // swap_intent recovery open() does before reading -- otherwise a
+        // crashed phase-1 (db_path missing, real data still at the .old
+        // backup) makes the diff phase see an empty snapshot and conclude
+        // every previously indexed file was deleted.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        let mut bootstrap = DuckDbHnswBackend::new(super::super::test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        bootstrap.open().expect("open");
+        bootstrap
+            .write_batch(&super::super::test_support::single_file_batch("seed.py"))
+            .expect("write");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&intent_path, "phase1").expect("write intent");
+        assert!(!db_path.exists(), "db_path must not exist pre-recovery");
+
+        // Deliberately call read_file_states() directly, without open() --
+        // this is exactly how the pipeline's diff phase calls it.
+        let backend = DuckDbHnswBackend::new(super::super::test_support::config(
+            db_path.to_string_lossy().into_owned(),
+        ));
+        let entries = backend.read_file_states().expect("read_file_states");
+
+        assert!(!intent_path.exists(), "intent file must be recovered away");
+        assert_eq!(
+            entries.len(),
+            1,
+            "seed.py must be visible to the diff snapshot, recovered from the \
+             .old backup, not silently reported as an empty/all-deleted DB"
+        );
+        assert_eq!(entries[0].path, "seed.py");
+    }
+
+    #[test]
     fn phase2_intent_removes_old_file() {
         // Already-swapped leftover: compact→db rename finished, .old and
         // intent were not cleaned up. Recovery must keep the live DB and

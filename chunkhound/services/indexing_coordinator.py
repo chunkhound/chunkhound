@@ -1734,19 +1734,24 @@ class IndexingCoordinator(BaseService):
                 # those out into the skipped-due-to-timeout bucket — mirroring
                 # the Python path's equivalent split in _on_batch_store above —
                 # so run.py's timeout-exclusion prompt fires for the Rust path
-                # too. Match on the specific "parse timed out after" prefix,
-                # not a bare "timed out" substring: rust_result.errors also
-                # carries embed errors shaped like "embedding failed for N
-                # chunk(s): {message}", and {message} could itself mention a
-                # provider-side timeout — that must stay a real error, not get
-                # silently reclassified as a harmless parse skip.
+                # too. _split_rust_error() has already stripped the "{path}: "
+                # prefix, so err["error"] is exactly _parse_with_timeout's
+                # returned message with nothing else concatenated onto it —
+                # anchor on startswith(), not a bare "in" substring search:
+                # rust_result.errors also carries embed errors shaped like
+                # "embedding failed for N chunk(s): {message}", and a bare
+                # substring search would silently reclassify a genuine parse
+                # or provider error as a harmless skip if {message} happened
+                # to *contain* this phrase anywhere in its free-text body.
+                # startswith() only matches when the message itself IS the
+                # timeout message, not merely mentions it.
                 #
                 # Non-timeout skip reasons (binary/unknown/large config) arrive
                 # on rust_result.skipped_paths, not in errors.
                 agg_errors = []
                 agg_skipped_timeout = []
                 for err in rust_result.errors:
-                    if "parse timed out after" in (err.get("error") or ""):
+                    if (err.get("error") or "").startswith("parse timed out after"):
                         agg_skipped_timeout.append(str(err.get("file")))
                     else:
                         agg_errors.append(err)

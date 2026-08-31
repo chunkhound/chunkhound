@@ -55,5 +55,6 @@ pub struct DbFileEntry {
     pub id: i64,
     pub path: String,
     pub mtime: Option<f64>, // Unix timestamp; None if modified_time is NULL
+    pub size_bytes: Option<i64>, // bytes; None if the `size` column is NULL
     pub content_hash: Option<String>,
 }

@@ -141,8 +141,21 @@ async def test_reconnects_even_when_rust_pipeline_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_reconnect_attempted_when_never_released(monkeypatch):
-    """If the DB wasn't connected (nothing released), don't spuriously connect()."""
+async def test_release_and_reconnect_still_happen_when_db_starts_disconnected(
+    monkeypatch,
+):
+    """Regression test: the release/ownership-flag/reconnect sequence must not
+    be skipped just because `db.is_connected` is already False going in.
+
+    `is_connected` only reflects the connection manager's connection, not the
+    executor's separate thread-local one -- a prior run that failed mid-release
+    can leave the two out of sync. Gating this block on `db.is_connected`
+    meant a `db` left disconnected by an earlier failure skipped release and
+    the ownership flag entirely while Rust still ran below, producing a
+    second native writer on the same file with no guard at all.
+    release_for_rust_pipeline() tolerates already-closed connections, so it's
+    always safe to call.
+    """
     monkeypatch.setattr(
         runner_module, "run_rust_pipeline", _fake_run_rust_pipeline_success
     )
@@ -150,8 +163,9 @@ async def test_no_reconnect_attempted_when_never_released(monkeypatch):
 
     await run_rust_indexing_phase(**_phase_kwargs(db))
 
-    assert db.release_calls == 0
-    assert db.connect_calls == 0
+    assert db.release_calls == 1
+    assert db.connect_calls == 1
+    assert db.rust_pipeline_active_during_release is True
 
 
 @pytest.mark.asyncio
