@@ -173,7 +173,9 @@ class SerialDatabaseProvider(ABC):
                 on the same file Rust is about to write to.
         """
         try:
-            self._execute_in_db_thread_sync("disconnect", False)
+            self._execute_in_db_thread_sync(
+                "disconnect", False, _bypass_rust_pipeline_guard=True
+            )
         except Exception as e:
             raise DatabaseError(
                 operation="release_for_rust_pipeline",

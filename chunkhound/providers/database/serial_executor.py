@@ -183,19 +183,26 @@ class SerialDatabaseExecutor:
         """Return True when the Rust pipeline currently owns the database file."""
         return self._rust_pipeline_in_progress.is_set()
 
-    def _raise_if_db_unavailable_before_submit(self, operation_name: str) -> None:
+    def _raise_if_db_unavailable_before_submit(
+        self, operation_name: str, _bypass_rust_pipeline_guard: bool = False
+    ) -> None:
         """Fast-fail new work while compaction or the Rust pipeline owns the database."""
         if self.is_compaction_in_progress():
             raise DatabaseCompactionInProgressError(
                 "Database compaction in progress — retry in a few seconds"
             )
-        if self.is_rust_pipeline_in_progress():
+        if not _bypass_rust_pipeline_guard and self.is_rust_pipeline_in_progress():
             raise DatabaseRustPipelineInProgressError(
                 "Rust indexing pipeline owns the database — retry once it finishes"
             )
 
     def execute_sync(
-        self, provider: Any, operation_name: str, *args: Any, **kwargs: Any
+        self,
+        provider: Any,
+        operation_name: str,
+        *args: Any,
+        _bypass_rust_pipeline_guard: bool = False,
+        **kwargs: Any,
     ) -> Any:
         """Execute named operation synchronously in DB thread.
 
@@ -208,13 +215,22 @@ class SerialDatabaseExecutor:
             operation_name: Name of the executor method to call
                 (e.g., 'search_semantic')
             *args: Positional arguments for the operation
+            _bypass_rust_pipeline_guard: Skip only the Rust-pipeline fast-fail
+                check (the compaction check still applies). Only for
+                release_for_rust_pipeline()'s own "disconnect" submission —
+                set_rust_pipeline_in_progress(True) is published before that
+                call runs (to close a handoff race window), which would
+                otherwise make the guard reject the very disconnect that
+                releases the database to the Rust pipeline.
             **kwargs: Keyword arguments for the operation
 
         Returns:
             The result of the operation, fully materialized
         """
 
-        self._raise_if_db_unavailable_before_submit(operation_name)
+        self._raise_if_db_unavailable_before_submit(
+            operation_name, _bypass_rust_pipeline_guard
+        )
 
         def executor_operation() -> Any:
             # Get thread-local connection (created on first access)
