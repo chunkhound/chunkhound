@@ -97,6 +97,45 @@ async def test_fragmentation_threshold_pct_forwarded_as_compaction_ratio(
 
 
 @pytest.mark.asyncio
+async def test_embedding_configuration_reaches_native_pipeline(
+    tmp_path: Path,
+    fake_native_pipeline: _FakeNativePipeline,
+) -> None:
+    """Resolved provider settings cross the Python/Rust boundary intact."""
+    from chunkhound import pipeline_bridge
+    from chunkhound.core.config.embedding_config import EmbeddingConfig
+
+    embedding = EmbeddingConfig(
+        provider="openai",
+        api_key="secret-test-key",
+        base_url="http://127.0.0.1:9999/v1",
+        output_dims=8,
+        client_side_truncation=True,
+        ssl_verify=False,
+    )
+    await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=False,
+        config=SimpleNamespace(
+            database=SimpleNamespace(),
+            indexing=SimpleNamespace(),
+            embedding=embedding,
+        ),
+    )
+
+    captured = fake_native_pipeline.captured_config
+    assert captured["embedding_model"] == "text-embedding-3-small"
+    assert captured["embedding_api_key"] == "secret-test-key"
+    assert captured["embedding_base_url"] == "http://127.0.0.1:9999/v1"
+    assert captured["embedding_output_dims"] == 8
+    assert captured["embedding_client_side_truncation"] is True
+    assert captured["embedding_ssl_verify"] is False
+    assert captured["embed_max_tokens_per_batch"] == 8091
+
+
+@pytest.mark.asyncio
 async def test_missing_fragmentation_threshold_pct_defaults_to_30_pct(
     tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
 ) -> None:

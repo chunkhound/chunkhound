@@ -10,8 +10,10 @@ use super::differ::DiffResult;
 use super::report::PipelineReport;
 
 use crate::db::{check_disk_usage_limit, create_backend, DbBackend, DbConfig};
+use crate::embed::{create_embed_fn, EmbedBatchFn};
 use crate::error::DbError;
 use crate::types::{ChunkRecord, DbFileEntry, DbWriterBatch, FileRecord};
+use std::sync::Arc;
 
 /// The main PyO3 class — Python calls `.run()` from `asyncio.to_thread`.
 #[pyclass]
@@ -260,7 +262,15 @@ impl IndexingPipeline {
         // panics without the GIL held, and this whole call runs inside
         // py.allow_threads() below.
         let parse_cb = parse_batch_callback.clone_ref(py);
-        let embed_cb = embed_batch_callback.as_ref().map(|cb| cb.clone_ref(py));
+        let embed_fn = if self.config.skip_embeddings {
+            None
+        } else {
+            let callback = embed_batch_callback.as_ref().map(|cb| cb.clone_ref(py));
+            Some(Arc::from(
+                create_embed_fn(&self.config.embed_config(), callback)
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+            ))
+        };
         let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
         let store_progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
         let t_run = Instant::now();
@@ -270,7 +280,7 @@ impl IndexingPipeline {
                     &batch_paths,
                     parse_cb,
                     parse_config,
-                    embed_cb,
+                    embed_fn.clone(),
                     &provider,
                     &model,
                     progress_cb,
@@ -452,7 +462,7 @@ impl IndexingPipeline {
         files: &[PathBuf],
         parse_cb: Py<PyAny>,
         parse_config: Py<super::parse_call_config::ParseCallConfig>,
-        embed_cb: Option<Py<PyAny>>,
+        embed_fn: Option<Arc<dyn EmbedBatchFn>>,
         provider: &str,
         model: &str,
         progress_cb: Option<Py<PyAny>>,
@@ -923,7 +933,7 @@ impl IndexingPipeline {
                         seen_chunks += embed_targets.len() as u64;
 
                         if !embed_targets.is_empty() {
-                            if let Some(ref batch_cb) = embed_cb {
+                            if let Some(ref batch_fn) = embed_fn {
                                 // `None` progress arg is deliberate:
                                 // embed_batch_parallel's internal progress
                                 // callback reports a total scoped to just
@@ -937,7 +947,7 @@ impl IndexingPipeline {
                                     embed_batch_size,
                                     &mut parsed_files,
                                     &embed_targets,
-                                    batch_cb,
+                                    batch_fn.as_ref(),
                                     &provider,
                                     &model,
                                     None,
@@ -1362,9 +1372,10 @@ impl IndexingPipeline {
             .map_err(|e| e.to_string())
     }
 
-    /// Dispatch embed batches via rayon to a Python batch callback.
+    /// Dispatch embed batches via rayon to the selected embedding adapter.
     ///
-    /// Each batch calls Python's ``embed_batch_callback(texts) → List[List[float]]``.
+    /// Each batch returns one ordered result slot per input text. Python is
+    /// involved only when the selected adapter is `PythonEmbedCallback`.
     /// Results are collected and applied to ``parsed`` after all batches complete.
     ///
     /// **Caller must release the GIL** before entering this method (via
@@ -1379,7 +1390,7 @@ impl IndexingPipeline {
         embed_batch_size: usize,
         parsed: &mut [super::types::ParsedFile],
         targets: &[(usize, usize, String)],
-        callback: &Py<PyAny>,
+        embed_fn: &dyn EmbedBatchFn,
         provider: &str,
         model: &str,
         progress_callback: Option<Py<PyAny>>,
@@ -1411,13 +1422,13 @@ impl IndexingPipeline {
                     batch.iter().map(|(fi, ci, _)| (*fi, *ci)).collect();
                 let batch_len = batch.len() as u64;
 
-                match Python::with_gil(|gil_py| {
-                    let cb = callback.bind(gil_py);
-                    let ret = cb.call1((texts,))?;
-                    let vectors: Vec<Vec<f64>> = ret.extract()?;
-                    Ok::<_, pyo3::PyErr>(vectors)
-                }) {
-                    Ok(vectors) => {
+                match embed_fn.embed_batch(&texts) {
+                    Ok(embed_result) => {
+                        log::trace!(
+                            "embedding batch requests={} retries={}",
+                            embed_result.stats.requests,
+                            embed_result.stats.retries
+                        );
                         let mut batch_results = Vec::with_capacity(batch.len());
                         // Indices for which the callback returned no vector at
                         // all (a well-formed but short response — e.g. a
@@ -1425,12 +1436,8 @@ impl IndexingPipeline {
                         // raised exception, which is handled below instead).
                         let mut missing: Vec<(usize, usize)> = Vec::new();
                         for (i, (fi, ci)) in indices.iter().enumerate() {
-                            if let Some(vec) = vectors.get(i) {
-                                batch_results.push((
-                                    *fi,
-                                    *ci,
-                                    vec.iter().map(|x| *x as f32).collect(),
-                                ));
+                            if let Some(Some(vec)) = embed_result.vectors.get(i) {
+                                batch_results.push((*fi, *ci, vec.clone()));
                             } else {
                                 missing.push((*fi, *ci));
                             }
@@ -1442,15 +1449,20 @@ impl IndexingPipeline {
                         if !missing.is_empty() {
                             log::warn!(
                                 "embed batch returned {} vector(s) for {} chunk(s), {} missing",
-                                vectors.len(),
+                                embed_result.vectors.len(),
                                 batch_len,
                                 missing.len()
                             );
                             let reason = format!(
                                 "provider returned {} vector(s) for {} requested",
-                                vectors.len(),
+                                embed_result.vectors.iter().filter(|v| v.is_some()).count(),
                                 batch_len
                             );
+                            let reason = if embed_result.errors.is_empty() {
+                                reason
+                            } else {
+                                format!("{} ({})", reason, embed_result.errors.join("; "))
+                            };
                             batch_errors
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())

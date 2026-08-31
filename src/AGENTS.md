@@ -13,20 +13,25 @@ NOT log individual bug fixes here — those belong in commit messages and
 `CHANGELOG.md`. This doc records *why*, not a changelog. If you notice an entry
 below is stale, fix it rather than leaving it.
 
-## 1. Scope: orchestration only, not a full reimplementation
+## 1. Scope: orchestration with native embedding adapters
 
-The Rust pipeline does NOT parse code or compute embeddings. It owns:
-file scanning, diffing, threading/scheduling, and DB writes (DuckDB only).
-Parsing and embedding are called back into the existing Python implementation:
+The Rust pipeline does NOT parse code. It owns file scanning, diffing,
+threading/scheduling, DuckDB writes, and native embedding requests for the
+OpenAI/Azure OpenAI and VoyageAI providers. All other provider names (or an
+unrecognized provider/configuration combination) fall back to the existing
+Python embedding callback:
 
 - `IndexingPipeline.run()` takes `parse_batch_callback` and `embed_batch_callback`
-  as Python callables and invokes them from dedicated Rust threads.
-- The Python side of these callbacks lives in `chunkhound/pipeline_bridge.py`
-  (`parse_file_callback`, `embed_batch_callback`) — this is where language
-  detection, tree-sitter parsing, and embedding-provider calls actually happen.
+  as Python callables and invokes the parse callback from a dedicated Rust
+  thread. The embedding callback remains available as the per-run fallback.
+- Native adapters live under `embed/`; the Python side of the fallback lives in
+  `chunkhound/pipeline_bridge.py` (`embed_batch_callback`).
+- Parsing remains entirely in the existing Python implementation: language
+  detection and tree-sitter parsing happen in `parse_file_callback`.
 
-This is a deliberate architecture, not a partial migration in progress. Do not
-assume "port more of this to Rust" is implicitly the goal.
+This is a deliberate architecture, not a partial parsing migration in
+progress. Embedding deduplication/reuse is explicitly out of scope here and
+does not currently exist anywhere in the pipeline.
 
 ## 2. Module map
 
@@ -34,6 +39,7 @@ assume "port more of this to Rust" is implicitly the goal.
 |---|---|
 | `lib.rs` | `#[pymodule]` entry point; `scan_files()` — parallel file discovery via the `ignore` crate |
 | `error.rs` | `DbError`/`ScanError` → `PyErr` conversions |
+| `embed/{mod,callback,factory,openai,voyageai,retry,token}.rs` | Embedding trait, Python fallback, native providers, retries, and token-aware batching |
 | `types.rs` | DB-facing serde structs shared across the PyO3 boundary |
 | `db/mod.rs` | `DbBackend` trait, `DbConfig`, `create_backend()` |
 | `db/duckdb_backend/mod.rs` | `DuckDbHnswBackend` struct, open/close lifecycle |
@@ -78,6 +84,12 @@ Python on a mid-run Rust failure** — `indexing_coordinator.py` reports
 `{"status": "error", "pipeline": "rust", "rust_pipeline_error": True}` and stops;
 it does not retry on the Python path.
 
+`PipelineError` covers provider authentication, request, retry, context-length,
+and response-validation failures. Its `is_fatal()` method means
+non-retryable, not pipeline-aborting: by deliberate choice, a bad provider key
+or malformed provider response is recorded in `PipelineReport.errors` and the
+affected chunks are written with `embedding=NULL`.
+
 **Fail-closed philosophy**: a scan that hits walk errors and ends up with zero
 files must raise, not report an ordinary empty scan — an empty scan is
 indistinguishable from every file having been deleted, and downstream cleanup
@@ -92,8 +104,8 @@ This is a deliberate, settled decision, not an experimental opt-in —
 "should this default to off" in review; see the module's own docstring for the
 rationale.
 
-There are two independent, narrower fallback layers — both are pre-run
-capability checks, not runtime-exception recovery:
+There are three independent, narrower fallback layers. The scanning and write
+layers are pre-run capability checks, not runtime-exception recovery:
 
 1. **Scanning** (`chunkhound/utils/file_patterns.py`): the Rust fast path
    (`chunkhound_native.scan_files`) only handles patterns that reduce to a pure
@@ -116,6 +128,12 @@ capability checks, not runtime-exception recovery:
    isn't literally `chunks.db` (the Rust backend hardcodes this). Regression
    test: `tests/integration/test_rust_pipeline_lancedb_fallback.py`.
 
+3. **Embedding provider selection** (`embed/factory.rs`): OpenAI/Azure OpenAI
+   and VoyageAI use native Rust adapters; unknown or unsupported provider names
+   use the Python callback supplied for the run. Python always supplies both
+   the native configuration and that fallback, so this is selected per-run in
+   Rust rather than by a Python pre-run capability gate.
+
 Call chain for reference: `IndexingCoordinator.process_directory()` →
 `chunkhound/services/rust_pipeline_runner.py::run_rust_indexing_phase()` →
 `chunkhound/pipeline_bridge.py::run_rust_pipeline()` →
@@ -131,3 +149,4 @@ Call chain for reference: `IndexingCoordinator.process_directory()` →
 | DuckDB FK / `ON CONFLICT DO UPDATE` two-phase write pattern | Inherent DuckDB limitation (can't `ON CONFLICT DO UPDATE` on an FK parent row), worked around with a two-phase pre-transaction delete/insert; documented atomicity gap between the phases. | `db/duckdb_backend/write.rs` |
 | Cross-process DB reopen (open pipeline's DB in a separate process after close) | Verify current status before relying on it — the test is phrased as a hard guard, suggesting this was, or may still be, an unmet requirement. | `tests/contracts/test_reopen_after_close.py` |
 | Platform/wheel coverage (Intel macOS, musl/pre-manylinux_2_34, no sdist, air-gapped builds) | Deliberate, documented gaps — not duplicated here. | Root `AGENTS.md`, `RUST_COMMANDS` section |
+| Embedding deduplication/reuse | Absent by design; it never existed in this pipeline. Deferred to a future content-hash→vector lookup backed by a chunk-granularity `content_hash` column; a bare bloom filter is insufficient. | Future follow-up plan |
