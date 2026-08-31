@@ -2888,9 +2888,11 @@ class TestRustPipelineGuard:
         db.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
         db.connect()
         db.release_for_rust_pipeline()
-        # Set the flag AFTER release_for_rust_pipeline() the same way
-        # run_rust_indexing_phase() does — release closes the connection,
-        # then the flag is published separately.
+        # Order here doesn't need to match run_rust_indexing_phase() (which
+        # sets the flag *before* calling release_for_rust_pipeline(), see
+        # test_release_for_rust_pipeline_succeeds_when_flag_set_first) — this
+        # test only checks that connect() itself fast-fails once the flag is
+        # set, independent of how release_for_rust_pipeline() got here.
         db._executor.set_rust_pipeline_in_progress(True)
         try:
             with pytest.raises(DatabaseRustPipelineInProgressError):
@@ -2995,6 +2997,21 @@ class TestCheckpointFailureSurfaces:
         """No regression on the happy path: a clean checkpoint still lets
         release_for_rust_pipeline() (and a subsequent reconnect) return normally."""
         file_backed_db.release_for_rust_pipeline()
+        file_backed_db.connect()
+        assert file_backed_db.is_connected
+
+    def test_release_for_rust_pipeline_succeeds_when_flag_set_first(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """Regression test: run_rust_indexing_phase() calls
+        set_rust_pipeline_in_progress(True) *before* release_for_rust_pipeline()
+        (to close a handoff race window), not after. release_for_rust_pipeline()
+        must not fast-fail against its own flag."""
+        file_backed_db.set_rust_pipeline_in_progress(True)
+        try:
+            file_backed_db.release_for_rust_pipeline()
+        finally:
+            file_backed_db.set_rust_pipeline_in_progress(False)
         file_backed_db.connect()
         assert file_backed_db.is_connected
 

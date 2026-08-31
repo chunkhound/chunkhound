@@ -560,7 +560,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         """
         failures: list[str] = []
         try:
-            self._execute_in_db_thread_sync("disconnect", False)
+            self._execute_in_db_thread_sync(
+                "disconnect", False, _bypass_rust_pipeline_guard=True
+            )
         except Exception as e:
             failures.append(f"executor connection: {e}")
         finally:
