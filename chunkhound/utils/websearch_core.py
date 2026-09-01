@@ -24,7 +24,7 @@ import urllib.request
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
@@ -651,14 +651,26 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
 
         if ct in {"text/plain", "text/markdown"}:
             await asyncio.wait_for(tab.wait(), timeout=30)
-            body, base64_encoded = await asyncio.wait_for(
-                tab.send(
-                    cdp.network.get_response_body(request_id=response_event.request_id)
+            body_text, base64_encoded = cast(
+                tuple[str, bool],
+                await asyncio.wait_for(
+                    tab.send(
+                        cast(
+                            Any,
+                            cdp.network.get_response_body(
+                                request_id=response_event.request_id
+                            ),
+                        )
+                    ),
+                    timeout=30,
                 ),
-                timeout=30,
             )
-            body = base64.b64decode(body) if base64_encoded else body.encode("utf-8")
-            return ct, body, response.charset or "utf-8"
+            body_bytes = (
+                base64.b64decode(body_text)
+                if base64_encoded
+                else body_text.encode("utf-8")
+            )
+            return ct, body_bytes, "utf-8"
 
         if ct != "text/html":
             raise ValueError(f"Unsupported content-type: {ct!r}")
