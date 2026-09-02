@@ -460,6 +460,60 @@ async def test_hybrid_pagination_handles_source_continuation():
     assert len(seen) == 31
     assert len(set(seen)) == 31
     assert metadata["next_offset"] is None
+    canonical, _ = await service.search_hybrid(
+        "query",
+        regex_pattern="match",
+        page_size=100,
+        semantic_weight=0.4,
+    )
+    assert seen == [str(result["chunk_id"]) for result in canonical]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_overlap_has_same_ranking_on_every_page():
+    chunks = [make_chunk(f"x{index}", file_path=f"x{index}.py") for index in range(100)]
+    embeddings = [[1.0, 0.0, 0.0]] * len(chunks)
+    regex_results = [
+        {
+            "chunk_id": f"diff:x{index}.py:1:x{index}",
+            "file_path": f"x{index}.py",
+            "content": "match",
+        }
+        for index in (91, 0)
+    ]
+    service = DiffAwareSearchService(
+        make_original(regex_results=regex_results),
+        chunks,
+        embeddings,
+        "diff",
+        make_embedding_manager([[1.0, 0.0, 0.0]]),
+    )
+
+    canonical, _ = await service.search_hybrid(
+        "query",
+        regex_pattern="match",
+        page_size=200,
+        semantic_weight=0.4,
+    )
+    first, _ = await service.search_hybrid(
+        "query",
+        regex_pattern="match",
+        page_size=1,
+        offset=0,
+        semantic_weight=0.4,
+    )
+    second, _ = await service.search_hybrid(
+        "query",
+        regex_pattern="match",
+        page_size=1,
+        offset=1,
+        semantic_weight=0.4,
+    )
+
+    assert [first[0]["chunk_id"], second[0]["chunk_id"]] == [
+        canonical[0]["chunk_id"],
+        canonical[1]["chunk_id"],
+    ]
 
 
 # ---------------------------------------------------------------------------

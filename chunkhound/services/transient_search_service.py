@@ -322,47 +322,62 @@ class TransientSearchService:
         from chunkhound.services.search.result_enhancer import ResultEnhancer
 
         candidate_limit = offset + page_size + 1
-        source_page_size = candidate_limit
-        semantic_task = asyncio.create_task(
-            self.search_semantic(
-                query,
-                page_size=source_page_size,
-                offset=0,
-                threshold=threshold,
-            )
-        )
-        if regex_pattern is None:
-            semantic_results, semantic_page = await semantic_task
-            regex_results: list[dict[str, Any]] = []
-            regex_page: dict[str, Any] = {"has_more": False}
-        else:
-            regex_task = asyncio.create_task(
-                self.search_regex_async(
-                    regex_pattern, page_size=source_page_size, offset=0
+
+        async def semantic_snapshot() -> list[dict[str, Any]]:
+            fetch_size = candidate_limit
+            while True:
+                results, pagination = await self.search_semantic(
+                    query,
+                    page_size=fetch_size,
+                    offset=0,
+                    threshold=threshold,
                 )
+                if not pagination.get("has_more"):
+                    return results
+                total = pagination.get("total")
+                fetch_size = (
+                    total
+                    if isinstance(total, int) and total > fetch_size
+                    else fetch_size * 2
+                )
+
+        async def regex_snapshot(pattern: str) -> list[dict[str, Any]]:
+            fetch_size = candidate_limit
+            while True:
+                results, pagination = await self.search_regex_async(
+                    pattern, page_size=fetch_size, offset=0
+                )
+                if not pagination.get("has_more"):
+                    return results
+                total = pagination.get("total")
+                fetch_size = (
+                    total
+                    if isinstance(total, int) and total > fetch_size
+                    else fetch_size * 2
+                )
+
+        semantic_task = asyncio.create_task(semantic_snapshot())
+        if regex_pattern is None:
+            semantic_results = await semantic_task
+            regex_results: list[dict[str, Any]] = []
+        else:
+            regex_task = asyncio.create_task(regex_snapshot(regex_pattern))
+            semantic_results, regex_results = await _await_pair(
+                semantic_task, regex_task
             )
-            (
-                (semantic_results, semantic_page),
-                (regex_results, regex_page),
-            ) = await _await_pair(semantic_task, regex_task)
         combined = ResultEnhancer().combine_search_results(
             semantic_results=semantic_results,
             regex_results=regex_results,
             semantic_weight=semantic_weight,
-            limit=candidate_limit,
-            stable_position_scores=True,
+            limit=len(semantic_results) + len(regex_results),
         )
-        has_more = (
-            len(combined) > offset + page_size
-            or bool(semantic_page.get("has_more"))
-            or bool(regex_page.get("has_more"))
-        )
+        has_more = len(combined) > offset + page_size
         return combined[offset : offset + page_size], {
             "offset": offset,
             "page_size": page_size,
             "has_more": has_more,
             "next_offset": offset + page_size if has_more else None,
-            "total": None,
+            "total": len(combined),
         }
 
     async def get_chunk_similarities_async(

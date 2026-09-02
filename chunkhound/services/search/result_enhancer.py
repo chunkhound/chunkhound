@@ -107,7 +107,6 @@ class ResultEnhancer:
         regex_results: list[dict[str, Any]],
         semantic_weight: float,
         limit: int,
-        stable_position_scores: bool = False,
     ) -> list[dict[str, Any]]:
         """Combine semantic and regex search results with weighted ranking.
 
@@ -116,7 +115,6 @@ class ResultEnhancer:
             regex_results: Results from regex search
             semantic_weight: Weight for semantic results (0.0-1.0)
             limit: Maximum number of results to return
-            stable_position_scores: Use prefix-independent reciprocal ranks
 
         Returns:
             Combined and ranked results
@@ -129,11 +127,7 @@ class ResultEnhancer:
             chunk_id = result.get("chunk_id") or result.get("id")
             if chunk_id:
                 # Score based on position and similarity
-                position_score = (
-                    1.0 / (i + 1)
-                    if stable_position_scores
-                    else (len(semantic_results) - i) / len(semantic_results)
-                )
+                position_score = (len(semantic_results) - i) / len(semantic_results)
                 similarity_score = result.get("similarity", 0.5)
                 score = (
                     position_score * 0.3 + similarity_score * 0.7
@@ -151,11 +145,7 @@ class ResultEnhancer:
             chunk_id = result.get("chunk_id") or result.get("id")
             if chunk_id:
                 # Score based on position (regex has no similarity score)
-                position_score = (
-                    1.0 / (i + 1)
-                    if stable_position_scores
-                    else (len(regex_results) - i) / len(regex_results)
-                )
+                position_score = (len(regex_results) - i) / len(regex_results)
                 score = position_score * regex_weight
 
                 if chunk_id in combined:
