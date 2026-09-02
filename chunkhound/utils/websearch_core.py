@@ -24,13 +24,12 @@ import urllib.request
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, cast
+from typing import IO, TYPE_CHECKING, Any
 
 from loguru import logger
 
 if TYPE_CHECKING:
     from http.client import HTTPMessage
-    from typing import Any
 
     import zendriver as zd
 
@@ -651,19 +650,13 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
 
         if ct in {"text/plain", "text/markdown"}:
             await asyncio.wait_for(tab.wait(), timeout=30)
-            body_text, base64_encoded = cast(
-                tuple[str, bool],
-                await asyncio.wait_for(
-                    tab.send(
-                        cast(
-                            Any,
-                            cdp.network.get_response_body(
-                                request_id=response_event.request_id
-                            ),
-                        )
-                    ),
-                    timeout=30,
+            body_text, base64_encoded = await asyncio.wait_for(
+                tab.send(
+                    cdp.network.get_response_body(
+                        request_id=response_event.request_id
+                    )
                 ),
+                timeout=30,
             )
             body_bytes = (
                 base64.b64decode(body_text)

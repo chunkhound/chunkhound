@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
@@ -32,25 +33,48 @@ async def test_raw_markdown_content_types_are_returned_without_html_rendering(
 
 
 @pytest.mark.asyncio
-async def test_fetch_page_reads_raw_text_from_pinned_cdp_response_shape() -> None:
+@pytest.mark.parametrize(
+    ("body_result", "expected_body"),
+    [
+        (("# Raw Markdown\n", False), b"# Raw Markdown\n"),
+        (
+            (base64.b64encode(b"# Raw Markdown\n").decode("ascii"), True),
+            b"# Raw Markdown\n",
+        ),
+    ],
+    ids=["plain-body", "base64-body"],
+)
+async def test_fetch_page_reads_raw_text_from_pinned_cdp_response_shape(
+    body_result: tuple[str, bool], expected_body: bytes
+) -> None:
     class _ResponseReceived:
         pass
+
+    class _Command:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    enable_command = _Command("enable")
+    navigate_command = _Command("navigate")
+    body_command = _Command("get_response_body")
 
     class Network:
         ResponseReceived = _ResponseReceived
 
         @staticmethod
-        def enable() -> str:
-            return "enable"
+        def enable() -> _Command:
+            return enable_command
 
         @staticmethod
-        def get_response_body(*, request_id: str) -> tuple[str, str]:
-            return ("body", request_id)
+        def get_response_body(*, request_id: str) -> _Command:
+            assert request_id == "request"
+            return body_command
 
     class Page:
         @staticmethod
-        def navigate(*, url: str) -> tuple[str, str, None]:
-            return ("frame", "loader", None)
+        def navigate(*, url: str) -> _Command:
+            assert url == "https://example.test/raw.md"
+            return navigate_command
 
     cdp = SimpleNamespace(network=Network, page=Page)
     zendriver = ModuleType("zendriver")
@@ -75,14 +99,15 @@ async def test_fetch_page_reads_raw_text_from_pinned_cdp_response_shape() -> Non
             self.handler = handler
 
         async def send(self, command):
-            if command == "enable":
+            if command is enable_command:
                 return None
-            if command == ("frame", "loader", None):
+            if command is navigate_command:
                 assert self.handler is not None
                 await self.handler(event)
-                return command
-            assert command == ("body", "request")
-            return body_result
+                return ("frame", "loader", None)
+            if command is body_command:
+                return body_result
+            raise AssertionError(f"Unexpected command: {command!r}")
 
         async def wait(self) -> None:
             return None
@@ -98,7 +123,11 @@ async def test_fetch_page_reads_raw_text_from_pinned_cdp_response_shape() -> Non
             assert new_tab
             return tab
 
-    with patch.dict(sys.modules, {"zendriver": zendriver}):
-        result = await _fetch_page(Browser(), "https://example.test/raw.md")
+    with patch.object(
+        Network, "get_response_body", return_value=body_command
+    ) as get_body:
+        with patch.dict(sys.modules, {"zendriver": zendriver}):
+            result = await _fetch_page(Browser(), "https://example.test/raw.md")
 
-    assert result == ("text/plain", b"# Raw Markdown\n", "utf-8")
+    get_body.assert_called_once_with(request_id="request")
+    assert result == ("text/plain", expected_body, "utf-8")
