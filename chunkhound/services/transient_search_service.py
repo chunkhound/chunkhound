@@ -322,7 +322,7 @@ class TransientSearchService:
         from chunkhound.services.search.result_enhancer import ResultEnhancer
 
         candidate_limit = offset + page_size + 1
-        source_page_size = candidate_limit * 2
+        source_page_size = candidate_limit
         semantic_task = asyncio.create_task(
             self.search_semantic(
                 query,
@@ -350,6 +350,7 @@ class TransientSearchService:
             regex_results=regex_results,
             semantic_weight=semantic_weight,
             limit=candidate_limit,
+            stable_position_scores=True,
         )
         has_more = (
             len(combined) > offset + page_size

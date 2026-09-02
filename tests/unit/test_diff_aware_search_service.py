@@ -403,6 +403,65 @@ async def test_hybrid_pagination_does_not_skip_ranked_candidates():
     assert metadata["next_offset"] is None
 
 
+@pytest.mark.asyncio
+async def test_hybrid_pagination_handles_source_continuation():
+    chunk = make_chunk("semantic", file_path="semantic.py")
+    regex_results = [
+        {
+            "chunk_id": f"regex-{index}",
+            "file_path": f"regex-{index}.py",
+            "content": "match",
+        }
+        for index in range(30)
+    ]
+    original = make_original()
+
+    async def search_regex(
+        pattern,
+        page_size=10,
+        offset=0,
+        path_filter=None,
+        query=None,
+    ):
+        page = regex_results[offset : offset + page_size]
+        has_more = offset + page_size < len(regex_results)
+        return page, {
+            "offset": offset,
+            "page_size": page_size,
+            "has_more": has_more,
+            "next_offset": offset + page_size if has_more else None,
+            "total": len(regex_results),
+        }
+
+    original.search_regex_async = AsyncMock(side_effect=search_regex)
+    service = DiffAwareSearchService(
+        original,
+        [chunk],
+        [[1.0, 0.0, 0.0]],
+        "diff",
+        make_embedding_manager([[1.0, 0.0, 0.0]]),
+    )
+
+    seen: list[str] = []
+    offset = 0
+    while True:
+        results, metadata = await service.search_hybrid(
+            "query",
+            regex_pattern="match",
+            page_size=5,
+            offset=offset,
+            semantic_weight=0.4,
+        )
+        seen.extend(str(result["chunk_id"]) for result in results)
+        if not metadata["has_more"]:
+            break
+        offset = metadata["next_offset"]
+
+    assert len(seen) == 31
+    assert len(set(seen)) == 31
+    assert metadata["next_offset"] is None
+
+
 # ---------------------------------------------------------------------------
 # Hybrid search: diff chunks must survive combine_search_results
 # ---------------------------------------------------------------------------

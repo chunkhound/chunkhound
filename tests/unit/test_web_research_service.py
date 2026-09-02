@@ -264,13 +264,23 @@ async def test_research_propagates_error_after_partial_page_stream() -> None:
         )
     )
     captured: dict = {}
+    observed: list[BaseException] = []
     research = MagicMock()
 
     async def deep_research(query: str):
-        try:
-            await captured["db_services"].search_service.search_semantic(query)
-        except RuntimeError:
-            pass
+        search_service = captured["db_services"].search_service
+        concurrent = await asyncio.gather(
+            search_service.search_semantic(query),
+            search_service.search_semantic(f"{query} concurrent"),
+            return_exceptions=True,
+        )
+        late = await asyncio.gather(
+            search_service.search_semantic(f"{query} late"),
+            return_exceptions=True,
+        )
+        observed.extend(
+            item for item in [*concurrent, *late] if isinstance(item, BaseException)
+        )
         return {"answer": "must not escape"}
 
     research.deep_research = deep_research
@@ -293,3 +303,65 @@ async def test_research_propagates_error_after_partial_page_stream() -> None:
             manager,
             MagicMock(),
         )
+
+    assert len(observed) == 3
+    assert all(
+        isinstance(error, RuntimeError) and str(error) == "page stream failed"
+        for error in observed
+    )
+
+
+@pytest.mark.asyncio
+async def test_research_cancellation_finalizes_page_producer() -> None:
+    started = asyncio.Event()
+    finalized = asyncio.Event()
+
+    async def pages():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finalized.set()
+        yield "https://example.invalid/never", ".md", "never"
+
+    manager = MagicMock()
+    manager.embed_texts = AsyncMock(
+        return_value=LocalEmbeddingResult(
+            embeddings=[[1.0, 0.0]],
+            model="test",
+            provider="test",
+            dims=2,
+        )
+    )
+    captured: dict = {}
+    research = MagicMock()
+
+    async def deep_research(query: str):
+        await captured["db_services"].search_service.search_semantic(query)
+        return {"answer": "must not escape"}
+
+    research.deep_research = deep_research
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return research
+
+    with patch(
+        "chunkhound.services.web_research_service.ResearchServiceFactory.create",
+        side_effect=create,
+    ):
+        task = asyncio.create_task(
+            research_web_pages(
+                "query",
+                pages(),
+                MagicMock(),
+                manager,
+                MagicMock(),
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert finalized.is_set()
