@@ -10,6 +10,31 @@ from chunkhound.services.vector_cache import VectorCache
 __all__ = ["DiffAwareSearchService", "SearchServiceProtocol"]
 
 
+class _PreloadedVectorCache(VectorCache):
+    """Constructor-preloaded vectors live in one embedding space."""
+
+    def get(
+        self,
+        text: str,
+        *,
+        provider: str = "",
+        model: str = "",
+        dims: int = 0,
+    ) -> list[float] | None:
+        return super().get(text)
+
+    def put(
+        self,
+        text: str,
+        vector: list[float],
+        *,
+        provider: str = "",
+        model: str = "",
+        dims: int = 0,
+    ) -> None:
+        super().put(text, vector)
+
+
 class DiffAwareSearchService(TransientSearchService):
     """Retain the former eager constructor for external callers."""
 
@@ -23,7 +48,7 @@ class DiffAwareSearchService(TransientSearchService):
     ) -> None:
         count = min(len(diff_chunks), len(diff_embeddings))
         source_chunks = diff_chunks[:count]
-        cache = VectorCache(max_entries=max(1, count))
+        cache = _PreloadedVectorCache(max_entries=max(1, count))
         for chunk, vector in zip(source_chunks, diff_embeddings[:count]):
             cache.put(chunk.code, vector)
 

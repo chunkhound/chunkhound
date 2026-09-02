@@ -15,6 +15,17 @@ _OVERFETCH_FACTOR = 5
 ChunkBatchStream = Callable[[], AsyncIterator[list[Any]]]
 
 
+async def _await_pair(first: asyncio.Task[Any], second: asyncio.Task[Any]) -> Any:
+    """Wait for two tasks and cancel the sibling if either fails."""
+    try:
+        return await asyncio.gather(first, second)
+    except BaseException:
+        first.cancel()
+        second.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
+        raise
+
+
 class TransientSearchService:
     """Overlay bounded, streaming vector search onto a DB search service."""
 
@@ -33,6 +44,7 @@ class TransientSearchService:
         self._vector_source = vector_source
         self._embedding_manager = embedding_manager
         self._vector_cache = vector_cache if vector_cache is not None else VectorCache()
+        self.peak_live_vectors = 0
 
     @staticmethod
     def _chunk_to_dict(chunk: Any, score: float) -> dict[str, Any]:
@@ -74,6 +86,11 @@ class TransientSearchService:
                 raise ValueError(f"Path filter contains forbidden pattern: {danger!r}")
         return path_filter.replace("\\", "/").lstrip("/").rstrip("/") + "/"
 
+    async def _embed_texts(self, texts: list[str], provider: str | None) -> Any:
+        if provider is None:
+            return await self._embedding_manager.embed_texts(texts)
+        return await self._embedding_manager.embed_texts(texts, provider_name=provider)
+
     async def _search_transient(
         self,
         query: str,
@@ -81,11 +98,18 @@ class TransientSearchService:
         offset: int,
         threshold: float | None,
         path_filter: str | None,
+        provider: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        query_result = await self._embedding_manager.embed_texts([query])
+        self.peak_live_vectors = 0
+        query_result = await self._embed_texts([query], provider)
         if not query_result.embeddings:
             return [], self._pagination(page_size, offset, 0)
         query_vector = self._normalise(query_result.embeddings[0])
+        cache_ns = {
+            "provider": query_result.provider,
+            "model": query_result.model,
+            "dims": query_result.dims,
+        }
         path_prefix = self._validate_path_filter(path_filter)
         limit = max(offset + page_size, page_size * _OVERFETCH_FACTOR)
         heap: list[tuple[float, int, dict[str, Any]]] = []
@@ -105,17 +129,20 @@ class TransientSearchService:
                 continue
 
             vectors: list[list[float] | None] = [
-                self._vector_cache.get(chunk.code) for chunk in filtered
+                self._vector_cache.get(chunk.code, **cache_ns) for chunk in filtered
             ]
             missing_indices = [
                 index for index, vector in enumerate(vectors) if vector is None
             ]
             if missing_indices:
                 texts = [filtered[index].code for index in missing_indices]
-                embedded = await self._embedding_manager.embed_texts(texts)
+                embedded = await self._embed_texts(texts, provider)
                 for index, vector in zip(missing_indices, embedded.embeddings):
                     vectors[index] = vector
-                    self._vector_cache.put(filtered[index].code, vector)
+                    self._vector_cache.put(filtered[index].code, vector, **cache_ns)
+
+            live = sum(1 for vector in vectors if vector is not None)
+            self.peak_live_vectors = max(self.peak_live_vectors, len(heap) + live)
 
             for chunk, vector in zip(filtered, vectors):
                 if vector is None:
@@ -132,8 +159,7 @@ class TransientSearchService:
                     heapq.heapreplace(heap, entry)
 
         ranked = [
-            entry[2]
-            for entry in sorted(heap, key=lambda item: (item[0], item[1]), reverse=True)
+            entry[2] for entry in sorted(heap, key=lambda item: (-item[0], item[1]))
         ]
         return ranked[offset : offset + page_size], self._pagination(
             page_size, offset, len(ranked)
@@ -178,12 +204,12 @@ class TransientSearchService:
             )
         if self._vector_source == "diff":
             return await self._search_transient(
-                query, page_size, offset, threshold, path_filter
+                query, page_size, offset, threshold, path_filter, provider
             )
 
         fetch_size = max(offset + page_size, page_size * _OVERFETCH_FACTOR)
         transient_task = asyncio.create_task(
-            self._search_transient(query, fetch_size, 0, None, path_filter)
+            self._search_transient(query, fetch_size, 0, None, path_filter, provider)
         )
         db_task = asyncio.create_task(
             self._original.search_semantic(
@@ -199,7 +225,7 @@ class TransientSearchService:
                 result_limit=result_limit,
             )
         )
-        (transient_results, _), (db_results, _) = await asyncio.gather(
+        (transient_results, _), (db_results, _) = await _await_pair(
             transient_task, db_task
         )
         merged = self._merge(transient_results, db_results, threshold)
@@ -292,19 +318,18 @@ class TransientSearchService:
                 threshold=threshold,
             )
         )
-        regex_task = (
-            asyncio.create_task(
+        if regex_pattern is None:
+            semantic_results, _ = await semantic_task
+            regex_results: list[dict[str, Any]] = []
+        else:
+            regex_task = asyncio.create_task(
                 self.search_regex_async(
                     regex_pattern, page_size=page_size * 2, offset=offset
                 )
             )
-            if regex_pattern
-            else None
-        )
-        semantic_results, _ = await semantic_task
-        regex_results: list[dict[str, Any]] = []
-        if regex_task is not None:
-            regex_results, _ = await regex_task
+            (semantic_results, _), (regex_results, _) = await _await_pair(
+                semantic_task, regex_task
+            )
         combined = ResultEnhancer().combine_search_results(
             semantic_results=semantic_results,
             regex_results=regex_results,

@@ -132,7 +132,12 @@ def _patch_websearch_for_tests() -> None:
             for url in urls:
                 yield url, ".md", "stub content"
 
-        async def _stub_research(*args, **kwargs):
+        async def _stub_research(query, pages, *args, **kwargs):
+            if hasattr(pages, "__aiter__"):
+                async for _ in pages:
+                    pass
+            elif pages:
+                pass
             return {"answer": "ANSWER"}
 
         ws_core.search = _stub_search  # type: ignore[assignment]

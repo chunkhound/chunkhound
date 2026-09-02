@@ -45,6 +45,16 @@ def test_vector_cache_max_entries_zero_disables_storage() -> None:
     assert len(cache) == 0
 
 
+def test_vector_cache_namespaces_provider_model_and_dims() -> None:
+    cache = VectorCache(max_entries=10, ttl_seconds=60)
+    cache.put("same", [1.0, 0.0], provider="a", model="m", dims=2)
+
+    assert cache.get("same", provider="b", model="m", dims=2) is None
+    assert cache.get("same", provider="a", model="other", dims=2) is None
+    assert cache.get("same", provider="a", model="m", dims=3) is None
+    assert cache.get("same", provider="a", model="m", dims=2) == [1.0, 0.0]
+
+
 def test_vector_cache_stores_hashes_and_vectors_not_text() -> None:
     cache = VectorCache(max_entries=2, ttl_seconds=60)
     secret_text = "text that must not be retained"

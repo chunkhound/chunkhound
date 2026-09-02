@@ -28,11 +28,12 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
 
     def _on_query_failure(q: str, e: urllib.error.URLError) -> None:
         formatter.warning(
-            f"DDG query failed ({q!r}): {e.reason}; "
-            "continuing with remaining queries"
+            f"DDG query failed ({q!r}): {e.reason}; continuing with remaining queries"
         )
 
-    try:
+    timeout_s = websearch_timeout()
+
+    async def _run() -> tuple[dict, list[str]] | None:
         queries = await expand_web_queries(args.query, llm_manager)
         results = await search_multi(
             queries,
@@ -40,50 +41,56 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
             formatter.progress_indicator,
             failure_callback=_on_query_failure,
         )
+        if not results:
+            formatter.error(
+                f"No results found for {args.query!r} — "
+                "DDG HTML structure may have changed"
+            )
+            return None
+        formatter.progress_indicator(
+            f"Found {len(results)} results, fetching content..."
+        )
+        warnings: list[str] = []
+        got_page = False
+
+        async def pages():
+            nonlocal got_page
+            async for page in fetch_pages(
+                [url for _, url, _ in results],
+                formatter.progress_indicator,
+                warnings.append,
+            ):
+                got_page = True
+                yield page
+
+        result = await research_web_pages(
+            args.query,
+            pages(),
+            config,
+            embedding_manager,
+            llm_manager,
+            progress=formatter.progress_indicator,
+        )
+        if not got_page:
+            formatter.error(f"No pages could be fetched for {args.query!r}")
+            raise RuntimeError("no pages fetched")
+        return result, warnings
+
+    try:
+        outcome = await asyncio.wait_for(_run(), timeout=timeout_s)
     except urllib.error.URLError as e:
         formatter.error(f"Web search failed: {e.reason}")
         sys.exit(1)
-    if not results:
-        formatter.error(
-            f"No results found for {args.query!r} — DDG HTML structure may have changed"
-        )
-        # 10 = empty results (distinct from 1=fetch/research error, 124=timeout).
-        sys.exit(10)
-    formatter.progress_indicator(
-        f"Found {len(results)} results, fetching content..."
-    )
-    warnings: list[str] = []
-    pages = [
-        page
-        async for page in fetch_pages(
-            [url for _, url, _ in results],
-            formatter.progress_indicator,
-            warnings.append,
-        )
-    ]
-    for warning in warnings:
-        formatter.warning(warning)
-    if not pages:
-        formatter.error(f"No pages could be fetched for {args.query!r}")
-        sys.exit(1)
-
-    timeout_s = websearch_timeout()
-    try:
-        result = await asyncio.wait_for(
-            research_web_pages(
-                args.query,
-                pages,
-                config,
-                embedding_manager,
-                llm_manager,
-                progress=formatter.progress_indicator,
-            ),
-            timeout=timeout_s,
-        )
     except asyncio.TimeoutError:
         formatter.error(f"websearch timed out after {timeout_s:.0f}s")
         sys.exit(124)
     except Exception as exc:
         formatter.error(f"Research failed: {exc}")
         sys.exit(1)
+    if outcome is None:
+        # 10 = empty results (distinct from 1=fetch/research error, 124=timeout).
+        sys.exit(10)
+    result, warnings = outcome
+    for warning in warnings:
+        formatter.warning(warning)
     formatter.text_block(str(result.get("answer", "")))

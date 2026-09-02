@@ -134,3 +134,147 @@ async def test_concurrent_searches_do_not_cross_results() -> None:
 
     assert left[0][0]["content"] == "left"
     assert right[0][0]["content"] == "right"
+
+
+@pytest.mark.asyncio
+async def test_peak_live_vectors_stays_within_heap_plus_batch() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(5_000)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks, batch_size=100),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    await service.search_semantic("query", page_size=10)
+
+    assert service.peak_live_vectors <= 50 + 100
+
+
+@pytest.mark.asyncio
+async def test_equal_scores_prefer_earlier_ordinal() -> None:
+    chunks = [
+        make_chunk("first", code="target-one"),
+        make_chunk("second", code="target-two"),
+    ]
+    manager = MagicMock()
+
+    async def embed(texts: list[str]) -> LocalEmbeddingResult:
+        return LocalEmbeddingResult(
+            embeddings=[[1.0, 0.0] for _ in texts],
+            model="test-model",
+            provider="test",
+            dims=2,
+        )
+
+    manager.embed_texts = AsyncMock(side_effect=embed)
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "diff",
+        manager,
+        VectorCache(max_entries=0),
+    )
+
+    results, _ = await service.search_semantic("query", page_size=10)
+
+    assert [result["symbol"] for result in results] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_cache_does_not_reuse_vectors_across_embedding_spaces() -> None:
+    cache = VectorCache(max_entries=10)
+    chunks = [make_chunk("one", code="shared-text")]
+
+    async def manager_for(provider: str, dims: int, vector: list[float]) -> MagicMock:
+        manager = MagicMock()
+
+        async def embed(texts: list[str]) -> LocalEmbeddingResult:
+            return LocalEmbeddingResult(
+                embeddings=[vector[:dims] for _ in texts],
+                model="model",
+                provider=provider,
+                dims=dims,
+            )
+
+        manager.embed_texts = AsyncMock(side_effect=embed)
+        return manager
+
+    first = await manager_for("alpha", 2, [1.0, 0.0])
+    second = await manager_for("beta", 3, [1.0, 0.0, 0.0])
+    await TransientSearchService(
+        make_original(), stream_chunks(chunks), "diff", first, cache
+    ).search_semantic("query")
+    await TransientSearchService(
+        make_original(), stream_chunks(chunks), "diff", second, cache
+    ).search_semantic("query")
+
+    assert first.embed_texts.await_count == 2
+    assert second.embed_texts.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_lower_scoring_diff_wins_same_file_line() -> None:
+    chunks = [make_chunk("fn", file_path="src/foo.py", start_line=10, code="diff-body")]
+    original = make_original(
+        [
+            {
+                "file_path": "src/foo.py",
+                "start_line": 10,
+                "content": "db-body",
+                "score": 0.99,
+                "similarity": 0.99,
+            }
+        ]
+    )
+    manager = MagicMock()
+
+    async def embed(texts: list[str]) -> LocalEmbeddingResult:
+        vectors = []
+        for text in texts:
+            vectors.append([1.0, 0.0] if text == "query" else [0.0, 1.0])
+        return LocalEmbeddingResult(
+            embeddings=vectors, model="test", provider="test", dims=2
+        )
+
+    manager.embed_texts = AsyncMock(side_effect=embed)
+    service = TransientSearchService(
+        original, stream_chunks(chunks), "both", manager, VectorCache(max_entries=0)
+    )
+
+    results, _ = await service.search_semantic("query", page_size=10)
+
+    assert len(results) == 1
+    assert results[0]["content"] == "diff-body"
+
+
+@pytest.mark.asyncio
+async def test_both_mode_cancels_sibling_on_failure() -> None:
+    cancelled = asyncio.Event()
+    original = make_original()
+
+    async def hang(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    original.search_semantic = hang
+
+    async def boom() -> AsyncIterator[list]:
+        raise RuntimeError("stream failed")
+        yield []  # pragma: no cover
+
+    service = TransientSearchService(
+        original, boom, "both", embedding_manager(), VectorCache(max_entries=0)
+    )
+
+    with pytest.raises(RuntimeError, match="stream failed"):
+        await service.search_semantic("query")
+
+    assert cancelled.is_set()

@@ -3,7 +3,7 @@ import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-_SAFE_REF = re.compile(r'^[a-zA-Z0-9_.^~/:@{}\-]+\Z')
+_SAFE_REF = re.compile(r"^[a-zA-Z0-9_.^~/:@{}\-]+\Z")
 
 _GIT_DIFF_TIMEOUT_SECONDS = 30
 
@@ -14,7 +14,7 @@ _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # single commit_hash.  Both capture groups must be identical.
 # Accepts uppercase hex (git emits lowercase but accepts both) and up to 64
 # chars to cover SHA256 object hashes as well as the standard SHA1 40-char form.
-_SINGLE_COMMIT_RANGE_RE = re.compile(r'^([0-9a-fA-F]{4,64})\^\.\.([0-9a-fA-F]{4,64})\Z')
+_SINGLE_COMMIT_RANGE_RE = re.compile(r"^([0-9a-fA-F]{4,64})\^\.\.([0-9a-fA-F]{4,64})\Z")
 
 
 def _validate_commit_range(commit_range: str) -> None:
@@ -30,7 +30,10 @@ def _validate_commit_range(commit_range: str) -> None:
 async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
     _validate_commit_range(commit_range)
     proc = await asyncio.create_subprocess_exec(
-        "git", "diff", commit_range, "--",
+        "git",
+        "diff",
+        commit_range,
+        "--",
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -54,7 +57,10 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
         if m and m.group(1) == m.group(2) and "unknown revision" in err:
             root_range = f"{_EMPTY_TREE_SHA}..{m.group(2)}"
             proc2 = await asyncio.create_subprocess_exec(
-                "git", "diff", root_range, "--",
+                "git",
+                "diff",
+                root_range,
+                "--",
                 cwd=str(cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -75,6 +81,20 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
             err = stderr2.decode("utf-8", errors="replace").strip()
         raise ValueError(f"git diff failed: {err}")
     return stdout.decode("utf-8", errors="replace")
+
+
+async def _cleanup_git_diff_process(
+    proc: asyncio.subprocess.Process, stderr_task: asyncio.Task[bytes]
+) -> None:
+    if proc.returncode is None:
+        proc.kill()
+        await proc.wait()
+    if not stderr_task.done():
+        stderr_task.cancel()
+        try:
+            await stderr_task
+        except asyncio.CancelledError:
+            pass
 
 
 async def stream_git_diff_file_blocks(
@@ -105,6 +125,7 @@ async def stream_git_diff_file_blocks(
         block: list[str] = []
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _GIT_DIFF_TIMEOUT_SECONDS
+        stderr = b""
         try:
             while True:
                 remaining = deadline - loop.time()
@@ -126,19 +147,12 @@ async def stream_git_diff_file_blocks(
             await asyncio.wait_for(proc.wait(), timeout=remaining)
             stderr = await stderr_task
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            stderr_task.cancel()
             raise TimeoutError(
                 f"git diff timed out after {_GIT_DIFF_TIMEOUT_SECONDS}s"
                 f" for range {current_range!r}"
-            )
-        except (asyncio.CancelledError, GeneratorExit):
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
-            stderr_task.cancel()
-            raise
+            ) from None
+        finally:
+            await _cleanup_git_diff_process(proc, stderr_task)
 
         if proc.returncode == 0:
             return

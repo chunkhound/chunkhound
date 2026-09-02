@@ -1,6 +1,6 @@
 """In-process research composition for transient fetched web pages."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,6 +21,8 @@ from chunkhound.services.vector_cache import VectorCache
 _PAGE_CHUNK_CHARS = 10_000
 _BATCH_SIZE = 100
 _WEB_VECTOR_CACHE = VectorCache()
+
+Page = tuple[str, str, str | bytes]
 
 
 class _EmptySearchService:
@@ -57,6 +59,15 @@ class _EmptySearchService:
 
 
 class _TransientProvider:
+    def __init__(self) -> None:
+        self._files: dict[str, str] = {}
+
+    def store_page_text(self, source_url: str, text: str) -> None:
+        self._files[source_url] = text
+
+    def get_transient_file_content(self, file_path: str) -> str | None:
+        return self._files.get(file_path)
+
     def get_base_directory(self) -> Path:
         return Path.cwd()
 
@@ -68,6 +79,12 @@ class _TransientProvider:
 
     def get_chunks_by_file_id(self, *args: Any, **kwargs: Any) -> list:
         return []
+
+
+def _is_unusable_pdf_chunk(chunk: Chunk) -> bool:
+    return chunk.symbol == "pdf_unavailable" or "PDF parsing not available" in (
+        chunk.code or ""
+    )
 
 
 def _text_chunks(source_url: str, content: str) -> list[Chunk]:
@@ -116,48 +133,80 @@ def _text_chunks(source_url: str, content: str) -> list[Chunk]:
     return chunks
 
 
-def pages_to_chunks(pages: list[tuple[str, str, str | bytes]]) -> list[Chunk]:
+def pages_to_chunks(pages: Sequence[Page]) -> list[Chunk]:
     """Convert fetched page bodies to embedding-safe chunks."""
     chunks: list[Chunk] = []
     for source_url, extension, content in pages:
-        if extension == ".pdf" and isinstance(content, bytes):
-            parsed = PDFMapping().parse_pdf_content(content, None, FileId(0))
-            chunks.extend(
-                Chunk(
-                    symbol=chunk.symbol,
-                    start_line=chunk.start_line,
-                    end_line=chunk.end_line,
-                    code=chunk.code,
-                    chunk_type=chunk.chunk_type,
-                    file_id=chunk.file_id,
-                    language=chunk.language,
-                    file_path=FilePath(source_url),
-                    parent_header=chunk.parent_header,
-                    start_byte=chunk.start_byte,
-                    end_byte=chunk.end_byte,
-                    metadata=chunk.metadata,
-                )
-                for chunk in parsed
-            )
-        elif isinstance(content, str):
-            chunks.extend(_text_chunks(source_url, content))
+        chunks.extend(_page_to_chunks(source_url, extension, content))
     return chunks
+
+
+def _page_to_chunks(
+    source_url: str, extension: str, content: str | bytes
+) -> list[Chunk]:
+    if extension == ".pdf" and isinstance(content, bytes):
+        parsed = PDFMapping().parse_pdf_content(content, None, FileId(0))
+        return [
+            Chunk(
+                symbol=chunk.symbol,
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                code=chunk.code,
+                chunk_type=chunk.chunk_type,
+                file_id=chunk.file_id,
+                language=chunk.language,
+                file_path=FilePath(source_url),
+                parent_header=chunk.parent_header,
+                start_byte=chunk.start_byte,
+                end_byte=chunk.end_byte,
+                metadata=chunk.metadata,
+            )
+            for chunk in parsed
+            if not _is_unusable_pdf_chunk(chunk)
+        ]
+    if isinstance(content, str):
+        return _text_chunks(source_url, content)
+    return []
+
+
+async def _iter_pages(
+    pages: AsyncIterator[Page] | Sequence[Page],
+) -> AsyncIterator[Page]:
+    if isinstance(pages, Sequence):
+        for page in pages:
+            yield page
+        return
+    async for page in pages:
+        yield page
 
 
 async def research_web_pages(
     query: str,
-    pages: list[tuple[str, str, str | bytes]],
+    pages: AsyncIterator[Page] | Sequence[Page],
     config: Any,
     embedding_manager: Any,
     llm_manager: Any,
     progress: Any = None,
 ) -> dict[str, Any]:
     """Run the configured research strategy over fetched pages in process."""
-    chunks = pages_to_chunks(pages)
+    provider = _TransientProvider()
 
     async def chunk_stream() -> AsyncIterator[list[Chunk]]:
-        for start in range(0, len(chunks), _BATCH_SIZE):
-            yield chunks[start : start + _BATCH_SIZE]
+        batch: list[Chunk] = []
+        async for source_url, extension, content in _iter_pages(pages):
+            page_chunks = _page_to_chunks(source_url, extension, content)
+            if isinstance(content, str):
+                provider.store_page_text(source_url, content)
+            elif page_chunks:
+                provider.store_page_text(
+                    source_url, "".join(chunk.code for chunk in page_chunks)
+                )
+            batch.extend(page_chunks)
+            while len(batch) >= _BATCH_SIZE:
+                yield batch[:_BATCH_SIZE]
+                batch = batch[_BATCH_SIZE:]
+        if batch:
+            yield batch
 
     search_service = TransientSearchService(
         original=cast(Any, _EmptySearchService()),
@@ -167,7 +216,7 @@ async def research_web_pages(
         vector_cache=_WEB_VECTOR_CACHE,
     )
     services = DatabaseServices(
-        provider=cast(Any, _TransientProvider()),
+        provider=cast(Any, provider),
         indexing_coordinator=cast(Any, None),
         search_service=search_service,
         embedding_service=cast(Any, None),

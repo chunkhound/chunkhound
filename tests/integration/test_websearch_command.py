@@ -1,6 +1,7 @@
 """Integration contracts for the in-process websearch CLI flow."""
 
 import argparse
+import asyncio
 import urllib.error
 from unittest.mock import AsyncMock, MagicMock
 
@@ -38,7 +39,13 @@ async def test_websearch_command_runs_research_in_process(
     async def pages(*args, **kwargs):
         yield "https://example.invalid/page", ".md", "# In memory"
 
-    research = AsyncMock(return_value={"answer": "ANSWER"})
+    seen: dict[str, object] = {}
+
+    async def research(query, page_stream, *args, **kwargs):
+        seen["async"] = hasattr(page_stream, "__aiter__")
+        seen["pages"] = [page async for page in page_stream]
+        return {"answer": "ANSWER"}
+
     monkeypatch.setattr(ws_mod, "fetch_pages", pages)
     monkeypatch.setattr(ws_mod, "research_web_pages", research)
     rendered: list[str] = []
@@ -50,13 +57,25 @@ async def test_websearch_command_runs_research_in_process(
 
     await ws_mod.websearch_command(make_args(), MagicMock())
 
-    research.assert_awaited_once()
-    assert research.await_args.args[1] == [
-        ("https://example.invalid/page", ".md", "# In memory")
-    ]
+    assert seen["async"] is True
+    assert seen["pages"] == [("https://example.invalid/page", ".md", "# In memory")]
     assert rendered == ["ANSWER"]
     assert not hasattr(ws_mod, "tempfile")
     assert not hasattr(ws_mod, "subprocess")
+
+
+@pytest.mark.asyncio
+async def test_websearch_timeout_covers_query_expansion(monkeypatch, providers) -> None:
+    async def blocked(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", blocked)
+    monkeypatch.setattr(ws_mod, "websearch_timeout", lambda: 0.01)
+
+    with pytest.raises(SystemExit) as exc:
+        await ws_mod.websearch_command(make_args(), MagicMock())
+
+    assert exc.value.code == 124
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
 """Unit tests for chunkhound.core.git_diff.runner."""
+
 import asyncio
 from pathlib import Path
 from unittest.mock import patch
@@ -21,7 +22,9 @@ class FakeProcess:
         pass
 
 
-def make_fake_process(stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0) -> FakeProcess:
+def make_fake_process(
+    stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0
+) -> FakeProcess:
     return FakeProcess(stdout, stderr, returncode)
 
 
@@ -83,9 +86,7 @@ async def test_streams_complete_file_blocks_from_real_git(
     await proc.communicate()
     for name in ("one.py", "two.py"):
         (tmp_path / name).write_text(f"{name} = 1\n", encoding="utf-8")
-    proc = await asyncio.create_subprocess_exec(
-        "git", "add", ".", cwd=str(tmp_path)
-    )
+    proc = await asyncio.create_subprocess_exec("git", "add", ".", cwd=str(tmp_path))
     await proc.communicate()
     proc = await asyncio.create_subprocess_exec(
         "git",
@@ -104,8 +105,7 @@ async def test_streams_complete_file_blocks_from_real_git(
         (tmp_path / name).write_text(f"{name} = 2\n", encoding="utf-8")
 
     blocks = [
-        block
-        async for block in stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
+        block async for block in stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
     ]
 
     assert len(blocks) == 2
@@ -138,7 +138,9 @@ async def test_root_commit_uses_empty_tree(tmp_path: Path) -> None:
         stderr=b"fatal: ambiguous argument 'aaaa^': unknown revision or path",
         returncode=128,
     )
-    root_success = make_fake_process(stdout=b"diff --git a/f b/f\n+hello", stderr=b"", returncode=0)
+    root_success = make_fake_process(
+        stdout=b"diff --git a/f b/f\n+hello", stderr=b"", returncode=0
+    )
 
     call_count = 0
 
@@ -227,3 +229,95 @@ async def test_non_root_failure_not_retried(tmp_path: Path) -> None:
             await run_git_diff(f"{HASH}^..{HASH}", tmp_path)
 
     assert call_count == 1  # no retry
+
+
+class _LineStdout:
+    def __init__(
+        self, lines: list[bytes], hang: bool = False, error: Exception | None = None
+    ) -> None:
+        self._lines = list(lines)
+        self._hang = hang
+        self._error = error
+
+    async def readline(self) -> bytes:
+        if self._error is not None:
+            raise self._error
+        if self._lines:
+            return self._lines.pop(0)
+        if self._hang:
+            await asyncio.Event().wait()
+        return b""
+
+
+class _Stderr:
+    def __init__(self, hang: bool = False) -> None:
+        self._hang = hang
+
+    async def read(self) -> bytes:
+        if self._hang:
+            await asyncio.Event().wait()
+        return b""
+
+
+class StreamProcess:
+    def __init__(
+        self,
+        lines: list[bytes],
+        hang_stdout: bool = False,
+        hang_stderr: bool = False,
+        error: Exception | None = None,
+    ) -> None:
+        self.stdout = _LineStdout(lines, hang=hang_stdout, error=error)
+        self.stderr = _Stderr(hang=hang_stderr)
+        self.returncode: int | None = None
+        self.killed = False
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -1
+
+    async def wait(self) -> None:
+        if self.returncode is None:
+            self.returncode = 0
+
+
+@pytest.mark.asyncio
+async def test_stream_timeout_kills_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import chunkhound.core.git_diff.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_GIT_DIFF_TIMEOUT_SECONDS", 0.05)
+    proc = StreamProcess(lines=[], hang_stdout=True, hang_stderr=True)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(TimeoutError, match="timed out"):
+            async for _ in stream_git_diff_file_blocks("HEAD", cwd=tmp_path):
+                pass
+    assert proc.killed is True
+
+
+@pytest.mark.asyncio
+async def test_stream_cancel_kills_process(tmp_path: Path) -> None:
+    proc = StreamProcess(lines=[], hang_stdout=True, hang_stderr=True)
+
+    async def consume() -> None:
+        async for _ in stream_git_diff_file_blocks("HEAD", cwd=tmp_path):
+            pass
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert proc.killed is True
+
+
+@pytest.mark.asyncio
+async def test_stream_unexpected_io_kills_process(tmp_path: Path) -> None:
+    proc = StreamProcess(lines=[], error=OSError("pipe closed"), hang_stderr=True)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(OSError, match="pipe closed"):
+            async for _ in stream_git_diff_file_blocks("HEAD", cwd=tmp_path):
+                pass
+    assert proc.killed is True

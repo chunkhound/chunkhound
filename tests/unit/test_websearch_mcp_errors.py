@@ -28,7 +28,12 @@ def patched(monkeypatch):
         yield "https://example.invalid/page", ".md", "# Page"
 
     monkeypatch.setattr(websearch_core, "fetch_pages", pages)
-    research = AsyncMock(return_value={"answer": "ANSWER"})
+
+    async def research(query, page_stream, *args, **kwargs):
+        async for _ in page_stream:
+            pass
+        return {"answer": "ANSWER"}
+
     monkeypatch.setattr(web_research_service, "research_web_pages", research)
     return search, research
 
