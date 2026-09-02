@@ -22,7 +22,7 @@ def make_chunk(
     file_path: str = "src/foo.py",
     start_line: int = 1,
     end_line: int | None = None,
-    code: str = "def foo(): pass",
+    code: str | None = None,
 ) -> Chunk:
     # Ensure start_line is positive and end_line >= start_line
     sl = max(1, start_line)
@@ -32,7 +32,7 @@ def make_chunk(
         symbol=symbol,
         start_line=LineNumber(sl),
         end_line=LineNumber(el),
-        code=code,
+        code=code or f"def {symbol}(): pass",
         chunk_type=ChunkType.FUNCTION,
         file_id=FileId(1),
         language=Language.PYTHON,

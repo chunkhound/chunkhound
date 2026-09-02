@@ -97,9 +97,8 @@ def _patch_websearch_for_tests() -> None:
     """Stub the websearch pipeline so stdio integration tests run offline.
 
     Activated by CH_TEST_WEBSEARCH_STUB=1. Flips capability gating off for the
-    websearch tool and replaces the three lazy-imported helpers with trivial
-    stubs: search returns fixed results, fetch_and_save is a no-op, and the
-    subprocess launch runs a one-line `print('ANSWER')` command.
+    websearch tool and replaces network fetch plus in-process research with
+    deterministic stubs.
     """
     try:
         from chunkhound.mcp_server.tools import TOOL_REGISTRY
@@ -113,16 +112,12 @@ def _patch_websearch_for_tests() -> None:
         pass
 
     try:
-        import sys as _sys
-
         from chunkhound.utils import websearch_core as ws_core
+        from chunkhound.services import web_research_service as web_research
 
-        # Touch each symbol before rebinding so a rename surfaces as
-        # AttributeError at import time instead of silently leaving the
-        # stub inactive while tests hit the real network.
         ws_core.search  # noqa: B018
-        ws_core.fetch_and_save  # noqa: B018
-        ws_core.build_quickresearch_argv_core  # noqa: B018
+        ws_core.fetch_pages  # noqa: B018
+        web_research.research_web_pages  # noqa: B018
 
         def _stub_search(query, limit=30, progress_callback=None):
             return [
@@ -131,27 +126,18 @@ def _patch_websearch_for_tests() -> None:
                 ("Stub Result Three", "https://example.invalid/three", "third stub"),
             ][:limit]
 
-        async def _stub_fetch_and_save(
-            urls, tmpdir, progress_callback=None, warning_callback=None,
-            mapping=None,
+        async def _stub_fetch_pages(
+            urls, progress_callback=None, warning_callback=None
         ):
-            # Write minimal .md files so _quickresearch (stubbed separately)
-            # has input should it ever run.
-            for i, url in enumerate(urls):
-                name = f"stub_{i}.md"
-                (tmpdir / name).write_text("stub content", encoding="utf-8")
-                if mapping is not None:
-                    mapping[name] = url
+            for url in urls:
+                yield url, ".md", "stub content"
 
-        def _stub_build_argv(query, tmpdir, config, parent_pid):
-            # -S skips site init so this sitecustomize isn't re-loaded in the
-            # grandchild — avoids a recursive chunkhound cold-import that
-            # blew past the 30s tools/call budget on Windows.
-            return [_sys.executable, "-S", "-c", "print('ANSWER')"]
+        async def _stub_research(*args, **kwargs):
+            return {"answer": "ANSWER"}
 
         ws_core.search = _stub_search  # type: ignore[assignment]
-        ws_core.fetch_and_save = _stub_fetch_and_save  # type: ignore[assignment]
-        ws_core.build_quickresearch_argv_core = _stub_build_argv  # type: ignore[assignment]
+        ws_core.fetch_pages = _stub_fetch_pages  # type: ignore[assignment]
+        web_research.research_web_pages = _stub_research  # type: ignore[assignment]
     except ImportError:
         pass
 

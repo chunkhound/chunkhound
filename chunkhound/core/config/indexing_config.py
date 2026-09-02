@@ -577,8 +577,7 @@ class IndexingConfig(BaseModel):
         `workspace_gitignore_*`, `gitignore_backend`) are untouched.
 
         Use when filters loaded from `.chunkhound.json`, `--config`, env vars,
-        or global config must not apply to a runtime-supplied path (e.g., a
-        tempdir of fetched pages in `_quickresearch`).
+        or global config must not apply to a runtime-supplied path.
         """
         defaults = IndexingConfig()
         self.include = list(defaults.include)

@@ -1,8 +1,4 @@
-"""Regression test: deep_research_impl must return dict even on truncation-warning path.
-
-execute_tool() checks isinstance(result, dict) to extract the 'answer' key.
-If truncation_warning converts result to str, the MCP response degrades silently.
-"""
+"""Regression tests for uncapped transient diff research responses."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,8 +17,7 @@ def _make_embedding_manager() -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_truncation_warning_preserves_dict_return_type():
-    """When commit_range triggers truncation_warning, return value must stay dict."""
+async def test_large_diff_path_has_no_cap_warning_and_preserves_dict():
     research_result = {"answer": "original answer text"}
 
     mock_research_service = MagicMock()
@@ -39,7 +34,7 @@ async def test_truncation_warning_preserves_dict_return_type():
         ),
         patch(
             "chunkhound.mcp_server.tools._inject_diff_service",
-            new=AsyncMock(return_value=(mock_services, "diff too large, truncated to 500 lines")),
+            new=AsyncMock(return_value=(mock_services, None)),
         ),
         patch(
             "chunkhound.mcp_server.tools.ResearchServiceFactory.create",
@@ -55,9 +50,9 @@ async def test_truncation_warning_preserves_dict_return_type():
             commit_range="HEAD~1..HEAD",
         )
 
-    assert isinstance(result, dict), "truncation_warning path must not convert result to str"
-    assert "> **Note:**" in result["answer"], "warning must be prepended to answer"
-    assert "original answer text" in result["answer"], "original answer must be preserved"
+    assert isinstance(result, dict)
+    assert result["answer"] == "original answer text"
+    assert "> **Note:**" not in result["answer"]
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from chunkhound.core.git_diff.runner import run_git_diff
+from chunkhound.core.git_diff.runner import run_git_diff, stream_git_diff_file_blocks
 
 
 class FakeProcess:
@@ -71,6 +71,47 @@ async def test_empty_diff(tmp_path: Path) -> None:
     with patch("asyncio.create_subprocess_exec", return_value=fake):
         result = await run_git_diff("HEAD~1..HEAD", tmp_path)
     assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_streams_complete_file_blocks_from_real_git(
+    tmp_path: Path,
+) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "git", "init", cwd=str(tmp_path), stdout=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+    for name in ("one.py", "two.py"):
+        (tmp_path / name).write_text(f"{name} = 1\n", encoding="utf-8")
+    proc = await asyncio.create_subprocess_exec(
+        "git", "add", ".", cwd=str(tmp_path)
+    )
+    await proc.communicate()
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "initial",
+        cwd=str(tmp_path),
+        stdout=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+    for name in ("one.py", "two.py"):
+        (tmp_path / name).write_text(f"{name} = 2\n", encoding="utf-8")
+
+    blocks = [
+        block
+        async for block in stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
+    ]
+
+    assert len(blocks) == 2
+    assert all(block.startswith("diff --git ") for block in blocks)
+    assert "one.py" in blocks[0]
+    assert "two.py" in blocks[1]
 
 
 @pytest.mark.asyncio

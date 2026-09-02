@@ -1,5 +1,6 @@
 import asyncio
 import re
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 _SAFE_REF = re.compile(r'^[a-zA-Z0-9_.^~/:@{}\-]+\Z')
@@ -16,7 +17,7 @@ _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 _SINGLE_COMMIT_RANGE_RE = re.compile(r'^([0-9a-fA-F]{4,64})\^\.\.([0-9a-fA-F]{4,64})\Z')
 
 
-async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
+def _validate_commit_range(commit_range: str) -> None:
     if (
         not _SAFE_REF.match(commit_range)
         or "../" in commit_range
@@ -24,6 +25,10 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
         or commit_range.startswith("-")
     ):
         raise ValueError(f"Unsafe git ref rejected: {commit_range!r}")
+
+
+async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
+    _validate_commit_range(commit_range)
     proc = await asyncio.create_subprocess_exec(
         "git", "diff", commit_range, "--",
         cwd=str(cwd),
@@ -70,3 +75,81 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
             err = stderr2.decode("utf-8", errors="replace").strip()
         raise ValueError(f"git diff failed: {err}")
     return stdout.decode("utf-8", errors="replace")
+
+
+async def stream_git_diff_file_blocks(
+    commit_range: str, cwd: Path | str
+) -> AsyncIterator[str]:
+    """Yield one ``git diff`` file block at a time from subprocess stdout."""
+    _validate_commit_range(commit_range)
+    ranges = [commit_range]
+    single_commit = _SINGLE_COMMIT_RANGE_RE.match(commit_range)
+
+    while ranges:
+        current_range = ranges.pop(0)
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "diff",
+            current_range,
+            "--",
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        if proc.stdout is None or proc.stderr is None:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError("git diff subprocess pipes were not created")
+
+        stderr_task = asyncio.create_task(proc.stderr.read())
+        block: list[str] = []
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _GIT_DIFF_TIMEOUT_SECONDS
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace")
+                if decoded.startswith("diff --git ") and block:
+                    yield "".join(block)
+                    block = []
+                block.append(decoded)
+            if block:
+                yield "".join(block)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            await asyncio.wait_for(proc.wait(), timeout=remaining)
+            stderr = await stderr_task
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            stderr_task.cancel()
+            raise TimeoutError(
+                f"git diff timed out after {_GIT_DIFF_TIMEOUT_SECONDS}s"
+                f" for range {current_range!r}"
+            )
+        except (asyncio.CancelledError, GeneratorExit):
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            stderr_task.cancel()
+            raise
+
+        if proc.returncode == 0:
+            return
+
+        error = stderr.decode("utf-8", errors="replace").strip()
+        if (
+            current_range == commit_range
+            and single_commit
+            and single_commit.group(1) == single_commit.group(2)
+            and "unknown revision" in error
+        ):
+            ranges.append(f"{_EMPTY_TREE_SHA}..{single_commit.group(2)}")
+            continue
+        raise ValueError(f"git diff failed: {error}")

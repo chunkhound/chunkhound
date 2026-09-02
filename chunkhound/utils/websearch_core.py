@@ -16,11 +16,11 @@ import itertools
 import os
 import re
 import subprocess
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
@@ -32,8 +32,6 @@ if TYPE_CHECKING:
 
     import zendriver as zd
 
-from chunkhound.core.config.config import Config
-
 MAX_FETCH_CONCURRENCY = 5
 
 WEBSEARCH_LIMIT_MAX = 100
@@ -42,9 +40,9 @@ __all__ = [
     "WEBSEARCH_LIMIT_MAX",
     "clamp_limit",
     "websearch_timeout",
+    "fetch_pages",
     "fetch_and_save",
     "search_multi",
-    "build_quickresearch_argv_core",
 ]
 
 # Probe these paths before zendriver's auto-discovery. zendriver picks the
@@ -576,15 +574,13 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             await _close_tab_quietly(tab)
 
 
-async def _fetch_one(
+async def _fetch_content(
     url: str,
-    tmpdir: Path,
     browser: zd.Browser | None,
     progress_callback: Callable[[str], None] | None,
     warning_callback: Callable[[str], None] | None,
     semaphore: asyncio.Semaphore,
-    mapping: dict[str, str] | None,
-) -> None:
+) -> tuple[str, str, str | bytes] | None:
     async with semaphore:
         if progress_callback:
             progress_callback(f"Fetching {url}...")
@@ -606,64 +602,48 @@ async def _fetch_one(
             # an empty file that consumes a result slot.
             if not content.strip():
                 raise ValueError(f"{ct!r} body rendered empty ({len(body)} bytes)")
-            path = tmpdir / (_url_to_filename(url) + ext)
-            if isinstance(content, bytes):
-                path.write_bytes(content)
-            else:
-                path.write_text(content, encoding="utf-8")
-            if mapping is not None:
-                mapping[path.name] = url
+            return url, ext, content
         except Exception as e:
             if warning_callback:
                 warning_callback(f"Failed to fetch {url}: {type(e).__name__}: {e}")
+            return None
 
 
-async def fetch_and_save(
-    urls: list[str],
+async def _fetch_one(
+    url: str,
     tmpdir: Path,
-    progress_callback: Callable[[str], None] | None = None,
-    warning_callback: Callable[[str], None] | None = None,
-    mapping: dict[str, str] | None = None,
+    browser: zd.Browser | None,
+    progress_callback: Callable[[str], None] | None,
+    warning_callback: Callable[[str], None] | None,
+    semaphore: asyncio.Semaphore,
+    mapping: dict[str, str] | None,
 ) -> None:
-    """Fetch each URL concurrently (bounded) and save content to tmpdir."""
-    semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
+    fetched = await _fetch_content(
+        url, browser, progress_callback, warning_callback, semaphore
+    )
+    if fetched is None:
+        return
+    source_url, ext, content = fetched
+    path = tmpdir / (_url_to_filename(source_url) + ext)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content, encoding="utf-8")
+    if mapping is not None:
+        mapping[path.name] = source_url
 
-    async def _run(browser: zd.Browser | None) -> None:
-        tasks = [
-            _fetch_one(
-                url, tmpdir, browser, progress_callback, warning_callback,
-                semaphore, mapping,
-            )
-            for url in urls
-        ]
-        await asyncio.gather(*tasks)
 
-    # Lazy import: pulls in websockets + CDP binding modules. Wasted cost
-    # for CLI commands that never touch websearch (e.g. `chunkhound index`).
+@asynccontextmanager
+async def _browser_session(
+    warning_callback: Callable[[str], None] | None,
+) -> AsyncIterator[zd.Browser | None]:
     import zendriver as zd
 
-    # Must run before any tab.send() creates a Transaction.
     _install_late_completion_guard()
-
-    # _resolve_chrome_path returns None for every "no usable Chrome >=124"
-    # case (not installed, too old, --version probe failed) and emits its
-    # own warning describing the cause. urllib is the unified fallback —
-    # we never hand a bad binary to zendriver, so the silent
-    # Response.charset parse-failure loop is never reached.
     chrome_path = _resolve_chrome_path(warning_callback)
     if chrome_path is None:
-        await _run(None)
+        yield None
         return
-
-    # --headless=new is required for the PDF path: legacy --headless hands
-    # PDFs to Chrome's internal viewer and never exposes the response to
-    # _fetch_page. Pass both headless=True and the explicit flag — the
-    # relationship between zendriver's Config flag and the explicit arg is
-    # undocumented; belt-and-braces.
-    # --disable-dev-shm-usage: containers default /dev/shm to 64MB, which
-    # 5-way concurrent navigation of JS-heavy SPAs exhausts — Chrome dies
-    # and every in-flight tab raises ConnectionClosedError on its CDP
-    # WebSocket. --disable-gpu drops the unused GPU process to free RAM.
     try:
         browser = await zd.start(
             headless=True,
@@ -681,18 +661,68 @@ async def fetch_and_save(
                 " (If Google Chrome is not installed, install it to"
                 " enable rich page fetches.)"
             )
-        await _run(None)
+        yield None
         return
     try:
-        await _run(browser)
+        yield browser
     finally:
-        # Bounded best-effort stop. browser.stop() can wedge on a stuck
-        # websocket close or a Chrome process ignoring SIGTERM; the subprocess
-        # process-group reaps any orphans when _quickresearch exits.
         try:
             await asyncio.wait_for(browser.stop(), timeout=10)
         except asyncio.TimeoutError:
             pass
+
+
+async def fetch_pages(
+    urls: list[str],
+    progress_callback: Callable[[str], None] | None = None,
+    warning_callback: Callable[[str], None] | None = None,
+) -> AsyncIterator[tuple[str, str, str | bytes]]:
+    """Yield fetched page bodies in memory as each request completes."""
+    semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
+    async with _browser_session(warning_callback) as browser:
+        tasks = [
+            asyncio.create_task(
+                _fetch_content(
+                    url,
+                    browser,
+                    progress_callback,
+                    warning_callback,
+                    semaphore,
+                )
+            )
+            for url in urls
+        ]
+        try:
+            for completed in asyncio.as_completed(tasks):
+                fetched = await completed
+                if fetched is not None:
+                    yield fetched
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def fetch_and_save(
+    urls: list[str],
+    tmpdir: Path,
+    progress_callback: Callable[[str], None] | None = None,
+    warning_callback: Callable[[str], None] | None = None,
+    mapping: dict[str, str] | None = None,
+) -> None:
+    """Fetch each URL concurrently (bounded) and save content to tmpdir."""
+    semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
+    async with _browser_session(warning_callback) as browser:
+        tasks = [
+            _fetch_one(
+                url, tmpdir, browser, progress_callback, warning_callback,
+                semaphore, mapping,
+            )
+            for url in urls
+        ]
+        await asyncio.gather(*tasks)
 
 
 def search(
@@ -807,32 +837,3 @@ async def search_multi(
             if key not in seen:
                 seen[key] = row
     return list(seen.values())[:limit]
-
-
-def build_quickresearch_argv_core(
-    query: str,
-    tmpdir: Path,
-    config: Config,
-    parent_pid: int,
-) -> list[str]:
-    """Build argv to invoke _quickresearch as a subprocess.
-
-    Forwards the config source file as an absolute path so the child process
-    does not need to re-run config discovery (which would otherwise fall back
-    to env vars / defaults under the MCP server's working directory).
-
-    ``parent_pid`` is the caller's own PID (``os.getpid()``); the child uses
-    it as the reference for its orphan watchdog.
-    """
-    cmd: list[str] = [
-        sys.executable,
-        "-m", "chunkhound.api.cli.main",
-        "_quickresearch",
-        query,
-        str(tmpdir),
-        "--parent-pid", str(parent_pid),
-    ]
-    source = config.config_file or config.local_config_file
-    if source is not None:
-        cmd.extend(["--config", str(Path(source).resolve())])
-    return cmd

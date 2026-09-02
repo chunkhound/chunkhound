@@ -52,7 +52,7 @@ class DuckDBConnectionManager:
         self.config = config
         # :memory: DBs cannot meaningfully be opened read-only — there is
         # nothing to read. Dropping the flag here keeps callers that inherit a
-        # project-level read_only setting (e.g. _quickresearch under --config)
+            # project-level read_only setting on an in-memory connection
         # from asking DuckDB for an impossible open.
         self._read_only = bool(
             config and config.read_only and str(db_path) != ":memory:"

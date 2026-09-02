@@ -92,6 +92,27 @@ class FileReader:
                     path = base_dir / file_path
 
                 if not path.exists():
+                    transient_content = "\n\n...\n\n".join(
+                        str(chunk.get("content", ""))
+                        for chunk in file_chunks
+                        if chunk.get("content")
+                    )
+                    if transient_content:
+                        estimated_tokens = llm.estimate_tokens(transient_content)
+                        if (
+                            budget_limit is None
+                            or total_tokens + estimated_tokens <= budget_limit
+                        ):
+                            file_contents[file_path] = transient_content
+                            total_tokens += estimated_tokens
+                        else:
+                            remaining_tokens = budget_limit - total_tokens
+                            if remaining_tokens > 500:
+                                file_contents[file_path] = transient_content[
+                                    : remaining_tokens * 4
+                                ]
+                                total_tokens = budget_limit
+                        continue
                     logger.warning(f"File not found (expected at {path}): {file_path}")
                     continue
 
