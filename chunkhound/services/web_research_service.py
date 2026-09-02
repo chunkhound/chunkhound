@@ -1,6 +1,7 @@
 """In-process research composition for transient fetched web pages."""
 
-from collections.abc import AsyncIterator, Sequence
+import asyncio
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -82,8 +83,9 @@ class _TransientProvider:
 
 
 def _is_unusable_pdf_chunk(chunk: Chunk) -> bool:
-    return chunk.symbol == "pdf_unavailable" or "PDF parsing not available" in (
-        chunk.code or ""
+    return chunk.symbol in {"pdf_unavailable", "pdf_parse_error"} or any(
+        message in (chunk.code or "")
+        for message in ("PDF parsing not available", "Error parsing PDF:")
     )
 
 
@@ -180,6 +182,88 @@ async def _iter_pages(
         yield page
 
 
+class _ReplayableChunkStream:
+    """Convert a one-shot page stream once and replay batches to every search."""
+
+    def __init__(
+        self,
+        pages: AsyncIterator[Page] | Sequence[Page],
+        provider: _TransientProvider,
+        warning_callback: Callable[[str], None] | None,
+    ) -> None:
+        self._pages = pages
+        self._provider = provider
+        self._warning_callback = warning_callback
+        self._batches: list[list[Chunk]] = []
+        self._condition = asyncio.Condition()
+        self._producer: asyncio.Task[None] | None = None
+        self._complete = False
+        self._error: BaseException | None = None
+        self.usable_page_count = 0
+
+    async def _append(self, batch: list[Chunk]) -> None:
+        async with self._condition:
+            self._batches.append(batch)
+            self._condition.notify_all()
+
+    async def _produce(self) -> None:
+        batch: list[Chunk] = []
+        try:
+            async for source_url, extension, content in _iter_pages(self._pages):
+                page_chunks = _page_to_chunks(source_url, extension, content)
+                if not page_chunks:
+                    if self._warning_callback is not None:
+                        self._warning_callback(
+                            f"No usable content parsed from {source_url}"
+                        )
+                    continue
+
+                self.usable_page_count += 1
+                if isinstance(content, str):
+                    self._provider.store_page_text(source_url, content)
+                else:
+                    self._provider.store_page_text(
+                        source_url, "".join(chunk.code for chunk in page_chunks)
+                    )
+                batch.extend(page_chunks)
+                while len(batch) >= _BATCH_SIZE:
+                    await self._append(batch[:_BATCH_SIZE])
+                    batch = batch[_BATCH_SIZE:]
+            if batch:
+                await self._append(batch)
+        except BaseException as exc:
+            self._error = exc
+        finally:
+            async with self._condition:
+                self._complete = True
+                self._condition.notify_all()
+
+    async def __call__(self) -> AsyncIterator[list[Chunk]]:
+        if self._producer is None:
+            self._producer = asyncio.create_task(self._produce())
+
+        index = 0
+        while True:
+            async with self._condition:
+                await self._condition.wait_for(
+                    lambda: index < len(self._batches) or self._complete
+                )
+                if index < len(self._batches):
+                    batch = self._batches[index]
+                    index += 1
+                else:
+                    if self._error is not None:
+                        raise self._error
+                    return
+            yield batch
+
+    async def close(self) -> None:
+        if self._producer is not None and not self._producer.done():
+            self._producer.cancel()
+        if self._producer is not None:
+            await asyncio.gather(self._producer, return_exceptions=True)
+
+
 async def research_web_pages(
     query: str,
     pages: AsyncIterator[Page] | Sequence[Page],
@@ -187,26 +271,11 @@ async def research_web_pages(
     embedding_manager: Any,
     llm_manager: Any,
     progress: Any = None,
+    warning_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Run the configured research strategy over fetched pages in process."""
     provider = _TransientProvider()
-
-    async def chunk_stream() -> AsyncIterator[list[Chunk]]:
-        batch: list[Chunk] = []
-        async for source_url, extension, content in _iter_pages(pages):
-            page_chunks = _page_to_chunks(source_url, extension, content)
-            if isinstance(content, str):
-                provider.store_page_text(source_url, content)
-            elif page_chunks:
-                provider.store_page_text(
-                    source_url, "".join(chunk.code for chunk in page_chunks)
-                )
-            batch.extend(page_chunks)
-            while len(batch) >= _BATCH_SIZE:
-                yield batch[:_BATCH_SIZE]
-                batch = batch[_BATCH_SIZE:]
-        if batch:
-            yield batch
+    chunk_stream = _ReplayableChunkStream(pages, provider, warning_callback)
 
     search_service = TransientSearchService(
         original=cast(Any, _EmptySearchService()),
@@ -230,4 +299,10 @@ async def research_web_pages(
         progress=progress,
         path_filter=None,
     )
-    return await research_service.deep_research(query)
+    try:
+        result = await research_service.deep_research(query)
+    finally:
+        await chunk_stream.close()
+    if chunk_stream.usable_page_count == 0:
+        raise ValueError("No usable page content was produced")
+    return result

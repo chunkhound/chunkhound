@@ -6,9 +6,10 @@ import argparse
 import asyncio
 import sys
 import urllib.error
+from collections.abc import AsyncIterator
 
 from chunkhound.core.config.config import Config
-from chunkhound.services.web_research_service import research_web_pages
+from chunkhound.services.web_research_service import Page, research_web_pages
 from chunkhound.utils.websearch_core import (
     fetch_pages,
     search_multi,
@@ -53,7 +54,7 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         warnings: list[str] = []
         got_page = False
 
-        async def pages():
+        async def pages() -> AsyncIterator[Page]:
             nonlocal got_page
             async for page in fetch_pages(
                 [url for _, url, _ in results],
@@ -70,6 +71,7 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
             embedding_manager,
             llm_manager,
             progress=formatter.progress_indicator,
+            warning_callback=warnings.append,
         )
         if not got_page:
             formatter.error(f"No pages could be fetched for {args.query!r}")

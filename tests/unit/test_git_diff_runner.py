@@ -69,6 +69,36 @@ async def test_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_git_diff_cancellation_kills_process(tmp_path: Path) -> None:
+    class BlockingProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.killed = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.Event().wait()
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -1
+
+        async def wait(self) -> None:
+            return None
+
+    proc = BlockingProcess()
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        task = asyncio.create_task(run_git_diff("HEAD", tmp_path))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert proc.killed is True
+
+
+@pytest.mark.asyncio
 async def test_empty_diff(tmp_path: Path) -> None:
     fake = make_fake_process(stdout=b"", stderr=b"", returncode=0)
     with patch("asyncio.create_subprocess_exec", return_value=fake):
@@ -112,6 +142,51 @@ async def test_streams_complete_file_blocks_from_real_git(
     assert all(block.startswith("diff --git ") for block in blocks)
     assert "one.py" in blocks[0]
     assert "two.py" in blocks[1]
+
+
+@pytest.mark.asyncio
+async def test_stream_root_commit_uses_empty_tree(tmp_path: Path) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "git", "init", cwd=str(tmp_path), stdout=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+    (tmp_path / "root.py").write_text("root = True\n", encoding="utf-8")
+    proc = await asyncio.create_subprocess_exec("git", "add", ".", cwd=str(tmp_path))
+    await proc.communicate()
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "root",
+        cwd=str(tmp_path),
+        stdout=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "rev-parse",
+        "HEAD",
+        cwd=str(tmp_path),
+        stdout=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    root_hash = stdout.decode().strip()
+
+    blocks = [
+        block
+        async for block in stream_git_diff_file_blocks(
+            f"{root_hash}^..{root_hash}", cwd=tmp_path
+        )
+    ]
+
+    assert len(blocks) == 1
+    assert blocks[0].startswith("diff --git ")
+    assert "root.py" in blocks[0]
+    assert "+root = True" in blocks[0]
 
 
 @pytest.mark.asyncio

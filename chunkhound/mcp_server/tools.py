@@ -514,6 +514,8 @@ async def _git_cwd_from_services(services: DatabaseServices) -> Path:
     gives the correct repo root for the indexed project.  Falls back to
     project-marker detection then cwd only when the git lookup fails.
     """
+    proc: asyncio.subprocess.Process | None = None
+    start = Path.cwd()
     try:
         db_path = Path(services.provider.db_path)
         start = db_path if db_path.is_dir() else db_path.parent
@@ -533,6 +535,10 @@ async def _git_cwd_from_services(services: DatabaseServices) -> Path:
         from loguru import logger as _log
 
         _log.debug("git rev-parse failed from {}, falling back", start, exc_info=True)
+    finally:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
 
     # Fallback: project markers, then bare cwd
     from chunkhound.utils.project_detection import find_project_root
@@ -835,7 +841,7 @@ async def websearch_impl(
         Markdown research answer plus an optional fetch-warning block.
     """
     from chunkhound.mcp_server.common import MCPError
-    from chunkhound.services.web_research_service import research_web_pages
+    from chunkhound.services.web_research_service import Page, research_web_pages
     from chunkhound.utils.websearch_core import (
         clamp_limit,
         fetch_pages,
@@ -862,7 +868,7 @@ async def websearch_impl(
         warnings: list[str] = []
         got_page = False
 
-        async def pages():
+        async def pages() -> AsyncIterator[Page]:
             nonlocal got_page
             async for page in fetch_pages(
                 [url for _, url, _ in results],
@@ -878,6 +884,7 @@ async def websearch_impl(
             config,
             embedding_manager,
             llm_manager,
+            warning_callback=warnings.append,
         )
         if not got_page:
             raise MCPError(f"No pages could be fetched for {query!r}")

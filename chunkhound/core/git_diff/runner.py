@@ -17,6 +17,10 @@ _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 _SINGLE_COMMIT_RANGE_RE = re.compile(r"^([0-9a-fA-F]{4,64})\^\.\.([0-9a-fA-F]{4,64})\Z")
 
 
+def _is_missing_parent_error(error: str) -> bool:
+    return "unknown revision" in error or "bad revision" in error
+
+
 def _validate_commit_range(commit_range: str) -> None:
     if (
         not _SAFE_REF.match(commit_range)
@@ -25,6 +29,24 @@ def _validate_commit_range(commit_range: str) -> None:
         or commit_range.startswith("-")
     ):
         raise ValueError(f"Unsafe git ref rejected: {commit_range!r}")
+
+
+async def _communicate_git_diff(
+    proc: asyncio.subprocess.Process, commit_range: str
+) -> tuple[bytes, bytes]:
+    try:
+        return await asyncio.wait_for(
+            proc.communicate(), timeout=_GIT_DIFF_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        raise TimeoutError(
+            f"git diff timed out after {_GIT_DIFF_TIMEOUT_SECONDS}s"
+            f" for range {commit_range!r}"
+        ) from None
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
 
 
 async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
@@ -38,23 +60,13 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=_GIT_DIFF_TIMEOUT_SECONDS
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise TimeoutError(
-            f"git diff timed out after {_GIT_DIFF_TIMEOUT_SECONDS}s"
-            f" for range {commit_range!r}"
-        )
+    stdout, stderr = await _communicate_git_diff(proc, commit_range)
     if proc.returncode != 0:
         err = stderr.decode("utf-8", errors="replace").strip()
         # Root commit has no parent: <hash>^..<hash> fails with "unknown revision".
         # Retry using the empty tree so `git diff EMPTY_TREE..<hash>` succeeds.
         m = _SINGLE_COMMIT_RANGE_RE.match(commit_range)
-        if m and m.group(1) == m.group(2) and "unknown revision" in err:
+        if m and m.group(1) == m.group(2) and _is_missing_parent_error(err):
             root_range = f"{_EMPTY_TREE_SHA}..{m.group(2)}"
             proc2 = await asyncio.create_subprocess_exec(
                 "git",
@@ -65,17 +77,7 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            try:
-                stdout2, stderr2 = await asyncio.wait_for(
-                    proc2.communicate(), timeout=_GIT_DIFF_TIMEOUT_SECONDS
-                )
-            except asyncio.TimeoutError:
-                proc2.kill()
-                await proc2.wait()
-                raise TimeoutError(
-                    f"git diff timed out after {_GIT_DIFF_TIMEOUT_SECONDS}s"
-                    f" for range {root_range!r}"
-                )
+            stdout2, stderr2 = await _communicate_git_diff(proc2, root_range)
             if proc2.returncode == 0:
                 return stdout2.decode("utf-8", errors="replace")
             err = stderr2.decode("utf-8", errors="replace").strip()
@@ -162,7 +164,7 @@ async def stream_git_diff_file_blocks(
             current_range == commit_range
             and single_commit
             and single_commit.group(1) == single_commit.group(2)
-            and "unknown revision" in error
+            and _is_missing_parent_error(error)
         ):
             ranges.append(f"{_EMPTY_TREE_SHA}..{single_commit.group(2)}")
             continue

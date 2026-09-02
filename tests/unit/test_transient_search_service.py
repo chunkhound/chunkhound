@@ -61,7 +61,26 @@ async def test_streams_5000_chunks_into_bounded_top_page() -> None:
 
     assert len(results) == 10
     assert results[0]["content"] == "chunk 4999"
-    assert pagination["total"] <= 50
+    assert pagination == {
+        "offset": 0,
+        "page_size": 10,
+        "has_more": True,
+        "next_offset": 10,
+        "total": 5_000,
+    }
+
+    final_results, final_page = await service.search_semantic(
+        "query", page_size=10, offset=4_990
+    )
+
+    assert len(final_results) == 10
+    assert final_page == {
+        "offset": 4_990,
+        "page_size": 10,
+        "has_more": False,
+        "next_offset": None,
+        "total": 5_000,
+    }
 
 
 @pytest.mark.asyncio

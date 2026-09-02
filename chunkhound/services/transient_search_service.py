@@ -114,6 +114,7 @@ class TransientSearchService:
         limit = max(offset + page_size, page_size * _OVERFETCH_FACTOR)
         heap: list[tuple[float, int, dict[str, Any]]] = []
         ordinal = 0
+        qualifying_count = 0
 
         async for chunks in self._chunk_stream():
             filtered = [
@@ -150,6 +151,7 @@ class TransientSearchService:
                 score = float(np.dot(self._normalise(vector), query_vector))
                 if threshold is not None and score < threshold:
                     continue
+                qualifying_count += 1
                 result = self._chunk_to_dict(chunk, score)
                 entry = (score, ordinal, result)
                 ordinal += 1
@@ -162,7 +164,7 @@ class TransientSearchService:
             entry[2] for entry in sorted(heap, key=lambda item: (-item[0], item[1]))
         ]
         return ranked[offset : offset + page_size], self._pagination(
-            page_size, offset, len(ranked)
+            page_size, offset, qualifying_count
         )
 
     @staticmethod
@@ -225,13 +227,22 @@ class TransientSearchService:
                 result_limit=result_limit,
             )
         )
-        (transient_results, _), (db_results, _) = await _await_pair(
+        (transient_results, transient_page), (db_results, db_page) = await _await_pair(
             transient_task, db_task
         )
         merged = self._merge(transient_results, db_results, threshold)
-        return merged[offset : offset + page_size], self._pagination(
-            page_size, offset, len(merged)
+        has_more = (
+            len(merged) > offset + page_size
+            or bool(transient_page.get("has_more"))
+            or bool(db_page.get("has_more"))
         )
+        page = self._pagination(page_size, offset, len(merged))
+        if has_more:
+            page["has_more"] = True
+            page["next_offset"] = offset + page_size
+            if transient_page.get("has_more") or db_page.get("has_more"):
+                page["total"] = None
+        return merged[offset : offset + page_size], page
 
     @staticmethod
     def _merge(

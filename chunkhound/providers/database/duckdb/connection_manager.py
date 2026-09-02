@@ -52,7 +52,7 @@ class DuckDBConnectionManager:
         self.config = config
         # :memory: DBs cannot meaningfully be opened read-only — there is
         # nothing to read. Dropping the flag here keeps callers that inherit a
-            # project-level read_only setting on an in-memory connection
+        # project-level read_only setting on an in-memory connection
         # from asking DuckDB for an impossible open.
         self._read_only = bool(
             config and config.read_only and str(db_path) != ":memory:"
@@ -380,9 +380,13 @@ class DuckDBConnectionManager:
                 ):
                     # Force checkpoint before close to ensure durability
                     self.connection.execute("CHECKPOINT")
-                    log_if_not_mcp("debug", "Database checkpoint completed before disconnect")
+                    log_if_not_mcp(
+                        "debug", "Database checkpoint completed before disconnect"
+                    )
                 else:
-                    log_if_not_mcp("debug", "Skipping checkpoint before disconnect (already done)")
+                    log_if_not_mcp(
+                        "debug", "Skipping checkpoint before disconnect (already done)"
+                    )
             except Exception as e:
                 log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")
                 # Continue with close - don't block shutdown
