@@ -198,6 +198,7 @@ class _ReplayableChunkStream:
         self._condition = asyncio.Condition()
         self._producer: asyncio.Task[None] | None = None
         self._complete = False
+        self._closing = False
         self._error: BaseException | None = None
         self.usable_page_count = 0
 
@@ -232,7 +233,8 @@ class _ReplayableChunkStream:
             if batch:
                 await self._append(batch)
         except BaseException as exc:
-            self._error = exc
+            if not (self._closing and isinstance(exc, asyncio.CancelledError)):
+                self._error = exc
         finally:
             async with self._condition:
                 self._complete = True
@@ -259,9 +261,14 @@ class _ReplayableChunkStream:
 
     async def close(self) -> None:
         if self._producer is not None and not self._producer.done():
+            self._closing = True
             self._producer.cancel()
         if self._producer is not None:
             await asyncio.gather(self._producer, return_exceptions=True)
+
+    def raise_producer_error(self) -> None:
+        if self._error is not None:
+            raise self._error
 
 
 async def research_web_pages(
@@ -303,6 +310,7 @@ async def research_web_pages(
         result = await research_service.deep_research(query)
     finally:
         await chunk_stream.close()
+    chunk_stream.raise_producer_error()
     if chunk_stream.usable_page_count == 0:
         raise ValueError("No usable page content was produced")
     return result

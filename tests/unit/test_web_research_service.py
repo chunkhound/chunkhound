@@ -158,8 +158,10 @@ async def test_research_consumes_pages_incrementally_and_stores_full_text() -> N
             search_service.search_semantic(query),
             search_service.search_semantic(f"{query} follow-up"),
         )
+        third = await search_service.search_semantic(f"{query} later")
         assert first[0][0]["content"] == full
         assert second[0][0]["content"] == full
+        assert third[0][0]["content"] == full
         provider = captured["db_services"].provider
         assert (
             provider.get_transient_file_content("https://example.invalid/docs") == full
@@ -243,3 +245,51 @@ async def test_research_rejects_pages_without_usable_content() -> None:
         )
 
     assert warnings == ["No usable content parsed from https://example.invalid/bad.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_research_propagates_error_after_partial_page_stream() -> None:
+    async def pages():
+        for index in range(100):
+            yield f"https://example.invalid/{index}", ".md", f"page {index}"
+        raise RuntimeError("page stream failed")
+
+    manager = MagicMock()
+    manager.embed_texts = AsyncMock(
+        return_value=LocalEmbeddingResult(
+            embeddings=[[1.0, 0.0]],
+            model="test",
+            provider="test",
+            dims=2,
+        )
+    )
+    captured: dict = {}
+    research = MagicMock()
+
+    async def deep_research(query: str):
+        try:
+            await captured["db_services"].search_service.search_semantic(query)
+        except RuntimeError:
+            pass
+        return {"answer": "must not escape"}
+
+    research.deep_research = deep_research
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return research
+
+    with (
+        patch(
+            "chunkhound.services.web_research_service.ResearchServiceFactory.create",
+            side_effect=create,
+        ),
+        pytest.raises(RuntimeError, match="page stream failed"),
+    ):
+        await research_web_pages(
+            "query",
+            pages(),
+            MagicMock(),
+            manager,
+            MagicMock(),
+        )

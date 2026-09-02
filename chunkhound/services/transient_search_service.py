@@ -321,34 +321,42 @@ class TransientSearchService:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         from chunkhound.services.search.result_enhancer import ResultEnhancer
 
+        candidate_limit = offset + page_size + 1
+        source_page_size = candidate_limit * 2
         semantic_task = asyncio.create_task(
             self.search_semantic(
                 query,
-                page_size=page_size * 2,
-                offset=offset,
+                page_size=source_page_size,
+                offset=0,
                 threshold=threshold,
             )
         )
         if regex_pattern is None:
-            semantic_results, _ = await semantic_task
+            semantic_results, semantic_page = await semantic_task
             regex_results: list[dict[str, Any]] = []
+            regex_page: dict[str, Any] = {"has_more": False}
         else:
             regex_task = asyncio.create_task(
                 self.search_regex_async(
-                    regex_pattern, page_size=page_size * 2, offset=offset
+                    regex_pattern, page_size=source_page_size, offset=0
                 )
             )
-            (semantic_results, _), (regex_results, _) = await _await_pair(
-                semantic_task, regex_task
-            )
+            (
+                (semantic_results, semantic_page),
+                (regex_results, regex_page),
+            ) = await _await_pair(semantic_task, regex_task)
         combined = ResultEnhancer().combine_search_results(
             semantic_results=semantic_results,
             regex_results=regex_results,
             semantic_weight=semantic_weight,
-            limit=page_size,
+            limit=candidate_limit,
         )
-        has_more = len(combined) == page_size
-        return combined, {
+        has_more = (
+            len(combined) > offset + page_size
+            or bool(semantic_page.get("has_more"))
+            or bool(regex_page.get("has_more"))
+        )
+        return combined[offset : offset + page_size], {
             "offset": offset,
             "page_size": page_size,
             "has_more": has_more,
