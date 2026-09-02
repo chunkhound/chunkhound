@@ -2,7 +2,7 @@
 
 import asyncio
 import heapq
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import numpy as np
@@ -323,45 +323,50 @@ class TransientSearchService:
 
         candidate_limit = offset + page_size + 1
 
-        async def semantic_snapshot() -> list[dict[str, Any]]:
-            fetch_size = candidate_limit
-            while True:
-                results, pagination = await self.search_semantic(
-                    query,
-                    page_size=fetch_size,
-                    offset=0,
-                    threshold=threshold,
-                )
-                if not pagination.get("has_more"):
-                    return results
-                total = pagination.get("total")
-                fetch_size = (
-                    total
-                    if isinstance(total, int) and total > fetch_size
-                    else fetch_size * 2
-                )
+        async def frozen_snapshot(
+            fetch: Callable[
+                [int],
+                Awaitable[tuple[list[dict[str, Any]], dict[str, Any]]],
+            ],
+        ) -> list[dict[str, Any]]:
+            results, pagination = await fetch(candidate_limit)
+            if not pagination.get("has_more"):
+                return results
 
-        async def regex_snapshot(pattern: str) -> list[dict[str, Any]]:
-            fetch_size = candidate_limit
-            while True:
-                results, pagination = await self.search_regex_async(
-                    pattern, page_size=fetch_size, offset=0
-                )
-                if not pagination.get("has_more"):
-                    return results
-                total = pagination.get("total")
-                fetch_size = (
-                    total
-                    if isinstance(total, int) and total > fetch_size
-                    else fetch_size * 2
-                )
+            initial_total = pagination.get("total")
+            snapshot_size = (
+                initial_total
+                if isinstance(initial_total, int) and initial_total > candidate_limit
+                else candidate_limit * 2
+            )
+            results, _ = await fetch(snapshot_size)
+            return results
 
-        semantic_task = asyncio.create_task(semantic_snapshot())
+        async def fetch_semantic(
+            fetch_size: int,
+        ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            return await self.search_semantic(
+                query,
+                page_size=fetch_size,
+                offset=0,
+                threshold=threshold,
+            )
+
+        async def fetch_regex(
+            fetch_size: int,
+        ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            if regex_pattern is None:
+                return [], {"has_more": False, "total": 0}
+            return await self.search_regex_async(
+                regex_pattern, page_size=fetch_size, offset=0
+            )
+
+        semantic_task = asyncio.create_task(frozen_snapshot(fetch_semantic))
         if regex_pattern is None:
             semantic_results = await semantic_task
             regex_results: list[dict[str, Any]] = []
         else:
-            regex_task = asyncio.create_task(regex_snapshot(regex_pattern))
+            regex_task = asyncio.create_task(frozen_snapshot(fetch_regex))
             semantic_results, regex_results = await _await_pair(
                 semantic_task, regex_task
             )

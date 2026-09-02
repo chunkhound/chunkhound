@@ -297,3 +297,44 @@ async def test_both_mode_cancels_sibling_on_failure() -> None:
         await service.search_semantic("query")
 
     assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_hybrid_freezes_initial_source_total() -> None:
+    original = make_original()
+    calls = 0
+
+    async def growing_search(**kwargs):
+        nonlocal calls
+        calls += 1
+        page_size = kwargs["page_size"]
+        total = page_size + 1
+        results = [
+            {
+                "chunk_id": f"db-{index}",
+                "file_path": f"db-{index}.py",
+                "similarity": 1.0 - index / 100,
+            }
+            for index in range(page_size)
+        ]
+        return results, {
+            "offset": 0,
+            "page_size": page_size,
+            "has_more": True,
+            "next_offset": page_size,
+            "total": total,
+        }
+
+    original.search_semantic = AsyncMock(side_effect=growing_search)
+    service = TransientSearchService(
+        original,
+        stream_chunks([]),
+        "db",
+        embedding_manager(),
+    )
+
+    results, pagination = await service.search_hybrid("query", page_size=1)
+
+    assert calls == 2
+    assert len(results) == 1
+    assert pagination["total"] == 3
