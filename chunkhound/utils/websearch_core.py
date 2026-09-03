@@ -9,19 +9,16 @@ sites depend on this neutral module instead of each other.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import html
 import html.parser
 import itertools
 import os
-import re
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
 from loguru import logger
@@ -41,7 +38,6 @@ __all__ = [
     "clamp_limit",
     "websearch_timeout",
     "fetch_pages",
-    "fetch_and_save",
     "search_multi",
 ]
 
@@ -90,7 +86,7 @@ def _install_late_completion_guard() -> None:
     was the awaiter inside Connection.send, which already received
     CancelledError.
 
-    Idempotent via module-level flag — safe to call from every fetch_and_save.
+    Idempotent via module-level flag — safe to call from every fetch_pages.
     """
     global _late_completion_guard_installed
     if _late_completion_guard_installed:
@@ -314,16 +310,6 @@ def _fetch(params: dict[str, str]) -> str:
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode()
-
-
-def _url_to_filename(url: str, max_length: int = 100) -> str:
-    # Append a short stable hash of the full URL so distinct URLs cannot
-    # collide via the lossy [^\w.-]→_ substitution or via truncation when
-    # two URLs share a long common prefix.
-    name = re.sub(r"^https?://", "", url)
-    name = re.sub(r"[^\w.-]", "_", name)
-    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
-    return f"{name[: max(0, max_length - 9)]}_{digest}"[:max_length]
 
 
 def _html_to_markdown(html_text: str) -> str:
@@ -617,30 +603,6 @@ async def _fetch_content(
             return None
 
 
-async def _fetch_one(
-    url: str,
-    tmpdir: Path,
-    browser: zd.Browser | None,
-    progress_callback: Callable[[str], None] | None,
-    warning_callback: Callable[[str], None] | None,
-    semaphore: asyncio.Semaphore,
-    mapping: dict[str, str] | None,
-) -> None:
-    fetched = await _fetch_content(
-        url, browser, progress_callback, warning_callback, semaphore
-    )
-    if fetched is None:
-        return
-    source_url, ext, content = fetched
-    path = tmpdir / (_url_to_filename(source_url) + ext)
-    if isinstance(content, bytes):
-        path.write_bytes(content)
-    else:
-        path.write_text(content, encoding="utf-8")
-    if mapping is not None:
-        mapping[path.name] = source_url
-
-
 @asynccontextmanager
 async def _browser_session(
     warning_callback: Callable[[str], None] | None,
@@ -711,31 +673,6 @@ async def fetch_pages(
                     task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def fetch_and_save(
-    urls: list[str],
-    tmpdir: Path,
-    progress_callback: Callable[[str], None] | None = None,
-    warning_callback: Callable[[str], None] | None = None,
-    mapping: dict[str, str] | None = None,
-) -> None:
-    """Fetch each URL concurrently (bounded) and save content to tmpdir."""
-    semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
-    async with _browser_session(warning_callback) as browser:
-        tasks = [
-            _fetch_one(
-                url,
-                tmpdir,
-                browser,
-                progress_callback,
-                warning_callback,
-                semaphore,
-                mapping,
-            )
-            for url in urls
-        ]
-        await asyncio.gather(*tasks)
 
 
 def search(

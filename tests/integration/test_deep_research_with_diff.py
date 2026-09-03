@@ -3,14 +3,14 @@ when commit_range / commit_hash / last_n_commits parameters are supplied.
 
 The key claim:  after the injection block runs, the ResearchServiceFactory
 receives a *swapped* DatabaseServices whose search_service is a
-DiffAwareSearchService wrapping the original.  We verify this by:
+TransientSearchService wrapping the original.  We verify this by:
 
-  1. Mocking run_git_diff to return a known diff string.
+  1. Mocking stream_git_diff_file_blocks to yield a known diff block.
   2. Providing a controlled EmbeddingManager that returns unit-length vectors.
   3. Spying on the original search_service.search_semantic — in "diff" mode it
      must NOT be called; in "both" mode it WILL be called.
   4. Asserting that the services object received by ResearchServiceFactory has
-     a DiffAwareSearchService as its search_service.
+     a TransientSearchService as its search_service.
 """
 
 from __future__ import annotations

@@ -1,4 +1,8 @@
-"""Regression tests for uncapped transient diff research responses."""
+"""Contract tests: deep_research_impl returns the research dict unchanged.
+
+There is no diff-chunk cap and no truncation notice to inject, so the
+answer must reach the caller exactly as the research service produced it.
+"""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,7 +21,7 @@ def _make_embedding_manager() -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_large_diff_path_has_no_cap_warning_and_preserves_dict():
+async def test_diff_injection_path_preserves_research_dict():
     research_result = {"answer": "original answer text"}
 
     mock_research_service = MagicMock()
@@ -34,13 +38,16 @@ async def test_large_diff_path_has_no_cap_warning_and_preserves_dict():
         ),
         patch(
             "chunkhound.mcp_server.tools._inject_diff_service",
-            new=AsyncMock(return_value=(mock_services, None)),
+            new=AsyncMock(return_value=mock_services),
         ),
         patch(
             "chunkhound.mcp_server.tools.ResearchServiceFactory.create",
             return_value=mock_research_service,
         ),
-        patch("chunkhound.mcp_server.tools.Config.from_environment", return_value=MagicMock()),
+        patch(
+            "chunkhound.mcp_server.tools.Config.from_environment",
+            return_value=MagicMock(),
+        ),
     ):
         result = await deep_research_impl(
             services=mock_services,
@@ -52,12 +59,11 @@ async def test_large_diff_path_has_no_cap_warning_and_preserves_dict():
 
     assert isinstance(result, dict)
     assert result["answer"] == "original answer text"
-    assert "> **Note:**" not in result["answer"]
 
 
 @pytest.mark.asyncio
-async def test_no_truncation_warning_returns_dict_unchanged():
-    """Without truncation_warning, result dict is returned as-is."""
+async def test_plain_path_returns_dict_unchanged():
+    """Without a commit range, the result dict is returned as-is."""
     research_result = {"answer": "clean answer", "sources": []}
 
     mock_research_service = MagicMock()
@@ -73,7 +79,10 @@ async def test_no_truncation_warning_returns_dict_unchanged():
             "chunkhound.mcp_server.tools.ResearchServiceFactory.create",
             return_value=mock_research_service,
         ),
-        patch("chunkhound.mcp_server.tools.Config.from_environment", return_value=MagicMock()),
+        patch(
+            "chunkhound.mcp_server.tools.Config.from_environment",
+            return_value=MagicMock(),
+        ),
     ):
         result = await deep_research_impl(
             services=mock_services,
@@ -84,4 +93,3 @@ async def test_no_truncation_warning_returns_dict_unchanged():
 
     assert isinstance(result, dict)
     assert result["answer"] == "clean answer"
-    assert "> **Note:**" not in result["answer"]

@@ -318,7 +318,6 @@ class SearchResponse(TypedDict):
 
     results: list[dict[str, Any]]
     pagination: PaginationInfo
-    warnings: NotRequired[list[str]]
 
 
 def estimate_tokens(text: str) -> int:
@@ -554,7 +553,7 @@ async def _inject_diff_service(
     effective_commit_range: str,
     vector_source: str,
     embedding_manager: Any,
-) -> tuple[DatabaseServices, str | None]:
+) -> DatabaseServices:
     """Build a streaming transient search service for a git revision range."""
     if vector_source not in ("diff", "db", "both"):
         raise ValueError(
@@ -587,7 +586,7 @@ async def _inject_diff_service(
         embedding_manager=embedding_manager,
         vector_cache=_TRANSIENT_VECTOR_CACHE,
     )
-    return services._replace(search_service=diff_service), None
+    return services._replace(search_service=diff_service)
 
 
 @register_tool(
@@ -652,13 +651,12 @@ async def search_impl(
                 "Use type='regex' for pattern-based search without embeddings."
             )
 
-    truncation_warning: str | None = None
     if (
         effective_commit_range is not None
         and type == "semantic"
         and vector_source != "db"
     ):
-        services, truncation_warning = await _inject_diff_service(
+        services = await _inject_diff_service(
             services, effective_commit_range, vector_source, embedding_manager
         )
 
@@ -694,8 +692,6 @@ async def search_impl(
     native_results = _convert_paths_to_native(results)
 
     response: dict[str, Any] = {"results": native_results, "pagination": pagination}
-    if truncation_warning:
-        response["warnings"] = [truncation_warning]
     return cast(SearchResponse, response)
 
 
@@ -780,9 +776,8 @@ async def deep_research_impl(
         commit_range, commit_hash, last_n_commits
     )
 
-    truncation_warning: str | None = None
     if effective_commit_range is not None and vector_source != "db":
-        services, truncation_warning = await _inject_diff_service(
+        services = await _inject_diff_service(
             services, effective_commit_range, vector_source, embedding_manager
         )
 
@@ -803,9 +798,6 @@ async def deep_research_impl(
     )
 
     result = await research_service.deep_research(query)
-    if truncation_warning:
-        answer = result.get("answer", "")
-        result["answer"] = f"> **Note:** {truncation_warning}\n\n{answer}"
     return result
 
 
@@ -997,7 +989,6 @@ async def execute_tool(
             search_type = arguments.get("type", "regex")
             results_list = list(result.get("results", []))
             pagination = dict(result.get("pagination", {}))
-            diff_warnings: list[str] = result.get("warnings", [])
             md = format_search_results_markdown(results_list, pagination, search_type)
             # Keep at least 1 result; preserve original page_size so the footer's
             # total-page count stays calibrated to the requested page size.
@@ -1037,9 +1028,6 @@ async def execute_tool(
                     md = format_search_results_markdown(
                         [result_copy], pagination, search_type
                     )
-            if diff_warnings:
-                warning_block = "\n".join(f"> **Warning:** {w}" for w in diff_warnings)
-                md = f"{warning_block}\n\n{md}"
             return md
 
     # String return types (e.g., websearch) pass through directly as markdown
