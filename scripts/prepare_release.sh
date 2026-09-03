@@ -2,9 +2,9 @@
 set -e
 
 # DEPRECATED: This script is no longer part of the release workflow.
-# Releases are fully automated via GitHub Actions (release.yml / release-rc.yml).
-# See RELEASING.md and AGENTS.md for the current process.
-# Do NOT use uv publish or this script manually.
+# .github/workflows/release.yml and release-rc.yml own GitHub-Release and
+# pre-release publication respectively. Do NOT use uv publish or this script
+# manually.
 
 # ChunkHound Release Preparation Script
 # Modern uv-based release process with dependency locking
