@@ -1,7 +1,10 @@
 """Compatibility facade for the streaming transient search service."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
+
+import numpy as np
+import numpy.typing as npt
 
 from chunkhound.services.search_service_protocol import SearchServiceProtocol
 from chunkhound.services.transient_search_service import TransientSearchService
@@ -20,13 +23,13 @@ class _PreloadedVectorCache(VectorCache):
         provider: str = "",
         model: str = "",
         dims: int = 0,
-    ) -> list[float] | None:
+    ) -> npt.NDArray[np.float32] | None:
         return super().get(text)
 
     def put(
         self,
         text: str,
-        vector: list[float],
+        vector: Sequence[float] | np.ndarray,
         *,
         provider: str = "",
         model: str = "",

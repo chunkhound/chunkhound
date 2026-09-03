@@ -2,7 +2,7 @@
 
 import asyncio
 import heapq
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
 import numpy as np
@@ -70,7 +70,7 @@ class TransientSearchService:
         }
 
     @staticmethod
-    def _normalise(vector: list[float]) -> np.ndarray:
+    def _normalise(vector: Sequence[float] | np.ndarray) -> np.ndarray:
         result = np.asarray(vector, dtype=np.float32)
         norm = np.linalg.norm(result)
         if norm > 1e-9:
@@ -129,7 +129,7 @@ class TransientSearchService:
             if not filtered:
                 continue
 
-            vectors: list[list[float] | None] = [
+            vectors: list[Sequence[float] | np.ndarray | None] = [
                 self._vector_cache.get(chunk.code, **cache_ns) for chunk in filtered
             ]
             missing_indices = [
@@ -240,8 +240,9 @@ class TransientSearchService:
         if has_more:
             page["has_more"] = True
             page["next_offset"] = offset + page_size
-            if transient_page.get("has_more") or db_page.get("has_more"):
-                page["total"] = None
+        # `total` stays len(merged): a lower bound while either source still has
+        # results to give, exact once both are exhausted. Never None -- callers
+        # render it directly (see api/cli/commands/search.py).
         return merged[offset : offset + page_size], page
 
     @staticmethod

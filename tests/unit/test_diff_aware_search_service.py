@@ -850,6 +850,66 @@ async def test_both_mode_preserves_continuation_until_all_sources_are_consumed()
     assert metadata["next_offset"] is None
 
 
+@pytest.mark.asyncio
+async def test_both_mode_total_is_numeric_lower_bound_while_sources_have_more():
+    """AC9: `total` is a lower bound, never None.
+
+    The merged view is bounded by the overfetch heap, so `total` cannot be the
+    exact corpus size. It must still be a number callers can render -- the CLI
+    interpolates it straight into the results header.
+    """
+    chunks = [
+        make_chunk(f"diff-{index}", file_path=f"diff-{index}.py") for index in range(3)
+    ]
+    diff_embeddings = [[1.0, 0.0, 0.0]] * 3
+    db_results = [
+        {
+            "chunk_id": f"db-{index}",
+            "file_path": f"db-{index}.py",
+            "start_line": 1,
+            "content": "db",
+            "score": 0.5 - index / 100,
+            "similarity": 0.5 - index / 100,
+        }
+        for index in range(12)
+    ]
+
+    async def search_db(**kwargs):
+        offset = kwargs["offset"]
+        page_size = kwargs["page_size"]
+        page = db_results[offset : offset + page_size]
+        has_more = offset + page_size < len(db_results)
+        return page, {
+            "offset": offset,
+            "page_size": page_size,
+            "has_more": has_more,
+            "next_offset": offset + page_size if has_more else None,
+            "total": len(db_results),
+        }
+
+    original = make_original()
+    original.search_semantic = AsyncMock(side_effect=search_db)
+    service = DiffAwareSearchService(
+        original,
+        chunks,
+        diff_embeddings,
+        "both",
+        make_embedding_manager([[1.0, 0.0, 0.0]]),
+    )
+
+    results, pagination = await service.search_semantic("query", page_size=2, offset=0)
+
+    assert len(results) == 2
+    # DB still has results past the overfetch window, so more exist.
+    assert pagination["has_more"] is True
+    assert pagination["next_offset"] == 2
+    total = pagination["total"]
+    assert isinstance(total, int)
+    # A lower bound: at least what the merged view holds, never more than the
+    # true corpus size (3 diff + 12 db).
+    assert len(results) <= total <= len(chunks) + len(db_results)
+
+
 # ---------------------------------------------------------------------------
 # Empty diff_embeddings with vector_source="both"
 # ---------------------------------------------------------------------------

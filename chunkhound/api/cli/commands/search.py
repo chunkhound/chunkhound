@@ -195,9 +195,13 @@ def _format_search_results(
         return
 
     # Display header
-    total = pagination.get("total", len(results))
     offset = pagination.get("offset", 0)
     page_size = pagination.get("page_size", len(results))
+    total = pagination.get("total")
+    if total is None:
+        # Hybrid search reports total=None (it cannot estimate one); fall back
+        # to what this page shows so the header never renders "of None".
+        total = offset + len(results)
 
     formatter.section_header(f"{search_type.title()} Search Results")
     formatter.info(f"Query: '{query}'")
