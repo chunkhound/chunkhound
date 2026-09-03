@@ -224,6 +224,39 @@ jobs:
         with:
           skip-tag-version-patch: 'true'
 
+  # Run the public Makefile contract once on macOS rather than only checking
+  # its printed commands. Other platforms exercise the equivalent native build
+  # through the test matrix without multiplying this expensive build.
+  native-dev-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # install_native.py verifies tracked source files
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Set up Rust toolchain
+        uses: ./.github/actions/setup-rust-toolchain
+
+      - name: Cache DuckDB precompiled library
+        uses: ./.github/actions/cache-duckdb-lib
+
+      - name: Run native development workflow
+        run: make dev
+
   pages-artifact:
     needs:
       - site-build
@@ -232,6 +265,7 @@ jobs:
       - site-build-validation
       - watchman-rollout-gate
       - native-wheel-smoke-arm64
+      - native-dev-macos
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

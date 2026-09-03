@@ -5,8 +5,13 @@ description: >
   release.yml and release-rc.yml, which previously each carried their own
   byte-identical copy of this step, plus ci.yml's native-wheel-smoke-arm64
   job (with skip-tag-version-patch: true, since a CI branch/PR ref has no
-  release tag to derive a version from). Assumes the calling job has already
-  checked out the repo and installed `uv`.
+  release tag to derive a version from). Published native-wheel support is
+  macOS arm64, Linux x86_64/aarch64 (manylinux_2_34), and Windows x86_64.
+  Intel macOS is deliberately excluded: free Intel macOS runners are retired,
+  and arm64 cross-compilation has unresolved PyO3 framework-linking failures.
+  musl and older glibc need a separate manylinux-container build; no native
+  sdist fallback exists. Assumes the calling job has already checked out the
+  repo and installed `uv`.
 
 inputs:
   skip-tag-version-patch:
@@ -104,8 +109,9 @@ runs:
       shell: bash
       run: |
         # Run outside the repo root: the repo's own chunkhound_native/__init__.py
-        # source-tree stub (kept so `maturin develop` re-exports survive editable
-        # reinstalls locally) would otherwise shadow the installed wheel package,
+        # source-tree stub (populated by scripts/install_native.py for the local
+        # maturin build + install_native.py dev workflow) would otherwise shadow
+        # the installed wheel package,
         # since it expects a compiled extension sitting next to it that only
         # exists after a local editable build, not in this CI job. Catches a
         # wheel that built successfully but doesn't actually import (e.g. a
