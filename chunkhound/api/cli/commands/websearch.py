@@ -19,6 +19,7 @@ from chunkhound.utils.websearch_expansion import expand_web_queries
 
 from ..utils.provider_setup import setup_embedding_manager, setup_llm_manager
 from ..utils.rich_output import RichOutputFormatter
+from ..utils.tree_progress import TreeProgressDisplay
 
 
 async def websearch_command(args: argparse.Namespace, config: Config) -> None:
@@ -64,15 +65,16 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
                 got_page = True
                 yield page
 
-        result = await research_web_pages(
-            args.query,
-            pages(),
-            config,
-            embedding_manager,
-            llm_manager,
-            progress=formatter.progress_indicator,
-            warning_callback=warnings.append,
-        )
+        with TreeProgressDisplay(output=sys.stdout) as research_progress:
+            result = await research_web_pages(
+                args.query,
+                pages(),
+                config,
+                embedding_manager,
+                llm_manager,
+                progress=research_progress,
+                warning_callback=warnings.append,
+            )
         if not got_page:
             formatter.error(f"No pages could be fetched for {args.query!r}")
             raise RuntimeError("no pages fetched")

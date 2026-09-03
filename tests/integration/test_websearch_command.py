@@ -44,6 +44,7 @@ async def test_websearch_command_runs_research_in_process(
     async def research(query, page_stream, *args, **kwargs):
         seen["async"] = hasattr(page_stream, "__aiter__")
         seen["pages"] = [page async for page in page_stream]
+        seen["progress"] = hasattr(kwargs["progress"], "emit_event")
         return {"answer": "ANSWER"}
 
     monkeypatch.setattr(ws_mod, "fetch_pages", pages)
@@ -59,6 +60,7 @@ async def test_websearch_command_runs_research_in_process(
 
     assert seen["async"] is True
     assert seen["pages"] == [("https://example.invalid/page", ".md", "# In memory")]
+    assert seen["progress"] is True
     assert rendered == ["ANSWER"]
     assert not hasattr(ws_mod, "tempfile")
     assert not hasattr(ws_mod, "subprocess")
