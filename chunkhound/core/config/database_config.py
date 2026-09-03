@@ -113,7 +113,8 @@ class DatabaseConfig(BaseModel):
 
         Returns the final path used by the provider, including all
         provider-specific transformations:
-        - DuckDB: path/chunks.db (file) or :memory: for in-memory
+        - DuckDB: path/chunks.db for directory paths, explicit .db/.duckdb
+          files and existing legacy files directly, or :memory: for in-memory
         - LanceDB: path/lancedb.lancedb/ (directory with .lancedb suffix)
 
         This is the authoritative source for database location checks.

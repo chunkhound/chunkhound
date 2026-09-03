@@ -22,6 +22,8 @@ def _find_bundled_duckdb_files() -> list[Path]:
     return sorted(candidates)
 
 
+# Windows has no RPATH equivalent, so register the extension directory before
+# importing it; local builds place duckdb.dll there.
 if sys.platform == "win32":
     import os
 
