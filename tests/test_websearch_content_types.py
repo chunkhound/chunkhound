@@ -88,8 +88,6 @@ async def test_fetch_page_reads_raw_text_from_pinned_cdp_response_shape(
     event = SimpleNamespace(
         loader_id="loader", request_id="request", response=response
     )
-    body_result = ("# Raw Markdown\n", False)
-
     class Tab:
         def __init__(self) -> None:
             self.handler = None
