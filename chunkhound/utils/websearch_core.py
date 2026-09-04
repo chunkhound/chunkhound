@@ -9,6 +9,7 @@ sites depend on this neutral module instead of each other.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import html
 import html.parser
@@ -23,13 +24,12 @@ import urllib.request
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Any
 
 from loguru import logger
 
 if TYPE_CHECKING:
     from http.client import HTTPMessage
-    from typing import Any
 
     import zendriver as zd
 
@@ -546,7 +546,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         # is known.
         nav_loader_id: cdp.network.LoaderId | None = None
         candidates: list[cdp.network.ResponseReceived] = []
-        main_response: asyncio.Future[cdp.network.Response] = (
+        main_response: asyncio.Future[cdp.network.ResponseReceived] = (
             asyncio.get_running_loop().create_future()
         )
 
@@ -563,7 +563,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
                 candidates.append(event)
                 return
             if event.loader_id == nav_loader_id:
-                main_response.set_result(event.response)
+                main_response.set_result(event)
 
         # Register the handler BEFORE Network.enable. Events that fire
         # during the enable round-trip would otherwise land before the
@@ -590,10 +590,11 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         # loader_id; the ResponseReceived event does).
         for ev in candidates:
             if ev.loader_id == nav_loader_id and not main_response.done():
-                main_response.set_result(ev.response)
+                main_response.set_result(ev)
                 break
 
-        response = await asyncio.wait_for(main_response, timeout=30)
+        response_event = await asyncio.wait_for(main_response, timeout=30)
+        response = response_event.response
         ct = _normalize_ct(
             response.headers.get("content-type")
             or response.headers.get("Content-Type")
@@ -646,6 +647,23 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
                 _fetch_url, pdf_url, extra, False  # follow_redirects=False
             )
             return "application/pdf", body, "utf-8"
+
+        if ct in {"text/plain", "text/markdown"}:
+            await asyncio.wait_for(tab.wait(), timeout=30)
+            body_text, base64_encoded = await asyncio.wait_for(
+                tab.send(
+                    cdp.network.get_response_body(
+                        request_id=response_event.request_id
+                    )
+                ),
+                timeout=30,
+            )
+            body_bytes = (
+                base64.b64decode(body_text)
+                if base64_encoded
+                else body_text.encode("utf-8")
+            )
+            return ct, body_bytes, "utf-8"
 
         if ct != "text/html":
             raise ValueError(f"Unsupported content-type: {ct!r}")
@@ -700,10 +718,14 @@ async def fetch_url_to_content(
             source_metadata["title"] = _extract_html_title(
                 body.decode(charset, errors="replace")
             )
-    elif ct == "text/html":
+    elif ct in {"text/html", "text/plain", "text/markdown"}:
         html_text = body.decode(charset, errors="replace")
-        source_metadata["title"] = _extract_html_title(html_text)
-        kind, content = ".md", _html_to_markdown(html_text)
+        if ct == "text/html":
+            source_metadata["title"] = _extract_html_title(html_text)
+            content = _html_to_markdown(html_text)
+        else:
+            content = html_text
+        kind = ".md"
     else:
         raise ValueError(f"Unsupported content-type: {ct!r}")
     # Auth walls and error pages often render to whitespace-only markdown —
