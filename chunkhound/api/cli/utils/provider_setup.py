@@ -46,7 +46,7 @@ def setup_llm_manager(
     try:
         if config.llm:
             utility_config, synthesis_config = config.llm.get_provider_configs()
-            return LLMManager(utility_config, synthesis_config)
+            return LLMManager(utility_config, synthesis_config, target_dir=config.target_dir)
     except (ValueError, ConfigurationError) as e:
         formatter.error(f"LLM provider setup failed: {e}")
         formatter.info(

@@ -255,6 +255,7 @@ class TestNonBlockingInitialization:
                     mock_llm_manager.assert_called_once_with(
                         {"provider": "codex-cli", "model": "codex"},
                         {"provider": "codex-cli", "model": "codex"},
+                        target_dir=tmp_path,
                     )
                     assert server.llm_manager is mock_llm_manager.return_value
                     config.llm.get_provider_configs.assert_called_once_with()

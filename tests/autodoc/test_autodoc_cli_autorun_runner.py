@@ -29,7 +29,7 @@ async def test_autorun_code_mapper_for_autodoc_returns_plan_out_dir(
     monkeypatch.setattr(
         autorun,
         "resolve_auto_map_options",
-        lambda *, args, output_dir: options,
+        lambda *, args, output_dir, target_dir: options,
     )
 
     async def fake_run(**kwargs):  # type: ignore[no-untyped-def]
@@ -48,7 +48,7 @@ async def test_autorun_code_mapper_for_autodoc_returns_plan_out_dir(
 
     out_dir = await autorun.autorun_code_mapper_for_autodoc(
         args=args,
-        config=SimpleNamespace(),  # type: ignore[arg-type]
+        config=SimpleNamespace(target_dir=tmp_path),  # type: ignore[arg-type]
         formatter=formatter,  # type: ignore[arg-type]
         output_dir=tmp_path / "site",
         question="Proceed?",
