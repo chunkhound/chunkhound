@@ -257,6 +257,12 @@ jobs:
       - name: Run native development workflow
         run: make dev
 
+      - name: Smoke-test repaired macOS native wheel
+        uses: ./.github/actions/build-native-wheel
+        with:
+          skip-tag-version-patch: 'true'
+          out-dir: native-dist
+
   pages-artifact:
     needs:
       - site-build
@@ -358,6 +364,23 @@ jobs:
           CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME: "1"
         run: uv build --wheel --clear
 
+      - name: Build repaired native wheel
+        uses: ./.github/actions/build-native-wheel
+        with:
+          skip-tag-version-patch: 'true'
+          out-dir: native-dist
+
+      # Debug artifact only: keep the repaired wheel alive if a later
+      # verification step fails, so it does not die with the runner.
+      # Deliberately NOT named watchman-wheel-* -- the rollout gate's
+      # download pattern would merge it into its supported-matrix checks.
+      - name: Upload repaired native wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repaired-native-wheel-${{ matrix.os }}
+          path: native-dist/*.whl
+          if-no-files-found: error
+
       - name: Verify Watchman runtime wheel artifacts
         shell: bash
         run: |
@@ -378,7 +401,13 @@ jobs:
             echo "No wheel produced in dist/"
             exit 1
           fi
-          uv run python scripts/verify_watchman_live_indexing_e2e.py "${wheels[@]}"
+          native_wheels=(native-dist/chunkhound_native-*.whl)
+          if [[ ${#native_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one repaired native wheel in native-dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_live_indexing_e2e.py \
+            --native-wheel "${native_wheels[0]}" "${wheels[@]}"
 
       - name: Upload Watchman wheel artifact
         uses: actions/upload-artifact@v4
@@ -412,8 +441,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Build Rust extension
-        uses: ./.github/actions/build-rust-extension
+      - name: Build repaired native wheel
+        uses: ./.github/actions/build-native-wheel
+        with:
+          skip-tag-version-patch: 'true'
+          out-dir: native-dist
 
       - name: Download staged Watchman wheel artifacts
         uses: actions/download-artifact@v4
@@ -434,7 +466,14 @@ jobs:
           uv run python scripts/verify_watchman_runtime_resources.py --require-supported-matrix "${wheels[@]}"
 
       - name: Verify source/editable Watchman fallback contract
-        run: >-
-          uv run python scripts/verify_watchman_live_indexing_e2e.py
-          --verify-source-fallback
-          --source-root .
+        shell: bash
+        run: |
+          shopt -s nullglob
+          native_wheels=(native-dist/chunkhound_native-*.whl)
+          if [[ ${#native_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one repaired native wheel in native-dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_live_indexing_e2e.py \
+            --native-wheel "${native_wheels[0]}" \
+            --verify-source-fallback --source-root .
