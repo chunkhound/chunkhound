@@ -64,6 +64,12 @@ fi
 echo "✅ Found staged wheel artifacts:"
 printf '   %s\n' "${WHEEL_PATHS[@]}"
 
+NATIVE_WHEEL_PATH="${CHUNKHOUND_NATIVE_WHEEL:-}"
+if [[ ! -f "$NATIVE_WHEEL_PATH" || "$NATIVE_WHEEL_PATH" != *.whl ]]; then
+    echo "❌ Set CHUNKHOUND_NATIVE_WHEEL to the matching repaired chunkhound-native wheel."
+    exit 1
+fi
+
 # Verify AutoDoc packaged resources exist in the staged wheel(s)
 echo "🔎 Verifying AutoDoc wheel resources..."
 uv run python scripts/verify_autodoc_wheel_resources.py "${WHEEL_PATHS[@]}"
@@ -76,12 +82,12 @@ echo "✅ Watchman runtime wheel resources verified"
 
 # Verify the documented sdist/source/editable fallback contract before wheel e2e
 echo "🔎 Verifying Watchman sdist/source/editable fallback behavior..."
-uv run python scripts/verify_watchman_live_indexing_e2e.py --verify-source-fallback --source-root "$PROJECT_ROOT"
+uv run python scripts/verify_watchman_live_indexing_e2e.py --native-wheel "$NATIVE_WHEEL_PATH" --verify-source-fallback --source-root "$PROJECT_ROOT"
 echo "✅ Watchman sdist/source/editable fallback behavior verified"
 
 # Verify host-compatible staged wheels satisfy the managed Watchman live-indexing contract
 echo "🔎 Verifying Watchman installed-wheel live indexing..."
-uv run python scripts/verify_watchman_live_indexing_e2e.py "${WHEEL_PATHS[@]}"
+uv run python scripts/verify_watchman_live_indexing_e2e.py --native-wheel "$NATIVE_WHEEL_PATH" "${WHEEL_PATHS[@]}"
 echo "✅ Watchman installed-wheel live indexing verified"
 
 # Generate checksums for release artifacts
